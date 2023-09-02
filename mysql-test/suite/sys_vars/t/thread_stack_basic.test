@@ -1,0 +1,20 @@
+#
+# only global
+#
+select @@global.thread_stack;
+--error ER_INCORRECT_GLOBAL_LOCAL_VAR
+select @@session.thread_stack;
+show global variables like 'thread_stack';
+show session variables like 'thread_stack';
+--disable_warnings
+select * from performance_schema.global_variables where variable_name='thread_stack';
+select * from performance_schema.session_variables where variable_name='thread_stack';
+--enable_warnings
+
+#
+# show that it's read-only
+#
+--error ER_INCORRECT_GLOBAL_LOCAL_VAR
+set global thread_stack=1;
+--error ER_INCORRECT_GLOBAL_LOCAL_VAR
+set session thread_stack=1;

@@ -1,0 +1,63 @@
+drop table if exists t1;
+create table t1 (`a` blob);
+insert into t1 values("hello world"),("Hello mars"),(NULL);
+select load_file(concat(@tmpdir,"/outfile-test.1"));
+load_file(concat(@tmpdir,"/outfile-test.1"))
+hello world
+Hello mars
+\N
+
+select load_file(concat(@tmpdir,"/outfile-test.2"));
+load_file(concat(@tmpdir,"/outfile-test.2"))
+hello world
+select length(load_file(concat(@tmpdir,"/outfile-test.3")));
+length(load_file(concat(@tmpdir,"/outfile-test.3")))
+1
+ERROR HY000: File '../../tmp/outfile-test.1' already exists
+ERROR HY000: File '../../tmp/outfile-test.2' already exists
+ERROR HY000: File '../../tmp/outfile-test.3' already exists
+select load_file(concat(@tmpdir,"/outfile-test.not-exist"));
+load_file(concat(@tmpdir,"/outfile-test.not-exist"))
+NULL
+drop table t1;
+select load_file(concat(@tmpdir,"/outfile-test.4"));
+load_file(concat(@tmpdir,"/outfile-test.4"))
+1
+
+CREATE TABLE t1 (a INT);
+EXPLAIN
+SELECT /*+ SET_VAR(optimizer_switch='hypergraph_optimizer=off') */ *
+INTO OUTFILE '/tmp/t1.txt'
+  FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"' LINES TERMINATED BY '\r\n'
+  FROM t1;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	1	100.00	NULL
+Warnings:
+Note	1003	/* select#1 */ select /*+ SET_VAR(optimizer_switch='hypergraph_optimizer=off') */ `test`.`t1`.`a` AS `a` from `test`.`t1`
+DROP TABLE t1;
+use test;
+create table t1(a int);
+select * into outfile "MYSQL_TEST_DIR/outfile-test1" from t1;
+ERROR HY000: The MySQL server is running with the --secure-file-priv option so it cannot execute this statement
+drop table t1;
+create database mysqltest;
+create user user_1@localhost;
+grant all on mysqltest.* to user_1@localhost;
+select schema_name
+into outfile "../../tmp/outfile-test.4"
+fields terminated by ',' optionally enclosed by '"'
+ lines terminated by '\n'
+from information_schema.schemata
+where schema_name like 'mysqltest';
+ERROR 42000: Access denied; you need (at least one of) the FILE privilege(s) for this operation
+grant file on *.* to user_1@localhost;
+select schema_name
+into outfile "../../tmp/outfile-test.4"
+fields terminated by ',' optionally enclosed by '"'
+ lines terminated by '\n'
+from information_schema.schemata
+where schema_name like 'mysqltest';
+use test;
+revoke all privileges on *.* from user_1@localhost;
+drop user user_1@localhost;
+drop database mysqltest;

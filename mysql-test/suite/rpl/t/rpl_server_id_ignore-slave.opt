@@ -1,0 +1,1 @@
+--disable-log-replica-updates --replicate-same-server-id --gtid-mode=off

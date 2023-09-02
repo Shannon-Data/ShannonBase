@@ -1,0 +1,11 @@
+# Test of partitioning features with replication for InnoDB
+--source include/set_privilege_checks_user_as_system_user.inc
+--source include/master-slave.inc
+
+# Set the default connection to 'master'
+
+let $engine_type= 'InnoDB';
+
+--source suite/rpl/include/rpl_partition.inc
+
+--source include/rpl_end.inc

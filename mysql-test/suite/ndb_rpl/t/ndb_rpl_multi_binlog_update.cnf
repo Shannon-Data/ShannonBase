@@ -1,0 +1,120 @@
+!include include/default_mysqld.cnf
+!include include/default_ndbd.cnf
+
+[cluster_config.1]
+# NoOfReplicas refers to NDBD nodes/nodegroup
+NoOfReplicas=                  2
+ndbd=,
+ndb_mgmd=
+# 3 MySQLDS attached to Cluster 1
+mysqld=,,                   
+
+
+
+[cluster_config.slave]
+# NoOfReplicas refers to NDBD nodes/nodegroup
+NoOfReplicas=                  2
+ndbd=,
+ndb_mgmd=
+# 3 MySQLDs attached to Cluster 2
+mysqld=,,
+
+
+
+[mysqld]
+# Make all mysqlds use cluster
+ndbcluster
+ndb-wait-connected=30
+ndb-wait-setup=120
+# Default log-replica-updates to off and turn it on
+# only selectively for some of the servers in config
+log-replica-updates=0
+
+
+[cluster_config.mysqld.1.1]
+NodeId=49
+Dedicated=1
+
+[cluster_config.mysqld.2.1]
+NodeId=16
+Dedicated=1
+
+[cluster_config.mysqld.3.1]
+NodeId=32
+Dedicated=1
+
+[mysqld.1.1]
+ndb-nodeid=49
+server-id= 1
+ndb-log-bin=1
+log-bin= master-bin
+binlog_format=row
+
+
+
+[mysqld.2.1]
+ndb-nodeid=16
+server-id= 2
+# Note no binary log
+skip-log-bin
+
+
+
+[mysqld.3.1]
+ndb-nodeid=32
+server-id= 3
+ndb-log-bin=1
+log-bin= master-bin
+binlog_format=row
+
+
+[cluster_config.mysqld.1.slave]
+NodeId=49
+Dedicated=1
+
+[cluster_config.mysqld.2.slave]
+NodeId=16
+Dedicated=1
+
+[cluster_config.mysqld.3.slave]
+NodeId=32
+Dedicated=1
+
+
+[mysqld.1.slave]
+ndb-nodeid=49
+# Note no binlog on this slave
+skip-log-bin
+server-id= 4
+skip-replica-start
+
+
+[mysqld.2.slave]
+ndb-nodeid=16
+# Note binlog on this slave, but not logging slave updates
+server-id= 5
+skip-replica-start
+log-bin= slave-master-bin
+binlog_format=row
+ndb-log-bin=1
+
+
+[mysqld.3.slave]
+ndb-nodeid=32
+# Note binlog on this slave, with slave updates logged
+server-id= 6
+skip-replica-start
+log-bin= slave-master-bin
+binlog_format=row
+log-replica-updates
+ndb-log-bin=1
+
+
+[ENV]
+SERVER_MYPORT_1= @mysqld.1.1.port
+SERVER_MYPORT_2= @mysqld.2.1.port
+SERVER_MYPORT_3= @mysqld.3.1.port
+SERVER_MYPORT_4= @mysqld.1.slave.port
+SERVER_MYPORT_5= @mysqld.2.slave.port
+SERVER_MYPORT_6= @mysqld.3.slave.port
+
