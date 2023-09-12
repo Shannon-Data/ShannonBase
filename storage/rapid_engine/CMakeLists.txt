@@ -1,4 +1,4 @@
-# Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2006, 2019, Oracle and/or its affiliates. All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -19,22 +19,73 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-# Shannon Data AI, 2023.
 
-DISABLE_MISSING_PROFILE_WARNING()
-ADD_DEFINITIONS(-DMYSQL_SERVER)
+# This is the CMakeLists for Shannon Rapid
 
-IF(WITH_SHANNON_RAPID_SECONDARY_STORAGE_ENGINE AND
-	NOT WITHOUT_SHANNON_RAPID_SECONDARY_STORAGE_ENGINE)
-  MYSQL_ADD_PLUGIN(rapid ha_shannon_rapid.cc
-    STORAGE_ENGINE
-    DEFAULT
-    LINK_LIBRARIES extra::rapidjson ext::zlib
+ADD_DEFINITIONS(-DLOG_SUBSYSTEM_TAG="Rapid")
+
+# TODO: Fix up all non-canonical include paths and remove this.
+INCLUDE_DIRECTORIES(
+  ${CMAKE_SOURCE_DIR}/sql
+)
+
+# Conflicting YYSTYPE, because we have multiple Bison grammars.
+# WL#11100 Migrate to Bison 3.x should fix this.
+#
+# STRING(REPLACE "-flto" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+# STRING(REPLACE "-flto" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+
+SET(SHANNON_RAPID_ZIP_DECOMPRESS_SOURCES
+  compress/zlib/zlib.cc
+)
+
+SET(SHANNON_RAPID_SOURCES
+  ha_shannon_rapid.cc
+)
+
+ADD_LIBRARY(rapid_zipdecompress STATIC ${SHANNON_RAPID_ZIP_DECOMPRESS_SOURCES})
+TARGET_COMPILE_DEFINITIONS(
+  rapid_zipdecompress PRIVATE UNIV_LIBRARY UNIV_NO_ERR_MSGS)
+ADD_DEPENDENCIES(rapid_zipdecompress GenError)
+
+UNSET(NUMA_LIBRARY)
+IF(HAVE_LIBNUMA)
+  SET(NUMA_LIBRARY "numa")
+ENDIF()
+
+MYSQL_ADD_PLUGIN(shannon_rapid
+  ${SHANNON_RAPID_SOURCES} ${SHANNON_RAPID_ZIP_DECOMPRESS_SOURCES} STORAGE_ENGINE
+  MANDATORY
+  MODULE_OUTPUT_NAME ha_rapid
+  LINK_LIBRARIES sql_dd ${ZLIB_LIBRARY} ${LZ4_LIBRARY} ${NUMA_LIBRARY})
+
+# Avoid generating Hardware Capabilities due to crc32 instructions
+IF(SOLARIS_INTEL)
+  MY_CHECK_CXX_COMPILER_FLAG("-Wa,-nH" HAVE_WA_NH)
+  IF(HAVE_WA_NH)
+    ADD_COMPILE_FLAGS(
+      COMPILE_FLAGS "-Wa,-nH"
     )
-ELSEIF(NOT WITHOUT_SHANNON_RAPID_SECONDARY_STORAGE_ENGINE)
-  MYSQL_ADD_PLUGIN(rapid ha_shannon_rapid.cc
-    STORAGE_ENGINE
-    MODULE_ONLY
-    LINK_LIBRARIES extra::rapidjson ext::zlib
+  ENDIF()
+ENDIF()
+
+# On linux: /usr/include/stdio.h:#define BUFSIZ 8192
+# On Solaris: /usr/include/iso/stdio_iso.h:#define    BUFSIZ  1024
+IF(SOLARIS AND MY_COMPILER_IS_GNU)
+  ADD_COMPILE_FLAGS(
+    COMPILE_FLAGS "-Wno-format-truncation"
     )
 ENDIF()
+
+# Generated code with logical-op warnings
+MY_CHECK_CXX_COMPILER_WARNING("-Wlogical-op" HAS_WARN_FLAG)
+IF(HAS_WARN_FLAG)
+  ADD_COMPILE_FLAGS(
+    COMPILE_FLAGS "${HAS_WARN_FLAG}")
+ENDIF()
+MY_CHECK_CXX_COMPILER_WARNING("-Wcast-function-type" HAS_WARN_FLAG)
+IF(HAS_WARN_FLAG)
+  ADD_COMPILE_FLAGS(
+    COMPILE_FLAGS "${HAS_WARN_FLAG}")
+ENDIF()
+
