@@ -133,7 +133,7 @@ struct MYSQL_XID {
 #define PLUGIN_LICENSE_BSD_STRING "BSD"
 
 #define PLUGIN_AUTHOR_ORACLE "Oracle Corporation"
-
+#define PLUGIN_AUTHOR_SHANNON "Shannon Data AI"
 /*
   Macros for beginning and ending plugin declarations.  Between
   mysql_declare_plugin and mysql_declare_plugin_end there should
