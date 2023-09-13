@@ -379,7 +379,7 @@ static int Rapid_Deinit(MYSQL_PLUGIN) {
 static st_mysql_storage_engine rapid_storage_engine{
     MYSQL_HANDLERTON_INTERFACE_VERSION};
 
-mysql_declare_plugin(mock){
+mysql_declare_plugin(shannon_rapid){
     MYSQL_STORAGE_ENGINE_PLUGIN,
     &rapid_storage_engine,
     "Rapid",
