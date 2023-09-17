@@ -18,7 +18,10 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+
+  Shannon Data AI.
+*/
 
 #include "sql/pack_rows.h"
 
@@ -158,6 +161,7 @@ static size_t CalculateColumnStorageSize(const Column &column) {
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_DB_TRX_ID:
       // Field_typed_array inherits from Field_blob, so we have to treat it as a
       // BLOB column. And is_array() the only way to detect if the field is a
       // typed array.
