@@ -23,7 +23,10 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Shannon Data AI.
+*/
 
 /**
   @file field_types.h
@@ -73,6 +76,7 @@ enum enum_field_types {
   MYSQL_TYPE_DATETIME2,   /**< Internal to MySQL. Not used in protocol */
   MYSQL_TYPE_TIME2,       /**< Internal to MySQL. Not used in protocol */
   MYSQL_TYPE_TYPED_ARRAY, /**< Used for replication only */
+  MYSQL_TYPE_DB_TRX_ID = 242, /**Internal to MySQL. Not used in protocol */
   MYSQL_TYPE_INVALID = 243,
   MYSQL_TYPE_BOOL = 244, /**< Currently just a placeholder */
   MYSQL_TYPE_JSON = 245,

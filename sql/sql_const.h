@@ -18,7 +18,10 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Shannon Data AI.
+*/
 
 /**
   @file
@@ -74,7 +77,8 @@ constexpr const int MAX_TIME_FULL_WIDTH{23};
 constexpr const int MAX_DATETIME_FULL_WIDTH{29};
 /** YYYY-MM-DD HH:MM:SS */
 constexpr const int MAX_DATETIME_WIDTH{19};
-
+/**TRANSACTION ID WIDTH, ulonglong*/
+constexpr const int MAX_DB_TRX_ID_WIDTH{8};
 /**
   MAX_TABLES and xxx_TABLE_BIT are used in optimization of table factors and
   expressions, and in join plan generation.

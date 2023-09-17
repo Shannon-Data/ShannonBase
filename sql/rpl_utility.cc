@@ -18,7 +18,11 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+
+   Shannon Data AI.
+*/
 
 #include "sql/rpl_utility.h"
 
@@ -430,6 +434,9 @@ static bool can_convert_field_to(Field *field, enum_field_types source_type,
     case MYSQL_TYPE_TYPED_ARRAY:
     case MYSQL_TYPE_NULL:
     case MYSQL_TYPE_INVALID:
+      return false;
+    case MYSQL_TYPE_DB_TRX_ID:
+      assert(false);
       return false;
   }
   return false;  // To keep GCC happy
