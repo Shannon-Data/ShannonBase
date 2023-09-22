@@ -133,6 +133,10 @@ static bool find_record_length(const dd::Table &table, size_t min_length,
     share->fields++;
   }
 
+  //Here, due to we need an extra space to store ghost column, db_trx_id length
+  //therefore, 'MAX_DB_TRX_ID_WIDTH' is added.
+  share->reclength += MAX_DB_TRX_ID_WIDTH;
+
   // Find preamble length and add it to the total record length.
   share->null_bytes = (share->null_fields + leftover_bits + 7) / 8;
   share->last_null_bit_pos = (share->null_fields + leftover_bits) & 7;

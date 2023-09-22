@@ -2946,6 +2946,7 @@ int open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
   if ((db_stat & HA_OPEN_KEYFILE) || (prgflag & DELAYED_OPEN)) records = 1;
   if (prgflag & (READ_ALL + EXTRA_RECORD)) records++;
 
+  //in find_record_length(), MAX_DB_TRX_ID_WIDTH is already added.
   record = root->ArrayAlloc<uchar>(share->rec_buff_length * records +
                                    share->null_bytes);
   if (record == nullptr) goto err; /* purecov: inspected */
@@ -2964,7 +2965,8 @@ int open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
   outparam->null_flags_saved = record + (records * share->rec_buff_length);
   memset(outparam->null_flags_saved, '\0', share->null_bytes);
 
-  if (!(field_ptr = root->ArrayAlloc<Field *>(share->fields + 1)))
+  //Here we need an extra space to store 'ghost' column from table_share.
+  if (!(field_ptr = root->ArrayAlloc<Field *>(share->fields + 1 + 1)))
     goto err; /* purecov: inspected */
 
   outparam->field = field_ptr;
@@ -3002,6 +3004,17 @@ int open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
         (outparam->file->ha_table_flags() & HA_CAN_FULLTEXT_EXT) &&
         !strcmp(outparam->field[i]->field_name, FTS_DOC_ID_COL_NAME))
       fts_doc_id_field = new_field;
+  }
+
+  /*The ghost column here. DB_TRX_ID*/
+  if (share->field[share->fields]) {
+     Field* db_trx_id_field = share->field[share->fields]->clone(root);
+     *field_ptr = db_trx_id_field;
+     if (db_trx_id_field == nullptr) goto err;
+     db_trx_id_field->init(outparam);
+     db_trx_id_field->move_field_offset(move_offset);
+
+     field_ptr ++;
   }
   (*field_ptr) = nullptr;  // End marker
 

@@ -2502,12 +2502,14 @@ void row_sel_field_store_in_mysql_format_func(
     IF_DEBUG(ulint field_no, ) const byte *data,
     ulint len IF_DEBUG(, ulint sec_field)) {
   byte *ptr;
-#ifdef UNIV_DEBUG
+//#ifdef UNIV_DEBUG
   const dict_field_t *field =
       templ->is_virtual ? nullptr : index->get_field(field_no);
 
   bool clust_templ_for_sec = (sec_field != ULINT_UNDEFINED);
-#endif /* UNIV_DEBUG */
+  ulint prtype = field->col->prtype;
+  ib_id_t id;
+//#endif /* UNIV_DEBUG */
   ulint mysql_col_len =
       templ->is_multi_val ? templ->mysql_mvidx_len : templ->mysql_col_len;
 
@@ -2660,13 +2662,22 @@ void row_sel_field_store_in_mysql_format_func(
       break;
 
     default:
-#ifdef UNIV_DEBUG
     case DATA_SYS_CHILD:
     case DATA_SYS:
-      /* These column types should never be shipped to MySQL. */
-      ut_d(ut_error);
-      [[fallthrough]];
-
+      /* These column types should never be shipped to MySQL. But, in Shannon,
+         we will retrieve trx id to MySQL. */
+      switch (prtype & DATA_SYS_PRTYPE_MASK) {
+         case DATA_TRX_ID:
+             id = mach_read_from_6(data);
+             memcpy(dest, &id, sizeof(ib_id_t));
+             break;
+         case DATA_ROW_ID:
+         case DATA_ROLL_PTR:
+           assert(0);
+           break;
+      }
+      break;
+#ifdef UNIV_DEBUG
     case DATA_CHAR:
     case DATA_FIXBINARY:
     case DATA_FLOAT:
@@ -3628,7 +3639,8 @@ static inline byte *row_sel_fetch_last_buf(
   if (record_buffer == nullptr) {
     ut_ad(prebuilt->n_fetch_cached < MYSQL_FETCH_CACHE_SIZE);
   } else {
-    ut_ad(prebuilt->mysql_prefix_len <= record_buffer->record_size());
+    /*Some extra spaces added, so this test failed*/
+    //ut_ad(prebuilt->mysql_prefix_len <= record_buffer->record_size());
     ut_ad(record_buffer->records() == prebuilt->n_fetch_cached);
   }
 

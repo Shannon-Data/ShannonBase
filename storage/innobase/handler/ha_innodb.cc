@@ -8268,7 +8268,15 @@ static mysql_row_templ_t *build_template_field(
     templ->mysql_mvidx_len = 0;
     templ->is_multi_val = false;
   }
-  templ->type = col->mtype;
+
+  if (!strcmp (field->field_name, "DB_TRX_ID") ||
+      !strcmp(field->field_name, "DB_ROLL_PTR")) {
+    templ->type = DATA_SYS;
+    templ->rec_field_no = templ->col_no ;
+    assert (templ->col_no == 1 || templ->col_no == 2);
+  } else {
+    templ->type = col->mtype;
+  }
   templ->mysql_type = (ulint)field->type();
 
   if (templ->mysql_type == DATA_MYSQL_TRUE_VARCHAR) {
@@ -8399,9 +8407,10 @@ void ha_innobase::build_template(bool whole_row) {
 
   n_fields = (ulint)table->s->fields; /* number of columns */
 
+  /*Need an extra space to keep DB_TRX_ID sys ghost field*/
   if (!m_prebuilt->mysql_template) {
     m_prebuilt->mysql_template = (mysql_row_templ_t *)ut::malloc_withkey(
-        UT_NEW_THIS_FILE_PSI_KEY, n_fields * sizeof(mysql_row_templ_t));
+        UT_NEW_THIS_FILE_PSI_KEY, (n_fields + 1) * sizeof(mysql_row_templ_t));
   }
 
 #if defined(UNIV_DEBUG) && !defined(UNIV_DEBUG_VALGRIND)
@@ -8627,6 +8636,12 @@ void ha_innobase::build_template(bool whole_row) {
         num_v++;
       }
     }
+  }
+
+  Field* db_trx_id_field = table->field[n_fields];
+  if (db_trx_id_field) {
+        mysql_row_templ_t *templ [[maybe_unused]] = build_template_field(
+        m_prebuilt, clust_index, index, table, db_trx_id_field, 1, 0);
   }
 
   if (index != clust_index && m_prebuilt->need_to_access_clustered) {
