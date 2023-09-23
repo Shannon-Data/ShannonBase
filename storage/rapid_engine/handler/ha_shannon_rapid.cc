@@ -18,9 +18,12 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-#include "storage/rapid_engine/ha_shannon_rapid.h"
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+*/
+
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 
 #include <stddef.h>
 #include <algorithm>
@@ -53,6 +56,9 @@
 #include "template_utils.h"
 #include "thr_lock.h"
 
+#include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/populate/populate.h"
+/* clang-format off */
 namespace dd {
 class Table;
 }
@@ -352,8 +358,106 @@ static handler *Create(handlerton *hton, TABLE_SHARE *table_share, bool,
                        MEM_ROOT *mem_root) {
   return new (mem_root) ShannonBase::ha_rapid(hton, table_share);
 }
+/*********************************************************************
+ *  Start to define the sys var for shannonbase rapid.
+ *********************************************************************/
+static void shannonbase_rapid_populate_buffer_size_update(
+    /*===========================*/
+    THD *thd,                       /*!< in: thread handle */
+    SYS_VAR *var [[maybe_unused]],  /*!< in: pointer to system variable */
+    void *var_ptr [[maybe_unused]], /*!< out: where the formal string goes */
+    const void *save) /*!< in: immediate result from check function */
+{
+  ulong in_val = *static_cast<const ulong *>(save);
+  //set to in_val;
+  if (in_val < shannonbase::populate::population_buffer_size) {
+    in_val = shannonbase::populate::population_buffer_size;
+    push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
+                        "population_buffer_size cannot be"
+                        " set more than rapid_memory_size.");
+    push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
+                        "Setting population_buffer_size to %lu",
+                        shannonbase::populate::population_buffer_size);
+  }
 
-static int Rapid_Init(MYSQL_PLUGIN p) {
+  shannonbase::populate::population_buffer_size = in_val;
+}
+
+static void rapid_memory_size_update(
+    /*===========================*/
+    THD *thd,                       /*!< in: thread handle */
+    SYS_VAR *var [[maybe_unused]],  /*!< in: pointer to system variable */
+    void *var_ptr [[maybe_unused]], /*!< out: where the formal string goes */
+    const void *save) /*!< in: immediate result from check function */
+{
+  ulong in_val = *static_cast<const ulong *>(save);
+
+  if (in_val < shannonbase::imcs::rapid_memory_size) {
+    in_val = shannonbase::imcs::rapid_memory_size;
+    push_warning_printf(
+        thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
+        "rapid_memory_size cannot be set more than srv buffer.");
+    push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
+                        "Setting rapid_memory_size to %lu",
+                        shannonbase::imcs::rapid_memory_size);
+  }
+
+  shannonbase::imcs::rapid_memory_size = in_val;
+}
+
+/** Here we export shannonbase status variables to MySQL. */
+static SHOW_VAR shannonbase_rapid_status_variables[] = {
+    {"rapid_memory_size", (char*)&shannonbase::imcs::rapid_memory_size, 
+                          SHOW_LONG, SHOW_SCOPE_GLOBAL},
+
+    {"rapid_populate_buffer_size", (char*)&shannonbase::populate::population_buffer_size, 
+                                  SHOW_LONG, SHOW_SCOPE_GLOBAL},
+
+    {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}
+};
+    
+/** Callback function for accessing the Rapid variables from MySQL:  SHOW VARIABLES. */
+static int show_shannonbase_rapid_vars(THD *, SHOW_VAR *var, char *) {
+  //gets the latest variables of shannonbase rapid.
+  var->type = SHOW_ARRAY;
+  var->value = (char *)&shannonbase_rapid_status_variables;
+  var->scope = SHOW_SCOPE_GLOBAL;
+
+  return (0);
+}
+static SHOW_VAR shannonbase_rapid_status_variables_export[] = {
+    {"ShannonBase Rapid", (char *)&show_shannonbase_rapid_vars, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
+
+static MYSQL_SYSVAR_ULONG(
+    rapid_memory_size, 
+    shannonbase::imcs::rapid_memory_size,
+    PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+    "Number of memory size that used for rapid engine, and it must "
+    "not be oversize half of physical mem size.",
+    nullptr, rapid_memory_size_update,
+    shannonbase::imcs::DEFAULT_MEMRORY_SIZE, 0,
+    shannonbase::imcs::MAX_MEMRORY_SIZE, 0);
+
+static MYSQL_SYSVAR_ULONG(rapid_populate_buffer_size,
+                          shannonbase::populate::population_buffer_size,
+                          PLUGIN_VAR_RQCMDARG,
+                          "Number of populate buffer size that must not be 10% "
+                          "rapid_populate_buffer size.",
+                          NULL, shannonbase_rapid_populate_buffer_size_update, 
+                          shannonbase::populate::DEFAULT_POPULATION_BUFFER_SIZE, 0, 
+                          shannonbase::populate::MAX_POPULATION_BUFFER_SIZE,0);
+
+//System variables of Shannonbase
+static struct SYS_VAR *shannonbase_rapid_system_variables[] = {
+    MYSQL_SYSVAR(rapid_memory_size),
+    MYSQL_SYSVAR(rapid_populate_buffer_size),
+    nullptr,
+};
+
+/** Here, end of, we export shannonbase status variables to MySQL. */
+
+static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   loaded_tables = new LoadedTables();
 
   handlerton *hton = static_cast<handlerton *>(p);
@@ -370,28 +474,28 @@ static int Rapid_Init(MYSQL_PLUGIN p) {
   return 0;
 }
 
-static int Rapid_Deinit(MYSQL_PLUGIN) {
+static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
   delete loaded_tables;
   loaded_tables = nullptr;
   return 0;
 }
 
-static st_mysql_storage_engine rapid_storage_engine{
+static st_mysql_storage_engine shannonbase_rapid_storage_engine{
     MYSQL_HANDLERTON_INTERFACE_VERSION};
 
 mysql_declare_plugin(shannon_rapid){
     MYSQL_STORAGE_ENGINE_PLUGIN,
-    &rapid_storage_engine,
+    &shannonbase_rapid_storage_engine,
     "Rapid",
     PLUGIN_AUTHOR_SHANNON,
     "Shannon Rapid storage engine",
     PLUGIN_LICENSE_GPL,
-    Rapid_Init,
+    Shannonbase_Rapid_Init,
     nullptr,
-    Rapid_Deinit,
+    Shannonbase_Rapid_Deinit,
     0x0001,
-    nullptr,
-    nullptr,
+    shannonbase_rapid_status_variables_export,
+    shannonbase_rapid_system_variables,
     nullptr,
     0,
 } mysql_declare_plugin_end;

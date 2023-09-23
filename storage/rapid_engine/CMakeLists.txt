@@ -39,8 +39,19 @@ SET(SHANNON_RAPID_ZIP_DECOMPRESS_SOURCES
   compress/zlib/zlib.cc
 )
 
+SET(SHANNON_IMCS_SOURCES
+   imcs/imcs.cpp
+   imcs/imcu.cpp
+   imcs/cu.cpp
+)
+
+SET(SHANNON_POPULATE_SOURCES
+)
+
 SET(SHANNON_RAPID_SOURCES
-  ha_shannon_rapid.cc
+  handler/ha_shannon_rapid.cc
+  ${SHANNON_IMCS_SOURCES}
+  ${SHANNON_POPULATE_SOURCES}
 )
 
 ADD_LIBRARY(rapid_zipdecompress STATIC ${SHANNON_RAPID_ZIP_DECOMPRESS_SOURCES})
