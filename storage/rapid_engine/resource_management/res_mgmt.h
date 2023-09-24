@@ -23,3 +23,11 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
+#ifndef __SHANNONBASE_RES_MGMT_H__
+#define __SHANNONBASE_RES_MGMT_H__
+namespace ShannonBase{
+namespace ResMgmt {
+   
+}
+}
+#endif //__SHANNONBASE_RES_MGMT_H__

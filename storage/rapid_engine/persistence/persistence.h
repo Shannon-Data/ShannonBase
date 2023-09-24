@@ -23,4 +23,11 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
+#ifndef __SHANNONBASE_PERSISTENCE_H__
+#define __SHANNONBASE_PERSISTENCE_H__
+namespace ShannonBase{
+namespace Persistence{
 
+} //ns:persist
+} //ns:shannonbase
+#endif //__SHANNONBASE_PERSISTENCE_H__

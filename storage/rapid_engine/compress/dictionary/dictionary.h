@@ -26,3 +26,18 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
+#ifndef __SHANNONBASE_COMPRESS_DICTIONARY_H__
+#define __SHANNONBASE_COMPRESS_DICTIONARY_H__
+#include "storage/rapid_engine/compress/algorithms.h"
+
+namespace ShannonBase{
+namespace Compress{
+
+//Dictionary compression algorithm.
+class Dictionary : public Compress_algorithm {
+};
+
+
+} //ns:compress
+} //ns:shannonbase
+#endif //__SHANNONBASE_COMPRESS_DICTIONARY_H__

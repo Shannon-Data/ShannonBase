@@ -33,8 +33,8 @@
 
 #include "my_inttypes.h"
 
-namespace shannonbase{
-namespace populate{
+namespace ShannonBase{
+namespace Populate{
 
 constexpr unsigned long MAX_POPULATION_BUFFER_SIZE = 200;
 constexpr unsigned long DEFAULT_POPULATION_BUFFER_SIZE = 100;

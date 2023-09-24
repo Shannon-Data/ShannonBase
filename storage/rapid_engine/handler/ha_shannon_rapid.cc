@@ -101,7 +101,7 @@ class LoadedTables {
 };
 
 LoadedTables *loaded_tables{nullptr};
-
+ShannonBase::Imcs::Imcs* imcs_instance{nullptr};
 /**
   Execution context class for the Rapid engine. It allocates some data
   on the heap when it is constructed, and frees it when it is
@@ -370,17 +370,17 @@ static void shannonbase_rapid_populate_buffer_size_update(
 {
   ulong in_val = *static_cast<const ulong *>(save);
   //set to in_val;
-  if (in_val < shannonbase::populate::population_buffer_size) {
-    in_val = shannonbase::populate::population_buffer_size;
+  if (in_val < ShannonBase::Populate::population_buffer_size) {
+    in_val = ShannonBase::Populate::population_buffer_size;
     push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
                         "population_buffer_size cannot be"
                         " set more than rapid_memory_size.");
     push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
                         "Setting population_buffer_size to %lu",
-                        shannonbase::populate::population_buffer_size);
+                        ShannonBase::Populate::population_buffer_size);
   }
 
-  shannonbase::populate::population_buffer_size = in_val;
+  ShannonBase::Populate::population_buffer_size = in_val;
 }
 
 static void rapid_memory_size_update(
@@ -392,25 +392,25 @@ static void rapid_memory_size_update(
 {
   ulong in_val = *static_cast<const ulong *>(save);
 
-  if (in_val < shannonbase::imcs::rapid_memory_size) {
-    in_val = shannonbase::imcs::rapid_memory_size;
+  if (in_val < ShannonBase::Imcs::rapid_memory_size) {
+    in_val = ShannonBase::Imcs::rapid_memory_size;
     push_warning_printf(
         thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
         "rapid_memory_size cannot be set more than srv buffer.");
     push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
                         "Setting rapid_memory_size to %lu",
-                        shannonbase::imcs::rapid_memory_size);
+                        ShannonBase::Imcs::rapid_memory_size);
   }
 
-  shannonbase::imcs::rapid_memory_size = in_val;
+  ShannonBase::Imcs::rapid_memory_size = in_val;
 }
 
 /** Here we export shannonbase status variables to MySQL. */
 static SHOW_VAR shannonbase_rapid_status_variables[] = {
-    {"rapid_memory_size", (char*)&shannonbase::imcs::rapid_memory_size, 
+    {"rapid_memory_size", (char*)&ShannonBase::Imcs::rapid_memory_size,
                           SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
-    {"rapid_populate_buffer_size", (char*)&shannonbase::populate::population_buffer_size, 
+    {"rapid_populate_buffer_size", (char*)&ShannonBase::Populate::population_buffer_size,
                                   SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}
@@ -431,22 +431,22 @@ static SHOW_VAR shannonbase_rapid_status_variables_export[] = {
 
 static MYSQL_SYSVAR_ULONG(
     rapid_memory_size, 
-    shannonbase::imcs::rapid_memory_size,
+    ShannonBase::Imcs::rapid_memory_size,
     PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
     "Number of memory size that used for rapid engine, and it must "
     "not be oversize half of physical mem size.",
     nullptr, rapid_memory_size_update,
-    shannonbase::imcs::DEFAULT_MEMRORY_SIZE, 0,
-    shannonbase::imcs::MAX_MEMRORY_SIZE, 0);
+    ShannonBase::Imcs::DEFAULT_MEMRORY_SIZE, 0,
+    ShannonBase::Imcs::MAX_MEMRORY_SIZE, 0);
 
 static MYSQL_SYSVAR_ULONG(rapid_populate_buffer_size,
-                          shannonbase::populate::population_buffer_size,
+                           ShannonBase::Populate::population_buffer_size,
                           PLUGIN_VAR_RQCMDARG,
                           "Number of populate buffer size that must not be 10% "
                           "rapid_populate_buffer size.",
                           NULL, shannonbase_rapid_populate_buffer_size_update, 
-                          shannonbase::populate::DEFAULT_POPULATION_BUFFER_SIZE, 0, 
-                          shannonbase::populate::MAX_POPULATION_BUFFER_SIZE,0);
+                          ShannonBase::Populate::DEFAULT_POPULATION_BUFFER_SIZE, 0,
+                          ShannonBase::Populate::MAX_POPULATION_BUFFER_SIZE,0);
 
 //System variables of Shannonbase
 static struct SYS_VAR *shannonbase_rapid_system_variables[] = {
@@ -471,12 +471,23 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   hton->secondary_engine_flags =
       MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN);
   hton->secondary_engine_modify_access_path_cost = ModifyAccessPathCost;
+
+  MEM_ROOT* mem_root {nullptr};
+  imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
+  if (!imcs_instance) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+             "Cannot get IMCS instance.");
+    return 1;
+  };
+  imcs_instance->Initialization(mem_root);
+
   return 0;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
   delete loaded_tables;
   loaded_tables = nullptr;
+  imcs_instance->Deinitialization();
   return 0;
 }
 

@@ -29,10 +29,49 @@
 
 #include "storage/rapid_engine/imcs/imcs.h"
 
-namespace shannonbase{
-namespace imcs{
+namespace ShannonBase{
+namespace Imcs{
 
+unsigned long rapid_memory_size {0};
 
+Imcs* Imcs::m_instance {nullptr};
+std::once_flag Imcs::one;
+
+uint Imcs::Initialization(MEM_ROOT* mem_root)
+{
+  if (mem_root) return true;
+
+  return false;
+}
+uint Imcs::Deinitialization()
+{
+  return false;
+}
+
+Imcu* Alloc_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name, const char* column_name)
+{
+    if (!mem_root) return nullptr;
+
+    Imcu* rapid_imcu {nullptr};
+
+    std::string cu_key;
+    cu_key += db_name;
+    cu_key += table_name;
+    cu_key += column_name;
+
+    return rapid_imcu;
+}
+
+Imcu* Imcs::Get_imcu(const char* db_name, const char* table_name, const char* column_name)
+{
+    std::string cu_key;
+    cu_key += db_name;
+    cu_key += table_name;
+    cu_key += column_name;
+
+    Imcu* rapid_cu {nullptr};
+    return rapid_cu;
+}
 
 } //ns:imcs 
 } //ns:shannonbase

@@ -23,3 +23,68 @@
 
    The fundmental code for imcs.
 */
+#ifndef __SHANNONBASE_CU_H__
+#define __SHANNONBASE_CU_H__
+
+#include <vector>
+
+#include "field_types.h" //for MYSQL_TYPE_XXX
+#include "my_inttypes.h"
+#include "sql/field.h"   //Field
+
+#include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/compress/algorithms.h"
+
+namespace ShannonBase{
+namespace Imcs{
+
+class Cu;
+
+//A cu divide into lots of chunk, each chunk has 65K rows.
+struct Cu_chunk {
+ //index. index <= m_num_chunks
+ uint m_index;
+ //belongs to which cu.
+ Cu* m_owner;
+ uchar* m_data;
+ uchar* m_null_pos;
+};
+
+class Cu_header {
+public:
+  Cu_header() {}
+  virtual ~Cu_header() {}
+ //which field belongs to.
+ Field* m_field;
+ //field type of this cu.
+ enum_field_types m_cu_type;
+ //whether the is not null or not.
+ bool m_nullable;
+
+ //compression alg.
+ Compress::enum_compress_algos m_compress_algo;
+ Compress::Dictionary* m_local_dict;
+
+ //statistics info.
+ ulonglong m_max_value, m_min_value, m_middle_value, m_median_value, m_avg_value;
+ uint m_num_rows, m_num_nulls;
+ uint m_num_chunks;
+};
+
+class Cu {
+public:
+ Cu(){}
+ virtual ~Cu(){}
+ uint Insert(uchar* );
+ uint Delete(uchar* );
+ uint Update(uchar*, uchar*);
+private:
+  Cu_header* m_header;
+  std::vector<Cu_chunk*> m_chunks;
+};
+
+} //ns:imcs
+} //ns:shannonbase
+
+#endif //__SHANNONBASE_CU_H__

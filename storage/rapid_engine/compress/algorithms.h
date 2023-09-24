@@ -19,15 +19,29 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   The fundmental code for imcs. The chunk is used to store the data which
+   transfer from row-based format to column-based format.
 
    The fundmental code for imcs.
-*/
-#ifndef __SHANNONBASE_RECOVERY_H__
-#define __SHANNONBASE_RECOVERY_H__
-namespace ShannonBase{
-namespace Reconvery{
 
-}
-}
-#endif //__SHANNONBASE_RECOVERY_H__
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+*/
+#ifndef __SHANNONBASE_COMPRESS_ALGORITHMS_H__
+#define __SHANNONBASE_COMPRESS_ALGORITHMS_H__
+namespace ShannonBase{
+namespace Compress{
+
+enum enum_compress_algos{
+  NONE = 0,  
+  ZLIB,
+  DICTIONARY
+};
+
+class Compress_algorithm{
+
+};
+
+} //ns:compress
+} //ns:shannonbase
+
+#endif //__SHANNONBASE_COMPRESS_ALGORITHMS_H__
