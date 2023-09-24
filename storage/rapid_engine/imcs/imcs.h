@@ -27,18 +27,63 @@
 #ifndef __SHANNONBASE_IMCS_H__
 #define __SHANNONBASE_IMCS_H__
 
-#include "my_inttypes.h"
+#include <mutex>
+#include <map>
 
-namespace shannonbase{
-namespace imcs{
+#include "my_alloc.h"
+#include "my_inttypes.h"
+#include "storage/rapid_engine/imcs/imcu.h"
+#include "storage/rapid_engine/imcs/cu.h"
+
+namespace ShannonBase{
+namespace Imcs{
 
 //this is used for allocate memory buffer at start of imcs to keep all the loaded data.
 constexpr unsigned long MAX_MEMRORY_SIZE = 100;    
 constexpr unsigned long DEFAULT_MEMRORY_SIZE = MAX_MEMRORY_SIZE;
 
 //the memory size of allocation for imcs to store the loaded data.
-unsigned long rapid_memory_size;
+extern unsigned long rapid_memory_size;
 
-}
+class Memory_object{
+
+};
+
+class Imcu;
+
+class Imcs :public Memory_object {
+public:
+ static Imcs* Get_instance(){
+     std::call_once(one, [&] { m_instance = new Imcs();
+                             });
+    return m_instance;
+ }
+
+ //init and deinit.
+ uint Initialization(MEM_ROOT* mem_root);
+ uint Deinitialization();
+
+ //Gets a new IMCU handler and insert into
+ Imcu* Alloc_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name, const char* column_name);
+ Imcu* Get_imcu(const char* db_name, const char* table_name, const char* column_name);
+ inline uint Get_num_imcu() { return m_imcus.size(); }
+private:
+ //make ctor and dctor private.
+ Imcs() {}
+ virtual ~Imcs() {}
+
+ Imcs(Imcs&& ) = delete;
+ Imcs(Imcs&) = delete;
+ Imcs& operator = (const Imcs&) = delete;
+
+ static Imcs* m_instance;
+ static std::once_flag one;
+
+ //used to keep all allocated imcus
+ std::map<std::string, Imcu*> m_imcus;
+ std::mutex m_imcu_mtx;
+};
+
+} //ns: imcs
 } //ns:shannonbase
 #endif //__SHANNONBASE_IMCS_H__

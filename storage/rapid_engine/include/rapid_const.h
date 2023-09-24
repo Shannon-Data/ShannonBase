@@ -23,11 +23,18 @@
 
    The fundmental code for imcs.
 */
-#ifndef __SHANNONBASE_RECOVERY_H__
-#define __SHANNONBASE_RECOVERY_H__
+#ifndef __SHANNONBASE_CONST_H__
+#define __SHANNONBASE_CONST_H__
+
+#include "my_inttypes.h"
 namespace ShannonBase{
-namespace Reconvery{
+
+//The max num of rows in a chunk.
+constexpr uint MAX_NUM_CHUNK_ROWS = 65535;
+//The max num of cus in an imcu.
+constexpr uint MAX_NUM_CUS = 65535;
+//The max num of IMCU dims.
+constexpr uint MAX_NUM_IMCU_DIMS = 1024;
 
 }
-}
-#endif //__SHANNONBASE_RECOVERY_H__
+#endif //__SHANNONBASE_CONST_H__

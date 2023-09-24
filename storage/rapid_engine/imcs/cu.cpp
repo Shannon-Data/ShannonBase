@@ -26,3 +26,28 @@
 
    The fundmental code for imcs.
 */
+#include "storage/rapid_engine/imcs/cu.h"
+
+namespace ShannonBase {
+namespace Imcs {
+
+uint Cu::Insert(uchar* data)
+{
+   if (!data) return 1;
+
+   return 0;
+}
+uint Cu::Delete(uchar* data)
+{
+   if (!data) return 1;
+
+   return 0;
+}
+uint Cu::Update(uchar* from, uchar* to)
+{
+   if (!from || !to) return 1;
+
+   return 0;
+}
+} // ns:Imcs
+} // ns:ShannonBase

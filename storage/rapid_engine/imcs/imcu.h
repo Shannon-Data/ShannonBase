@@ -19,7 +19,55 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs.
-   
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+
+   The fundmental code for imcs.
 */
+
+#ifndef __SHANNONBASE_IMCU_H__
+#define __SHANNONBASE_IMCU_H__
+
+#include <mutex>
+#include <map>
+
+#include "field_types.h" //for MYSQL_TYPE_XXX
+#include "my_inttypes.h"
+
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/compress/algorithms.h"
+#include "storage/rapid_engine/imcs/cu.h"
+
+namespace ShannonBase{
+namespace Imcs{
+
+class Imcu_header{
+
+private:
+ uint m_num_cu;
+ //statistics information, just like: maximum, minmum, median,middle.
+ ulonglong m_max_value, m_min_value, m_median, m_middle, m_avg;
+ uint m_num_rows, m_num_columns;
+
+ //has generated column or not.
+ bool m_has_vcol;
+};
+
+class Imcu {
+public:
+ Imcu() {}
+ virtual ~Imcu() {}
+
+ Imcu_header& Get_header() { return m_headers; }
+private:
+ // use to proctect header.
+ std::mutex m_mutex_header;
+ Imcu_header m_headers;
+
+ //The all CUs in this IMCU.
+ std::map<std::string, Cu> m_cus;
+};
+
+} //ns: imcs
+} //ns:shannonbase
+
+#endif //__SHANNONBASE_IMCU_H__
