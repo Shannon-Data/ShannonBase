@@ -62,10 +62,12 @@ public:
  //init and deinit.
  uint Initialization(MEM_ROOT* mem_root);
  uint Deinitialization();
+ bool IsInitialized () { return m_initialized; }
 
  //Gets a new IMCU handler and insert into
- Imcu* Alloc_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name, const char* column_name);
- Imcu* Get_imcu(const char* db_name, const char* table_name, const char* column_name);
+ Imcu* Allocate_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name);
+ uint  Deallcate_imcu(const char* db_name, const char* table_name);
+ Imcu* Get_imcu(const char* db_name, const char* table_name);
  inline uint Get_num_imcu() { return m_imcus.size(); }
 private:
  //make ctor and dctor private.
@@ -76,6 +78,7 @@ private:
  Imcs(Imcs&) = delete;
  Imcs& operator = (const Imcs&) = delete;
 
+ bool m_initialized {false};
  static Imcs* m_instance;
  static std::once_flag one;
 

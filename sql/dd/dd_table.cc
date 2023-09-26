@@ -553,8 +553,8 @@ bool fill_dd_columns_from_create_fields(THD *thd, dd::Abstract_table *tab_obj,
   for (const Create_field &field : create_fields) {
     //
     // Add new DD column
-    //
-
+    //we dont add the ghost column to a new column.
+    if (field.sql_type == MYSQL_TYPE_DB_TRX_ID) continue;
     dd::Column *col_obj = tab_obj->add_column();
 
     col_obj->set_name(field.field_name);
