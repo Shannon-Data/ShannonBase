@@ -643,4 +643,29 @@ bool lock_check_constraint_names_for_rename(THD *thd, const char *db,
 bool prepare_check_constraints_for_create(THD *thd, const char *db_name,
                                           const char *table_name,
                                           Alter_info *alter_info);
+constexpr uint MAX_SHANNON_RPD_STRING_LEN = 128;
+struct shannon_rpd_columns_info_t {
+  /**unique id, index*/
+  uint id;
+  /**table id of loaded table*/
+  uint table_id;
+  /**table_name loaded into rapid*/
+  char table_name[MAX_SHANNON_RPD_STRING_LEN] = {0};
+  /**cloumn name with charset info*/
+  char column_name[MAX_SHANNON_RPD_STRING_LEN] = {0};
+  /**columun id of loaded table*/
+  uint column_id;
+  /**The number of distinct values in the column.*/
+  longlong ndv;
+  /**The type of encoding used.*/
+  char encoding[MAX_SHANNON_RPD_STRING_LEN] = {0};
+  /**data placement index*/
+  uint data_placement_index;
+  /**The dictionary size per column, in bytes.*/
+  longlong data_dict_bytes;
+};
+
+using rpd_columns_info = shannon_rpd_columns_info_t;
+using rpd_columns_container = std::vector<rpd_columns_info>;
+extern rpd_columns_container meta_rpd_columns_infos;
 #endif /* SQL_TABLE_INCLUDED */

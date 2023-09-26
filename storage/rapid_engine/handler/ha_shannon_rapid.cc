@@ -43,6 +43,7 @@
 #include "my_sys.h"
 #include "mysql/plugin.h"
 #include "mysqld_error.h"
+#include "sql/current_thd.h" //current_thd
 #include "sql/debug_sync.h"
 #include "sql/handler.h"
 #include "sql/join_optimizer/access_path.h"
@@ -68,12 +69,17 @@ namespace {
 struct RapidShare {
   THR_LOCK lock;
   RapidShare() { thr_lock_init(&lock); }
+  RapidShare(const char* db_name,
+             const char* table_name) : m_db_name(db_name), m_table_name(table_name)
+            { thr_lock_init(&lock); }
   ~RapidShare() { thr_lock_delete(&lock); }
 
   // Not copyable. The THR_LOCK object must stay where it is in memory
   // after it has been initialized.
   RapidShare(const RapidShare &) = delete;
   RapidShare &operator=(const RapidShare &) = delete;
+  const char* m_db_name {nullptr};
+  const char* m_table_name {nullptr};
 };
 
 // Map from (db_name, table_name) to the RapidShare with table state.
@@ -207,13 +213,94 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to,
 
 int ha_rapid::load_table(const TABLE &table_arg) {
   assert(table_arg.file != nullptr);
-  loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str);
+  THD* thd = current_thd;
+  RapidShare *share [[maybe_unused]] {nullptr};
   if (loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) ==
       nullptr) {
+      share = new RapidShare ();
+  } else { //TODO: after alter table, do we need to reload it or not???
+    //my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+    //         "Table is already loaded on a secondary engine, you need not load it again");
+    //return 1;
+  }
+
+  // check if primary key is missing. rapid engine must has at least one PK.
+  if (table_arg.s->is_missing_primary_key()) {
+    my_error(ER_REQUIRES_PRIMARY_KEY, MYF(0));
+    return HA_ERR_GENERIC;
+  }
+  KEY *key = table_arg.key_info + table_arg.s->primary_key;
+  if (key->actual_key_parts != 1) {
+    my_error(ER_RAPID_DA_ONLY_SUPPORT_SINGLE_PRIMARY_KEY, MYF(0),
+             table_arg.s->db.str, table_arg.s->table_name.str,
+             key->actual_key_parts);
+    return HA_ERR_GENERIC;
+  }
+
+  //The key field MUST be set.
+  if (key->key_part->field->is_flag_set(NOT_SECONDARY_FLAG)) {
+      my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
+               table_arg.s->db.str, table_arg.s->table_name.str);
+      return HA_ERR_GENERIC;
+  }
+
+  // Scan the primary table and read the records.
+  if (table_arg.file->inited == NONE && table_arg.file->ha_rnd_init(true)) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str,
              table_arg.s->table_name.str);
-    return HA_ERR_KEY_NOT_FOUND;
+    return HA_ERR_GENERIC;
   }
+  //Do scan the primary table.
+  int tmp {HA_ERR_GENERIC};
+  uchar *record = table_arg.record[0];
+  while ((tmp = table_arg.file->ha_rnd_next(record)) != HA_ERR_END_OF_FILE) {
+   /*
+      ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is
+      reading and another deleting without locks. Now, do full scan, but
+      multi-thread scan will impl in future.
+    */
+   if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+    std::vector<Field *> field_lst;
+    uint32 field_count = table_arg.s->fields;
+    Field *field_ptr = nullptr;
+    uint32 primary_key_idx [[maybe_unused]] = field_count;
+    for (uint32 index = 0; index < field_count; index++) {
+      field_ptr = *(table_arg.field + index);
+      // Skip columns marked as NOT SECONDARY. │
+      if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+      field_lst.push_back(field_ptr);
+
+
+      char buff[MAX_FIELD_WIDTH] = {0};
+      String str(buff, sizeof(buff), &my_charset_bin);
+#ifndef NDEBUG
+      my_bitmap_map *old_map = 0;
+      TABLE *table = const_cast<TABLE *>(&table_arg);
+      if (table && table->file)
+        old_map = dbug_tmp_use_all_columns(table, table->read_set);
+#endif
+        // Here, we get the col data in string format. And, here, do insertion
+        // to IMCS.
+        // String *res = field_ptr->val_str(&str);
+#ifndef NDEBUG
+      if (old_map) dbug_tmp_restore_column_map(table->read_set, old_map);
+#endif
+    }
+    // Gets trx id
+    field_ptr = *(table_arg.field + field_count);
+    assert(field_ptr->type() == MYSQL_TYPE_DB_TRX_ID);
+    uint64_t trx_id [[maybe_unused]] = field_ptr->val_int();
+    //TODO: Start to write to IMCS.
+    ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
+    assert(imcs_instance);
+
+    ha_statistic_increment(&System_status_var::ha_read_rnd_count);
+    if (tmp == HA_ERR_RECORD_DELETED && !thd->killed) continue;
+  }
+
+  table_arg.file->ha_rnd_end();
+  loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str);
   return 0;
 }
 
@@ -224,12 +311,16 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Table is not loaded on a secondary engine");
     return 1;
-  } else {
-    loaded_tables->erase(db_name, table_name);
-    return 0;
   }
-}
+  
+  //TODO: Starts to unload data from ICMS.
+  ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
+  assert(imcs_instance);
 
+  //Execute unload operation.
+  loaded_tables->erase(db_name, table_name);
+  return 0;
+}
 }  // namespace ShannonBase 
 
 static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
@@ -456,23 +547,24 @@ static struct SYS_VAR *shannonbase_rapid_system_variables[] = {
 };
 
 /** Here, end of, we export shannonbase status variables to MySQL. */
-
+static struct handlerton* shannon_rapid_hton_ptr {nullptr};
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   loaded_tables = new LoadedTables();
 
-  handlerton *hton = static_cast<handlerton *>(p);
-  hton->create = Create;
-  hton->state = SHOW_OPTION_YES;
-  hton->flags = HTON_IS_SECONDARY_ENGINE;
-  hton->db_type = DB_TYPE_UNKNOWN;
-  hton->prepare_secondary_engine = PrepareSecondaryEngine;
-  hton->optimize_secondary_engine = OptimizeSecondaryEngine;
-  hton->compare_secondary_engine_cost = CompareJoinCost;
-  hton->secondary_engine_flags =
+  handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);
+  shannon_rapid_hton_ptr = shannon_rapid_hton;
+  shannon_rapid_hton->create = Create;
+  shannon_rapid_hton->state = SHOW_OPTION_YES;
+  shannon_rapid_hton->flags = HTON_IS_SECONDARY_ENGINE;
+  shannon_rapid_hton->db_type = DB_TYPE_UNKNOWN;
+  shannon_rapid_hton->prepare_secondary_engine = PrepareSecondaryEngine;
+  shannon_rapid_hton->optimize_secondary_engine = OptimizeSecondaryEngine;
+  shannon_rapid_hton->compare_secondary_engine_cost = CompareJoinCost;
+  shannon_rapid_hton->secondary_engine_flags =
       MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN);
-  hton->secondary_engine_modify_access_path_cost = ModifyAccessPathCost;
+  shannon_rapid_hton->secondary_engine_modify_access_path_cost = ModifyAccessPathCost;
 
-  MEM_ROOT* mem_root {nullptr};
+  MEM_ROOT* mem_root = current_thd->mem_root;
   imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
   if (!imcs_instance) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
