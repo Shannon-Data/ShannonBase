@@ -2725,22 +2725,22 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
   for (uint32 index = 0; index < field_count; index++) {
     field_ptr = *(table.field + index);
 
-    // Skip columns marked as NOT SECONDARY. │
+    // Skip columns marked as NOT SECONDARY.
     if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     rpd_columns_info row_rpd_columns;
-    row_rpd_columns.id = meta_rpd_columns_infos.size();
+    row_rpd_columns.table_id = static_cast<uint>(table.s->table_map_id.id());
+    row_rpd_columns.column_id = field_ptr->field_index();
     strncpy(row_rpd_columns.column_name, field_ptr->field_name,
             strlen(field_ptr->field_name));
+    strncpy(row_rpd_columns.table_name, table.s->table_name.str,
+            strlen(table.s->table_name.str));
     row_rpd_columns.data_dict_bytes = 0;
     row_rpd_columns.data_placement_index = 0;
     strcpy(row_rpd_columns.encoding, "N/A");
     row_rpd_columns.ndv = 0;
-    row_rpd_columns.table_id = static_cast<uint>(table.s->table_map_id.id());
-    strncpy(row_rpd_columns.table_name, table.s->table_name.str,
-            table.s->table_name.length);
 
     meta_rpd_columns_infos.push_back(row_rpd_columns);
-  } 
+  }
   return false;
 }
 

@@ -118,6 +118,8 @@
 #include "storage/perfschema/table_replication_applier_status.h"
 #include "storage/perfschema/table_replication_applier_status_by_coordinator.h"
 #include "storage/perfschema/table_replication_applier_status_by_worker.h"
+#include "storage/perfschema/table_rpd_column_id.h"  // rpd_column_id
+#include "storage/perfschema/table_rpd_columns.h"    // rpd_columns
 /* For replication related perfschema tables. */
 #include "storage/perfschema/table_log_status.h"
 #include "storage/perfschema/table_replication_asynchronous_connection_failover.h"
@@ -581,6 +583,8 @@ static PFS_engine_table_share *all_shares[] = {
     &table_replication_applier_global_filters::m_share,
     &table_replication_asynchronous_connection_failover::m_share,
     &table_rpl_async_connection_failover_managed::m_share,
+    &table_rpd_column_id::m_share,
+    &table_rpd_columns::m_share,
     &table_log_status::m_share,
 
     &table_prepared_stmt_instances::m_share,

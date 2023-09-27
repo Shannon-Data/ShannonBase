@@ -148,6 +148,8 @@ table_replication_applier_status_by_worker.h
 table_replication_connection_configuration.h
 table_replication_connection_status.h
 table_replication_group_member_stats.h
+table_rpd_column_id.h
+table_rpd_columns.h
 table_replication_group_members.h
 table_session_account_connect_attrs.h
 table_session_connect.h
@@ -316,6 +318,8 @@ table_replication_connection_configuration.cc
 table_replication_connection_status.cc
 table_replication_group_member_stats.cc
 table_replication_group_members.cc
+table_rpd_column_id.cc
+table_rpd_columns.cc
 table_session_account_connect_attrs.cc
 table_session_connect.cc
 table_session_connect_attrs.cc
