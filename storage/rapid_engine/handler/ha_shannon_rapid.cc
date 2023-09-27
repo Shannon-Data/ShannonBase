@@ -219,9 +219,9 @@ int ha_rapid::load_table(const TABLE &table_arg) {
       nullptr) {
       share = new RapidShare ();
   } else { //TODO: after alter table, do we need to reload it or not???
-    //my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-    //         "Table is already loaded on a secondary engine, you need not load it again");
-    //return 1;
+    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
+             table_arg.s->table_name.str);
+    return HA_ERR_GENERIC;
   }
 
   // check if primary key is missing. rapid engine must has at least one PK.
