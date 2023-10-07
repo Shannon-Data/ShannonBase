@@ -57,6 +57,7 @@
 #include "template_utils.h"
 #include "thr_lock.h"
 
+#include "storage/rapid_engine/include/rapid_stats.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/populate/populate.h"
 /* clang-format off */
@@ -147,7 +148,8 @@ class Rapid_execution_context : public Secondary_engine_execution_context {
 }  // namespace
 
 namespace ShannonBase {
-
+//global rpd meta infos
+rpd_columns_container meta_rpd_columns_infos;
 ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
     : handler(hton, table_share_arg) {}
 
@@ -217,7 +219,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   RapidShare *share [[maybe_unused]] {nullptr};
   if (loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) ==
       nullptr) {
-      share = new RapidShare ();
+      share = new (thd->mem_root)RapidShare ();
   } else { //TODO: after alter table, do we need to reload it or not???
     my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
              table_arg.s->table_name.str);
@@ -250,6 +252,20 @@ int ha_rapid::load_table(const TABLE &table_arg) {
              table_arg.s->table_name.str);
     return HA_ERR_GENERIC;
   }
+  //TODO: Start to write to IMCS.
+  ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
+  assert(imcs_instance);
+  if (!imcs_instance->IsInitialized()) {
+     imcs_instance->Initialization(thd->mem_root);
+  }
+  Imcs::Imcu* imcu_instance {nullptr};
+  imcu_instance = imcs_instance->Get_imcu(table_arg.s->db.str, table_arg.s->table_name.str);
+  if (!imcu_instance) {
+    imcu_instance = imcs_instance->Allocate_imcu (thd->mem_root, table_arg.s->db.str,
+                                                  table_arg.s->table_name.str, table_arg.s->fields);
+  }
+  imcu_instance->Build_header(table_arg);
+
   //Do scan the primary table.
   int tmp {HA_ERR_GENERIC};
   uchar *record = table_arg.record[0];
@@ -259,18 +275,20 @@ int ha_rapid::load_table(const TABLE &table_arg) {
       reading and another deleting without locks. Now, do full scan, but
       multi-thread scan will impl in future.
     */
-   if (tmp == HA_ERR_KEY_NOT_FOUND) break;
-    std::vector<Field *> field_lst;
+    if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+  
     uint32 field_count = table_arg.s->fields;
     Field *field_ptr = nullptr;
     uint32 primary_key_idx [[maybe_unused]] = field_count;
+    // Gets trx id
+    field_ptr = *(table_arg.field + field_count);
+    assert(field_ptr->type() == MYSQL_TYPE_DB_TRX_ID);
+    uint64_t trx_id [[maybe_unused]] = field_ptr->val_int();
+
     for (uint32 index = 0; index < field_count; index++) {
       field_ptr = *(table_arg.field + index);
       // Skip columns marked as NOT SECONDARY. │
       if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-      field_lst.push_back(field_ptr);
-
 
       char buff[MAX_FIELD_WIDTH] = {0};
       String str(buff, sizeof(buff), &my_charset_bin);
@@ -280,20 +298,19 @@ int ha_rapid::load_table(const TABLE &table_arg) {
       if (table && table->file)
         old_map = dbug_tmp_use_all_columns(table, table->read_set);
 #endif
-        // Here, we get the col data in string format. And, here, do insertion
-        // to IMCS.
+        // Here, we get the col data in string format. And, here, do insertion to IMCS.
         // String *res = field_ptr->val_str(&str);
 #ifndef NDEBUG
       if (old_map) dbug_tmp_restore_column_map(table->read_set, old_map);
 #endif
+      std::string field_name = field_ptr->field_name;
+      Imcs::Cu* cu = imcu_instance->Get_cu(field_name);
+      if (cu->Insert(field_ptr)){
+        my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
+                 table_arg.s->table_name.str);
+        return HA_ERR_GENERIC;
+      }
     }
-    // Gets trx id
-    field_ptr = *(table_arg.field + field_count);
-    assert(field_ptr->type() == MYSQL_TYPE_DB_TRX_ID);
-    uint64_t trx_id [[maybe_unused]] = field_ptr->val_int();
-    //TODO: Start to write to IMCS.
-    ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
-    assert(imcs_instance);
 
     ha_statistic_increment(&System_status_var::ha_read_rnd_count);
     if (tmp == HA_ERR_RECORD_DELETED && !thd->killed) continue;

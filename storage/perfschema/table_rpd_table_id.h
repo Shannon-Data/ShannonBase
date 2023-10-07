@@ -24,12 +24,12 @@
    Shannon Data AI.
 */
 
-#ifndef __TABLE_SHANNONBASE_RPD_COLUMN_ID_H__
-#define __TABLE_SHANNONBASE_RPD_COLUMN_ID_H__
+#ifndef __TABLE_SHANNONBASE_RPD_TABLE_ID_H__
+#define __TABLE_SHANNONBASE_RPD_TABLE_ID_H__
 
 /**
-  @file storage/perfschema/table_rpd_column_id.h
-  Table table_rpd_column_id (declarations).
+  @file storage/perfschema/table_rpd_table_id.h
+  Table table_rpd_table_id (declarations).
 */
 
 #include <stddef.h>
@@ -57,15 +57,15 @@ struct THR_LOCK;
   length field denoted by @<field_name@>_length.
 */
 
-struct st_row_rpd_column_id {
-  ulonglong column_id {0};
+struct st_row_rpd_table_id {
   ulonglong table_id {0};
-  char column_name[NAME_LEN] {0};
-  uint column_name_length {0};
+  char full_table_name[NAME_LEN] ={0}; //including schema_name
+  char schema_name[NAME_LEN] ={0};
+  char table_name[NAME_LEN] ={0};
 };
 
-/** Table PERFORMANCE_SCHEMA.RPD_COLUMN_ID. */
-class table_rpd_column_id : public PFS_engine_table {
+/** Table PERFORMANCE_SCHEMA.RPD_TABLE_ID. */
+class table_rpd_table_id : public PFS_engine_table {
   typedef PFS_simple_index pos_t;
 
  private:
@@ -77,7 +77,7 @@ class table_rpd_column_id : public PFS_engine_table {
   static Plugin_table m_table_def;
 
   /** Current row */
-  st_row_rpd_column_id m_row;
+  st_row_rpd_table_id m_row;
   /** Current position. */
   pos_t m_pos;
   /** Next position. */
@@ -95,10 +95,10 @@ class table_rpd_column_id : public PFS_engine_table {
   int read_row_values(TABLE *table, unsigned char *buf, Field **fields,
                       bool read_all) override;
 
-  table_rpd_column_id();
+  table_rpd_table_id();
 
  public:
-  ~table_rpd_column_id() override;
+  ~table_rpd_table_id() override;
 
   /** Table share. */
   static PFS_engine_table_share m_share;
@@ -110,4 +110,4 @@ class table_rpd_column_id : public PFS_engine_table {
 };
 
 /** @} */
-#endif
+#endif //__TABLE_SHANNONBASE_RPD_TABLE_ID_H__

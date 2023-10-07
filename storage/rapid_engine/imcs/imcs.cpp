@@ -26,7 +26,7 @@
 
    The fundmental code for imcs.
 */
-
+#include <mutex>
 #include "storage/rapid_engine/imcs/imcs.h"
 
 namespace ShannonBase{
@@ -37,20 +37,18 @@ unsigned long rapid_memory_size {0};
 Imcs* Imcs::m_instance {nullptr};
 std::once_flag Imcs::one;
 
-uint Imcs::Initialization(MEM_ROOT* mem_root)
-{
-  if (mem_root) return true;
+uint Imcs::Initialization(MEM_ROOT* mem_root) {
+  if (!mem_root) return true;
   m_initialized = true;
   return false;
 }
-uint Imcs::Deinitialization()
-{
+
+uint Imcs::Deinitialization() {
   m_initialized = false;
   return false;
 }
 
-Imcu* Allocate_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name)
-{
+Imcu* Imcs::Allocate_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name, uint fields) {
     if (!mem_root) return nullptr;
 
     Imcu* rapid_imcu {nullptr};
@@ -58,23 +56,42 @@ Imcu* Allocate_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_n
     std::string cu_key;
     cu_key += db_name;
     cu_key += table_name;
-  
+
+    std::scoped_lock lk(m_imcu_mtx);
+    rapid_imcu  = new (mem_root) Imcu(fields);
+    auto flag  = m_imcus.insert(std::make_pair(cu_key, rapid_imcu));
+    if (!flag.second) {
+      delete rapid_imcu;
+      rapid_imcu = nullptr;
+    }
+
     return rapid_imcu;
 }
-uint  Imcs::Deallcate_imcu(const char* db_name, const char* table_name)
-{
+uint  Imcs::Deallcate_imcu(const char* db_name, const char* table_name) {
   std::string cu_key;
   cu_key += db_name;
   cu_key += table_name;
+
+  std::scoped_lock lk(m_imcu_mtx);
+  auto pos = m_imcus.find(cu_key);
+  if (pos != m_imcus.end()) {
+    Imcu* imcu_ptr  = pos->second;
+    delete imcu_ptr;
+    m_imcus.erase (pos);
+  }
+
   return 0;
 }
-Imcu* Imcs::Get_imcu(const char* db_name, const char* table_name)
-{
+Imcu* Imcs::Get_imcu(const char* db_name, const char* table_name) {
     std::string cu_key;
     cu_key += db_name;
     cu_key += table_name;
 
     Imcu* rapid_cu {nullptr};
+    std::scoped_lock<std::mutex> scoped_lk(m_imcu_mtx);
+    if (m_imcus.find(cu_key) != m_imcus.end())
+      rapid_cu = m_imcus[cu_key];
+
     return rapid_cu;
 }
 

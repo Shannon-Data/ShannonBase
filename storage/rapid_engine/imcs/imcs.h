@@ -34,6 +34,7 @@
 #include "my_inttypes.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/include/rapid_object.h"
 
 namespace ShannonBase{
 namespace Imcs{
@@ -45,13 +46,9 @@ constexpr unsigned long DEFAULT_MEMRORY_SIZE = MAX_MEMRORY_SIZE;
 //the memory size of allocation for imcs to store the loaded data.
 extern unsigned long rapid_memory_size;
 
-class Memory_object{
-
-};
-
 class Imcu;
 
-class Imcs :public Memory_object {
+class Imcs :public MemoryObject {
 public:
  static Imcs* Get_instance(){
      std::call_once(one, [&] { m_instance = new Imcs();
@@ -65,7 +62,7 @@ public:
  bool IsInitialized () { return m_initialized; }
 
  //Gets a new IMCU handler and insert into
- Imcu* Allocate_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name);
+ Imcu* Allocate_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name, uint fields);
  uint  Deallcate_imcu(const char* db_name, const char* table_name);
  Imcu* Get_imcu(const char* db_name, const char* table_name);
  inline uint Get_num_imcu() { return m_imcus.size(); }

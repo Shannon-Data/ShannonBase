@@ -29,42 +29,55 @@
 
 #include <mutex>
 #include <map>
+#include <string>
 
 #include "field_types.h" //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"
+#include "my_list.h" //for LIST
+#include "sql/table.h" //for TABLE
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/include/rapid_object.h"
 
 namespace ShannonBase{
 namespace Imcs{
 
-class Imcu_header{
-
-private:
- uint m_num_cu;
- //statistics information, just like: maximum, minmum, median,middle.
- ulonglong m_max_value, m_min_value, m_median, m_middle, m_avg;
- uint m_num_rows, m_num_columns;
-
- //has generated column or not.
- bool m_has_vcol;
-};
-
-class Imcu {
+class Imcu : public MemoryObject{
 public:
- Imcu() {}
- virtual ~Imcu() {}
 
- Imcu_header& Get_header() { return m_headers; }
+  class Imcu_header_t {
+  public:
+    uint m_num_cu;
+    uint m_num_rows;
+    //statistics information, just like: maximum, minmum, median,middle.
+    double m_max_value, m_min_value, m_median, m_middle;
+    double m_avg;
+    //has generated column or not.
+    bool m_has_vcol;
+    //db name and table name which imcu belongs to.
+    std::string m_db, m_table;
+    //fields
+    uint m_fields;
+    std::vector<Field*> m_field;
+  };
+  using Imcu_header = Imcu_header_t;
+
+  Imcu();
+  Imcu(uint num_cus);
+  virtual ~Imcu();
+
+  uint Build_header (const TABLE& table_arg);
+  Imcu_header& Get_header() { return m_headers; }
+  Cu* Get_cu(std::string& field_name);
 private:
- // use to proctect header.
- std::mutex m_mutex_header;
- Imcu_header m_headers;
+  // use to proctect header.
+  std::mutex m_mutex_header;
+  Imcu_header m_headers;
 
- //The all CUs in this IMCU.
- std::map<std::string, Cu> m_cus;
+  //The all CUs in this IMCU.
+  std::map<std::string, Cu*> m_cus;
 };
 
 } //ns: imcs

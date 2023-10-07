@@ -197,6 +197,7 @@
 #include "thr_lock.h"
 #include "typelib.h"
 
+#include "storage/rapid_engine/include/rapid_stats.h" //meta_rpd_columns_infos
 namespace dd {
 class View;
 }  // namespace dd
@@ -211,9 +212,6 @@ using std::to_string;
 static constexpr const int KEY_DEFAULT_PACK_LENGTH{8};
 /* Max number of enumeration values */
 static constexpr const int MAX_ENUM_VALUES{65535};
-
-/** Global shannon rpd column information map, keep loaded table. */
-rpd_columns_container meta_rpd_columns_infos;
 
 #define ER_THD_OR_DEFAULT(thd, X) \
   ((thd) ? ER_THD_NONCONST(thd, X) : ER_DEFAULT_NONCONST(X))
@@ -2727,7 +2725,9 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
 
     // Skip columns marked as NOT SECONDARY.
     if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-    rpd_columns_info row_rpd_columns;
+
+    ShannonBase::rpd_columns_info row_rpd_columns;
+    strncpy(row_rpd_columns.schema_name, table.s->db.str, table.s->db.length);
     row_rpd_columns.table_id = static_cast<uint>(table.s->table_map_id.id());
     row_rpd_columns.column_id = field_ptr->field_index();
     strncpy(row_rpd_columns.column_name, field_ptr->field_name,
@@ -2739,7 +2739,7 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
     strcpy(row_rpd_columns.encoding, "N/A");
     row_rpd_columns.ndv = 0;
 
-    meta_rpd_columns_infos.push_back(row_rpd_columns);
+    ShannonBase::meta_rpd_columns_infos.push_back(row_rpd_columns);
   }
   return false;
 }

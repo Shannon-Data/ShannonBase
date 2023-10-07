@@ -23,3 +23,63 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
+#include <limits.h>
+
+#include "sql/current_thd.h"
+#include "sql/sql_class.h"
+
+#include "storage/rapid_engine/imcs/imcu.h"
+
+namespace ShannonBase {
+namespace Imcs {
+Imcu::Imcu() {
+
+}
+
+Imcu::Imcu(uint num_cus [[maybe_unused]]) {
+
+}
+Imcu::~Imcu() {
+
+}
+
+uint Imcu::Build_header(const TABLE& table_arg) {
+  m_headers.m_num_cu = 0;
+
+  m_headers.m_max_value = 0;
+  m_headers.m_min_value = LLONG_MIN;
+  m_headers.m_median = 0;
+  m_headers.m_middle = 0;
+  m_headers.m_avg = 0;
+  m_headers.m_has_vcol = false;
+
+  Field* field_ptr = *table_arg.s->field;
+  m_headers.m_db = table_arg.s->db.str;
+  m_headers.m_table = table_arg.s->table_name.str;
+
+  for (uint index =0; index < table_arg.s->fields; index ++) {
+    m_headers.m_field.push_back((field_ptr + index));
+    std::string field_name  = field_ptr->field_name;
+    //TODO: use own memory.
+    Cu* cu_ptr = new (current_thd->mem_root) Cu (field_ptr + index);
+    if (cu_ptr)
+      m_cus.insert(std::make_pair(field_name, cu_ptr));
+  }
+  m_headers.m_fields = table_arg.s->fields;
+  return 0;
+}
+/**Gets a CU by field_name (aka: key)*/
+Cu* Imcu::Get_cu(std::string& field_name) {
+  Cu* cu_ptr {nullptr};
+  std::scoped_lock lk(m_mutex_header);
+  auto pos =  m_cus.find(field_name);
+  if (pos == m_cus.end()) {
+    return cu_ptr;
+  }
+
+  cu_ptr = pos->second;
+  return cu_ptr;
+}
+
+} // ns:Imcs
+} // ns:ShannonBase
