@@ -45,6 +45,7 @@
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
+#include "storage/rapid_engine/include/rapid_stats.h"
 /*
   Callbacks implementation for RPD_COLUMNS.
 */
@@ -108,7 +109,7 @@ void table_rpd_columns::reset_position() {
 }
 
 ha_rows table_rpd_columns::get_row_count() {
-  return meta_rpd_columns_infos.size();
+  return ShannonBase::meta_rpd_columns_infos.size();
 }
 
 int table_rpd_columns::rnd_next() {
@@ -138,16 +139,16 @@ int table_rpd_columns::rnd_pos(const void *pos) {
 int table_rpd_columns::make_row(uint index[[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= meta_rpd_columns_infos.size()) {
+  if (index >= ShannonBase::meta_rpd_columns_infos.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.colum_id = meta_rpd_columns_infos[index].column_id;
-    m_row.table_id = meta_rpd_columns_infos[index].table_id;
-    m_row.data_placement_index = meta_rpd_columns_infos[index].data_placement_index;
-    m_row.dict_size_bytes = meta_rpd_columns_infos[index].data_dict_bytes;
-    m_row.ndv = meta_rpd_columns_infos[index].ndv;
-    strncpy(m_row.encoding, meta_rpd_columns_infos[index].encoding, 
-            strlen(meta_rpd_columns_infos[index].encoding));
+    m_row.colum_id = ShannonBase::meta_rpd_columns_infos[index].column_id;
+    m_row.table_id = ShannonBase::meta_rpd_columns_infos[index].table_id;
+    m_row.data_placement_index = ShannonBase::meta_rpd_columns_infos[index].data_placement_index;
+    m_row.dict_size_bytes = ShannonBase::meta_rpd_columns_infos[index].data_dict_bytes;
+    m_row.ndv = ShannonBase::meta_rpd_columns_infos[index].ndv;
+    strncpy(m_row.encoding, ShannonBase::meta_rpd_columns_infos[index].encoding,
+            strlen(ShannonBase::meta_rpd_columns_infos[index].encoding));
   }
   return 0;
 }

@@ -1,4 +1,6 @@
-/**
+/*
+   Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
@@ -17,33 +19,17 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
-
-   The fundmental code for imcs.
+   Shannon Data AI.
 */
-#ifndef __SHANNONBASE_CONST_H__
-#define __SHANNONBASE_CONST_H__
 
-#include "my_inttypes.h"
-namespace ShannonBase{
+#ifndef __TABLE_SHANNONBASE_RPD_PRELOAD_STATS_H__
+#define __TABLE_SHANNONBASE_RPD_PRELOAD_STATS_H__
 
-//The max num of rows in a chunk.
-constexpr uint MAX_NUM_CHUNK_ROWS = 65535;
-//The max num of cus in an imcu.
-constexpr uint MAX_NUM_CUS = 65535;
-//The max num of IMCU dims.
-constexpr uint MAX_NUM_IMCU_DIMS = 1024;
-//The max row width
-constexpr uint MAX_ROW_LEN = 512;
-//This is use for Rapid cluster in future.
-enum class RPD_NODE_ROLE {
-  //meta node and primary role, name node.
-  NODE_PRIMARY_NODE = 0,
-  //secondary node: data node
-  NODE_SECONDARY_NODE
-};
+/**
+  @file storage/perfschema/table_rpd_preload_stats.h
+  Table table_rpd_preload_stats (declarations).
+*/
 
-}
-#endif //__SHANNONBASE_CONST_H__
+#endif //__TABLE_SHANNONBASE_RPD_PRELOAD_STATS_H__

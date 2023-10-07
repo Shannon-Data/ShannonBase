@@ -25,11 +25,11 @@
 */
 
 /**
-  @file storage/perfschema/table_rpd_column_id.cc
-  Table table_rpd_column_id (implementation).
+  @file storage/perfschema/table_rpd_table_id.cc
+  Table table_rpd_table_id (implementation).
 */
 
-#include "storage/perfschema/table_rpd_column_id.h"
+#include "storage/perfschema/table_rpd_table_id.h"
 
 #include <stddef.h>
 
@@ -39,38 +39,40 @@
 
 #include "sql/field.h"
 #include "sql/plugin_table.h"
-#include "sql/sql_table.h"
 #include "sql/table.h"
+#include "sql/sql_table.h" // meta_rpd_columns_infos
 
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
 #include "storage/rapid_engine/include/rapid_stats.h"
 /*
-  Callbacks implementation for RPD_COLUMN_ID.
+  Callbacks implementation for RPD_TABLE_ID.
 */
-THR_LOCK table_rpd_column_id::m_table_lock;
 
-Plugin_table table_rpd_column_id::m_table_def(
+THR_LOCK table_rpd_table_id::m_table_lock;
+
+Plugin_table table_rpd_table_id::m_table_def(
     /* Schema name */
     "performance_schema",
     /* Name */
-    "rpd_column_id",
+    "rpd_table_id",
     /* Definition */
     "  ID BIGINT unsigned not null,\n"
-    "  TABLE_ID BIGINT unsigned not null,\n"
-    "  COLUMN_NAME CHAR(128) collate utf8mb4_bin not null\n",
+    "  NAME CHAR(64) collate utf8mb4_bin not null,\n"
+    "  SCHEMA_NAME CHAR(64) collate utf8mb4_bin not null,\n"
+    "  TABLE_NAME CHAR(64) collate utf8mb4_bin not null\n",
     /* Options */
     " ENGINE=PERFORMANCE_SCHEMA",
     /* Tablespace */
     nullptr);
 
-PFS_engine_table_share table_rpd_column_id::m_share = {
+PFS_engine_table_share table_rpd_table_id::m_share = {
     &pfs_readonly_acl,
-    &table_rpd_column_id::create,
+    &table_rpd_table_id::create,
     nullptr, /* write_row */
     nullptr, /* delete_all_rows */
-    table_rpd_column_id::get_row_count,
+    table_rpd_table_id::get_row_count,
     sizeof(pos_t), /* ref length */
     &m_table_lock,
     &m_table_def,
@@ -80,32 +82,33 @@ PFS_engine_table_share table_rpd_column_id::m_share = {
     false /* m_in_purgatory */
 };
 
-PFS_engine_table *table_rpd_column_id::create(
+PFS_engine_table *table_rpd_table_id::create(
     PFS_engine_table_share *) {
-  return new table_rpd_column_id();
+  return new table_rpd_table_id();
 }
 
-table_rpd_column_id::table_rpd_column_id()
+table_rpd_table_id::table_rpd_table_id()
     : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
-  m_row.column_id = 0;
   m_row.table_id = 0;
-  m_row.column_name_length = 0;
+  memset (m_row.full_table_name, 0x0, NAME_LEN);
+  memset (m_row.schema_name, 0x0, NAME_LEN);
+  memset (m_row.table_name, 0x0, NAME_LEN);
 }
 
-table_rpd_column_id::~table_rpd_column_id() {
+table_rpd_table_id::~table_rpd_table_id() {
   //clear.
 }
 
-void table_rpd_column_id::reset_position() {
+void table_rpd_table_id::reset_position() {
   m_pos.m_index = 0;
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_column_id::get_row_count() {
+ha_rows table_rpd_table_id::get_row_count() {
   return ShannonBase::meta_rpd_columns_infos.size();
 }
 
-int table_rpd_column_id::rnd_next() {
+int table_rpd_table_id::rnd_next() {
   for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count();
        m_pos.next()) {
     make_row(m_pos.m_index);
@@ -116,7 +119,7 @@ int table_rpd_column_id::rnd_next() {
   return HA_ERR_END_OF_FILE;
 }
 
-int table_rpd_column_id::rnd_pos(const void *pos) {
+int table_rpd_table_id::rnd_pos(const void *pos) {
   if (get_row_count() == 0) {
     return HA_ERR_END_OF_FILE;
   }
@@ -129,22 +132,28 @@ int table_rpd_column_id::rnd_pos(const void *pos) {
   return make_row(m_pos.m_index);
 }
 
-int table_rpd_column_id::make_row(uint index[[maybe_unused]]) {
+int table_rpd_table_id::make_row(uint index[[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
   if (index >= ShannonBase::meta_rpd_columns_infos.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.column_id = ShannonBase::meta_rpd_columns_infos[index].column_id;
     m_row.table_id = ShannonBase::meta_rpd_columns_infos[index].table_id;
-    strncpy(m_row.column_name, ShannonBase::meta_rpd_columns_infos[index].table_name, 
+
+    std::string full_name;
+    full_name += ShannonBase::meta_rpd_columns_infos[index].schema_name;
+    full_name += "\\";
+    full_name += ShannonBase::meta_rpd_columns_infos[index].table_name;
+    strncpy(m_row.full_table_name, full_name.c_str(), full_name.length());
+    strncpy(m_row.schema_name, ShannonBase::meta_rpd_columns_infos[index].schema_name,
+            strlen(ShannonBase::meta_rpd_columns_infos[index].schema_name));
+    strncpy(m_row.table_name, ShannonBase::meta_rpd_columns_infos[index].table_name,
             strlen(ShannonBase::meta_rpd_columns_infos[index].table_name));
-    m_row.column_name_length = strlen(ShannonBase::meta_rpd_columns_infos[index].table_name);
   }
   return 0;
 }
 
-int table_rpd_column_id::read_row_values(TABLE *table,
+int table_rpd_table_id::read_row_values(TABLE *table,
                                          unsigned char *buf,
                                          Field **fields,
                                          bool read_all) {
@@ -156,14 +165,17 @@ int table_rpd_column_id::read_row_values(TABLE *table,
   for (; (f = *fields); fields++) {
     if (read_all || bitmap_is_set(table->read_set, f->field_index())) {
       switch (f->field_index()) {
-        case 0: /** colum_id */
-          set_field_ulonglong(f, m_row.column_id);
-          break;
-        case 1: /** table_id */
+        case 0: /** TABLE_ID */
           set_field_ulonglong(f, m_row.table_id);
           break;
-        case 2: /** column name */
-          set_field_char_utf8mb4(f, m_row.column_name, m_row.column_name_length);
+        case 1: /** full table name */
+          set_field_char_utf8mb4(f, m_row.full_table_name, strlen(m_row.full_table_name));
+          break;
+        case 2: /** schema_name */
+          set_field_char_utf8mb4(f, m_row.schema_name, strlen(m_row.schema_name));
+          break;
+        case 3: /** table_name */
+          set_field_char_utf8mb4(f, m_row.table_name, strlen(m_row.table_name));
           break;
         default:
           assert(false);

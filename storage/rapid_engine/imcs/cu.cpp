@@ -31,23 +31,83 @@
 namespace ShannonBase {
 namespace Imcs {
 
-uint Cu::Insert(uchar* data)
-{
-   if (!data) return 1;
-
-   return 0;
+Cu::Cu() {
+  assert (false);
+  Set_header(nullptr);
+  Allocate_chunk();
 }
-uint Cu::Delete(uchar* data)
-{
-   if (!data) return 1;
-
-   return 0;
+Cu::Cu(Field* field) {
+  Set_header (field);
+  Allocate_chunk();
 }
-uint Cu::Update(uchar* from, uchar* to)
-{
-   if (!from || !to) return 1;
+Cu::~Cu() {
 
-   return 0;
 }
+uint Cu::Set_header(Field* field) {
+  m_header->m_max_value = LLONG_MIN ;
+  m_header->m_min_value = LLONG_MAX_DOUBLE;
+  m_header->m_avg_value = 0;
+  m_header->m_middle_value = 0;
+  m_header->m_median_value = 0;
+
+  m_header->m_num_rows = 0 ;
+  m_header->m_num_nulls = 0;
+  m_header->m_num_chunks = 0;
+
+  m_header->m_nullable = false;
+
+  m_header->m_compress_algo =  Compress::enum_compress_algos::NONE;
+  m_header->m_local_dict = nullptr;
+  if (!field) {
+    m_header->m_field = nullptr;
+    m_header->m_cu_type = enum_field_types::MYSQL_TYPE_NULL;
+  } else {
+    m_header->m_field = field;
+    m_header->m_cu_type = field->type();
+  }
+  return 0;
+}
+Cu_chunk* Cu::Get_chunk(uint index) {
+   if (index >= m_chunks.size())
+    return nullptr;
+   return m_chunks[index];
+}
+Cu_chunk* Cu::Allocate_chunk() {
+  Cu_chunk* chunk = new (current_thd->mem_root) Cu_chunk();
+  chunk->Set_owner (this);
+  chunk->Allocate_one();
+  m_chunks.push_back(chunk);
+  return chunk;
+}
+uint Cu::Deallocate_chunks() {
+
+  return 0;
+}
+uint Cu::Insert(uchar* data, uint length) {
+  if (!data || !length) return 1;
+
+  Cu_chunk* curr_chunk = *m_chunks.rbegin();
+  if (curr_chunk->Is_full()) {
+   curr_chunk = Allocate_chunk();
+  }
+  curr_chunk->Add (data, length);
+  return 0;
+}
+uint Cu::Insert(Field* field){
+  if (!field) return 1;
+
+  return 0;
+}
+uint Cu::Delete(uchar* data, uint length) {
+  if (!data || !length) return 1;
+
+  return 0;
+}
+uint Cu::Update(uchar* from, uchar* to) {
+  if (!from || !to) return 1;
+
+  return 0;
+}
+
 } // ns:Imcs
 } // ns:ShannonBase
