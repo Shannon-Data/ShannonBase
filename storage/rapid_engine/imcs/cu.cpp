@@ -33,15 +33,17 @@ namespace Imcs {
 
 Cu::Cu() {
   assert (false);
+  Allocate_header();
   Set_header(nullptr);
   Allocate_chunk();
 }
 Cu::Cu(Field* field) {
+  Allocate_header();
   Set_header (field);
   Allocate_chunk();
 }
 Cu::~Cu() {
-
+  Deallocate_header();
 }
 uint Cu::Set_header(Field* field) {
   m_header->m_max_value = LLONG_MIN ;

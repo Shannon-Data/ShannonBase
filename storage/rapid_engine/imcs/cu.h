@@ -47,12 +47,12 @@ class Cu;
 //A cu divide into lots of chunk, each chunk has 65K rows.
 struct Cu_chunk {
  //index. index <= m_num_chunks
- uint m_index;
+ uint m_index {0};
  //belongs to which cu.
- Cu* m_owner;
+ Cu* m_owner {nullptr};
  //start pos, current pos, null pos.
- uchar* m_data, *m_current_pos, *m_null_pos;
- uint m_chunk_size;
+ uchar* m_data{nullptr}, *m_current_pos{nullptr}, *m_null_pos{nullptr};
+ uint m_chunk_size {0};
  Cu_chunk () {
   m_chunk_size = (uint)my_getpagesize();
   m_index = 0;
@@ -65,15 +65,19 @@ struct Cu_chunk {
    m_owner = owner;
  }
  uchar* Allocate_one () {
-  //TODO: use own memory pool.
-  MEM_ROOT* mem_root = current_thd->mem_root;
-  m_data = (uchar*) mem_root->Alloc(m_chunk_size);
-  if (!m_data) return nullptr;
-  memset(m_data, 0x0, m_chunk_size);
-  m_current_pos = m_data;
-  return m_data;
+   //TODO: use own memory pool temporarily. It will use own memory arena/memory area
+   //to store the data.
+   MEM_ROOT* mem_root = current_thd->mem_root;
+   m_data = (uchar*) mem_root->Alloc(m_chunk_size);
+   if (!m_data) return nullptr;
+   memset(m_data, 0x0, m_chunk_size);
+   m_current_pos = m_data;
+   return m_data;
  }
  uint Deallocate() {
+  /* Do nothing, will be globally freed when arena (mem_root)
+   * released
+   */
    return 0;
  }
  inline bool Is_full() { return m_current_pos == (m_data + m_chunk_size); }
@@ -115,14 +119,28 @@ public:
  uint Insert(uchar* data, uint length);
  uint Delete(uchar* data, uint length);
  uint Update(uchar* from, uchar* to);
- 
 private:
+  //allocate/deallocate header
+  uint Allocate_header() {
+    if (!m_header) {
+      m_header = new (current_thd->mem_root) Cu_header();
+    }
+    return 0;
+  }
+  uint Deallocate_header(){
+    if (m_header) {
+      delete m_header;
+      m_header = nullptr;
+    }
+    return 0;
+  }
+
   uint Set_header(Field* field);
   Cu_chunk* Get_chunk(uint index);
   Cu_chunk* Allocate_chunk();
   uint Deallocate_chunks();
 private:
-  Cu_header* m_header;
+  Cu_header* m_header {nullptr};
   std::vector<Cu_chunk*> m_chunks;
 };
 
