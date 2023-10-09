@@ -72,10 +72,15 @@ public:
   Imcu_header& Get_header() { return m_headers; }
   Cu* Get_cu(std::string& field_name);
 private:
+  // release all the headers when in imcs release phase.
+  uint Release_header();
+
   // use to proctect header.
   std::mutex m_mutex_header;
   Imcu_header m_headers;
 
+  // use to protect cus in imcu.
+  std::mutex m_mutex_cus;
   //The all CUs in this IMCU.
   std::map<std::string, Cu*> m_cus;
 };
