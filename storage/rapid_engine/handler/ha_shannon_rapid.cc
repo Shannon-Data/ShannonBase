@@ -255,16 +255,6 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   //TODO: Start to write to IMCS.
   ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
   assert(imcs_instance);
-  if (!imcs_instance->IsInitialized()) {
-     imcs_instance->Initialization(thd->mem_root);
-  }
-  Imcs::Imcu* imcu_instance {nullptr};
-  imcu_instance = imcs_instance->Get_imcu(table_arg.s->db.str, table_arg.s->table_name.str);
-  if (!imcu_instance) {
-    imcu_instance = imcs_instance->Allocate_imcu (thd->mem_root, table_arg.s->db.str,
-                                                  table_arg.s->table_name.str, table_arg.s->fields);
-  }
-  imcu_instance->Build_header(table_arg);
 
   //Do scan the primary table.
   int tmp {HA_ERR_GENERIC};
@@ -283,7 +273,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     // Gets trx id
     field_ptr = *(table_arg.field + field_count);
     assert(field_ptr->type() == MYSQL_TYPE_DB_TRX_ID);
-    uint64_t trx_id [[maybe_unused]] = field_ptr->val_int();
+    TransactionID trx_id = field_ptr->val_int();
 
     for (uint32 index = 0; index < field_count; index++) {
       field_ptr = *(table_arg.field + index);
@@ -303,9 +293,9 @@ int ha_rapid::load_table(const TABLE &table_arg) {
 #ifndef NDEBUG
       if (old_map) dbug_tmp_restore_column_map(table->read_set, old_map);
 #endif
-      std::string field_name = field_ptr->field_name;
-      Imcs::Cu* cu = imcu_instance->Get_cu(field_name);
-      if (cu->Insert(field_ptr)){
+      ShannonBase::Cu_Context cu_context;
+      cu_context.m_type = field_ptr->type();
+      if (imcs_instance->Write(&cu_context, trx_id, field_ptr)) {
         my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
                  table_arg.s->table_name.str);
         return HA_ERR_GENERIC;
@@ -327,7 +317,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
       loaded_tables->get(db_name, table_name) == nullptr) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Table is not loaded on a secondary engine");
-    return 1;
+    return HA_ERR_GENERIC;
   }
   
   //TODO: Starts to unload data from ICMS.
@@ -581,14 +571,14 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
       MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN);
   shannon_rapid_hton->secondary_engine_modify_access_path_cost = ModifyAccessPathCost;
 
-  MEM_ROOT* mem_root = current_thd->mem_root;
+  //MEM_ROOT* mem_root = current_thd->mem_root;
   imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
   if (!imcs_instance) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Cannot get IMCS instance.");
     return 1;
   };
-  imcs_instance->Initialization(mem_root);
+  //imcs_instance->Initialization(mem_root);
 
   return 0;
 }
@@ -596,7 +586,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
   delete loaded_tables;
   loaded_tables = nullptr;
-  imcs_instance->Deinitialization();
+  //imcs_instance->Deinitialization();
   return 0;
 }
 

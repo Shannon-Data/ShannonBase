@@ -32,65 +32,67 @@
 
 namespace ShannonBase {
 namespace Imcs {
-Imcu::Imcu() {
+Imcu::Imcu(const TABLE& table_arg) {
+  m_version_num = 0x1;
+  m_magic_num = 0x1;
 
-}
-
-Imcu::Imcu(uint num_cus [[maybe_unused]]) {
-
-}
-Imcu::~Imcu() {
-
-}
-
-uint Imcu::Build_header(const TABLE& table_arg) {
-  m_headers.m_num_cu = 0;
-
-  m_headers.m_max_value = 0;
-  m_headers.m_min_value = LLONG_MIN;
+  m_headers.m_avg = 0;
+  m_headers.m_fields = 0;
+  m_headers.m_max_value = std::numeric_limits<double>::lowest();
+  m_headers.m_min_value = std::numeric_limits<double>::max();
   m_headers.m_median = 0;
   m_headers.m_middle = 0;
-  m_headers.m_avg = 0;
-  m_headers.m_has_vcol = false;
 
-  Field* field_ptr = *table_arg.s->field;
   m_headers.m_db = table_arg.s->db.str;
   m_headers.m_table = table_arg.s->table_name.str;
+  m_headers.m_has_vcol = false;
 
-  std::scoped_lock lk (m_mutex_cus);
-  for (uint index =0; index < table_arg.s->fields; index ++) {
-    field_ptr = *(table_arg.s->field + index);
-    m_headers.m_field.push_back(field_ptr);
-    std::string field_name  = field_ptr->field_name;
-    //TODO: use own memory.
-    Cu* cu_ptr = new (current_thd->mem_root) Cu (field_ptr);
-    if (cu_ptr)
-      m_cus.insert(std::make_pair(field_name, cu_ptr));
-  }
-  m_headers.m_fields = table_arg.s->fields;
-  return 0;
-}
-uint Imcu::Release_header() {
+  uint fields {table_arg.s->fields};
   std::scoped_lock lk(m_mutex_cus);
-  std::map<std::string, Cu*>::iterator its = m_cus.begin();
-  for (; its != m_cus.end(); its ++) {
-    if (its->second) {
-      delete its->second;
+  for (uint index =0; index < fields; index ++) {
+    Field* col  = *(table_arg.s->field + index);
+    if (col->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    m_headers.m_fields ++;
+    m_headers.m_field.push_back(col);
+
+    Cu* cu = new (current_thd->mem_root) Cu (col);
+    auto ret = m_cus.insert (std::make_pair(col, cu));
+    if (!ret.second) { //if insert failed. the clear up all the inserted items.
+      m_cus.clear();
+      m_headers.m_fields =0;
+      m_headers.m_field.clear();
     }
   }
-  return 0;
-}
-/**Gets a CU by field_name (aka: key)*/
-Cu* Imcu::Get_cu(std::string& field_name) {
-  Cu* cu_ptr {nullptr};
-  std::scoped_lock lk(m_mutex_header);
-  auto pos =  m_cus.find(field_name);
-  if (pos == m_cus.end()) {
-    return cu_ptr;
-  }
 
-  cu_ptr = pos->second;
+  m_prev = nullptr;
+  m_next = nullptr;
+}
+
+Imcu::~Imcu() {
+  std::scoped_lock lk(m_mutex_cus);
+  for (auto item : m_cus) {
+    if (item.second) {
+      delete item.second;
+    }
+  }
+  m_cus.clear();
+}
+
+/**Gets a CU by field_name (aka: key)*/
+Cu* Imcu::Get_cu(const Field* field) {
+  Cu* cu_ptr {nullptr};
+  assert(field);
   return cu_ptr;
+}
+
+/**
+ * Whether this imcu is full or not. Before wirte it will check the capacity of a imuc
+ * 
+*/
+bool Imcu::Is_full() {
+  //if there're not imcu in, the we consider that it's full. return true.
+  if (!m_cus.size()) return true;
+  return false;
 }
 
 } // ns:Imcs
