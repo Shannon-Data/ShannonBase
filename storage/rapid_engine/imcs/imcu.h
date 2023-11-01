@@ -23,13 +23,33 @@
 
    The fundmental code for imcs.
 */
-
+/**
+ * The specification of IMCU, pls ref: https://github.com/Shannon-Data/ShannonBase/issues/8
+ * ------------------------------------------------+
+ * |  | CU1 | | CU2 |                     |  CU |  |
+ * |  |     | |     |  IMCU1              |     |  |
+ * |  |     | |     |                     |     |  |
+ * +-----------------------------------------------+
+ * ------------------------------------------------+
+ * |  | CU1 | | CU2 |                     |  CU |  |
+ * |  |     | |     |  IMCU2              |     |  |
+ * |  |     | |     |                     |     |  |
+ * +-----------------------------------------------+
+ * ...
+ *  * ------------------------------------------------+
+ * |  | CU1 | | CU2 |                     |  CU |  |
+ * |  |     | |     |  IMCUN              |     |  |
+ * |  |     | |     |                     |     |  |
+ * +-----------------------------------------------+
+ * 
+*/
 #ifndef __SHANNONBASE_IMCU_H__
 #define __SHANNONBASE_IMCU_H__
 
 #include <mutex>
 #include <map>
 #include <string>
+#include <atomic> //std::atomic<T>
 
 #include "field_types.h" //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"
@@ -45,47 +65,61 @@ namespace ShannonBase{
 namespace Imcs{
 
 class Imcu : public MemoryObject{
-public:
-
-  class Imcu_header_t {
-  public:
-    uint m_num_cu;
-    uint m_num_rows;
-    //statistics information, just like: maximum, minmum, median,middle.
-    double m_max_value, m_min_value, m_median, m_middle;
-    double m_avg;
-    //has generated column or not.
-    bool m_has_vcol;
-    //db name and table name which imcu belongs to.
-    std::string m_db, m_table;
-    //fields
-    uint m_fields;
-    std::vector<Field*> m_field;
-  };
-  using Imcu_header = Imcu_header_t;
-
-  Imcu();
-  Imcu(uint num_cus);
+ public:
+  class Imcu_header {
+    public:
+      //statistics information, just like: maximum, minmum, median,middle.
+      std::atomic<double> m_max_value, m_min_value, m_median, m_middle;
+      std::atomic<double> m_avg;
+      //has generated column or not.
+      bool m_has_vcol;
+      //db name and table name which imcu belongs to.
+      std::string m_db, m_table;
+      //fields
+      uint m_fields;
+      std::vector<Field*> m_field;
+  }; //Imcu_header
+ public:
+  Imcu(const TABLE& table_arg);
   virtual ~Imcu();
 
-  uint Build_header (const TABLE& table_arg);
   Imcu_header& Get_header() { return m_headers; }
-  Cu* Get_cu(std::string& field_name);
-private:
-  // release all the headers when in imcs release phase.
-  uint Release_header();
+  Cu* Get_cu(const Field*);
 
+  inline void Set_previous(Imcu* prev) {
+    this->m_prev = prev;
+  }
+  inline void Set_next(Imcu* next) {
+    this->m_next = next;
+  }
+  
+  inline Imcu* Get_next() {return m_next;}
+  inline Imcu* Get_prev() {return m_prev;}
+private:
+  bool Is_full();
+private:
+  static constexpr uint CHUNK_NUMS_LIMITS = MAX_CHUNK_NUMS;
   // use to proctect header.
   std::mutex m_mutex_header;
   Imcu_header m_headers;
-
   // use to protect cus in imcu.
   std::mutex m_mutex_cus;
   //The all CUs in this IMCU.
-  std::map<std::string, Cu*> m_cus;
+  std::map<Field*, Cu*> m_cus;
+  //name of this imcs. 'db_name + table_name'
+  std::string m_name;
+  //point to the next imcu.
+  Imcu* m_prev, *m_next, *m_curr;
+  //magic num and version
+  uint m_version_num, m_magic_num;
+};
+
+//As the description above, Imcus consists of an imcu store.
+
+class Imcu_store {
+
 };
 
 } //ns: imcs
 } //ns:shannonbase
-
 #endif //__SHANNONBASE_IMCU_H__

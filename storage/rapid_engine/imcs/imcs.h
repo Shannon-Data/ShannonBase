@@ -27,6 +27,7 @@
 #ifndef __SHANNONBASE_IMCS_H__
 #define __SHANNONBASE_IMCS_H__
 
+#include <atomic>
 #include <mutex>
 #include <map>
 
@@ -47,7 +48,6 @@ constexpr unsigned long DEFAULT_MEMRORY_SIZE = MAX_MEMRORY_SIZE;
 extern unsigned long rapid_memory_size;
 
 class Imcu;
-
 class Imcs :public MemoryObject {
 public:
  static Imcs* Get_instance(){
@@ -55,33 +55,28 @@ public:
                              });
     return m_instance;
  }
+ uint Write(ShannonBaseContext* context, TransactionID trxid, Field* fields);
+ uint Read (ShannonBaseContext* context, Field* field);
 
- //init and deinit.
- uint Initialization(MEM_ROOT* mem_root);
- uint Deinitialization();
- bool IsInitialized () { return m_initialized; }
-
- //Gets a new IMCU handler and insert into
- Imcu* Allocate_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name, uint fields);
- uint  Deallcate_imcu(const char* db_name, const char* table_name);
- Imcu* Get_imcu(const char* db_name, const char* table_name);
- inline uint Get_num_imcu() { return m_imcus.size(); }
 private:
  //make ctor and dctor private.
- Imcs() {}
- virtual ~Imcs() {}
+ Imcs();
+ virtual ~Imcs();
 
  Imcs(Imcs&& ) = delete;
  Imcs(Imcs&) = delete;
  Imcs& operator = (const Imcs&) = delete;
 
- bool m_initialized {false};
+ Imcu* New_imcu(const TABLE& table_arg);
+
  static Imcs* m_instance;
  static std::once_flag one;
 
- //used to keep all allocated imcus
- std::map<std::string, Imcu*> m_imcus;
+ //used to keep all allocated imcus. key string: db_name + table_name.
  std::mutex m_imcu_mtx;
+ std::map<std::string, Imcu*> m_imcus;
+ //the last id of an imcu
+ std::atomic<uint> m_cu_id {0};
 };
 
 } //ns: imcs

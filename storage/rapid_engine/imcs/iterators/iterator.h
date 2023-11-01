@@ -19,58 +19,27 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs. The chunk is used to store the data which
-   transfer from row-based format to column-based format.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs.
 */
-#include <limits.h>
-#include "storage/rapid_engine/imcs/cu.h"
-
+/** The basic iterator class for IMCS. All specific iterators are all inherited
+ * from this.
+*/
+#ifndef __SHANNONBASE_ITERATOR_H__
+#define __SHANNONBASE_ITERATOR_H__
 namespace ShannonBase {
 namespace Imcs {
 
-Cu::Cu(Field* field) {
-  m_version_num = 0x1;
-  m_magic_num = 0x2;
- 
-  m_headers.m_field = field;
-  m_headers.m_local_dict = nullptr;
-  m_headers.m_compress_algo = Compress::enum_compress_algos::NONE;
-  m_headers.m_cu_type = field->type();
-  m_headers.m_num_chunks = 1;
+class Iterator {
+public:
+  Iterator();
+  virtual ~Iterator() = 0;
+  virtual bool Init() = 0;
+  virtual bool Read() = 0;
+  virtual bool Next() = 0;
+} ;
 
-  m_headers.m_avg_value = 0;
-  m_headers.m_max_value = std::numeric_limits<long long>::lowest();
-  m_headers.m_min_value = std::numeric_limits<long long>::max();
-  m_headers.m_middle_value = 0;
-  m_headers.m_median_value = 0;
-  
-  m_next = m_prev = nullptr;
-
-  m_chunks = new (current_thd->mem_root) Chunk (m_headers.m_cu_type);
-}
-Cu::~Cu() {
-  Chunk* chunk_ptr = m_chunks; 
-  while (chunk_ptr) {
-    Chunk* freep = chunk_ptr;
-    assert(freep);
-    freep->Set_next(nullptr);
-    chunk_ptr = chunk_ptr->Get_next();
-    delete freep;
-    freep = nullptr;
-  }
-}
-
-/**
- * write the field data to a chunk sequently.
-*/
-uint Cu::Write() {
-
-  return 0;
-}
-
-} // ns:Imcs
-} // ns:ShannonBase
+} //ns:imcs
+} //ns:shannonbase
+#endif //__SHANNONBASE_ITERATOR_H__

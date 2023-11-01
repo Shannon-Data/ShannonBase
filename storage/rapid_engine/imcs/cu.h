@@ -35,113 +35,78 @@
 #include "sql/field.h"   //Field
 #include "sql/current_thd.h"
 
+#include "storage/rapid_engine/imcs/chunk.h" //chunk
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/compress/algorithms.h"
-#include "storage/rapid_engine/include/rapid_object.h"
+
 
 namespace ShannonBase{
 namespace Imcs{
 
-class Cu;
-//A cu divide into lots of chunk, each chunk has 65K rows.
-struct Cu_chunk {
- //index. index <= m_num_chunks
- uint m_index {0};
- //belongs to which cu.
- Cu* m_owner {nullptr};
- //start pos, current pos, null pos.
- uchar* m_data{nullptr}, *m_current_pos{nullptr}, *m_null_pos{nullptr};
- uint m_chunk_size {0};
- Cu_chunk () {
-  m_chunk_size = (uint)my_getpagesize();
-  m_index = 0;
-  m_owner = nullptr;
-  m_null_pos = nullptr;
-  m_data = nullptr;
-  m_current_pos = m_data;
- }
- inline void Set_owner(Cu* owner) {
-   m_owner = owner;
- }
- uchar* Allocate_one () {
-   //TODO: use own memory pool temporarily. It will use own memory arena/memory area
-   //to store the data.
-   MEM_ROOT* mem_root = current_thd->mem_root;
-   m_data = (uchar*) mem_root->Alloc(m_chunk_size);
-   if (!m_data) return nullptr;
-   memset(m_data, 0x0, m_chunk_size);
-   m_current_pos = m_data;
-   return m_data;
- }
- uint Deallocate() {
-  /* Do nothing, will be globally freed when arena (mem_root)
-   * released
-   */
-   return 0;
- }
- inline bool Is_full() { return m_current_pos == (m_data + m_chunk_size); }
- inline bool Is_free() { return m_current_pos == m_data; }
- uchar* Add(uchar* data, uint length) {
-    memcpy(m_current_pos, data, length);
-    m_current_pos += length;
-    return m_current_pos;
- }
-};
+/**A Snapshot Metadata Unit (SMU) contains metadata and 
+ * transactional information for an associated IMCU.*/
+class Snapshot_meta_unit {
 
-class Cu_header {
-public:
-  Cu_header() {}
-  virtual ~Cu_header() {}
- //which field belongs to.
- Field* m_field;
- //field type of this cu.
- enum_field_types m_cu_type;
- //whether the is not null or not.
- bool m_nullable;
-
- //compression alg.
- Compress::enum_compress_algos m_compress_algo;
- Compress::Dictionary* m_local_dict;
-
- //statistics info.
- long double m_max_value, m_min_value, m_middle_value, m_median_value, m_avg_value;
- uint m_num_rows, m_num_nulls;
- uint m_num_chunks;
 };
 
 class Cu :public MemoryObject{
 public:
- Cu();
+ class Cu_header {
+  public:
+  //which field belongs to.
+  Field* m_field;
+  //field type of this cu.
+  enum_field_types m_cu_type;
+  //whether the is not null or not.
+  bool m_nullable;
+
+  //compression alg.
+  Compress::enum_compress_algos m_compress_algo;
+  Compress::Dictionary* m_local_dict;
+
+  //statistics info.
+  std::atomic<long long> m_max_value, m_min_value, m_middle_value, m_median_value, m_avg_value;
+  std::atomic<uint> m_num_chunks;
+ };
+
  Cu(Field* field);
  virtual ~Cu();
- uint Insert(Field* field);
- uint Insert(uchar* data, uint length);
- uint Delete(uchar* data, uint length);
- uint Update(uchar* from, uchar* to);
-private:
-  //allocate/deallocate header
-  uint Allocate_header() {
-    if (!m_header) {
-      m_header = new (current_thd->mem_root) Cu_header();
-    }
-    return 0;
-  }
-  uint Deallocate_header(){
-    if (m_header) {
-      delete m_header;
-      m_header = nullptr;
-    }
-    return 0;
-  }
+ Cu_header& Get_header() { return m_headers;}
 
-  uint Set_header(Field* field);
-  Cu_chunk* Get_chunk(uint index);
-  Cu_chunk* Allocate_chunk();
-  uint Deallocate_chunks();
+ inline void Set_next(Cu* next) { m_next = next; }
+ inline void Set_prev(Cu* prev) { m_prev = prev; }
+ inline Cu* Get_next() { return m_next; }
+ inline Cu* Get_prev () {return m_prev; }
+ bool Is_full() {return (m_headers.m_num_chunks == Cu::MAX_CHUNK_NUM_IN_CU); }
+ uint Write ();
 private:
-  Cu_header* m_header {nullptr};
-  std::vector<Cu_chunk*> m_chunks;
+  inline bool Is_supported_data_type(enum_field_types type) {
+    if (type == enum_field_types::MYSQL_TYPE_DECIMAL ||
+      type == enum_field_types::MYSQL_TYPE_DOUBLE  ||
+      type == enum_field_types::MYSQL_TYPE_FLOAT ||
+      type == enum_field_types::MYSQL_TYPE_LONGLONG  ||
+      type == enum_field_types::MYSQL_TYPE_SHORT ||
+      type == enum_field_types::MYSQL_TYPE_STRING)
+    return true;
+
+    return false;    
+  }
+private:
+  std::mutex m_header_mutex;
+  //header info of this Cu.
+  Cu_header m_headers;
+  //the star chunk pos of this chunk.
+  Chunk* m_chunks {nullptr};
+  //the next cu object.
+  Cu* m_next {nullptr}, *m_prev{nullptr};
+  //hash map to store all chunks header in this cu to accelerate find.
+  //getting the chunk by chunk_id or something else.
+  //std::std::unordered_map<std::string, Cu_header*> m_chunks_map;
+  uint m_version_num, m_magic_num;
+  static constexpr uint MAX_CHUNK_NUM_IN_CU = 2048;
 };
 
 } //ns:imcs

@@ -27,6 +27,9 @@
    The fundmental code for imcs.
 */
 #include <mutex>
+
+#include "sql/field.h"
+
 #include "storage/rapid_engine/imcs/imcs.h"
 
 namespace ShannonBase{
@@ -37,62 +40,57 @@ unsigned long rapid_memory_size {0};
 Imcs* Imcs::m_instance {nullptr};
 std::once_flag Imcs::one;
 
-uint Imcs::Initialization(MEM_ROOT* mem_root) {
-  if (!mem_root) return true;
-  m_initialized = true;
-  return false;
+Imcs::Imcs() {
+
 }
-
-uint Imcs::Deinitialization() {
-  m_initialized = false;
-  return false;
+Imcs::~Imcs() {
+  
 }
-
-Imcu* Imcs::Allocate_imcu(MEM_ROOT* mem_root, const char* db_name, const char* table_name, uint fields) {
-    if (!mem_root) return nullptr;
-
-    Imcu* rapid_imcu {nullptr};
-
-    std::string cu_key;
-    cu_key += db_name;
-    cu_key += table_name;
-
-    std::scoped_lock lk(m_imcu_mtx);
-    rapid_imcu  = new (mem_root) Imcu(fields);
-    auto flag  = m_imcus.insert(std::make_pair(cu_key, rapid_imcu));
-    if (!flag.second) {
-      delete rapid_imcu;
-      rapid_imcu = nullptr;
-    }
-
-    return rapid_imcu;
-}
-uint  Imcs::Deallcate_imcu(const char* db_name, const char* table_name) {
-  std::string cu_key;
-  cu_key += db_name;
-  cu_key += table_name;
-
+Imcu* Imcs::New_imcu(const TABLE& table_arg) {
+  std::string db_name = table_arg.s->db.str;
+  std::string table_name = table_arg.s->table_name.str;
   std::scoped_lock lk(m_imcu_mtx);
-  auto pos = m_imcus.find(cu_key);
-  if (pos != m_imcus.end()) {
-    Imcu* imcu_ptr  = pos->second;
-    delete imcu_ptr;
-    m_imcus.erase (pos);
-  }
+  std::string key_name = db_name + table_name;
+  key_name += m_cu_id;
+  Imcu* imcu = new (current_thd->mem_root) Imcu(table_arg);
+  m_imcus.insert(std::make_pair(key_name, imcu));
+  m_cu_id += 1;
+  return imcu;
+}
 
+uint Imcs::Write(ShannonBaseContext* context, TransactionID trxid, Field* fields) {
+  assert(context);
+  assert(trxid != 0);
+  assert(fields);
+  /** before insertion, should to check whether there's spare space to store the new data.
+      or not. If no extra sapce left, allocate a new imcu. After a new imcu allocated, the
+      meta info is stored into 'm_imcus'.
+  */
+  //the last imcu key_name.
+  std::string key_name = *fields->table_name;
+  key_name += fields->orig_db_name;
+  key_name += (m_cu_id > 0 ) ? (m_cu_id -1) : 0;
+
+  Imcu* curr_imcu {nullptr};
+  if (!m_imcus.size()) {
+    curr_imcu = New_imcu(*fields->table);
+  } else {
+    curr_imcu = m_imcus[key_name];
+  }
+  assert(curr_imcu);
+
+  Field* field = fields;
+  while (field) {
+ 
+    field ++;
+  }
   return 0;
 }
-Imcu* Imcs::Get_imcu(const char* db_name, const char* table_name) {
-    std::string cu_key;
-    cu_key += db_name;
-    cu_key += table_name;
+uint Imcs::Read (ShannonBaseContext* context, Field* field) {
+  assert(context);
+  assert(field);
 
-    Imcu* rapid_cu {nullptr};
-    std::scoped_lock<std::mutex> scoped_lk(m_imcu_mtx);
-    if (m_imcus.find(cu_key) != m_imcus.end())
-      rapid_cu = m_imcus[cu_key];
-
-    return rapid_cu;
+  return 0;
 }
 
 } //ns:imcs 
