@@ -21,12 +21,16 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
 # This is the CMakeLists for Shannon Rapid
+INCLUDE(${CMAKE_SOURCE_DIR}/storage/innobase/innodb.cmake)
+
+MSVC_CPPCHECK_DISABLE()
 
 ADD_DEFINITIONS(-DLOG_SUBSYSTEM_TAG="Rapid")
 
 # TODO: Fix up all non-canonical include paths and remove this.
 INCLUDE_DIRECTORIES(
   ${CMAKE_SOURCE_DIR}/sql
+  ${CMAKE_SOURCE_DIR}/include 
 )
 
 # Conflicting YYSTYPE, because we have multiple Bison grammars.
