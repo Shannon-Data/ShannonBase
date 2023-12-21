@@ -27,6 +27,7 @@
 #define __SHANNONBASE_CU_H__
 
 #include <vector>
+#include <memory>
 
 #include "field_types.h" //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"
@@ -65,48 +66,41 @@ public:
 
   //compression alg.
   Compress::enum_compress_algos m_compress_algo;
-  Compress::Dictionary* m_local_dict;
+  std::unique_ptr<Compress::Dictionary> m_local_dict;
 
   //statistics info.
-  std::atomic<long long> m_max_value, m_min_value, m_middle_value, m_median_value, m_avg_value;
-  std::atomic<uint> m_num_chunks;
+  std::atomic<long long> m_max, m_min, m_middle, m_median;
+  std::atomic<long long> m_rows, m_sum, m_avg;
  };
 
- Cu(Field* field);
+ explicit Cu(Field* field);
  virtual ~Cu();
- Cu_header& Get_header() { return m_headers;}
 
- inline void Set_next(Cu* next) { m_next = next; }
- inline void Set_prev(Cu* prev) { m_prev = prev; }
- inline Cu* Get_next() { return m_next; }
- inline Cu* Get_prev () {return m_prev; }
- bool Is_full() {return (m_headers.m_num_chunks == Cu::MAX_CHUNK_NUM_IN_CU); }
- uint Write ();
+ //writes the data into this chunk. length unspecify means calc by chunk. 
+ uchar* Write_data(RapidContext* context, uchar* data, uint length = 0);
+ //reads the data by from address .
+ uchar* Read_data(RapidContext* context, uchar* from, uchar* to, uint length = 0);
+ //reads the data by rowid.
+ uchar* Read_data(RapidContext* context, uchar* rowid, uint length = 0);
+ //deletes the data by rowid
+ uchar* Delete_data(RapidContext* context, uchar* rowid);
+ //deletes all
+ uchar* Delete_all();
+ //updates the data with rowid with the new data.
+ uchar* Update_data(RapidContext* context, uchar* rowid, uchar* data, uint length = 0);
+ //flush the data to disk. by now, we cannot impl this part.
+ uint flush(RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
 private:
-  inline bool Is_supported_data_type(enum_field_types type) {
-    if (type == enum_field_types::MYSQL_TYPE_DECIMAL ||
-      type == enum_field_types::MYSQL_TYPE_DOUBLE  ||
-      type == enum_field_types::MYSQL_TYPE_FLOAT ||
-      type == enum_field_types::MYSQL_TYPE_LONGLONG  ||
-      type == enum_field_types::MYSQL_TYPE_SHORT ||
-      type == enum_field_types::MYSQL_TYPE_STRING)
-    return true;
-
-    return false;    
-  }
-private:
+  uint m_magic{SHANNON_MAGIC_CU};
+  //proctect header.
   std::mutex m_header_mutex;
   //header info of this Cu.
-  Cu_header m_headers;
-  //the star chunk pos of this chunk.
-  Chunk* m_chunks {nullptr};
-  //the next cu object.
-  Cu* m_next {nullptr}, *m_prev{nullptr};
-  //hash map to store all chunks header in this cu to accelerate find.
-  //getting the chunk by chunk_id or something else.
-  //std::std::unordered_map<std::string, Cu_header*> m_chunks_map;
-  uint m_version_num, m_magic_num;
-  static constexpr uint MAX_CHUNK_NUM_IN_CU = 2048;
+  std::unique_ptr<Cu_header> m_header;
+  //chunks in this cu.
+  std::vector<std::unique_ptr<Chunk> > m_chunks;
+  //the next and prev cu object.
+  std::unique_ptr<Cu> m_next {nullptr};
+  std::unique_ptr<Cu> m_prev{nullptr};
 };
 
 } //ns:imcs

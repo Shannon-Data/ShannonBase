@@ -25,6 +25,12 @@
 */
 #ifndef __SHANNONBASE_CONTEXT_H__
 #define __SHANNONBASE_CONTEXT_H__
+
+#include "storage/rapid_engine/include/rapid_const.h"
+
+class trx_t;
+class ReadView;
+
 namespace ShannonBase {
 
 class ShannonBaseContext {
@@ -35,10 +41,22 @@ public:
   ShannonBaseContext& operator=(const ShannonBaseContext&) = delete;
 };
 
-class Cu_Context : public ShannonBaseContext {
+class RapidContext : public ShannonBaseContext {
 public:
-   //the data type we write.
-   enum_field_types m_type;
+  //current transaction.
+  trx_t* m_trx;
+  //current active read view
+  ReadView* m_readview; //???
+  //the current db and table name.
+  std::string m_current_db, m_current_table;
+  //the primary key of this table.
+  struct {
+   //primary key of this innodb rows.
+   uint64 m_pk;
+   //trxid of this innodb rows.
+   uint64 m_trxid;
+  } m_extra_info;
+  TABLE* m_table;
 };
 
 

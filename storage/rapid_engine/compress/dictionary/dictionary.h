@@ -28,6 +28,9 @@
 */
 #ifndef __SHANNONBASE_COMPRESS_DICTIONARY_H__
 #define __SHANNONBASE_COMPRESS_DICTIONARY_H__
+
+#include "include/my_inttypes.h"
+#include "include/sql_string.h" //String
 #include "storage/rapid_engine/compress/algorithms.h"
 
 namespace ShannonBase{
@@ -35,6 +38,11 @@ namespace Compress{
 
 //Dictionary compression algorithm.
 class Dictionary : public Compress_algorithm {
+  public:
+  Dictionary() = default;
+  virtual ~Dictionary()  = default;
+  //gets the string id by its vale.
+  uint64 GetStringId(String* str_val);
 };
 
 

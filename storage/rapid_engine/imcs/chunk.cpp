@@ -29,72 +29,120 @@
 namespace ShannonBase {
 namespace Imcs {
 
-Chunk::Chunk(enum_field_types type) {
+struct deleter_helper {
+  void operator() (uchar* ptr) {
+    if (ptr) my_free(ptr);
+  }
+};
+
+Chunk::Chunk(Field* field) {
+   assert(field);
+
   //allocate space for data. Here rows.
-  uint size = Chunk::MAX_CHUNK_NUMS_LIMIT * Get_unit(type);
-  m_data_base = new (current_thd->mem_root) uchar[size];
-  if (!m_data_base) { //OOM.
-    return;
+  {
+    std::scoped_lock lk(m_header_mutex);
+    m_header.reset (new (current_thd->mem_root) Chunk_header);
+    if (!m_header.get()) return;
+    m_header->m_field = field;
+    m_header->m_chunk_type = field->type();
+    m_header->m_null = field->is_nullable();
+    switch (m_header->m_chunk_type) {
+      case MYSQL_TYPE_VARCHAR:
+      case MYSQL_TYPE_BIT:
+      case MYSQL_TYPE_JSON:
+      case MYSQL_TYPE_TINY_BLOB:
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_MEDIUM_BLOB:
+      case MYSQL_TYPE_VAR_STRING:
+      case MYSQL_TYPE_STRING:
+      case MYSQL_TYPE_GEOMETRY:
+        m_header->m_varlen = true;
+        break;
+      default:
+        m_header->m_varlen = false;
+        break;
+    }
   }
 
-  memset(m_data_base, 0x0, size);
-  m_data = m_data_base;
-
-  m_headers.m_avg = 0;
-  m_headers.m_max = std::numeric_limits <long long>::lowest();
-  m_headers.m_min = std::numeric_limits <long long>::max();
-  m_headers.m_median = 0;
-  m_headers.m_middle = 0;
-
-  assert(m_data <= m_data_end);
-}
-Chunk::~Chunk() {
-  //deallocate data space.
-  assert(m_data< m_data_end);
+  //m_data_base
+  m_data_base = static_cast<uchar*> (my_malloc(PSI_NOT_INSTRUMENTED, Chunk::SHANNON_CHUNK_SIZE,
+                                                     MYF(MY_ZEROFILL | MY_WME)));
   if (m_data_base) {
-    delete []  m_data_base;
+    m_header->m_avg = 0;
+    m_header->m_max = std::numeric_limits <long long>::lowest();
+    m_header->m_min = std::numeric_limits <long long>::max();
+    m_header->m_median = 0;
+    m_header->m_middle = 0;
+    m_header->m_lines = 0;
+    m_header->m_sum = 0;
+
+    m_data_end = m_data_base + static_cast<ptrdiff_t>(Chunk::SHANNON_CHUNK_SIZE);
+    m_data = m_data_base;
+  }
+}
+
+Chunk::~Chunk() {
+  if (m_data_base) {
+    my_free(m_data_base);
     m_data_base = nullptr;
   }
+}
+
+uchar* Chunk::Write_data(RapidContext* context, uchar* data, uint length) {
+  assert(m_data_base || data);
+  std::scoped_lock lk(m_data_mutex);
+  if (m_data + length > m_data_end)  return nullptr;
+
+  memcpy(m_data, data, length);
+  m_data += length;
+  //updates the meta info.
+  m_header->m_rows ++;
+  if (m_header->m_chunk_type == MYSQL_TYPE_BLOB || m_header->m_chunk_type == MYSQL_TYPE_STRING) {
+    String buff;
+    String* val [[maybe_unused]]= m_header->m_field->val_str(&buff);
+  } else {
+    long long val = m_header->m_field->val_int();
+    m_header->m_sum += val;
+    m_header->m_avg = m_header->m_sum / m_header->m_rows;
+    if (m_header->m_max < val)
+      m_header->m_max.store(val, std::memory_order::memory_order_relaxed);
+    if (m_header->m_min > val)
+      m_header->m_min.store(val, std::memory_order::memory_order_relaxed);
+  }
+  return m_data;
+}
+
+uchar* Chunk::Read_data(RapidContext* context, uchar* from, uchar* to, uint length) {
+  assert(from || to);
+  if (from + length > m_data_end) return nullptr;
+  return m_data;
+}
+
+uchar* Chunk::Read_data(RapidContext* context, uchar* rowid, uint length [[maybe_unused]]) {
+  assert(context && rowid);  
+  return nullptr;
+}
+uchar* Chunk::Delete_data(RapidContext* context, uchar* rowid) {
+  return nullptr;
+}
+uchar* Chunk::Delete_all() {
   m_data = m_data_base;
+  m_data_end = m_data_base;
+  memset(m_data_base, 0x0, Chunk::SHANNON_CHUNK_SIZE);
+  return m_data_base; 
 }
 
-uchar* Chunk::Write_data(uchar* data, uint length) {
-  if (!data || !length) return nullptr;
-  
-  if ((m_data + length) >m_data_end) { //need a new chunk.
-    return nullptr;
-  }
-  std::scoped_lock lk(m_data_mutex);
-  //write the data to this chunk, and advance the pointer to new pos.
-  uchar* curr_pos{nullptr};
-  m_headers.m_rows = m_headers.m_rows + 1; 
-  return curr_pos;
+uchar* Chunk::Update_date(RapidContext* context, uchar* rowid, uchar* data, uint length) {
+  return nullptr;
 }
 
-template<typename data_T>
-uchar* Chunk::Write_fixed_value(data_T value) {
-  uchar* curr_pos {nullptr};
-  if (typeid(data_T) != typeid(int)) { //data type error, not supported now.
-    return nullptr;
-  }
+uint flush(RapidContext* context, uchar* from, uchar* to) {
+  bool flush_all[[maybe_unused]] {true};
+  if (!from || !to)
+    flush_all = false;
 
-  return curr_pos; 
-}
-    
-template<typename data_T>
-uchar* Chunk::Write_var_value(data_T value, uint length, CHARSET_INFO* charset) {
-  uchar* curr_pos {nullptr};
-  uchar infos;
-  
-  return curr_pos;
-}
-uchar* Chunk::Read_data(uchar* data, uint length) {
-  if (!data || !length) return nullptr;
-
-  std::scoped_lock lk(m_data_mutex);
-  uchar* read_pos {nullptr};
-
-  return read_pos;
+  assert(false);
+  return 0;
 }
 
 } //ns:icms

@@ -70,12 +70,6 @@ Imcu::Imcu(const TABLE& table_arg) {
 
 Imcu::~Imcu() {
   std::scoped_lock lk(m_mutex_cus);
-  for (auto item : m_cus) {
-    if (item.second) {
-      delete item.second;
-    }
-  }
-  m_cus.clear();
 }
 
 /**Gets a CU by field_name (aka: key)*/

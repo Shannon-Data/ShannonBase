@@ -32,6 +32,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sstream>
 #include <tuple>
 #include <utility>
 
@@ -60,6 +61,8 @@
 #include "storage/rapid_engine/include/rapid_stats.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/populate/populate.h"
+
+#include "storage/innobase/handler/ha_innodb.h"
 /* clang-format off */
 namespace dd {
 class Table;
@@ -81,6 +84,8 @@ struct RapidShare {
   RapidShare &operator=(const RapidShare &) = delete;
   const char* m_db_name {nullptr};
   const char* m_table_name {nullptr};
+  handler* file {nullptr};
+  TABLE* m_table;
 };
 
 // Map from (db_name, table_name) to the RapidShare with table state.
@@ -108,7 +113,7 @@ class LoadedTables {
 };
 
 LoadedTables *loaded_tables{nullptr};
-ShannonBase::Imcs::Imcs* imcs_instance{nullptr};
+ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();;
 /**
   Execution context class for the Rapid engine. It allocates some data
   on the heap when it is constructed, and frees it when it is
@@ -152,7 +157,9 @@ namespace ShannonBase {
 rpd_columns_container meta_rpd_columns_infos;
 ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
     : handler(hton, table_share_arg) {}
-
+int ha_rapid::create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
+    return HA_ERR_WRONG_COMMAND;
+}
 int ha_rapid::open(const char *, int, unsigned int, const dd::Table *) {
   RapidShare *share =
       loaded_tables->get(table_share->db.str, table_share->table_name.str);
@@ -161,10 +168,33 @@ int ha_rapid::open(const char *, int, unsigned int, const dd::Table *) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Table has not been loaded");
     return HA_ERR_GENERIC;
   }
+
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
   return 0;
 }
+int ha_rapid::close () {
+  m_start_of_scan = false;
+  inited = NONE;
+  return 0;
+}
+int ha_rapid::rnd_init(bool scan) {
+  inited = RND;
+  return 0;
+}
 
+int ha_rapid::rnd_next(unsigned char *buffer) {
+  if (inited != RND) return HA_ERR_END_OF_FILE;
+  if (!m_start_of_scan)
+    m_start_of_scan = true;
+  assert(imcs_instance);
+
+  RapidContext context;
+  context.m_current_db = table->s->db.str;
+  context.m_current_table = table->s->table_name.str;
+  context.m_trx = thd_to_trx (current_thd);
+  context.m_table = table;
+  return imcs_instance->Read(&context, buffer);
+}
 int ha_rapid::info(unsigned int flags) {
   // Get the cardinality statistics from the primary storage engine.
   handler *primary = ha_get_primary_handler();
@@ -174,7 +204,6 @@ int ha_rapid::info(unsigned int flags) {
   }
   return ret;
 }
-
 handler::Table_flags ha_rapid::table_flags() const {
   // Secondary engines do not support index access. Indexes are only used for
   // cost estimates.
@@ -217,85 +246,94 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   assert(table_arg.file != nullptr);
   THD* thd = current_thd;
   RapidShare *share [[maybe_unused]] {nullptr};
-  if (loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) ==
-      nullptr) {
+  if (loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) == nullptr) {
       share = new (thd->mem_root)RapidShare ();
+      share->file = this;
+      share->m_table =const_cast<TABLE*>(&table_arg);     
   } else { //TODO: after alter table, do we need to reload it or not???
-    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
-             table_arg.s->table_name.str);
+    std::ostringstream err;
+    err << table_arg.s->db.str<< "." <<table_arg.s->table_name.str << " already loaded";
+    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
-  // check if primary key is missing. rapid engine must has at least one PK.
+  // check if primary key is missing. rapid engine must has at least one PK. 
   if (table_arg.s->is_missing_primary_key()) {
     my_error(ER_REQUIRES_PRIMARY_KEY, MYF(0));
     return HA_ERR_GENERIC;
+  } else {
+    KEY* key  = table_arg.s->key_info;
+    for (uint idx =0; idx < key->user_defined_key_parts; idx ++) {
+       Field* key_field = (key->key_part + idx)->field;
+       if (key_field->is_flag_set(NOT_SECONDARY_FLAG)) {////The key field MUST be set.
+         my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
+                  table_arg.s->db.str, table_arg.s->table_name.str);
+         return HA_ERR_GENERIC;
+       }
+       //only numeric data type allowed.
+       switch (key_field->type()){
+        case MYSQL_TYPE_LONG:
+        case MYSQL_TYPE_DOUBLE:
+        case MYSQL_TYPE_DECIMAL:
+        case MYSQL_TYPE_INT24:
+          break;
+        default:
+           std::ostringstream err;
+           err << table_arg.s->table_name.str << "." << key_field->field_name << " PK type not allowed";
+           my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
+           table_arg.s->table_name.str);
+           return HA_ERR_GENERIC;
+       }
+    }
   }
-  KEY *key = table_arg.key_info + table_arg.s->primary_key;
-  if (key->actual_key_parts != 1) {
-    my_error(ER_RAPID_DA_ONLY_SUPPORT_SINGLE_PRIMARY_KEY, MYF(0),
-             table_arg.s->db.str, table_arg.s->table_name.str,
-             key->actual_key_parts);
-    return HA_ERR_GENERIC;
-  }
-
-  //The key field MUST be set.
-  if (key->key_part->field->is_flag_set(NOT_SECONDARY_FLAG)) {
-      my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
-               table_arg.s->db.str, table_arg.s->table_name.str);
-      return HA_ERR_GENERIC;
-  }
-
+  
   // Scan the primary table and read the records.
   if (table_arg.file->inited == NONE && table_arg.file->ha_rnd_init(true)) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str,
              table_arg.s->table_name.str);
     return HA_ERR_GENERIC;
   }
-  //TODO: Start to write to IMCS.
-  ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
-  assert(imcs_instance);
-
+  //Start to write to IMCS.
   //Do scan the primary table.
   int tmp {HA_ERR_GENERIC};
-  uchar *record = table_arg.record[0];
-  while ((tmp = table_arg.file->ha_rnd_next(record)) != HA_ERR_END_OF_FILE) {
+  while ((tmp = table_arg.file->ha_rnd_next(table_arg.record[0])) != HA_ERR_END_OF_FILE) {
    /*
       ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is
       reading and another deleting without locks. Now, do full scan, but
       multi-thread scan will impl in future.
     */
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
-  
     uint32 field_count = table_arg.s->fields;
     Field *field_ptr = nullptr;
     uint32 primary_key_idx [[maybe_unused]] = field_count;
     // Gets trx id
-    field_ptr = *(table_arg.field + field_count);
+    field_ptr = *(table_arg.field + field_count); //ghost field.
     assert(field_ptr->type() == MYSQL_TYPE_DB_TRX_ID);
-    TransactionID trx_id = field_ptr->val_int();
 
+    ShannonBase::RapidContext context;
+    context.m_extra_info.m_trxid = field_ptr->val_int();;
+    context.m_trx = thd_to_trx(current_thd);
+    context.m_current_db = table_arg.s->db.str;
+    context.m_current_table = table_arg.s->table_name.str;
+    for (uint32 index = 0; index < field_count; index++) {
+      field_ptr = *(table_arg.field + index);
+      if (field_ptr->is_flag_set(PRI_KEY_FLAG))
+         context.m_extra_info.m_pk += field_ptr->val_real();
+    }
     for (uint32 index = 0; index < field_count; index++) {
       field_ptr = *(table_arg.field + index);
       // Skip columns marked as NOT SECONDARY. │
       if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-      char buff[MAX_FIELD_WIDTH] = {0};
-      String str(buff, sizeof(buff), &my_charset_bin);
 #ifndef NDEBUG
       my_bitmap_map *old_map = 0;
       TABLE *table = const_cast<TABLE *>(&table_arg);
       if (table && table->file)
         old_map = dbug_tmp_use_all_columns(table, table->read_set);
 #endif
-        // Here, we get the col data in string format. And, here, do insertion to IMCS.
-        // String *res = field_ptr->val_str(&str);
 #ifndef NDEBUG
       if (old_map) dbug_tmp_restore_column_map(table->read_set, old_map);
 #endif
-      ShannonBase::Cu_Context cu_context;
-      cu_context.m_type = field_ptr->type();
-      if (imcs_instance->Write(&cu_context, trx_id, field_ptr)) {
+      if (imcs_instance->Write(&context, field_ptr)) {
         my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
                  table_arg.s->table_name.str);
         return HA_ERR_GENERIC;
@@ -534,8 +572,8 @@ static MYSQL_SYSVAR_ULONG(
     "Number of memory size that used for rapid engine, and it must "
     "not be oversize half of physical mem size.",
     nullptr, rapid_memory_size_update,
-    ShannonBase::Imcs::DEFAULT_MEMRORY_SIZE, 0,
-    ShannonBase::Imcs::MAX_MEMRORY_SIZE, 0);
+    ShannonBase::DEFAULT_MEMRORY_SIZE, 0,
+    ShannonBase::MAX_MEMRORY_SIZE, 0);
 
 static MYSQL_SYSVAR_ULONG(rapid_populate_buffer_size,
                            ShannonBase::Populate::population_buffer_size,

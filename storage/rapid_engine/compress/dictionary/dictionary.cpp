@@ -26,3 +26,15 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
+
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
+
+namespace ShannonBase{
+namespace Compress {
+
+uint64 Dictionary::GetStringId(String* str_val) {
+   return 0;
+}
+
+} //ns:Compress
+} //ns::shannonbase

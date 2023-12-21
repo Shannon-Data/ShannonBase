@@ -29,6 +29,7 @@
 #include "my_base.h"
 #include "sql/handler.h"
 #include "thr_lock.h"
+#include "storage/rapid_engine/imcs/imcs.h"
 /* clang-format off */
 class THD;
 struct TABLE;
@@ -59,18 +60,16 @@ class ha_rapid : public handler {
   ha_rapid(handlerton *hton, TABLE_SHARE *table_share);
 
  private:
-  int create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) override {
-    return HA_ERR_WRONG_COMMAND;
-  }
+  int create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) override;
 
   int open(const char *name, int mode, unsigned int test_if_locked,
            const dd::Table *table_def) override;
 
-  int close() override { return 0; }
+  int close() override;
 
-  int rnd_init(bool) override { return 0; }
+  int rnd_init(bool) override;
 
-  int rnd_next(unsigned char *) override { return HA_ERR_END_OF_FILE; }
+  int rnd_next(unsigned char *) override;
 
   int rnd_pos(unsigned char *, unsigned char *) override {
     return HA_ERR_WRONG_COMMAND;
@@ -98,6 +97,9 @@ class ha_rapid : public handler {
                    bool error_if_not_loaded) override;
 
   THR_LOCK_DATA m_lock;
+  /** this is set to 1 when we are starting a table scan but have
+      not yet fetched any row, else false */
+  bool m_start_of_scan {false};
 };
 
 }  // namespace ShannonBase

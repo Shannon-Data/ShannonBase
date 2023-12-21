@@ -41,57 +41,67 @@ Imcs* Imcs::m_instance {nullptr};
 std::once_flag Imcs::one;
 
 Imcs::Imcs() {
-
 }
-Imcs::~Imcs() {
-  
-}
-Imcu* Imcs::New_imcu(const TABLE& table_arg) {
-  std::string db_name = table_arg.s->db.str;
-  std::string table_name = table_arg.s->table_name.str;
-  std::scoped_lock lk(m_imcu_mtx);
-  std::string key_name = db_name + table_name;
-  key_name += m_cu_id;
-  Imcu* imcu = new (current_thd->mem_root) Imcu(table_arg);
-  m_imcus.insert(std::make_pair(key_name, imcu));
-  m_cu_id += 1;
-  return imcu;
+Imcs::~Imcs() { 
 }
 
-uint Imcs::Write(ShannonBaseContext* context, TransactionID trxid, Field* fields) {
+uint Imcs::Write(RapidContext* context, Field* field) {
   assert(context);
-  assert(trxid != 0);
-  assert(fields);
+  assert(field);
   /** before insertion, should to check whether there's spare space to store the new data.
       or not. If no extra sapce left, allocate a new imcu. After a new imcu allocated, the
       meta info is stored into 'm_imcus'.
   */
   //the last imcu key_name.
-  std::string key_name = *fields->table_name;
-  key_name += fields->orig_db_name;
-  key_name += (m_cu_id > 0 ) ? (m_cu_id -1) : 0;
+  std::string key_name = *field->table_name;
+  key_name += field->table->s->db.str;
+  key_name += field->field_name;
 
-  Imcu* curr_imcu {nullptr};
-  if (!m_imcus.size()) {
-    curr_imcu = New_imcu(*fields->table);
-  } else {
-    curr_imcu = m_imcus[key_name];
+  auto elem = m_cus.find(key_name);
+  if ( elem == m_cus.end()) { //a new field. not found
+    auto [it, sucess] = m_cus.insert(std::pair{key_name, std::make_unique<Cu>(field)});
+    if (!sucess) return 1;
   }
-  assert(curr_imcu);
+  //start writing the data, at first, assemble the data we want to write. the layout of data
+  //pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr| data]
+  uint data_len = 1 + 8 + 8 + 4;
+  if (!field->is_real_null())
+    data_len += field->pack_length();
 
-  Field* field = fields;
-  while (field) {
- 
-    field ++;
-  }
+  std::unique_ptr<uchar> data(new uchar[data_len]);
+  int8 info {0};
+  int64 sum_ptr{0};
+  if (field->is_real_null())
+   info |= DATA_NULL_FLAG_MASK;
+
+  memcpy(data.get(), &info, 1);
+  memcpy(data.get() + 1, &context->m_extra_info.m_trxid, 8);
+  memcpy(data.get() + 9, &context->m_extra_info.m_pk, 8);
+  memcpy(data.get() + 17, &sum_ptr, 4);
+  //value is null, then return.
+  if (!field->is_real_null())
+    memcpy(data.get() + 21, field->data_ptr(), field->pack_length());
+  
+  if (!m_cus[key_name]->Write_data(context, data.get(), data_len)) return 1;
   return 0;
 }
-uint Imcs::Read (ShannonBaseContext* context, Field* field) {
-  assert(context);
-  assert(field);
-
+uint Imcs::Read (RapidContext* context, Field* field) {
+  assert(context && field);
   return 0;
 }
-
+uint Imcs::Read(RapidContext* context, uchar* buffer) {
+  assert(context && buffer);
+  return 0;
+}
+uint Read_batch(RapidContext* context, uchar* buffer){
+  assert(context && buffer);
+  return 0;
+}
+uint Imcs::Delete(RapidContext* context, Field* field, uchar* rowid) {
+  return 0;
+}
+uint Imcs::Delete_all(RapidContext* context) {
+  return 0;
+}
 } //ns:imcs 
 } //ns:shannonbase

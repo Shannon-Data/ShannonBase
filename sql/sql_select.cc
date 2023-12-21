@@ -478,15 +478,14 @@ bool validate_use_secondary_engine(const LEX *lex) {
     if (!thd->is_error() && find_and_set_offload_fail_reason(lex)) {
       return true;
     }
-    // If no specifc error could be generated so far,
-    // we give out a generic one.
-    if (!thd->is_error()) {
+    // If no specifc error could be generated so far, we give out a generic one.
+    if (thd->is_error()) {
       const char *err_msg =
           "use_secondary_engine is FORCED but query could not be executed in "
           "secondary engine";
       set_fail_reason_and_raise_error(lex, err_msg);
       return true;
-    }
+    } else return false;
   }
   return false;
 }

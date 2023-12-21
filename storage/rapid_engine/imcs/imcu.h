@@ -105,7 +105,7 @@ private:
   // use to protect cus in imcu.
   std::mutex m_mutex_cus;
   //The all CUs in this IMCU.
-  std::map<Field*, Cu*> m_cus;
+  std::map<Field*, std::unique_ptr<Cu> > m_cus;
   //name of this imcs. 'db_name + table_name'
   std::string m_name;
   //point to the next imcu.

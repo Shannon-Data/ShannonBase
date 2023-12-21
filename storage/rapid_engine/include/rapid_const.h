@@ -29,10 +29,10 @@
 #include "my_inttypes.h"
 namespace ShannonBase{
 
-#define KB 1024
-#define MB (KB * KB)
-
 using  TransactionID = uint64_t;
+
+constexpr uint DEFAULT_MEMRORY_SIZE = 0;
+constexpr uint MAX_MEMRORY_SIZE = 0;
 
 //The max num of rows in a chunk.
 constexpr uint MAX_NUM_CHUNK_ROWS = 65535;
@@ -51,19 +51,25 @@ enum class RPD_NODE_ROLE {
   //secondary node: data node
   NODE_SECONDARY_NODE
 };
+//batch num of one read oper.
+constexpr uint MAX_BATCH_NUMS = 128;
 
 //these mask used for get meta info of data.
 //infos is var according the data length we write,
-constexpr uint DATA_BYTES_FLAG_MASK =0x0011;
-constexpr uint DATA_DELETE_FLAG_MASK = 0x0;
-constexpr uint DATA_NULL_FLAG_MASK =0X0;
-constexpr uint DATA_LEN_FLAG_MASK =0x0;
+constexpr uint DATA_DELETE_FLAG_MASK = 0x80;
+constexpr uint DATA_NULL_FLAG_MASK =0x40;
+
 constexpr uint SHANNON_RAPID_VERSION = 0x1;
 constexpr uint SHANNONBASE_VERSION = 0x1;
-constexpr uint8 SHANNON_MAGIC_IMCS = 0x0001;
-constexpr uint8 SHANNON_MAGIC_IMCU = 0x0002;
-constexpr uint8 SHANNON_MAGIC_CU = 0x0003;
-constexpr uint8 SHANNON_MAGIC_CHUNK = 0x0004;
+
+constexpr uint SHANNON_MAGIC_IMCS = 0x0001;
+constexpr uint SHANNON_MAGIC_IMCU = 0x0002;
+constexpr uint SHANNON_MAGIC_CU = 0x0003;
+constexpr uint SHANNON_MAGIC_CHUNK = 0x0004;
+
+constexpr uint64 SHANNON_KB = 1024 * 1024;
+constexpr uint64 SHANNON_MB = SHANNON_KB * 1024;
+constexpr uint64 SHANNON_GB = SHANNON_MB * 1024;
 
 } //ns:shannonbase
 #endif //__SHANNONBASE_CONST_H__

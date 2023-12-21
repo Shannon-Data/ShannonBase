@@ -27,6 +27,8 @@
 #define __SHANNONBASE_CHUNK_H__
 
 #include <atomic>
+#include <memory>
+#include <type_traits>
 
 #include "field_types.h" //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"
@@ -42,63 +44,90 @@
 namespace ShannonBase{
 namespace Imcs{
 
+/**
+ * The chunk is an memory pool area, where the data writes here.
+ * The format of rows is following: (ref to: https://github.com/Shannon-Data/ShannonBase/issues/8)
+ *     +-----------------------------------------+
+ *     | Info bits | TrxID | PK | SMU_ptr | Data |
+ *     +-----------------------------------------+
+ *   Info bits: highest bit: var bit flag: 1 two bytes, 0 one byte.
+ *              (N-1)th: null flag, 1 null, 0 not null;
+ *              (N-2)th: delete flag: 1 deleted, 0 not deleted.
+ *              [(N-3) - 0] : data lenght;
+*/
 class Chunk : public MemoryObject{
   public:
     class Chunk_header{
       public:
-        std::atomic<long long> m_max, m_min, m_median, m_middle, m_avg, m_rows;
+        //ctor and dctor.
+        Chunk_header() = default;
+        ~Chunk_header() = default;
+        //field of this chunk.
+        Field* m_field;
+        //statistics data.
+        std::atomic<long long> m_max, m_min, m_median, m_middle, m_avg, m_rows, m_sum;
+        //pointer to the next or prev.
+        Chunk* m_next_chunk{nullptr}, *m_prev_chunk {nullptr};
+        //data type in mysql.
+        enum_field_types m_chunk_type {MYSQL_TYPE_TINY};
+        //is null or not.
+        bool m_null {false};
+        //whether it is var type or not
+        bool m_varlen {false};
+        //line number of this chunk.
+        uint32 m_lines;
     };
 
-    Chunk(enum_field_types type);
+    explicit Chunk(Field* field);
     virtual ~Chunk();
     
     Chunk_header& Get_header() { 
       std::scoped_lock lk(m_header_mutex);
-      return m_headers;
+      return *m_header;
     }
-    inline bool Is_full () { return (m_headers.m_rows == Chunk::MAX_CHUNK_NUMS_LIMIT); }
-    uchar* Write_data(uchar* data, uint length);
-    template<typename data_T> uchar*
-    Write_fixed_value(data_T value);
-    
-    template<typename data_T> uchar*
-    Write_var_value(data_T value, uint length, CHARSET_INFO* charset);
-    uchar* Read_data(uchar* data, uint length);
+    //writes the data into this chunk. length unspecify means calc by chunk. 
+    uchar* Write_data(RapidContext* context, uchar* data, uint length = 0);
+    //reads the data by from address .
+    uchar* Read_data(RapidContext* context, uchar* from, uchar* to, uint length = 0);
+    //reads the data by rowid.
+    uchar* Read_data(RapidContext* context, uchar* rowid, uint length = 0);
+    //deletes the data by rowid.
+    uchar* Delete_data(RapidContext* context, uchar* rowid);
+    //deletes all.
+    uchar* Delete_all();
+    //updates the data.
+    uchar* Update_date(RapidContext* context, uchar* rowid, uchar* data, uint length =0);
+    //flush the data to disk. by now, we cannot impl this part.
+    uint flush(RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
 
-    uint Capacity() {return 0;}
-    double Ratio() { return 100; }
-    Chunk* Get_next() { return m_next; }
-    Chunk* Get_prev() { return m_prev; }
-    void Set_next(Chunk* next) { m_next = next; }
-    void Set_prev(Chunk* prev) { m_prev = prev; }
+    void Set_next(Chunk* next) { m_header->m_next_chunk = next; }
+    void Set_prev(Chunk* prev) { m_header->m_prev_chunk = prev; }
+    inline Chunk* Get_next() const { return m_header->m_next_chunk; }
+    inline Chunk* Get_prev() const { return m_header->m_prev_chunk; }
+    inline uchar* Get_base() const { return m_data_base; }
+    inline uchar* Get_end() const { return m_data_end; }
   private:
-    inline int8 Get_unit(enum_field_types type) {
-      switch (type) {
-        case MYSQL_TYPE_DECIMAL:
-        case MYSQL_TYPE_LONG :
-          return 8;
-        case MYSQL_TYPE_STRING:
-          return -1;
-        case MYSQL_TYPE_GEOMETRY:
-          return -1;
-        default:
-          return 4;
-      }
-      return 0;
-    }
 
+    static constexpr uint64 SHANNON_CHUNK_SIZE = 8 * SHANNON_MB;
+    static constexpr uint SHANNON_CHUNK_VAR_MASK = 0x8;
+    static constexpr uint SHANNON_CHUNK_NULL_MASK = 0x40;
+    static constexpr uint SHANNON_CHUNK_DELETE_MASK = 0x20;
+    static constexpr uint SHANNON_CHUNK_DATA_MASK = 0x1F;
     std::mutex m_header_mutex;
-    Chunk_header m_headers;
+    std::unique_ptr<Chunk_header> m_header{nullptr};
 
     std::mutex m_data_mutex;
-    /** the base pointer of chunk, and the current pos of data. 
-      whether data should be in order or not */
-    uchar *m_data_base {nullptr}, *m_data {nullptr};
-    uchar* m_data_end = m_data_base;
-    static constexpr uint MAX_CHUNK_NUMS_LIMIT = MAX_NUM_CHUNK_ROWS;
-    Chunk* m_next{nullptr}, *m_prev{nullptr}, *m_curr{nullptr};
-    //the check sum of this chunk.
-    uint m_check_sum;
+    
+    /** the base pointer of chunk, and the current pos of data. whether data should be in order or not */
+    uchar* m_data_base {nullptr};
+    //current pointer, where the data is.
+    uchar* m_data {nullptr};
+    //end address of memory, to determine whether the memory is full or not.
+    uchar* m_data_end {nullptr};
+    //the check sum of this chunk. it used to do check when the data flush to disk.
+    uint m_check_sum {0};
+    //maigic num of chunk.
+    uint m_magic = SHANNON_MAGIC_CHUNK;
 };
 
 } //ns:imcs
