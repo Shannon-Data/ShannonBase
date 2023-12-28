@@ -625,8 +625,8 @@ static MYSQL_SYSVAR_ULONG(
     "Number of memory size that used for rapid engine, and it must "
     "not be oversize half of physical mem size.",
     nullptr, rapid_memory_size_update,
-    ShannonBase::DEFAULT_MEMRORY_SIZE, 0,
-    ShannonBase::MAX_MEMRORY_SIZE, 0);
+    ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE, 0,
+    ShannonBase::SHANNON_MAX_MEMRORY_SIZE, 0);
 
 static MYSQL_SYSVAR_ULONG(rapid_populate_buffer_size,
                            ShannonBase::Populate::population_buffer_size,
@@ -634,8 +634,8 @@ static MYSQL_SYSVAR_ULONG(rapid_populate_buffer_size,
                           "Number of populate buffer size that must not be 10% "
                           "rapid_populate_buffer size.",
                           NULL, shannonbase_rapid_populate_buffer_size_update, 
-                          ShannonBase::Populate::DEFAULT_POPULATION_BUFFER_SIZE, 0,
-                          ShannonBase::Populate::MAX_POPULATION_BUFFER_SIZE,0);
+                          ShannonBase::SHANNON_DEFAULT_POPULATION_BUFFER_SIZE, 0,
+                          ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE,0);
 
 //System variables of Shannonbase
 static struct SYS_VAR *shannonbase_rapid_system_variables[] = {

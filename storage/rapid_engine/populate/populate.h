@@ -35,6 +35,7 @@
 
 namespace ShannonBase{
 namespace Populate{
+uint64 population_buffer_size;
 } //ns:populate
 } //ns:shannonbase
 #endif //__SHANNONBASE_POPULATE_H__

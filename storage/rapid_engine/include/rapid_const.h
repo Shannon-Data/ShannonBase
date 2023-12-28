@@ -33,24 +33,19 @@ namespace ShannonBase{
 constexpr uint SHANNONBASE_VERSION = 0x1;
 constexpr uint SHANNON_RAPID_VERSION = 0x0001;
 
+//unit of shannonbase.
 constexpr uint64 SHANNON_KB = 1024 * 1024;
 constexpr uint64 SHANNON_MB = SHANNON_KB * 1024;
 constexpr uint64 SHANNON_GB = SHANNON_MB * 1024;
 
+//some sizes used by imcs.
 constexpr uint64 SHANNON_CHUNK_SIZE = 16 * SHANNON_MB;
-constexpr uint64 DEFAULT_MEMRORY_SIZE = 128 * SHANNON_MB;
-constexpr uint64 MAX_MEMRORY_SIZE = DEFAULT_MEMRORY_SIZE;
+constexpr uint64 SHANNON_DEFAULT_MEMRORY_SIZE = 128 * SHANNON_MB;
+constexpr uint64 SHANNON_MAX_MEMRORY_SIZE = SHANNON_DEFAULT_MEMRORY_SIZE;
+constexpr uint64 SHANNON_DEFAULT_POPULATION_BUFFER_SIZE = 8 * SHANNON_MB;
+constexpr uint64 SHANNON_MAX_POPULATION_BUFFER_SIZE = 8 * SHANNON_MB;
 
-//This is use for Rapid cluster in future.
-enum class RPD_NODE_ROLE {
-  //meta node and primary role, name node.
-  NODE_PRIMARY_NODE = 0,
-  //secondary node: data node
-  NODE_SECONDARY_NODE
-};
-
-//these mask used for get meta info of data.
-//infos is var according the data length we write,
+//these mask used for get meta info of data. infos is var according the data length we write,
 constexpr uint DATA_DELETE_FLAG_MASK = 0x80;
 constexpr uint DATA_NULL_FLAG_MASK =0x40;
 
@@ -58,6 +53,14 @@ constexpr uint SHANNON_MAGIC_IMCS = 0x0001;
 constexpr uint SHANNON_MAGIC_IMCU = 0x0002;
 constexpr uint SHANNON_MAGIC_CU = 0x0003;
 constexpr uint SHANNON_MAGIC_CHUNK = 0x0004;
+
+//This is use for Rapid cluster in future. in next, we will build up a AP clust for ShannonBase.
+enum class RPD_NODE_ROLE {
+  //meta node and primary role, name node.
+  NODE_PRIMARY_NODE = 0,
+  //secondary node: data node
+  NODE_SECONDARY_NODE
+};
 
 } //ns:shannonbase
 #endif //__SHANNONBASE_CONST_H__
