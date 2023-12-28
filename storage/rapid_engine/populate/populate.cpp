@@ -19,51 +19,26 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
+   The fundmental code for imcs. The chunk is used to store the data which
+   transfer from row-based format to column-based format.
+
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. The chunk is used to store the data which
+   transfer from row-based format to column-based format.
 */
-#ifndef __SHANNONBASE_CONTEXT_H__
-#define __SHANNONBASE_CONTEXT_H__
 
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
-class trx_t;
-class ReadView;
-class TABLE;
+#include "storage/rapid_engine/populate/populate.h"
 
-namespace ShannonBase {
-class ShannonBaseContext {
-public:
-  ShannonBaseContext() {}
-  virtual ~ShannonBaseContext() {}
-  ShannonBaseContext(ShannonBaseContext&) = delete;
-  ShannonBaseContext& operator=(const ShannonBaseContext&) = delete;
-};
+#include "storage/rapid_engine/populate/log_parser.h"
 
-class RapidContext : public ShannonBaseContext {
-public:
-  class extra_info_t{
-    public:
-      extra_info_t(): m_pk(0), m_trxid(0) {}
-      ~extra_info_t() {}
-      //primary key of this innodb rows.
-      uint64 m_pk;
-      //trxid of this innodb rows.
-      uint64 m_trxid;
-  };
+#include "storage/innobase/include/mtr0types.h"
+#include "storage/innobase/include/mtr0log.h"
+#include "storage/innobase/include/univ.i"
+#include "storage/innobase/include/fil0fil.h"
+#include "storage/innobase/include/log0write.h"
 
-  RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}
-  virtual ~RapidContext() = default;
-  //current transaction.
-  trx_t* m_trx;
-  //the current db and table name.
-  std::string m_current_db, m_current_table;
-  //the primary key of this table.
-  TABLE* m_table;
-  //the dictionary for this DB.
-  Compress::Dictionary* m_local_dict;
-  extra_info_t m_extra_info;
-};
-
-} //ns:shannonbase
-#endif
+namespace ShannonBase{
+namespace Populate{
+}  //ns:populate
+}  //ns:shannonbase    

@@ -58,9 +58,10 @@
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/compress/algorithms.h"
-#include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/imcs/cu.h"
 
+class Field;
 namespace ShannonBase{
 namespace Imcs{
 
@@ -98,7 +99,6 @@ class Imcu : public MemoryObject{
 private:
   bool Is_full();
 private:
-  static constexpr uint CHUNK_NUMS_LIMITS = MAX_CHUNK_NUMS;
   // use to proctect header.
   std::mutex m_mutex_header;
   Imcu_header m_headers;

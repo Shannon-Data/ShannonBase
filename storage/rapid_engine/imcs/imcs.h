@@ -30,23 +30,22 @@
 #include <atomic>
 #include <mutex>
 #include <map>
+#include <memory>
 
-#include "my_alloc.h"
 #include "my_inttypes.h"
 
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/imcs/imcu.h"
-#include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //for local dictionary.
 
+class Field;
 namespace ShannonBase{
+class RapidContext;
+extern std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
 namespace Imcs{
-
 //the memory size of allocation for imcs to store the loaded data.
 extern unsigned long rapid_memory_size;
-
+class Cu;
 class Imcu;
 class Imcs :public MemoryObject {
 public:
@@ -57,17 +56,25 @@ public:
                              });
     return m_instance;
  }
+ //initialize the imcs.
+ uint Initialize();
+ //deinitialize the imcs.
+ uint Deinitialize();
+ //scan oper initialization.
+ uint Rnd_init(bool scan);
+ //end of scanning
+ uint Rnd_end();
  //writes a row of a column in.
- uint Write(RapidContext* context, Field* fields);
+ uint Write(ShannonBase::RapidContext* context, Field* fields);
  //reads the data by a rowid into a field.
- uint Read(RapidContext* context, Field* field);
+ uint Read(ShannonBase::RapidContext* context, Field* field);
  //reads the data by a rowid into buffer.
- uint Read(RapidContext* context, uchar* buffer);
- uint Read_batch(RapidContext* context, uchar* buffer);
+ uint Read(ShannonBase::RapidContext* context, uchar* buffer);
+ uint Read_batch(ShannonBase::RapidContext* context, uchar* buffer);
  //deletes the data by a rowid
- uint Delete(RapidContext* context, Field* field, uchar* rowid);
+ uint Delete(ShannonBase::RapidContext* context, Field* field, uchar* rowid);
  //deletes all the data.
- uint Delete_all(RapidContext* context);
+ uint Delete_all(ShannonBase::RapidContext* context);
 private:
  //make ctor and dctor private.
  Imcs();
@@ -77,6 +84,7 @@ private:
  Imcs(Imcs&) = delete;
  Imcs& operator = (const Imcs&) = delete;
  Imcs& operator = (const Imcs&&) = delete;
+private:
  //imcs instance
  static Imcs* m_instance;
  //initialization flag, only once.

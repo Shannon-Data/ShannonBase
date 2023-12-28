@@ -25,9 +25,9 @@
 */
 #ifndef __SHANNONBASE_UTILS_H__
 #define __SHANNONBASE_UTILS_H__
+
 namespace ShannonBase{
 namespace Utils{
-
 }
 }
 #endif //__SHANNONBASE_UTILS_H__

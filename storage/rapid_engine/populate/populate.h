@@ -35,12 +35,6 @@
 
 namespace ShannonBase{
 namespace Populate{
-
-constexpr unsigned long MAX_POPULATION_BUFFER_SIZE = 200;
-constexpr unsigned long DEFAULT_POPULATION_BUFFER_SIZE = 100;
-//the population buffer is used to keep all the changes in TP engine. and will apply to AP engine.
-unsigned long population_buffer_size;
-
 } //ns:populate
 } //ns:shannonbase
 #endif //__SHANNONBASE_POPULATE_H__

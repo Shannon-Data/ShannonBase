@@ -26,17 +26,27 @@
 
    The fundmental code for imcs.
 */
-#include <limits.h>
 #include "storage/rapid_engine/imcs/cu.h"
+
+#include <limits.h>
+
+#include "sql/field.h"      //Field
+
+#include "storage/innobase/include/univ.i"
+#include "storage/innobase/include/ut0new.h"
+
+#include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/imcs/chunk.h"
 
 namespace ShannonBase {
 namespace Imcs {
 
 Cu::Cu(Field* field) {
   std::scoped_lock lk(m_header_mutex);
-  m_header.reset (new (current_thd->mem_root) Cu_header());
-
-  m_header->m_field = field;
+  m_header = ut::new_withkey<Cu_header>(UT_NEW_THIS_FILE_PSI_KEY);
+  if (!m_header) return;
+  m_header->m_field_no = field->field_index();
   m_header->m_avg = m_header->m_sum = m_header->m_rows = 0;
   m_header->m_max = std::numeric_limits<long long>::lowest();
   m_header->m_min = std::numeric_limits<long long>::max();
@@ -45,61 +55,95 @@ Cu::Cu(Field* field) {
 
   m_header->m_cu_type = field->type();
   m_header->m_nullable = field->is_nullable();
-  m_header->m_compress_algo = Compress::enum_compress_algos::NONE;
-  m_header->m_local_dict.reset(new (current_thd->mem_root) Compress::Dictionary());
+  m_header->m_compress_algo = Compress::compress_algos::NONE;
+  m_header->m_local_dict = ut::new_withkey<Compress::Dictionary>(UT_NEW_THIS_FILE_PSI_KEY);
   //the initial one chunk built.
   m_chunks.push_back(std::make_unique<Chunk>(field));
 }
 Cu::~Cu() {
-}
-
-uchar* Cu::Write_data(RapidContext* context, uchar* data, uint length) {
-  assert(m_header);
-  uchar* pos{nullptr};
-  if (!m_chunks.size()) { //empty.
-    m_chunks.push_back(std::make_unique<Chunk>(m_header->m_field));
+  m_chunks.clear();
+  if (m_header) {
+    if (m_header->m_local_dict) { ut::delete_(m_header->m_local_dict); m_header->m_local_dict = nullptr;}
+     ut::delete_(m_header);
+    m_header = nullptr;
   }
-
+}
+uint Cu::Rnd_init(bool scan) {
+  if (!m_chunks.size()) return 0;
+  for (size_t index =0; index < m_chunks.size(); index++) {
+    if (m_chunks[index].get()->Rnd_init(scan))
+      return HA_ERR_INITIALIZATION;
+  }
+  return 0;
+}
+uint Cu::Rnd_end() {
+  if (!m_chunks.size()) return 0;
+  for (size_t index =0; index < m_chunks.size(); index++) {
+    if (m_chunks[index].get()->Rnd_end())
+      return HA_ERR_INITIALIZATION;
+  }
+  return 0;
+}
+uchar* Cu::Write_data(ShannonBase::RapidContext* context, uchar* data, uint length) {
+  assert(m_header && m_chunks.size());
+  uchar* pos{nullptr};
   Chunk* chunk_ptr = m_chunks[m_chunks.size()-1].get();
-  if (!(pos = chunk_ptr->Write_data(context, data, length))) { //the chunk is full.
-    //allocate a new chunk to write.
-    m_chunks.push_back(std::make_unique<Chunk>(m_header->m_field));
+  if (!(pos = chunk_ptr->Write_data(context, data, length))) {
+    //the prev chunk is full, then allocate a new chunk to write.
+    std::scoped_lock lk(m_header_mutex);
+    Field* field = *(context->m_table->field + m_header->m_field_no);
+    assert(field);
+    m_chunks.push_back(std::make_unique<Chunk>(field));
     chunk_ptr = m_chunks[m_chunks.size()-1].get();
     pos = chunk_ptr->Write_data(context, data, length);
-    if (!pos) return nullptr;
     //To update the metainfo.
   }
-
-  longlong data_val = m_header->m_field->val_real();
-  if (m_header->m_cu_type == MYSQL_TYPE_BLOB || m_header->m_cu_type == MYSQL_TYPE_STRING) {
-    String buf;
-    String *val1[[maybe_unused]] = m_header->m_field->val_str(&buf);  
-    m_header->m_local_dict->GetStringId(val1);
+  //update the meta info.
+  if (m_header->m_cu_type == MYSQL_TYPE_BLOB || m_header->m_cu_type == MYSQL_TYPE_STRING ||
+      m_header->m_cu_type == MYSQL_TYPE_VARCHAR) { //string type, otherwise, update the meta info.
+      return pos;
   }
+  longlong data_val = *(longlong*) (data + 21);
   m_header->m_rows++;
   m_header->m_sum += data_val;
   m_header->m_avg.store(m_header->m_sum/m_header->m_rows, std::memory_order::memory_order_relaxed);
-
   if (data_val > m_header->m_max)
     m_header->m_max.store(data_val, std::memory_order::memory_order_relaxed);
   if (data_val < m_header->m_min)
     m_header->m_min.store(data_val, std::memory_order::memory_order_relaxed);
-
   return pos;
 }
-
-uchar* Cu::Read_data(RapidContext* context, uchar* from, uchar* to, uint length) {
+uchar* Cu::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
   if (!m_chunks.size()) return nullptr;
-  Chunk* chunk = m_chunks [m_chunks.size() - 1].get();
-  return chunk->Read_data(context, from, length);
+#ifdef SHANNON_GET_NTH_CHUNK
+  //Gets the last chunk data.
+  m_chunk_id = m_chunks.size() - 1;
+  Chunk* chunk = m_chunks [m_chunk_id].get();
+  if (!chunk) return nullptr;
+  return chunk->Read_data(context, buffer);
+#else
+  if (m_chunk_id >= m_chunks.size())  return nullptr;
+  Chunk* chunk = m_chunks [m_chunk_id].get();
+  if (!chunk) return nullptr;
+  auto ret = chunk->Read_data(context, buffer);
+  if (!ret) {//to the end of this chunk, then start to read the next chunk.
+    m_chunk_id.store(m_chunk_id + 1, std::memory_order::memory_order_seq_cst);
+    if (m_chunk_id >= m_chunks.size()) return nullptr;
+    Chunk* chunk = m_chunks [m_chunk_id].get();
+    if (!chunk) return nullptr;
+    ret = chunk->Read_data(context, buffer);
+  }
+  return ret;
+#endif
 }
 
-uchar* Cu::Read_data(RapidContext* context, uchar* rowid, uint length) {
+uchar* Cu::Read_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
   if (!m_chunks.size()) return nullptr;
-  Chunk* chunk = m_chunks [m_chunks.size() - 1].get();
-  return  chunk->Read_data(context, rowid, length);
+  //Chunk* chunk = m_chunks [m_chunks.size() - 1].get(); //to get the last chunk data.
+  //if (!chunk) return nullptr;
+  return  nullptr;
 }
-uchar* Cu::Delete_data(RapidContext* context, uchar* rowid) {
+uchar* Cu::Delete_data(ShannonBase::RapidContext* context, uchar* rowid) {
   return nullptr;
 }
 uchar* Cu::Delete_all(){
@@ -110,13 +154,12 @@ uchar* Cu::Delete_all(){
   }
   return base;
 }
-uchar* Cu::Update_data(RapidContext* context, uchar* rowid, uchar* data, uint length){
+uchar* Cu::Update_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length){
   
   return nullptr;
 }
-uint Cu::flush(RapidContext* context, uchar* from, uchar* to) {
+uint Cu::flush(ShannonBase::RapidContext* context, uchar* from, uchar* to) {
   assert(from ||to);
-
   return 0;
 }
 

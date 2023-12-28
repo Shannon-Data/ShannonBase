@@ -137,9 +137,9 @@ int table_rpd_column_id::make_row(uint index[[maybe_unused]]) {
   } else {
     m_row.column_id = ShannonBase::meta_rpd_columns_infos[index].column_id;
     m_row.table_id = ShannonBase::meta_rpd_columns_infos[index].table_id;
-    strncpy(m_row.column_name, ShannonBase::meta_rpd_columns_infos[index].table_name, 
-            strlen(ShannonBase::meta_rpd_columns_infos[index].table_name));
-    m_row.column_name_length = strlen(ShannonBase::meta_rpd_columns_infos[index].table_name);
+    strncpy(m_row.column_name, ShannonBase::meta_rpd_columns_infos[index].column_name,
+            strlen(ShannonBase::meta_rpd_columns_infos[index].column_name));
+    m_row.column_name_length = strlen(ShannonBase::meta_rpd_columns_infos[index].column_name);
   }
   return 0;
 }

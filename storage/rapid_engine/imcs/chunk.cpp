@@ -23,85 +23,119 @@
 
    The fundmental code for imcs.
 */
-#include <typeinfo>
-
 #include "storage/rapid_engine/imcs/chunk.h"
+
+#include <stddef.h>
+#include <typeinfo>
+#include <memory>
+
+#include "sql/field.h"  //Field
+#include "storage/innobase/include/read0types.h"  //readview
+#include "storage/innobase/include/trx0trx.h"
+#include "storage/innobase/include/univ.i"        //new_withkey
+#include "storage/innobase/include/ut0new.h"      //new_withkey
+
+#include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/compress/algorithms.h"
+
 namespace ShannonBase {
 namespace Imcs {
-
-struct deleter_helper {
-  void operator() (uchar* ptr) {
-    if (ptr) my_free(ptr);
-  }
-};
-
+static unsigned long rapid_allocated_mem_size{0};
+extern unsigned long rapid_memory_size;
 Chunk::Chunk(Field* field) {
    assert(field);
-
-  //allocate space for data. Here rows.
-  {
+   {
+     /**m_data_base，here, we use the same psi key with buffer pool which used in innodb page allocation.
+      * Here, we use ut::xxx to manage memory allocation and free as innobase doese. In SQL lay, we will
+      * use MEM_ROOT to manage the memory management. In IMCS, all modules use ut:: to manage memory
+      * operations, it's an effiecient memory utils. it has been initialized in ha_innodb.cc: ut_new_boot();
+     */
     std::scoped_lock lk(m_header_mutex);
-    m_header.reset (new (current_thd->mem_root) Chunk_header);
-    if (!m_header.get()) return;
-    m_header->m_field = field;
-    m_header->m_chunk_type = field->type();
-    m_header->m_null = field->is_nullable();
-    switch (m_header->m_chunk_type) {
-      case MYSQL_TYPE_VARCHAR:
-      case MYSQL_TYPE_BIT:
-      case MYSQL_TYPE_JSON:
-      case MYSQL_TYPE_TINY_BLOB:
-      case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_MEDIUM_BLOB:
-      case MYSQL_TYPE_VAR_STRING:
-      case MYSQL_TYPE_STRING:
-      case MYSQL_TYPE_GEOMETRY:
-        m_header->m_varlen = true;
-        break;
-      default:
-        m_header->m_varlen = false;
-        break;
-    }
-  }
-
-  //m_data_base
-  m_data_base = static_cast<uchar*> (my_malloc(PSI_NOT_INSTRUMENTED, Chunk::SHANNON_CHUNK_SIZE,
-                                                     MYF(MY_ZEROFILL | MY_WME)));
-  if (m_data_base) {
-    m_header->m_avg = 0;
-    m_header->m_max = std::numeric_limits <long long>::lowest();
-    m_header->m_min = std::numeric_limits <long long>::max();
-    m_header->m_median = 0;
-    m_header->m_middle = 0;
-    m_header->m_lines = 0;
-    m_header->m_sum = 0;
-
-    m_data_end = m_data_base + static_cast<ptrdiff_t>(Chunk::SHANNON_CHUNK_SIZE);
-    m_data = m_data_base;
-  }
+    if (rapid_allocated_mem_size + ShannonBase::SHANNON_CHUNK_SIZE <= rapid_memory_size) {
+       m_data_base = static_cast<uchar *>(ut::malloc_large_page_withkey(
+          ut::make_psi_memory_key(mem_key_buf_buf_pool), ShannonBase::SHANNON_CHUNK_SIZE,
+          ut::fallback_to_normal_page_t{}));
+       if (!m_data_base) return;
+       m_data = m_data_base;
+       m_data_end = m_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
+       rapid_allocated_mem_size += ShannonBase::SHANNON_CHUNK_SIZE;
+    } else {
+       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
+       return;
+     }
+   }
+   { //allocate space for data. Here rows.
+      std::scoped_lock lk(m_header_mutex);
+      m_header = ut::new_withkey<Chunk_header>(UT_NEW_THIS_FILE_PSI_KEY);
+      //m_header = ut::make_unique<Chunk_header>(ut::make_psi_memory_key(mem_key_buf_buf_pool));
+      if (!m_header) return;
+      m_header->m_avg = 0;
+      m_header->m_max = std::numeric_limits <long long>::lowest();
+      m_header->m_min = std::numeric_limits <long long>::max();
+      m_header->m_median = 0;
+      m_header->m_middle = 0;
+      m_header->m_sum = 0;
+      m_header->m_field_no = field->field_index();
+      m_header->m_chunk_type = field->type();
+      m_header->m_null = field->is_nullable();
+      switch (m_header->m_chunk_type) {
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_BIT:
+        case MYSQL_TYPE_JSON:
+        case MYSQL_TYPE_TINY_BLOB:
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_MEDIUM_BLOB:
+        case MYSQL_TYPE_VAR_STRING:
+        case MYSQL_TYPE_STRING:
+        case MYSQL_TYPE_GEOMETRY:
+          m_header->m_varlen = true;
+          break;
+        default:
+          m_header->m_varlen = false;
+          break;
+      }
+   }
 }
-
 Chunk::~Chunk() {
-  if (m_data_base) {
-    my_free(m_data_base);
+  std::scoped_lock lk(m_header_mutex);
+  if (m_header) {
+    ut::delete_(m_header);
+    m_header = nullptr;
+  }
+
+  if (!m_data_base && ut::free_large_page(m_data_base, ut::fallback_to_normal_page_t{})) {
     m_data_base = nullptr;
+    m_data_cursor = m_data_base;
+    m_data_end = m_data_base;
   }
 }
-
-uchar* Chunk::Write_data(RapidContext* context, uchar* data, uint length) {
+uint Chunk::Rnd_init(bool scan){
+  if (scan) {
+    m_data_cursor = m_data_base;
+    m_inited = handler::RND;
+  }
+  return 0;
+}
+uint Chunk::Rnd_end()
+{
+  assert(m_inited == handler::RND);
+  m_data_cursor = m_data_base;
+  m_inited = handler::NONE;
+  return 0;
+}
+uchar* Chunk::Write_data(ShannonBase::RapidContext* context, uchar* data, uint length) {
   assert(m_data_base || data);
   std::scoped_lock lk(m_data_mutex);
   if (m_data + length > m_data_end)  return nullptr;
-
   memcpy(m_data, data, length);
   m_data += length;
-  //updates the meta info.
   m_header->m_rows ++;
-  if (m_header->m_chunk_type == MYSQL_TYPE_BLOB || m_header->m_chunk_type == MYSQL_TYPE_STRING) {
-    String buff;
-    String* val [[maybe_unused]]= m_header->m_field->val_str(&buff);
+  //writes success, then updates the meta info.
+  long long val {0};
+  memcpy(&val, m_data + 21, 8); //fixed size. it's numerical data or string id.
+  if (m_header->m_chunk_type == MYSQL_TYPE_BLOB || m_header->m_chunk_type == MYSQL_TYPE_STRING ||
+      m_header->m_chunk_type == MYSQL_TYPE_VARCHAR) {
   } else {
-    long long val = m_header->m_field->val_int();
     m_header->m_sum += val;
     m_header->m_avg = m_header->m_sum / m_header->m_rows;
     if (m_header->m_max < val)
@@ -111,32 +145,73 @@ uchar* Chunk::Write_data(RapidContext* context, uchar* data, uint length) {
   }
   return m_data;
 }
+uchar* Chunk::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
+  assert(context && buffer);
+  //has to the end.
+  ptrdiff_t diff = m_data_cursor - m_data;
+  if (diff >= 0) return nullptr;
 
-uchar* Chunk::Read_data(RapidContext* context, uchar* from, uchar* to, uint length) {
-  assert(from || to);
-  if (from + length > m_data_end) return nullptr;
-  return m_data;
+  uint8 info = *((uint8*)m_data_cursor);          //info byte
+  uint64 trxid = *((uint64*)(m_data_cursor + 1)); //trxid bytes
+  //visibility check at firt.
+  table_name_t name{const_cast<char*>(context->m_current_db.c_str())};
+  ReadView* read_view = trx_get_read_view(context->m_trx);
+  assert(read_view);
+  if (!read_view->changes_visible(trxid, name) || (info & DATA_DELETE_FLAG_MASK)) {//invisible and deleted
+    //TODO: travel the change link to get the visibile version data.
+    m_data_cursor += 29; //to the next value.
+    diff = m_data_cursor - m_data;
+    if (diff >= 0) return nullptr; //no data here.
+    return m_data_cursor;
+  }
+ #ifdef SHANNON_ONLY_DATA_FETCH
+  uint32 sum_ptr_off;
+  uint64 pk, data;
+  //reads info field
+  info [[maybe_unused]] = *(m_data_cursor ++);
+  m_data_cursor += 8;
+  //reads PK field
+  memcpy(&pk, m_data_cursor, 8);
+  m_data_cursor += 8;
+  //reads sum_ptr field
+  memcpy(&sum_ptr_off, m_data_cursor, 4);
+  m_data_cursor +=4;
+  if (!sum_ptr_off) {
+  //To be impled.
+  }
+  //reads real data field. if it string type stores strid otherwise, real data.
+  memcpy(&data, m_data_cursor, 8);
+  m_data_cursor +=8;
+  //cpy the data into buffer.
+  memcpy(buffer, &data, 8);
+ #else
+  memcpy(buffer, m_data_cursor, 29);
+  m_data_cursor += 29; //go to the next.
+ #endif
+  return m_data_cursor;
 }
-
-uchar* Chunk::Read_data(RapidContext* context, uchar* rowid, uint length [[maybe_unused]]) {
-  assert(context && rowid);  
+uchar* Chunk::Read_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
+  assert(context && rowid && buffer);
   return nullptr;
 }
-uchar* Chunk::Delete_data(RapidContext* context, uchar* rowid) {
+uchar* Chunk::Delete_data(ShannonBase::RapidContext* context, uchar* rowid) {
   return nullptr;
 }
 uchar* Chunk::Delete_all() {
+  if (m_data_base) {
+    my_free(m_data_base);
+    m_data_base = nullptr;
+  }
   m_data = m_data_base;
   m_data_end = m_data_base;
-  memset(m_data_base, 0x0, Chunk::SHANNON_CHUNK_SIZE);
   return m_data_base; 
 }
 
-uchar* Chunk::Update_date(RapidContext* context, uchar* rowid, uchar* data, uint length) {
+uchar* Chunk::Update_date(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length) {
   return nullptr;
 }
 
-uint flush(RapidContext* context, uchar* from, uchar* to) {
+uint flush(ShannonBase::RapidContext* context, uchar* from, uchar* to) {
   bool flush_all[[maybe_unused]] {true};
   if (!from || !to)
     flush_all = false;

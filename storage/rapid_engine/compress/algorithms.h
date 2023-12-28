@@ -28,17 +28,22 @@
 */
 #ifndef __SHANNONBASE_COMPRESS_ALGORITHMS_H__
 #define __SHANNONBASE_COMPRESS_ALGORITHMS_H__
+
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
+
 namespace ShannonBase{
 namespace Compress{
 
-enum enum_compress_algos{
+enum compress_algos{
   NONE = 0,  
   ZLIB,
   DICTIONARY
 };
 
 class Compress_algorithm{
-
+public:
+  Compress_algorithm() = default;
+  virtual ~Compress_algorithm() = default;
 };
 
 } //ns:compress

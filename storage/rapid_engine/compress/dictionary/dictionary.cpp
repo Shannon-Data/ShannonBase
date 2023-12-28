@@ -26,15 +26,41 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
+#include <iostream>
+#include <sstream>
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 
 namespace ShannonBase{
 namespace Compress {
 
-uint64 Dictionary::GetStringId(String* str_val) {
-   return 0;
+uint32 Dictionary::Store(String& str) {
+  //returns dictionary id.
+  std::ostringstream oss;
+  if (str.c_ptr()) {
+    oss << str.c_ptr();
+  }
+  {
+    std::unique_lock lk(m_content_mtx);
+    std::string strv = oss.str();
+    if (m_content.find(oss.str()) == m_content.end()){
+      m_content.insert(std::make_pair<std::string, uint32>(oss.str(), m_content.size()));
+    } else
+      return m_content[oss.str()];
+  }
+  return m_content.size() -1;
 }
-
+uint32 Dictionary::Get(uint64 strid, String& val, CHARSET_INFO& charset) {
+  std::shared_lock lk(m_content_mtx);
+  for (auto it = m_content.begin(); it != m_content.end(); it++) {
+    if (it->second == strid) {
+      std::string strstr = it->first;
+      String strs (strstr.c_str(), strstr.length(), &charset);
+      copy_if_not_alloced(&val, &strs, strs.length());
+      break;
+    }
+  }
+  return 0;
+}
 } //ns:Compress
 } //ns::shannonbase

@@ -30,80 +30,76 @@
 #include <memory>
 
 #include "field_types.h" //for MYSQL_TYPE_XXX
-#include "my_inttypes.h"
-#include "my_sys.h"      //for page size
-#include "sql/sql_class.h"
-#include "sql/field.h"   //Field
-#include "sql/current_thd.h"
+#include "my_inttypes.h" //uintxxx
 
-#include "storage/rapid_engine/imcs/chunk.h" //chunk
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/compress/algorithms.h"
 
-
+class Field;
 namespace ShannonBase{
+class RapidContext;
 namespace Imcs{
-
-/**A Snapshot Metadata Unit (SMU) contains metadata and 
- * transactional information for an associated IMCU.*/
+class Dictionary;
+/**A Snapshot Metadata Unit (SMU) contains metadata and transactional information
+ * for an associated IMCU.*/
 class Snapshot_meta_unit {
-
 };
-
+class Chunk;
 class Cu :public MemoryObject{
 public:
  class Cu_header {
   public:
-  //which field belongs to.
-  Field* m_field;
-  //field type of this cu.
-  enum_field_types m_cu_type;
-  //whether the is not null or not.
-  bool m_nullable;
-
-  //compression alg.
-  Compress::enum_compress_algos m_compress_algo;
-  std::unique_ptr<Compress::Dictionary> m_local_dict;
-
-  //statistics info.
-  std::atomic<long long> m_max, m_min, m_middle, m_median;
-  std::atomic<long long> m_rows, m_sum, m_avg;
+    Cu_header() {}
+    virtual ~Cu_header() {}
+    //the index of field.
+    uint16 m_field_no {0};
+    //field type of this cu.
+    enum_field_types m_cu_type {MYSQL_TYPE_TINY};
+    //whether the is not null or not.
+    bool m_nullable {false};
+    //compression alg.
+    Compress::compress_algos m_compress_algo {Compress::compress_algos::NONE};
+    //local dictionary.
+    Compress::Dictionary* m_local_dict {nullptr};
+    //statistics info.
+    std::atomic<long long> m_max{0}, m_min{0}, m_middle{0}, m_median{0};
+    std::atomic<long long> m_rows{0}, m_sum{0}, m_avg{0};
  };
 
  explicit Cu(Field* field);
  virtual ~Cu();
 
+ //initialization.
+ uint Rnd_init(bool scan);
+ //End of Rnd scan
+ uint Rnd_end();
  //writes the data into this chunk. length unspecify means calc by chunk. 
- uchar* Write_data(RapidContext* context, uchar* data, uint length = 0);
- //reads the data by from address .
- uchar* Read_data(RapidContext* context, uchar* from, uchar* to, uint length = 0);
- //reads the data by rowid.
- uchar* Read_data(RapidContext* context, uchar* rowid, uint length = 0);
+ uchar* Write_data(ShannonBase::RapidContext* context, uchar* data, uint length = 0);
+ //reads the data by from address.
+ uchar* Read_data(ShannonBase::RapidContext* context, uchar* buffer);
+ //reads the data by rowid to buffer.
+ uchar* Read_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer);
  //deletes the data by rowid
- uchar* Delete_data(RapidContext* context, uchar* rowid);
+ uchar* Delete_data(ShannonBase::RapidContext* context, uchar* rowid);
  //deletes all
  uchar* Delete_all();
  //updates the data with rowid with the new data.
- uchar* Update_data(RapidContext* context, uchar* rowid, uchar* data, uint length = 0);
+ uchar* Update_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length = 0);
  //flush the data to disk. by now, we cannot impl this part.
- uint flush(RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
+ uint flush(ShannonBase::RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
 private:
   uint m_magic{SHANNON_MAGIC_CU};
   //proctect header.
   std::mutex m_header_mutex;
   //header info of this Cu.
-  std::unique_ptr<Cu_header> m_header;
+  Cu_header* m_header;
   //chunks in this cu.
   std::vector<std::unique_ptr<Chunk> > m_chunks;
-  //the next and prev cu object.
-  std::unique_ptr<Cu> m_next {nullptr};
-  std::unique_ptr<Cu> m_prev{nullptr};
+  //current chunk read.
+  std::atomic<uint32> m_chunk_id {0};
 };
 
 } //ns:imcs
 } //ns:shannonbase
-
 #endif //__SHANNONBASE_CU_H__

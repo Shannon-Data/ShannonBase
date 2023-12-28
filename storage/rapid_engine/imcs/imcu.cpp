@@ -23,18 +23,18 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
+#include "storage/rapid_engine/imcs/imcu.h"
+
 #include <limits.h>
 
-#include "sql/current_thd.h"
 #include "sql/sql_class.h"
-
-#include "storage/rapid_engine/imcs/imcu.h"
+#include "sql/field.h"  //Field
 
 namespace ShannonBase {
 namespace Imcs {
 Imcu::Imcu(const TABLE& table_arg) {
-  m_version_num = 0x1;
-  m_magic_num = 0x1;
+  m_version_num = SHANNON_MAGIC_IMCU;
+  m_magic_num = SHANNON_MAGIC_IMCU;
 
   m_headers.m_avg = 0;
   m_headers.m_fields = 0;
@@ -55,7 +55,7 @@ Imcu::Imcu(const TABLE& table_arg) {
     m_headers.m_fields ++;
     m_headers.m_field.push_back(col);
 
-    Cu* cu = new (current_thd->mem_root) Cu (col);
+    Cu* cu = new Cu (col);
     auto ret = m_cus.insert (std::make_pair(col, cu));
     if (!ret.second) { //if insert failed. the clear up all the inserted items.
       m_cus.clear();

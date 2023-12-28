@@ -21,49 +21,22 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. for transaction.
 */
-#ifndef __SHANNONBASE_CONTEXT_H__
-#define __SHANNONBASE_CONTEXT_H__
-
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
-class trx_t;
-class ReadView;
-class TABLE;
+#include "storage/rapid_engine/trx/transaction.h"
 
 namespace ShannonBase {
-class ShannonBaseContext {
-public:
-  ShannonBaseContext() {}
-  virtual ~ShannonBaseContext() {}
-  ShannonBaseContext(ShannonBaseContext&) = delete;
-  ShannonBaseContext& operator=(const ShannonBaseContext&) = delete;
-};
+namespace Transaction {
 
-class RapidContext : public ShannonBaseContext {
-public:
-  class extra_info_t{
-    public:
-      extra_info_t(): m_pk(0), m_trxid(0) {}
-      ~extra_info_t() {}
-      //primary key of this innodb rows.
-      uint64 m_pk;
-      //trxid of this innodb rows.
-      uint64 m_trxid;
-  };
-
-  RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}
-  virtual ~RapidContext() = default;
-  //current transaction.
-  trx_t* m_trx;
-  //the current db and table name.
-  std::string m_current_db, m_current_table;
-  //the primary key of this table.
-  TABLE* m_table;
-  //the dictionary for this DB.
-  Compress::Dictionary* m_local_dict;
-  extra_info_t m_extra_info;
-};
-
+int Transaction::Begin(ISOLATION_LEVEL iso_level) {
+  m_iso_level = iso_level;
+  return 0;
+}
+int Transaction::Commit () {
+  return 0;
+}
+int Transaction::Rollback() {
+  return 0;
+}
+} //ns:transaction   
 } //ns:shannonbase
-#endif

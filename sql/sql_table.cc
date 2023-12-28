@@ -2722,7 +2722,6 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
   Field *field_ptr = nullptr;
   for (uint32 index = 0; index < field_count; index++) {
     field_ptr = *(table.field + index);
-
     // Skip columns marked as NOT SECONDARY.
     if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
@@ -2738,7 +2737,6 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
     row_rpd_columns.data_placement_index = 0;
     strcpy(row_rpd_columns.encoding, "N/A");
     row_rpd_columns.ndv = 0;
-
     ShannonBase::meta_rpd_columns_infos.push_back(row_rpd_columns);
   }
   return false;
@@ -2812,7 +2810,17 @@ static bool secondary_engine_unload_table(THD *thd, const char *db_name,
   if (handler == nullptr) return true;
 
   // Unload table from secondary engine.
-  return handler->ha_unload_table(db_name, table_name, error_if_not_loaded) > 0;
+  if (handler->ha_unload_table(db_name, table_name, error_if_not_loaded))
+    return true;
+  //ease the meta info.
+  for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::meta_rpd_columns_infos.begin();
+       it != ShannonBase::meta_rpd_columns_infos.end();) {
+        if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
+            it = ShannonBase::meta_rpd_columns_infos.erase(it);
+        else
+            ++it;
+  }
+  return false;
 }
 
 /**

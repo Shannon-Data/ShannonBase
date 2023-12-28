@@ -41,6 +41,23 @@ class Table;
 
 namespace ShannonBase {
 
+struct RapidShare {
+  RapidShare() { thr_lock_init(&m_lock);}
+  RapidShare(const char* db_name,
+             const char* table_name) : m_db_name(db_name), m_table_name(table_name)
+            { thr_lock_init(&m_lock); }
+  ~RapidShare() { thr_lock_delete(&m_lock); }
+
+  // Not copyable. The THR_LOCK object must stay where it is in memory
+  // after it has been initialized.
+  RapidShare(const RapidShare &) = delete;
+  THR_LOCK m_lock;
+  RapidShare &operator=(const RapidShare &) = delete;
+  const char* m_db_name {nullptr};
+  const char* m_table_name {nullptr};
+  handler* file {nullptr};
+};
+
 /**
  * The shannon rapid storage engine is used for testing MySQL server functionality
  * related to secondary storage engines.
@@ -71,9 +88,16 @@ class ha_rapid : public handler {
 
   int rnd_next(unsigned char *) override;
 
+  int rnd_end() override;
+
   int rnd_pos(unsigned char *, unsigned char *) override {
     return HA_ERR_WRONG_COMMAND;
   }
+  
+  int read_range_first(const key_range *start_key, const key_range *end_key,
+                       bool eq_range_arg, bool sorted) override;
+
+  int read_range_next() override;
 
   int info(unsigned int) override;
 
@@ -84,12 +108,14 @@ class ha_rapid : public handler {
 
   unsigned long index_flags(unsigned int, unsigned int, bool) const override;
 
+  Item *idx_cond_push(uint keyno, Item *idx_cond) override;
+
   THR_LOCK_DATA **store_lock(THD *thd, THR_LOCK_DATA **to,
                              thr_lock_type lock_type) override;
 
   Table_flags table_flags() const override;
 
-  const char *table_type() const override { return "MOCK"; }
+  const char *table_type() const override { return "SHANNON_RAPID"; }
 
   int load_table(const TABLE &table) override;
 
@@ -100,6 +126,9 @@ class ha_rapid : public handler {
   /** this is set to 1 when we are starting a table scan but have
       not yet fetched any row, else false */
   bool m_start_of_scan {false};
+
+  /** information for MySQL table locking */
+  RapidShare *m_share;
 };
 
 }  // namespace ShannonBase

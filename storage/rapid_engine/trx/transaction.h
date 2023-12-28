@@ -21,49 +21,28 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. for transaction.
 */
-#ifndef __SHANNONBASE_CONTEXT_H__
-#define __SHANNONBASE_CONTEXT_H__
-
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
-class trx_t;
-class ReadView;
-class TABLE;
-
+#include "include/my_inttypes.h"
 namespace ShannonBase {
-class ShannonBaseContext {
-public:
-  ShannonBaseContext() {}
-  virtual ~ShannonBaseContext() {}
-  ShannonBaseContext(ShannonBaseContext&) = delete;
-  ShannonBaseContext& operator=(const ShannonBaseContext&) = delete;
+namespace Transaction {
+
+/**This class is used for an interface of real implementation of trans.
+Here, is used as an interface of innobase transaction. In future we can
+use any transaction impl to replace innobase's trx used here.
+*/
+class Transaction {
+ public:
+   enum class ISOLATION_LEVEL : uint8 {READ_UNCOMMITTED, READ_COMMITTED, READ_REPEATABLE, SERIALIZABLE};
+   enum class STATUS : uint8 {NOT_START, ACTIVE, PREPARED, COMMITTED_IN_MEMORY};
+   Transaction () = default;
+   virtual ~ Transaction() = default;
+   virtual int Begin(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
+   virtual int Commit ();
+   virtual int Rollback();
+ private:
+  ISOLATION_LEVEL m_iso_level {ISOLATION_LEVEL::READ_REPEATABLE};
 };
 
-class RapidContext : public ShannonBaseContext {
-public:
-  class extra_info_t{
-    public:
-      extra_info_t(): m_pk(0), m_trxid(0) {}
-      ~extra_info_t() {}
-      //primary key of this innodb rows.
-      uint64 m_pk;
-      //trxid of this innodb rows.
-      uint64 m_trxid;
-  };
-
-  RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}
-  virtual ~RapidContext() = default;
-  //current transaction.
-  trx_t* m_trx;
-  //the current db and table name.
-  std::string m_current_db, m_current_table;
-  //the primary key of this table.
-  TABLE* m_table;
-  //the dictionary for this DB.
-  Compress::Dictionary* m_local_dict;
-  extra_info_t m_extra_info;
-};
-
+} //ns:transaction   
 } //ns:shannonbase
-#endif

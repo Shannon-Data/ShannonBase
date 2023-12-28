@@ -26,35 +26,10 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
-#ifndef __SHANNONBASE_COMPRESS_DICTIONARY_H__
-#define __SHANNONBASE_COMPRESS_DICTIONARY_H__
+#include "storage/rapid_engine/compress/algorithms.h"
 
-#include <map>
-#include <mutex>
-#include <shared_mutex>
-#include "include/my_inttypes.h"
-#include "include/mysql/strings/m_ctype.h"  //CHARSET_INFO
-#include "include/sql_string.h" //String
-
-namespace ShannonBase{
-namespace Compress{
-
-//Dictionary, which store all the dictionary data.
-class Dictionary {
-  public:
-    enum class Dictionary_algo_t : uint8 {NAIVE, COMPRESSED};
-    Dictionary() = default;
-    virtual ~Dictionary()  = default;
-    virtual uint32 Store(String&);
-    virtual uint32 Get(uint64 strid, String& val, CHARSET_INFO& charset = my_charset_bin);
-    inline Dictionary_algo_t Get_algo () const { return m_algo; }
-  private:
-    std::shared_mutex m_content_mtx;
-    std::map<std::string, uint64> m_content;
-    Dictionary_algo_t m_algo{Dictionary_algo_t::NAIVE};
-};
-
-
+namespace ShannonBase {
+namespace Compress {
 } //ns:compress
-} //ns:shannonbase
-#endif //__SHANNONBASE_COMPRESS_DICTIONARY_H__
+} //ns:shnnonbase
+
