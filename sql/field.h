@@ -4534,13 +4534,22 @@ class Field_sys_trx_id : public Field_longlong {
 
   Field_sys_trx_id(uchar *ptr_arg, uint32 len_arg)
       : Field_longlong(ptr_arg, len_arg, nullptr, 0, 0, "DB_TRX_ID", 0, false)
-  {}
+  {
+    stored_in_db = false;
+    set_hidden(dd::Column::enum_hidden_type::HT_HIDDEN_SE);
+    set_column_format(COLUMN_FORMAT_TYPE_DEFAULT);
+    set_flag(NO_DEFAULT_VALUE_FLAG);
+  }
   Field_sys_trx_id(uint32 len_arg, bool is_nullable_arg,
                    const char *field_name_arg, bool unsigned_arg)
       : Field_longlong(nullptr, len_arg, is_nullable_arg ? &dummy_null_buffer : nullptr,
 		      0, 0, field_name_arg, 0, unsigned_arg)
-  {}
-
+  {
+    stored_in_db = false;
+    set_hidden(dd::Column::enum_hidden_type::HT_HIDDEN_SE);
+    set_column_format(COLUMN_FORMAT_TYPE_DEFAULT);
+    set_flag(NO_DEFAULT_VALUE_FLAG);
+  }
   type_conversion_status store(longlong nr, bool unsigned_val) final;
   enum_field_types type() const final { return MYSQL_TYPE_DB_TRX_ID; }
   uint32 pack_length() const final { return PACK_LENGTH_TRX_ID; }

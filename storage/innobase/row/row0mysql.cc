@@ -573,7 +573,7 @@ static void row_mysql_convert_row_to_innobase(
     bool is_multi_val = false;
 
     templ = prebuilt->mysql_template + i;
-
+    if (templ->mysql_type == MYSQL_TYPE_DB_TRX_ID) continue; //ghost col.
     if (templ->is_virtual) {
       ut_ad(n_v_col < dtuple_get_n_v_fields(row));
       dfield = dtuple_get_nth_v_field(row, n_v_col);

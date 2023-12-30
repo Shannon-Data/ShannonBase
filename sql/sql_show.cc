@@ -1393,6 +1393,8 @@ void mysqld_list_fields(THD *thd, Table_ref *table_list, const char *wild) {
 
   Field **ptr, *field;
   for (ptr = table->field; (field = *ptr); ptr++) {
+    //if it's `Field_sys_trx_id` do nothing.
+    if (field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (!wild || !wild[0] ||
         !wild_case_compare(system_charset_info, field->field_name, wild)) {
       Item *item;

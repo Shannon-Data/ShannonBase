@@ -99,6 +99,7 @@ class LoadedTables {
 
 LoadedTables *loaded_tables{nullptr};
 static struct handlerton* shannon_rapid_hton_ptr {nullptr};
+static bool shannon_rpd_inited {false};
 ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();;
 /**
   Execution context class for the Rapid engine. It allocates some data
@@ -146,7 +147,7 @@ ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
     : handler(hton, table_share_arg) {
 }
 int ha_rapid::create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
-  assert(false);
+  ut_ad(false);
   return HA_ERR_WRONG_COMMAND;
 }
 int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, const dd::Table * table_def) {
@@ -160,21 +161,26 @@ int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, cons
   return 0;
 }
 int ha_rapid::close () {
-  m_start_of_scan = false;
-  inited = NONE;
   return 0;
 }
 int ha_rapid::rnd_init(bool scan) {
-  assert(inited == handler::NONE);
-  assert(m_start_of_scan == false);
-  inited = handler::RND;
+  ut_ad(shannon_rpd_inited == true);
+  ut_ad(m_start_of_scan == false);
   m_start_of_scan = true;
+
+  trx_t* trx = thd_to_trx (current_thd);
+  TrxInInnoDB trx_in_innodb(trx);
+  trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
+
   //imcs do initialization. scan: random read or scan.
   return imcs_instance->Rnd_init(scan);
 }
 int ha_rapid::rnd_end() {
-  m_start_of_scan = false;
-  return imcs_instance->Rnd_end();
+  if (m_start_of_scan) {
+    m_start_of_scan = false;
+    return imcs_instance->Rnd_end();
+  }
+  return 0;
 }
 int ha_rapid::read_range_first(const key_range *start_key,
                                   const key_range *end_key, bool eq_range_arg,
@@ -186,10 +192,8 @@ int ha_rapid::read_range_next() {
   return (handler::read_range_next());
 }
 int ha_rapid::rnd_next(unsigned char *buffer) {
-  if (inited != RND) return HA_ERR_END_OF_FILE;
-  if (!m_start_of_scan)
-    m_start_of_scan = true;
-  assert(imcs_instance);
+  ut_ad (m_start_of_scan && inited == handler::RND);
+  ut_ad(imcs_instance);
 
   if (pushed_idx_cond){ //icp
     //TODO: evaluate condition item, and do condtion eval in scan.
@@ -198,7 +202,6 @@ int ha_rapid::rnd_next(unsigned char *buffer) {
   context.m_current_db = table->s->db.str;
   context.m_current_table = table->s->table_name.str;
   context.m_trx = thd_to_trx (current_thd);
-  trx_start_if_not_started(context.m_trx, false, UT_LOCATION_HERE);
   context.m_table = table;
   if (!srv_read_only_mode) {
     trx_assign_read_view(context.m_trx);
@@ -228,8 +231,8 @@ handler::Table_flags ha_rapid::table_flags() const {
 Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
 {
   DBUG_TRACE;
-  assert(keyno != MAX_KEY);
-  assert(idx_cond != nullptr);
+  ut_ad(keyno != MAX_KEY);
+  ut_ad(idx_cond != nullptr);
 
   pushed_idx_cond = idx_cond;
   pushed_idx_cond_keyno = keyno;
@@ -270,7 +273,7 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to,
 }
 
 int ha_rapid::load_table(const TABLE &table_arg) {
-  assert(table_arg.file != nullptr);
+  ut_ad(table_arg.file != nullptr);
   THD* thd = current_thd;
   if (loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
     std::ostringstream err;
@@ -357,12 +360,13 @@ int ha_rapid::load_table(const TABLE &table_arg) {
       my_bitmap_map *old_map = 0;
       TABLE *table = const_cast<TABLE *>(&table_arg);
       if (table && table->file)
-        old_map = dbug_tmp_use_all_columns(table, table->read_set);
+        old_map = tmp_use_all_columns(table, table->read_set);
 #endif
 #ifndef NDEBUG
-      if (old_map) dbug_tmp_restore_column_map(table->read_set, old_map);
+      if (old_map) tmp_restore_column_map(table->read_set, old_map);
 #endif
       if (imcs_instance->Write(&context, field_ptr)) {
+        table_arg.file->ha_rnd_end();
         my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
                  table_arg.s->table_name.str);
         return HA_ERR_GENERIC;
@@ -671,7 +675,9 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
              "Cannot get IMCS instance.");
     return 1;
   };
-  return imcs_instance->Initialize();
+  auto ret = imcs_instance->Initialize();
+  if (!ret) shannon_rpd_inited = true;
+  return ret;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
@@ -679,6 +685,7 @@ static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
     delete loaded_tables;
     loaded_tables = nullptr;
   }
+  shannon_rpd_inited = false;
   return imcs_instance->Deinitialize();
 }
 

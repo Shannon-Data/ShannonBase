@@ -8273,7 +8273,7 @@ static mysql_row_templ_t *build_template_field(
       !strcmp(field->field_name, "DB_ROLL_PTR")) {
     templ->type = DATA_SYS;
     templ->rec_field_no = templ->col_no ;
-    assert (templ->col_no == 1 || templ->col_no == 2);
+    ut_ad (templ->col_no == 1 || templ->col_no == 2);
   } else {
     templ->type = col->mtype;
   }
@@ -8638,6 +8638,9 @@ void ha_innobase::build_template(bool whole_row) {
     }
   }
 
+  /**there're two places using this template for accelerating, one: select, another place is for DML
+  in 'row_mysql_convert_row_to_innobase', it uses for build up innobase row format by using template.
+  */
   Field* db_trx_id_field = table->field[n_fields];
   if (db_trx_id_field) {
         mysql_row_templ_t *templ [[maybe_unused]] = build_template_field(

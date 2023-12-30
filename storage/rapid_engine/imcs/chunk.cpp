@@ -43,7 +43,8 @@ namespace Imcs {
 static unsigned long rapid_allocated_mem_size{0};
 extern unsigned long rapid_memory_size;
 Chunk::Chunk(Field* field) {
-   assert(field);
+   ut_ad(field);
+   ut_ad(ShannonBase::SHANNON_CHUNK_SIZE < rapid_memory_size);
    {
      /**m_data_base，here, we use the same psi key with buffer pool which used in innodb page allocation.
       * Here, we use ut::xxx to manage memory allocation and free as innobase doese. In SQL lay, we will
@@ -55,7 +56,10 @@ Chunk::Chunk(Field* field) {
        m_data_base = static_cast<uchar *>(ut::malloc_large_page_withkey(
           ut::make_psi_memory_key(mem_key_buf_buf_pool), ShannonBase::SHANNON_CHUNK_SIZE,
           ut::fallback_to_normal_page_t{}));
-       if (!m_data_base) return;
+       if (!m_data_base) {
+          my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
+          return;
+        }
        m_data = m_data_base;
        m_data_end = m_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
        rapid_allocated_mem_size += ShannonBase::SHANNON_CHUNK_SIZE;
@@ -118,13 +122,13 @@ uint Chunk::Rnd_init(bool scan){
 }
 uint Chunk::Rnd_end()
 {
-  assert(m_inited == handler::RND);
+  ut_ad(m_inited == handler::RND);
   m_data_cursor = m_data_base;
   m_inited = handler::NONE;
   return 0;
 }
 uchar* Chunk::Write_data(ShannonBase::RapidContext* context, uchar* data, uint length) {
-  assert(m_data_base || data);
+  ut_ad(m_data_base || data);
   std::scoped_lock lk(m_data_mutex);
   if (m_data + length > m_data_end)  return nullptr;
   memcpy(m_data, data, length);
@@ -146,7 +150,7 @@ uchar* Chunk::Write_data(ShannonBase::RapidContext* context, uchar* data, uint l
   return m_data;
 }
 uchar* Chunk::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
-  assert(context && buffer);
+  ut_ad(context && buffer);
   //has to the end.
   ptrdiff_t diff = m_data_cursor - m_data;
   if (diff >= 0) return nullptr;
@@ -156,7 +160,7 @@ uchar* Chunk::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
   //visibility check at firt.
   table_name_t name{const_cast<char*>(context->m_current_db.c_str())};
   ReadView* read_view = trx_get_read_view(context->m_trx);
-  assert(read_view);
+  ut_ad(read_view);
   if (!read_view->changes_visible(trxid, name) || (info & DATA_DELETE_FLAG_MASK)) {//invisible and deleted
     //TODO: travel the change link to get the visibile version data.
     m_data_cursor += 29; //to the next value.

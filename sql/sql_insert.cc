@@ -310,6 +310,7 @@ bool validate_default_values_of_unset_fields(THD *thd, TABLE *table) {
   DBUG_TRACE;
 
   for (Field **field = table->field; *field; field++) {
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue; /*ghost column*/
     if (!bitmap_is_set(write_set, (*field)->field_index()) &&
         !(*field)->is_flag_set(NO_DEFAULT_VALUE_FLAG)) {
       if ((*field)->validate_stored_val(thd) && thd->is_error()) return true;
@@ -2219,6 +2220,7 @@ bool check_that_all_fields_are_given_values(THD *thd, TABLE *entry,
   MY_BITMAP *write_set = entry->fields_set_during_insert;
 
   for (Field **field = entry->field; *field; field++) {
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue; //ghost column.
     if (!bitmap_is_set(write_set, (*field)->field_index()) &&
         ((*field)->is_flag_set(NO_DEFAULT_VALUE_FLAG) &&
          ((*field)->m_default_val_expr == nullptr)) &&

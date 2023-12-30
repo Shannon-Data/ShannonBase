@@ -1213,11 +1213,11 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
     Field_sys_trx_id *sys_trx_id_field =
         new (*THR_MALLOC) Field_sys_trx_id(rec_pos, MAX_DB_TRX_ID_WIDTH);
     assert(sys_trx_id_field);
-    sys_trx_id_field->set_hidden(dd::Column::enum_hidden_type::HT_HIDDEN_SE);
+    sys_trx_id_field->set_field_index(field_nr);
 
     share->field[field_nr] = sys_trx_id_field;
+    assert (sys_trx_id_field->pack_length_in_rec() == MAX_DB_TRX_ID_WIDTH);
     //rec_pos += share->field[field_nr]->pack_length_in_rec();
-
     field_nr++;
     assert(share->fields + 1 == field_nr);
   } else
@@ -1226,7 +1226,6 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
   // Make sure the scan of the columns is consistent with other data.
   assert(share->null_bytes == (null_pos - null_flags + (null_bit_pos + 7) / 8));
   assert(share->last_null_bit_pos == null_bit_pos);
-
   return (false);
 }
 
@@ -1247,7 +1246,7 @@ static void fill_index_element_from_dd(TABLE_SHARE *share,
   // field
   assert(keypart->fieldnr > 0);
   Field *field = keypart->field = share->field[keypart->fieldnr - 1];
-
+  assert(field->type() != MYSQL_TYPE_DB_TRX_ID);
   // offset
   keypart->offset = field->offset(share->default_values);
 

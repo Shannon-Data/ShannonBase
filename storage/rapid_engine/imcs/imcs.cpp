@@ -31,6 +31,7 @@
 #include <mutex>
 #include "sql/field.h"
 
+#include "storage/innobase/include/ut0dbg.h"   //ut_ad
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/cu.h"
@@ -68,8 +69,7 @@ uint Imcs::Rnd_end() {
   return 0;
 }
 uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
-  assert(context);
-  assert(field);
+  ut_ad(context && field);
   /** before insertion, should to check whether there's spare space to store the new data.
       or not. If no extra sapce left, allocate a new imcu. After a new imcu allocated, the
       meta info is stored into 'm_imcus'.
@@ -111,7 +111,7 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
           Compress::Dictionary* dict = loaded_dictionaries[field->table->s->db.str].get();
           data_val = dict->Store(buf);
         } else
-          assert(false);
+          ut_ad(false);
       } break;
       case MYSQL_TYPE_INT24:
       case MYSQL_TYPE_LONG:
@@ -131,16 +131,16 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
   return 0;
 }
 uint Imcs::Read (ShannonBase::RapidContext* context, Field* field) {
-  assert(context && field);
+  ut_ad(context && field);
   return 0;
 }
 uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
-  assert(context && buffer);
+  ut_ad(context && buffer);
   if (!m_cus.size()) return HA_ERR_END_OF_FILE;
 
   for (uint index =0; index < context->m_table->s->fields; index++) {
     Field* field_ptr = *(context->m_table->field + index);
-    assert(field_ptr);
+    ut_ad(field_ptr);
     if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     std::string key = context->m_current_db + context->m_current_table;
     key += field_ptr->field_name;
@@ -202,7 +202,7 @@ uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
   return 0;
 }
 uint Read_batch(ShannonBase::RapidContext* context, uchar* buffer){
-  assert(context && buffer);
+  ut_ad(context && buffer);
   return 0;
 }
 uint Imcs::Delete(ShannonBase::RapidContext* context, Field* field, uchar* rowid) {

@@ -34,12 +34,12 @@ constexpr uint SHANNONBASE_VERSION = 0x1;
 constexpr uint SHANNON_RAPID_VERSION = 0x0001;
 
 //unit of shannonbase.
-constexpr uint64 SHANNON_KB = 1024 * 1024;
+constexpr uint64 SHANNON_KB = 1024;
 constexpr uint64 SHANNON_MB = SHANNON_KB * 1024;
 constexpr uint64 SHANNON_GB = SHANNON_MB * 1024;
 
 //some sizes used by imcs.
-constexpr uint64 SHANNON_CHUNK_SIZE = 16 * SHANNON_MB;
+constexpr uint64 SHANNON_CHUNK_SIZE = 8 * SHANNON_MB;
 constexpr uint64 SHANNON_DEFAULT_MEMRORY_SIZE = 128 * SHANNON_MB;
 constexpr uint64 SHANNON_MAX_MEMRORY_SIZE = SHANNON_DEFAULT_MEMRORY_SIZE;
 constexpr uint64 SHANNON_DEFAULT_POPULATION_BUFFER_SIZE = 8 * SHANNON_MB;

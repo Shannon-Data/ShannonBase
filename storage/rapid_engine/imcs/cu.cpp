@@ -85,14 +85,14 @@ uint Cu::Rnd_end() {
   return 0;
 }
 uchar* Cu::Write_data(ShannonBase::RapidContext* context, uchar* data, uint length) {
-  assert(m_header && m_chunks.size());
+  ut_ad(m_header && m_chunks.size());
   uchar* pos{nullptr};
   Chunk* chunk_ptr = m_chunks[m_chunks.size()-1].get();
   if (!(pos = chunk_ptr->Write_data(context, data, length))) {
     //the prev chunk is full, then allocate a new chunk to write.
     std::scoped_lock lk(m_header_mutex);
     Field* field = *(context->m_table->field + m_header->m_field_no);
-    assert(field);
+    ut_ad(field);
     m_chunks.push_back(std::make_unique<Chunk>(field));
     chunk_ptr = m_chunks[m_chunks.size()-1].get();
     pos = chunk_ptr->Write_data(context, data, length);
