@@ -34,7 +34,7 @@
 namespace ShannonBase{
 namespace Compress {
 
-uint32 Dictionary::Store(String& str) {
+uint32 Dictionary::Store(String& str, Dictionary_algo_t algo) {
   //returns dictionary id.
   std::ostringstream oss;
   if (str.c_ptr()) {

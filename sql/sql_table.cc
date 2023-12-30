@@ -2735,7 +2735,14 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
             strlen(table.s->table_name.str));
     row_rpd_columns.data_dict_bytes = 0;
     row_rpd_columns.data_placement_index = 0;
-    strcpy(row_rpd_columns.encoding, "N/A");
+
+    std::string comment (field_ptr->comment.str);
+    if (comment.find("SORTED") != std::string::npos)
+      strcpy(row_rpd_columns.encoding, "SORTED");
+    else if (comment.find ("VARLEN") != std::string::npos)
+      strcpy(row_rpd_columns.encoding, "VARLEN");
+    else
+      strcpy(row_rpd_columns.encoding, "N/A");
     row_rpd_columns.ndv = 0;
     ShannonBase::meta_rpd_columns_infos.push_back(row_rpd_columns);
   }
@@ -11525,6 +11532,8 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
   // only the columns included in the read_set.
   bitmap_clear_all(table_list->table->read_set);
   for (Field **field = table_list->table->field; *field != nullptr; ++field) {
+    // skip the ghost column.
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     // Skip hidden generated columns.
     if (bitmap_is_set(&table_list->table->fields_for_functional_indexes,
                       (*field)->field_index()))

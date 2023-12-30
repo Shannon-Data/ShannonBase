@@ -47,21 +47,22 @@ public:
       extra_info_t(): m_pk(0), m_trxid(0) {}
       ~extra_info_t() {}
       //primary key of this innodb rows.
-      uint64 m_pk;
+      uint64 m_pk {0};
       //trxid of this innodb rows.
-      uint64 m_trxid;
+      uint64 m_trxid {0};
+      Compress::Dictionary::Dictionary_algo_t m_algo {Compress::Dictionary::Dictionary_algo_t::SORTED};
   };
 
   RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}
   virtual ~RapidContext() = default;
   //current transaction.
-  trx_t* m_trx;
+  trx_t* m_trx {nullptr};
   //the current db and table name.
   std::string m_current_db, m_current_table;
   //the primary key of this table.
-  TABLE* m_table;
+  TABLE* m_table {nullptr};
   //the dictionary for this DB.
-  Compress::Dictionary* m_local_dict;
+  Compress::Dictionary* m_local_dict {nullptr};
   extra_info_t m_extra_info;
 };
 

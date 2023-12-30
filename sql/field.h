@@ -4559,6 +4559,7 @@ class Field_sys_trx_id : public Field_longlong {
     assert(type() == MYSQL_TYPE_DB_TRX_ID);
     return new (mem_root) Field_sys_trx_id(*this);
   }
+  longlong val_int() const final;
 };
 
 

@@ -282,8 +282,9 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_GENERIC;
   }
 
-  //in future, we will load the content strings from dictionary file, which makes it more flexible.
-  //at rapid engine startup phase.
+  /*** in future, we will load the content strings from dictionary file, which makes it more flexible.
+  at rapid engine startup phase. and will make each loaded column use its own dictionary, so called
+  local dictionary. the dictionary algo defined by column's comment text. */
   std::string db_name(table_arg.s->db.str);
   if (loaded_dictionaries.find(db_name) == loaded_dictionaries.end())
      loaded_dictionaries.insert(std::make_pair(db_name, std::make_unique<Compress::Dictionary>()));
@@ -329,20 +330,19 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   context.m_current_table = table_arg.s->table_name.str;
   context.m_table = const_cast<TABLE *>(&table_arg);
   while ((tmp = table_arg.file->ha_rnd_next(table_arg.record[0])) != HA_ERR_END_OF_FILE) {
-   /*
-      ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is
-      reading and another deleting without locks. Now, do full scan, but
-      multi-thread scan will impl in future.
-    */
+   /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
+    without locks. Now, do full scan, but multi-thread scan will impl in future. */
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
     uint32 field_count = table_arg.s->fields;
     Field *field_ptr = nullptr;
     uint32 primary_key_idx [[maybe_unused]] = field_count;
-    // Gets trx id
-    field_ptr = *(table_arg.field + field_count); //ghost field.
-    assert(field_ptr->type() == MYSQL_TYPE_DB_TRX_ID);
-    context.m_extra_info.m_trxid = field_ptr->val_int();
+
     context.m_trx = thd_to_trx(current_thd);
+    field_ptr = *(table_arg.field + field_count); //ghost field.
+    if (field_ptr && field_ptr->type() == MYSQL_TYPE_DB_TRX_ID) {
+      context.m_extra_info.m_trxid = field_ptr->val_int();
+    }
+
     if (context.m_trx->state == TRX_STATE_NOT_STARTED) {
       assert (false);
     }
@@ -354,7 +354,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     }
     for (uint32 index = 0; index < field_count; index++) {
       field_ptr = *(table_arg.field + index);
-      // Skip columns marked as NOT SECONDARY. │
+      // Skip columns marked as NOT SECONDARY.
       if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 #ifndef NDEBUG
       my_bitmap_map *old_map = 0;

@@ -9138,6 +9138,12 @@ void Field_sys_trx_id::sql_type(String &res) const {
   integer_sql_type(this, "DB_TRX_ID", &res);
 }
 
+longlong Field_sys_trx_id::val_int() const {
+  if (table->s->db_low_byte_first)
+    return sint8korr(ptr);
+  else
+    return longlongget(ptr);
+}
 /*****************************************************************************
   Handling of field and Create_field
 *****************************************************************************/

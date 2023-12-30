@@ -42,16 +42,18 @@ namespace Compress{
 //Dictionary, which store all the dictionary data.
 class Dictionary {
   public:
-    enum class Dictionary_algo_t : uint8 {NAIVE, COMPRESSED};
+    enum class Dictionary_algo_t : uint8 {NONE, SORTED, VARLEN};
+    Dictionary(Dictionary_algo_t algo) : m_algo(algo) {}
     Dictionary() = default;
     virtual ~Dictionary()  = default;
-    virtual uint32 Store(String&);
+    virtual uint32 Store(String&, Dictionary_algo_t algo = Dictionary_algo_t::SORTED);
     virtual uint32 Get(uint64 strid, String& val, CHARSET_INFO& charset = my_charset_bin);
+    virtual void Set_algo (Dictionary_algo_t algo) { m_algo = algo; }
     inline Dictionary_algo_t Get_algo () const { return m_algo; }
   private:
     std::shared_mutex m_content_mtx;
     std::map<std::string, uint64> m_content;
-    Dictionary_algo_t m_algo{Dictionary_algo_t::NAIVE};
+    Dictionary_algo_t m_algo{Dictionary_algo_t::SORTED};
 };
 
 

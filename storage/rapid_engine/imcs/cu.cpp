@@ -55,8 +55,17 @@ Cu::Cu(Field* field) {
 
   m_header->m_cu_type = field->type();
   m_header->m_nullable = field->is_nullable();
+
+  std::string comment (field->comment.str);
+  std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
+  Compress::Dictionary::Dictionary_algo_t dict_algo {Compress::Dictionary::Dictionary_algo_t::NONE};
+  if (comment.find("SORTED") != std::string::npos)
+    dict_algo = Compress::Dictionary::Dictionary_algo_t::SORTED;
+  else if (comment.find ("VARLEN") != std::string::npos)
+    dict_algo = Compress::Dictionary::Dictionary_algo_t::VARLEN;
+
   m_header->m_compress_algo = Compress::compress_algos::NONE;
-  m_header->m_local_dict = ut::new_withkey<Compress::Dictionary>(UT_NEW_THIS_FILE_PSI_KEY);
+  m_header->m_local_dict = ut::new_withkey<Compress::Dictionary>(UT_NEW_THIS_FILE_PSI_KEY, dict_algo);
   //the initial one chunk built.
   m_chunks.push_back(std::make_unique<Chunk>(field));
 }
