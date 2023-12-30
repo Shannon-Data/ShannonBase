@@ -2737,12 +2737,13 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
     row_rpd_columns.data_placement_index = 0;
 
     std::string comment (field_ptr->comment.str);
+    memset (row_rpd_columns.encoding, 0x0, NAME_LEN);
     if (comment.find("SORTED") != std::string::npos)
-      strcpy(row_rpd_columns.encoding, "SORTED");
+      strncpy(row_rpd_columns.encoding, "SORTED", strlen("SORTED") + 1);
     else if (comment.find ("VARLEN") != std::string::npos)
-      strcpy(row_rpd_columns.encoding, "VARLEN");
+      strncpy(row_rpd_columns.encoding, "VARLEN", strlen("VARLEN") + 1);
     else
-      strcpy(row_rpd_columns.encoding, "N/A");
+      strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
     row_rpd_columns.ndv = 0;
     ShannonBase::meta_rpd_columns_infos.push_back(row_rpd_columns);
   }

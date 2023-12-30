@@ -2172,6 +2172,8 @@ void calc_used_field_length(TABLE *table, bool needs_rowid,
 
   uneven_bit_fields = null_fields = blobs = fields = rec_length = 0;
   for (f_ptr = table->field; (field = *f_ptr); f_ptr++) {
+    //skip ghost column
+    if (field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(read_set, field->field_index())) {
       fields++;
       rec_length += field->pack_length();

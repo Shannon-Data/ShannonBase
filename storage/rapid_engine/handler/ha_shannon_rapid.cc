@@ -178,6 +178,8 @@ int ha_rapid::rnd_init(bool scan) {
 int ha_rapid::rnd_end() {
   if (m_start_of_scan) {
     m_start_of_scan = false;
+    trx_t* trx = thd_to_trx (current_thd);
+    trx_commit(trx);
     return imcs_instance->Rnd_end();
   }
   return 0;
@@ -304,6 +306,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
        //only numeric data type allowed.
        switch (key_field->type()){
         case MYSQL_TYPE_LONG:
+        case MYSQL_TYPE_LONGLONG:
         case MYSQL_TYPE_DOUBLE:
         case MYSQL_TYPE_DECIMAL:
         case MYSQL_TYPE_INT24:

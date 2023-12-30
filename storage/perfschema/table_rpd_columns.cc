@@ -147,6 +147,7 @@ int table_rpd_columns::make_row(uint index[[maybe_unused]]) {
     m_row.data_placement_index = ShannonBase::meta_rpd_columns_infos[index].data_placement_index;
     m_row.dict_size_bytes = ShannonBase::meta_rpd_columns_infos[index].data_dict_bytes;
     m_row.ndv = ShannonBase::meta_rpd_columns_infos[index].ndv;
+    memset(m_row.encoding, 0x0, NAME_LEN);
     strncpy(m_row.encoding, ShannonBase::meta_rpd_columns_infos[index].encoding,
             strlen(ShannonBase::meta_rpd_columns_infos[index].encoding));
   }
