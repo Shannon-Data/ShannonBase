@@ -98,7 +98,7 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
   memcpy(data.get() + 1, &context->m_extra_info.m_trxid, 8);
   memcpy(data.get() + 9, &context->m_extra_info.m_pk, 8);
   memcpy(data.get() + 17, &sum_ptr, 4);
-  longlong data_val {0};
+  double data_val {0};
   if (!field->is_real_null()) {//not null
     switch (field->type()) {
       case MYSQL_TYPE_BLOB:
@@ -116,12 +116,15 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
       case MYSQL_TYPE_INT24:
       case MYSQL_TYPE_LONG:
       case MYSQL_TYPE_LONGLONG: {
+      case MYSQL_TYPE_DECIMAL:
+      case MYSQL_TYPE_NEWDECIMAL:
         data_val = field->val_real();
-      }break;
-      case MYSQL_TYPE_DECIMAL: {} break;
+      } break;
       case MYSQL_TYPE_DATE:
       case MYSQL_TYPE_DATETIME:
-      case MYSQL_TYPE_TIME: {} break;
+      case MYSQL_TYPE_TIME: {
+        data_val = field->val_real();
+      } break;
       default: data_val = field->val_real();
     }
     memcpy(data.get() + 21, &data_val, sizeof(data_val));
@@ -172,7 +175,7 @@ uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
         field_ptr->set_null();
       else {
         field_ptr->set_notnull();
-        long long val = *(long long*) (buff + 21);
+        double val = *(double*) (buff + 21);
         switch (field_ptr->type()) {
           case MYSQL_TYPE_BLOB:
           case MYSQL_TYPE_STRING:
@@ -183,15 +186,15 @@ uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
           }break;
           case MYSQL_TYPE_INT24:
           case MYSQL_TYPE_LONG:
-          case MYSQL_TYPE_LONGLONG: {
-            field_ptr->store (val);
+          case MYSQL_TYPE_LONGLONG:
+          case MYSQL_TYPE_DECIMAL:
+          case MYSQL_TYPE_NEWDECIMAL: {
+            field_ptr->store(val);
           } break;
-          case MYSQL_TYPE_DECIMAL:{} break;
           case MYSQL_TYPE_DATE:
           case MYSQL_TYPE_DATETIME2:
           case MYSQL_TYPE_DATETIME:{
-            my_decimal* decimal{nullptr};
-            field_ptr->store_decimal(decimal);
+            field_ptr->store (val);
           } break;
           default: field_ptr->store (val);
         }

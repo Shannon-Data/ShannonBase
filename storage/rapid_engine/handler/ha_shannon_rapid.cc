@@ -32,6 +32,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <iostream>
 #include <sstream>
 #include <tuple>
 #include <utility>
@@ -279,7 +280,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   THD* thd = current_thd;
   if (loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
     std::ostringstream err;
-    err << table_arg.s->db.str<< "." <<table_arg.s->table_name.str << " already loaded";
+    err << table_arg.s->db.str << "." <<table_arg.s->table_name.str << " already loaded";
     my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
@@ -309,13 +310,13 @@ int ha_rapid::load_table(const TABLE &table_arg) {
         case MYSQL_TYPE_LONGLONG:
         case MYSQL_TYPE_DOUBLE:
         case MYSQL_TYPE_DECIMAL:
+        case MYSQL_TYPE_NEWDECIMAL:
         case MYSQL_TYPE_INT24:
           break;
         default:
            std::ostringstream err;
            err << table_arg.s->table_name.str << "." << key_field->field_name << " PK type not allowed";
-           my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
-           table_arg.s->table_name.str);
+           my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
            return HA_ERR_GENERIC;
        }
     }

@@ -112,7 +112,7 @@ uchar* Cu::Write_data(ShannonBase::RapidContext* context, uchar* data, uint leng
       m_header->m_cu_type == MYSQL_TYPE_VARCHAR) { //string type, otherwise, update the meta info.
       return pos;
   }
-  longlong data_val = *(longlong*) (data + 21);
+  double data_val = *(double*) (data + 21);
   m_header->m_rows++;
   m_header->m_sum += data_val;
   m_header->m_avg.store(m_header->m_sum/m_header->m_rows, std::memory_order::memory_order_relaxed);
