@@ -2506,9 +2506,11 @@ void row_sel_field_store_in_mysql_format_func(
   const dict_field_t *field =
       templ->is_virtual ? nullptr : index->get_field(field_no);
 
-  bool clust_templ_for_sec = (sec_field != ULINT_UNDEFINED);
-  ulint prtype = field->col->prtype;
+  ulint prtype {DATA_SYS_PRTYPE_MASK};
+  if (!templ->is_virtual) prtype = field->col->prtype;
   ib_id_t id;
+
+  bool clust_templ_for_sec = (sec_field != ULINT_UNDEFINED);
 //#endif /* UNIV_DEBUG */
   ulint mysql_col_len =
       templ->is_multi_val ? templ->mysql_mvidx_len : templ->mysql_col_len;

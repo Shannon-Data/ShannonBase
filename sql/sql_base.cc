@@ -9679,6 +9679,8 @@ static bool check_inserting_record(THD *thd, Field **ptr) {
   Field *field;
 
   while ((field = *ptr++) && !thd->is_error()) {
+    //skip ghost column.
+    if (field->type() ==MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(field->table->fields_set_during_insert,
                       field->field_index()) &&
         field->check_constraints(ER_BAD_NULL_ERROR) != TYPE_OK)
@@ -9787,6 +9789,8 @@ inline bool call_before_insert_triggers(THD *thd, TABLE *table,
                                         enum enum_trigger_event_type event,
                                         MY_BITMAP *insert_into_fields_bitmap) {
   for (Field **f = table->field; *f; ++f) {
+    //skip ghost column.
+    if ((*f)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if ((*f)->is_flag_set(NO_DEFAULT_VALUE_FLAG) &&
         !bitmap_is_set(insert_into_fields_bitmap, (*f)->field_index())) {
       (*f)->set_tmp_null();

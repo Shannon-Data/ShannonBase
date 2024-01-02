@@ -1214,7 +1214,6 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
         new (*THR_MALLOC) Field_sys_trx_id(rec_pos, MAX_DB_TRX_ID_WIDTH);
     assert(sys_trx_id_field);
     sys_trx_id_field->set_field_index(field_nr);
-
     share->field[field_nr] = sys_trx_id_field;
     assert (sys_trx_id_field->pack_length_in_rec() == MAX_DB_TRX_ID_WIDTH);
     //rec_pos += share->field[field_nr]->pack_length_in_rec();

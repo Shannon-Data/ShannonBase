@@ -8273,7 +8273,7 @@ static mysql_row_templ_t *build_template_field(
   if (!strcmp (field->field_name, "DB_TRX_ID") ||
       !strcmp(field->field_name, "DB_ROLL_PTR")) {
     templ->type = DATA_SYS;
-    templ->rec_field_no = templ->col_no ;
+    templ->rec_field_no = index->is_clustered() ? templ->col_no : ULINT_UNDEFINED ;
     ut_ad (templ->col_no == 1 || templ->col_no == 2);
   } else {
     templ->type = col->mtype;
@@ -8416,7 +8416,7 @@ void ha_innobase::build_template(bool whole_row) {
 
 #if defined(UNIV_DEBUG) && !defined(UNIV_DEBUG_VALGRIND)
   /* zero-filling for compare contents for debug */
-  memset(m_prebuilt->mysql_template, 0, n_fields * sizeof(mysql_row_templ_t));
+  memset(m_prebuilt->mysql_template, 0, (n_fields + 1) * sizeof(mysql_row_templ_t));
 #endif /* UNIV_DEBUG && !UNIV_DEBUG_VALGRIND */
 
   m_prebuilt->template_type =
@@ -8641,6 +8641,9 @@ void ha_innobase::build_template(bool whole_row) {
 
   /**there're two places using this template for accelerating, one: select, another place is for DML
   in 'row_mysql_convert_row_to_innobase', it uses for build up innobase row format by using template.
+  This field is need in any queries, so that we dont use 'build_template_needs_field()' to check it.
+  only one we should know that the difference between index (secondary index)and primary key(cluster
+  index).
   */
   Field* db_trx_id_field = table->field[n_fields];
   if (db_trx_id_field) {

@@ -4539,6 +4539,7 @@ class Field_sys_trx_id : public Field_longlong {
     set_hidden(dd::Column::enum_hidden_type::HT_HIDDEN_SE);
     set_column_format(COLUMN_FORMAT_TYPE_DEFAULT);
     set_flag(NO_DEFAULT_VALUE_FLAG);
+    stored_in_db = true;
   }
   Field_sys_trx_id(uint32 len_arg, bool is_nullable_arg,
                    const char *field_name_arg, bool unsigned_arg)
@@ -4549,6 +4550,7 @@ class Field_sys_trx_id : public Field_longlong {
     set_hidden(dd::Column::enum_hidden_type::HT_HIDDEN_SE);
     set_column_format(COLUMN_FORMAT_TYPE_DEFAULT);
     set_flag(NO_DEFAULT_VALUE_FLAG);
+    stored_in_db = true;
   }
   type_conversion_status store(longlong nr, bool unsigned_val) final;
   enum_field_types type() const final { return MYSQL_TYPE_DB_TRX_ID; }
