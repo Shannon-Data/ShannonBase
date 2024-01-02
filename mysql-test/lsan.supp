@@ -29,6 +29,13 @@ leak:Perl_Slab_Alloc
 leak:Perl_newUNOP_AUX
 leak:Perl_newSTATEOP
 leak:Perl_pmruntime
+#for higher version
+leak:Perl_more_bodies
+leak:Perl_init_stacks
+leak:Perl_reentrant_init
+leak:Perl_safesysmalloc
+leak:Perl_new_stackinfo
+leak:perl_construct
 leak:/usr/bin/perl
 leak:/usr/bin/sort
 leak:/usr/bin/tail
