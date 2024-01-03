@@ -541,6 +541,8 @@ int ha_tina::encode_quote(uchar *) {
   buffer.length(0);
 
   for (Field **field = table->field; *field; field++) {
+    //skip ghost column.
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     const char *ptr;
     const char *end_ptr;
     const bool was_null = (*field)->is_null();
@@ -693,6 +695,8 @@ int ha_tina::find_current_row(uchar *buf) {
   */
 
   for (Field **field = table->field; *field; field++) {
+    //skip ghost column.
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     char curr_char;
 
     buffer.length(0);
@@ -1550,6 +1554,8 @@ int ha_tina::create(const char *name, TABLE *table_arg, HA_CREATE_INFO *,
     check columns
   */
   for (Field **field = table_arg->s->field; *field; field++) {
+    //skip ghost column.
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if ((*field)->is_nullable()) {
       my_error(ER_CHECK_NOT_IMPLEMENTED, MYF(0), "nullable columns");
       return HA_ERR_UNSUPPORTED;

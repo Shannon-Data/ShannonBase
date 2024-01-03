@@ -188,6 +188,8 @@ static bool check_insert_fields(THD *thd, Table_ref *table_list,
     if (check_grant_all_columns(thd, INSERT_ACL, &it)) return true;
 
     for (it.set(table_list); !it.end_of_fields(); it.next()) {
+      //ghost column skip.
+      if (it.field()->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       if (it.field()->is_hidden()) continue;
       Item *item = it.create_item(thd);
       if (item == nullptr) return true;
@@ -2909,6 +2911,8 @@ bool Query_result_create::start_execution(THD *thd) {
   }
   /* Mark all fields that are given values */
   for (Field **f = table_fields; *f != nullptr; f++) {
+    //skip ghost column.
+    if ((*f)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     bitmap_set_bit(table->write_set, (*f)->field_index());
     bitmap_set_bit(table->fields_set_during_insert, (*f)->field_index());
   }

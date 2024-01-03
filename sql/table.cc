@@ -5309,6 +5309,8 @@ Natural_join_column *Field_iterator_table_ref::get_or_create_column_ref(
   if (field_it == &table_field_it) {
     /* The field belongs to a stored table. */
     Field *tmp_field = table_field_it.field();
+    //make suure not ghost column. ???
+    assert(tmp_field->type() != MYSQL_TYPE_DB_TRX_ID);
     assert(table_ref == tmp_field->table->pos_in_table_list);
     Item_field *tmp_item = new Item_field(thd, &table_ref->query_block->context,
                                           table_ref, tmp_field);

@@ -2998,6 +2998,8 @@ inline static uint32 adjust_max_effective_column_length(Field *field_par,
 }
 
 void Item_field::set_field(Field *field_par) {
+  //ghost name is invisibile to sql. so skip it.
+  assert(field_par->type() != MYSQL_TYPE_DB_TRX_ID);
   table_ref = field_par->table->pos_in_table_list;
   assert(table_ref == nullptr || table_ref->table == field_par->table);
   assert(field_par->field_index() != NO_FIELD_INDEX);
@@ -3048,6 +3050,8 @@ void Item_field::set_field(Field *field_par) {
 */
 
 void Item_field::reset_field(Field *f) {
+  //ghost name is invisibile to sql. so skip it.
+  assert(f->type() != MYSQL_TYPE_DB_TRX_ID);
   set_field(f);
   /* 'name' is pointing at field->field_name of old field */
   item_name.set(f->field_name);
@@ -5866,7 +5870,7 @@ bool Item_field::fix_fields(THD *thd, Item **reference) {
 
           Item_field *const item_field = (Item_field *)(*res);
           Field *const new_field = item_field->field;
-
+          assert(new_field->type() != MYSQL_TYPE_DB_TRX_ID);
           if (new_field == nullptr) {
             /* The column to which we link isn't valid. */
             my_error(ER_BAD_FIELD_ERROR, MYF(0), item_field->item_name.ptr(),

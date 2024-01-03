@@ -4116,8 +4116,9 @@ bool check_grant_all_columns(THD *thd, ulong want_access_arg,
   if (!acl_cache_lock.lock()) return true;
 
   for (; !fields->end_of_fields(); fields->next()) {
-    // Skip invisible columns.
-    if (fields->field() != nullptr && fields->field()->is_hidden_by_user())
+    // Skip invisible columns. and ghost column
+    if (fields->field() != nullptr && (fields->field()->is_hidden_by_user() ||
+                                       fields->field()->type() == MYSQL_TYPE_DB_TRX_ID))
       continue;
 
     grant = fields->grant(); /* Get cached GRANT_INFO on field */

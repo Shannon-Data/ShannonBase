@@ -8470,6 +8470,8 @@ static bool mark_common_columns(THD *thd, Table_ref *table_ref_1,
   *found_using_fields = 0;
 
   for (it_1.set(table_ref_1); !it_1.end_of_fields(); it_1.next()) {
+    //ghost column skip.
+    if (it_1.field()->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     bool found = false;
     const char *field_name_1;
     /* true if field_name_1 is a member of using_fields */
@@ -8493,6 +8495,8 @@ static bool mark_common_columns(THD *thd, Table_ref *table_ref_1,
     */
     nj_col_2 = nullptr;
     for (it_2.set(table_ref_2); !it_2.end_of_fields(); it_2.next()) {
+      //ghost column skip.
+      if (it_2.field()->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       Natural_join_column *cur_nj_col_2;
       const char *cur_field_name_2;
       if (!(cur_nj_col_2 = it_2.get_or_create_column_ref(thd, leaf_2)))
@@ -9415,6 +9419,8 @@ bool insert_fields(THD *thd, Query_block *query_block, const char *db_name,
     field_iterator.set(tables);
 
     for (; !field_iterator.end_of_fields(); field_iterator.next()) {
+      Field* field_ptr = field_iterator.field();
+      if (field_ptr&& field_ptr->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       Item *const item = field_iterator.create_item(thd);
       if (!item) return true; /* purecov: inspected */
       assert(item->fixed);

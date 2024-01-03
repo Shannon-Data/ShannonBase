@@ -295,8 +295,9 @@ bool Table_trigger_dispatcher::prepare_record1_accessors() {
 
   assert(m_subject_table);
 
+  //need an extra field to store the ghost column.
   m_record1_field = (Field **)m_subject_table->mem_root.Alloc(
-      (m_subject_table->s->fields + 1) * sizeof(Field *));
+      (m_subject_table->s->fields + 1 + 1) * sizeof(Field *));
 
   if (!m_record1_field) return true;
 
