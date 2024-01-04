@@ -2506,7 +2506,7 @@ void row_sel_field_store_in_mysql_format_func(
   const dict_field_t *field =
       templ->is_virtual ? nullptr : index->get_field(field_no);
 
-  ulint prtype {DATA_SYS_PRTYPE_MASK};
+  ulint prtype {DATA_TRX_ID};
   if (!templ->is_virtual) prtype = field->col->prtype;
   ib_id_t id;
 

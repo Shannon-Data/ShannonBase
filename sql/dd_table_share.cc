@@ -359,6 +359,7 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
         }
 
         Field *field = key_part->field;
+        assert(field->type() != MYSQL_TYPE_DB_TRX_ID);
 
         key_part->type = field->key_type();
         if (field->is_nullable()) {

@@ -77,8 +77,10 @@ constexpr const int MAX_TIME_FULL_WIDTH{23};
 constexpr const int MAX_DATETIME_FULL_WIDTH{29};
 /** YYYY-MM-DD HH:MM:SS */
 constexpr const int MAX_DATETIME_WIDTH{19};
-/**TRANSACTION ID WIDTH, ulonglong*/
-constexpr const int MAX_DB_TRX_ID_WIDTH{6};
+/**TRANSACTION ID WIDTH, ulonglong, is should be same with sizeof(ib_id_t)
+ * in row_sel_field_store_in_mysql_format_func, will memcpy trxid to dest.
+*/
+constexpr const int MAX_DB_TRX_ID_WIDTH{8};
 /**
   MAX_TABLES and xxx_TABLE_BIT are used in optimization of table factors and
   expressions, and in join plan generation.

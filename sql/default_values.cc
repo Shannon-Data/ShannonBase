@@ -299,7 +299,8 @@ bool prepare_default_value_buffer_and_table_share(THD *thd,
     // Initialize the default value buffer. The default values for the
     // columns are assigned when each individual column is initialized,
     // in 'Table_share_utils::fill_column_from_dd()'.
-    memset(share->default_values, 0, share->reclength);
+    // why not using share->rec_buff_length to memset the allocated memor?
+    memset(share->default_values, 0, share->rec_buff_length);
 
     // Find the number of used bits in the preamble.
     ulong preamble_bits = share->last_null_bit_pos;

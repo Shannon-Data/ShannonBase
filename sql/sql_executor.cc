@@ -631,6 +631,8 @@ static size_t record_prefix_size(const TABLE *table) {
       prefix_end = std::max(prefix_end, f->field_ptr() + f->pack_length());
     }
   }
+  //ghost column also always needed.
+  prefix_end += MAX_DB_TRX_ID_WIDTH;
 
   return prefix_end - table->record[0];
 }
