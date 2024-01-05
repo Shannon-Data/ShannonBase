@@ -1944,7 +1944,10 @@ TABLE *create_tmp_table_from_fields(THD *thd, List<Create_field> &field_list,
   table->init_tmp_table(thd, share, m_root, nullptr, alias, reg_field,
                         blob_field, is_virtual);
 
-  /* Create all fields and calculate the total length of record */
+ /* Create all fields and calculate the total length of record.
+    we dont add the ghost column to temp table. and the field is only make by result
+    field, therefore it should not be ghonst field anytime.
+ */
   List_iterator_fast<Create_field> it(field_list);
   uint idx = 0;
   while ((cdef = it++)) {

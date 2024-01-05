@@ -1563,7 +1563,11 @@ bool Explain_join::explain_rows_and_filtered() {
     fmt->entry()->col_prefix_cost.set(pos->prefix_cost);
     // Calculate amount of data from this table per query
     char data_size_str[32];
-    const double data_size = prefix_rows * tab->table()->s->rec_buff_length;
+    //due to we have already added an extra length of MAX_DB_TRX_ID_WIDTH to rec_buff_length
+    //to  no tmp table.
+    uint len = (tab->table()->s->tmp_table == NO_TMP_TABLE) ?
+               (tab->table()->s->rec_buff_length - MAX_DB_TRX_ID_WIDTH) : tab->table()->s->rec_buff_length;
+    const double data_size = prefix_rows * len;
     human_readable_num_bytes(data_size_str, sizeof(data_size_str), data_size);
     fmt->entry()->col_data_size_query.set(data_size_str);
   }
@@ -1681,6 +1685,7 @@ bool Explain_join::explain_extra() {
                                  !bitmap_is_clear_all(table->write_set))) {
     Field **fld;
     for (fld = table->field; *fld; fld++) {
+      if ((*fld)->type() ==MYSQL_TYPE_DB_TRX_ID) continue;
       if (!bitmap_is_set(table->read_set, (*fld)->field_index()) &&
           !bitmap_is_set(table->write_set, (*fld)->field_index()))
         continue;
@@ -1810,9 +1815,11 @@ bool Explain_table::explain_rows_and_filtered() {
 bool Explain_table::explain_extra() {
   if (message) return fmt->entry()->col_message.set(message);
 
-  for (Field **fld = table->field; *fld != nullptr; ++fld)
+  for (Field **fld = table->field; *fld != nullptr; ++fld) {
+    if ((*fld)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (table->is_binary_diff_enabled(*fld))
       fmt->entry()->col_partial_update_columns.push_back((*fld)->field_name);
+  }
 
   uint keyno;
   int range_scan_type;
