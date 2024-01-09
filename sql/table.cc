@@ -674,7 +674,17 @@ inline bool is_system_table_name(const char *name, size_t length) {
             my_tolower(ci, name[2]) == 'e' && my_tolower(ci, name[3]) == 'n' &&
             my_tolower(ci, name[4]) == 't'))));
 }
-
+bool is_system_object(const char* db_name, const char* table_name) {
+  size_t len = strlen(table_name);
+  return is_system_db(db_name) ||
+         is_system_table_name(table_name, len) ||
+         dd::get_dictionary()->is_system_table_name(db_name, table_name) ||
+         dd::get_dictionary()->is_dd_table_name(db_name, table_name) ||
+         strstr(table_name, "innodb_dynamic_metadata") ||
+         strstr(table_name, "innodb_table_stats") ||
+         strstr(table_name, "innodb_index_stats") ||
+         strstr(table_name, "innodb_ddl_log");
+}
 /**
   Initialize key_part_flag from source field.
 */
@@ -2880,7 +2890,7 @@ bool create_key_part_field_with_prefix_length(TABLE *table, MEM_ROOT *root) {
   @retval 8    Table row format has changed in engine
 */
 
-int open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
+int  open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
                           uint db_stat, uint prgflag, uint ha_open_flags,
                           TABLE *outparam, bool is_create_table,
                           const dd::Table *table_def_param) {
@@ -2988,8 +2998,9 @@ int open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
                 (internal_tmp ? 2 * share->rec_buff_length : 0);
 
   /* Setup copy of fields from share, but use the right alias and record */
-  for (i = 0; i < share->fields; i++, field_ptr++) {
-    Field *new_field = share->field[i]->clone(root);
+  i = 0;
+  for (auto field = share->field; (*field); i++, field ++, field_ptr ++) {
+    Field *new_field = (*field)->clone(root);
     *field_ptr = new_field;
     if (new_field == nullptr) goto err;
     new_field->init(outparam);
@@ -3004,17 +3015,6 @@ int open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
         (outparam->file->ha_table_flags() & HA_CAN_FULLTEXT_EXT) &&
         !strcmp(outparam->field[i]->field_name, FTS_DOC_ID_COL_NAME))
       fts_doc_id_field = new_field;
-  }
-
-  /*The ghost column here. DB_TRX_ID*/
-  if (share->field[share->fields]) {
-     Field* db_trx_id_field = share->field[share->fields]->clone(root);
-     *field_ptr = db_trx_id_field;
-     if (db_trx_id_field == nullptr) goto err;
-     db_trx_id_field->init(outparam);
-     db_trx_id_field->move_field_offset(move_offset);
-
-     field_ptr ++;
   }
   (*field_ptr) = nullptr;  // End marker
 

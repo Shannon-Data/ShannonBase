@@ -2506,8 +2506,8 @@ void row_sel_field_store_in_mysql_format_func(
   const dict_field_t *field =
       templ->is_virtual ? nullptr : index->get_field(field_no);
 
-  ulint prtype {DATA_TRX_ID};
-  if (!templ->is_virtual) prtype = field->col->prtype;
+  ulint prtype {DATA_ROW_ID};
+  prtype = (templ->type != DATA_SYS && field) ? field->col->prtype : DATA_TRX_ID;
   ib_id_t id;
 
   bool clust_templ_for_sec = (sec_field != ULINT_UNDEFINED);
@@ -2751,7 +2751,7 @@ void row_sel_field_store_in_mysql_format_func(
     field_no = sec_field_no;
   }
 
-  if (rec_offs_nth_extern(rec_index, offsets, field_no)) {
+  if (templ->type != DATA_SYS && rec_offs_nth_extern(rec_index, offsets, field_no)) {
     /* Copy an externally stored field to a temporary heap */
 
     ut_a(!prebuilt->trx->has_search_latch);
@@ -2829,10 +2829,11 @@ void row_sel_field_store_in_mysql_format_func(
     }
   } else {
     /* Field is stored in the row. */
-
+    if (templ->type == DATA_SYS)
+        field_no = templ->clust_rec_field_no;
     data = rec_get_nth_field_instant(rec, offsets, field_no, rec_index, &len);
 
-    if (len == UNIV_SQL_NULL) {
+    if (templ->type != DATA_SYS && len == UNIV_SQL_NULL) {
       /* MySQL assumes that the field for an SQL
       NULL value is set to the default value. */
       ut_ad(templ->mysql_null_bit_mask);
@@ -2845,7 +2846,8 @@ void row_sel_field_store_in_mysql_format_func(
              (const byte *)prebuilt->default_rec + templ->mysql_col_offset,
              templ->mysql_col_len);
       return true;
-    }
+    } else if (templ->type == DATA_SYS)
+       len = templ->mysql_col_len;
 
     if (DATA_LARGE_MTYPE(templ->type) || DATA_GEOMETRY_MTYPE(templ->type)) {
       /* It is a BLOB field locally stored in the
@@ -2994,7 +2996,8 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
     /* We should never deliver column prefixes to MySQL,
     except for evaluating innobase_index_cond() or
     row_search_end_range_check(). */
-    ut_ad(rec_index->get_field(field_no)->prefix_len == 0);
+    if (templ->type != DATA_SYS)
+      ut_ad(rec_index->get_field(field_no)->prefix_len == 0);
 
     if (clust_templ_for_sec) {
       std::vector<const dict_col_t *>::iterator it;
@@ -3011,7 +3014,6 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
 
       sec_field_no = it - template_col.begin();
     }
-
     if (!row_sel_store_mysql_field(mysql_rec, prebuilt, rec, rec_index,
                                    prebuilt_index, offsets, field_no, templ,
                                    sec_field_no, lob_undo, blob_heap)) {

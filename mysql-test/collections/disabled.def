@@ -118,3 +118,8 @@ group_replication.gr_xa_commit_one_phase_failure_before_gtid_externalization @wi
 group_replication.gr_xa_prepare_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 group_replication.gr_xa_rollback_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 
+# shannonbase disabled we dont support myisam engine and dont test it anaymore
+main.alter_table_myisam : WL#12356 2024-01-05 shannonbase disable myisam will be fixed
+main.dd_is_gcov_myisam : WL#1234 2024-01-05 shannonbase disable myisam will be fixed
+main.system_tables_myisam : WL#123456 2024-01-05 shannonbase disable myisam will be fixed
+main.myisam_recover : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed

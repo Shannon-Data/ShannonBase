@@ -5228,6 +5228,8 @@ void append_row_to_str(String &str, const uchar *row, TABLE *table) {
   if (!fields) return;
   fields[num_fields] = nullptr;
   for (field_ptr = table->field; *field_ptr; field_ptr++) {
+    //skip ghost column.
+    if ((*field_ptr)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (!bitmap_is_set(table->read_set, (*field_ptr)->field_index())) continue;
     fields[curr_field_index++] = *field_ptr;
   }
@@ -5236,6 +5238,8 @@ void append_row_to_str(String &str, const uchar *row, TABLE *table) {
 
   for (field_ptr = fields; *field_ptr; field_ptr++) {
     Field *field = *field_ptr;
+    //skip ghost column.
+    if (field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     str.append(" ");
     str.append(field->field_name);
     str.append(":");

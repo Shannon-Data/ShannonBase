@@ -12657,6 +12657,8 @@ bool mysql_compare_tables(THD *thd, TABLE *table, Alter_info *alter_info,
   tmp_new_field_it.init(tmp_alter_info.create_list);
   for (Field **f_ptr = table->field; *f_ptr; f_ptr++) {
     Field *field = *f_ptr;
+    //skip ghost column.
+    if (field && field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     const Create_field *tmp_new_field = tmp_new_field_it++;
 
     /* Check to see if both fields are alike. */

@@ -64,6 +64,10 @@
 #include "prealloced_array.h"
 #include "sql-common/json_dom.h"  // Json_wrapper
 #include "sql/current_thd.h"
+#include "sql/dd/dd.h"     //dd::dictionary
+#include "sql/dd/impl/dictionary_impl.h"                // dd::Dictionary_impl
+#include "sql/dd/impl/system_registry.h"                // dd::System_tables
+#include "sql/dd/upgrade_57/upgrade.h"
 #include "sql/field.h"
 #include "sql/filesort.h"  // Filesort
 #include "sql/handler.h"
@@ -606,9 +610,10 @@ static size_t record_prefix_size(const TABLE *table) {
     highest end pointer.
   */
   const uchar *prefix_end = table->record[0];  // beginning of record
-  for (auto f = table->field, end = table->field + table->s->fields; f < end;
-       ++f) {
-    if (bitmap_is_set(table->read_set, (*f)->field_index()))
+  for (auto f = table->field; (*f); f++) {
+    auto type = (*f)->type();
+    if ((type != MYSQL_TYPE_DB_TRX_ID) &&
+      bitmap_is_set(table->read_set, (*f)->field_index()))
       prefix_end = std::max<const uchar *>(
           prefix_end, (*f)->field_ptr() + (*f)->pack_length());
   }
@@ -631,8 +636,6 @@ static size_t record_prefix_size(const TABLE *table) {
       prefix_end = std::max(prefix_end, f->field_ptr() + f->pack_length());
     }
   }
-  //ghost column also always needed.
-  prefix_end += MAX_DB_TRX_ID_WIDTH;
 
   return prefix_end - table->record[0];
 }

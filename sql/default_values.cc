@@ -133,10 +133,6 @@ static bool find_record_length(const dd::Table &table, size_t min_length,
     share->fields++;
   }
 
-  //Here, due to we need an extra space to store ghost column, db_trx_id length
-  //therefore, 'MAX_DB_TRX_ID_WIDTH' is added.
-  share->reclength += MAX_DB_TRX_ID_WIDTH;
-
   // Find preamble length and add it to the total record length.
   share->null_bytes = (share->null_fields + leftover_bits + 7) / 8;
   share->last_null_bit_pos = (share->null_fields + leftover_bits) & 7;
@@ -144,6 +140,10 @@ static bool find_record_length(const dd::Table &table, size_t min_length,
 
   // Hack to avoid bugs with small static rows in MySQL.
   share->reclength = std::max<size_t>(min_length, share->reclength);
+  //Here, due to we need an extra space to store ghost column, db_trx_id length
+  //therefore, 'MAX_DB_TRX_ID_WIDTH' is added.
+  
+  share->reclength += calc_pack_length(MYSQL_TYPE_DB_TRX_ID, 0);
   share->stored_rec_length = share->reclength;
 
   return false;
@@ -299,8 +299,7 @@ bool prepare_default_value_buffer_and_table_share(THD *thd,
     // Initialize the default value buffer. The default values for the
     // columns are assigned when each individual column is initialized,
     // in 'Table_share_utils::fill_column_from_dd()'.
-    // why not using share->rec_buff_length to memset the allocated memor?
-    memset(share->default_values, 0, share->rec_buff_length);
+    memset(share->default_values, 0, share->reclength);
 
     // Find the number of used bits in the preamble.
     ulong preamble_bits = share->last_null_bit_pos;

@@ -4267,7 +4267,26 @@ inline bool is_perfschema_db(const char *name) {
   return !my_strcasecmp(system_charset_info, PERFORMANCE_SCHEMA_DB_NAME.str,
                         name);
 }
-
+inline bool is_dd_schema_name(const char* name) {
+  return !my_strcasecmp(system_charset_info, MYSQL_SCHEMA_NAME.str,
+                        name);
+}
+inline bool is_dd_schema_name(const char* name, size_t len) {
+  return (MYSQL_SCHEMA_NAME.length == len &&
+          !my_strcasecmp(system_charset_info, MYSQL_SCHEMA_NAME.str,
+                         name));
+}
+inline bool is_system_db (const char* name) {
+  return (is_infoschema_db(name) ||
+          is_perfschema_db(name) ||
+          is_dd_schema_name(name));
+}
+inline bool is_system_db(const char* name, size_t len) {
+  return (is_infoschema_db(name, len) ||
+          is_perfschema_db(name, len) ||
+          is_dd_schema_name(name, len));
+}
+bool is_system_object(const char* db_name, const char* table_name);
 /**
   Check if the table belongs to the P_S, excluding setup and threads tables.
 

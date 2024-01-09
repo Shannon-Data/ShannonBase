@@ -342,6 +342,7 @@ int table_prepared_stmt_instances::read_row_values(TABLE *table,
   buf[0] = 0;
 
   for (; (f = *fields); fields++) {
+    if (f->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (read_all || bitmap_is_set(table->read_set, f->field_index())) {
       switch (f->field_index()) {
         case 0: /* OBJECT_INSTANCE_BEGIN */

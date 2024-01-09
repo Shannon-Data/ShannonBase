@@ -8470,8 +8470,9 @@ static bool mark_common_columns(THD *thd, Table_ref *table_ref_1,
   *found_using_fields = 0;
 
   for (it_1.set(table_ref_1); !it_1.end_of_fields(); it_1.next()) {
-    //ghost column skip.
-    if (it_1.field()->type() == MYSQL_TYPE_DB_TRX_ID) continue;
+    //no ghost column firstly, not adding the logic in is_non_participant_column.
+    Field* fld1 = it_1.field();
+    if (fld1 && fld1->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     bool found = false;
     const char *field_name_1;
     /* true if field_name_1 is a member of using_fields */
@@ -8496,7 +8497,8 @@ static bool mark_common_columns(THD *thd, Table_ref *table_ref_1,
     nj_col_2 = nullptr;
     for (it_2.set(table_ref_2); !it_2.end_of_fields(); it_2.next()) {
       //ghost column skip.
-      if (it_2.field()->type() == MYSQL_TYPE_DB_TRX_ID) continue;
+      Field* fld2 = it_2.field();
+      if (fld2 && fld2->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       Natural_join_column *cur_nj_col_2;
       const char *cur_field_name_2;
       if (!(cur_nj_col_2 = it_2.get_or_create_column_ref(thd, leaf_2)))
@@ -8693,6 +8695,9 @@ static bool store_natural_using_join_columns(THD *thd,
   /* Append the columns of the first join operand. */
   for (it_1.set(table_ref_1); !it_1.end_of_fields(); it_1.next()) {
     nj_col_1 = it_1.get_natural_column_ref();
+    //skip ghost column.
+    Field* fld1 = nj_col_1->field();
+    if (fld1 && fld1->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (nj_col_1->is_common) {
       natural_using_join->join_columns->push_back(nj_col_1);
       /* Reset the common columns for the next call to mark_common_columns. */
@@ -8732,6 +8737,9 @@ static bool store_natural_using_join_columns(THD *thd,
   /* Append the non-equi-join columns of the second join operand. */
   for (it_2.set(table_ref_2); !it_2.end_of_fields(); it_2.next()) {
     nj_col_2 = it_2.get_natural_column_ref();
+    //skip ghost column.
+    Field* fld2 = nj_col_2->field();
+    if (fld2 && fld2->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (!nj_col_2->is_common)
       non_join_columns->push_back(nj_col_2);
     else {

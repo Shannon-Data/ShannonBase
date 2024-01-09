@@ -8269,15 +8269,7 @@ static mysql_row_templ_t *build_template_field(
     templ->mysql_mvidx_len = 0;
     templ->is_multi_val = false;
   }
-
-  if (!strcmp (field->field_name, "DB_TRX_ID") ||
-      !strcmp(field->field_name, "DB_ROLL_PTR")) {
-    templ->type = DATA_SYS;
-    templ->rec_field_no = index->is_clustered() ? templ->col_no : ULINT_UNDEFINED ;
-    ut_ad (templ->col_no == 1 || templ->col_no == 2);
-  } else {
-    templ->type = col->mtype;
-  }
+  templ->type = col->mtype;
   templ->mysql_type = (ulint)field->type();
 
   if (templ->mysql_type == DATA_MYSQL_TRUE_VARCHAR) {
@@ -8315,6 +8307,14 @@ static mysql_row_templ_t *build_template_field(
     prebuilt->templ_contains_fixed_point = true;
   }
 
+  if (field && field->type() == MYSQL_TYPE_DB_TRX_ID) {
+    /**if it's ghost column, we just only care about its offset, and templ->type.
+     * which will be passed to row_sel_field_store_in_mysql_format(). to store
+     * DB_TRX_ID, then return to mysql used by rapid engine. */
+    templ->type = DATA_SYS;
+    templ->rec_field_no = index->is_clustered() ? templ->col_no : ULINT_UNDEFINED ;
+    ut_ad (templ->col_no == 1 || templ->col_no == 2);
+  }
   return (templ);
 }
 

@@ -51,6 +51,7 @@
 #include "mysql_com.h"
 #include "mysqld_error.h"
 #include "sql/dd/collection.h"
+#include "sql/create_field.h"      //create_field
 #include "sql/dd/dd_table.h"       // dd::FIELD_NAME_SEPARATOR_CHAR
 #include "sql/dd/dd_tablespace.h"  // dd::get_tablespace_name
 #include "sql/dd/dictionary.h"
@@ -69,6 +70,7 @@
 #include "sql/dd/types/partition.h"            // dd::Partition
 #include "sql/dd/types/partition_value.h"      // dd::Partition_value
 #include "sql/dd/types/table.h"                // dd::Table
+#include "sql/dd/upgrade_57/upgrade.h"
 #include "sql/default_values.h"  // prepare_default_value_buffer...
 #include "sql/error_handler.h"   // Internal_error_handler
 #include "sql/field.h"
@@ -1204,24 +1206,25 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
     }
   }
 
-  bool is_internal_table = dd::get_dictionary()->is_system_table_name(share->db.str, share->table_name.str)
-                           || dd::get_dictionary()->is_dd_table_name(share->db.str, share->table_name.str)
-                           || is_infoschema_db(share->db.str)
-                           || is_perfschema_db(share->db.str);
+  assert(share->fields == field_nr);
 
-  /*we dont add the extra file for system table or at bootstrap phase.*/
-  if (!thd->is_bootstrap_system_thread() && !is_internal_table){
-    Field_sys_trx_id *sys_trx_id_field =
-        new (*THR_MALLOC) Field_sys_trx_id(rec_pos, MAX_DB_TRX_ID_WIDTH);
-    assert(sys_trx_id_field);
+  bool is_in_upgrade = dd::upgrade_57::in_progress();
+  bool is_system_objs = is_system_object(share->db.str, share->table_name.str);
+  /*we dont add the extra file for system table or in upgrading phase.*/
+  if (!is_in_upgrade && !is_system_objs){
+    Create_field db_trx_id_field;
+    db_trx_id_field.sql_type = MYSQL_TYPE_DB_TRX_ID;
+    db_trx_id_field.is_nullable = db_trx_id_field.is_zerofill = false;
+    db_trx_id_field.is_unsigned = true;
+    Field *sys_trx_id_field = make_field(db_trx_id_field, share, "DB_TRX_ID",
+                                                    MAX_DB_TRX_ID_WIDTH, rec_pos, null_pos, 0);
     sys_trx_id_field->set_field_index(field_nr);
     share->field[field_nr] = sys_trx_id_field;
     assert (sys_trx_id_field->pack_length_in_rec() == MAX_DB_TRX_ID_WIDTH);
     //rec_pos += share->field[field_nr]->pack_length_in_rec();
     field_nr++;
     assert(share->fields + 1 == field_nr);
-  } else
-    assert(share->fields == field_nr);
+  }
 
   // Make sure the scan of the columns is consistent with other data.
   assert(share->null_bytes == (null_pos - null_flags + (null_bit_pos + 7) / 8));

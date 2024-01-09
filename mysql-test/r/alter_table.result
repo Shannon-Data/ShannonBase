@@ -457,11 +457,11 @@ Warning	1364	Field 'h' doesn't have a default value
 Warning	1364	Field 'i' doesn't have a default value
 show table status like 't1';
 Name	Engine	Version	Row_format	Rows	Avg_row_length	Data_length	Max_data_length	Index_length	Data_free	Auto_increment	Create_time	Update_time	Check_time	Collation	Checksum	Create_options	Comment
-t1	MyISAM	10	Fixed	1	37	X	X	X	X	X	X	X	X	utf8mb4_0900_ai_ci	NULL		
+t1	MyISAM	10	Fixed	1	45	X	X	X	X	X	X	X	X	utf8mb4_0900_ai_ci	NULL		
 alter table t1 modify a int;
 show table status like 't1';
 Name	Engine	Version	Row_format	Rows	Avg_row_length	Data_length	Max_data_length	Index_length	Data_free	Auto_increment	Create_time	Update_time	Check_time	Collation	Checksum	Create_options	Comment
-t1	MyISAM	10	Fixed	1	37	X	X	X	X	X	X	X	X	utf8mb4_0900_ai_ci	NULL		
+t1	MyISAM	10	Fixed	1	45	X	X	X	X	X	X	X	X	utf8mb4_0900_ai_ci	NULL		
 drop table t1;
 create table t1 (a int not null, b int not null, c int not null, d int not null, e int not null, f int not null, g int not null, h int not null,i int not null, primary key (a,b,c,d,e,f,g,i,h)) engine=MyISAM;
 insert into t1 (a) values(1);
@@ -476,7 +476,7 @@ Warning	1364	Field 'h' doesn't have a default value
 Warning	1364	Field 'i' doesn't have a default value
 show table status like 't1';
 Name	Engine	Version	Row_format	Rows	Avg_row_length	Data_length	Max_data_length	Index_length	Data_free	Auto_increment	Create_time	Update_time	Check_time	Collation	Checksum	Create_options	Comment
-t1	MyISAM	10	Fixed	1	37	X	X	X	X	X	X	X	X	utf8mb4_0900_ai_ci	NULL		
+t1	MyISAM	10	Fixed	1	45	X	X	X	X	X	X	X	X	utf8mb4_0900_ai_ci	NULL		
 drop table t1;
 create table t1 (a char(10) character set koi8r);
 insert into t1 values ('тест');

@@ -4556,7 +4556,6 @@ class Field_sys_trx_id : public Field_longlong {
   enum_field_types type() const final { return MYSQL_TYPE_DB_TRX_ID; }
   uint32 pack_length() const final { return PACK_LENGTH_TRX_ID; }
   void sql_type(String &str) const final;
-
   Field_sys_trx_id *clone(MEM_ROOT *mem_root) const final {
     assert(type() == MYSQL_TYPE_DB_TRX_ID);
     return new (mem_root) Field_sys_trx_id(*this);
