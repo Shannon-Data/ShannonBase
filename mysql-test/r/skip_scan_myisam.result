@@ -1,0 +1,1118 @@
+CREATE TABLE t (a INT, b INT, c INT, d INT, e INT, PRIMARY KEY(a, b, c, d), KEY(b, d)) ENGINE=myisam;
+# Since ANALYZE TABLE only reads a subset of the data, the statistics for
+# table t depends on the row order. And since the INSERT INTO ... SELECT
+# may be executed using different execution plans, we've added ORDER BY
+# to ensure that we rows has the same order every time. If not, the
+# estimated number of rows in EXPLAIN may change on different platforms.
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT b, d FROM t WHERE d < 2;
+EXPLAIN
+-> Filter: (t.d < 2)  (rows=833)
+    -> Covering index skip scan on t using b over d < 2  (rows=833)
+
+FLUSH STATUS;
+SELECT b, d FROM t WHERE d < 2;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	10
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT b, d FROM t WHERE d < 2;
+EXPLAIN
+-> Filter: (t.d < 2)  (rows=833)
+    -> Covering index scan on t using b  (rows=2500)
+
+FLUSH STATUS;
+SELECT b, d FROM t WHERE d < 2;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	0
+Handler_read_last	0
+Handler_read_next	2500
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ b, d FROM t WHERE d < 2;
+EXPLAIN
+-> Filter: (t.d < 2)  (rows=833)
+    -> Covering index skip scan on t using b over d < 2  (rows=833)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ b, d FROM t WHERE d < 2;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	10
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT b, d FROM t WHERE d > 4;
+EXPLAIN
+-> Filter: (t.d > 4)  (rows=833)
+    -> Covering index skip scan on t using b over 4 < d  (rows=833)
+
+FLUSH STATUS;
+SELECT b, d FROM t WHERE d > 4;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	10
+Handler_read_last	0
+Handler_read_next	1500
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT b, d FROM t WHERE d > 4;
+EXPLAIN
+-> Filter: (t.d > 4)  (rows=833)
+    -> Covering index scan on t using b  (rows=2500)
+
+FLUSH STATUS;
+SELECT b, d FROM t WHERE d > 4;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	0
+Handler_read_last	0
+Handler_read_next	2500
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ b, d FROM t WHERE d > 4;
+EXPLAIN
+-> Filter: (t.d > 4)  (rows=833)
+    -> Covering index skip scan on t using b over 4 < d  (rows=833)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ b, d FROM t WHERE d > 4;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	10
+Handler_read_last	0
+Handler_read_next	1500
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a = 5 AND d <= 3;
+EXPLAIN
+-> Filter: (t.d <= 3)  (rows=63)
+    -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a = 5 AND d <= 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a = 5 AND d <= 3;
+EXPLAIN
+-> Filter: (t.d <= 3)  (rows=63)
+    -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a = 5 AND d <= 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a = 5 AND d <= 3;
+EXPLAIN
+-> Filter: ((t.a = 5) and (t.d <= 3))  (rows=62)
+    -> Covering index skip scan on t using PRIMARY over a = 5, d <= 3  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a = 5 AND d <= 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	51
+Handler_read_last	0
+Handler_read_next	75
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a = 5 AND d >= 98;
+EXPLAIN
+-> Filter: (t.d >= 98)  (rows=63)
+    -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a = 5 AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a = 5 AND d >= 98;
+EXPLAIN
+-> Filter: (t.d >= 98)  (rows=63)
+    -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a = 5 AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a = 5 AND d >= 98;
+EXPLAIN
+-> Filter: ((t.a = 5) and (t.d >= 98))  (rows=62)
+    -> Covering index skip scan on t using PRIMARY over a = 5, 98 <= d  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a = 5 AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	51
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a IN (1, 5) AND d >= 98;
+EXPLAIN
+-> Filter: ((t.a in (1,5)) and (t.d >= 98))  (rows=182)
+    -> Covering index range scan on t using PRIMARY over (a = 1) OR (a = 5)  (rows=547)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a IN (1, 5) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	2
+Handler_read_last	0
+Handler_read_next	500
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a IN (1, 5) AND d >= 98;
+EXPLAIN
+-> Filter: ((t.a in (1,5)) and (t.d >= 98))  (rows=182)
+    -> Covering index range scan on t using PRIMARY over (a = 1) OR (a = 5)  (rows=547)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a IN (1, 5) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	2
+Handler_read_last	0
+Handler_read_next	500
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a IN (1, 5) AND d >= 98;
+EXPLAIN
+-> Filter: ((t.a in (1,5)) and (t.d >= 98))  (rows=182)
+    -> Covering index skip scan on t using PRIMARY over a IN (1, 5), 98 <= d  (rows=182)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a IN (1, 5) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	102
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a IN (1, 3, 5) AND d >= 98;
+EXPLAIN
+-> Filter: ((t.a in (1,3,5)) and (t.d >= 98))  (rows=301)
+    -> Covering index range scan on t using PRIMARY over (a = 1) OR (a = 3) OR (a = 5)  (rows=904)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a IN (1, 3, 5) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	3
+Handler_read_last	0
+Handler_read_next	750
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a IN (1, 3, 5) AND d >= 98;
+EXPLAIN
+-> Filter: ((t.a in (1,3,5)) and (t.d >= 98))  (rows=301)
+    -> Covering index range scan on t using PRIMARY over (a = 1) OR (a = 3) OR (a = 5)  (rows=904)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a IN (1, 3, 5) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	3
+Handler_read_last	0
+Handler_read_next	750
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a IN (1, 3, 5) AND d >= 98;
+EXPLAIN
+-> Filter: ((t.a in (1,3,5)) and (t.d >= 98))  (rows=301)
+    -> Covering index skip scan on t using PRIMARY over a IN (1, 3, 5), 98 <= d  (rows=301)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a IN (1, 3, 5) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	153
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a IN (1, 5) AND b IN (1, 2) AND d >= 98;
+EXPLAIN
+-> Filter: (t.a in (1,5))  (rows=0.4)
+    -> Index range scan on t using b over (b = 1 AND 98 <= d) OR (b = 2 AND 98 <= d), with index condition: ((t.b in (1,2)) and (t.d >= 98))  (rows=2)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a IN (1, 5) AND b IN (1, 2) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	2
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a IN (1, 5) AND b IN (1, 2) AND d >= 98;
+EXPLAIN
+-> Filter: (t.a in (1,5))  (rows=0.4)
+    -> Index range scan on t using b over (b = 1 AND 98 <= d) OR (b = 2 AND 98 <= d), with index condition: ((t.b in (1,2)) and (t.d >= 98))  (rows=2)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a IN (1, 5) AND b IN (1, 2) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	2
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a IN (1, 5) AND b IN (1, 2) AND d >= 98;
+EXPLAIN
+-> Filter: ((t.a in (1,5)) and (t.b in (1,2)) and (t.d >= 98))  (rows=72)
+    -> Covering index skip scan on t using PRIMARY over a IN (1, 5), b IN (1, 2), 98 <= d  (rows=72)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a IN (1, 5) AND b IN (1, 2) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	44
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a IN (1, 2, 3, 4, 5) AND b IN (1, 2, 3) AND d >= 98;
+EXPLAIN
+-> Filter: (t.a in (1,2,3,4,5))  (rows=1.5)
+    -> Index range scan on t using b over (b = 1 AND 98 <= d) OR (b = 2 AND 98 <= d) OR (b = 3 AND 98 <= d), with index condition: ((t.b in (1,2,3)) and (t.d >= 98))  (rows=3)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a IN (1, 2, 3, 4, 5) AND b IN (1, 2, 3) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	3
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a IN (1, 2, 3, 4, 5) AND b IN (1, 2, 3) AND d >= 98;
+EXPLAIN
+-> Filter: (t.a in (1,2,3,4,5))  (rows=1.5)
+    -> Index range scan on t using b over (b = 1 AND 98 <= d) OR (b = 2 AND 98 <= d) OR (b = 3 AND 98 <= d), with index condition: ((t.b in (1,2,3)) and (t.d >= 98))  (rows=3)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a IN (1, 2, 3, 4, 5) AND b IN (1, 2, 3) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	3
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a IN (1, 2, 3, 4, 5) AND b IN (1, 2, 3) AND d >= 98;
+EXPLAIN
+-> Filter: ((t.a in (1,2,3,4,5)) and (t.b in (1,2,3)) and (t.d >= 98))  (rows=317)
+    -> Covering index skip scan on t using PRIMARY over a IN (1, 2, (3 more)), b IN (1, 2, 3), 98 <= d  (rows=317)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a IN (1, 2, 3, 4, 5) AND b IN (1, 2, 3) AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	165
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a = 5 AND b = 2 AND d >= 98;
+EXPLAIN
+-> Filter: (t.a = 5)  (rows=0.1)
+    -> Index range scan on t using b over (b = 2 AND 98 <= d), with index condition: ((t.b = 2) and (t.d >= 98))  (rows=1)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a = 5 AND b = 2 AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a = 5 AND b = 2 AND d >= 98;
+EXPLAIN
+-> Filter: (t.a = 5)  (rows=0.1)
+    -> Index range scan on t using b over (b = 2 AND 98 <= d), with index condition: ((t.b = 2) and (t.d >= 98))  (rows=1)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a = 5 AND b = 2 AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a = 5 AND b = 2 AND d >= 98;
+EXPLAIN
+-> Filter: ((t.b = 2) and (t.a = 5) and (t.d >= 98))  (rows=12)
+    -> Covering index skip scan on t using PRIMARY over a = 5, b = 2, 98 <= d  (rows=12)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a = 5 AND b = 2 AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT a+1, b, c, d FROM t WHERE a = 5 AND d < 3;
+EXPLAIN
+-> Filter: (t.d < 3)  (rows=63)
+    -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT a+1, b, c, d FROM t WHERE a = 5 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT a+1, b, c, d FROM t WHERE a = 5 AND d < 3;
+EXPLAIN
+-> Filter: (t.d < 3)  (rows=63)
+    -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT a+1, b, c, d FROM t WHERE a = 5 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ a+1, b, c, d FROM t WHERE a = 5 AND d < 3;
+EXPLAIN
+-> Filter: ((t.a = 5) and (t.d < 3))  (rows=62)
+    -> Covering index skip scan on t using PRIMARY over a = 5, d < 3  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ a+1, b, c, d FROM t WHERE a = 5 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	51
+Handler_read_last	0
+Handler_read_next	50
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND d < 3;
+EXPLAIN
+-> Filter: (t.d < 3)  (rows=63)
+    -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND d < 3;
+EXPLAIN
+-> Filter: (t.d < 3)  (rows=63)
+    -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND d < 3;
+EXPLAIN
+-> Filter: ((t.a = 5) and (t.d < 3))  (rows=62)
+    -> Covering index skip scan on t using PRIMARY over a = 5, d < 3  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	51
+Handler_read_last	0
+Handler_read_next	50
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a = b AND d >= 98;
+EXPLAIN
+-> Filter: ((t.b = t.a) and (t.d >= 98))  (rows=833)
+    -> Covering index scan on t using PRIMARY  (rows=2500)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a = b AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	0
+Handler_read_last	0
+Handler_read_next	2500
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT a, b, c, d FROM t WHERE a = b AND d >= 98;
+EXPLAIN
+-> Filter: ((t.b = t.a) and (t.d >= 98))  (rows=833)
+    -> Covering index scan on t using PRIMARY  (rows=2500)
+
+FLUSH STATUS;
+SELECT a, b, c, d FROM t WHERE a = b AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	0
+Handler_read_last	0
+Handler_read_next	2500
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a = b AND d >= 98;
+EXPLAIN
+-> Filter: ((t.b = t.a) and (t.d >= 98))  (rows=833)
+    -> Covering index skip scan on t using PRIMARY over 98 <= d  (rows=833)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ a, b, c, d FROM t WHERE a = b AND d >= 98;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	500
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=20.7)
+    -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Filter: ((t.c > 10) and (t.d < 3))  (rows=21)
+    -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=20.7)
+    -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c;
+EXPLAIN
+-> Sort: t.d, t.c  (rows=62)
+    -> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=62)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c;
+EXPLAIN
+-> Sort: t.d, t.c  (rows=189)
+    -> Filter: ((t.c > 10) and (t.d < 3))  (rows=189)
+        -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c;
+EXPLAIN
+-> Sort: t.d, t.c  (rows=62)
+    -> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=62)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND c > 1 AND d < 3 ORDER BY d, c * -1;
+EXPLAIN
+-> Sort: t.d, (t.c * -(1))  (rows=62)
+    -> Filter: ((t.a = 5) and (t.c > 1) and (t.d < 3))  (rows=62)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 1 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND c > 1 AND d < 3 ORDER BY d, c * -1;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	200
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND c > 1 AND d < 3 ORDER BY d, c * -1;
+EXPLAIN
+-> Sort: t.d, (t.c * -(1))  (rows=189)
+    -> Filter: ((t.c > 1) and (t.d < 3))  (rows=189)
+        -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND c > 1 AND d < 3 ORDER BY d, c * -1;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND c > 1 AND d < 3 ORDER BY d, c * -1;
+EXPLAIN
+-> Sort: t.d, (t.c * -(1))  (rows=62)
+    -> Filter: ((t.a = 5) and (t.c > 1) and (t.d < 3))  (rows=62)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 1 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND c > 1 AND d < 3 ORDER BY d, c * -1;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	200
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT e FROM t WHERE a = 5 AND d <= 3;
+EXPLAIN
+-> Index lookup on t using PRIMARY (a=5), with index condition: (t.d <= 3)  (rows=189)
+
+FLUSH STATUS;
+SELECT e FROM t WHERE a = 5 AND d <= 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	75
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT e FROM t WHERE a = 5 AND d <= 3;
+EXPLAIN
+-> Index lookup on t using PRIMARY (a=5), with index condition: (t.d <= 3)  (rows=189)
+
+FLUSH STATUS;
+SELECT e FROM t WHERE a = 5 AND d <= 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	75
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ e FROM t WHERE a = 5 AND d <= 3;
+EXPLAIN
+-> Index lookup on t using PRIMARY (a=5), with index condition: (t.d <= 3)  (rows=189)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ e FROM t WHERE a = 5 AND d <= 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	75
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c, e;
+EXPLAIN
+-> Sort: t.d, t.c, t.e  (rows=189)
+    -> Index lookup on t using PRIMARY (a=5), with index condition: ((t.c > 10) and (t.d < 3))  (rows=189)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c, e;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c, e;
+EXPLAIN
+-> Sort: t.d, t.c, t.e  (rows=189)
+    -> Index lookup on t using PRIMARY (a=5), with index condition: ((t.c > 10) and (t.d < 3))  (rows=189)
+
+FLUSH STATUS;
+SELECT b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c, e;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c, e;
+EXPLAIN
+-> Sort: t.d, t.c, t.e  (rows=189)
+    -> Index lookup on t using PRIMARY (a=5), with index condition: ((t.c > 10) and (t.d < 3))  (rows=189)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ b, c, d FROM t WHERE a = 5 AND c > 10 AND d < 3 ORDER BY d, c, e;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT count(a), count(b), count(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Aggregate: count(t.a), count(t.b), count(t.c)  (rows=1)
+    -> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=20.7)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT count(a), count(b), count(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT count(a), count(b), count(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Aggregate: count(t.a), count(t.b), count(t.c)  (rows=1)
+    -> Filter: ((t.c > 10) and (t.d < 3))  (rows=21)
+        -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT count(a), count(b), count(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ count(a), count(b), count(c) FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Aggregate: count(t.a), count(t.b), count(t.c)  (rows=1)
+    -> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=20.7)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ count(a), count(b), count(c) FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT min(a), max(b), min(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Aggregate: min(t.a), max(t.b), min(t.c)  (rows=1)
+    -> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=20.7)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT min(a), max(b), min(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT min(a), max(b), min(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Aggregate: min(t.a), max(t.b), min(t.c)  (rows=1)
+    -> Filter: ((t.c > 10) and (t.d < 3))  (rows=21)
+        -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT min(a), max(b), min(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ min(a), max(b), min(c) FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Aggregate: min(t.a), max(t.b), min(t.c)  (rows=1)
+    -> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=20.7)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ min(a), max(b), min(c) FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT sum(a), sum(b), sum(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Aggregate: sum(t.a), sum(t.b), sum(t.c)  (rows=1)
+    -> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=20.7)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT sum(a), sum(b), sum(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT sum(a), sum(b), sum(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Aggregate: sum(t.a), sum(t.b), sum(t.c)  (rows=1)
+    -> Filter: ((t.c > 10) and (t.d < 3))  (rows=21)
+        -> Covering index lookup on t using PRIMARY (a=5)  (rows=189)
+
+FLUSH STATUS;
+SELECT sum(a), sum(b), sum(c)  FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ sum(a), avg(b), sum(c) FROM t WHERE a = 5 AND c > 10 AND d < 3;
+EXPLAIN
+-> Aggregate: sum(t.a), avg(t.b), sum(t.c)  (rows=1)
+    -> Filter: ((t.a = 5) and (t.c > 10) and (t.d < 3))  (rows=20.7)
+        -> Covering index skip scan on t using PRIMARY over a = 5, 10 < c  (rows=62)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ sum(a), avg(b), sum(c) FROM t WHERE a = 5 AND c > 10 AND d < 3;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	11
+Handler_read_last	0
+Handler_read_next	0
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = 'skip_scan=on';
+EXPLAIN FORMAT=TREE SELECT count(*) FROM t WHERE d < 2;;
+EXPLAIN
+-> Aggregate: count(0)  (rows=1)
+    -> Filter: (t.d < 2)  (rows=833)
+        -> Covering index skip scan on t using b over d < 2  (rows=833)
+
+FLUSH STATUS;
+SELECT count(*) FROM t WHERE d < 2;;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	10
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+set optimizer_switch = 'skip_scan=off';
+EXPLAIN FORMAT=TREE SELECT count(*) FROM t WHERE d < 2;;
+EXPLAIN
+-> Aggregate: count(0)  (rows=1)
+    -> Filter: (t.d < 2)  (rows=833)
+        -> Covering index scan on t using b  (rows=2500)
+
+FLUSH STATUS;
+SELECT count(*) FROM t WHERE d < 2;;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	0
+Handler_read_last	0
+Handler_read_next	2500
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.skip_scan, test.no_skip_scan]
+EXPLAIN FORMAT=TREE SELECT /*+ SKIP_SCAN(t) */ count(*) FROM t WHERE d < 2;;
+EXPLAIN
+-> Aggregate: count(0)  (rows=1)
+    -> Filter: (t.d < 2)  (rows=833)
+        -> Covering index skip scan on t using b over d < 2  (rows=833)
+
+FLUSH STATUS;
+SELECT /*+ SKIP_SCAN(t) */ count(*) FROM t WHERE d < 2;;
+SHOW STATUS LIKE 'handler_read%';
+Variable_name	Value
+Handler_read_first	1
+Handler_read_key	10
+Handler_read_last	0
+Handler_read_next	250
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+include/diff_tables.inc [test.hint_skip_scan, test.no_skip_scan]
+set optimizer_switch = default;
+DROP TABLE t;

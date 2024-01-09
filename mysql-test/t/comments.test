@@ -1,0 +1,130 @@
+
+#
+# Testing of comments
+#
+
+select 1+2/*hello*/+3;
+select 1 /* long
+multi line comment */;
+--error 1065
+ ;
+select 1 /*!32301 +1 */;
+select 1 /*!999999 +1 */;
+select 1--1;
+# Note that the following returns 4 while it should return 2
+# This is because the mysqld server doesn't parse -- comments
+select 1 --2
++1;
+select 1 # The rest of the row will be ignored
+;
+/* line with only comment */;
+
+# End of 4.1 tests
+
+#
+# Bug#25411 (trigger code truncated)
+#
+
+--error ER_PARSE_ERROR
+select 1/*!2*/;
+
+--error ER_PARSE_ERROR
+select 1/*!000002*/;
+
+select 1/*!999992*/;
+
+select 1 + /*!00000 2 */ + 3 /*!99999 noise*/ + 4;
+
+#
+# Bug#28779 (mysql_query() allows execution of statements with unbalanced
+# comments)
+#
+
+--disable_warnings
+drop table if exists table_28779;
+--enable_warnings
+
+create table table_28779 (a int);
+
+--error 1064
+prepare bar from "DELETE FROM table_28779 WHERE a = 7 OR 1=1/*' AND b = 'bar';";
+
+--error 1064
+prepare bar from "DELETE FROM table_28779 WHERE a = 7 OR 1=1/*' AND b = 'bar';*";
+
+--error 1064
+prepare bar from "DELETE FROM table_28779 WHERE a = 7 OR 1=1/*! AND 2=2;";
+
+--error 1064
+prepare bar from "DELETE FROM table_28779 WHERE a = 7 OR 1=1/*! AND 2=2;*";
+
+--error 1064
+prepare bar from "DELETE FROM table_28779 WHERE a = 7 OR 1=1/*!98765' AND b = 'bar';";
+
+--error 1064
+prepare bar from "DELETE FROM table_28779 WHERE a = 7 OR 1=1/*!98765' AND b = 'bar';*";
+
+drop table table_28779;
+
+--echo #
+--echo # WL#12099: Deprecate nested comments in 8.0
+--echo #
+
+SELECT 1 /*!99999 /* */ */;
+SELECT 2 /*!12345 /* */ */;
+SELECT 3 /*! /* */ */;
+
+
+--echo #
+--echo # Deprecation warning if the version number is not immediately followed
+--echo # by a white-space character.
+--echo #
+
+--echo # No whitespace. Should raise warning.
+DO 1 /*!80034+1*/;
+
+--echo # Horizontal tab (0x09). Should pass without warning.
+DO 1 /*!80034	+1*/;
+
+--echo # Line feed (0x0a). Should pass without warning.
+DO 1 /*!80034
++1*/;
+
+--echo # Vertical tab (0x0b). Should pass without warning.
+DO 1 /*!80034+1*/;
+
+--echo # Form feed (0x0c). Should pass without warning.
+DO 1 /*!80034+1*/;
+
+--echo # Carriage return (0x0d). Should pass without warning.
+DO 1 /*!80034+1*/;
+
+--echo # Space (0x20). Should pass without warning.
+DO 1 /*!80034 +1*/;
+
+--echo #
+--echo # Six digit version numbers.
+--echo #
+
+--echo # No whitespace after version number. Should be interpreted as five digit version number.
+# Interpreted as 1 + 1+0 + 0 in version 8.0.0 or higher (and not 1 + +0 + 0 in version 80.0.1 or higher).
+SELECT 1 + /*!800001+0 */ + 0 AS should_return_2;
+
+--echo # Horizontal tab (0x09). Should be interpreted as six digit version number.
+SELECT 1 /*!080100	+1*/ AS should_return_2;
+
+--echo # Line feed (0x0a). Should be interpreted as six digit version number.
+SELECT 1 /*!080100
++1*/ AS should_return_2;
+
+--echo # Vertical tab (0x0b). Should be interpreted as six digit version number.
+SELECT 1 /*!080100+1*/ AS should_return_2;
+
+--echo # Form feed (0x0c). Should be interpreted as six digit version number.
+SELECT 1 /*!080100+1*/ AS should_return_2;
+
+--echo # Carriage return (0x0d). Should be interpreted as six digit version number.
+SELECT 1 /*!080100+1*/ AS should_return_2;
+
+--echo # Space (0x20). Should be interpreted as six digit version number.
+SELECT 1 /*!080100 +1*/ AS should_return_2;

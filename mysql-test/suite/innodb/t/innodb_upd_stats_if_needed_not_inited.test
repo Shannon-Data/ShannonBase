@@ -1,0 +1,35 @@
+#
+# Test executing row_update_statistics_if_needed() when the stats
+# for the given table are not initialized
+#
+
+-- source include/have_debug.inc
+
+CREATE TABLE parent (
+	a INT PRIMARY KEY
+) ENGINE=INNODB;
+
+CREATE TABLE child (
+	a INT PRIMARY KEY,
+	FOREIGN KEY (a) REFERENCES parent(a) ON DELETE CASCADE
+) ENGINE=INNODB;
+
+INSERT INTO parent VALUES (1);
+INSERT INTO child VALUES (1);
+
+-- source include/restart_mysqld.inc
+
+SET SESSION DEBUG='+d,test_upd_stats_if_needed_not_inited';
+
+# this will cause row_update_statistics_if_needed() to be called for a table
+# that is not opened (child) and thus has table->stat_initialized set to FALSE
+DELETE FROM parent;
+
+SET SESSION DEBUG='-d,test_upd_stats_if_needed_not_inited';
+
+let SEARCH_PATTERN=test_upd_stats_if_needed_not_inited was executed;
+let SEARCH_FILE=$MYSQLTEST_VARDIR/log/mysqld.1.err;
+--source include/search_pattern.inc
+
+DROP TABLE child;
+DROP TABLE parent;

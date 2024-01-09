@@ -1,0 +1,9 @@
+[workers_0]
+replica-parallel-workers=00
+
+[workers_1]
+replica-parallel-workers=1
+
+[workers_8]
+replica-parallel-workers=8
+

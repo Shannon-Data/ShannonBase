@@ -1,0 +1,74 @@
+#
+# Performance Schema
+#
+# Verify that the Performance Schema correctly identifies normal and temporary
+# tables with non-standard names.
+
+# The server uses the table name prefix "#sql" for temporary and intermediate
+# tables, however user-defined tables having the "#sql" prefix are also permitted.
+# Independent of the table name, temporary or intermediate tables always have the
+# "#sql" prefix in the filename. (For non-temporary tables starting with "#",
+# the "#" is encoded to @0023 in the filename.)
+#
+# Given the ambiguity with temporary table names, the Performance Schema identifies
+# temporary tables tables either by the table category or by the filename.
+#
+
+--echo
+--echo #
+--echo # TEST 1: Temporary tables, no special prefix.
+--echo #
+--echo
+CREATE TEMPORARY TABLE sql_temp2_innodb (a int, b text) ENGINE=INNODB;
+INSERT INTO sql_temp2_innodb VALUES(1,'one');
+--echo
+--echo # Confirm that the temporary tables are ignored.
+--echo
+SELECT object_type, object_schema, object_name
+FROM performance_schema.objects_summary_global_by_type
+WHERE object_schema="test"
+ORDER BY object_name;
+--echo
+--echo # Drop the tables, verify that the table objects are not created.
+--echo
+DROP TABLE sql_temp2_innodb;
+--echo
+SELECT object_type, object_schema, object_name
+FROM performance_schema.objects_summary_global_by_type
+WHERE object_schema="test"
+ORDER BY object_name;
+
+--echo
+--echo #
+--echo # TEST 2: Temporary tables with the "#sql" prefix.
+--echo #
+--echo
+CREATE TEMPORARY TABLE `#sql_temp3_innodb` (a int, b text) ENGINE=INNODB;
+CHECK TABLE `#sql_temp3_innodb`;
+INSERT INTO `#sql_temp3_innodb` VALUES(1,'one');
+--echo
+--echo # Confirm that the temporary tables are ignored.
+--echo
+SELECT object_type, object_schema, object_name
+FROM performance_schema.objects_summary_global_by_type
+WHERE object_schema="test"
+ORDER BY object_name;
+--echo
+--echo # Drop the temporary tables.
+--echo
+DROP TABLE `#sql_temp3_innodb`;
+--echo
+--echo # Confirm that the temporary tables are still ignored.
+--echo
+SELECT object_type, object_schema, object_name
+FROM performance_schema.objects_summary_global_by_type
+WHERE object_schema="test"
+ORDER BY object_name;
+
+--echo
+--echo # Confirm that no tables remain;
+--echo
+SELECT object_type, object_schema, object_name
+FROM performance_schema.objects_summary_global_by_type
+WHERE object_schema="test"
+ORDER BY object_name;

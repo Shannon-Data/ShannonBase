@@ -1,0 +1,98 @@
+drop table if exists `£‘£±`;
+drop table if exists `£‘£≤`;
+drop table if exists `£‘£≥`;
+drop table if exists `£‘£¥`;
+drop table if exists `£‘£µ`;
+drop table if exists `£‘£∂`;
+drop table if exists `£‘£∑`;
+drop table if exists `£‘£∏`;
+drop table if exists `£‘£π`;
+SET NAMES ujis;
+SET character_set_database = ucs2;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1681	Updating 'character_set_database' is deprecated. It will be made read-only in a future release.
+SET collation_connection = ucs2_general_ci;
+Warnings:
+Warning	4079	'ucs2_general_ci' is a collation of the deprecated character set ucs2. Please consider using utf8mb4 with an appropriate collation instead.
+CREATE TABLE `£‘£±` (`£√£±` char(5), INDEX(`£√£±`)) DEFAULT CHARSET = ucs2 engine = innodb;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+CREATE TABLE `£‘£≤` (`£√£±` char(5), INDEX(`£√£±`)) DEFAULT CHARSET = ucs2 engine = innodb;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+CREATE TABLE `£‘£≥` (`£√£±` char(5), INDEX(`£√£±`)) DEFAULT CHARSET = ucs2 engine = innodb;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+CREATE TABLE `£‘£¥` (`£√£±` char(5), INDEX(`£√£±`)) DEFAULT CHARSET = ucs2 engine = myisam;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+CREATE TABLE `£‘£µ` (`£√£±` char(5), INDEX(`£√£±`)) DEFAULT CHARSET = ucs2 engine = myisam;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+CREATE TABLE `£‘£∂` (`£√£±` char(5), INDEX(`£√£±`)) DEFAULT CHARSET = ucs2 engine = myisam;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+CREATE TABLE `£‘£∑` (`£√£±` char(5), INDEX(`£√£±`)) DEFAULT CHARSET = ucs2 engine = MEMORY;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+CREATE TABLE `£‘£∏` (`£√£±` char(5), INDEX(`£√£±`)) DEFAULT CHARSET = ucs2 engine = MEMORY;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+CREATE TABLE `£‘£π` (`£√£±` char(5), INDEX(`£√£±`)) DEFAULT CHARSET = ucs2 engine = MEMORY;
+Warnings:
+Warning	1287	'ucs2' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+INSERT INTO `£‘£±` VALUES ('é±é≤é≥é¥éµ');
+INSERT INTO `£‘£≤` VALUES ('§¢§§§¶§®§™');
+INSERT INTO `£‘£≥` VALUES ('èÌ‹èÌ›èÌﬁèÌﬂèÌ‡');
+INSERT INTO `£‘£¥` VALUES ('é±é≤é≥é¥éµ');
+INSERT INTO `£‘£µ` VALUES ('§¢§§§¶§®§™');
+INSERT INTO `£‘£∂` VALUES ('èÌ‹èÌ›èÌﬁèÌﬂèÌ‡');
+INSERT INTO `£‘£∑` VALUES ('é±é≤é≥é¥éµ');
+INSERT INTO `£‘£∏` VALUES ('§¢§§§¶§®§™');
+INSERT INTO `£‘£π` VALUES ('èÌ‹èÌ›èÌﬁèÌﬂèÌ‡');
+UPDATE `£‘£±` SET `£√£±` = ('é∂é∑é∏éπé∫');
+UPDATE `£‘£≤` SET `£√£±` = ('§´§≠§Ø§±§≥');
+UPDATE `£‘£≥` SET `£√£±` = ('èÌ»èÌ…èÌ èÌÀèÌÃ');
+UPDATE `£‘£¥` SET `£√£±` = ('é∂é∑é∏éπé∫');
+UPDATE `£‘£µ` SET `£√£±` = ('§´§≠§Ø§±§≥');
+UPDATE `£‘£∂` SET `£√£±` = ('èÌ»èÌ…èÌ èÌÀèÌÃ');
+UPDATE `£‘£∑` SET `£√£±` = ('é∂é∑é∏éπé∫');
+UPDATE `£‘£∏` SET `£√£±` = ('§´§≠§Ø§±§≥');
+UPDATE `£‘£π` SET `£√£±` = ('èÌ»èÌ…èÌ èÌÀèÌÃ');
+SELECT * FROM `£‘£±`;
+£√£±
+é∂é∑é∏éπé∫
+SELECT * FROM `£‘£≤`;
+£√£±
+§´§≠§Ø§±§≥
+SELECT * FROM `£‘£≥`;
+£√£±
+èÌ»èÌ…èÌ èÌÀèÌÃ
+SELECT * FROM `£‘£¥`;
+£√£±
+é∂é∑é∏éπé∫
+SELECT * FROM `£‘£µ`;
+£√£±
+§´§≠§Ø§±§≥
+SELECT * FROM `£‘£∂`;
+£√£±
+èÌ»èÌ…èÌ èÌÀèÌÃ
+SELECT * FROM `£‘£∑`;
+£√£±
+é∂é∑é∏éπé∫
+SELECT * FROM `£‘£∏`;
+£√£±
+§´§≠§Ø§±§≥
+SELECT * FROM `£‘£π`;
+£√£±
+èÌ»èÌ…èÌ èÌÀèÌÃ
+DROP TABLE `£‘£±`;
+DROP TABLE `£‘£≤`;
+DROP TABLE `£‘£≥`;
+DROP TABLE `£‘£¥`;
+DROP TABLE `£‘£µ`;
+DROP TABLE `£‘£∂`;
+DROP TABLE `£‘£∑`;
+DROP TABLE `£‘£∏`;
+DROP TABLE `£‘£π`;

@@ -1,0 +1,117 @@
+<Include xmlns="http://schemas.microsoft.com/wix/2006/wi"
+         xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+<!--
+   Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+   
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License, version 2.0,
+   as published by the Free Software Foundation.
+
+   This program is also distributed with certain software (including
+   but not limited to OpenSSL) that is licensed under separate terms,
+   as designated in a particular file or component or in included license
+   documentation.  The authors of MySQL hereby grant you an additional
+   permission to link the program and your derivative works with the
+   separately licensed software that they have included with MySQL.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License, version 2.0, for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program; if not, write to the Free Software
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+-->
+
+    <!-- Include shortcuts -->
+    <DirectoryRef Id='INSTALLDIR'>
+    <Directory Id="DesktopFolder"/>
+    <Directory Id="ProgramMenuFolder">
+      <Directory Id="MysqlProgramMenuFolder" Name="MySQL">
+        <Directory Id="MysqlProductMenuFolder" Name="MySQL Server @MAJOR_VERSION@.@MINOR_VERSION@">
+          <Component Id="MysqlProductMenuFolder" Guid="*" Win64="yes">
+            <!-- Include a shortcut to the mysql command line client -->
+            <Shortcut Id="MysqlCommandLineShellShortcut"
+                      Name="MySQL @MAJOR_VERSION@.@MINOR_VERSION@ Command Line Client"
+                      Description="The MySQL Command Line Shell"
+                      Icon="Icon.MysqlCmdShell"
+                      Target="[D.bin]mysql.exe"
+                      Arguments='"--defaults-file=[INSTALLDIR]my.ini" "-uroot" "-p"'
+                      WorkingDirectory="D.bin"/>
+            <?if "@MAJOR_VERSION@.@MINOR_VERSION@" != "5.5" ?>
+            <!-- Include another shortcut to the mysql command line client with a different name -->
+              <Shortcut Id="MysqlCommandLineShellShortcutUnicode"
+                      Name="MySQL @MAJOR_VERSION@.@MINOR_VERSION@ Command Line Client - Unicode"
+                      Description="The MySQL Command Line Shell in UTF8 Mode"
+                      Icon="Icon.MysqlCmdShell"
+                      Target="[D.bin]mysql.exe"
+                      Arguments='"--defaults-file=[INSTALLDIR]my.ini" "-uroot" "-p" "--default-character-set=utf8mb4"'
+                      WorkingDirectory="D.bin"/>
+            <!-- Write Console settings for applications with this name to the registry -->
+              <RegistryKey Root="HKCU" 
+                           Key="Console\MySQL @MAJOR_VERSION@.@MINOR_VERSION@ Command Line Client - Unicode"
+                           ForceDeleteOnUninstall="yes">
+                <RegistryValue Type="string" Name="FaceName" Value="Lucida Console"/>
+                <RegistryValue Type="integer" Name="FontWeight" Value="400"/>
+              </RegistryKey>
+            <?endif ?>
+            <?if "@BUNDLE_MYSQL_CONFIGURATOR@" != "" ?>
+            <!-- Include another shortcut to the mysql configurator -->
+            <Shortcut Id="MysqlConfiguratorShortcut"
+                      Name="MySQL @MAJOR_VERSION@.@MINOR_VERSION@ Configurator"
+                      Description="A tool to help with the configuration of a MySQL Server installation"
+                      Icon="Icon.MysqlConfigurator"
+                      Target="[D.bin]mysql_configurator.exe"
+                      WorkingDirectory="D.bin">
+            </Shortcut>
+            <?endif ?>
+            <!-- Make sure this gets deleted on uninstall -->
+            <RemoveFolder Id="MysqlProductMenuFolder" Directory="MysqlProductMenuFolder" On="uninstall"/>
+            <RemoveFolder Id="MysqlProgramMenuFolder" Directory="MysqlProgramMenuFolder" On="uninstall"/>
+            <RegistryValue Root="HKCU" Key="Software\MySQL AB\MySQL Server @MAJOR_VERSION@.@MINOR_VERSION@" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    </DirectoryRef>
+    <Feature Id="ProgramMenu" Level="1" Display="hidden" ConfigurableDirectory="INSTALLDIR">
+    <ComponentRef Id="MysqlProductMenuFolder"/>
+    </Feature>    
+      
+    <!-- Registry -->
+    <!-- We still use "MySQL AB" because we don't want to break software that expects it -->
+    <DirectoryRef Id='TARGETDIR'>
+    <Component Id="RegKeys" Guid="*">
+      <RegistryKey
+        Id='MySQLKey'
+        Root='HKLM'
+        Key='SOFTWARE\MySQL AB\[ProductName]'
+        ForceDeleteOnUninstall='yes'>
+        <RegistryValue
+          Type='string'
+          Name='Location'
+          Value='[INSTALLDIR]'/>
+        <RegistryValue
+          Type="string"
+          Name="Version"
+          Value="[ProductVersion]"/>
+        <RegistryValue
+          Type="string"
+          Name="DataLocation"
+          Value="[DATADIR]"/>
+      </RegistryKey>
+    </Component>
+    </DirectoryRef>
+    <Feature
+    Id='RegKeys'
+    Display='hidden'
+    Level='1'>
+    <ComponentRef Id='RegKeys'/>
+    </Feature>
+
+</Include>
+
+
+

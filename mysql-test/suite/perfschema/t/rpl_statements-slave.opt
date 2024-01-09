@@ -1,0 +1,2 @@
+--binlog-format=mixed
+--replica-parallel-workers=0

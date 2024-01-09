@@ -1,0 +1,218 @@
+set names ascii;
+select 'e'='`';
+'e'='`'
+0
+select 'y'='~';
+'y'='~'
+0
+create table t1 (a char(1) character set ascii);
+insert into t1 (a) values (' '), ('a'), ('b'), ('c'), ('d'), ('e'), ('f'), ('g'), ('h'), ('i'), ('j'), ('k'), ('l'), ('m'), ('n'), ('o'), ('p'), ('q'), ('r'), ('s'), ('t'), ('u'), ('v'), ('w'), ('x'), ('y'), ('z'), ('A'), ('B'), ('C'), ('D'), ('E'), ('F'), ('G'), ('H'), ('I'), ('J'), ('K'), ('L'), ('M'), ('N'), ('O'), ('P'), ('Q'), ('R'), ('S'), ('T'), ('U'), ('V'), ('W'), ('X'), ('Y'), ('Z'), ('!'), ('@'), ('#'), ('$'), ('%'), ('^'), ('&'), ('*'), ('('), (')'), ('_'), ('+'), ('`'), ('~'), ('1'), ('2'), ('3'), ('4'), ('5'), ('6'), ('7'), ('8'), ('9'), ('0'), ('['), (']'), ('\\'), ('|'), ('}'), ('{'), ('"'), (':'), (''''), (';'), ('/'), ('.'), (','), ('?'), ('>'), ('<'), ('\n'), ('\t'), ('\a'), ('\f'), ('\v');
+select t1a.a, t1b.a from t1 as t1a, t1 as t1b where t1a.a=t1b.a order by binary t1a.a, binary t1b.a;
+a	a
+	
+			
+
+	
+
+!	!
+"	"
+#	#
+$	$
+%	%
+&	&
+'	'
+(	(
+)	)
+*	*
++	+
+,	,
+.	.
+/	/
+0	0
+1	1
+2	2
+3	3
+4	4
+5	5
+6	6
+7	7
+8	8
+9	9
+:	:
+;	;
+<	<
+>	>
+?	?
+@	@
+A	A
+A	a
+A	a
+B	B
+B	b
+C	C
+C	c
+D	D
+D	d
+E	E
+E	e
+F	F
+F	f
+F	f
+G	G
+G	g
+H	H
+H	h
+I	I
+I	i
+J	J
+J	j
+K	K
+K	k
+L	L
+L	l
+M	M
+M	m
+N	N
+N	n
+O	O
+O	o
+P	P
+P	p
+Q	Q
+Q	q
+R	R
+R	r
+S	S
+S	s
+T	T
+T	t
+U	U
+U	u
+V	V
+V	v
+V	v
+W	W
+W	w
+X	X
+X	x
+Y	Y
+Y	y
+Z	Z
+Z	z
+[	[
+\	\
+]	]
+^	^
+_	_
+`	`
+a	A
+a	A
+a	a
+a	a
+a	a
+a	a
+b	B
+b	b
+c	C
+c	c
+d	D
+d	d
+e	E
+e	e
+f	F
+f	F
+f	f
+f	f
+f	f
+f	f
+g	G
+g	g
+h	H
+h	h
+i	I
+i	i
+j	J
+j	j
+k	K
+k	k
+l	L
+l	l
+m	M
+m	m
+n	N
+n	n
+o	O
+o	o
+p	P
+p	p
+q	Q
+q	q
+r	R
+r	r
+s	S
+s	s
+t	T
+t	t
+u	U
+u	u
+v	V
+v	V
+v	v
+v	v
+v	v
+v	v
+w	W
+w	w
+x	X
+x	x
+y	Y
+y	y
+z	Z
+z	z
+{	{
+|	|
+}	}
+~	~
+Warnings:
+Warning	1287	'BINARY expr' is deprecated and will be removed in a future release. Please use CAST instead
+Warning	1287	'BINARY expr' is deprecated and will be removed in a future release. Please use CAST instead
+drop table t1;
+End of 5.0 tests.
+Start of 5.6 tests.
+#
+# Bugs#12635232: VALGRIND WARNINGS: IS_IPV6, IS_IPV4, INET6_ATON,
+# INET6_NTOA + MULTIBYTE CHARSET.
+#
+SET NAMES ascii;
+SELECT is_ipv4(inet_ntoa('1'));
+is_ipv4(inet_ntoa('1'))
+1
+SELECT is_ipv6(inet_ntoa('1'));
+is_ipv6(inet_ntoa('1'))
+0
+SELECT HEX(inet6_aton(inet_ntoa('1')));
+HEX(inet6_aton(inet_ntoa('1')))
+00000001
+SELECT inet6_ntoa(inet_ntoa('1'));
+inet6_ntoa(inet_ntoa('1'))
+NULL
+#
+# Bug#14040277 UNINITIALIZED VALUE REFERENCED IN STR_TO_IPV6
+#
+SELECT inet6_aton(soundex('a'));
+inet6_aton(soundex('a'))
+NULL
+#
+# Bug#19047425 UNINITIALISED VALUE IN STR_TO_IPV6
+#
+do is_ipv4_mapped(inet6_aton(convert(_ascii "a:" using ascii)));
+End of 5.6 tests.
+# Bug#24847620: Invalid ASCII values accepted into ASCII columns
+CREATE TABLE t1 (v VARCHAR(10) CHARACTER SET ASCII);
+INSERT INTO t1 VALUES('a');
+INSERT INTO t1 VALUES(0xe5);
+ERROR HY000: Incorrect string value: '\xE5' for column 'v' at row 1
+SELECT HEX(v) FROM t1;
+HEX(v)
+61
+DROP TABLE t1;

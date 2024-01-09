@@ -1,0 +1,33 @@
+# emacs backup files
+*~
+
+# Misc tags/ctags files
+tags
+TAGS
+TAGS_sorted_by_file
+
+# googletest files
+source_downloads
+
+# Vim swap files
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+
+# Configuration files for Visual Studio Code
+.vscode/
+
+build/
+datatool/
+datatools/
+__pycache__/
+heatwaveml.*
+automl.egg-info/
+_userconf.sh
+scalability_jobs_*
+# Configuration files for Eclipse
+.cproject
+.project
+.settings/
