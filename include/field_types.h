@@ -25,7 +25,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Shannon Data AI.
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
 /**
