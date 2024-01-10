@@ -20,8 +20,9 @@ for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
 
+Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 *****************************************************************************/
 
 /** @file handler/handler0alter.cc
@@ -720,6 +721,7 @@ static bool ok_to_rename_column(const Alter_inplace_info *ha_alter_info,
       ha_alter_info->alter_info->create_list);
 
   for (Field **fp = old_table->field; *fp; fp++) {
+    if ((*fp)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (!(*fp)->is_flag_set(FIELD_IS_RENAMED)) {
       continue;
     }
@@ -779,6 +781,7 @@ static bool ok_to_rename_column(const Alter_inplace_info *ha_alter_info,
           ha_alter_info->alter_info->create_list);
 
       for (Field **fp = old_table->field; *fp; fp++) {
+        if ((*fp)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
         if (!(*fp)->is_flag_set(FIELD_IS_RENAMED)) {
           continue;
         }
@@ -1287,7 +1290,8 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
 
     for (Field **fp = table->field; *fp; fp++) {
       if (!((*fp)->is_flag_set(FIELD_IS_RENAMED) ||
-            (*fp)->is_flag_set(FIELD_IS_DROPPED))) {
+            (*fp)->is_flag_set(FIELD_IS_DROPPED)) ||
+            ((*fp)->type() == MYSQL_TYPE_DB_TRX_ID)) {
         continue;
       }
 

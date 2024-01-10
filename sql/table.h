@@ -4309,7 +4309,9 @@ inline bool is_user_table(TABLE *table) {
   const char *name = table->s->table_name.str;
   return strncmp(name, tmp_file_prefix, tmp_file_prefix_length);
 }
-
+inline bool is_tmp_table(const char* name) {
+    return !strncmp(name, tmp_file_prefix, tmp_file_prefix_length);
+}
 bool is_simple_order(ORDER *order);
 
 uint add_pk_parts_to_sk(KEY *sk, uint sk_n, KEY *pk, uint pk_n,

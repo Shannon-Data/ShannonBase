@@ -1218,7 +1218,7 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
     db_trx_id_field.sql_type = MYSQL_TYPE_DB_TRX_ID;
     db_trx_id_field.is_nullable = db_trx_id_field.is_zerofill = false;
     db_trx_id_field.is_unsigned = true;
-    Field *sys_trx_id_field = make_field(db_trx_id_field, share, "DB_TRX_ID",
+    Field *sys_trx_id_field = make_field(db_trx_id_field, share, "MYSQL_TYPE_DB_TRX_ID",
                                                     MAX_DB_TRX_ID_WIDTH, rec_pos, null_pos, 0);
     sys_trx_id_field->set_field_index(field_nr);
     share->field[field_nr] = sys_trx_id_field;

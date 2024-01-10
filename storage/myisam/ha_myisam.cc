@@ -19,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #define MYSQL_SERVER 1
 #include "storage/myisam/ha_myisam.h"
@@ -272,6 +274,7 @@ int table2myisam(TABLE *table_arg, MI_KEYDEF **keydef_out,
     keydef[i].keysegs = pos->user_defined_key_parts;
     for (j = 0; j < pos->user_defined_key_parts; j++) {
       Field *field = pos->key_part[j].field;
+      if (field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       type = field->key_type();
       keydef[i].seg[j].flag = pos->key_part[j].key_part_flag;
 
@@ -333,6 +336,7 @@ int table2myisam(TABLE *table_arg, MI_KEYDEF **keydef_out,
     length = 0;
 
     for (field = table_arg->field; *field; field++) {
+      if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       if ((fieldpos = (*field)->offset(record)) >= recpos &&
           fieldpos <= minpos) {
         /* skip null fields */
