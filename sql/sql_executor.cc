@@ -618,6 +618,9 @@ static size_t record_prefix_size(const TABLE *table) {
       bitmap_is_set(table->read_set, (*f)->field_index()))
       prefix_end = std::max<const uchar *>(
           prefix_end, (*f)->field_ptr() + (*f)->pack_length());
+    if (type == MYSQL_TYPE_DB_TRX_ID)
+      prefix_end = std::max<const uchar *>(
+          prefix_end, (*f)->field_ptr() + (*f)->pack_length());
   }
 
   /*
@@ -701,13 +704,7 @@ bool set_record_buffer(TABLE *table, double expected_rows_to_fetch) {
   // Do not allocate space for more rows than the handler asked for.
   rows_in_buffer = std::min(rows_in_buffer, max_rows);
 
-  bool is_in_upgrade = dd::upgrade_57::in_progress();
-  bool is_system_objs = is_system_object(table->s->db.str, table->s->table_name.str);
-  size_t extra_size = 0; /*we dont add the extra file for system table or in upgrading phase.*/
-  if (!is_in_upgrade && !is_system_objs){
-    extra_size = rows_in_buffer * MAX_DB_TRX_ID_WIDTH;
-  }
-  const auto bufsize = Record_buffer::buffer_size(rows_in_buffer, record_size) + extra_size;
+  const auto bufsize = Record_buffer::buffer_size(rows_in_buffer, record_size);
   const auto ptr = pointer_cast<uchar *>(current_thd->alloc(bufsize));
   if (ptr == nullptr) return true; /* purecov: inspected */
 

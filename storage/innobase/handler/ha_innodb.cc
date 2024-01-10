@@ -8239,7 +8239,8 @@ static mysql_row_templ_t *build_template_field(
     if (index->is_clustered()) {
       templ->rec_field_no = templ->clust_rec_field_no;
     } else {
-      templ->rec_field_no = index->get_col_pos(i);
+      templ->rec_field_no = (field->type() != MYSQL_TYPE_DB_TRX_ID) ?
+                            index->get_col_pos(i) : ULINT_UNDEFINED;
     }
   } else {
     templ->clust_rec_field_no = v_no;
@@ -8288,8 +8289,9 @@ static mysql_row_templ_t *build_template_field(
     prebuilt->need_to_access_clustered = true;
   }
 
-  /* For spatial index, we need to access cluster index. */
-  if (dict_index_is_spatial(index)) {
+  /* For spatial index, we need to access cluster index. and ghost field also
+     need to do that. here to make sure again.*/
+  if (dict_index_is_spatial(index) || field->type() == MYSQL_TYPE_DB_TRX_ID) {
     prebuilt->need_to_access_clustered = true;
   }
 
@@ -8313,7 +8315,7 @@ static mysql_row_templ_t *build_template_field(
      * which will be passed to row_sel_field_store_in_mysql_format(). to store
      * DB_TRX_ID, then return to mysql used by rapid engine. */
     templ->type = DATA_SYS;
-    templ->rec_field_no = index->is_clustered() ? templ->col_no : ULINT_UNDEFINED ;
+    templ->rec_field_no = index->is_clustered() ? templ->col_no : ULINT_UNDEFINED;
     ut_ad (templ->col_no == 1 || templ->col_no == 2);
   }
   return (templ);
@@ -8413,8 +8415,12 @@ void ha_innobase::build_template(bool whole_row) {
   if (!m_prebuilt->mysql_template) {
     m_prebuilt->mysql_template = (mysql_row_templ_t *)ut::malloc_withkey(
         UT_NEW_THIS_FILE_PSI_KEY, (n_fields + 1) * sizeof(mysql_row_templ_t));
+  } else if (m_prebuilt->n_template < (n_fields + 1)) {//realloc, if field bigger
+    m_prebuilt->mysql_template = reinterpret_cast<mysql_row_templ_t *>(
+        ut::realloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, m_prebuilt->mysql_template ,
+                            (n_fields + 1) * sizeof(mysql_row_templ_t)));
+    assert (m_prebuilt->mysql_template != nullptr);
   }
-
 #if defined(UNIV_DEBUG) && !defined(UNIV_DEBUG_VALGRIND)
   /* zero-filling for compare contents for debug */
   memset(m_prebuilt->mysql_template, 0, (n_fields + 1) * sizeof(mysql_row_templ_t));
@@ -8640,18 +8646,6 @@ void ha_innobase::build_template(bool whole_row) {
     }
   }
 
-  /**there're two places using this template for accelerating, one: select, another place is for DML
-  in 'row_mysql_convert_row_to_innobase', it uses for build up innobase row format by using template.
-  This field is need in any queries, so that we dont use 'build_template_needs_field()' to check it.
-  only one we should know that the difference between index (secondary index)and primary key(cluster
-  index).
-  */
-  Field* db_trx_id_field = table->field[n_fields];
-  if (db_trx_id_field) {
-        mysql_row_templ_t *templ [[maybe_unused]] = build_template_field(
-        m_prebuilt, clust_index, index, table, db_trx_id_field, 1, 0);
-  }
-
   if (index != clust_index && m_prebuilt->need_to_access_clustered) {
     /* Change rec_field_no's to correspond to the clustered index
     record */
@@ -8660,6 +8654,19 @@ void ha_innobase::build_template(bool whole_row) {
 
       templ->rec_field_no = templ->clust_rec_field_no;
     }
+  }
+
+  /**there're two places using this template for accelerating, one: select, another place is for DML
+  in 'row_mysql_convert_row_to_innobase', it uses for build up innobase row format by using template.
+  This field is need in any queries, so that we dont use 'build_template_needs_field()' to check it.
+  only one we should know that the difference between index (secondary index)and primary key(cluster
+  index). append the ghost field template at the end.
+  */
+  Field* db_trx_id_field = table->field[n_fields];
+  if (db_trx_id_field) {
+    assert(db_trx_id_field->type() == MYSQL_TYPE_DB_TRX_ID);
+    mysql_row_templ_t *templ [[maybe_unused]] = build_template_field(
+      m_prebuilt, clust_index, index, table, db_trx_id_field, 1, 0);
   }
 }
 
