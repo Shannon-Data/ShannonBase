@@ -212,7 +212,7 @@ NULL	NULL	NULL	NULL-1
 explain 
 select * from t4 where (a ='b-1' or a='bb-1') and b IS NULL and (c='c-1' or c='cc-2');
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t4	NULL	range	idx1	idx1	89	NULL	21	100.00	Using where; Using MRR
+1	SIMPLE	t4	NULL	range	idx1	idx1	89	NULL	20	100.00	Using where; Using MRR
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t4`.`a` AS `a`,`test`.`t4`.`b` AS `b`,`test`.`t4`.`c` AS `c`,`test`.`t4`.`filler` AS `filler` from `test`.`t4` where (((`test`.`t4`.`a` = 'b-1') or (`test`.`t4`.`a` = 'bb-1')) and (`test`.`t4`.`b` is null) and ((`test`.`t4`.`c` = 'c-1') or (`test`.`t4`.`c` = 'cc-2')))
 select * from t4 where (a ='b-1' or a='bb-1') and b IS NULL and (c='c-1' or c='cc-2');
