@@ -842,6 +842,7 @@ int prepare_record(TABLE *const table, const MY_BITMAP *cols,
   bitmap_set_all(table->write_set);
 
   for (Field **field_ptr = table->field; *field_ptr; ++field_ptr) {
+    if ((*field_ptr)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     uint field_index = (uint)(field_ptr - table->field);
     if (field_index >= cols->n_bits || !bitmap_is_set(cols, field_index)) {
       Field *const f = *field_ptr;

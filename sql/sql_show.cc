@@ -2051,7 +2051,8 @@ bool store_create_info(THD *thd, Table_ref *table_list, String *packet,
 
   for (ptr = first_field; (field = *ptr); ptr++) {
     // Skip hidden system fields.
-    if (field->is_hidden_by_system()) continue;
+    if (field->is_hidden_by_system() ||
+       (field->type() == MYSQL_TYPE_DB_TRX_ID)) continue;
 
     const enum_field_types field_type = field->real_type();
 
@@ -4028,6 +4029,7 @@ static int get_schema_tmp_table_columns_record(THD *thd, Table_ref *tables,
   }
 
   for (; (field = *ptr); ptr++) {
+    if (field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     const uchar *pos;
     char tmp[MAX_FIELD_WIDTH];
     String type(tmp, sizeof(tmp), system_charset_info);
