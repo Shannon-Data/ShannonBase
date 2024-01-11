@@ -1154,9 +1154,11 @@ create temporary table t1(f1 int, index(f1));
 show columns from t1;
 Field	Type	Null	Key	Default	Extra
 f1	int	YES	MUL	NULL	NULL
+DB_TRX_ID	DB_TRX_ID	NO		NULL	NULL
 describe t1;
 Field	Type	Null	Key	Default	Extra
 f1	int	YES	MUL	NULL	NULL
+DB_TRX_ID	DB_TRX_ID	NO		NULL	NULL
 show indexes from t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
 t1	1	f1	1	f1	A	0	NULL	NULL	YES	BTREE			YES	NULL
