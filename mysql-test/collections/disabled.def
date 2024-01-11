@@ -132,3 +132,6 @@ main.show_check_cs_myisam : WL#123456 2024-01-05 shannonbase disable mysisam wil
 main.alter_sync_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
 main.ctype_latin2_ch_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
 main.ctype_utf8mb4_myisam: WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.mix2_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.almost_full : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed

@@ -75,6 +75,7 @@ f2	int	YES		NULL	NULL
 f3	int	YES		NULL	INVISIBLE
 f4	int	YES		NULL	VIRTUAL GENERATED INVISIBLE
 f5	int	YES		NULL	STORED GENERATED INVISIBLE
+DB_TRX_ID	DB_TRX_ID	NO		NULL	NULL
 SHOW EXTENDED COLUMNS FROM temp;
 Field	Type	Null	Key	Default	Extra
 f1	int	YES		NULL	NULL
@@ -82,6 +83,7 @@ f2	int	YES		NULL	NULL
 f3	int	YES		NULL	INVISIBLE
 f4	int	YES		NULL	VIRTUAL GENERATED INVISIBLE
 f5	int	YES		NULL	STORED GENERATED INVISIBLE
+DB_TRX_ID	DB_TRX_ID	NO		NULL	NULL
 DROP TABLE temp;
 #------------------------------------------------------------------------
 # Test case to verify wildcard expansion in SELECT operation on table
@@ -764,6 +766,7 @@ t2	CREATE TEMPORARY TABLE `t2` (
 SHOW COLUMNS FROM t2;
 Field	Type	Null	Key	Default	Extra
 f2	int	YES		NULL	NULL
+DB_TRX_ID	DB_TRX_ID	NO		NULL	NULL
 SELECT * FROM t2;
 f2
 88
@@ -781,6 +784,7 @@ SHOW COLUMNS FROM t2;
 Field	Type	Null	Key	Default	Extra
 f1	int	NO		NULL	NULL
 f2	int	YES		NULL	NULL
+DB_TRX_ID	DB_TRX_ID	NO		NULL	NULL
 SELECT * FROM t2 ORDER BY f1;
 f1	f2
 10	88
@@ -798,6 +802,7 @@ SHOW COLUMNS FROM t2;
 Field	Type	Null	Key	Default	Extra
 f1	int	YES		NULL	INVISIBLE
 f2	int	YES		NULL	NULL
+DB_TRX_ID	DB_TRX_ID	NO		NULL	NULL
 SELECT * FROM t2;
 f2
 88
