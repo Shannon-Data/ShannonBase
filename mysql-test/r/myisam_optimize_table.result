@@ -26,10 +26,10 @@ Key:  1:  Keyblocks used:   3%  Packed:    0%  Max levels:  1
 Total:    Keyblocks used:   3%  Packed:    0%
 
 - check records and index references
-Records:                 3    M.recordlength:       31   Packed:            98%
+Records:                 3    M.recordlength:       39   Packed:            98%
 Recordspace used:       98%   Empty space:           1%  Blocks/Record:   1.33
 Record blocks:           4    Delete blocks:         0
-Record data:            95    Deleted data:          0
+Record data:           119    Deleted data:          0
 Lost space:              2    Linkdata:             23
 OPTIMIZE TABLE t1;
 Table	Op	Msg_type	Msg_text
@@ -45,10 +45,10 @@ Key:  1:  Keyblocks used:   3%  Packed:    0%  Max levels:  1
 Total:    Keyblocks used:   3%  Packed:    0%
 
 - check records and index references
-Records:                 3    M.recordlength:       31   Packed:            98%
+Records:                 3    M.recordlength:       39   Packed:            98%
 Recordspace used:      100%   Empty space:           0%  Blocks/Record:   1.00
 Record blocks:           3    Delete blocks:         0
-Record data:            95    Deleted data:          0
+Record data:           119    Deleted data:          0
 Lost space:              0    Linkdata:              9
 SELECT * FROM test_bug30869674.t1;
 id	name	description	count
