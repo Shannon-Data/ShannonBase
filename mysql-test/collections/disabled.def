@@ -119,19 +119,16 @@ group_replication.gr_xa_prepare_failure_before_gtid_externalization @windows : B
 group_replication.gr_xa_rollback_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 
 # shannonbase disabled we dont support myisam engine and dont test it anaymore
-main.alter_table_myisam : WL#12356 2024-01-05 shannonbase disable myisam will be fixed
-main.dd_is_gcov_myisam : WL#1234 2024-01-05 shannonbase disable myisam will be fixed
-main.system_tables_myisam : WL#123456 2024-01-05 shannonbase disable myisam will be fixed
-main.myisam_recover : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
 main.grant4_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
-main.index_merge_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
-main.information_schema_statistics_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
-main.ctype_latin1_de_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
-main.myisam-blob : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
-main.show_check_cs_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
-main.alter_sync_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
-main.ctype_latin2_ch_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
-main.ctype_utf8mb4_myisam: WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
-main.mix2_myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
 main.myisam : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.mysqlpump_bugs : WL#123456 shannonbase disabled it needs perl 5.34.0
 main.almost_full : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.dd_schema_definition_after_upgrade_57_debug : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.dd_upgrade_partition : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.partition_prefixkey_upgrade : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.dictionary_tablespace : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.index_skip_scan_end_range : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.mysql_load_data_local_dir : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.dd_upgrade_error : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.mysqld_safe : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.upgrade_system_tables : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
