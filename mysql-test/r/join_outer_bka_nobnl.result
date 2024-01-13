@@ -20,9 +20,9 @@ grp	a	c	id	a	c	d
 EXPLAIN FORMAT=tree select t1.*,t2.* from t1 left join t2 on (t1.a=t2.a) order by t1.grp,t1.a,t2.c;
 EXPLAIN
 -> Sort: t1.grp, t1.a, t2.c
-    -> Stream results  (cost=3.67 rows=7)
-        -> Nested loop left join  (cost=3.67 rows=7)
-            -> Table scan on t1  (cost=1.22 rows=7)
+    -> Stream results  (cost=3.68 rows=7)
+        -> Nested loop left join  (cost=3.68 rows=7)
+            -> Table scan on t1  (cost=1.23 rows=7)
             -> Single-row index lookup on t2 using PRIMARY (a=t1.a)  (cost=0.264 rows=1)
 
 select t1.*,t2.* from t1 left join t2 on (t1.a=t2.a) order by t1.grp,t1.a,t2.c;
