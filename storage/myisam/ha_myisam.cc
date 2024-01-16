@@ -760,6 +760,7 @@ int ha_myisam::open(const char *name, int mode, uint test_if_locked,
       goto err;
       /* purecov: end */
     }
+    recs = (recs == file->s->base.fields) ? recs : (recs -1);
     if (check_definition(keyinfo, recinfo, table->s->keys, recs,
                          file->s->keyinfo, file->s->rec, file->s->base.keys,
                          file->s->base.fields, true)) {

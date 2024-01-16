@@ -610,14 +610,14 @@ insert t1 values (1, "aaa", "bbb"), (NULL, "", "ccccc"), (0, NULL, "");
 insert t2 select * from t1;
 checksum table t1, t2, t3 quick;
 Table	Checksum
-test.t1	2948697075
+test.t1	1636672967
 test.t2	NULL
 test.t3	NULL
 Warnings:
 Error	1146	Table 'test.t3' doesn't exist
 checksum table t1, t2, t3;
 Table	Checksum
-test.t1	2948697075
+test.t1	1636672967
 test.t2	2948697075
 test.t3	NULL
 Warnings:
@@ -916,7 +916,7 @@ Table	Op	Msg_type	Msg_text
 test.t1	analyze	status	OK
 SHOW TABLE STATUS LIKE 't1';
 Name	Engine	Version	Row_format	Rows	Avg_row_length	Data_length	Max_data_length	Index_length	Data_free	Auto_increment	Create_time	Update_time	Check_time	Collation	Checksum	Create_options	Comment
-t1	MyISAM	10	Dynamic	2	#	#	#	#	140	#	#	#	#	#	#		
+t1	MyISAM	10	Dynamic	2	#	#	#	#	196	#	#	#	#	#	#		
 CHECK TABLE t1 EXTENDED;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
@@ -988,7 +988,7 @@ Table	Op	Msg_type	Msg_text
 test.t1	analyze	status	OK
 SHOW TABLE STATUS LIKE 't1';
 Name	Engine	Version	Row_format	Rows	Avg_row_length	Data_length	Max_data_length	Index_length	Data_free	Auto_increment	Create_time	Update_time	Check_time	Collation	Checksum	Create_options	Comment
-t1	MyISAM	10	Dynamic	2	#	#	#	#	140	#	#	#	#	#	#		
+t1	MyISAM	10	Dynamic	2	#	#	#	#	196	#	#	#	#	#	#		
 CHECK TABLE t1 EXTENDED;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
@@ -1003,7 +1003,7 @@ Table	Op	Msg_type	Msg_text
 test.t1	analyze	status	Table is already up to date
 SHOW TABLE STATUS LIKE 't1';
 Name	Engine	Version	Row_format	Rows	Avg_row_length	Data_length	Max_data_length	Index_length	Data_free	Auto_increment	Create_time	Update_time	Check_time	Collation	Checksum	Create_options	Comment
-t1	MyISAM	10	Dynamic	2	#	#	#	#	140	#	#	#	#	#	#		
+t1	MyISAM	10	Dynamic	2	#	#	#	#	196	#	#	#	#	#	#		
 SELECT _id FROM t1;
 _id
 8
@@ -2034,7 +2034,7 @@ i VARCHAR(1), j VARCHAR(1), k VARCHAR(1)) CHECKSUM=1;
 INSERT INTO t1 VALUES('', '', '', '', '', '', '', '', '');
 CHECKSUM TABLE t1 QUICK;
 Table	Checksum
-test.t1	467455460
+test.t1	3183374462
 CHECKSUM TABLE t1 EXTENDED;
 Table	Checksum
 test.t1	467455460
@@ -2439,7 +2439,7 @@ MyISAM file:         MYSQLD_DATADIR/test/t1
 Record format:       Packed
 Collation:           utf8mb3_general_ci (33)
 Data records:                    0  Deleted blocks:                 0
-Recordlength:                   94
+Recordlength:                  102
 
 table description:
 Key Start Len Index   Type
@@ -2672,7 +2672,7 @@ CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text
 test.t1	check	warning	1 client is using or hasn't closed the table properly
 test.t1	check	error	Size of indexfile is: 1024        Should be: 2048
-test.t1	check	warning	Size of datafile is: 14       Should be: 7
+test.t1	check	warning	Size of datafile is: 26       Should be: 7
 test.t1	check	error	Corrupt
 # Alter table should report error and not auto-repair the table.
 ALTER TABLE t1 ENGINE = MyISAM;
@@ -2682,7 +2682,7 @@ Table	Op	Msg_type	Msg_text
 test.t1	check	warning	Table is marked as crashed
 test.t1	check	warning	1 client is using or hasn't closed the table properly
 test.t1	check	error	Size of indexfile is: 1024        Should be: 2048
-test.t1	check	warning	Size of datafile is: 14       Should be: 7
+test.t1	check	warning	Size of datafile is: 26       Should be: 7
 test.t1	check	error	Corrupt
 DROP TABLE t1;
 #
