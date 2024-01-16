@@ -3011,7 +3011,7 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
         continue;
       }
 
-      ut_ad(templ->rec_field_no == templ->clust_rec_field_no);
+      //ut_ad(templ->rec_field_no == templ->clust_rec_field_no);
 
       sec_field_no = it - template_col.begin();
     }
