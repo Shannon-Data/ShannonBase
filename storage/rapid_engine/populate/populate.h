@@ -32,10 +32,11 @@
 #define __SHANNONBASE_POPULATE_H__
 
 #include "my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase{
 namespace Populate{
-uint64 population_buffer_size;
+ uint64 population_buffer_size {ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};
 } //ns:populate
 } //ns:shannonbase
 #endif //__SHANNONBASE_POPULATE_H__
