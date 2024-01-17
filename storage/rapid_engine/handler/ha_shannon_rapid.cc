@@ -148,7 +148,6 @@ ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
     : handler(hton, table_share_arg) {
 }
 int ha_rapid::create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
-  ut_ad(false);
   return HA_ERR_WRONG_COMMAND;
 }
 int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, const dd::Table * table_def) {

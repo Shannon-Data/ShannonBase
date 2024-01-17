@@ -685,7 +685,8 @@ bool is_system_object(const char* db_name, const char* table_name) {
          strstr(table_name, "innodb_dynamic_metadata") ||
          strstr(table_name, "innodb_table_stats") ||
          strstr(table_name, "innodb_index_stats") ||
-         strstr(table_name, "innodb_ddl_log");
+         strstr(table_name, "innodb_ddl_log") ||
+         is_tmp_table(table_name) /**not temp table, #sqlxxxx*/;
 }
 /**
   Initialize key_part_flag from source field.

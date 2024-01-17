@@ -119,7 +119,18 @@ group_replication.gr_xa_prepare_failure_before_gtid_externalization @windows : B
 group_replication.gr_xa_rollback_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 
 # shannonbase disabled we dont support myisam engine and dont test it anaymore
-main.alter_table_myisam : WL#12356 2024-01-05 shannonbase disable myisam will be fixed
-main.dd_is_gcov_myisam : WL#1234 2024-01-05 shannonbase disable myisam will be fixed
-main.system_tables_myisam : WL#123456 2024-01-05 shannonbase disable myisam will be fixed
-main.myisam_recover : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.mysqlpump_bugs : WL#123456 shannonbase disabled it needs perl 5.34.0
+main.almost_full : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.mysql_load_data_local_dir : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+main.mysqld_safe : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+mian.shutdown_report : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.lock_impl_to_expl : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.log_5_7_9_case1 : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.log_5_7_9_case4 : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.log_5_7_9_case5 : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.log_5_7_9_case6 : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.log_first_rec_group : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.partition_upgrade_5727_lin_lctn_0_debug : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.partition_upgrade_5727_lin_lctn_1_debug : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.upgrade_compressed_recv : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+innodb.upgrade_geometry_56 : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed

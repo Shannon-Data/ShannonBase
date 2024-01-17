@@ -618,6 +618,9 @@ static size_t record_prefix_size(const TABLE *table) {
       bitmap_is_set(table->read_set, (*f)->field_index()))
       prefix_end = std::max<const uchar *>(
           prefix_end, (*f)->field_ptr() + (*f)->pack_length());
+    if (type == MYSQL_TYPE_DB_TRX_ID)
+      prefix_end = std::max<const uchar *>(
+          prefix_end, (*f)->field_ptr() + (*f)->pack_length());
   }
 
   /*
