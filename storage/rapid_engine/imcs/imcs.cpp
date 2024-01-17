@@ -89,7 +89,7 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
   //store the string but using string id instead. offset[] = {0, 1, 9, 17, 21, 29}
   uint data_len = 1 + 8 + 8 + 4 + 8;
   //start to pack the data, then writes into memory. 
-  std::unique_ptr<uchar> data (new uchar[data_len]);
+  std::unique_ptr<uchar[]> data (new uchar[data_len]);
   int8 info {0};
   int64 sum_ptr{0};
   if (field->is_real_null())
