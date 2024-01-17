@@ -11730,7 +11730,7 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
 
   if (cleanup()) return true;
 
-  my_ok(thd);
+  my_ok(thd, thd->get_sent_row_count());
   return false;
 }
 

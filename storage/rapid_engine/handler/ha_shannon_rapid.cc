@@ -376,6 +376,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
       }
     }
     ha_statistic_increment(&System_status_var::ha_read_rnd_count);
+    current_thd->inc_sent_row_count(1);
     if (tmp == HA_ERR_RECORD_DELETED && !thd->killed) continue;
   }
   table_arg.file->ha_rnd_end();
@@ -557,7 +558,7 @@ static int ShannonStartConsistentSnapshot(handlerton* hton, THD* thd) {
 /*********************************************************************
  *  Start to define the sys var for shannonbase rapid.
  *********************************************************************/
-static void shannonbase_rapid_populate_buffer_size_update(
+static void shannonbase_rapid_populate_buffer_size_update [[maybe_unused]](
     /*===========================*/
     THD *thd,                       /*!< in: thread handle */
     SYS_VAR *var [[maybe_unused]],  /*!< in: pointer to system variable */
@@ -579,7 +580,7 @@ static void shannonbase_rapid_populate_buffer_size_update(
   ShannonBase::Populate::population_buffer_size = in_val;
 }
 
-static void rapid_memory_size_update(
+static void rapid_memory_size_update [[maybe_unused]](
     /*===========================*/
     THD *thd,                       /*!< in: thread handle */
     SYS_VAR *var [[maybe_unused]],  /*!< in: pointer to system variable */
@@ -603,12 +604,14 @@ static void rapid_memory_size_update(
 
 /** Here we export shannonbase status variables to MySQL. */
 static SHOW_VAR shannonbase_rapid_status_variables[] = {
-    {"rapid_memory_size", (char*)&ShannonBase::Imcs::rapid_memory_size,
+    {"rapid_memory_size_max", (char*)&ShannonBase::Imcs::rapid_memory_size,
                           SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
-    {"rapid_populate_buffer_size", (char*)&ShannonBase::Populate::population_buffer_size,
+    {"rapid_populate_buffer_size_max", (char*)&ShannonBase::Populate::population_buffer_size,
                                   SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
+    {"rapid_chunk_size_max", (char*)&ShannonBase::Imcs::rapid_chunk_size,
+                          SHOW_LONG, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}
 };
     
@@ -626,28 +629,38 @@ static SHOW_VAR shannonbase_rapid_status_variables_export[] = {
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
 static MYSQL_SYSVAR_ULONG(
-    rapid_memory_size, 
+    rapid_memory_size_max,
     ShannonBase::Imcs::rapid_memory_size,
     PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
     "Number of memory size that used for rapid engine, and it must "
     "not be oversize half of physical mem size.",
-    nullptr, rapid_memory_size_update,
-    ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE, 0,
+    nullptr, nullptr,
+    ShannonBase::SHANNON_MAX_MEMRORY_SIZE, 0,
     ShannonBase::SHANNON_MAX_MEMRORY_SIZE, 0);
 
-static MYSQL_SYSVAR_ULONG(rapid_populate_buffer_size,
-                           ShannonBase::Populate::population_buffer_size,
-                          PLUGIN_VAR_RQCMDARG,
+static MYSQL_SYSVAR_ULONG(rapid_populate_buffer_size_max,
+                          ShannonBase::Populate::population_buffer_size,
+                          PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                           "Number of populate buffer size that must not be 10% "
                           "rapid_populate_buffer size.",
-                          NULL, shannonbase_rapid_populate_buffer_size_update, 
-                          ShannonBase::SHANNON_DEFAULT_POPULATION_BUFFER_SIZE, 0,
+                          NULL, nullptr,
+                          ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE, 0,
                           ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE,0);
+
+static MYSQL_SYSVAR_ULONG(
+    rapid_chunk_size_max,
+    ShannonBase::Imcs::rapid_chunk_size,
+    PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+    "Number of chunk memory size that used for rapid engine.",
+    nullptr, nullptr,
+    ShannonBase::SHANNON_CHUNK_SIZE, 0,
+    ShannonBase::SHANNON_CHUNK_SIZE, 0);
 
 //System variables of Shannonbase
 static struct SYS_VAR *shannonbase_rapid_system_variables[] = {
-    MYSQL_SYSVAR(rapid_memory_size),
-    MYSQL_SYSVAR(rapid_populate_buffer_size),
+    MYSQL_SYSVAR(rapid_memory_size_max),
+    MYSQL_SYSVAR(rapid_populate_buffer_size_max),
+    MYSQL_SYSVAR(rapid_chunk_size_max),
     nullptr,
 };
 

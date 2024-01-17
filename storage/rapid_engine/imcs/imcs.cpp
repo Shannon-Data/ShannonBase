@@ -39,7 +39,8 @@
 namespace ShannonBase{
 namespace Imcs{
 
-unsigned long rapid_memory_size {SHANNON_DEFAULT_MEMRORY_SIZE};
+unsigned long rapid_memory_size {SHANNON_MAX_MEMRORY_SIZE};
+unsigned long rapid_chunk_size {SHANNON_CHUNK_SIZE};
 Imcs* Imcs::m_instance {nullptr};
 std::once_flag Imcs::one;
 

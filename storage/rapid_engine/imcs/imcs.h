@@ -45,6 +45,7 @@ extern std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dicti
 namespace Imcs{
 //the memory size of allocation for imcs to store the loaded data.
 extern unsigned long rapid_memory_size;
+extern unsigned long rapid_chunk_size;
 class Cu;
 class Imcu;
 class Imcs :public MemoryObject {
