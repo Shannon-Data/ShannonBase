@@ -69,7 +69,7 @@ class Chunk : public MemoryObject{
         //field no.
         uint16 m_field_no{0};
         //statistics data.
-        std::atomic<long long> m_max{0}, m_min{0}, m_median{0}, m_middle{0}, m_avg{0}, m_rows{0}, m_sum{0};
+        std::atomic<ulonglong> m_max{0}, m_min{0}, m_median{0}, m_middle{0}, m_avg{0}, m_rows{0}, m_sum{0};
         //pointer to the next or prev.
         Chunk* m_next_chunk{nullptr}, *m_prev_chunk {nullptr};
         //data type in mysql.

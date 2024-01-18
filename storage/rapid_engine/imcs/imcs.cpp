@@ -88,18 +88,23 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
   //start writing the data, at first, assemble the data we want to write. the layout of data
   //pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr| data]. And the string we dont
   //store the string but using string id instead. offset[] = {0, 1, 9, 17, 21, 29}
-  uint data_len = 1 + 8 + 8 + 4 + 8;
+  uint data_len = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
+  data_len += SHANNON_SUMPTR_BYTE_LEN + SHANNON_DATA_BYTE_LEN;
   //start to pack the data, then writes into memory. 
   std::unique_ptr<uchar[]> data (new uchar[data_len]);
   int8 info {0};
-  int64 sum_ptr{0};
+  int64 sum_ptr{0}, offset{0};
   if (field->is_real_null())
    info |= DATA_NULL_FLAG_MASK;
-  memcpy(data.get(), &info, 1);
-  memcpy(data.get() + 1, &context->m_extra_info.m_trxid, 8);
-  memcpy(data.get() + 9, &context->m_extra_info.m_pk, 8);
-  memcpy(data.get() + 17, &sum_ptr, 4);
-  double data_val {0};
+  memcpy(data.get() + offset, &info, SHANNON_INFO_BYTE_LEN);
+  offset += SHANNON_INFO_BYTE_LEN;
+  memcpy(data.get() + offset, &context->m_extra_info.m_trxid, SHANNON_TRX_ID_BYTE_LEN);
+  offset += SHANNON_TRX_ID_BYTE_LEN;
+  memcpy(data.get() + offset, &context->m_extra_info.m_pk, SHANNON_ROWID_BYTE_LEN);
+  offset += SHANNON_ROWID_BYTE_LEN;
+  memcpy(data.get() + offset, &sum_ptr, SHANNON_SUMPTR_BYTE_LEN);
+  offset += SHANNON_SUMPTR_BYTE_LEN;
+  ulonglong data_val {0};
   if (!field->is_real_null()) {//not null
     switch (field->type()) {
       case MYSQL_TYPE_BLOB:
@@ -108,11 +113,9 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
         String buf;
         buf.set_charset(field->charset());
         field->val_str(&buf);
-        if (loaded_dictionaries.find(field->table->s->db.str) != loaded_dictionaries.end()) {
-          Compress::Dictionary* dict = loaded_dictionaries[field->table->s->db.str].get();
-          data_val = dict->Store(buf);
-        } else
-          ut_ad(false);
+        Compress::Dictionary* dict = m_cus[key_name]->Local_dictionary();
+        ut_ad(dict);
+        data_val = dict->Store(buf);
       } break;
       case MYSQL_TYPE_INT24:
       case MYSQL_TYPE_LONG:
@@ -128,7 +131,7 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
       } break;
       default: data_val = field->val_real();
     }
-    memcpy(data.get() + 21, &data_val, sizeof(data_val));
+    memcpy(data.get() + offset, &data_val, SHANNON_DATA_BYTE_LEN);
   }
 
   if (!m_cus[key_name]->Write_data(context, data.get(), data_len)) return 1;
@@ -161,7 +164,9 @@ uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
       if (field_ptr->type() == MYSQL_TYPE_BLOB || field_ptr->type() == MYSQL_TYPE_STRING
           || field_ptr->type() == MYSQL_TYPE_VARCHAR) { //read the data
         String str;
-        context->m_local_dict->Get(data, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
+        Compress::Dictionary* dict = m_cus[key]->Local_dictionary();
+        ut_ad(dict);
+        dict->Get(data, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
         if (str.length())
           field_ptr->set_notnull();
         field_ptr->store(str.c_ptr(), str.length(), &my_charset_bin);
@@ -176,13 +181,17 @@ uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
         field_ptr->set_null();
       else {
         field_ptr->set_notnull();
-        double val = *(double*) (buff + 21);
+        uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
+              data_offset += SHANNON_SUMPTR_BYTE_LEN;
+        ulonglong val = *(ulonglong*) (buff + data_offset);
         switch (field_ptr->type()) {
           case MYSQL_TYPE_BLOB:
           case MYSQL_TYPE_STRING:
-          case MYSQL_TYPE_VARCHAR: {
+          case MYSQL_TYPE_VARCHAR: { //if string, stores its stringid, and gets from local dictionary.
             String str;
-            context->m_local_dict->Get(val, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
+            Compress::Dictionary* dict = m_cus[key]->Local_dictionary();
+            ut_ad(dict);
+            dict->Get(val, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
             field_ptr->store(str.c_ptr(), str.length(), &my_charset_bin);
           }break;
           case MYSQL_TYPE_INT24:

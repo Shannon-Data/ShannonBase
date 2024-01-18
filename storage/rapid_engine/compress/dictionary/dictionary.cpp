@@ -30,32 +30,52 @@
 #include <sstream>
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/compress/algorithms.h"
 
 namespace ShannonBase{
 namespace Compress {
 
-uint32 Dictionary::Store(String& str, Dictionary_algo_t algo) {
-  //returns dictionary id.
-  std::ostringstream oss;
-  if (str.c_ptr()) {
-    oss << str.c_ptr();
+uint32 Dictionary::Store(String& str, Encoding_type type) {
+  //returns dictionary id. //encoding alg pls ref to: heatwave document.
+  std::string orgin_str(str.c_ptr());
+  compress_algos alg {compress_algos::NONE};
+  switch (m_encoding_type) {
+    case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
+    case Encoding_type::VARLEN:
+    case Encoding_type::NONE:
+      alg = compress_algos::LZ4;
+    break;
+    default: break;
   }
+
+  std::string compressed_str = CompressFactory::GetInstance(alg)->compressString(orgin_str);
+
   {
     std::unique_lock lk(m_content_mtx);
-    std::string strv = oss.str();
-    if (m_content.find(oss.str()) == m_content.end()){
-      m_content.insert(std::make_pair<std::string, uint32>(oss.str(), m_content.size()));
+    if (m_content.find(compressed_str) == m_content.end()){
+      m_content.insert({compressed_str, m_content.size()});
     } else
-      return m_content[oss.str()];
+      return m_content[compressed_str];
   }
   return m_content.size() -1;
 }
 uint32 Dictionary::Get(uint64 strid, String& val, CHARSET_INFO& charset) {
+  compress_algos alg {compress_algos::NONE};
+  switch (m_encoding_type) {
+    case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
+    case  Encoding_type::VARLEN:
+    case Encoding_type::NONE:
+      alg = compress_algos::LZ4;
+    break;
+    default: break;
+  }
+
   std::shared_lock lk(m_content_mtx);
   for (auto it = m_content.begin(); it != m_content.end(); it++) {
     if (it->second == strid) {
-      std::string strstr = it->first;
-      String strs (strstr.c_str(), strstr.length(), &charset);
+      std::string compressed_str = it->first;
+      std::string decom_str = CompressFactory::GetInstance(alg)->decompressString(compressed_str);
+      String strs (decom_str.c_str(), decom_str.length(), &charset);
       copy_if_not_alloced(&val, &strs, strs.length());
       break;
     }

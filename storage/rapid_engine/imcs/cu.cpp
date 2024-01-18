@@ -29,6 +29,7 @@
 #include "storage/rapid_engine/imcs/cu.h"
 
 #include <limits.h>
+#include <regex>
 
 #include "sql/field.h"      //Field
 
@@ -44,8 +45,10 @@ namespace Imcs {
 
 Cu::Cu(Field* field) {
   std::scoped_lock lk(m_header_mutex);
-  m_header = ut::new_withkey<Cu_header>(UT_NEW_THIS_FILE_PSI_KEY);
-  if (!m_header) return;
+  //m_header = ut::new_withkey<Cu_header>(UT_NEW_THIS_FILE_PSI_KEY);
+  m_header = std::make_unique<Cu_header>();
+  if (!m_header.get()) return;
+
   m_header->m_field_no = field->field_index();
   m_header->m_avg = m_header->m_sum = m_header->m_rows = 0;
   m_header->m_max = std::numeric_limits<long long>::lowest();
@@ -58,24 +61,21 @@ Cu::Cu(Field* field) {
 
   std::string comment (field->comment.str);
   std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
-  Compress::Dictionary::Dictionary_algo_t dict_algo {Compress::Dictionary::Dictionary_algo_t::NONE};
-  if (comment.find("SORTED") != std::string::npos)
-    dict_algo = Compress::Dictionary::Dictionary_algo_t::SORTED;
-  else if (comment.find ("VARLEN") != std::string::npos)
-    dict_algo = Compress::Dictionary::Dictionary_algo_t::VARLEN;
-
-  m_header->m_compress_algo = Compress::compress_algos::NONE;
-  m_header->m_local_dict = ut::new_withkey<Compress::Dictionary>(UT_NEW_THIS_FILE_PSI_KEY, dict_algo);
+  const char* const patt_str = "RAPID_COLUMN\\s*=\\s*ENCODING\\s*=\\s*(SORTED|VARLEN)";
+  std::regex column_encoding_patt(patt_str, std::regex_constants::nosubs |
+                                                   std::regex_constants::icase);
+  if (std::regex_search(comment.c_str(), column_encoding_patt)) {
+    if (comment.find("SORTED") != std::string::npos)
+      m_header->m_encoding_type = Compress::Encoding_type::SORTED;
+    else if (comment.find ("VARLEN") != std::string::npos)
+      m_header->m_encoding_type = Compress::Encoding_type::VARLEN;
+  }
+  m_header->m_local_dict = std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
   //the initial one chunk built.
   m_chunks.push_back(std::make_unique<Chunk>(field));
 }
 Cu::~Cu() {
   m_chunks.clear();
-  if (m_header) {
-    if (m_header->m_local_dict) { ut::delete_(m_header->m_local_dict); m_header->m_local_dict = nullptr;}
-     ut::delete_(m_header);
-    m_header = nullptr;
-  }
 }
 uint Cu::Rnd_init(bool scan) {
   if (!m_chunks.size()) return 0;
@@ -94,7 +94,7 @@ uint Cu::Rnd_end() {
   return 0;
 }
 uchar* Cu::Write_data(ShannonBase::RapidContext* context, uchar* data, uint length) {
-  ut_ad(m_header && m_chunks.size());
+  ut_ad(m_header.get() && m_chunks.size());
   uchar* pos{nullptr};
   Chunk* chunk_ptr = m_chunks[m_chunks.size()-1].get();
   if (!(pos = chunk_ptr->Write_data(context, data, length))) {
@@ -112,7 +112,9 @@ uchar* Cu::Write_data(ShannonBase::RapidContext* context, uchar* data, uint leng
       m_header->m_cu_type == MYSQL_TYPE_VARCHAR) { //string type, otherwise, update the meta info.
       return pos;
   }
-  double data_val = *(double*) (data + 21);
+  uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
+        data_offset += SHANNON_SUMPTR_BYTE_LEN;
+  double data_val = *(double*) (data + data_offset);
   m_header->m_rows++;
   m_header->m_sum += data_val;
   m_header->m_avg.store(m_header->m_sum/m_header->m_rows, std::memory_order::memory_order_relaxed);

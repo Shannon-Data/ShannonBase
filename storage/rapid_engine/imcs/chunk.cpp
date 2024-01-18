@@ -135,8 +135,10 @@ uchar* Chunk::Write_data(ShannonBase::RapidContext* context, uchar* data, uint l
   m_data += length;
   m_header->m_rows ++;
   //writes success, then updates the meta info.
-  long long val {0};
-  memcpy(&val, m_data + 21, 8); //fixed size. it's numerical data or string id.
+  ulonglong val {0};
+  uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
+        data_offset += SHANNON_SUMPTR_BYTE_LEN;
+  memcpy(&val, m_data + data_offset, SHANNON_DATA_BYTE_LEN); //fixed size. it's numerical data or string id.
   if (m_header->m_chunk_type == MYSQL_TYPE_BLOB || m_header->m_chunk_type == MYSQL_TYPE_STRING ||
       m_header->m_chunk_type == MYSQL_TYPE_VARCHAR) {
   } else {
@@ -155,15 +157,18 @@ uchar* Chunk::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
   ptrdiff_t diff = m_data_cursor - m_data;
   if (diff >= 0) return nullptr;
 
-  uint8 info = *((uint8*)m_data_cursor);          //info byte
-  uint64 trxid = *((uint64*)(m_data_cursor + 1)); //trxid bytes
+  uint8 offset{0};
+  uint8 info = *((uint8*)(m_data_cursor + offset));   //info byte
+  offset += SHANNON_INFO_BYTE_LEN;
+  uint64 trxid = *((uint64*)(m_data_cursor + offset)); //trxid bytes
+  offset += SHANNON_TRX_ID_BYTE_LEN;
   //visibility check at firt.
   table_name_t name{const_cast<char*>(context->m_current_db.c_str())};
   ReadView* read_view = trx_get_read_view(context->m_trx);
   ut_ad(read_view);
   if (!read_view->changes_visible(trxid, name) || (info & DATA_DELETE_FLAG_MASK)) {//invisible and deleted
     //TODO: travel the change link to get the visibile version data.
-    m_data_cursor += 29; //to the next value.
+    m_data_cursor += SHANNON_ROW_TOTAL_LEN; //to the next value.
     diff = m_data_cursor - m_data;
     if (diff >= 0) return nullptr; //no data here.
     return m_data_cursor;
@@ -173,24 +178,24 @@ uchar* Chunk::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
   uint64 pk, data;
   //reads info field
   info [[maybe_unused]] = *(m_data_cursor ++);
-  m_data_cursor += 8;
+  m_data_cursor += SHANNON_TRX_ID_BYTE_LEN;
   //reads PK field
-  memcpy(&pk, m_data_cursor, 8);
-  m_data_cursor += 8;
+  memcpy(&pk, m_data_cursor, SHANNON_ROWID_BYTE_LEN);
+  m_data_cursor += SHANNON_ROWID_BYTE_LEN;
   //reads sum_ptr field
-  memcpy(&sum_ptr_off, m_data_cursor, 4);
-  m_data_cursor +=4;
+  memcpy(&sum_ptr_off, m_data_cursor, SHANNON_SUMPTR_BYTE_LEN);
+  m_data_cursor +=SHANNON_SUMPTR_BYTE_LEN;
   if (!sum_ptr_off) {
   //To be impled.
   }
   //reads real data field. if it string type stores strid otherwise, real data.
-  memcpy(&data, m_data_cursor, 8);
-  m_data_cursor +=8;
+  memcpy(&data, m_data_cursor, SHANNON_DATA_BYTE_LEN);
+  m_data_cursor +=SHANNON_DATA_BYTE_LEN;
   //cpy the data into buffer.
-  memcpy(buffer, &data, 8);
+  memcpy(buffer, &data, SHANNON_DATA_BYTE_LEN);
  #else
-  memcpy(buffer, m_data_cursor, 29);
-  m_data_cursor += 29; //go to the next.
+  memcpy(buffer, m_data_cursor, SHANNON_ROW_TOTAL_LEN);
+  m_data_cursor += SHANNON_ROW_TOTAL_LEN; //go to the next.
  #endif
   return m_data_cursor;
 }
