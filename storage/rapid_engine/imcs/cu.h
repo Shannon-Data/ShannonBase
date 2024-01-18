@@ -58,10 +58,12 @@ public:
     enum_field_types m_cu_type {MYSQL_TYPE_TINY};
     //whether the is not null or not.
     bool m_nullable {false};
-    //compression alg.
-    Compress::compress_algos m_compress_algo {Compress::compress_algos::NONE};
+    //encoding type. pls ref to:
+    //https://dev.mysql.com/doc/heatwave/en/mys-hw-varlen-encoding.html
+    //https://dev.mysql.com/doc/heatwave/en/mys-hw-dictionary-encoding.html
+    Compress::Encoding_type m_encoding_type {Compress::Encoding_type::NONE};
     //local dictionary.
-    Compress::Dictionary* m_local_dict {nullptr};
+    std::unique_ptr<Compress::Dictionary> m_local_dict;
     //statistics info.
     std::atomic<long long> m_max{0}, m_min{0}, m_middle{0}, m_median{0};
     std::atomic<long long> m_rows{0}, m_sum{0}, m_avg{0};
@@ -88,12 +90,13 @@ public:
  uchar* Update_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length = 0);
  //flush the data to disk. by now, we cannot impl this part.
  uint flush(ShannonBase::RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
+ Compress::Dictionary* Local_dictionary() const { return m_header->m_local_dict.get(); }
 private:
   uint m_magic{SHANNON_MAGIC_CU};
   //proctect header.
   std::mutex m_header_mutex;
   //header info of this Cu.
-  Cu_header* m_header;
+  std::unique_ptr<Cu_header> m_header;
   //chunks in this cu.
   std::vector<std::unique_ptr<Chunk> > m_chunks;
   //current chunk read.

@@ -50,7 +50,7 @@ public:
       uint64 m_pk {0};
       //trxid of this innodb rows.
       uint64 m_trxid {0};
-      Compress::Dictionary::Dictionary_algo_t m_algo {Compress::Dictionary::Dictionary_algo_t::SORTED};
+      Compress::Encoding_type m_algo {Compress::Encoding_type::SORTED};
   };
 
   RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}

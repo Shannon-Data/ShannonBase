@@ -28,6 +28,8 @@
 */
 #ifndef __SHANNONBASE_COMPRESS_ALGORITHMS_H__
 #define __SHANNONBASE_COMPRESS_ALGORITHMS_H__
+#include <atomic>
+#include <memory>
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 
@@ -37,13 +39,52 @@ namespace Compress{
 enum compress_algos{
   NONE = 0,  
   ZLIB,
-  DICTIONARY
+  ZSTD,
+  LZ4
 };
 
 class Compress_algorithm{
 public:
   Compress_algorithm() = default;
   virtual ~Compress_algorithm() = default;
+  virtual std::string compressString(std::string& orginal) = 0;
+  virtual std::string decompressString(std::string& compressed_str) = 0;
+};
+
+class zstd_compress : public Compress_algorithm{
+public:
+  virtual std::string compressString(std::string& orginal) final;
+  virtual std::string decompressString(std::string& compressed_str) final;
+};
+
+class zlib_compress : public Compress_algorithm{
+public:
+  virtual std::string compressString(std::string& orginal) final;
+  virtual std::string decompressString(std::string& compressed_str) final;
+};
+
+class lz4_compress : public Compress_algorithm{
+public:
+  virtual std::string compressString(std::string& orginal) final;
+  virtual std::string decompressString(std::string& compressed_str) final;
+};
+
+class default_compress : public zstd_compress{
+};
+
+class CompressFactory {
+public:
+  static std::unique_ptr<Compress_algorithm> GetInstance(compress_algos algo);
+private:
+  CompressFactory() = delete;
+  virtual ~CompressFactory() = delete;
+  CompressFactory(CompressFactory&& ) = delete;
+  CompressFactory(CompressFactory&) = delete;
+  CompressFactory& operator = (const CompressFactory&) = delete;
+  CompressFactory& operator = (const CompressFactory&&) = delete;
+private:
+ static std::once_flag one;
+ static Compress_algorithm* m_instance;
 };
 
 } //ns:compress

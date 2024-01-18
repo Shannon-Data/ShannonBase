@@ -327,6 +327,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_GENERIC;
   }
   //Start to write to IMCS. Do scan the primary table.
+  current_thd->set_sent_row_count(0);
   int tmp {HA_ERR_GENERIC};
   ShannonBase::RapidContext context;
   context.m_current_db = table_arg.s->db.str;

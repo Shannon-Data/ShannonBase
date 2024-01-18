@@ -54,6 +54,15 @@ constexpr uint SHANNON_MAGIC_IMCU = 0x0002;
 constexpr uint SHANNON_MAGIC_CU = 0x0003;
 constexpr uint SHANNON_MAGIC_CHUNK = 0x0004;
 
+constexpr uint8 SHANNON_INFO_BYTE_LEN = 1;
+constexpr uint8 SHANNON_TRX_ID_BYTE_LEN = 8;
+constexpr uint8 SHANNON_ROWID_BYTE_LEN = 8;
+constexpr uint8 SHANNON_SUMPTR_BYTE_LEN = 4;
+constexpr uint8 SHANNON_DATA_BYTE_LEN = 8;
+constexpr uint8 SHANNON_ROW_TOTAL_LEN = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN +
+                                        SHANNON_ROWID_BYTE_LEN + SHANNON_SUMPTR_BYTE_LEN +
+                                        SHANNON_DATA_BYTE_LEN;
+
 //This is use for Rapid cluster in future. in next, we will build up a AP clust for ShannonBase.
 enum class RPD_NODE_ROLE {
   //meta node and primary role, name node.

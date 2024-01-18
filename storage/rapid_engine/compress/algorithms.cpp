@@ -26,10 +26,140 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
+#include "extra/zstd/zstd-1.5.5/lib/zstd.h"
+#include "extra/zlib/zlib-1.2.13/zlib.h"
+#include "extra/lz4/lz4-1.9.4/lib/lz4.h"
+
 #include "storage/rapid_engine/compress/algorithms.h"
 
 namespace ShannonBase {
 namespace Compress {
+
+std::once_flag CompressFactory::one;
+std::string zstd_compress::compressString(std::string& orginal) {
+   size_t inputSize = orginal.size();
+   size_t compressedBufferSize = ZSTD_compressBound(inputSize);
+   std::unique_ptr<char[]> compressedBuffer;
+   compressedBuffer.reset (new char[compressedBufferSize]);
+   size_t compressedSize = ZSTD_compress(compressedBuffer.get(), compressedBufferSize, orginal.c_str(), inputSize, 1);
+   if (ZSTD_isError(compressedSize)) {
+       //std::cerr << "Compression error: " << ZSTD_getErrorName(compressedSize) << std::endl;
+       return "";
+   }
+   std::string compressedString(compressedBuffer.get(), compressedSize);
+   return compressedString;
+}
+std::string zstd_compress::decompressString(std::string& compressed_str) {
+   size_t compressedSize = compressed_str.size();
+   size_t decompressedBufferSize = ZSTD_getFrameContentSize(compressed_str.c_str(), compressedSize);
+   std::unique_ptr<char[]> decompressedBuffer;
+   decompressedBuffer.reset(new char[decompressedBufferSize]);
+   size_t decompressedSize = ZSTD_decompress(decompressedBuffer.get(), decompressedBufferSize, compressed_str.c_str(), compressedSize);
+
+   if (ZSTD_isError(decompressedSize)) {
+       //std::cerr << "Decompression error: " << ZSTD_getErrorName(decompressedSize) << std::endl;
+       return "";
+   }
+   std::string decompressedString(decompressedBuffer.get(), decompressedSize);
+   return decompressedString;
+}
+std::string zlib_compress::compressString(std::string& orginal) {
+   int compressionLevel = Z_BEST_COMPRESSION;
+
+   z_stream zStream;
+   zStream.zalloc = Z_NULL;
+   zStream.zfree = Z_NULL;
+   zStream.opaque = Z_NULL;
+   zStream.avail_in = orginal.size();
+   zStream.next_in = (Bytef *)(orginal.c_str());
+
+   if (deflateInit(&zStream, compressionLevel) != Z_OK) {
+      return "";
+   }
+
+   const int bufferSize = 65535;
+   std::unique_ptr<char[]> buffer(new char[bufferSize]);
+   std::string compressedString;
+   do {
+       zStream.avail_out = bufferSize;
+       zStream.next_out = (Bytef *)buffer.get();
+
+       if (deflate(&zStream, Z_FINISH) == Z_STREAM_ERROR) {
+           deflateEnd(&zStream);
+           return "";
+       }
+
+       compressedString.append(buffer.get(), bufferSize - zStream.avail_out);
+    } while (zStream.avail_out == 0);
+
+    deflateEnd(&zStream);
+    return compressedString;
+}
+std::string zlib_compress::decompressString(std::string& compressed_str) {
+   z_stream zStream;
+   zStream.zalloc = Z_NULL;
+   zStream.zfree = Z_NULL;
+   zStream.opaque = Z_NULL;
+   zStream.avail_in = compressed_str.size();
+   zStream.next_in = (Bytef *)(compressed_str.c_str());
+
+   if (inflateInit(&zStream) != Z_OK) {
+      return "";
+   }
+
+   const int bufferSize = 65535;
+   std::unique_ptr<char[]> buffer(new char[bufferSize]);
+   std::string decompressedString;
+   do {
+       zStream.avail_out = bufferSize;
+       zStream.next_out = (Bytef *)buffer.get();
+       if (inflate(&zStream, Z_NO_FLUSH) == Z_STREAM_ERROR) {
+           inflateEnd(&zStream);
+           return "";
+       }
+       decompressedString.append(buffer.get(), bufferSize - zStream.avail_out);
+   } while (zStream.avail_out == 0);
+
+   inflateEnd(&zStream);
+   return decompressedString;
+}
+std::string lz4_compress::compressString(std::string& orginal) {
+    size_t maxCompressedSize = LZ4_compressBound(orginal.size());
+    std::string compressedData(maxCompressedSize, '\0');
+    int compressedSize = LZ4_compress_default(orginal.c_str(), &compressedData[0], orginal.size(), maxCompressedSize);
+    if (compressedSize <= 0) {
+        return "";
+    }
+    compressedData.resize(compressedSize);
+    return compressedData;
+}
+std::string lz4_compress::decompressString(std::string& compressed_str) {
+   uint original_size = 65535;
+    std::string decompressedData(original_size, '\0');
+    int decompressedSize = LZ4_decompress_safe(compressed_str.c_str(), &decompressedData[0], compressed_str.size(), original_size);
+    if (decompressedSize <= 0) {
+        return "";
+    }
+    decompressedData.resize(decompressedSize);
+    return decompressedData;
+}
+
+std::unique_ptr<Compress_algorithm> CompressFactory::GetInstance(compress_algos algo) {
+  switch (algo) {
+   case compress_algos::ZLIB:
+     return std::make_unique<zlib_compress>();
+   break;
+   case compress_algos::ZSTD:
+     return std::make_unique<zstd_compress>();
+   break;
+   case compress_algos::LZ4:
+     return std::make_unique<lz4_compress>();
+   break;
+   default: break;
+  }
+  return std::make_unique<default_compress>();
+}
+
 } //ns:compress
 } //ns:shnnonbase
 
