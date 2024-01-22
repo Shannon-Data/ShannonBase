@@ -45,22 +45,34 @@
 namespace ShannonBase {
 
 CuView::CuView(TABLE* table, Field* field) : m_source_table(table), m_source_field(field){
+  ut_a(!m_source_field->is_flag_set(NOT_SECONDARY_FLAG));
   m_key_name = m_source_table->s->db.str;
   m_key_name+= m_source_table->s->table_name.str;
   m_key_name+= m_source_field->field_name;
   m_source_cu = Imcs::Imcs::get_instance()->get_Cu(m_key_name);
+  if (!m_source_cu) {
+    std::unique_ptr<Imcs::Cu> new_cu = std::make_unique<Imcs::Cu>(field);
+    Imcs::Imcs::get_instance()->add_cu(m_key_name, new_cu);
+  }
+  m_source_cu = Imcs::Imcs::get_instance()->get_Cu(m_key_name);
   ut_a(m_source_cu);
 }
-
 int CuView::open(){
-  auto chunk = m_source_cu->get_chunk(m_current_chunk_id);
+  auto chunk = m_source_cu->get_chunk(m_reader_chunk_id);
   ut_a(chunk);
-  m_current_pos = chunk->get_base();
+  m_reader_pos = chunk->get_base();
+  m_reader_chunk_id = 0;
+
+  m_writter_chunk_id = m_source_cu->get_chunk_nums() ? m_source_cu->get_chunk_nums() -1: 0;
+  m_writter_pos = m_source_cu->get_chunk(m_writter_chunk_id)->get_data();
   return 0;
 }
 int CuView::close(){
-  m_current_chunk_id = 0;
-  m_current_pos = nullptr;
+  m_reader_chunk_id = 0;
+  m_reader_pos = nullptr;
+
+  m_writter_chunk_id = 0;
+  m_writter_pos = nullptr;
   return 0;
 }
 /**
@@ -73,20 +85,20 @@ int CuView::read(ShannonBaseContext* context, uchar* buffer, size_t length)
   if (!m_source_cu) return HA_ERR_END_OF_FILE;
 
   //gets the chunks belongs to this cu.
-  auto chunk = m_source_cu->get_chunk(m_current_chunk_id);
+  auto chunk = m_source_cu->get_chunk(m_reader_chunk_id);
   while (chunk) {
-    ptrdiff_t diff = m_current_pos - chunk->get_Data();
+    ptrdiff_t diff = m_reader_pos - chunk->get_data();
     if (diff >= 0) { //to the next
-      m_current_chunk_id.store(m_current_chunk_id + 1, std::memory_order::memory_order_seq_cst),
-      chunk = m_source_cu->get_chunk(m_current_chunk_id);
+      m_reader_chunk_id.fetch_add(1, std::memory_order::memory_order_acq_rel);
+      chunk = m_source_cu->get_chunk(m_reader_chunk_id);
       if (!chunk) return HA_ERR_END_OF_FILE;
-      m_current_pos = chunk->get_base();
+      m_reader_pos.store(chunk->get_base(), std::memory_order_acq_rel);
       continue;
     }
     uint8 offset{0};
-    uint8 info = *((uint8*)(m_current_pos + offset));   //info byte
+    uint8 info = *((uint8*)(m_reader_pos + offset));   //info byte
     offset += SHANNON_INFO_BYTE_LEN;
-    uint64 trxid = *((uint64*)(m_current_pos + offset)); //trxid bytes
+    uint64 trxid = *((uint64*)(m_reader_pos + offset)); //trxid bytes
     offset += SHANNON_TRX_ID_BYTE_LEN;
     //visibility check at firt.
     table_name_t name{const_cast<char*>(m_source_table->s->table_name.str)};
@@ -94,13 +106,13 @@ int CuView::read(ShannonBaseContext* context, uchar* buffer, size_t length)
     ut_ad(read_view);
     if (!read_view->changes_visible(trxid, name) || (info & DATA_DELETE_FLAG_MASK)) {//invisible and deleted
       //TODO: travel the change link to get the visibile version data.
-      m_current_pos += SHANNON_ROW_TOTAL_LEN; //to the next value.
-      diff = m_current_pos - chunk->get_Data();
+      m_reader_pos.fetch_add (SHANNON_ROW_TOTAL_LEN, std::memory_order_acq_rel); //to the next value.
+      diff = m_reader_pos - chunk->get_data();
       if (diff >= 0) {
-        m_current_chunk_id.store(m_current_chunk_id + 1, std::memory_order::memory_order_seq_cst),
-        chunk = m_source_cu->get_chunk(m_current_chunk_id);
+        m_reader_chunk_id.fetch_add(1, std::memory_order::memory_order_seq_cst);
+        chunk = m_source_cu->get_chunk(m_reader_chunk_id);
         if (!chunk) return HA_ERR_END_OF_FILE;
-        m_current_pos = chunk->get_base();
+        m_reader_pos.store(chunk->get_base(), std::memory_order_acq_rel);
         continue;
       } //no data here to the next.
     }
@@ -126,12 +138,50 @@ int CuView::read(ShannonBaseContext* context, uchar* buffer, size_t length)
       memcpy(buffer, &data, SHANNON_DATA_BYTE_LEN);
       return 0;
     #else
-      memcpy(buffer, m_current_pos, SHANNON_ROW_TOTAL_LEN);
-      m_current_pos += SHANNON_ROW_TOTAL_LEN; //go to the next.
+      memcpy(buffer, m_reader_pos, SHANNON_ROW_TOTAL_LEN);
+      m_reader_pos.fetch_add(SHANNON_ROW_TOTAL_LEN, std::memory_order_acq_rel); //go to the next.
       return 0;
     #endif
   }
   return HA_ERR_END_OF_FILE;
+}
+int CuView::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
+  ut_a(context && buffer);
+  uchar* pos{nullptr};
+  RapidContext* rpd_context = dynamic_cast<RapidContext*> (context);
+  auto chunk_ptr = m_source_cu->get_chunk(m_writter_chunk_id);
+  auto header = m_source_cu->get_header();
+  if (!(pos = chunk_ptr->write_data_direct(rpd_context, buffer, length))) {
+    //the prev chunk is full, then allocate a new chunk to write.
+    ut_ad(m_source_field);
+    auto new_chunk = std::make_unique<Imcs::Chunk>(m_source_field);
+    pos = new_chunk->write_data_direct(rpd_context, buffer, length);
+    if (pos){
+      m_source_cu->add_chunk(new_chunk);
+      m_writter_chunk_id.fetch_add(1, std::memory_order_acq_rel);
+
+      chunk_ptr->get_header().m_next_chunk = m_source_cu->get_last_chunk();
+      m_source_cu->get_last_chunk()->get_header().m_prev_chunk = chunk_ptr;
+      m_writter_pos.store(m_source_cu->get_last_chunk()->get_data(), std::memory_order_acq_rel);
+    } else return HA_ERR_GENERIC;
+    //To update the metainfo.
+  }
+  //update the meta info.
+  if (header->m_cu_type == MYSQL_TYPE_BLOB || header->m_cu_type == MYSQL_TYPE_STRING ||
+      header->m_cu_type == MYSQL_TYPE_VARCHAR) { //string type, otherwise, update the meta info.
+      return 0;
+  }
+  uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
+        data_offset += SHANNON_SUMPTR_BYTE_LEN;
+  double data_val = *(double*) (buffer + data_offset);
+  header->m_rows++;
+  header->m_sum += data_val;
+  header->m_avg.store(header->m_sum/header->m_rows, std::memory_order::memory_order_relaxed);
+  if (data_val > header->m_max)
+    header->m_max.store(data_val, std::memory_order::memory_order_relaxed);
+  if (data_val < header->m_min)
+    header->m_min.store(data_val, std::memory_order::memory_order_relaxed);
+  return 0;
 }
 ImcsReader::ImcsReader(TABLE* table) :
                       m_source_table(table),
@@ -141,7 +191,9 @@ ImcsReader::ImcsReader(TABLE* table) :
   m_start_of_scan = false;
   for (uint idx =0; idx < m_source_table->s->fields; idx ++) {
     std::string key = m_db_name + m_table_name;
-    Field* field_ptr = *(m_source_table->s->field + idx);
+    Field* field_ptr = *(m_source_table->field + idx);
+    // Skip columns marked as NOT SECONDARY.
+    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     key += field_ptr->field_name;
     m_cu_views.insert({key, std::make_unique<CuView>(table, field_ptr)});
   }
@@ -165,6 +217,9 @@ int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) 
   if (!m_start_of_scan) return HA_ERR_GENERIC;
   for (uint idx =0; idx < m_source_table->s->fields; idx++) {
     Field* field_ptr = *(m_source_table->field + idx);
+    // Skip columns marked as NOT SECONDARY.
+    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
     ut_a(field_ptr);
     if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     std::string key = m_db_name + m_table_name + field_ptr->field_name;
@@ -234,6 +289,81 @@ int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) 
   return 0;
 }
 int ImcsReader::write(ShannonBaseContext* context, uchar*buffer, size_t lenght) {
+  ut_a(context && buffer);
+  if (!m_start_of_scan) return HA_ERR_GENERIC;
+  RapidContext* rpd_context = dynamic_cast<RapidContext*>(context);
+  /** before insertion, should to check whether there's spare space to store the new data.
+      or not. If no extra sapce left, allocate a new imcu. After a new imcu allocated, the
+      meta info is stored into 'm_imcus'.
+  */
+  for (uint idx =0; idx < m_source_table->s->fields; idx++) {
+    Field* field = *(m_source_table->field + idx);
+    ut_a(field);
+    // Skip columns marked as NOT SECONDARY.
+    if ((field)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    std::string key_name = field->table->s->db.str;
+    key_name += *field->table_name;
+    key_name += field->field_name;
+    if (m_cu_views.find(key_name) == m_cu_views.end()) return HA_ERR_END_OF_FILE;
+
+    //start writing the data, at first, assemble the data we want to write. the layout of data
+    //pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr| data]. And the string we dont
+    //store the string but using string id instead. offset[] = {0, 1, 9, 17, 21, 29}
+    uint data_len = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
+    data_len += SHANNON_SUMPTR_BYTE_LEN + SHANNON_DATA_BYTE_LEN;
+    //start to pack the data, then writes into memory.
+    std::unique_ptr<uchar[]> data (new uchar[data_len]);
+    int8 info {0};
+    int64 sum_ptr{0}, offset{0};
+    if (field->is_real_null())
+    info |= DATA_NULL_FLAG_MASK;
+    memcpy(data.get() + offset, &info, SHANNON_INFO_BYTE_LEN);
+    offset += SHANNON_INFO_BYTE_LEN;
+    memcpy(data.get() + offset, &rpd_context->m_extra_info.m_trxid, SHANNON_TRX_ID_BYTE_LEN);
+    offset += SHANNON_TRX_ID_BYTE_LEN;
+    memcpy(data.get() + offset, &rpd_context->m_extra_info.m_pk, SHANNON_ROWID_BYTE_LEN);
+    offset += SHANNON_ROWID_BYTE_LEN;
+    memcpy(data.get() + offset, &sum_ptr, SHANNON_SUMPTR_BYTE_LEN);
+    offset += SHANNON_SUMPTR_BYTE_LEN;
+    double data_val {0};
+    if (!field->is_real_null()) {//not null
+      switch (field->type()) {
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_STRING:
+        case MYSQL_TYPE_VARCHAR: {
+          String buf;
+          buf.set_charset(field->charset());
+          field->val_str(&buf);
+          Compress::Dictionary* dict = m_cu_views[key_name].get()->get_source()->local_dictionary();
+          ut_ad(dict);
+          data_val = dict->store(buf);
+        } break;
+        case MYSQL_TYPE_INT24:
+        case MYSQL_TYPE_LONG:
+        case MYSQL_TYPE_LONGLONG:
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DOUBLE: {
+          data_val = field->val_real();
+        }break;
+        case MYSQL_TYPE_DECIMAL:
+        case MYSQL_TYPE_NEWDECIMAL: {
+          my_decimal dval;
+          field->val_decimal(&dval);
+          my_decimal2double(10, &dval, &data_val);
+        } break;
+        case MYSQL_TYPE_DATE:
+        case MYSQL_TYPE_DATETIME:
+        case MYSQL_TYPE_TIME: {
+          data_val = field->val_real();
+        } break;
+        default: data_val = field->val_real();
+      }
+      memcpy(data.get() + offset, &data_val, SHANNON_DATA_BYTE_LEN);
+    }
+    auto err = m_cu_views[key_name].get()->write(context, data.get(), data_len);
+    if (err) return err;
+  }
   return 0;
 }
 uchar* ImcsReader::tell() {

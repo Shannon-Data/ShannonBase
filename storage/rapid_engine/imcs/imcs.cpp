@@ -61,6 +61,10 @@ Cu* Imcs::get_Cu(std::string& key) {
   }
   return nullptr;
 }
+void Imcs::add_cu(std::string key, std::unique_ptr<Cu>& cu) {
+  m_cus.insert({key, std::move(cu)});
+  return;
+}
 uint Imcs::rnd_init(bool scan) {
   //ut::new_withkey<Compress::Dictionar>(UT_NEW_THIS_FILE_PSI_KEY);
   for(auto &cu: m_cus) {

@@ -80,13 +80,16 @@ uchar* Cu::get_base() {
   if (!m_chunks.size()) return nullptr;
   return m_chunks[0].get()->get_base();
 }
+void Cu::add_chunk(std::unique_ptr<Chunk>& chunk) {
+  m_chunks.push_back(std::move(chunk));
+}
 uint Cu::rnd_init(bool scan) {
   if (!m_chunks.size()) return 0;
   for (size_t index =0; index < m_chunks.size(); index++) {
     if (m_chunks[index].get()->rnd_init(scan))
       return HA_ERR_INITIALIZATION;
   }
-  m_chunk_id.store(0, std::memory_order::memory_order_relaxed);
+  m_current_chunk_id.store(0, std::memory_order::memory_order_relaxed);
   return 0;
 }
 uint Cu::rnd_end() {
@@ -120,7 +123,7 @@ uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, ui
   }
   uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
         data_offset += SHANNON_SUMPTR_BYTE_LEN;
-  longlong data_val = *(longlong*) (data + data_offset);
+  double data_val = *(double*) (data + data_offset);
   m_header->m_rows++;
   m_header->m_sum += data_val;
   m_header->m_avg.store(m_header->m_sum/m_header->m_rows, std::memory_order::memory_order_relaxed);
@@ -134,19 +137,19 @@ uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   if (!m_chunks.size()) return nullptr;
 #ifdef SHANNON_GET_NTH_CHUNK
   //Gets the last chunk data.
-  m_chunk_id = m_chunks.size() - 1;
-  Chunk* chunk = m_chunks [m_chunk_id].get();
+  m_current_chunk_id = m_chunks.size() - 1;
+  Chunk* chunk = m_chunks [m_current_chunk_id].get();
   if (!chunk) return nullptr;
   return chunk->Read_data(context, buffer);
 #else
-  if (m_chunk_id >= m_chunks.size())  return nullptr;
-  Chunk* chunk = m_chunks [m_chunk_id].get();
+  if (m_current_chunk_id >= m_chunks.size())  return nullptr;
+  Chunk* chunk = m_chunks [m_current_chunk_id].get();
   if (!chunk) return nullptr;
   auto ret = chunk->read_data_direct(context, buffer);
   if (!ret) {//to the end of this chunk, then start to read the next chunk.
-    m_chunk_id.store(m_chunk_id + 1, std::memory_order::memory_order_seq_cst);
-    if (m_chunk_id >= m_chunks.size()) return nullptr;
-    chunk = m_chunks [m_chunk_id].get();
+    m_current_chunk_id.fetch_add(1, std::memory_order::memory_order_seq_cst);
+    if (m_current_chunk_id >= m_chunks.size()) return nullptr;
+    chunk = m_chunks [m_current_chunk_id].get();
     if (!chunk) return nullptr;
     ret = chunk->read_data_direct(context, buffer);
   }

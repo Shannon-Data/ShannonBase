@@ -301,6 +301,8 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_GENERIC;
   }
 
+  m_imcs_reader.reset(new ImcsReader(const_cast<TABLE*>(&table_arg))) ;
+  m_imcs_reader->open();
   /*** in future, we will load the content strings from dictionary file, which makes it more flexible.
   at rapid engine startup phase. and will make each loaded column use its own dictionary, so called
   local dictionary. the dictionary algo defined by column's comment text. */
@@ -373,25 +375,13 @@ int ha_rapid::load_table(const TABLE &table_arg) {
       if (field_ptr->is_flag_set(PRI_KEY_FLAG))
          context.m_extra_info.m_pk += field_ptr->val_real();
     }
-    for (uint32 index = 0; index < field_count; index++) {
-      field_ptr = *(table_arg.field + index);
-      // Skip columns marked as NOT SECONDARY.
-      if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-#ifndef NDEBUG
-      my_bitmap_map *old_map = 0;
-      TABLE *table = const_cast<TABLE *>(&table_arg);
-      if (table && table->file)
-        old_map = tmp_use_all_columns(table, table->read_set);
-#endif
-#ifndef NDEBUG
-      if (old_map) tmp_restore_column_map(table->read_set, old_map);
-#endif
-      if (imcs_instance->write_direct(&context, field_ptr)) {
-        table_arg.file->ha_rnd_end();
-        my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
-                 table_arg.s->table_name.str);
-        return HA_ERR_GENERIC;
-      }
+    //if (imcs_instance->write_direct(&context, field_ptr)) {
+    if (m_imcs_reader->write(&context, const_cast<TABLE*>(&table_arg)->record[0])) {
+      table_arg.file->ha_rnd_end();
+      imcs_instance->delete_all_direct(&context);
+      my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
+               table_arg.s->table_name.str);
+      return HA_ERR_GENERIC;
     }
     ha_statistic_increment(&System_status_var::ha_read_rnd_count);
     current_thd->inc_sent_row_count(1);

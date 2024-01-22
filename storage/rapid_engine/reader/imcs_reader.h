@@ -53,14 +53,18 @@ public:
   virtual ~CuView() = default;
   int open();
   int close();
-  int read(ShannonBaseContext* context, uchar* buffer, size_t length =0);
+  int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
+  int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0);
   inline Imcs::Cu* get_source() {return m_source_cu;}
 private:
   std::string m_key_name;
   TABLE* m_source_table{nullptr};
   Field* m_source_field {nullptr};
-  std::atomic<uint> m_current_chunk_id {0};
-  std::atomic<uchar*> m_current_pos {nullptr};
+  //reader info, includes: current_chunkid, pos.
+  std::atomic<uint> m_reader_chunk_id {0};
+  std::atomic<uint> m_writter_chunk_id {0};
+  std::atomic<uchar*> m_reader_pos {nullptr};
+  std::atomic<uchar*> m_writter_pos {nullptr};
   Imcs::Cu* m_source_cu{nullptr};
 };
 class ImcsReader : public Reader {
@@ -71,7 +75,7 @@ public:
   int open() override;
   int close() override;
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0) override;
-  int write(ShannonBaseContext* context, uchar*buffer, size_t lenght = 0) override;
+  int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0) override;
   uchar* tell() override;
   uchar* seek(uchar* pos) override;
   uchar* seek(size_t offset) override;

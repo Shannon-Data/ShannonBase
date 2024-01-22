@@ -111,7 +111,8 @@ class Chunk : public MemoryObject{
     //the end loc of chunk. is base + chunk_size
     inline uchar* get_end() const { return m_data_end; }
     //gets the max valid loc of current the data has written to.
-    inline uchar* get_Data() const {return m_data;}
+    inline uchar* get_data() const {return m_data;}
+    bool is_full () {return (m_data == m_data_end)? true : false;}
   private:
     std::mutex m_header_mutex;
     Chunk_header* m_header{nullptr};
@@ -121,9 +122,9 @@ class Chunk : public MemoryObject{
     /** the base pointer of chunk, and the current pos of data. whether data should be in order or not */
     uchar* m_data_base {nullptr};
     //current pointer, where the data is. use write.
-    uchar* m_data{nullptr};
+    std::atomic<uchar*> m_data{nullptr};
     //pointer of cursor, which used for reading.
-    uchar* m_data_cursor {nullptr};
+    std::atomic<uchar*> m_data_cursor {nullptr};
     //end address of memory, to determine whether the memory is full or not.
     uchar* m_data_end {nullptr};
     //the check sum of this chunk. it used to do check when the data flush to disk.
