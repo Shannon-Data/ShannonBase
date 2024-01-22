@@ -35,7 +35,7 @@
 namespace ShannonBase{
 namespace Compress {
 
-uint32 Dictionary::Store(String& str, Encoding_type type) {
+uint32 Dictionary::store(String& str, Encoding_type type) {
   //returns dictionary id. //encoding alg pls ref to: heatwave document.
   std::string orgin_str(str.c_ptr());
   compress_algos alg {compress_algos::NONE};
@@ -48,7 +48,7 @@ uint32 Dictionary::Store(String& str, Encoding_type type) {
     default: break;
   }
 
-  std::string compressed_str = CompressFactory::GetInstance(alg)->compressString(orgin_str);
+  std::string compressed_str = CompressFactory::get_instance(alg)->compressString(orgin_str);
 
   {
     std::unique_lock lk(m_content_mtx);
@@ -59,7 +59,7 @@ uint32 Dictionary::Store(String& str, Encoding_type type) {
   }
   return m_content.size() -1;
 }
-uint32 Dictionary::Get(uint64 strid, String& val, CHARSET_INFO& charset) {
+uint32 Dictionary::get(uint64 strid, String& val, CHARSET_INFO& charset) {
   compress_algos alg {compress_algos::NONE};
   switch (m_encoding_type) {
     case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
@@ -74,7 +74,7 @@ uint32 Dictionary::Get(uint64 strid, String& val, CHARSET_INFO& charset) {
   for (auto it = m_content.begin(); it != m_content.end(); it++) {
     if (it->second == strid) {
       std::string compressed_str = it->first;
-      std::string decom_str = CompressFactory::GetInstance(alg)->decompressString(compressed_str);
+      std::string decom_str = CompressFactory::get_instance(alg)->decompressString(compressed_str);
       String strs (decom_str.c_str(), decom_str.length(), &charset);
       copy_if_not_alloced(&val, &strs, strs.length());
       break;

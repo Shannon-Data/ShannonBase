@@ -30,6 +30,7 @@
 #include "sql/handler.h"
 #include "thr_lock.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/reader/imcs_reader.h"
 /* clang-format off */
 class THD;
 struct TABLE;
@@ -40,7 +41,6 @@ class Table;
 }
 
 namespace ShannonBase {
-
 struct RapidShare {
   RapidShare() { thr_lock_init(&m_lock);}
   RapidShare(const char* db_name,
@@ -126,9 +126,11 @@ class ha_rapid : public handler {
   /** this is set to 1 when we are starting a table scan but have
       not yet fetched any row, else false */
   bool m_start_of_scan {false};
-
   /** information for MySQL table locking */
   RapidShare *m_share;
+  std::unique_ptr<ShannonBase::RapidContext> m_rpd_context;
+  //imscs reader;
+  std::unique_ptr<ImcsReader> m_imcs_reader;
 };
 
 }  // namespace ShannonBase

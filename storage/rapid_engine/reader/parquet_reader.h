@@ -19,27 +19,38 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
+   The fundmental code for imcs. The chunk is used to store the data which
+   transfer from row-based format to column-based format.
+
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs.
 */
-/** The basic iterator class for IMCS. All specific iterators are all inherited
- * from this.
-*/
-#ifndef __SHANNONBASE_ITERATOR_H__
-#define __SHANNONBASE_ITERATOR_H__
+#ifndef __SHANNONBASE_PARQUET_READER_H__
+#define __SHANNONBASE_PARQUET_READER_H__
+#include <string>
+#include "include/my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/reader/reader.h"
+
 namespace ShannonBase {
-namespace Imcs {
-
-class Iterator {
+class ParquetReader : public Reader {
 public:
-  Iterator();
-  virtual ~Iterator() = 0;
-  virtual bool Init() = 0;
-  virtual bool Read() = 0;
-  virtual bool Next() = 0;
-} ;
+  ParquetReader(std::string& path) : m_path(path){
+  }
+  ParquetReader() = delete;
+  virtual ~ParquetReader() {}
 
-} //ns:imcs
+  int open() override;
+  int close() override;
+  int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0) override;
+  int write(ShannonBaseContext* context, uchar*buffer, size_t lenght = 0) override;
+  uchar* tell() override;
+  uchar* seek(uchar* pos) override;
+  uchar* seek(size_t offset) override;
+private:
+  std::string m_path;
+};
+
 } //ns:shannonbase
-#endif //__SHANNONBASE_ITERATOR_H__
+#endif //__SHANNONBASE_PARQUET_READER_H__

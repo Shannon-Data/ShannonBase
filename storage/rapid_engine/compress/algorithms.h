@@ -30,8 +30,7 @@
 #define __SHANNONBASE_COMPRESS_ALGORITHMS_H__
 #include <atomic>
 #include <memory>
-
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include <mutex>
 
 namespace ShannonBase{
 namespace Compress{
@@ -74,7 +73,7 @@ class default_compress : public zstd_compress{
 
 class CompressFactory {
 public:
-  static std::unique_ptr<Compress_algorithm> GetInstance(compress_algos algo);
+  static std::unique_ptr<Compress_algorithm> get_instance(compress_algos algo);
 private:
   CompressFactory() = delete;
   virtual ~CompressFactory() = delete;
@@ -83,8 +82,8 @@ private:
   CompressFactory& operator = (const CompressFactory&) = delete;
   CompressFactory& operator = (const CompressFactory&&) = delete;
 private:
- static std::once_flag one;
- static Compress_algorithm* m_instance;
+ static std::once_flag m_alg_once;
+ static Compress_algorithm* m_factory;
 };
 
 } //ns:compress

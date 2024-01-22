@@ -84,20 +84,20 @@ class Imcu : public MemoryObject{
   Imcu(const TABLE& table_arg);
   virtual ~Imcu();
 
-  Imcu_header& Get_header() { return m_headers; }
-  Cu* Get_cu(const Field*);
+  Imcu_header& get_header() { return m_headers; }
+  Cu* get_cu(const Field*);
 
-  inline void Set_previous(Imcu* prev) {
+  inline void set_previous(Imcu* prev) {
     this->m_prev = prev;
   }
-  inline void Set_next(Imcu* next) {
+  inline void set_next(Imcu* next) {
     this->m_next = next;
   }
   
-  inline Imcu* Get_next() {return m_next;}
-  inline Imcu* Get_prev() {return m_prev;}
+  inline Imcu* get_next() {return m_next;}
+  inline Imcu* get_prev() {return m_prev;}
 private:
-  bool Is_full();
+  bool is_full();
 private:
   // use to proctect header.
   std::mutex m_mutex_header;

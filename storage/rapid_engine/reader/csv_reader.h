@@ -19,24 +19,40 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
+   The fundmental code for imcs. The chunk is used to store the data which
+   transfer from row-based format to column-based format.
+
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs. for transaction.
+   The fundmental code for imcs.
 */
-#include "storage/rapid_engine/trx/transaction.h"
+#ifndef __SHANNONBASE_CSV_READER_H__
+#define __SHANNONBASE_CSV_READER_H__
+#include <string>
+#include "include/my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/reader/reader.h"
 
 namespace ShannonBase {
-namespace Transaction {
+class CSVReader : public Reader {
+public:
+  CSVReader(std::string& path) : m_path(path), m_csv_fd(nullptr){
+  }
+  CSVReader(CSVReader&) = delete;
+  CSVReader(CSVReader&&) = delete;
+  virtual ~CSVReader() = default;
 
-int Transaction::begin(ISOLATION_LEVEL iso_level) {
-  m_iso_level = iso_level;
-  return 0;
-}
-int Transaction::commit () {
-  return 0;
-}
-int Transaction::rollback() {
-  return 0;
-}
-} //ns:transaction   
+  int open() override;
+  int close() override;
+  int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0) override;
+  int write(ShannonBaseContext* context, uchar*buffer, size_t lenght = 0) override;
+  uchar* tell() override;
+  uchar* seek(uchar* pos) override;
+  uchar* seek(size_t offset) override;
+private:
+  std::string m_path;
+  FILE* m_csv_fd;
+};
+
 } //ns:shannonbase
+#endif //__SHANNONBASE_CSV_READER_H__

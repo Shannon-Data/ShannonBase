@@ -73,7 +73,7 @@ Imcu::~Imcu() {
 }
 
 /**Gets a CU by field_name (aka: key)*/
-Cu* Imcu::Get_cu(const Field* field) {
+Cu* Imcu::get_cu(const Field* field) {
   Cu* cu_ptr {nullptr};
   assert(field);
   return cu_ptr;
@@ -83,7 +83,7 @@ Cu* Imcu::Get_cu(const Field* field) {
  * Whether this imcu is full or not. Before wirte it will check the capacity of a imuc
  * 
 */
-bool Imcu::Is_full() {
+bool Imcu::is_full() {
   //if there're not imcu in, the we consider that it's full. return true.
   if (!m_cus.size()) return true;
   return false;

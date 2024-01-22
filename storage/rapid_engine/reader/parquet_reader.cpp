@@ -19,24 +19,40 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
+   The fundmental code for imcs. The chunk is used to store the data which
+   transfer from row-based format to column-based format.
+
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs. for transaction.
+   The fundmental code for imcs.
 */
-#include "storage/rapid_engine/trx/transaction.h"
+#include "storage/rapid_engine/reader/parquet_reader.h"
+
+#include <string>
 
 namespace ShannonBase {
-namespace Transaction {
 
-int Transaction::begin(ISOLATION_LEVEL iso_level) {
-  m_iso_level = iso_level;
+int ParquetReader::open() {
+
   return 0;
 }
-int Transaction::commit () {
+int ParquetReader::close() { 
   return 0;
 }
-int Transaction::rollback() {
+int ParquetReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
   return 0;
 }
-} //ns:transaction   
+int ParquetReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
+  return 0;
+}
+uchar* ParquetReader::tell() {
+  return nullptr;
+}
+uchar* ParquetReader::seek(uchar* pos) {
+  return nullptr;
+}
+uchar* ParquetReader::seek(size_t offset) {
+  return nullptr;
+}
+
 } //ns:shannonbase

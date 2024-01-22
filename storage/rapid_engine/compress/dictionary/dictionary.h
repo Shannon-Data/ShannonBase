@@ -46,10 +46,10 @@ class Dictionary {
     Dictionary(Encoding_type type) : m_encoding_type(type) {}
     Dictionary() = default;
     virtual ~Dictionary()  = default;
-    virtual uint32 Store(String&, Encoding_type type = Encoding_type::NONE);
-    virtual uint32 Get(uint64 strid, String& val, CHARSET_INFO& charset = my_charset_bin);
-    virtual void Set_algo (Encoding_type type) { m_encoding_type = type; }
-    inline Encoding_type Get_algo () const { return m_encoding_type; }
+    virtual uint32 store(String&, Encoding_type type = Encoding_type::NONE);
+    virtual uint32 get(uint64 strid, String& val, CHARSET_INFO& charset = my_charset_bin);
+    virtual void set_algo (Encoding_type type) { m_encoding_type = type; }
+    inline Encoding_type get_algo () const { return m_encoding_type; }
   private:
     std::shared_mutex m_content_mtx;
     std::map<std::string, uint64> m_content;
