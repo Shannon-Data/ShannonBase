@@ -95,10 +95,15 @@ public:
  //flush the data to disk. by now, we cannot impl this part.
  uint flush_direct(ShannonBase::RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
  Compress::Dictionary* local_dictionary() const { return m_header->m_local_dict.get(); }
+ Cu_header* get_header() { return m_header.get();}
  //gets the base address of chunks.
  uchar* get_base();
+ void add_chunk(std::unique_ptr<Chunk>& chunk);
  inline Chunk* get_chunk(uint chunkid) { return (chunkid < m_chunks.size()) ?
                                                   m_chunks[chunkid].get() : nullptr;}
+ inline Chunk* get_first_chunk() { return get_chunk(0); }
+ inline Chunk* get_last_chunk() { return get_chunk(m_chunks.size() -1); }
+ inline size_t get_chunk_nums () {return m_chunks.size(); }
 private:
   uint m_magic{SHANNON_MAGIC_CU};
   //proctect header.
@@ -108,7 +113,7 @@ private:
   //chunks in this cu.
   std::vector<std::unique_ptr<Chunk>> m_chunks;
   //current chunk read.
-  std::atomic<uint32> m_chunk_id {0};
+  std::atomic<uint32> m_current_chunk_id {0};
 };
 
 } //ns:imcs

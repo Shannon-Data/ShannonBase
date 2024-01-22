@@ -62,6 +62,7 @@ Chunk::Chunk(Field* field) {
           return;
         }
        m_data = m_data_base;
+       m_data_cursor = m_data_base;
        m_data_end = m_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
        rapid_allocated_mem_size += ShannonBase::SHANNON_CHUNK_SIZE;
     } else {
@@ -170,7 +171,7 @@ uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer
     //TODO: travel the change link to get the visibile version data.
     m_data_cursor += SHANNON_ROW_TOTAL_LEN; //to the next value.
     diff = m_data_cursor - m_data;
-    if (diff >= 0) return nullptr; //no data here.
+    if (diff > 0) return nullptr; //no data here.
     return m_data_cursor;
   }
  #ifdef SHANNON_ONLY_DATA_FETCH
