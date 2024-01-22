@@ -72,10 +72,16 @@
 namespace dd {
 class Table;
 }
-
+/**
+  this is used to disable the warings:
+  'piecewise_construct' which is in '/usr/include/c++/11/bits/stl_pair.h:83:53'
+*/
+const char *__asan_default_options() {
+  return "verbosity=1:detect_odr_violation=0";
+}
 namespace {
 // Map from (db_name, table_name) to the RapidShare with table state.
-class LoadedTables {
+class ShannonLoadedTables {
   std::map<std::pair<std::string, std::string>, ShannonBase::RapidShare*> m_tables;
   std::mutex m_mutex;
  public:
@@ -98,10 +104,10 @@ class LoadedTables {
   }
 };
 
-LoadedTables *loaded_tables{nullptr};
+ShannonLoadedTables *shannon_loaded_tables{nullptr};
 static struct handlerton* shannon_rapid_hton_ptr {nullptr};
 static bool shannon_rpd_inited {false};
-ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();;
+ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::get_instance();;
 /**
   Execution context class for the Rapid engine. It allocates some data
   on the heap when it is constructed, and frees it when it is
@@ -151,7 +157,7 @@ int ha_rapid::create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
   return HA_ERR_WRONG_COMMAND;
 }
 int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, const dd::Table * table_def) {
-  m_share = loaded_tables->get(table_share->db.str, table_share->table_name.str);
+  m_share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
   if (m_share == nullptr) {
     // The table has not been loaded into the secondary storage engine yet.
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Table has not been loaded");
@@ -172,16 +178,34 @@ int ha_rapid::rnd_init(bool scan) {
   TrxInInnoDB trx_in_innodb(trx);
   trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
 
+  m_imcs_reader.reset(new ImcsReader(table)) ;
+  m_imcs_reader->open();
+
+  //init rapidcontext
+  m_rpd_context.reset(new ShannonBase::RapidContext());
+  m_rpd_context->m_table = table;
+  m_rpd_context->m_current_db = table->s->db.str;
+  m_rpd_context->m_current_table = table->s->table_name.str;
+  m_rpd_context->m_trx = thd_to_trx (current_thd);
+  if (loaded_dictionaries.find(m_rpd_context->m_current_db) == loaded_dictionaries.end()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Local dictionary error.");
+    return HA_ERR_GENERIC;
+  }
+  m_rpd_context->m_local_dict = loaded_dictionaries[m_rpd_context->m_current_db].get();
+
   //imcs do initialization. scan: random read or scan.
-  return imcs_instance->Rnd_init(scan);
+  return imcs_instance->initialized()? 0 : imcs_instance->rnd_init(scan);
 }
 int ha_rapid::rnd_end() {
   if (m_start_of_scan) {
     m_start_of_scan = false;
     trx_t* trx = thd_to_trx (current_thd);
-    trx_commit(trx);
-    return imcs_instance->Rnd_end();
+    if (trx->state == TRX_STATE_ACTIVE)
+      trx_commit(trx);
+    m_imcs_reader->close();
+    return imcs_instance->initialized()? imcs_instance->rnd_end() : 0;
   }
+
   return 0;
 }
 int ha_rapid::read_range_first(const key_range *start_key,
@@ -195,25 +219,18 @@ int ha_rapid::read_range_next() {
 }
 int ha_rapid::rnd_next(unsigned char *buffer) {
   ut_ad (m_start_of_scan && inited == handler::RND);
-  ut_ad(imcs_instance);
-
+  ut_ad(imcs_instance && m_rpd_context);
   if (pushed_idx_cond){ //icp
     //TODO: evaluate condition item, and do condtion eval in scan.
   }
-  ShannonBase::RapidContext context;
-  context.m_current_db = table->s->db.str;
-  context.m_current_table = table->s->table_name.str;
-  context.m_trx = thd_to_trx (current_thd);
-  context.m_table = table;
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   if (!srv_read_only_mode) {
-    trx_assign_read_view(context.m_trx);
+    trx_assign_read_view(m_rpd_context->m_trx);
   }
-  if (loaded_dictionaries.find(context.m_current_db) == loaded_dictionaries.end()) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Local dictionary error.");
-    return HA_ERR_GENERIC;
-  }
-  context.m_local_dict = loaded_dictionaries[context.m_current_db].get();
-  return imcs_instance->Read(&context, buffer);
+
+  auto err = m_imcs_reader->read(m_rpd_context.get(), buffer);
+  return err;
 }
 int ha_rapid::info(unsigned int flags) {
   // Get the cardinality statistics from the primary storage engine.
@@ -277,7 +294,7 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to,
 int ha_rapid::load_table(const TABLE &table_arg) {
   ut_ad(table_arg.file != nullptr);
   THD* thd = current_thd;
-  if (loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
+  if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
     std::ostringstream err;
     err << table_arg.s->db.str << "." <<table_arg.s->table_name.str << " already loaded";
     my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
@@ -369,7 +386,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
 #ifndef NDEBUG
       if (old_map) tmp_restore_column_map(table->read_set, old_map);
 #endif
-      if (imcs_instance->Write(&context, field_ptr)) {
+      if (imcs_instance->write_direct(&context, field_ptr)) {
         table_arg.file->ha_rnd_end();
         my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
                  table_arg.s->table_name.str);
@@ -384,8 +401,8 @@ int ha_rapid::load_table(const TABLE &table_arg) {
 
   m_share = new RapidShare ();
   m_share->file = this;
-  loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
-  if (loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) ==
+  shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
+  if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) ==
       nullptr) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str,
              table_arg.s->table_name.str);
@@ -397,22 +414,22 @@ int ha_rapid::load_table(const TABLE &table_arg) {
 int ha_rapid::unload_table(const char *db_name, const char *table_name,
                           bool error_if_not_loaded) {
   if (error_if_not_loaded &&
-      loaded_tables->get(db_name, table_name) == nullptr) {
+      shannon_loaded_tables->get(db_name, table_name) == nullptr) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Table is not loaded on a secondary engine");
     return HA_ERR_GENERIC;
   }
   
-  ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
+  ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
   assert(imcs_instance);
   RapidContext context;
   context.m_current_db = std::string(db_name);
   context.m_current_table = std::string(table_name);
   //int ret{0};
-  if (auto ret = imcs_instance->Delete_all(&context)) {
+  if (auto ret = imcs_instance->delete_all_direct(&context)) {
     return ret;
   }
-  loaded_tables->erase(db_name, table_name);
+  shannon_loaded_tables->erase(db_name, table_name);
   return 0;
 }
 }  // namespace ShannonBase 
@@ -539,9 +556,12 @@ static bool ShannonModifyAccessPathCost(THD *thd [[maybe_unused]],
   return false;
 }
 
-static handler *ShannonCreate(handlerton *hton, TABLE_SHARE *table_share, bool,
+static handler *ShannonCreateHandler(handlerton *hton, TABLE_SHARE *table_share, bool partitioned,
                        MEM_ROOT *mem_root) {
   assert(hton == shannon_rapid_hton_ptr);
+  if (partitioned) {
+    //to do, partitioned rapid table will be supported in next.
+  }
   return new (mem_root) ShannonBase::ha_rapid(hton, table_share);
 }
 static int ShannonStartConsistentSnapshot(handlerton* hton, THD* thd) {
@@ -667,11 +687,11 @@ static struct SYS_VAR *shannonbase_rapid_system_variables[] = {
 
 /** Here, end of, we export shannonbase status variables to MySQL. */
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
-  loaded_tables = new LoadedTables();
+  shannon_loaded_tables = new ShannonLoadedTables();
 
   handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);
   shannon_rapid_hton_ptr = shannon_rapid_hton;
-  shannon_rapid_hton->create = ShannonCreate;
+  shannon_rapid_hton->create = ShannonCreateHandler;
   shannon_rapid_hton->state = SHOW_OPTION_YES;
   shannon_rapid_hton->flags = HTON_IS_SECONDARY_ENGINE;
   shannon_rapid_hton->db_type = DB_TYPE_UNKNOWN;
@@ -686,24 +706,24 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   //shannon_rapid_hton->rollback = ;
 
   //MEM_ROOT* mem_root = current_thd->mem_root;
-  imcs_instance = ShannonBase::Imcs::Imcs::Get_instance();
+  imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
   if (!imcs_instance) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Cannot get IMCS instance.");
     return 1;
   };
-  auto ret = imcs_instance->Initialize();
+  auto ret = imcs_instance->initialize();
   if (!ret) shannon_rpd_inited = true;
   return ret;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
-  if (loaded_tables) {
-    delete loaded_tables;
-    loaded_tables = nullptr;
+  if (shannon_loaded_tables) {
+    delete shannon_loaded_tables;
+    shannon_loaded_tables = nullptr;
   }
   shannon_rpd_inited = false;
-  return imcs_instance->Deinitialize();
+  return imcs_instance->deinitialize();
 }
 
 static st_mysql_storage_engine shannonbase_rapid_storage_engine{

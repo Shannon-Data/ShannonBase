@@ -35,7 +35,8 @@
 namespace ShannonBase {
 namespace Compress {
 
-std::once_flag CompressFactory::one;
+std::once_flag CompressFactory::m_alg_once;
+Compress_algorithm* CompressFactory::m_factory = nullptr;
 std::string zstd_compress::compressString(std::string& orginal) {
    size_t inputSize = orginal.size();
    size_t compressedBufferSize = ZSTD_compressBound(inputSize);
@@ -144,7 +145,7 @@ std::string lz4_compress::decompressString(std::string& compressed_str) {
     return decompressedData;
 }
 
-std::unique_ptr<Compress_algorithm> CompressFactory::GetInstance(compress_algos algo) {
+std::unique_ptr<Compress_algorithm> CompressFactory::get_instance(compress_algos algo) {
   switch (algo) {
    case compress_algos::ZLIB:
      return std::make_unique<zlib_compress>();

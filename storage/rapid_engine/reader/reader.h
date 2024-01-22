@@ -19,24 +19,33 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
+   The fundmental code for imcs. The chunk is used to store the data which
+   transfer from row-based format to column-based format.
+
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs. for transaction.
+   The fundmental code for imcs.
 */
-#include "storage/rapid_engine/trx/transaction.h"
-
+#ifndef __SHANNONBASE_READER_READER_H__
+#define __SHANNONBASE_READER_READER_H__
+#include <string>
+#include "include/my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_context.h"
 namespace ShannonBase {
-namespace Transaction {
+//interface of reader, which is used to travel all data.
+class Reader : public MemoryObject{
+public:
+  Reader() = default;
+  virtual ~Reader() = default;
+  virtual int open() = 0;
+  virtual int close() = 0;
+  virtual int read(ShannonBaseContext*, uchar*, size_t = 0) = 0;
+  virtual int write(ShannonBaseContext*, uchar*, size_t = 0) = 0;
+  virtual uchar* tell() = 0;
+  virtual uchar* seek(uchar* pos) = 0;
+  virtual uchar* seek(size_t offset) = 0;
+};
 
-int Transaction::begin(ISOLATION_LEVEL iso_level) {
-  m_iso_level = iso_level;
-  return 0;
-}
-int Transaction::commit () {
-  return 0;
-}
-int Transaction::rollback() {
-  return 0;
-}
-} //ns:transaction   
 } //ns:shannonbase
+#endif //__SHANNONBASE_READER_READER_H__

@@ -21,22 +21,23 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs. for transaction.
+   The fundmental code for imcs.
 */
-#include "storage/rapid_engine/trx/transaction.h"
-
+/** The basic iterator class for IMCS. All specific iterators are all inherited
+ * from this.
+*/
+#ifndef __SHANNONBASE_ITERATOR_H__
+#define __SHANNONBASE_ITERATOR_H__
 namespace ShannonBase {
-namespace Transaction {
 
-int Transaction::begin(ISOLATION_LEVEL iso_level) {
-  m_iso_level = iso_level;
-  return 0;
-}
-int Transaction::commit () {
-  return 0;
-}
-int Transaction::rollback() {
-  return 0;
-}
-} //ns:transaction   
+class Iterator {
+public:
+  Iterator();
+  virtual ~Iterator() = 0;
+  virtual bool init() = 0;
+  virtual bool read() = 0;
+  virtual bool next() = 0;
+} ;
+
 } //ns:shannonbase
+#endif //__SHANNONBASE_ITERATOR_H__

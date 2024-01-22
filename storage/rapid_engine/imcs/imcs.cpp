@@ -30,8 +30,9 @@
 
 #include <mutex>
 #include "sql/field.h"
-
+#include "sql/my_decimal.h"
 #include "storage/innobase/include/ut0dbg.h"   //ut_ad
+
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/cu.h"
@@ -48,28 +49,36 @@ Imcs::Imcs() {
 }
 Imcs::~Imcs() { 
 }
-uint Imcs::Initialize() {
+uint Imcs::initialize() {
   return 0;
 }
-uint Imcs::Deinitialize() {
+uint Imcs::deinitialize() {
   return 0;
 }
-uint Imcs::Rnd_init(bool scan) {
+Cu* Imcs::get_Cu(std::string& key) {
+  if (m_cus.find(key) != m_cus.end()) {
+    return m_cus[key].get();
+  }
+  return nullptr;
+}
+uint Imcs::rnd_init(bool scan) {
   //ut::new_withkey<Compress::Dictionar>(UT_NEW_THIS_FILE_PSI_KEY);
   for(auto &cu: m_cus) {
-    auto ret = cu.second.get()->Rnd_init(scan);
+    auto ret = cu.second.get()->rnd_init(scan);
     if (ret) return ret;
   }
+  m_inited = handler::RND;
   return 0;
 }
-uint Imcs::Rnd_end() {
+uint Imcs::rnd_end() {
   for(auto &cu: m_cus) {
-    auto ret = cu.second.get()->Rnd_end();
+    auto ret = cu.second.get()->rnd_end();
     if (ret) return ret;
   }
+  m_inited = handler::NONE;
   return 0;
 }
-uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
+uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   ut_ad(context && field);
   /** before insertion, should to check whether there's spare space to store the new data.
       or not. If no extra sapce left, allocate a new imcu. After a new imcu allocated, the
@@ -104,7 +113,7 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
   offset += SHANNON_ROWID_BYTE_LEN;
   memcpy(data.get() + offset, &sum_ptr, SHANNON_SUMPTR_BYTE_LEN);
   offset += SHANNON_SUMPTR_BYTE_LEN;
-  ulonglong data_val {0};
+  double data_val {0};
   if (!field->is_real_null()) {//not null
     switch (field->type()) {
       case MYSQL_TYPE_BLOB:
@@ -113,16 +122,22 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
         String buf;
         buf.set_charset(field->charset());
         field->val_str(&buf);
-        Compress::Dictionary* dict = m_cus[key_name]->Local_dictionary();
+        Compress::Dictionary* dict = m_cus[key_name]->local_dictionary();
         ut_ad(dict);
-        data_val = dict->Store(buf);
+        data_val = dict->store(buf);
       } break;
       case MYSQL_TYPE_INT24:
       case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG: {
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL:
+      case MYSQL_TYPE_LONGLONG:
+      case MYSQL_TYPE_FLOAT:
+      case MYSQL_TYPE_DOUBLE: {
         data_val = field->val_real();
+      }break;
+      case MYSQL_TYPE_DECIMAL:
+      case MYSQL_TYPE_NEWDECIMAL: {
+        my_decimal dval;
+        field->val_decimal(&dval);
+        my_decimal2double(10, &dval, &data_val);
       } break;
       case MYSQL_TYPE_DATE:
       case MYSQL_TYPE_DATETIME:
@@ -134,14 +149,14 @@ uint Imcs::Write(ShannonBase::RapidContext* context, Field* field) {
     memcpy(data.get() + offset, &data_val, SHANNON_DATA_BYTE_LEN);
   }
 
-  if (!m_cus[key_name]->Write_data(context, data.get(), data_len)) return 1;
+  if (!m_cus[key_name]->write_data_direct(context, data.get(), data_len)) return 1;
   return 0;
 }
-uint Imcs::Read (ShannonBase::RapidContext* context, Field* field) {
+uint Imcs::read_direct(ShannonBase::RapidContext* context, Field* field) {
   ut_ad(context && field);
   return 0;
 }
-uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
+uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   ut_ad(context && buffer);
   if (!m_cus.size()) return HA_ERR_END_OF_FILE;
 
@@ -154,7 +169,7 @@ uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
 
     if (m_cus.find(key) == m_cus.end()) continue; //not found this field.
     uchar buff [30] = {0};
-    if (!m_cus[key].get()->Read_data(context, buff))
+    if (!m_cus[key].get()->read_data_direct(context, buff))
        return HA_ERR_END_OF_FILE;
 
     #ifdef SHANNON_ONLY_DATA_FETCH
@@ -164,9 +179,9 @@ uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
       if (field_ptr->type() == MYSQL_TYPE_BLOB || field_ptr->type() == MYSQL_TYPE_STRING
           || field_ptr->type() == MYSQL_TYPE_VARCHAR) { //read the data
         String str;
-        Compress::Dictionary* dict = m_cus[key]->Local_dictionary();
+        Compress::Dictionary* dict = m_cus[key]->local_dictionary();
         ut_ad(dict);
-        dict->Get(data, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
+        dict->get(data, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
         if (str.length())
           field_ptr->set_notnull();
         field_ptr->store(str.c_ptr(), str.length(), &my_charset_bin);
@@ -183,20 +198,24 @@ uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
         field_ptr->set_notnull();
         uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
               data_offset += SHANNON_SUMPTR_BYTE_LEN;
-        ulonglong val = *(ulonglong*) (buff + data_offset);
+        double val = *(double*) (buff + data_offset);
         switch (field_ptr->type()) {
           case MYSQL_TYPE_BLOB:
           case MYSQL_TYPE_STRING:
           case MYSQL_TYPE_VARCHAR: { //if string, stores its stringid, and gets from local dictionary.
             String str;
-            Compress::Dictionary* dict = m_cus[key]->Local_dictionary();
+            Compress::Dictionary* dict = m_cus[key]->local_dictionary();
             ut_ad(dict);
-            dict->Get(val, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
+            dict->get(val, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
             field_ptr->store(str.c_ptr(), str.length(), &my_charset_bin);
           }break;
           case MYSQL_TYPE_INT24:
           case MYSQL_TYPE_LONG:
           case MYSQL_TYPE_LONGLONG:
+          case MYSQL_TYPE_FLOAT:
+          case MYSQL_TYPE_DOUBLE: {
+            field_ptr->store(val);
+          }break;
           case MYSQL_TYPE_DECIMAL:
           case MYSQL_TYPE_NEWDECIMAL: {
             field_ptr->store(val);
@@ -214,14 +233,14 @@ uint Imcs::Read(ShannonBase::RapidContext* context, uchar* buffer) {
   }
   return 0;
 }
-uint Read_batch(ShannonBase::RapidContext* context, uchar* buffer){
+uint read_batch_direct(ShannonBase::RapidContext* context, uchar* buffer){
   ut_ad(context && buffer);
   return 0;
 }
-uint Imcs::Delete(ShannonBase::RapidContext* context, Field* field, uchar* rowid) {
+uint Imcs::delete_direct(ShannonBase::RapidContext* context, Field* field, uchar* rowid) {
   return 0;
 }
-uint Imcs::Delete_all(ShannonBase::RapidContext* context) {
+uint Imcs::delete_all_direct(ShannonBase::RapidContext* context) {
   m_cus.clear();
   return 0;
 }

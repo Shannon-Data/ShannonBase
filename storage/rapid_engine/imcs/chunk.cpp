@@ -45,6 +45,7 @@ extern unsigned long rapid_memory_size;
 Chunk::Chunk(Field* field) {
    ut_ad(field);
    ut_ad(ShannonBase::SHANNON_CHUNK_SIZE < rapid_memory_size);
+   m_inited = handler::NONE;
    {
      /**m_data_base，here, we use the same psi key with buffer pool which used in innodb page allocation.
       * Here, we use ut::xxx to manage memory allocation and free as innobase doese. In SQL lay, we will
@@ -113,21 +114,20 @@ Chunk::~Chunk() {
     m_data_end = m_data_base;
   }
 }
-uint Chunk::Rnd_init(bool scan){
-  if (scan) {
-    m_data_cursor = m_data_base;
-    m_inited = handler::RND;
-  }
+uint Chunk::rnd_init(bool scan){
+  ut_ad(m_inited == handler::NONE);
+  m_data_cursor = m_data_base;
+  m_inited = handler::RND;
   return 0;
 }
-uint Chunk::Rnd_end()
+uint Chunk::rnd_end()
 {
   ut_ad(m_inited == handler::RND);
   m_data_cursor = m_data_base;
   m_inited = handler::NONE;
   return 0;
 }
-uchar* Chunk::Write_data(ShannonBase::RapidContext* context, uchar* data, uint length) {
+uchar* Chunk::write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length) {
   ut_ad(m_data_base || data);
   std::scoped_lock lk(m_data_mutex);
   if (m_data + length > m_data_end)  return nullptr;
@@ -135,7 +135,7 @@ uchar* Chunk::Write_data(ShannonBase::RapidContext* context, uchar* data, uint l
   m_data += length;
   m_header->m_rows ++;
   //writes success, then updates the meta info.
-  ulonglong val {0};
+  double val {0};
   uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
         data_offset += SHANNON_SUMPTR_BYTE_LEN;
   memcpy(&val, m_data + data_offset, SHANNON_DATA_BYTE_LEN); //fixed size. it's numerical data or string id.
@@ -151,7 +151,7 @@ uchar* Chunk::Write_data(ShannonBase::RapidContext* context, uchar* data, uint l
   }
   return m_data;
 }
-uchar* Chunk::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
+uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   ut_ad(context && buffer);
   //has to the end.
   ptrdiff_t diff = m_data_cursor - m_data;
@@ -199,14 +199,14 @@ uchar* Chunk::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
  #endif
   return m_data_cursor;
 }
-uchar* Chunk::Read_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
+uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
   assert(context && rowid && buffer);
   return nullptr;
 }
-uchar* Chunk::Delete_data(ShannonBase::RapidContext* context, uchar* rowid) {
+uchar* Chunk::delete_data_direct(ShannonBase::RapidContext* context, uchar* rowid) {
   return nullptr;
 }
-uchar* Chunk::Delete_all() {
+uchar* Chunk::delete_all_direct() {
   if (m_data_base) {
     my_free(m_data_base);
     m_data_base = nullptr;
@@ -216,11 +216,11 @@ uchar* Chunk::Delete_all() {
   return m_data_base; 
 }
 
-uchar* Chunk::Update_date(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length) {
+uchar* Chunk::update_date_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length) {
   return nullptr;
 }
 
-uint flush(ShannonBase::RapidContext* context, uchar* from, uchar* to) {
+uint flush_direct(ShannonBase::RapidContext* context, uchar* from, uchar* to) {
   bool flush_all[[maybe_unused]] {true};
   if (!from || !to)
     flush_all = false;

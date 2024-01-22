@@ -32,7 +32,6 @@
 #include <regex>
 
 #include "sql/field.h"      //Field
-
 #include "storage/innobase/include/univ.i"
 #include "storage/innobase/include/ut0new.h"
 
@@ -77,34 +76,41 @@ Cu::Cu(Field* field) {
 Cu::~Cu() {
   m_chunks.clear();
 }
-uint Cu::Rnd_init(bool scan) {
+uchar* Cu::get_base() {
+  if (!m_chunks.size()) return nullptr;
+  return m_chunks[0].get()->get_base();
+}
+uint Cu::rnd_init(bool scan) {
   if (!m_chunks.size()) return 0;
   for (size_t index =0; index < m_chunks.size(); index++) {
-    if (m_chunks[index].get()->Rnd_init(scan))
+    if (m_chunks[index].get()->rnd_init(scan))
+      return HA_ERR_INITIALIZATION;
+  }
+  m_chunk_id.store(0, std::memory_order::memory_order_relaxed);
+  return 0;
+}
+uint Cu::rnd_end() {
+  if (!m_chunks.size()) return 0;
+  for (size_t index =0; index < m_chunks.size(); index++) {
+    if (m_chunks[index].get()->rnd_end())
       return HA_ERR_INITIALIZATION;
   }
   return 0;
 }
-uint Cu::Rnd_end() {
-  if (!m_chunks.size()) return 0;
-  for (size_t index =0; index < m_chunks.size(); index++) {
-    if (m_chunks[index].get()->Rnd_end())
-      return HA_ERR_INITIALIZATION;
-  }
-  return 0;
-}
-uchar* Cu::Write_data(ShannonBase::RapidContext* context, uchar* data, uint length) {
+uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length) {
   ut_ad(m_header.get() && m_chunks.size());
   uchar* pos{nullptr};
   Chunk* chunk_ptr = m_chunks[m_chunks.size()-1].get();
-  if (!(pos = chunk_ptr->Write_data(context, data, length))) {
+  if (!(pos = chunk_ptr->write_data_direct(context, data, length))) {
     //the prev chunk is full, then allocate a new chunk to write.
     std::scoped_lock lk(m_header_mutex);
     Field* field = *(context->m_table->field + m_header->m_field_no);
     ut_ad(field);
     m_chunks.push_back(std::make_unique<Chunk>(field));
+    chunk_ptr->get_header().m_next_chunk = m_chunks[m_chunks.size()-1].get();
+    m_chunks[m_chunks.size()-1].get()->get_header().m_prev_chunk = chunk_ptr;
     chunk_ptr = m_chunks[m_chunks.size()-1].get();
-    pos = chunk_ptr->Write_data(context, data, length);
+    pos = chunk_ptr->write_data_direct(context, data, length);
     //To update the metainfo.
   }
   //update the meta info.
@@ -114,7 +120,7 @@ uchar* Cu::Write_data(ShannonBase::RapidContext* context, uchar* data, uint leng
   }
   uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
         data_offset += SHANNON_SUMPTR_BYTE_LEN;
-  double data_val = *(double*) (data + data_offset);
+  longlong data_val = *(longlong*) (data + data_offset);
   m_header->m_rows++;
   m_header->m_sum += data_val;
   m_header->m_avg.store(m_header->m_sum/m_header->m_rows, std::memory_order::memory_order_relaxed);
@@ -124,7 +130,7 @@ uchar* Cu::Write_data(ShannonBase::RapidContext* context, uchar* data, uint leng
     m_header->m_min.store(data_val, std::memory_order::memory_order_relaxed);
   return pos;
 }
-uchar* Cu::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
+uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   if (!m_chunks.size()) return nullptr;
 #ifdef SHANNON_GET_NTH_CHUNK
   //Gets the last chunk data.
@@ -136,40 +142,39 @@ uchar* Cu::Read_data(ShannonBase::RapidContext* context, uchar* buffer) {
   if (m_chunk_id >= m_chunks.size())  return nullptr;
   Chunk* chunk = m_chunks [m_chunk_id].get();
   if (!chunk) return nullptr;
-  auto ret = chunk->Read_data(context, buffer);
+  auto ret = chunk->read_data_direct(context, buffer);
   if (!ret) {//to the end of this chunk, then start to read the next chunk.
     m_chunk_id.store(m_chunk_id + 1, std::memory_order::memory_order_seq_cst);
     if (m_chunk_id >= m_chunks.size()) return nullptr;
-    Chunk* chunk = m_chunks [m_chunk_id].get();
+    chunk = m_chunks [m_chunk_id].get();
     if (!chunk) return nullptr;
-    ret = chunk->Read_data(context, buffer);
+    ret = chunk->read_data_direct(context, buffer);
   }
   return ret;
 #endif
 }
-
-uchar* Cu::Read_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
+uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
   if (!m_chunks.size()) return nullptr;
   //Chunk* chunk = m_chunks [m_chunks.size() - 1].get(); //to get the last chunk data.
   //if (!chunk) return nullptr;
   return  nullptr;
 }
-uchar* Cu::Delete_data(ShannonBase::RapidContext* context, uchar* rowid) {
+uchar* Cu::delete_data_direct(ShannonBase::RapidContext* context, uchar* rowid) {
   return nullptr;
 }
-uchar* Cu::Delete_all(){
+uchar* Cu::delete_all_direct(){
   uchar* base{nullptr};
   for(size_t index = 0; index < m_chunks.size(); index++) {
-    if (index == 0) base = m_chunks[index]->Get_base();
-    m_chunks[index]->Delete_all();
+    if (index == 0) base = m_chunks[index]->get_base();
+    m_chunks[index]->delete_all_direct();
   }
   return base;
 }
-uchar* Cu::Update_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length){
+uchar* Cu::update_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length){
   
   return nullptr;
 }
-uint Cu::flush(ShannonBase::RapidContext* context, uchar* from, uchar* to) {
+uint Cu::flush_direct(ShannonBase::RapidContext* context, uchar* from, uchar* to) {
   assert(from ||to);
   return 0;
 }
