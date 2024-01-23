@@ -77,13 +77,16 @@ Cu::~Cu() {
   m_chunks.clear();
 }
 uchar* Cu::get_base() {
+  DBUG_TRACE;
   if (!m_chunks.size()) return nullptr;
   return m_chunks[0].get()->get_base();
 }
 void Cu::add_chunk(std::unique_ptr<Chunk>& chunk) {
+  DBUG_TRACE;
   m_chunks.push_back(std::move(chunk));
 }
 uint Cu::rnd_init(bool scan) {
+  DBUG_TRACE;
   if (!m_chunks.size()) return 0;
   for (size_t index =0; index < m_chunks.size(); index++) {
     if (m_chunks[index].get()->rnd_init(scan))
@@ -93,6 +96,7 @@ uint Cu::rnd_init(bool scan) {
   return 0;
 }
 uint Cu::rnd_end() {
+  DBUG_TRACE;
   if (!m_chunks.size()) return 0;
   for (size_t index =0; index < m_chunks.size(); index++) {
     if (m_chunks[index].get()->rnd_end())
@@ -101,6 +105,7 @@ uint Cu::rnd_end() {
   return 0;
 }
 uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length) {
+  DBUG_TRACE;
   ut_ad(m_header.get() && m_chunks.size());
   uchar* pos{nullptr};
   Chunk* chunk_ptr = m_chunks[m_chunks.size()-1].get();
@@ -134,6 +139,7 @@ uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, ui
   return pos;
 }
 uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
+  DBUG_TRACE;
   if (!m_chunks.size()) return nullptr;
 #ifdef SHANNON_GET_NTH_CHUNK
   //Gets the last chunk data.

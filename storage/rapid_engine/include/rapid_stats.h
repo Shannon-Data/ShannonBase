@@ -35,11 +35,6 @@ namespace ShannonBase{
       data_placement_index = 0;
       data_dict_bytes = 0;
       avg_byte_width_inc_null = 0 ;
-
-      memset (schema_name, 0x0, NAME_LEN);
-      memset (table_name, 0x0, NAME_LEN);
-      memset (column_name, 0x0, NAME_LEN);
-      memset (encoding, 0x0, NAME_LEN);
     }
     //schema name
     char schema_name [NAME_LEN] ={0};

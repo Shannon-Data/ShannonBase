@@ -58,6 +58,7 @@ CuView::CuView(TABLE* table, Field* field) : m_source_table(table), m_source_fie
   ut_a(m_source_cu);
 }
 int CuView::open(){
+  DBUG_TRACE;
   auto chunk = m_source_cu->get_chunk(m_reader_chunk_id);
   ut_a(chunk);
   m_reader_pos = chunk->get_base();
@@ -68,6 +69,7 @@ int CuView::open(){
   return 0;
 }
 int CuView::close(){
+  DBUG_TRACE;
   m_reader_chunk_id = 0;
   m_reader_pos = nullptr;
 
@@ -78,8 +80,8 @@ int CuView::close(){
 /**
  * this function is similiar to Chunk::Read_data, you should change these funcs in sync.
 */
-int CuView::read(ShannonBaseContext* context, uchar* buffer, size_t length)
-{
+int CuView::read(ShannonBaseContext* context, uchar* buffer, size_t length){
+  DBUG_TRACE;
   ut_a(context && buffer);
   RapidContext* rpd_context = dynamic_cast<RapidContext*> (context);
   if (!m_source_cu) return HA_ERR_END_OF_FILE;
@@ -146,6 +148,7 @@ int CuView::read(ShannonBaseContext* context, uchar* buffer, size_t length)
   return HA_ERR_END_OF_FILE;
 }
 int CuView::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
+  DBUG_TRACE;
   ut_a(context && buffer);
   uchar* pos{nullptr};
   RapidContext* rpd_context = dynamic_cast<RapidContext*> (context);
@@ -195,10 +198,11 @@ ImcsReader::ImcsReader(TABLE* table) :
     // Skip columns marked as NOT SECONDARY.
     if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     key += field_ptr->field_name;
-    m_cu_views.insert({key, std::make_unique<CuView>(table, field_ptr)});
+    m_cu_views.emplace(key, std::make_unique<CuView>(table, field_ptr));
   }
 }
 int ImcsReader::open() {
+  DBUG_TRACE;
   for(auto& item : m_cu_views) {
     item.second->open();
   }
@@ -206,6 +210,7 @@ int ImcsReader::open() {
   return 0;
 }
 int ImcsReader::close() {
+  DBUG_TRACE;
   for(auto& item : m_cu_views) {
     item.second->close();
   }
@@ -213,24 +218,24 @@ int ImcsReader::close() {
   return 0;
 }
 int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
+  DBUG_TRACE;
   ut_a(context && buffer);
   if (!m_start_of_scan) return HA_ERR_GENERIC;
   for (uint idx =0; idx < m_source_table->s->fields; idx++) {
     Field* field_ptr = *(m_source_table->field + idx);
-    // Skip columns marked as NOT SECONDARY.
-    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
     ut_a(field_ptr);
-    if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    // Skip columns marked as NOT SECONDARY.
+    if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
+        field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
     std::string key = m_db_name + m_table_name + field_ptr->field_name;
     if (m_cu_views.find(key) == m_cu_views.end()) return HA_ERR_END_OF_FILE;
 
     uchar buff[SHANNON_ROW_TOTAL_LEN + 1] = {0};
     if (auto ret = m_cu_views[key].get()->read(context, buff)) return ret;
     #ifdef SHANNON_ONLY_DATA_FETCH
-      long long data = *(long long*) buff;
-      my_bitmap_map *old_map = 0;
-      old_map = tmp_use_all_columns(m_source_table, m_source_table->write_set);
+      double data = *(double*) buff;
+      my_bitmap_map *old_map = tmp_use_all_columns(m_source_table, m_source_table->write_set);
       if (field_ptr->type() == MYSQL_TYPE_BLOB || field_ptr->type() == MYSQL_TYPE_STRING
           || field_ptr->type() == MYSQL_TYPE_VARCHAR) { //read the data
         String str;
@@ -245,8 +250,10 @@ int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) 
       }
       if (old_map) tmp_restore_column_map(m_source_table->write_set, old_map);
     #else
-      my_bitmap_map *old_map = tmp_use_all_columns(m_source_table, m_source_table->write_set);
       uint8 info = *(uint8*) buff;
+      if (info & DATA_DELETE_FLAG_MASK) continue; //deleted rows.
+
+      my_bitmap_map *old_map = tmp_use_all_columns(m_source_table, m_source_table->write_set);
       if (info & DATA_NULL_FLAG_MASK)
         field_ptr->set_null();
       else {
@@ -282,13 +289,14 @@ int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) 
           } break;
           default: field_ptr->store (val);
         }
-        if (old_map) tmp_restore_column_map(m_source_table->write_set, old_map);
       }
+      if (old_map) tmp_restore_column_map(m_source_table->write_set, old_map);
     #endif
   }
   return 0;
 }
 int ImcsReader::write(ShannonBaseContext* context, uchar*buffer, size_t lenght) {
+  DBUG_TRACE;
   ut_a(context && buffer);
   if (!m_start_of_scan) return HA_ERR_GENERIC;
   RapidContext* rpd_context = dynamic_cast<RapidContext*>(context);
@@ -317,7 +325,7 @@ int ImcsReader::write(ShannonBaseContext* context, uchar*buffer, size_t lenght) 
     int8 info {0};
     int64 sum_ptr{0}, offset{0};
     if (field->is_real_null())
-    info |= DATA_NULL_FLAG_MASK;
+       info |= DATA_NULL_FLAG_MASK;
     memcpy(data.get() + offset, &info, SHANNON_INFO_BYTE_LEN);
     offset += SHANNON_INFO_BYTE_LEN;
     memcpy(data.get() + offset, &rpd_context->m_extra_info.m_trxid, SHANNON_TRX_ID_BYTE_LEN);

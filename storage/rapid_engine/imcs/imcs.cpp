@@ -50,22 +50,27 @@ Imcs::Imcs() {
 Imcs::~Imcs() { 
 }
 uint Imcs::initialize() {
+  DBUG_TRACE;
   return 0;
 }
 uint Imcs::deinitialize() {
+  DBUG_TRACE;
   return 0;
 }
 Cu* Imcs::get_Cu(std::string& key) {
+  DBUG_TRACE;
   if (m_cus.find(key) != m_cus.end()) {
     return m_cus[key].get();
   }
   return nullptr;
 }
 void Imcs::add_cu(std::string key, std::unique_ptr<Cu>& cu) {
+  DBUG_TRACE;
   m_cus.insert({key, std::move(cu)});
   return;
 }
 uint Imcs::rnd_init(bool scan) {
+  DBUG_TRACE;
   //ut::new_withkey<Compress::Dictionar>(UT_NEW_THIS_FILE_PSI_KEY);
   for(auto &cu: m_cus) {
     auto ret = cu.second.get()->rnd_init(scan);
@@ -75,6 +80,7 @@ uint Imcs::rnd_init(bool scan) {
   return 0;
 }
 uint Imcs::rnd_end() {
+  DBUG_TRACE;
   for(auto &cu: m_cus) {
     auto ret = cu.second.get()->rnd_end();
     if (ret) return ret;
@@ -83,6 +89,7 @@ uint Imcs::rnd_end() {
   return 0;
 }
 uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
+  DBUG_TRACE;
   ut_ad(context && field);
   /** before insertion, should to check whether there's spare space to store the new data.
       or not. If no extra sapce left, allocate a new imcu. After a new imcu allocated, the
@@ -161,13 +168,15 @@ uint Imcs::read_direct(ShannonBase::RapidContext* context, Field* field) {
   return 0;
 }
 uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
+  DBUG_TRACE;
   ut_ad(context && buffer);
   if (!m_cus.size()) return HA_ERR_END_OF_FILE;
 
   for (uint index =0; index < context->m_table->s->fields; index++) {
     Field* field_ptr = *(context->m_table->field + index);
     ut_ad(field_ptr);
-    if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    if (!bitmap_is_set(context->m_table->read_set, field_ptr->field_index()) || 
+        field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     std::string key = context->m_current_db + context->m_current_table;
     key += field_ptr->field_name;
 
@@ -194,8 +203,10 @@ uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
       }
       if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
     #else
-      my_bitmap_map *old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);
       uint8 info = *(uint8*) buff;
+      if (info & DATA_DELETE_FLAG_MASK) continue;
+
+      my_bitmap_map *old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);      
       if (info & DATA_NULL_FLAG_MASK)
         field_ptr->set_null();
       else {
@@ -231,8 +242,8 @@ uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
           } break;
           default: field_ptr->store (val);
         }
-        if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
       }
+      if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
     #endif
   }
   return 0;

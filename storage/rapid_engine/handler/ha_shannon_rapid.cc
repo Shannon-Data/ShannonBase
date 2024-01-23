@@ -154,9 +154,11 @@ ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
     : handler(hton, table_share_arg) {
 }
 int ha_rapid::create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
+  DBUG_TRACE;
   return HA_ERR_WRONG_COMMAND;
 }
 int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, const dd::Table * table_def) {
+  DBUG_TRACE;
   m_share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
   if (m_share == nullptr) {
     // The table has not been loaded into the secondary storage engine yet.
@@ -167,9 +169,11 @@ int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, cons
   return 0;
 }
 int ha_rapid::close () {
+  DBUG_TRACE;
   return 0;
 }
 int ha_rapid::rnd_init(bool scan) {
+  DBUG_TRACE;
   ut_ad(shannon_rpd_inited == true);
   ut_ad(m_start_of_scan == false);
   m_start_of_scan = true;
@@ -193,10 +197,14 @@ int ha_rapid::rnd_init(bool scan) {
   }
   m_rpd_context->m_local_dict = loaded_dictionaries[m_rpd_context->m_current_db].get();
 
+  if (!srv_read_only_mode) {
+    trx_assign_read_view(m_rpd_context->m_trx);
+  }
   //imcs do initialization. scan: random read or scan.
   return imcs_instance->initialized()? 0 : imcs_instance->rnd_init(scan);
 }
 int ha_rapid::rnd_end() {
+  DBUG_TRACE;
   if (m_start_of_scan) {
     m_start_of_scan = false;
     trx_t* trx = thd_to_trx (current_thd);
@@ -218,17 +226,13 @@ int ha_rapid::read_range_next() {
   return (handler::read_range_next());
 }
 int ha_rapid::rnd_next(unsigned char *buffer) {
+  DBUG_TRACE;
   ut_ad (m_start_of_scan && inited == handler::RND);
-  ut_ad(imcs_instance && m_rpd_context);
   if (pushed_idx_cond){ //icp
     //TODO: evaluate condition item, and do condtion eval in scan.
   }
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  if (!srv_read_only_mode) {
-    trx_assign_read_view(m_rpd_context->m_trx);
-  }
-
   auto err = m_imcs_reader->read(m_rpd_context.get(), buffer);
   return err;
 }
@@ -292,6 +296,7 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to,
 }
 
 int ha_rapid::load_table(const TABLE &table_arg) {
+  DBUG_TRACE;
   ut_ad(table_arg.file != nullptr);
   THD* thd = current_thd;
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
@@ -403,6 +408,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name,
                           bool error_if_not_loaded) {
+  DBUG_TRACE;
   if (error_if_not_loaded &&
       shannon_loaded_tables->get(db_name, table_name) == nullptr) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),

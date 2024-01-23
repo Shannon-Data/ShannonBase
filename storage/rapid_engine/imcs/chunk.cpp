@@ -116,19 +116,21 @@ Chunk::~Chunk() {
   }
 }
 uint Chunk::rnd_init(bool scan){
+  DBUG_TRACE;
   ut_ad(m_inited == handler::NONE);
   m_data_cursor = m_data_base;
   m_inited = handler::RND;
   return 0;
 }
-uint Chunk::rnd_end()
-{
+uint Chunk::rnd_end(){
+  DBUG_TRACE;
   ut_ad(m_inited == handler::RND);
   m_data_cursor = m_data_base;
   m_inited = handler::NONE;
   return 0;
 }
 uchar* Chunk::write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length) {
+  DBUG_TRACE;
   ut_ad(m_data_base || data);
   std::scoped_lock lk(m_data_mutex);
   if (m_data + length > m_data_end)  return nullptr;
@@ -153,6 +155,7 @@ uchar* Chunk::write_data_direct(ShannonBase::RapidContext* context, uchar* data,
   return m_data;
 }
 uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
+  DBUG_TRACE;
   ut_ad(context && buffer);
   //has to the end.
   ptrdiff_t diff = m_data_cursor - m_data;
