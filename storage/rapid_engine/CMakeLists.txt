@@ -41,7 +41,6 @@ INCLUDE_DIRECTORIES(
 
 SET(SHANNON_RAPID_COMPRESS_SOURCES
   compress/algorithms.cpp
-  compress/zlib/zlib.cc
   compress/dictionary/dictionary.cpp
 )
 SET(SHANNON_IMCS_SOURCES

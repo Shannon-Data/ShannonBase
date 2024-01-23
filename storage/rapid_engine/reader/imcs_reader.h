@@ -81,7 +81,7 @@ public:
   uchar* seek(size_t offset) override;
 private:
    //viewer of cus.
-  std::map< std::string, std::unique_ptr<CuView>> m_cu_views;
+  std::map<std::string, std::unique_ptr<CuView>> m_cu_views;
   //source table.
   TABLE* m_source_table;
   //source name info.

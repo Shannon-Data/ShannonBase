@@ -146,19 +146,14 @@ std::string lz4_compress::decompressString(std::string& compressed_str) {
 }
 
 std::unique_ptr<Compress_algorithm> CompressFactory::get_instance(compress_algos algo) {
-  switch (algo) {
-   case compress_algos::ZLIB:
+  if(algo ==compress_algos::ZLIB)
      return std::make_unique<zlib_compress>();
-   break;
-   case compress_algos::ZSTD:
+  else if (algo == compress_algos::ZSTD)
      return std::make_unique<zstd_compress>();
-   break;
-   case compress_algos::LZ4:
+  else if (algo ==compress_algos::LZ4)
      return std::make_unique<lz4_compress>();
-   break;
-   default: break;
-  }
-  return std::make_unique<default_compress>();
+  else 
+    return std::make_unique<default_compress>();
 }
 
 } //ns:compress
