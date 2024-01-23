@@ -223,6 +223,9 @@ int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) 
   if (!m_start_of_scan) return HA_ERR_GENERIC;
   for (uint idx =0; idx < m_source_table->s->fields; idx++) {
     Field* field_ptr = *(m_source_table->field + idx);
+    // Skip columns marked as NOT SECONDARY.
+    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
     ut_a(field_ptr);
     // Skip columns marked as NOT SECONDARY.
     if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
