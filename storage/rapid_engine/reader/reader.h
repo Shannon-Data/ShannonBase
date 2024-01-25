@@ -32,6 +32,7 @@
 #include "include/my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+class key_range;
 namespace ShannonBase {
 //interface of reader, which is used to travel all data.
 class Reader : public MemoryObject{
@@ -41,6 +42,7 @@ public:
   virtual int open() = 0;
   virtual int close() = 0;
   virtual int read(ShannonBaseContext*, uchar*, size_t = 0) = 0;
+  virtual int records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) = 0;
   virtual int write(ShannonBaseContext*, uchar*, size_t = 0) = 0;
   virtual uchar* tell() = 0;
   virtual uchar* seek(uchar* pos) = 0;

@@ -57,7 +57,7 @@ uint Imcs::deinitialize() {
   DBUG_TRACE;
   return 0;
 }
-Cu* Imcs::get_Cu(std::string& key) {
+Cu* Imcs::get_cu(std::string& key) {
   DBUG_TRACE;
   if (m_cus.find(key) != m_cus.end()) {
     return m_cus[key].get();

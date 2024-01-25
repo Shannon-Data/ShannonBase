@@ -152,6 +152,7 @@ rpd_columns_container meta_rpd_columns_infos;
 std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
 ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
     : handler(hton, table_share_arg) {
+  m_rpd_thd = ha_thd();
 }
 int ha_rapid::create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
   DBUG_TRACE;
@@ -178,28 +179,27 @@ int ha_rapid::rnd_init(bool scan) {
   ut_ad(m_start_of_scan == false);
   m_start_of_scan = true;
 
-  trx_t* trx = thd_to_trx (current_thd);
+  trx_t* trx = check_trx_exists (m_rpd_thd);
   TrxInInnoDB trx_in_innodb(trx);
   trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
-
-  m_imcs_reader.reset(new ImcsReader(table)) ;
-  m_imcs_reader->open();
+  if (trx->isolation_level > TRX_ISO_READ_UNCOMMITTED)
+    trx_assign_read_view(trx);
 
   //init rapidcontext
   m_rpd_context.reset(new ShannonBase::RapidContext());
   m_rpd_context->m_table = table;
   m_rpd_context->m_current_db = table->s->db.str;
   m_rpd_context->m_current_table = table->s->table_name.str;
-  m_rpd_context->m_trx = thd_to_trx (current_thd);
+  m_rpd_context->m_trx = trx;
   if (loaded_dictionaries.find(m_rpd_context->m_current_db) == loaded_dictionaries.end()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Local dictionary error.");
     return HA_ERR_GENERIC;
   }
   m_rpd_context->m_local_dict = loaded_dictionaries[m_rpd_context->m_current_db].get();
 
-  if (!srv_read_only_mode) {
-    trx_assign_read_view(m_rpd_context->m_trx);
-  }
+  m_imcs_reader.reset(new ImcsReader(table)) ;
+  m_imcs_reader->open();
+
   //imcs do initialization. scan: random read or scan.
   return imcs_instance->initialized()? 0 : imcs_instance->rnd_init(scan);
 }
@@ -207,18 +207,19 @@ int ha_rapid::rnd_end() {
   DBUG_TRACE;
   if (m_start_of_scan) {
     m_start_of_scan = false;
-    trx_t* trx = thd_to_trx (current_thd);
-    if (trx->state == TRX_STATE_ACTIVE)
-      trx_commit(trx);
+    if (m_rpd_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) {
+       trx_t* trx = thd_to_trx (m_rpd_thd);
+       if (trx->state == TRX_STATE_ACTIVE)
+         trx_commit(trx);
+    }
     m_imcs_reader->close();
     return imcs_instance->initialized()? imcs_instance->rnd_end() : 0;
   }
-
   return 0;
 }
 int ha_rapid::read_range_first(const key_range *start_key,
-                                  const key_range *end_key, bool eq_range_arg,
-                                  bool sorted) {
+                               const key_range *end_key, bool eq_range_arg,
+                               bool sorted) {
   return handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
 }
 
@@ -280,11 +281,64 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part,
   // in rowid order.
   return ((HA_READ_RANGE | HA_KEY_SCAN_NOT_ROR) & primary_flags);
 }
+#if 0
+int ha_rapid::multi_range_read_init(RANGE_SEQ_IF *seq, void *seq_init_param,
+                          uint n_ranges, uint mode,
+                          HANDLER_BUFFER *buf) {
+  return 0;
+}
 
+int ha_rapid::multi_range_read_next(char **range_info) {
+  return 0;
+}
+
+ha_rows ha_rapid::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
+                                    void *seq_init_param, uint n_ranges,
+                                    uint *bufsz, uint *flags,
+                                    Cost_estimate *cost) {
+  return 0;
+}
+
+ha_rows ha_rapid::multi_range_read_info(uint keyno, uint n_ranges, uint keys,
+                              uint *bufsz, uint *flags,
+                              Cost_estimate *cost) {
+  return 0;
+}
+#endif
 ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
                                   key_range *max_key) {
   // Get the number of records in the range from the primary storage engine.
-  return ha_get_primary_handler()->records_in_range(index, min_key, max_key);
+  DBUG_TRACE;
+
+  if (pushed_idx_cond){ //icp
+    //TODO: evaluate condition item, and do condtion eval in scan.
+  }
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  /**
+   * due to the rows stored in imcs by primary key order, therefore, it should be in ordered.
+   * it's friendly to purge the unsatisfied chunk as fast as possible.
+  */
+  if (!m_imcs_reader.get()) {
+    m_imcs_reader.reset(new ImcsReader(table));
+    m_imcs_reader->open();
+  }
+  std::unique_ptr<RapidContext> rpd_context  = std::make_unique<RapidContext>();
+  rpd_context->m_table = table;
+  rpd_context->m_current_db = table->s->db.str;
+  rpd_context->m_current_table = table->s->table_name.str;
+/*
+  trx_t* trx = check_trx_exists (m_rpd_thd);
+  TrxInInnoDB trx_in_innodb(trx);
+  trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
+  if (trx->isolation_level > TRX_ISO_READ_UNCOMMITTED)
+    trx_assign_read_view(trx);
+  rpd_context->m_trx = trx;
+*/
+  auto nums = m_imcs_reader->records_in_range(rpd_context.get(), index, min_key, max_key);
+  //trx_commit(trx);
+  return nums;
+  //return ha_get_primary_handler()->records_in_range(index, min_key, max_key);
 }
 
 THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to,
@@ -298,7 +352,7 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to,
 int ha_rapid::load_table(const TABLE &table_arg) {
   DBUG_TRACE;
   ut_ad(table_arg.file != nullptr);
-  THD* thd = current_thd;
+  THD* thd = m_rpd_thd;
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
     std::ostringstream err;
     err << table_arg.s->db.str << "." <<table_arg.s->table_name.str << " already loaded";
@@ -306,8 +360,9 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_GENERIC;
   }
 
-  m_imcs_reader.reset(new ImcsReader(const_cast<TABLE*>(&table_arg))) ;
-  m_imcs_reader->open();
+  std::unique_ptr<ImcsReader> imcs_reader = std::make_unique<ImcsReader>(const_cast<TABLE*>(&table_arg));
+  ut_a(imcs_reader.get());
+  imcs_reader->open();
   /*** in future, we will load the content strings from dictionary file, which makes it more flexible.
   at rapid engine startup phase. and will make each loaded column use its own dictionary, so called
   local dictionary. the dictionary algo defined by column's comment text. */
@@ -351,7 +406,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_GENERIC;
   }
   //Start to write to IMCS. Do scan the primary table.
-  current_thd->set_sent_row_count(0);
+  m_rpd_thd->set_sent_row_count(0);
   int tmp {HA_ERR_GENERIC};
   ShannonBase::RapidContext context;
   context.m_current_db = table_arg.s->db.str;
@@ -365,7 +420,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     Field *field_ptr = nullptr;
     uint32 primary_key_idx [[maybe_unused]] = field_count;
 
-    context.m_trx = thd_to_trx(current_thd);
+    context.m_trx = thd_to_trx(m_rpd_thd);
     field_ptr = *(table_arg.field + field_count); //ghost field.
     if (field_ptr && field_ptr->type() == MYSQL_TYPE_DB_TRX_ID) {
       context.m_extra_info.m_trxid = field_ptr->val_int();
@@ -381,7 +436,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
          context.m_extra_info.m_pk += field_ptr->val_real();
     }
     //if (imcs_instance->write_direct(&context, field_ptr)) {
-    if (m_imcs_reader->write(&context, const_cast<TABLE*>(&table_arg)->record[0])) {
+    if (imcs_reader->write(&context, const_cast<TABLE*>(&table_arg)->record[0])) {
       table_arg.file->ha_rnd_end();
       imcs_instance->delete_all_direct(&context);
       my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str,
@@ -389,7 +444,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
       return HA_ERR_GENERIC;
     }
     ha_statistic_increment(&System_status_var::ha_read_rnd_count);
-    current_thd->inc_sent_row_count(1);
+    m_rpd_thd->inc_sent_row_count(1);
     if (tmp == HA_ERR_RECORD_DELETED && !thd->killed) continue;
   }
   table_arg.file->ha_rnd_end();

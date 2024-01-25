@@ -25,6 +25,7 @@
 */
 #ifndef __SHANNONBASE_CONST_H__
 #define __SHANNONBASE_CONST_H__
+#include <cmath>
 
 #include "my_inttypes.h"
 namespace ShannonBase{
@@ -54,15 +55,32 @@ constexpr uint SHANNON_MAGIC_IMCU = 0x0002;
 constexpr uint SHANNON_MAGIC_CU = 0x0003;
 constexpr uint SHANNON_MAGIC_CHUNK = 0x0004;
 
+constexpr uint8 SHANNON_INFO_BYTE_OFFSET = 0;
 constexpr uint8 SHANNON_INFO_BYTE_LEN = 1;
+constexpr uint8 SHANNON_TRX_ID_BYTE_OFFSET = 1;
 constexpr uint8 SHANNON_TRX_ID_BYTE_LEN = 8;
+constexpr uint8 SHANNON_ROW_ID_BYTE_OFFSET= 9;
 constexpr uint8 SHANNON_ROWID_BYTE_LEN = 8;
+constexpr uint8 SHANNON_SUMPTR_BYTE_OFFSET = 17;
 constexpr uint8 SHANNON_SUMPTR_BYTE_LEN = 4;
+constexpr uint8 SHANNON_DATA_BYTE_OFFSET = 21;
 constexpr uint8 SHANNON_DATA_BYTE_LEN = 8;
 constexpr uint8 SHANNON_ROW_TOTAL_LEN = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN +
                                         SHANNON_ROWID_BYTE_LEN + SHANNON_SUMPTR_BYTE_LEN +
                                         SHANNON_DATA_BYTE_LEN;
 
+constexpr double SHANNON_EPSILON = 1e-10;
+inline bool are_equal(double a, double b, double epsilon = SHANNON_EPSILON) {
+    return std::fabs(a - b) < epsilon;
+}
+
+inline bool is_less_than(double a, double b, double epsilon = SHANNON_EPSILON) {
+    return (b - a) > epsilon;
+}
+
+inline bool is_greater_than(double a, double b, double epsilon = SHANNON_EPSILON) {
+    return (a - b) > epsilon;
+}
 //This is use for Rapid cluster in future. in next, we will build up a AP clust for ShannonBase.
 enum class RPD_NODE_ROLE {
   //meta node and primary role, name node.

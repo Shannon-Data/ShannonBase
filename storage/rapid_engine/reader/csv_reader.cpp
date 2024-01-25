@@ -31,6 +31,7 @@
 #include <string>
 
 #include "include/ut0dbg.h"
+#include "include/my_base.h" //key_range
 
 namespace ShannonBase {
 
@@ -41,6 +42,9 @@ int CSVReader::close() {
   return 0;
 }
 int CSVReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
+  return 0;
+}
+int CSVReader::records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) {
   return 0;
 }
 int CSVReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {

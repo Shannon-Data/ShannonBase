@@ -33,6 +33,7 @@
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/reader/reader.h"
 
+class key_range;
 namespace ShannonBase {
 class CSVReader : public Reader {
 public:
@@ -46,6 +47,7 @@ public:
   int close() override;
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0) override;
   int write(ShannonBaseContext* context, uchar*buffer, size_t lenght = 0) override;
+  int records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) override;
   uchar* tell() override;
   uchar* seek(uchar* pos) override;
   uchar* seek(size_t offset) override;
