@@ -67,8 +67,8 @@ public:
     //local dictionary.
     std::unique_ptr<Compress::Dictionary> m_local_dict;
     //statistics info.
-    std::atomic<long long> m_max{0}, m_min{0}, m_middle{0}, m_median{0};
-    std::atomic<long long> m_rows{0}, m_sum{0}, m_avg{0};
+    std::atomic<double> m_max{0}, m_min{0}, m_middle{0}, m_median{0}, m_avg{0}, m_sum{0};
+    std::atomic<uint64> m_rows{0};
  };
 
  explicit Cu(Field* field);
@@ -94,7 +94,7 @@ public:
  uchar* update_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length = 0);
  //flush the data to disk. by now, we cannot impl this part.
  uint flush_direct(ShannonBase::RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
- Compress::Dictionary* local_dictionary() const { return m_header->m_local_dict.get(); }
+ inline Compress::Dictionary* local_dictionary() const { return m_header->m_local_dict.get(); }
  Cu_header* get_header() { return m_header.get();}
  //gets the base address of chunks.
  uchar* get_base();

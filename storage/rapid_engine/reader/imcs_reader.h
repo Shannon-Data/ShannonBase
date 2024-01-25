@@ -40,6 +40,7 @@
 
 class TABLE;
 class Field;
+class key_range;
 namespace ShannonBase {
 namespace Imcs{
   class Imcs;
@@ -54,6 +55,7 @@ public:
   int open();
   int close();
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
+  int records_in_range(ShannonBaseContext*, unsigned int , key_range *, key_range *);
   int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0);
   inline Imcs::Cu* get_source() {return m_source_cu;}
 private:
@@ -76,18 +78,22 @@ public:
   int close() override;
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0) override;
   int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0) override;
+  int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) override ;
   uchar* tell() override;
   uchar* seek(uchar* pos) override;
   uchar* seek(size_t offset) override;
+  bool is_open() const { return m_start_of_scan; }
 private:
-   //viewer of cus.
+  //local buffer.
+  uchar m_buff[32] = {0};
+  //viewer of cus.
   std::map<std::string, std::unique_ptr<CuView>> m_cu_views;
   //source table.
-  TABLE* m_source_table;
+  TABLE* m_source_table{nullptr};
   //source name info.
   std::string m_db_name, m_table_name;
-  ha_rows m_rows_read;
-  bool m_start_of_scan;
+  ha_rows m_rows_read {0};
+  bool m_start_of_scan {false};
 };
 
 } //ns:shannonbase

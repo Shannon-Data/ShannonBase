@@ -49,14 +49,17 @@ Cu::Cu(Field* field) {
   if (!m_header.get()) return;
 
   m_header->m_field_no = field->field_index();
-  m_header->m_avg = m_header->m_sum = m_header->m_rows = 0;
-  m_header->m_max = std::numeric_limits<long long>::lowest();
-  m_header->m_min = std::numeric_limits<long long>::max();
-  m_header->m_middle = std::numeric_limits<long long>::lowest();
-  m_header->m_median = std::numeric_limits<long long>::lowest();
+  m_header->m_rows = 0;
+  m_header->m_sum = 0;
+  m_header->m_avg = 0;
+
+  m_header->m_max = std::numeric_limits<double>::lowest();
+  m_header->m_min = std::numeric_limits<double>::max();
+  m_header->m_middle = std::numeric_limits<double>::lowest();
+  m_header->m_median = std::numeric_limits<double>::lowest();
 
   m_header->m_cu_type = field->type();
-  m_header->m_nullable = field->is_nullable();
+  m_header->m_nullable = field->is_real_null();
 
   std::string comment (field->comment.str);
   std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
@@ -115,8 +118,8 @@ uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, ui
     Field* field = *(context->m_table->field + m_header->m_field_no);
     ut_ad(field);
     m_chunks.push_back(std::make_unique<Chunk>(field));
-    chunk_ptr->get_header().m_next_chunk = m_chunks[m_chunks.size()-1].get();
-    m_chunks[m_chunks.size()-1].get()->get_header().m_prev_chunk = chunk_ptr;
+    chunk_ptr->get_header()->m_next_chunk = m_chunks[m_chunks.size()-1].get();
+    m_chunks[m_chunks.size()-1].get()->get_header()->m_prev_chunk = chunk_ptr;
     chunk_ptr = m_chunks[m_chunks.size()-1].get();
     pos = chunk_ptr->write_data_direct(context, data, length);
     //To update the metainfo.
@@ -126,11 +129,12 @@ uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, ui
       m_header->m_cu_type == MYSQL_TYPE_VARCHAR) { //string type, otherwise, update the meta info.
       return pos;
   }
-  uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
-        data_offset += SHANNON_SUMPTR_BYTE_LEN;
-  double data_val = *(double*) (data + data_offset);
+
+  double data_val{0};
+  if (m_header->m_nullable)
+    data_val = *(double*) (data + SHANNON_DATA_BYTE_OFFSET);
   m_header->m_rows++;
-  m_header->m_sum += data_val;
+  m_header->m_sum = m_header->m_sum + data_val;
   m_header->m_avg.store(m_header->m_sum/m_header->m_rows, std::memory_order::memory_order_relaxed);
   if (data_val > m_header->m_max)
     m_header->m_max.store(data_val, std::memory_order::memory_order_relaxed);

@@ -30,6 +30,8 @@
 
 #include <string>
 
+#include "include/my_base.h" //key_range
+
 namespace ShannonBase {
 
 int ParquetReader::open() {
@@ -40,6 +42,9 @@ int ParquetReader::close() {
   return 0;
 }
 int ParquetReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
+  return 0;
+}
+int ParquetReader::records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) {
   return 0;
 }
 int ParquetReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {

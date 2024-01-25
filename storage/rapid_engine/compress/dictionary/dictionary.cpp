@@ -81,12 +81,12 @@ uint32 Dictionary::get(uint64 strid, String& val, CHARSET_INFO& charset) {
 
   {
     std::shared_lock lk(m_content_mtx);
-    if (m_id2content.find(strid) != m_id2content.end()) {
+    //if (m_id2content.find(strid) != m_id2content.end()) {
       std::string compressed_str (m_id2content[strid]);
       std::string decom_str(CompressFactory::get_instance(alg)->decompressString(compressed_str));
       String strs (decom_str.c_str(), decom_str.length(), &charset);
       copy_if_not_alloced(&val, &strs, strs.length());
-    }
+    //}
   }
   return 0;
 }

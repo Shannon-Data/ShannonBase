@@ -69,7 +69,8 @@ class Chunk : public MemoryObject{
         //field no.
         uint16 m_field_no{0};
         //statistics data.
-        std::atomic<longlong> m_max{0}, m_min{0}, m_median{0}, m_middle{0}, m_avg{0}, m_rows{0}, m_sum{0};
+        std::atomic<double> m_max{0}, m_min{0}, m_median{0}, m_middle{0}, m_avg{0}, m_sum{0};
+        std::atomic<uint64> m_rows{0};
         //pointer to the next or prev.
         Chunk* m_next_chunk{nullptr}, *m_prev_chunk {nullptr};
         //data type in mysql.
@@ -84,9 +85,9 @@ class Chunk : public MemoryObject{
     Chunk(Chunk&&) = delete;
     Chunk& operator=(Chunk&&) = delete;
 
-    Chunk_header& get_header() {
+    Chunk_header* get_header() {
       std::scoped_lock lk(m_header_mutex);
-      return *m_header;
+      return m_header;
     }
     //initial the read opers.
     uint rnd_init(bool scan);
@@ -113,6 +114,7 @@ class Chunk : public MemoryObject{
     //gets the max valid loc of current the data has written to.
     inline uchar* get_data() const {return m_data;}
     bool is_full () {return (m_data == m_data_end)? true : false;}
+    ha_rows records_in_range(ShannonBase::RapidContext* context, key_range*, key_range*);
   private:
     std::mutex m_header_mutex;
     Chunk_header* m_header{nullptr};

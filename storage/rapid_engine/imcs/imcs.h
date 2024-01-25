@@ -78,7 +78,7 @@ public:
  uint delete_direct(ShannonBase::RapidContext* context, Field* field, uchar* rowid);
  //deletes all the data.
  uint delete_all_direct(ShannonBase::RapidContext* context);
- Cu* get_Cu(std::string& key);
+ Cu* get_cu(std::string& key);
  void add_cu(std::string key, std::unique_ptr<Cu>& cu);
 private:
  //make ctor and dctor private.

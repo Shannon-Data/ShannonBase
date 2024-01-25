@@ -31,6 +31,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <map>
 
 namespace ShannonBase{
 namespace Compress{
@@ -48,34 +49,43 @@ public:
   virtual ~Compress_algorithm() = default;
   virtual std::string compressString(std::string& orginal) = 0;
   virtual std::string decompressString(std::string& compressed_str) = 0;
+  static constexpr uint MAX_BUFF_LEN = 65535;
 };
 
 class zstd_compress : public Compress_algorithm{
 public:
   virtual std::string compressString(std::string& orginal) final;
   virtual std::string decompressString(std::string& compressed_str) final;
+private:
+  char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
 };
 
 class zlib_compress : public Compress_algorithm{
 public:
   virtual std::string compressString(std::string& orginal) final;
   virtual std::string decompressString(std::string& compressed_str) final;
+private:
+  char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
 };
 
 class lz4_compress : public Compress_algorithm{
 public:
   virtual std::string compressString(std::string& orginal) final;
   virtual std::string decompressString(std::string& compressed_str) final;
+private:
+  char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
 };
 
-class default_compress : public zstd_compress{
+//the default compress algorithm is zstd.
+class default_compress : public zlib_compress {
 };
 
 class CompressFactory {
 public:
-  static std::unique_ptr<Compress_algorithm> get_instance(compress_algos algo);
+  static Compress_algorithm* get_instance(compress_algos algo);
+  using AlgorithmFactoryT = std::map<compress_algos, std::unique_ptr<Compress_algorithm>>;
 private:
-  CompressFactory() = delete;
+  CompressFactory() = default;
   virtual ~CompressFactory() = delete;
   CompressFactory(CompressFactory&& ) = delete;
   CompressFactory(CompressFactory&) = delete;
@@ -83,7 +93,8 @@ private:
   CompressFactory& operator = (const CompressFactory&&) = delete;
 private:
  static std::once_flag m_alg_once;
- static Compress_algorithm* m_factory;
+ static CompressFactory* m_factory_instance;
+ AlgorithmFactoryT m_factory;
 };
 
 } //ns:compress
