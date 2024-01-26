@@ -8233,7 +8233,9 @@ static mysql_row_templ_t *build_template_field(
   if (!templ->is_virtual) {
     templ->col_no = i;
     templ->clust_rec_field_no = (field->type() != MYSQL_TYPE_DB_TRX_ID)?
-                                dict_col_get_clust_pos(col, clust_index) : 1;
+                                dict_col_get_clust_pos(col, clust_index) :
+                                (clust_index->n_user_defined_cols ?
+                                 clust_index->n_user_defined_cols : 1);
     ut_a(templ->clust_rec_field_no != ULINT_UNDEFINED);
 
     if (index->is_clustered()) {

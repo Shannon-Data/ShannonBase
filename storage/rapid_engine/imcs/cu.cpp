@@ -71,7 +71,8 @@ Cu::Cu(Field* field) {
       m_header->m_encoding_type = Compress::Encoding_type::SORTED;
     else if (comment.find ("VARLEN") != std::string::npos)
       m_header->m_encoding_type = Compress::Encoding_type::VARLEN;
-  }
+  } else
+    m_header->m_encoding_type = Compress::Encoding_type::NONE;
   m_header->m_local_dict = std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
   //the initial one chunk built.
   m_chunks.push_back(std::make_unique<Chunk>(field));

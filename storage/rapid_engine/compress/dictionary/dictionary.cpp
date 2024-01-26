@@ -44,10 +44,8 @@ uint32 Dictionary::store(String& str, Encoding_type type) {
   compress_algos alg {compress_algos::NONE};
   switch (m_encoding_type) {
     case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
-    case Encoding_type::VARLEN:
-    case Encoding_type::NONE:
-      alg = compress_algos::LZ4;
-    break;
+    case Encoding_type::VARLEN: alg = compress_algos::LZ4; break;
+    case Encoding_type::NONE: alg = compress_algos::NONE; break;
     default: break;
   }
 
@@ -72,18 +70,15 @@ uint32 Dictionary::get(uint64 strid, String& val, CHARSET_INFO& charset) {
   compress_algos alg {compress_algos::NONE};
   switch (m_encoding_type) {
     case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
-    case  Encoding_type::VARLEN:
-    case Encoding_type::NONE:
-      alg = compress_algos::LZ4;
-    break;
+    case Encoding_type::VARLEN: alg = compress_algos::LZ4; break;
+    case Encoding_type::NONE: alg =  compress_algos::NONE; break;
     default: break;
   }
 
   {
     std::shared_lock lk(m_content_mtx);
     //if (m_id2content.find(strid) != m_id2content.end()) {
-      std::string compressed_str (m_id2content[strid]);
-      std::string decom_str(CompressFactory::get_instance(alg)->decompressString(compressed_str));
+      std::string decom_str(CompressFactory::get_instance(alg)->decompressString(m_id2content[strid]));
       String strs (decom_str.c_str(), decom_str.length(), &charset);
       copy_if_not_alloced(&val, &strs, strs.length());
     //}
