@@ -65,9 +65,13 @@ constexpr uint8 SHANNON_SUMPTR_BYTE_OFFSET = 17;
 constexpr uint8 SHANNON_SUMPTR_BYTE_LEN = 4;
 constexpr uint8 SHANNON_DATA_BYTE_OFFSET = 21;
 constexpr uint8 SHANNON_DATA_BYTE_LEN = 8;
-constexpr uint8 SHANNON_ROW_TOTAL_LEN = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN +
-                                        SHANNON_ROWID_BYTE_LEN + SHANNON_SUMPTR_BYTE_LEN +
-                                        SHANNON_DATA_BYTE_LEN;
+constexpr uint8 SHANNON_ROW_TOTAL_LEN_UNALIGN = SHANNON_INFO_BYTE_LEN +
+                                                 SHANNON_TRX_ID_BYTE_LEN +
+                                                 SHANNON_ROWID_BYTE_LEN +
+                                                 SHANNON_SUMPTR_BYTE_LEN +
+                                                 SHANNON_DATA_BYTE_LEN;
+#define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
+constexpr uint8 SHANNON_ROW_TOTAL_LEN = ALIGN_WORD(SHANNON_ROW_TOTAL_LEN_UNALIGN, 8);
 
 constexpr double SHANNON_EPSILON = 1e-10;
 inline bool are_equal(double a, double b, double epsilon = SHANNON_EPSILON) {
