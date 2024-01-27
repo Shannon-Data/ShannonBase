@@ -233,8 +233,10 @@ ImcsReader::ImcsReader(TABLE* table) :
   for (uint idx =0; idx < m_source_table->s->fields; idx ++) {
     std::string key = m_db_name + m_table_name;
     Field* field_ptr = *(m_source_table->field + idx);
+    ut_a(field_ptr);
     // Skip columns marked as NOT SECONDARY.
-    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
+       field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     key += field_ptr->field_name;
     m_cu_views.emplace(key, std::make_unique<CuView>(table, field_ptr));
   }
@@ -269,8 +271,6 @@ int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) 
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
     std::string key(key_part1 + field_ptr->field_name);
-    if (m_cu_views.find(key) == m_cu_views.end()) return HA_ERR_END_OF_FILE;
-
     if (auto ret = m_cu_views[key].get()->read(context, m_buff)) return ret;
     #ifdef SHANNON_ONLY_DATA_FETCH
       double data = *(double*) m_buff;
@@ -289,7 +289,6 @@ int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) 
     #else
       uint8 info = *(uint8*) m_buff;
       if (info & DATA_DELETE_FLAG_MASK) continue; //deleted rows.
-
       my_bitmap_map *old_map = tmp_use_all_columns(m_source_table, m_source_table->write_set);
       if (info & DATA_NULL_FLAG_MASK)
         field_ptr->set_null();
@@ -300,11 +299,10 @@ int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) 
           case MYSQL_TYPE_BLOB:
           case MYSQL_TYPE_STRING:
           case MYSQL_TYPE_VARCHAR: { //if string, stores its stringid, and gets from local dictionary.
-            String str;
             Compress::Dictionary* dict = m_cu_views[key].get()->get_source()->local_dictionary();
             ut_ad(dict);
-            dict->get(val, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
-            field_ptr->store(str.c_ptr(), str.length(), &my_charset_bin);
+            dict->get(val, m_field_str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
+            field_ptr->store(m_field_str.c_ptr(), m_field_str.length(), &my_charset_bin);
           }break;
           case MYSQL_TYPE_INT24:
           case MYSQL_TYPE_LONG:

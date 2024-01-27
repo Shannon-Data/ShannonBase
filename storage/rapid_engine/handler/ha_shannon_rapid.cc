@@ -327,16 +327,16 @@ ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
   rpd_context->m_table = table;
   rpd_context->m_current_db = table->s->db.str;
   rpd_context->m_current_table = table->s->table_name.str;
-/*
+
   trx_t* trx = check_trx_exists (m_rpd_thd);
   TrxInInnoDB trx_in_innodb(trx);
   trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
   if (trx->isolation_level > TRX_ISO_READ_UNCOMMITTED)
     trx_assign_read_view(trx);
   rpd_context->m_trx = trx;
-*/
+
   auto nums = m_imcs_reader->records_in_range(rpd_context.get(), index, min_key, max_key);
-  //trx_commit(trx);
+  trx_commit(trx);
   return nums;
   //return ha_get_primary_handler()->records_in_range(index, min_key, max_key);
 }

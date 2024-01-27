@@ -181,7 +181,7 @@ uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
     key += field_ptr->field_name;
 
     if (m_cus.find(key) == m_cus.end()) continue; //not found this field.
-    uchar buff [30] = {0};
+    uchar buff [SHANNON_ROW_TOTAL_LEN] = {0};
     if (!m_cus[key].get()->read_data_direct(context, buff))
        return HA_ERR_END_OF_FILE;
 

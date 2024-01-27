@@ -92,8 +92,12 @@ private:
   TABLE* m_source_table{nullptr};
   //source name info.
   std::string m_db_name, m_table_name;
+  //row nums has read.
   ha_rows m_rows_read {0};
+  //whether start to read or not.
   bool m_start_of_scan {false};
+  //stores the filed string
+  String m_field_str;
 };
 
 } //ns:shannonbase
