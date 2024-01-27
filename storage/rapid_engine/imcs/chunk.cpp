@@ -139,7 +139,7 @@ uchar* Chunk::write_data_direct(ShannonBase::RapidContext* context, uchar* data,
   m_data += length;
   m_header->m_rows.fetch_add(1, std::memory_order_seq_cst);
   //writes success, then updates the meta info.
-  val = *(double*) (m_data - SHANNON_DATA_BYTE_LEN);
+  val = *(double*) (m_data - length + SHANNON_DATA_BYTE_OFFSET);
   if (m_header->m_chunk_type == MYSQL_TYPE_BLOB || m_header->m_chunk_type == MYSQL_TYPE_STRING ||
       m_header->m_chunk_type == MYSQL_TYPE_VARCHAR) {
   } else {
