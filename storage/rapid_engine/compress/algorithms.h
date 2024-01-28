@@ -30,8 +30,8 @@
 #define __SHANNONBASE_COMPRESS_ALGORITHMS_H__
 #include <atomic>
 #include <memory>
-
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include <mutex>
+#include <map>
 
 namespace ShannonBase{
 namespace Compress{
@@ -47,44 +47,67 @@ class Compress_algorithm{
 public:
   Compress_algorithm() = default;
   virtual ~Compress_algorithm() = default;
-  virtual std::string compressString(std::string& orginal) = 0;
-  virtual std::string decompressString(std::string& compressed_str) = 0;
+  virtual std::string& compressString(std::string& orginal) = 0;
+  virtual std::string& decompressString(std::string& compressed_str) = 0;
+  static constexpr uint MAX_BUFF_LEN = 65535;
+};
+class default_compress : public Compress_algorithm{
+  public:
+  virtual std::string& compressString(std::string& orginal) final;
+  virtual std::string& decompressString(std::string& compressed_str) final;
+private:
+  char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
+  std::string m_result;
 };
 
 class zstd_compress : public Compress_algorithm{
 public:
-  virtual std::string compressString(std::string& orginal) final;
-  virtual std::string decompressString(std::string& compressed_str) final;
+  zstd_compress();
+  virtual ~zstd_compress() =default;
+  virtual std::string& compressString(std::string& orginal) final;
+  virtual std::string& decompressString(std::string& compressed_str) final;
+private:
+  char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
+  std::string m_result;
 };
 
 class zlib_compress : public Compress_algorithm{
 public:
-  virtual std::string compressString(std::string& orginal) final;
-  virtual std::string decompressString(std::string& compressed_str) final;
+  zlib_compress();
+  virtual ~zlib_compress() = default;
+  virtual std::string& compressString(std::string& orginal) final;
+  virtual std::string& decompressString(std::string& compressed_str) final;
+private:
+  char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
+  std::string m_result;
 };
 
 class lz4_compress : public Compress_algorithm{
 public:
-  virtual std::string compressString(std::string& orginal) final;
-  virtual std::string decompressString(std::string& compressed_str) final;
-};
-
-class default_compress : public zstd_compress{
+  lz4_compress();
+  virtual ~lz4_compress() = default;
+  virtual std::string& compressString(std::string& orginal) final;
+  virtual std::string& decompressString(std::string& compressed_str) final;
+private:
+  char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
+  std::string m_result;
 };
 
 class CompressFactory {
 public:
-  static std::unique_ptr<Compress_algorithm> GetInstance(compress_algos algo);
+  static Compress_algorithm* get_instance(compress_algos algo);
+  using AlgorithmFactoryT = std::map<compress_algos, std::unique_ptr<Compress_algorithm>>;
 private:
-  CompressFactory() = delete;
+  CompressFactory() = default;
   virtual ~CompressFactory() = delete;
   CompressFactory(CompressFactory&& ) = delete;
   CompressFactory(CompressFactory&) = delete;
   CompressFactory& operator = (const CompressFactory&) = delete;
   CompressFactory& operator = (const CompressFactory&&) = delete;
 private:
- static std::once_flag one;
- static Compress_algorithm* m_instance;
+ static std::once_flag m_alg_once;
+ static CompressFactory* m_factory_instance;
+ AlgorithmFactoryT m_factory;
 };
 
 } //ns:compress

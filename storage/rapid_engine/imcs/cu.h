@@ -35,9 +35,11 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/compress/algorithms.h"
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 
 class Field;
 namespace ShannonBase{
+class ShannonBaseContext;
 class RapidContext;
 namespace Imcs{
 class Dictionary;
@@ -65,32 +67,43 @@ public:
     //local dictionary.
     std::unique_ptr<Compress::Dictionary> m_local_dict;
     //statistics info.
-    std::atomic<long long> m_max{0}, m_min{0}, m_middle{0}, m_median{0};
-    std::atomic<long long> m_rows{0}, m_sum{0}, m_avg{0};
+    std::atomic<double> m_max{0}, m_min{0}, m_middle{0}, m_median{0}, m_avg{0}, m_sum{0};
+    std::atomic<uint64> m_rows{0};
  };
 
  explicit Cu(Field* field);
  virtual ~Cu();
+ Cu(Cu&&) = delete;
+ Cu& operator=(Cu&&) = delete;
 
- //initialization.
- uint Rnd_init(bool scan);
+ //initialization. these're for internal.
+ uint rnd_init(bool scan);
  //End of Rnd scan
- uint Rnd_end();
- //writes the data into this chunk. length unspecify means calc by chunk. 
- uchar* Write_data(ShannonBase::RapidContext* context, uchar* data, uint length = 0);
+ uint rnd_end();
+ //writes the data into this chunk. length unspecify means calc by chunk.
+ uchar* write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length = 0);
  //reads the data by from address.
- uchar* Read_data(ShannonBase::RapidContext* context, uchar* buffer);
+ uchar* read_data_direct(ShannonBase::RapidContext* context, uchar* buffer);
  //reads the data by rowid to buffer.
- uchar* Read_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer);
+ uchar* read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer);
  //deletes the data by rowid
- uchar* Delete_data(ShannonBase::RapidContext* context, uchar* rowid);
+ uchar* delete_data_direct(ShannonBase::RapidContext* context, uchar* rowid);
  //deletes all
- uchar* Delete_all();
+ uchar* delete_all_direct();
  //updates the data with rowid with the new data.
- uchar* Update_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length = 0);
+ uchar* update_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length = 0);
  //flush the data to disk. by now, we cannot impl this part.
- uint flush(ShannonBase::RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
- Compress::Dictionary* Local_dictionary() const { return m_header->m_local_dict.get(); }
+ uint flush_direct(ShannonBase::RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
+ inline Compress::Dictionary* local_dictionary() const { return m_header->m_local_dict.get(); }
+ Cu_header* get_header() { return m_header.get();}
+ //gets the base address of chunks.
+ uchar* get_base();
+ void add_chunk(std::unique_ptr<Chunk>& chunk);
+ inline Chunk* get_chunk(uint chunkid) { return (chunkid < m_chunks.size()) ?
+                                                  m_chunks[chunkid].get() : nullptr;}
+ inline Chunk* get_first_chunk() { return get_chunk(0); }
+ inline Chunk* get_last_chunk() { return get_chunk(m_chunks.size() -1); }
+ inline size_t get_chunk_nums () {return m_chunks.size(); }
 private:
   uint m_magic{SHANNON_MAGIC_CU};
   //proctect header.
@@ -98,9 +111,9 @@ private:
   //header info of this Cu.
   std::unique_ptr<Cu_header> m_header;
   //chunks in this cu.
-  std::vector<std::unique_ptr<Chunk> > m_chunks;
+  std::vector<std::unique_ptr<Chunk>> m_chunks;
   //current chunk read.
-  std::atomic<uint32> m_chunk_id {0};
+  std::atomic<uint32> m_current_chunk_id {0};
 };
 
 } //ns:imcs

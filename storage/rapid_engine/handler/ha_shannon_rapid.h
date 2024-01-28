@@ -30,6 +30,7 @@
 #include "sql/handler.h"
 #include "thr_lock.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/reader/imcs_reader.h"
 /* clang-format off */
 class THD;
 struct TABLE;
@@ -40,7 +41,6 @@ class Table;
 }
 
 namespace ShannonBase {
-
 struct RapidShare {
   RapidShare() { thr_lock_init(&m_lock);}
   RapidShare(const char* db_name,
@@ -101,6 +101,22 @@ class ha_rapid : public handler {
 
   int info(unsigned int) override;
 
+#if 0
+  int multi_range_read_init(RANGE_SEQ_IF *seq, void *seq_init_param,
+                            uint n_ranges, uint mode,
+                            HANDLER_BUFFER *buf) override;
+
+  int multi_range_read_next(char **range_info) override;
+
+  ha_rows multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
+                                      void *seq_init_param, uint n_ranges,
+                                      uint *bufsz, uint *flags,
+                                      Cost_estimate *cost) override;
+
+  ha_rows multi_range_read_info(uint keyno, uint n_ranges, uint keys,
+                                uint *bufsz, uint *flags,
+                                Cost_estimate *cost) override;
+#endif
   ha_rows records_in_range(unsigned int index, key_range *min_key,
                            key_range *max_key) override;
 
@@ -122,13 +138,16 @@ class ha_rapid : public handler {
   int unload_table(const char *db_name, const char *table_name,
                    bool error_if_not_loaded) override;
 
+  THD* m_rpd_thd{nullptr};
   THR_LOCK_DATA m_lock;
   /** this is set to 1 when we are starting a table scan but have
       not yet fetched any row, else false */
   bool m_start_of_scan {false};
-
   /** information for MySQL table locking */
   RapidShare *m_share;
+  std::unique_ptr<ShannonBase::RapidContext> m_rpd_context;
+  //imscs reader;
+  std::unique_ptr<ImcsReader> m_imcs_reader;
 };
 
 }  // namespace ShannonBase

@@ -43,16 +43,21 @@ enum class Encoding_type : uint8 {NONE, SORTED, VARLEN};
 //Dictionary, which store all the dictionary data.
 class Dictionary {
   public:
-    Dictionary(Encoding_type type) : m_encoding_type(type) {}
+    Dictionary(Encoding_type type) : m_encoding_type(type) {
+    }
     Dictionary() = default;
     virtual ~Dictionary()  = default;
-    virtual uint32 Store(String&, Encoding_type type = Encoding_type::NONE);
-    virtual uint32 Get(uint64 strid, String& val, CHARSET_INFO& charset = my_charset_bin);
-    virtual void Set_algo (Encoding_type type) { m_encoding_type = type; }
-    inline Encoding_type Get_algo () const { return m_encoding_type; }
+    virtual uint32 store(String&, Encoding_type type = Encoding_type::NONE);
+    virtual uint32 get(uint64 strid, String& val, CHARSET_INFO& charset = my_charset_bin);
+    virtual void set_algo (Encoding_type type) { m_encoding_type = type; }
+    inline Encoding_type get_algo () const { return m_encoding_type; }
   private:
     std::shared_mutex m_content_mtx;
+    std::atomic<uint64> m_content_id{0};
+    //cotent string<--->id map.
     std::map<std::string, uint64> m_content;
+    //id<--> content string map. for access accleration.
+    std::map<uint64, std::string> m_id2content;
     Encoding_type m_encoding_type{Encoding_type::NONE};
 };
 

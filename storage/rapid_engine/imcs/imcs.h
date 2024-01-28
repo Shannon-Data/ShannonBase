@@ -33,7 +33,7 @@
 #include <memory>
 
 #include "my_inttypes.h"
-
+#include "sql/handler.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //for local dictionary.
@@ -52,30 +52,34 @@ class Imcs :public MemoryObject {
 public:
  using Cu_map_t = std::map<std::string, std::unique_ptr<Cu>>;
  using Imcu_map_t = std::multimap<std::string, std::unique_ptr<Imcu>>;
- inline static Imcs* Get_instance(){
+ inline static Imcs* get_instance(){
      std::call_once(one, [&] { m_instance = new Imcs();
                              });
     return m_instance;
  }
  //initialize the imcs.
- uint Initialize();
+ uint initialize();
  //deinitialize the imcs.
- uint Deinitialize();
+ uint deinitialize();
+ //gets initialized flag.
+ inline bool initialized() { return (m_inited == handler::NONE) ? false: true;}
  //scan oper initialization.
- uint Rnd_init(bool scan);
+ uint rnd_init(bool scan);
  //end of scanning
- uint Rnd_end();
+ uint rnd_end();
  //writes a row of a column in.
- uint Write(ShannonBase::RapidContext* context, Field* fields);
+ uint write_direct(ShannonBase::RapidContext* context, Field* fields);
  //reads the data by a rowid into a field.
- uint Read(ShannonBase::RapidContext* context, Field* field);
+ uint read_direct(ShannonBase::RapidContext* context, Field* field);
  //reads the data by a rowid into buffer.
- uint Read(ShannonBase::RapidContext* context, uchar* buffer);
- uint Read_batch(ShannonBase::RapidContext* context, uchar* buffer);
+ uint read_direct(ShannonBase::RapidContext* context, uchar* buffer);
+ uint read_batch_direct(ShannonBase::RapidContext* context, uchar* buffer);
  //deletes the data by a rowid
- uint Delete(ShannonBase::RapidContext* context, Field* field, uchar* rowid);
+ uint delete_direct(ShannonBase::RapidContext* context, Field* field, uchar* rowid);
  //deletes all the data.
- uint Delete_all(ShannonBase::RapidContext* context);
+ uint delete_all_direct(ShannonBase::RapidContext* context);
+ Cu* get_cu(std::string& key);
+ void add_cu(std::string key, std::unique_ptr<Cu>& cu);
 private:
  //make ctor and dctor private.
  Imcs();
@@ -95,6 +99,8 @@ private:
  //imcu in this imcs. <db name + table name, imcu*>
  Imcu_map_t m_imcus;
  //used to keep all allocated imcus. key string: db_name + table_name.
+ //initialization flag.
+ std::atomic<uint8> m_inited {handler::NONE};
 };
 
 } //ns: imcs

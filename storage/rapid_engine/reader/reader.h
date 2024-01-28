@@ -19,27 +19,35 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
+   The fundmental code for imcs. The chunk is used to store the data which
+   transfer from row-based format to column-based format.
+
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs.
 */
-/** The basic iterator class for IMCS. All specific iterators are all inherited
- * from this.
-*/
-#ifndef __SHANNONBASE_ITERATOR_H__
-#define __SHANNONBASE_ITERATOR_H__
+#ifndef __SHANNONBASE_READER_READER_H__
+#define __SHANNONBASE_READER_READER_H__
+#include <string>
+#include "include/my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_context.h"
+class key_range;
 namespace ShannonBase {
-namespace Imcs {
-
-class Iterator {
+//interface of reader, which is used to travel all data.
+class Reader : public MemoryObject{
 public:
-  Iterator();
-  virtual ~Iterator() = 0;
-  virtual bool Init() = 0;
-  virtual bool Read() = 0;
-  virtual bool Next() = 0;
-} ;
+  Reader() = default;
+  virtual ~Reader() = default;
+  virtual int open() = 0;
+  virtual int close() = 0;
+  virtual int read(ShannonBaseContext*, uchar*, size_t = 0) = 0;
+  virtual int records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) = 0;
+  virtual int write(ShannonBaseContext*, uchar*, size_t = 0) = 0;
+  virtual uchar* tell() = 0;
+  virtual uchar* seek(uchar* pos) = 0;
+  virtual uchar* seek(size_t offset) = 0;
+};
 
-} //ns:imcs
 } //ns:shannonbase
-#endif //__SHANNONBASE_ITERATOR_H__
+#endif //__SHANNONBASE_READER_READER_H__

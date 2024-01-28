@@ -37,9 +37,9 @@ class Transaction {
    enum class STATUS : uint8 {NOT_START, ACTIVE, PREPARED, COMMITTED_IN_MEMORY};
    Transaction () = default;
    virtual ~ Transaction() = default;
-   virtual int Begin(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
-   virtual int Commit ();
-   virtual int Rollback();
+   virtual int begin(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
+   virtual int commit ();
+   virtual int rollback();
  private:
   ISOLATION_LEVEL m_iso_level {ISOLATION_LEVEL::READ_REPEATABLE};
 };

@@ -17,12 +17,47 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
 
-   The fundmental code for imcs.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+
+   The fundmental code for imcs.
 */
+#include "storage/rapid_engine/reader/csv_reader.h"
+
+#include <string>
+
+#include "include/ut0dbg.h"
+#include "include/my_base.h" //key_range
+
+namespace ShannonBase {
+
+int CSVReader::open() {
+  return 0;
+}
+int CSVReader::close() {
+  return 0;
+}
+int CSVReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
+  return 0;
+}
+int CSVReader::records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) {
+  return 0;
+}
+int CSVReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
+  return 0;
+}
+uchar* CSVReader::tell() {
+  return nullptr;
+}
+uchar* CSVReader::seek(uchar* pos) {
+  return nullptr;
+}
+uchar* CSVReader::seek(size_t offset) {
+  return nullptr;
+}
+
+} //ns:shannonbase

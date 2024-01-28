@@ -69,7 +69,8 @@ class Chunk : public MemoryObject{
         //field no.
         uint16 m_field_no{0};
         //statistics data.
-        std::atomic<ulonglong> m_max{0}, m_min{0}, m_median{0}, m_middle{0}, m_avg{0}, m_rows{0}, m_sum{0};
+        std::atomic<double> m_max{0}, m_min{0}, m_median{0}, m_middle{0}, m_avg{0}, m_sum{0};
+        std::atomic<uint64> m_rows{0};
         //pointer to the next or prev.
         Chunk* m_next_chunk{nullptr}, *m_prev_chunk {nullptr};
         //data type in mysql.
@@ -81,35 +82,39 @@ class Chunk : public MemoryObject{
     };
     explicit Chunk(Field* field);
     virtual ~Chunk();
-    Chunk_header& Get_header() { 
+    Chunk(Chunk&&) = delete;
+    Chunk& operator=(Chunk&&) = delete;
+
+    Chunk_header* get_header() {
       std::scoped_lock lk(m_header_mutex);
-      return *m_header;
+      return m_header;
     }
     //initial the read opers.
-    uint Rnd_init(bool scan);
+    uint rnd_init(bool scan);
     //End of Rnd scan.
-    uint Rnd_end();
+    uint rnd_end();
     //writes the data into this chunk. length unspecify means calc by chunk.
-    uchar* Write_data(ShannonBase::RapidContext* context, uchar* data, uint length = 0);
+    uchar* write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length = 0);
     //reads the data by from address .
-    uchar* Read_data(ShannonBase::RapidContext* context, uchar*buffer);
+    uchar* read_data_direct(ShannonBase::RapidContext* context, uchar*buffer);
     //reads the data by rowid.
-    uchar* Read_data(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer);
+    uchar* read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer);
     //deletes the data by rowid.
-    uchar* Delete_data(ShannonBase::RapidContext* context, uchar* rowid);
+    uchar* delete_data_direct(ShannonBase::RapidContext* context, uchar* rowid);
     //deletes all.
-    uchar* Delete_all();
+    uchar* delete_all_direct();
     //updates the data.
-    uchar* Update_date(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length =0);
+    uchar* update_date_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length =0);
     //flush the data to disk. by now, we cannot impl this part.
-    uint flush(RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
-
-    void Set_next(Chunk* next) { m_header->m_next_chunk = next; }
-    void Set_prev(Chunk* prev) { m_header->m_prev_chunk = prev; }
-    inline Chunk* Get_next() const { return m_header->m_next_chunk; }
-    inline Chunk* Get_prev() const { return m_header->m_prev_chunk; }
-    inline uchar* Get_base() const { return m_data_base; }
-    inline uchar* Get_end() const { return m_data_end; }
+    uint flush_direct(RapidContext* context, uchar* from = nullptr, uchar* to = nullptr);
+    //the start loc of chunk. where the data wrtes from.
+    inline uchar* get_base() const { return m_data_base; }
+    //the end loc of chunk. is base + chunk_size
+    inline uchar* get_end() const { return m_data_end; }
+    //gets the max valid loc of current the data has written to.
+    inline uchar* get_data() const {return m_data;}
+    bool is_full () {return (m_data == m_data_end)? true : false;}
+    ha_rows records_in_range(ShannonBase::RapidContext* context, key_range*, key_range*);
   private:
     std::mutex m_header_mutex;
     Chunk_header* m_header{nullptr};
@@ -119,9 +124,9 @@ class Chunk : public MemoryObject{
     /** the base pointer of chunk, and the current pos of data. whether data should be in order or not */
     uchar* m_data_base {nullptr};
     //current pointer, where the data is. use write.
-    uchar* m_data{nullptr};
+    std::atomic<uchar*> m_data{nullptr};
     //pointer of cursor, which used for reading.
-    uchar* m_data_cursor {nullptr};
+    std::atomic<uchar*> m_data_cursor {nullptr};
     //end address of memory, to determine whether the memory is full or not.
     uchar* m_data_end {nullptr};
     //the check sum of this chunk. it used to do check when the data flush to disk.

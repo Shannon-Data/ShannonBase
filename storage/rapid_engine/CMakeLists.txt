@@ -41,7 +41,6 @@ INCLUDE_DIRECTORIES(
 
 SET(SHANNON_RAPID_COMPRESS_SOURCES
   compress/algorithms.cpp
-  compress/zlib/zlib.cc
   compress/dictionary/dictionary.cpp
 )
 SET(SHANNON_IMCS_SOURCES
@@ -56,12 +55,22 @@ SET(SHANNON_POPULATE_SOURCES
 SET (SHANNON_TRX_SOURCES
     trx/transaction.cpp
 )
+SET (SHANNON_READER_SOURCES
+    reader/imcs_reader.cpp
+    reader/parquet_reader.cpp
+    reader/csv_reader.cpp
+)
+SET (SHANNON_ITERATOR_SOURCES
+    iterators/iterator.cpp
+    ${SHANNON_READER_SOURCES}
+)
 SET(SHANNON_RAPID_SOURCES
-  handler/ha_shannon_rapid.cc
-  ${SHANNON_IMCS_SOURCES}
-  ${SHANNON_POPULATE_SOURCES}
-  ${SHANNON_TRX_SOURCES}
-  ${SHANNON_POPULATE_SOURCES}
+    handler/ha_shannon_rapid.cc
+    ${SHANNON_IMCS_SOURCES}
+    ${SHANNON_POPULATE_SOURCES}
+    ${SHANNON_TRX_SOURCES}
+    ${SHANNON_ITERATOR_SOURCES}
+    ${SHANNON_POPULATE_SOURCES}
 )
 
 ADD_LIBRARY(rapid_compress STATIC ${SHANNON_RAPID_COMPRESS_SOURCES})
