@@ -2500,8 +2500,8 @@ mysql_col_len, mbminlen, mbmaxlen
                                 range comparison. */
 void row_sel_field_store_in_mysql_format_func(
     byte *dest, const mysql_row_templ_t *templ, const dict_index_t *index,
-    IF_DEBUG(ulint field_no, ) const byte *data,
-    ulint len IF_DEBUG(, ulint sec_field)) {
+    ulint field_no,  const byte *data,
+    ulint len , ulint sec_field) {
   byte *ptr;
 //#ifdef UNIV_DEBUG
   const dict_field_t *field =
@@ -2511,7 +2511,7 @@ void row_sel_field_store_in_mysql_format_func(
   prtype = (templ->type != DATA_SYS && field) ? field->col->prtype : DATA_TRX_ID;
   ib_id_t id;
 
-  bool clust_templ_for_sec = (sec_field != ULINT_UNDEFINED);
+  bool clust_templ_for_sec [[maybe_unused]] = (sec_field != ULINT_UNDEFINED);
 //#endif /* UNIV_DEBUG */
   ulint mysql_col_len =
       templ->is_multi_val ? templ->mysql_mvidx_len : templ->mysql_col_len;
@@ -2663,8 +2663,7 @@ void row_sel_field_store_in_mysql_format_func(
         memset(dest + len, 0x20, mysql_col_len - len);
       }
       break;
-
-    default:
+   
     case DATA_SYS_CHILD:
     case DATA_SYS:
       /* These column types should never be shipped to MySQL. But, in Shannon,
@@ -2680,6 +2679,7 @@ void row_sel_field_store_in_mysql_format_func(
            break;
       }
       break;
+    default:
 #ifdef UNIV_DEBUG
     case DATA_CHAR:
     case DATA_FIXBINARY:
@@ -2997,8 +2997,9 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
     /* We should never deliver column prefixes to MySQL,
     except for evaluating innobase_index_cond() or
     row_search_end_range_check(). */
-    if (templ->type != DATA_SYS)
+    if (templ->type != DATA_SYS){
       ut_ad(rec_index->get_field(field_no)->prefix_len == 0);
+    }
 
     if (clust_templ_for_sec) {
       std::vector<const dict_col_t *>::iterator it;

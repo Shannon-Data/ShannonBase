@@ -2732,9 +2732,9 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
     row_rpd_columns.table_id = static_cast<uint>(table.s->table_map_id.id());
     row_rpd_columns.column_id = field_ptr->field_index();
     strncpy(row_rpd_columns.column_name, field_ptr->field_name,
-            strlen(field_ptr->field_name));
+            strlen(row_rpd_columns.column_name));
     strncpy(row_rpd_columns.table_name, table.s->table_name.str,
-            strlen(table.s->table_name.str));
+            strlen(row_rpd_columns.table_name));
     row_rpd_columns.data_dict_bytes = 0;
     row_rpd_columns.data_placement_index = 0;
 
