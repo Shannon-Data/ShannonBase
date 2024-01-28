@@ -76,9 +76,10 @@ class Table;
   this is used to disable the warings:
   'piecewise_construct' which is in '/usr/include/c++/11/bits/stl_pair.h:83:53'
 */
-const char *__asan_default_options() {
-  return "verbosity=1:detect_odr_violation=0";
+extern "C" const char* __asan_default_options() {
+  return "detect_odr_violation=0";
 }
+
 namespace {
 // Map from (db_name, table_name) to the RapidShare with table state.
 class ShannonLoadedTables {
