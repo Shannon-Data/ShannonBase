@@ -19,52 +19,33 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs. The chunk is used to store the data which
-   transfer from row-based format to column-based format.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs optimizer.
 */
-#include "storage/rapid_engine/reader/parquet_reader.h"
+#ifndef __SHANNONBASE_CONST_FOLD_RULE_H__
+#define __SHANNONBASE_CONST_FOLD_RULE_H__
 
 #include <string>
+#include <memory>
 
-#include "include/my_base.h" //key_range
+#include "storage/rapid_engine/optimizer/rules/rule.h"
+class Query_expression;
+class Query_block;
 
 namespace ShannonBase {
+namespace Optimizer {
 
-int ParquetReader::open() {
+class Const_fold : public Rule {
+  public:
+    Const_fold(std::shared_ptr<Query_expression>& expression);
+    virtual ~Const_fold();
+    void apply() override;
+    std::string name() override { return std::string ("Const_fold");}
+  private:
+    std::shared_ptr<Query_expression> m_query_expr;
+};
 
-  return 0;
-}
-int ParquetReader::close() { 
-  return 0;
-}
-int ParquetReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
-  return 0;
-}
-int ParquetReader::records_in_range(ShannonBaseContext*context, unsigned int index,
-                                    key_range *min, key_range *max) {
-  return 0;
-}
-int ParquetReader::index_read(ShannonBaseContext*context, uchar*buff, size_t length) {
-  return 0;
-}
-int ParquetReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
-  return 0;
-}
-int ParquetReader::get(ShannonBaseContext* context, uchar* buffer, size_t length) {
-  return 0;
-}
-uchar* ParquetReader::tell() {
-  return nullptr;
-}
-uchar* ParquetReader::seek(uchar* pos) {
-  return nullptr;
-}
-uchar* ParquetReader::seek(size_t offset) {
-  return nullptr;
-}
-
+} //ns:optimzer
 } //ns:shannonbase
+#endif //__SHANNONBASE_CONST_FOLD_RULE_H__

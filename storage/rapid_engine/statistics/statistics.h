@@ -19,43 +19,32 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs. The chunk is used to store the data which
-   transfer from row-based format to column-based format.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs optimizer.
 */
-#ifndef __SHANNONBASE_CSV_READER_H__
-#define __SHANNONBASE_CSV_READER_H__
-#include <string>
+#ifndef __SHANNONBASE_STATISTICS_H__
+#define __SHANNONBASE_STATISTICS_H__ 
+
 #include "include/my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/reader/reader.h"
 
-class key_range;
-namespace ShannonBase {
-class CSVReader : public Reader {
+namespace ShannonBase{
+namespace Optimizer{
+
+class Statistics : public MemoryObject {
 public:
-  CSVReader(std::string& path) : m_path(path), m_csv_fd(nullptr){
-  }
-  CSVReader(CSVReader&) = delete;
-  CSVReader(CSVReader&&) = delete;
-  virtual ~CSVReader() = default;
-
-  int open() override;
-  int close() override;
-  int read(ShannonBaseContext*, uchar*, size_t  = 0) override;
-  int write(ShannonBaseContext*, uchar*, size_t = 0) override;
-  int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) override;
-  int index_read(ShannonBaseContext*, uchar*, size_t = 0) override;
-  uchar* tell() override;
-  uchar* seek(uchar* pos) override;
-  uchar* seek(size_t offset) override;
-private:
-  std::string m_path;
-  FILE* m_csv_fd;
+  Statistics() = default;
+  virtual ~Statistics() = default;
+  virtual uint cost() = 0;
 };
 
+class CardinalityStatis : public Statistics {
+  CardinalityStatis() = default;
+  virtual ~CardinalityStatis() = default;
+  uint cost() override;
+};
+
+} //ns:optimizer
 } //ns:shannonbase
-#endif //__SHANNONBASE_CSV_READER_H__
+#endif //__SHANNONBASE_STATISTICS_H__

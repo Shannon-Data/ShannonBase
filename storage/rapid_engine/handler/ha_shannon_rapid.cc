@@ -68,6 +68,9 @@
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 
+#include "storage/rapid_engine/optimizer/optimizer.h" //optimizer
+#include "storage/rapid_engine/cost/cost.h"           //costestimator
+#include "storage/rapid_engine/optimizer/rules/rule.h"//Rule
 /* clang-format off */
 namespace dd {
 class Table;
@@ -109,21 +112,18 @@ ShannonLoadedTables *shannon_loaded_tables{nullptr};
 static struct handlerton* shannon_rapid_hton_ptr {nullptr};
 static bool shannon_rpd_inited {false};
 ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::get_instance();;
-/**
-  Execution context class for the Rapid engine. It allocates some data
-  on the heap when it is constructed, and frees it when it is
-  destructed, so that LeakSanitizer and Valgrind can detect if the
-  server doesn't destroy the object when the query execution has
-  completed.
-*/
-class Rapid_execution_context : public Secondary_engine_execution_context {
- public:
-  Rapid_execution_context() : m_data(std::make_unique<char[]>(10)) {}
-  /**
-    Checks if the specified cost is the lowest cost seen so far for executing
-    the given JOIN.
-  */
-  bool BestPlanSoFar(const JOIN &join, double cost) {
+
+}  // namespace
+
+namespace ShannonBase {
+
+//global rpd meta infos
+rpd_columns_container meta_rpd_columns_infos;
+std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
+
+Shannon_execution_context::Shannon_execution_context() : m_data(std::make_unique<char[]>(10)) {
+}
+bool Shannon_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
     if (&join != m_current_join) {
       // No plan has been seen for this join. The current one is best so far.
       m_current_join = &join;
@@ -135,26 +135,14 @@ class Rapid_execution_context : public Secondary_engine_execution_context {
     const bool cheaper = cost < m_best_cost;
     m_best_cost = std::min(m_best_cost, cost);
     return cheaper;
-  }
+}
 
- private:
-  std::unique_ptr<char[]> m_data;
-  /// The JOIN currently being optimized.
-  const JOIN *m_current_join{nullptr};
-  /// The cost of the best plan seen so far for the current JOIN.
-  double m_best_cost;
-};
-
-}  // namespace
-
-namespace ShannonBase {
-//global rpd meta infos
-rpd_columns_container meta_rpd_columns_infos;
-std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
 ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
     : handler(hton, table_share_arg) {
   m_rpd_thd = ha_thd();
 }
+const char *ha_rapid::table_type() const { return (rapid_hton_name); }
+
 int ha_rapid::create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
   DBUG_TRACE;
   return HA_ERR_WRONG_COMMAND;
@@ -248,9 +236,9 @@ int ha_rapid::info(unsigned int flags) {
   return ret;
 }
 handler::Table_flags ha_rapid::table_flags() const {
-  // Secondary engines do not support index access. Indexes are only used for
-  // cost estimates.
-  return HA_NO_INDEX_ACCESS;
+  ulong flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE |
+                HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
+  return ~HA_NO_INDEX_ACCESS || flags;
 }
 
 Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
@@ -267,9 +255,11 @@ Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
 }
 unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part,
                                    bool all_parts) const {
+  //here, we support the same index flag as primary engine.
   const handler *primary = ha_get_primary_handler();
   const unsigned long primary_flags =
       primary == nullptr ? 0 : primary->index_flags(idx, part, all_parts);
+
   if(pushed_idx_cond) {}
   // Inherit the following index flags from the primary handler, if they are
   // set:
@@ -282,6 +272,130 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part,
   // in rowid order.
   return ((HA_READ_RANGE | HA_KEY_SCAN_NOT_ROR) & primary_flags);
 }
+uint ha_rapid::max_supported_keys() const {
+  return (MAX_KEY);
+}
+
+uint ha_rapid::max_supported_key_length() const {
+  return (MAX_KEY);
+}
+
+int ha_rapid::index_init(uint keynr, bool sorted) {
+  DBUG_TRACE;
+  if (rnd_init(false))
+     return 0;
+  active_index = keynr;
+
+  m_primary_key = dynamic_cast<ha_innobase*>(ha_get_primary_handler())->innobase_get_index(keynr);
+  bool index_usable {false};
+  if (m_primary_key == nullptr) {
+    index_usable = false;
+    return 1;
+  }
+
+  index_usable = m_primary_key->is_usable(thd_to_trx(ha_thd()));
+  if (!index_usable) {
+    if (m_primary_key->is_corrupted()) {
+      return m_primary_key->is_clustered() ?  HA_ERR_TABLE_CORRUPT : HA_ERR_INDEX_CORRUPT;
+     }
+  }
+
+  KEY *key_info = table->key_info + keynr;
+  KEY_PART_INFO *key_part = key_info->key_part;
+  m_key_type = key_part->field->type();
+  double val {0};
+  switch (m_key_type) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:{
+      val = key_part->field->val_int();
+      break;
+    }
+    case MYSQL_TYPE_DOUBLE:
+    case MYSQL_TYPE_FLOAT: {
+      val = key_part->field->val_real();
+      break;
+    }
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+      my_decimal dec_val;
+      key_part->field->val_decimal(&dec_val);
+      decimal2double(&dec_val, &val);
+      break;
+    }
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING: {
+      String str_val;
+      key_part->field->val_str(&str_val);
+      break;
+    }
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_TIME:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_NEWDATE:
+    case MYSQL_TYPE_YEAR:
+    case MYSQL_TYPE_TIMESTAMP:
+    case MYSQL_TYPE_TIME2: {
+      val = key_part->field->val_int();
+      break;
+    }
+    default: break;
+  }
+  m_rpd_context->m_extra_info.m_key_val = val;
+  m_rpd_context->m_extra_info.m_keynr = keynr;
+  inited = handler::INDEX;
+  return 0;
+}
+
+int ha_rapid::index_end() {
+  DBUG_TRACE;
+
+  active_index = MAX_KEY;
+
+  in_range_check_pushed_down = false;
+  inited = handler::NONE;
+  return rnd_end();
+}
+
+int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len,
+                 ha_rkey_function find_flag) {
+  DBUG_TRACE;
+  ut_ad (m_start_of_scan && inited == handler::INDEX);
+  if (pushed_idx_cond){ //icp
+    //TODO: evaluate condition item, and do condtion eval in scan.
+  }
+  m_rpd_context->m_extra_info.m_find_flag = find_flag;
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf);
+  return err;
+}
+
+int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
+  return 0;
+}
+
+int ha_rapid::index_next(uchar *buf) {
+  return 0;
+}
+
+int ha_rapid::index_next_same(uchar *buf, const uchar *key, uint keylen) {
+  return 0;
+}
+
+int ha_rapid::index_prev(uchar *buf) {
+  return 0;
+}
+
+int ha_rapid::index_first(uchar *buf) {
+  return 0;
+}
+
+int ha_rapid::index_last(uchar *buf) {
+  return 0;
+}
+
 #if 0
 int ha_rapid::multi_range_read_init(RANGE_SEQ_IF *seq, void *seq_init_param,
                           uint n_ranges, uint mode,
@@ -492,7 +606,7 @@ static bool ShannonPrepareSecondaryEngine(THD *thd, LEX *lex) {
     return true;
   });
 
-  auto context = new (thd->mem_root) Rapid_execution_context;
+  auto context = new (thd->mem_root) ShannonBase::Shannon_execution_context();
   if (context == nullptr) return true;
   lex->set_secondary_engine_execution_context(context);
 
@@ -511,8 +625,6 @@ static void ShannonAssertSupportedPath(const AccessPath *path) {
     case AccessPath::NESTED_LOOP_JOIN: /* purecov: deadcode */
     case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
     case AccessPath::BKA_JOIN:
-    // Index access is disabled in ha_rapid::table_flags(), so we should see none
-    // of these access types.
     case AccessPath::INDEX_SCAN:
     case AccessPath::REF:
     case AccessPath::REF_OR_NULL:
@@ -554,10 +666,26 @@ static bool ShannonOptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) 
                       return false;
                     });
   }
+  /** Here, sql has been optimized with 'unit->optimize()'. hence, we just only use
+  rapid optimizer to do some necessaries optimization to adjust the best plan.*/
+#if 0
+  std::unique_ptr<ShannonBase::OptimizeContext> optimze_context =
+    std::make_unique<ShannonBase::OptimizeContext>();
+  optimze_context->m_thd = thd;
 
+  Query_expression* query_expr_second = lex->unit;
+  std::shared_ptr<Query_expression> query_expr(query_expr_second);
+
+  std::shared_ptr<ShannonBase::Optimizer::CostEstimator> cost_est;
+  cost_est.reset(new ShannonBase::Optimizer::CostEstimator());
+  std::unique_ptr<ShannonBase::Optimizer::Optimizer> optimizer =
+    std::make_unique<ShannonBase::Optimizer::Optimizer> (query_expr, cost_est);
+
+  auto ret = optimizer->optimize(optimze_context.get(), query_expr);
+#endif
   return false;
 }
-
+//to estimate the cost used  secondary engine.
 static bool ShannonCompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost,
                             bool *use_best_so_far, bool *cheaper,
                             double *secondary_engine_cost) {
@@ -591,7 +719,7 @@ static bool ShannonCompareJoinCost(THD *thd, const JOIN &join, double optimizer_
   });
 
   // Check if the calculated cost is cheaper than the best cost seen so far.
-  *cheaper = down_cast<Rapid_execution_context *>(
+  *cheaper = down_cast<ShannonBase::Shannon_execution_context *>(
                  thd->lex->secondary_engine_execution_context())
                  ->BestPlanSoFar(join, *secondary_engine_cost);
 

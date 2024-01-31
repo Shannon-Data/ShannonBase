@@ -29,6 +29,10 @@
 
 #include "my_inttypes.h"
 namespace ShannonBase{
+/** Handler name for InnoDB */
+static constexpr char handler_name[] = "Rapid";
+static const char rapid_hton_name[] = "Rapid";
+
 
 //the version of shannonbase.
 constexpr uint SHANNONBASE_VERSION = 0x1;

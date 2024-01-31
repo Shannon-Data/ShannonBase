@@ -19,52 +19,26 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs. The chunk is used to store the data which
-   transfer from row-based format to column-based format.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs optimizer.
 */
-#include "storage/rapid_engine/reader/parquet_reader.h"
-
-#include <string>
-
-#include "include/my_base.h" //key_range
+#ifndef __SHANNONBASE_COST_H__
+#define __SHANNONBASE_COST_H__
+#include "storage/rapid_engine/include/rapid_object.h"
 
 namespace ShannonBase {
+namespace Optimizer {
+//cost estimation strategies.    
+class CostEstimator : public MemoryObject
+{
+public:
+    CostEstimator();
+    virtual ~CostEstimator() = default;
+};
 
-int ParquetReader::open() {
-
-  return 0;
-}
-int ParquetReader::close() { 
-  return 0;
-}
-int ParquetReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
-  return 0;
-}
-int ParquetReader::records_in_range(ShannonBaseContext*context, unsigned int index,
-                                    key_range *min, key_range *max) {
-  return 0;
-}
-int ParquetReader::index_read(ShannonBaseContext*context, uchar*buff, size_t length) {
-  return 0;
-}
-int ParquetReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
-  return 0;
-}
-int ParquetReader::get(ShannonBaseContext* context, uchar* buffer, size_t length) {
-  return 0;
-}
-uchar* ParquetReader::tell() {
-  return nullptr;
-}
-uchar* ParquetReader::seek(uchar* pos) {
-  return nullptr;
-}
-uchar* ParquetReader::seek(size_t offset) {
-  return nullptr;
-}
-
+} //ns:optimizer
 } //ns:shannonbase
+
+
+#endif //__SHANNONBASE_COST_H__

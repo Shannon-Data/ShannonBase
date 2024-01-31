@@ -42,8 +42,11 @@ public:
   virtual int open() = 0;
   virtual int close() = 0;
   virtual int read(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  virtual int records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) = 0;
+  virtual int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) = 0;
   virtual int write(ShannonBaseContext*, uchar*, size_t = 0) = 0;
+  virtual int index_read(ShannonBaseContext*, uchar*, size_t = 0) = 0;
+  //the current cursor data to buffer.
+  virtual int get(ShannonBaseContext*, uchar*, size_t = 0) = 0;
   virtual uchar* tell() = 0;
   virtual uchar* seek(uchar* pos) = 0;
   virtual uchar* seek(size_t offset) = 0;
