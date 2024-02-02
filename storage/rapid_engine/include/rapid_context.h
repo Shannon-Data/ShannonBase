@@ -84,6 +84,7 @@ public:
       //index scan info
       uint m_keynr{0};
       double m_key_val {0};
+      enum_field_types m_key_type;
       ha_rkey_function m_find_flag {HA_READ_KEY_EXACT};
   };
   RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}

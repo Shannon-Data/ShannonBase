@@ -63,6 +63,7 @@
 #include "storage/innobase/handler/ha_innodb.h"
 
 #include "storage/rapid_engine/include/rapid_stats.h"
+#include "storage/rapid_engine/utils/utils.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
@@ -161,6 +162,24 @@ int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, cons
 int ha_rapid::close () {
   DBUG_TRACE;
   return 0;
+}
+//refined cost model should be impl in future. here, it's a coarse one.
+double ha_rapid::scan_time() {
+  //all memory operations.
+  return (estimate_rows_upper_bound() * 0.0000001);
+}
+double ha_rapid::read_time(uint index, uint ranges, ha_rows rows) {
+  ha_rows total_rows;
+
+  /* Assume that the read time is proportional to the scan time for all
+  rows + at most one seek per range. */
+  double time_for_scan = scan_time();
+
+  if ((total_rows = estimate_rows_upper_bound()) < rows) {
+    return (time_for_scan);
+  }
+
+  return (ranges + (double)rows / (double)total_rows * time_for_scan);
 }
 int ha_rapid::rnd_init(bool scan) {
   DBUG_TRACE;
@@ -270,7 +289,10 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part,
   // HA_KEY_SCAN_NOT_ROR - to signal if the index returns records in rowid
   // order. Used to disable use of the index in the range optimizer if it is not
   // in rowid order.
-  return ((HA_READ_RANGE | HA_KEY_SCAN_NOT_ROR) & primary_flags);
+
+  return ((HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER |
+           HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN |
+           HA_READ_RANGE | HA_KEY_SCAN_NOT_ROR) & primary_flags);
 }
 uint ha_rapid::max_supported_keys() const {
   return (MAX_KEY);
@@ -302,53 +324,11 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
 
   KEY *key_info = table->key_info + keynr;
   KEY_PART_INFO *key_part = key_info->key_part;
-  m_key_type = key_part->field->type();
-  double val {0};
-  switch (m_key_type) {
-    case MYSQL_TYPE_TINY:
-    case MYSQL_TYPE_SHORT:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG:{
-      val = key_part->field->val_int();
-      break;
-    }
-    case MYSQL_TYPE_DOUBLE:
-    case MYSQL_TYPE_FLOAT: {
-      val = key_part->field->val_real();
-      break;
-    }
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-      my_decimal dec_val;
-      key_part->field->val_decimal(&dec_val);
-      decimal2double(&dec_val, &val);
-      break;
-    }
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_VAR_STRING: {
-      String str_val;
-      key_part->field->val_str(&str_val);
-      break;
-    }
-    case MYSQL_TYPE_DATE:
-    case MYSQL_TYPE_TIME:
-    case MYSQL_TYPE_DATETIME:
-    case MYSQL_TYPE_NEWDATE:
-    case MYSQL_TYPE_YEAR:
-    case MYSQL_TYPE_TIMESTAMP:
-    case MYSQL_TYPE_TIME2: {
-      val = key_part->field->val_int();
-      break;
-    }
-    default: break;
-  }
-  m_rpd_context->m_extra_info.m_key_val = val;
-  m_rpd_context->m_extra_info.m_keynr = keynr;
+  m_rpd_context->m_extra_info.m_key_type = key_part->field->type();
+  m_rpd_context->m_extra_info.m_keynr =  key_part->field->field_index();
   inited = handler::INDEX;
   return 0;
 }
-
 int ha_rapid::index_end() {
   DBUG_TRACE;
 
@@ -358,7 +338,6 @@ int ha_rapid::index_end() {
   inited = handler::NONE;
   return rnd_end();
 }
-
 int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len,
                  ha_rkey_function find_flag) {
   DBUG_TRACE;
@@ -366,6 +345,8 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len,
   if (pushed_idx_cond){ //icp
     //TODO: evaluate condition item, and do condtion eval in scan.
   }
+  m_rpd_context->m_extra_info.m_key_val =
+    Utils::Util::get_value_mysql_type(m_rpd_context->m_extra_info.m_key_type, key, key_len);
   m_rpd_context->m_extra_info.m_find_flag = find_flag;
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf);
@@ -377,11 +358,19 @@ int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
 }
 
 int ha_rapid::index_next(uchar *buf) {
-  return 0;
+  ut_ad (m_start_of_scan && inited == handler::INDEX);
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf);
+  return err;
 }
 
 int ha_rapid::index_next_same(uchar *buf, const uchar *key, uint keylen) {
-  return 0;
+  ut_ad (m_start_of_scan && inited == handler::INDEX);
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf);
+  return err;
 }
 
 int ha_rapid::index_prev(uchar *buf) {
@@ -420,14 +409,24 @@ ha_rows ha_rapid::multi_range_read_info(uint keyno, uint n_ranges, uint keys,
   return 0;
 }
 #endif
+ha_rows ha_rapid::estimate_rows_upper_bound() {
+  DBUG_TRACE;
+
+  /* Calculate a minimum length for a clustered index record and from
+  that an upper bound for the number of rows. Since we only calculate
+  new statistics in row0mysql.cc when a table has grown by a threshold
+  factor, we must add a safety factor 2 in front of the formula below. */
+  ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
+  assert(imcs_instance);
+  ha_rows estimate = imcs_instance->get_rows(table);
+
+  return (ha_rows)estimate;
+}
+
 ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
                                   key_range *max_key) {
   // Get the number of records in the range from the primary storage engine.
   DBUG_TRACE;
-
-  if (pushed_idx_cond){ //icp
-    //TODO: evaluate condition item, and do condtion eval in scan.
-  }
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   /**

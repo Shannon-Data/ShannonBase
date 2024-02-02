@@ -26,8 +26,23 @@
 #ifndef __SHANNONBASE_UTILS_H__
 #define __SHANNONBASE_UTILS_H__
 
+#include "include/field_types.h"
+#include "include/my_inttypes.h"
+
+class Field;
 namespace ShannonBase{
+namespace Compress{
+   class Dictionary;
+}
+
 namespace Utils{
-}
-}
+class Util {
+  public:
+    static double get_value_mysql_type(enum_field_types&, const uchar*, uint);
+    static double get_field_value (Field*&, Compress::Dictionary*&);
+    static int store_field_value(Field*&, Compress::Dictionary*&, double&);
+};
+
+} //ns:util
+} //ns::shannonbase
 #endif //__SHANNONBASE_UTILS_H__

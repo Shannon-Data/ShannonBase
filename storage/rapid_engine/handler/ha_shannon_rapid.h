@@ -103,6 +103,10 @@ class ha_rapid : public handler {
 
   int close() override;
 
+  double scan_time() override;
+
+  double read_time(uint index, uint ranges, ha_rows rows) override;
+
   int rnd_init(bool) override;
 
   int rnd_next(unsigned char *) override;
@@ -157,6 +161,8 @@ class ha_rapid : public handler {
 #endif
   ha_rows records_in_range(unsigned int index, key_range *min_key,
                            key_range *max_key) override;
+
+  ha_rows estimate_rows_upper_bound() override;
 
   void position(const unsigned char *) override {}
 

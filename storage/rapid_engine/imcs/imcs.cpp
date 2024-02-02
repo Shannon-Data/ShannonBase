@@ -33,6 +33,7 @@
 #include "sql/my_decimal.h"
 #include "storage/innobase/include/ut0dbg.h"   //ut_ad
 
+#include "storage/rapid_engine/utils/utils.h" //Utils
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/cu.h"
@@ -68,6 +69,24 @@ void Imcs::add_cu(std::string key, std::unique_ptr<Cu>& cu) {
   DBUG_TRACE;
   m_cus.insert({key, std::move(cu)});
   return;
+}
+ha_rows Imcs::get_rows(TABLE* source_table) {
+  ha_rows row_count{0};
+  std::string key_part (source_table->s->db.str);
+  key_part += source_table->s->table_name.str;
+
+  for (uint index =0; index < source_table->s->fields; index++) {
+    Field* field_ptr = *(source_table->field + index);
+    ut_ad(field_ptr);
+    if (!bitmap_is_set(source_table->read_set, field_ptr->field_index()) ||
+        field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    std::string key = key_part + field_ptr->field_name;
+    if (m_cus.find(key) == m_cus.end()) continue; //not found this field.
+    row_count = m_cus[key].get()->get_header()->m_rows;
+    break;
+  }
+
+  return row_count;
 }
 uint Imcs::rnd_init(bool scan) {
   DBUG_TRACE;
@@ -116,6 +135,7 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   int64 sum_ptr{0}, offset{0};
   if (field->is_real_null())
    info |= DATA_NULL_FLAG_MASK;
+
   memcpy(data.get() + offset, &info, SHANNON_INFO_BYTE_LEN);
   offset += SHANNON_INFO_BYTE_LEN;
   memcpy(data.get() + offset, &context->m_extra_info.m_trxid, SHANNON_TRX_ID_BYTE_LEN);
@@ -124,41 +144,9 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   offset += SHANNON_ROWID_BYTE_LEN;
   memcpy(data.get() + offset, &sum_ptr, SHANNON_SUMPTR_BYTE_LEN);
   offset += SHANNON_SUMPTR_BYTE_LEN;
-  double data_val {0};
-  if (!field->is_real_null()) {//not null
-    switch (field->type()) {
-      case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_STRING:
-      case MYSQL_TYPE_VARCHAR: {
-        String buf;
-        buf.set_charset(field->charset());
-        field->val_str(&buf);
-        Compress::Dictionary* dict = m_cus[key_name]->local_dictionary();
-        ut_ad(dict);
-        data_val = dict->store(buf);
-      } break;
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DOUBLE: {
-        data_val = field->val_real();
-      }break;
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL: {
-        my_decimal dval;
-        field->val_decimal(&dval);
-        my_decimal2double(10, &dval, &data_val);
-      } break;
-      case MYSQL_TYPE_DATE:
-      case MYSQL_TYPE_DATETIME:
-      case MYSQL_TYPE_TIME: {
-        data_val = field->val_real();
-      } break;
-      default: data_val = field->val_real();
-    }
-    memcpy(data.get() + offset, &data_val, SHANNON_DATA_BYTE_LEN);
-  }
+  Compress::Dictionary* dict = m_cus[key_name]->local_dictionary();
+  double data_val = Utils::Util::get_field_value(field, dict);
+  memcpy(data.get() + offset, &data_val, SHANNON_DATA_BYTE_LEN);
 
   if (!m_cus[key_name]->write_data_direct(context, data.get(), data_len)) return 1;
   return 0;
@@ -214,34 +202,8 @@ uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
         uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
               data_offset += SHANNON_SUMPTR_BYTE_LEN;
         double val = *(double*) (buff + data_offset);
-        switch (field_ptr->type()) {
-          case MYSQL_TYPE_BLOB:
-          case MYSQL_TYPE_STRING:
-          case MYSQL_TYPE_VARCHAR: { //if string, stores its stringid, and gets from local dictionary.
-            String str;
-            Compress::Dictionary* dict = m_cus[key]->local_dictionary();
-            ut_ad(dict);
-            dict->get(val, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
-            field_ptr->store(str.c_ptr(), str.length(), &my_charset_bin);
-          }break;
-          case MYSQL_TYPE_INT24:
-          case MYSQL_TYPE_LONG:
-          case MYSQL_TYPE_LONGLONG:
-          case MYSQL_TYPE_FLOAT:
-          case MYSQL_TYPE_DOUBLE: {
-            field_ptr->store(val);
-          }break;
-          case MYSQL_TYPE_DECIMAL:
-          case MYSQL_TYPE_NEWDECIMAL: {
-            field_ptr->store(val);
-          } break;
-          case MYSQL_TYPE_DATE:
-          case MYSQL_TYPE_DATETIME2:
-          case MYSQL_TYPE_DATETIME:{
-            field_ptr->store (val);
-          } break;
-          default: field_ptr->store (val);
-        }
+        Compress::Dictionary* dict = m_cus[key]->local_dictionary();
+        Utils::Util::store_field_value(field_ptr, dict, val);
       }
       if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
     #endif

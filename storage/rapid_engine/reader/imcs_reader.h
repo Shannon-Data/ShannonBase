@@ -70,6 +70,8 @@ private:
   std::atomic<uchar*> m_reader_pos {nullptr};
   std::atomic<uchar*> m_writter_pos {nullptr};
   Imcs::Cu* m_source_cu{nullptr};
+  //local buffer
+  uchar m_rec_buff[SHANNON_ROW_TOTAL_LEN] = {0};
 };
 class ImcsReader : public Reader {
 public:

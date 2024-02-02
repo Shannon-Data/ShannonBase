@@ -1,0 +1,142 @@
+/**
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License, version 2.0,
+   as published by the Free Software Foundation.
+
+   This program is also distributed with certain software (including
+   but not limited to OpenSSL) that is licensed under separate terms,
+   as designated in a particular file or component or in included license
+   documentation.  The authors of MySQL hereby grant you an additional
+   permission to link the program and your derivative works with the
+   separately licensed software that they have included with MySQL.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License, version 2.0, for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program; if not, write to the Free Software
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+
+   The fundmental code for imcs.
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+*/
+#include "storage/rapid_engine/utils/utils.h"
+
+#include "sql/field.h" //Field
+#include "sql/my_decimal.h" //my_decimal
+#include "storage/innobase/include/ut0dbg.h" //ut_a
+
+#include "storage/rapid_engine/compress/dictionary/dictionary.h" //Dictionary
+namespace ShannonBase {
+namespace Utils{
+double Util::get_value_mysql_type(enum_field_types& types, const uchar* key, uint key_len) {
+  double val{0};
+  if (!key || !key_len) return val;
+
+  switch (types) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:{
+      ut_a (sizeof(int) == key_len);
+      val = *(int*) key;
+    } break;
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+      ut_a (sizeof(double) == key_len);
+      val = *(double*) key;
+    } break;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_TIME:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_NEWDATE:
+    case MYSQL_TYPE_YEAR:
+    case MYSQL_TYPE_TIMESTAMP:
+    case MYSQL_TYPE_TIME2: {
+      ut_a(false); //to impl
+    } break;
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING: {
+    } break;
+    case MYSQL_TYPE_DOUBLE:
+    case MYSQL_TYPE_FLOAT: {
+      ut_a (sizeof(double) == key_len);
+      val = *(double*) key;
+    } break;
+    default: break;
+  }
+  return val;
+}
+double Util::get_field_value (Field*& field, Compress::Dictionary*& dictionary) {
+  ut_ad(field && dictionary);
+  double data_val {0};
+  if (!field->is_real_null()) {//not null
+    switch (field->type()) {
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_STRING:
+      case MYSQL_TYPE_VARCHAR: {
+        String buf;
+        buf.set_charset(field->charset());
+        field->val_str(&buf);
+        data_val = dictionary->store(buf);
+      } break;
+      case MYSQL_TYPE_INT24:
+      case MYSQL_TYPE_LONG:
+      case MYSQL_TYPE_LONGLONG:
+      case MYSQL_TYPE_FLOAT:
+      case MYSQL_TYPE_DOUBLE: {
+        data_val = field->val_real();
+      }break;
+      case MYSQL_TYPE_DECIMAL:
+      case MYSQL_TYPE_NEWDECIMAL: {
+        my_decimal dval;
+        field->val_decimal(&dval);
+        my_decimal2double(10, &dval, &data_val);
+      } break;
+      case MYSQL_TYPE_DATE:
+      case MYSQL_TYPE_DATETIME:
+      case MYSQL_TYPE_TIME: {
+        data_val = field->val_real();
+      } break;
+      default: data_val = field->val_real();
+    }
+  }
+  return data_val;
+}
+int Util::store_field_value(Field*& field, Compress::Dictionary*& dictionary, double& value) {
+  ut_a(field && dictionary);
+  switch (field->type()) {
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VARCHAR: { //if string, stores its stringid, and gets from local dictionary.
+      String str;
+      dictionary->get(value, str, *const_cast<CHARSET_INFO*>(field->charset()));
+      field->store(str.c_ptr(), str.length(), &my_charset_bin);
+    }break;
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+    case MYSQL_TYPE_FLOAT:
+    case MYSQL_TYPE_DOUBLE: {
+       field->store(value);
+    } break;
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+      field->store(value);
+    } break;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_DATETIME2:
+    case MYSQL_TYPE_DATETIME:{
+      field->store (value);
+    } break;
+    default: field->store (value);
+  }  
+  return 0;
+}
+
+} //ns:utils
+} //ns:shannonbase
