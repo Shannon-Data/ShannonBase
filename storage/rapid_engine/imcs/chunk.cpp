@@ -207,40 +207,59 @@ uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer
 }
 ha_rows  Chunk::records_in_range(ShannonBase::RapidContext* context, key_range* min_key,
                                  key_range* max_key) {
+  /**
+   * in future, we will use sampling to get the nums in range, not to scan all data. it's
+   * a templ approach used here. */
   ha_rows count{0};
   uchar* cur_pos = m_data_base;
   double data_val {0}, minkey{0}, maxkey{0};
+  auto find_flag = context->m_extra_info.m_find_flag;
   while (cur_pos < m_data.load(std::memory_order::memory_order_seq_cst)) {
     auto info = *(uint8*) cur_pos;
-    if (info & DATA_DELETE_FLAG_MASK || info & DATA_NULL_FLAG_MASK) { //deleted.
+    if (info & DATA_DELETE_FLAG_MASK) { //deleted.
       cur_pos += SHANNON_ROW_TOTAL_LEN;
       continue;
     }
 
+    uint64 trxid = *((uint64*)(cur_pos + SHANNON_TRX_ID_BYTE_OFFSET)); //trxid bytes
+    //visibility check at firt.
+    table_name_t name{const_cast<char*>(context->m_current_db.c_str())};
+    ReadView* read_view = trx_get_read_view(context->m_trx);
+    ut_ad(read_view);
+    if (!read_view->changes_visible(trxid, name) || (info & DATA_DELETE_FLAG_MASK)) {//invisible and deleted
+      //TODO: travel the change link to get the visibile version data.
+      cur_pos += SHANNON_ROW_TOTAL_LEN; //to the next value.
+      continue;
+    }
+    data_val  = *(double*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
+
     switch (m_header->m_chunk_type) {
       case MYSQL_TYPE_INT24:
       case MYSQL_TYPE_LONG:{
-        data_val  = *(int*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
         minkey = min_key ? *(int*) min_key->key : std::numeric_limits <int>::lowest();
         maxkey = max_key ? *(int*) max_key->key : std::numeric_limits <int>::max();
       }break;
       case MYSQL_TYPE_LONGLONG: {
-        data_val  = *(longlong*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
         minkey = min_key? *(longlong*) min_key->key : std::numeric_limits <longlong>::lowest();
         maxkey = max_key? *(longlong*) max_key->key : std::numeric_limits <longlong>::max();
       } break;
       case MYSQL_TYPE_DECIMAL:
       case MYSQL_TYPE_NEWDECIMAL: {
-        data_val  = *(double*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
         minkey = min_key ? *(double*) min_key->key : std::numeric_limits <double>::lowest();
         maxkey = max_key ? *(double*) max_key->key : std::numeric_limits <double>::max();;
       }break;
       default:
         break;
     }
-    if ((is_greater_than(data_val, minkey) || are_equal(data_val, minkey)) &&
-       (is_less_than(data_val, maxkey) || are_equal(data_val, maxkey)))
-      count++;
+
+    assert (find_flag == HA_READ_KEY_EXACT);
+    if ((min_key && !max_key) && is_greater_than(data_val, minkey)) {
+      count ++;
+    } else if ((!min_key && max_key) && is_less_than(data_val, maxkey)){
+      count ++;
+    } else if ((min_key && max_key) && are_equal(data_val, minkey))
+      count ++;
+
     cur_pos += SHANNON_ROW_TOTAL_LEN;
   }
   return count;

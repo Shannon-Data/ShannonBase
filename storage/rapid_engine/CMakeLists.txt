@@ -49,6 +49,7 @@ SET(SHANNON_IMCS_SOURCES
    imcs/cu.cpp
    imcs/chunk.cpp
    imcs/index/art.cpp
+   utils/utils.cpp
 )
 SET(SHANNON_POPULATE_SOURCES
 )
@@ -64,6 +65,12 @@ SET (SHANNON_ITERATOR_SOURCES
     iterators/iterator.cpp
     ${SHANNON_READER_SOURCES}
 )
+set (SHANNON_OPTIMIZE
+    optimizer/optimizer.cpp
+    optimizer/rules/const_fold_rule.cpp
+    cost/cost.cpp
+    statistics/statistics.cpp
+)
 SET(SHANNON_RAPID_SOURCES
     handler/ha_shannon_rapid.cc
     ${SHANNON_IMCS_SOURCES}
@@ -71,6 +78,7 @@ SET(SHANNON_RAPID_SOURCES
     ${SHANNON_TRX_SOURCES}
     ${SHANNON_ITERATOR_SOURCES}
     ${SHANNON_POPULATE_SOURCES}
+    ${SHANNON_OPTIMIZE}
 )
 
 ADD_LIBRARY(rapid_compress STATIC ${SHANNON_RAPID_COMPRESS_SOURCES})

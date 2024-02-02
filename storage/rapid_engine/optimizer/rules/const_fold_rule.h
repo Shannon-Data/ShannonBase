@@ -19,30 +19,33 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+
+   The fundmental code for imcs optimizer.
 */
-#ifndef __SHANNONBASE_UTILS_H__
-#define __SHANNONBASE_UTILS_H__
+#ifndef __SHANNONBASE_CONST_FOLD_RULE_H__
+#define __SHANNONBASE_CONST_FOLD_RULE_H__
 
-#include "include/field_types.h"
-#include "include/my_inttypes.h"
+#include <string>
+#include <memory>
 
-class Field;
-namespace ShannonBase{
-namespace Compress{
-   class Dictionary;
-}
+#include "storage/rapid_engine/optimizer/rules/rule.h"
+class Query_expression;
+class Query_block;
 
-namespace Utils{
-class Util {
+namespace ShannonBase {
+namespace Optimizer {
+
+class Const_fold : public Rule {
   public:
-    static double get_value_mysql_type(enum_field_types&, const uchar*, uint);
-    static double get_field_value (Field*&, Compress::Dictionary*&);
-    static int store_field_value(Field*&, Compress::Dictionary*&, double&);
+    Const_fold(std::shared_ptr<Query_expression>& expression);
+    virtual ~Const_fold();
+    void apply() override;
+    std::string name() override { return std::string ("Const_fold");}
+  private:
+    std::shared_ptr<Query_expression> m_query_expr;
 };
 
-} //ns:util
-} //ns::shannonbase
-#endif //__SHANNONBASE_UTILS_H__
+} //ns:optimzer
+} //ns:shannonbase
+#endif //__SHANNONBASE_CONST_FOLD_RULE_H__

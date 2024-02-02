@@ -80,6 +80,7 @@ public:
  uint delete_all_direct(ShannonBase::RapidContext* context);
  Cu* get_cu(std::string& key);
  void add_cu(std::string key, std::unique_ptr<Cu>& cu);
+ ha_rows get_rows(TABLE* source_table);
 private:
  //make ctor and dctor private.
  Imcs();

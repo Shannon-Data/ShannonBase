@@ -19,30 +19,18 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+
+   The fundmental code for imcs optimizer.
 */
-#ifndef __SHANNONBASE_UTILS_H__
-#define __SHANNONBASE_UTILS_H__
 
-#include "include/field_types.h"
-#include "include/my_inttypes.h"
+#include "storage/rapid_engine/statistics/statistics.h"
 
-class Field;
 namespace ShannonBase{
-namespace Compress{
-   class Dictionary;
+namespace Optimizer{
+
+uint CardinalityStatis::cost() {
+    return 0;
 }
-
-namespace Utils{
-class Util {
-  public:
-    static double get_value_mysql_type(enum_field_types&, const uchar*, uint);
-    static double get_field_value (Field*&, Compress::Dictionary*&);
-    static int store_field_value(Field*&, Compress::Dictionary*&, double&);
-};
-
-} //ns:util
-} //ns::shannonbase
-#endif //__SHANNONBASE_UTILS_H__
+} //ns:optimizer
+} //ns:shannonbase

@@ -44,10 +44,17 @@ int ParquetReader::close() {
 int ParquetReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
   return 0;
 }
-int ParquetReader::records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) {
+int ParquetReader::records_in_range(ShannonBaseContext*context, unsigned int index,
+                                    key_range *min, key_range *max) {
+  return 0;
+}
+int ParquetReader::index_read(ShannonBaseContext*context, uchar*buff, size_t length) {
   return 0;
 }
 int ParquetReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
+  return 0;
+}
+int ParquetReader::get(ShannonBaseContext* context, uchar* buffer, size_t length) {
   return 0;
 }
 uchar* ParquetReader::tell() {

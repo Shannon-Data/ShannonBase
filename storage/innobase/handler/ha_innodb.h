@@ -472,6 +472,7 @@ class ha_innobase : public handler {
   bool check_if_incompatible_data(HA_CREATE_INFO *info,
                                   uint table_changes) override;
 
+  virtual dict_index_t *innobase_get_index(uint keynr);
  private:
   /** @name Multi Range Read interface
   @{ */
@@ -504,7 +505,6 @@ class ha_innobase : public handler {
   @return idx_cond if pushed; NULL if not pushed */
   Item *idx_cond_push(uint keyno, Item *idx_cond) override;
   /** @} */
-
  private:
   void update_thd();
 
@@ -555,9 +555,7 @@ class ha_innobase : public handler {
   void update_thd(THD *thd);
 
   int general_fetch(uchar *buf, uint direction, uint match_mode);
-
-  virtual dict_index_t *innobase_get_index(uint keynr);
-
+  
   /** Builds a 'template' to the m_prebuilt struct. The template is used in fast
   retrieval of just those column values MySQL needs in its processing.
   @param[in] whole_row true if access is needed to a whole row, false if

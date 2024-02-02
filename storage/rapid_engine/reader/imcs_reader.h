@@ -35,6 +35,7 @@
 #include "include/my_inttypes.h"
 #include "include/my_base.h" //HA_ERR_END_OF_FILE
 
+#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/reader/reader.h"
 
@@ -57,6 +58,7 @@ public:
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
   int records_in_range(ShannonBaseContext*, unsigned int , key_range *, key_range *);
   int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0);
+  int get(ShannonBaseContext* context, uchar* buffer, size_t length= 0);
   inline Imcs::Cu* get_source() {return m_source_cu;}
 private:
   std::string m_key_name;
@@ -68,6 +70,8 @@ private:
   std::atomic<uchar*> m_reader_pos {nullptr};
   std::atomic<uchar*> m_writter_pos {nullptr};
   Imcs::Cu* m_source_cu{nullptr};
+  //local buffer
+  uchar m_rec_buff[SHANNON_ROW_TOTAL_LEN] = {0};
 };
 class ImcsReader : public Reader {
 public:
@@ -76,16 +80,18 @@ public:
   virtual ~ImcsReader() {}
   int open() override;
   int close() override;
-  int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0) override;
-  int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0) override;
+  int read(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int write(ShannonBaseContext*, uchar*, size_t= 0) override;
   int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) override ;
+  int index_read(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int get(ShannonBaseContext*, uchar*, size_t = 0) override;
   uchar* tell() override;
   uchar* seek(uchar* pos) override;
   uchar* seek(size_t offset) override;
   bool is_open() const { return m_start_of_scan; }
 private:
   //local buffer.
-  uchar m_buff[32] = {0};
+  uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};
   //viewer of cus.
   std::map<std::string, std::unique_ptr<CuView>> m_cu_views;
   //source table.
