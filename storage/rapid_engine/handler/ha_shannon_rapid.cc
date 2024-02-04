@@ -540,6 +540,8 @@ ha_rows ha_rapid::estimate_rows_upper_bound() {
   return (ha_rows)estimate;
 }
 
+/** Estimates the number of index records in a range.
+ @return estimated number of rows */
 ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
                                   key_range *max_key) {
   // Get the number of records in the range from the primary storage engine.
@@ -567,7 +569,6 @@ ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
   auto nums = m_imcs_reader->records_in_range(rpd_context.get(), index, min_key, max_key);
   trx_commit(trx);
   return nums;
-  //return ha_get_primary_handler()->records_in_range(index, min_key, max_key);
 }
 
 THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to,
