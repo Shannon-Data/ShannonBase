@@ -686,7 +686,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
   RapidContext context;
   context.m_current_db = std::string(db_name);
   context.m_current_table = std::string(table_name);
-  //int ret{0};
+
   if (auto ret = imcs_instance->delete_all_direct(&context)) {
     return ret;
   }

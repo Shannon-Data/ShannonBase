@@ -234,11 +234,24 @@ uint read_batch_direct(ShannonBase::RapidContext* context, uchar* buffer){
 }
 
 uint Imcs::delete_direct(ShannonBase::RapidContext* context, Field* field, uchar* rowid) {
+  if (!context || !field) return HA_ERR_GENERIC;
+
+  std::string key = context->m_current_db + context->m_current_table;
+  key += field->field_name;
+  m_cus.erase(key);
   return 0;
 }
 
 uint Imcs::delete_all_direct(ShannonBase::RapidContext* context) {
-  m_cus.clear();
+
+  std::string key = context->m_current_db;
+  key += context->m_current_table;
+
+  for (auto& item : m_cus){
+    if (item.first.compare(0, key.length(), key, 0, key.length()) == 0)
+      m_cus.erase(item.first);
+  }
+
   return 0;
 }
 } //ns:imcs 
