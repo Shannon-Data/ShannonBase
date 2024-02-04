@@ -27,6 +27,7 @@
 #define PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H_
 
 #include "my_base.h"
+#include "include/my_icp.h" //ICP_RESULT
 #include "sql/handler.h"
 #include "thr_lock.h"
 #include "include/field_types.h"  //field types.
@@ -95,6 +96,8 @@ class ha_rapid : public handler {
 
   uint max_supported_key_length() const override;
 
+  int compare_key_icp(const key_range *range);
+  bool is_push_down() { return (pushed_idx_cond) ? true : false; }
  private:
   int create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) override;
 
@@ -174,6 +177,8 @@ class ha_rapid : public handler {
                              thr_lock_type lock_type) override;
 
   Table_flags table_flags() const override;
+  
+  int key_cmp(KEY_PART_INFO *key_part, const uchar *key, uint key_length);
 
   int load_table(const TABLE &table) override;
 
@@ -194,6 +199,9 @@ class ha_rapid : public handler {
   dict_index_t* m_primary_key;
   enum_field_types m_key_type;
 };
+
+[[nodiscard]] ICP_RESULT shannon_rapid_index_cond(
+    ha_rapid *h); /*!< in/out: pointer to ha_innobase */
 
 }  // namespace ShannonBase
 

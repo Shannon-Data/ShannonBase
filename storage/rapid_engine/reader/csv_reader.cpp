@@ -47,7 +47,14 @@ int CSVReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
 int CSVReader::records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) {
   return 0;
 }
-int CSVReader::index_read(ShannonBaseContext* context,  uchar*buffer, size_t length) {
+int CSVReader::index_read(ShannonBaseContext* context,  uchar*buffer, uchar* key,
+                          uint key_len, ha_rkey_function find_flag) {
+  return 0;
+}
+int CSVReader::index_next(ShannonBaseContext* context,  uchar*buffer, size_t length) {
+  return 0;
+}
+int CSVReader::index_general(ShannonBaseContext* context, uchar*buffer, size_t length) {
   return 0;
 }
 int CSVReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
