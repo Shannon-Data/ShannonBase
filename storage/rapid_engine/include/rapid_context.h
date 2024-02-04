@@ -85,8 +85,7 @@ public:
 
       //index scan info
       uint m_keynr{0};
-      double m_min_key_val {SHANNON_LOWEST_DOUBLE};
-      double m_max_key_val {SHANNON_LOWEST_DOUBLE};
+      double m_key_val {SHANNON_LOWEST_DOUBLE};
       enum_field_types m_key_type;
       ha_rkey_function m_find_flag {HA_READ_INVALID};
   };

@@ -195,14 +195,7 @@ double ha_rapid::read_time(uint index, uint ranges, ha_rows rows) {
 int ha_rapid::read_range_first(const key_range *start_key,
                                const key_range *end_key, bool eq_range_arg,
                                bool sorted) {
-  if (start_key)
-    m_rpd_context->m_extra_info.m_min_key_val =
-      Utils::Util::get_value_mysql_type(m_rpd_context->m_extra_info.m_key_type,
-                                        start_key->key, start_key->length);
-  else if (end_key)
-    m_rpd_context->m_extra_info.m_max_key_val =
-      Utils::Util::get_value_mysql_type(m_rpd_context->m_extra_info.m_key_type,
-                                        end_key->key, end_key->length);
+  DBUG_TRACE;
   return handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
 }
 
@@ -422,10 +415,6 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len,
   }
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  m_rpd_context->m_extra_info.m_min_key_val =
-    Utils::Util::get_value_mysql_type(m_rpd_context->m_extra_info.m_key_type, key, key_len);
-  m_rpd_context->m_extra_info.m_max_key_val= m_rpd_context->m_extra_info.m_min_key_val;
-  m_rpd_context->m_extra_info.m_find_flag = find_flag;
   auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf,
                                        const_cast<uchar*>(key), key_len, find_flag);
   return err;
@@ -590,6 +579,16 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_GENERIC;
   }
 
+  for (uint idx =0; idx < table_arg.s->fields; idx ++) {
+    Field* key_field = *(table_arg.field + idx);
+    if (!Utils::Util::is_support_type(key_field->type())) {
+      std::ostringstream err;
+      err << key_field->field_name << " type not allowed";
+      my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+  }
+
   std::unique_ptr<ImcsReader> imcs_reader = std::make_unique<ImcsReader>(const_cast<TABLE*>(&table_arg));
   ut_a(imcs_reader.get());
   imcs_reader->open();
@@ -599,6 +598,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   std::string db_name(table_arg.s->db.str);
   if (loaded_dictionaries.find(db_name) == loaded_dictionaries.end())
      loaded_dictionaries.insert(std::make_pair(db_name, std::make_unique<Compress::Dictionary>()));
+
   // check if primary key is missing. rapid engine must has at least one PK. 
   if (table_arg.s->is_missing_primary_key()) {
     my_error(ER_REQUIRES_PRIMARY_KEY, MYF(0));
@@ -644,12 +644,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     if (context.m_trx->state == TRX_STATE_NOT_STARTED) {
       assert (false);
     }
-    context.m_extra_info.m_pk = 0;
-    for (uint32 index = 0; index < field_count; index++) {
-      field_ptr = *(table_arg.field + index);
-      if (field_ptr->is_flag_set(PRI_KEY_FLAG))
-         context.m_extra_info.m_pk += field_ptr->val_real();
-    }
+    //will used rowid as rapid pk.
     //if (imcs_instance->write_direct(&context, field_ptr)) {
     if (imcs_reader->write(&context, const_cast<TABLE*>(&table_arg)->record[0])) {
       table_arg.file->ha_rnd_end();
