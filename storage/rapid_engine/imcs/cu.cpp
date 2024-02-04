@@ -77,18 +77,22 @@ Cu::Cu(Field* field) {
   //the initial one chunk built.
   m_chunks.push_back(std::make_unique<Chunk>(field));
 }
+
 Cu::~Cu() {
   m_chunks.clear();
 }
+
 uchar* Cu::get_base() {
   DBUG_TRACE;
   if (!m_chunks.size()) return nullptr;
   return m_chunks[0].get()->get_base();
 }
+
 void Cu::add_chunk(std::unique_ptr<Chunk>& chunk) {
   DBUG_TRACE;
   m_chunks.push_back(std::move(chunk));
 }
+
 uint Cu::rnd_init(bool scan) {
   DBUG_TRACE;
   if (!m_chunks.size()) return 0;
@@ -99,6 +103,7 @@ uint Cu::rnd_init(bool scan) {
   m_current_chunk_id.store(0, std::memory_order::memory_order_relaxed);
   return 0;
 }
+
 uint Cu::rnd_end() {
   DBUG_TRACE;
   if (!m_chunks.size()) return 0;
@@ -108,6 +113,7 @@ uint Cu::rnd_end() {
   }
   return 0;
 }
+
 uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length) {
   DBUG_TRACE;
   ut_ad(m_header.get() && m_chunks.size());
@@ -143,6 +149,7 @@ uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, ui
     m_header->m_min.store(data_val, std::memory_order::memory_order_relaxed);
   return pos;
 }
+
 uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   DBUG_TRACE;
   if (!m_chunks.size()) return nullptr;
@@ -167,15 +174,18 @@ uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   return ret;
 #endif
 }
+
 uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
   if (!m_chunks.size()) return nullptr;
   //Chunk* chunk = m_chunks [m_chunks.size() - 1].get(); //to get the last chunk data.
   //if (!chunk) return nullptr;
   return  nullptr;
 }
+
 uchar* Cu::delete_data_direct(ShannonBase::RapidContext* context, uchar* rowid) {
   return nullptr;
 }
+
 uchar* Cu::delete_all_direct(){
   uchar* base{nullptr};
   for(size_t index = 0; index < m_chunks.size(); index++) {
@@ -184,10 +194,12 @@ uchar* Cu::delete_all_direct(){
   }
   return base;
 }
+
 uchar* Cu::update_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length){
   
   return nullptr;
 }
+
 uint Cu::flush_direct(ShannonBase::RapidContext* context, uchar* from, uchar* to) {
   assert(from ||to);
   return 0;

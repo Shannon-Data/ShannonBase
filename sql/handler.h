@@ -4498,7 +4498,7 @@ class handler {
     of the current range.
   */
   enum enum_range_scan_direction { RANGE_SCAN_ASC, RANGE_SCAN_DESC };
-
+  int get_key_comp_result() { return key_compare_result_on_equal; }
  private:
   Record_buffer *m_record_buffer = nullptr;  ///< Buffer for multi-row reads.
   /*
@@ -4649,7 +4649,9 @@ class handler {
     if (rc) end_psi_batch_mode();
     return rc;
   }
-
+  enum_range_scan_direction get_range_scan_direction() {
+    return range_scan_direction;
+  }
  private:
   /**
     The lock type set by when calling::ha_external_lock(). This is

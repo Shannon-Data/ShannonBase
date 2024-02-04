@@ -25,10 +25,12 @@
 */
 #include "storage/rapid_engine/utils/utils.h"
 
+#include "sql/table.h" //TABLE
 #include "sql/field.h" //Field
 #include "sql/my_decimal.h" //my_decimal
 #include "storage/innobase/include/ut0dbg.h" //ut_a
 
+#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h" //Dictionary
 namespace ShannonBase {
 namespace Utils{
@@ -56,7 +58,9 @@ double Util::get_value_mysql_type(enum_field_types& types, const uchar* key, uin
     case MYSQL_TYPE_YEAR:
     case MYSQL_TYPE_TIMESTAMP:
     case MYSQL_TYPE_TIME2: {
-      ut_a(false); //to impl
+      Field_datetimef datetime(const_cast<uchar*>(key), nullptr, 0, 0,
+                              "temp_datetime", 6);
+      val = datetime.val_real();
     } break;
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VARCHAR:
@@ -107,8 +111,10 @@ double Util::get_field_value (Field*& field, Compress::Dictionary*& dictionary) 
   }
   return data_val;
 }
-int Util::store_field_value(Field*& field, Compress::Dictionary*& dictionary, double& value) {
+int Util::store_field_value(TABLE*& table, Field*& field, Compress::Dictionary*& dictionary, 
+                            double& value) {
   ut_a(field && dictionary);
+  my_bitmap_map *old_map = tmp_use_all_columns(table, table->write_set);
   switch (field->type()) {
     case MYSQL_TYPE_BLOB:
     case MYSQL_TYPE_STRING:
@@ -134,7 +140,60 @@ int Util::store_field_value(Field*& field, Compress::Dictionary*& dictionary, do
       field->store (value);
     } break;
     default: field->store (value);
-  }  
+  }
+  if (old_map) tmp_restore_column_map(table->write_set, old_map);
+  return 0;
+}
+int Util::get_range_value(enum_field_types type, key_range* min_key, key_range* max_key,
+                         double& minkey, double& maxkey) {
+  switch (type) {
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT: {
+        minkey = min_key ? *(int*) min_key->key : SHANNON_LOWEST_DOUBLE;
+        maxkey = max_key ? *(int*) max_key->key : SHANNON_LOWEST_DOUBLE;
+    } break;
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG: {
+        minkey = min_key ? *(int*) min_key->key : SHANNON_LOWEST_DOUBLE;
+        maxkey= max_key ? *(int*) max_key->key : SHANNON_LOWEST_DOUBLE;
+    } break;
+    case MYSQL_TYPE_DOUBLE:
+    case MYSQL_TYPE_FLOAT: {
+        minkey = min_key ? *(double*) min_key->key : SHANNON_LOWEST_DOUBLE;
+        maxkey = max_key ? *(double*) max_key->key : SHANNON_LOWEST_DOUBLE;
+    } break;
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+        minkey = min_key ? *(double*) min_key->key : SHANNON_LOWEST_DOUBLE;
+        maxkey = max_key ? *(double*) max_key->key : SHANNON_LOWEST_DOUBLE;
+    } break;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_TIME:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_NEWDATE:
+    case MYSQL_TYPE_YEAR:
+    case MYSQL_TYPE_TIMESTAMP:
+    case MYSQL_TYPE_TIME2: {
+      if (min_key) {
+        Field_datetimef datetime_min(const_cast<uchar*>(min_key->key), nullptr, 0, 0,
+                                     "start_datetime", 6);
+        minkey = datetime_min.val_real();
+      }
+      if (max_key) {
+        Field_datetimef datetime_max(const_cast<uchar*>(max_key->key), nullptr, 0, 0,
+                                     "start_datetime", 6);
+        maxkey = datetime_max.val_real();
+      }
+    } break;
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING: {
+      minkey = 0;
+      maxkey = 0;
+    } break;
+    default: break;
+  }
   return 0;
 }
 

@@ -29,7 +29,9 @@
 #include "include/field_types.h"
 #include "include/my_inttypes.h"
 
+class TABLE;
 class Field;
+class key_range;
 namespace ShannonBase{
 namespace Compress{
    class Dictionary;
@@ -40,7 +42,8 @@ class Util {
   public:
     static double get_value_mysql_type(enum_field_types&, const uchar*, uint);
     static double get_field_value (Field*&, Compress::Dictionary*&);
-    static int store_field_value(Field*&, Compress::Dictionary*&, double&);
+    static int store_field_value(TABLE*& table, Field*&, Compress::Dictionary*&, double&);
+    static int get_range_value(enum_field_types, key_range*, key_range*, double&, double&);
 };
 
 } //ns:util

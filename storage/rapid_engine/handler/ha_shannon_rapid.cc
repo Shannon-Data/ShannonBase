@@ -124,6 +124,7 @@ std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries
 
 Shannon_execution_context::Shannon_execution_context() : m_data(std::make_unique<char[]>(10)) {
 }
+
 bool Shannon_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
     if (&join != m_current_join) {
       // No plan has been seen for this join. The current one is best so far.
@@ -148,6 +149,7 @@ int ha_rapid::create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
   DBUG_TRACE;
   return HA_ERR_WRONG_COMMAND;
 }
+
 int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, const dd::Table * table_def) {
   DBUG_TRACE;
   m_share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
@@ -159,15 +161,23 @@ int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, cons
   thr_lock_data_init(&m_share->m_lock, &m_lock, nullptr);
   return 0;
 }
+
 int ha_rapid::close () {
   DBUG_TRACE;
   return 0;
 }
+
+/* Assume that the read time is proportional to the scan time for all
+  rows + at most one seek per range. */
 //refined cost model should be impl in future. here, it's a coarse one.
 double ha_rapid::scan_time() {
   //all memory operations.
   return (estimate_rows_upper_bound() * 0.0000001);
 }
+
+/** Calculate the time it takes to read a set of ranges through an index
+ This enables us to optimise reads for clustered indexes.
+ @return estimated time measured in disk seeks */
 double ha_rapid::read_time(uint index, uint ranges, ha_rows rows) {
   ha_rows total_rows;
 
@@ -181,6 +191,25 @@ double ha_rapid::read_time(uint index, uint ranges, ha_rows rows) {
 
   return (ranges + (double)rows / (double)total_rows * time_for_scan);
 }
+
+int ha_rapid::read_range_first(const key_range *start_key,
+                               const key_range *end_key, bool eq_range_arg,
+                               bool sorted) {
+  if (start_key)
+    m_rpd_context->m_extra_info.m_min_key_val =
+      Utils::Util::get_value_mysql_type(m_rpd_context->m_extra_info.m_key_type,
+                                        start_key->key, start_key->length);
+  else if (end_key)
+    m_rpd_context->m_extra_info.m_max_key_val =
+      Utils::Util::get_value_mysql_type(m_rpd_context->m_extra_info.m_key_type,
+                                        end_key->key, end_key->length);
+  return handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
+}
+
+int ha_rapid::read_range_next() {
+  return (handler::read_range_next());
+}
+
 int ha_rapid::rnd_init(bool scan) {
   DBUG_TRACE;
   ut_ad(shannon_rpd_inited == true);
@@ -195,6 +224,7 @@ int ha_rapid::rnd_init(bool scan) {
 
   //init rapidcontext
   m_rpd_context.reset(new ShannonBase::RapidContext());
+  m_rpd_context->m_handler = this;
   m_rpd_context->m_table = table;
   m_rpd_context->m_current_db = table->s->db.str;
   m_rpd_context->m_current_table = table->s->table_name.str;
@@ -211,6 +241,9 @@ int ha_rapid::rnd_init(bool scan) {
   //imcs do initialization. scan: random read or scan.
   return imcs_instance->initialized()? 0 : imcs_instance->rnd_init(scan);
 }
+
+/** Ends a table scan.
+ @return 0 or error number */
 int ha_rapid::rnd_end() {
   DBUG_TRACE;
   if (m_start_of_scan) {
@@ -225,15 +258,10 @@ int ha_rapid::rnd_end() {
   }
   return 0;
 }
-int ha_rapid::read_range_first(const key_range *start_key,
-                               const key_range *end_key, bool eq_range_arg,
-                               bool sorted) {
-  return handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
-}
 
-int ha_rapid::read_range_next() {
-  return (handler::read_range_next());
-}
+/** Reads the next row in a table scan (also used to read the FIRST row
+ in a table scan).
+ @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::rnd_next(unsigned char *buffer) {
   DBUG_TRACE;
   ut_ad (m_start_of_scan && inited == handler::RND);
@@ -245,6 +273,7 @@ int ha_rapid::rnd_next(unsigned char *buffer) {
   auto err = m_imcs_reader->read(m_rpd_context.get(), buffer);
   return err;
 }
+
 int ha_rapid::info(unsigned int flags) {
   // Get the cardinality statistics from the primary storage engine.
   handler *primary = ha_get_primary_handler();
@@ -254,10 +283,49 @@ int ha_rapid::info(unsigned int flags) {
   }
   return ret;
 }
+
 handler::Table_flags ha_rapid::table_flags() const {
   ulong flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE |
                 HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
   return ~HA_NO_INDEX_ACCESS || flags;
+}
+
+int ha_rapid::key_cmp(KEY_PART_INFO *key_part, const uchar *key, uint key_length) {
+  uint store_length;
+
+  for (const uchar *end = key + key_length; key < end;
+       key += store_length, key_part++) {
+    int cmp;
+    const int res = (key_part->key_part_flag & HA_REVERSE_SORT) ? -1 : 1;
+    store_length = key_part->store_length;
+    if (key_part->null_bit) {
+      /* This key part allows null values; NULL is lower than everything */
+      const bool field_is_null = key_part->field->is_null();
+      if (*key)  // If range key is null
+      {
+        /* the range is expecting a null value */
+        if (!field_is_null) return res;  // Found key is > range
+        /* null -- exact match, go to next key part */
+        continue;
+      } else if (field_is_null)
+        return -res;  // NULL is less than any value
+      key++;          // Skip null byte
+      store_length--;
+    }
+    if ((cmp = key_part->field->key_cmp(key, key_part->length)) < 0)
+      return -res;
+    if (cmp > 0) return res;
+  }
+  return 0;  // Keys are equal
+}
+
+int ha_rapid::compare_key_icp(const key_range *range) {
+  int cmp;
+  if (!range) return 0;  // no max range
+  cmp = key_cmp(range_key_part, range->key, range->length);
+  if (!cmp) cmp = get_key_comp_result();
+  if (get_range_scan_direction() == RANGE_SCAN_DESC) cmp = -cmp;
+  return cmp;
 }
 
 Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
@@ -272,6 +340,7 @@ Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
   /* We will evaluate the condition entirely */
   return nullptr;
 }
+
 unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part,
                                    bool all_parts) const {
   //here, we support the same index flag as primary engine.
@@ -294,6 +363,7 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part,
            HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN |
            HA_READ_RANGE | HA_KEY_SCAN_NOT_ROR) & primary_flags);
 }
+
 uint ha_rapid::max_supported_keys() const {
   return (MAX_KEY);
 }
@@ -329,6 +399,7 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
   inited = handler::INDEX;
   return 0;
 }
+
 int ha_rapid::index_end() {
   DBUG_TRACE;
 
@@ -338,6 +409,10 @@ int ha_rapid::index_end() {
   inited = handler::NONE;
   return rnd_end();
 }
+
+/** Positions an index cursor to the index specified in the handle. Fetches the
+ row if any.
+ @return 0, HA_ERR_KEY_NOT_FOUND, or error number */
 int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len,
                  ha_rkey_function find_flag) {
   DBUG_TRACE;
@@ -345,11 +420,14 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len,
   if (pushed_idx_cond){ //icp
     //TODO: evaluate condition item, and do condtion eval in scan.
   }
-  m_rpd_context->m_extra_info.m_key_val =
-    Utils::Util::get_value_mysql_type(m_rpd_context->m_extra_info.m_key_type, key, key_len);
-  m_rpd_context->m_extra_info.m_find_flag = find_flag;
+
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf);
+  m_rpd_context->m_extra_info.m_min_key_val =
+    Utils::Util::get_value_mysql_type(m_rpd_context->m_extra_info.m_key_type, key, key_len);
+  m_rpd_context->m_extra_info.m_max_key_val= m_rpd_context->m_extra_info.m_min_key_val;
+  m_rpd_context->m_extra_info.m_find_flag = find_flag;
+  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf,
+                                       const_cast<uchar*>(key), key_len, find_flag);
   return err;
 }
 
@@ -357,30 +435,48 @@ int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
   return 0;
 }
 
+/** Reads the next row from a cursor, which must have previously been
+ positioned using index_read.
+ @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::index_next(uchar *buf) {
   ut_ad (m_start_of_scan && inited == handler::INDEX);
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf);
+  auto err = m_imcs_reader->index_general(m_rpd_context.get(), buf);
   return err;
 }
 
+/** Reads the next row matching to the key value given as the parameter.
+ @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::index_next_same(uchar *buf, const uchar *key, uint keylen) {
   ut_ad (m_start_of_scan && inited == handler::INDEX);
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf);
+  auto err = m_imcs_reader->index_general(m_rpd_context.get(), buf);
   return err;
 }
 
+/** Reads the previous row from a cursor, which must have previously been
+ positioned using index_read.
+ @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::index_prev(uchar *buf) {
   return 0;
 }
 
+/** Positions a cursor on the first record in an index and reads the
+ corresponding row to buf.
+ @return 0, HA_ERR_END_OF_FILE, or error code */
 int ha_rapid::index_first(uchar *buf) {
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+
+  m_rpd_context->m_extra_info.m_find_flag = HA_READ_AFTER_KEY;
+  m_imcs_reader->index_general(m_rpd_context.get(), buf);
   return 0;
 }
 
+/** Positions a cursor on the last record in an index and reads the
+ corresponding row to buf.
+ @return 0, HA_ERR_END_OF_FILE, or error code */
 int ha_rapid::index_last(uchar *buf) {
   return 0;
 }
@@ -409,6 +505,27 @@ ha_rows ha_rapid::multi_range_read_info(uint keyno, uint n_ranges, uint keys,
   return 0;
 }
 #endif
+/**
+Index Condition Pushdown interface implementation */
+
+/** Shannon Rapid index push-down condition check
+ @return ICP_NO_MATCH, ICP_MATCH, or ICP_OUT_OF_RANGE */
+ICP_RESULT
+shannon_rapid_index_cond(ha_rapid *h) /*!< in/out: pointer to ha_rapid */
+{
+  DBUG_TRACE;
+
+  assert(h->pushed_idx_cond);
+  assert(h->pushed_idx_cond_keyno != MAX_KEY);
+
+  if (h->end_range && h->compare_key_icp(h->end_range) > 0) {
+    /* caller should return HA_ERR_END_OF_FILE already */
+    return ICP_OUT_OF_RANGE;
+  }
+
+  return h->pushed_idx_cond->val_int() ? ICP_MATCH : ICP_NO_MATCH;
+}
+
 ha_rows ha_rapid::estimate_rows_upper_bound() {
   DBUG_TRACE;
 
@@ -427,8 +544,6 @@ ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
                                   key_range *max_key) {
   // Get the number of records in the range from the primary storage engine.
   DBUG_TRACE;
-
-  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   /**
    * due to the rows stored in imcs by primary key order, therefore, it should be in ordered.
    * it's friendly to purge the unsatisfied chunk as fast as possible.
@@ -495,21 +610,6 @@ int ha_rapid::load_table(const TABLE &table_arg) {
          my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
                   table_arg.s->db.str, table_arg.s->table_name.str);
          return HA_ERR_GENERIC;
-       }
-       //only numeric data type allowed.
-       switch (key_field->type()){
-        case MYSQL_TYPE_LONG:
-        case MYSQL_TYPE_LONGLONG:
-        case MYSQL_TYPE_DOUBLE:
-        case MYSQL_TYPE_DECIMAL:
-        case MYSQL_TYPE_NEWDECIMAL:
-        case MYSQL_TYPE_INT24:
-          break;
-        default:
-           std::ostringstream err;
-           err << table_arg.s->table_name.str << "." << key_field->field_name << " PK type not allowed";
-           my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
-           return HA_ERR_GENERIC;
        }
     }
   }

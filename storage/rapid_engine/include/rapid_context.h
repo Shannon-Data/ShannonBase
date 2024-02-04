@@ -28,6 +28,7 @@
 
 #include "sql/sql_lex.h" //Secondary_engine_execution_context
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/include/rapid_const.h"
 
 class trx_t;
 class ReadView;
@@ -69,6 +70,7 @@ public:
 };
 
 //used in imcs.
+class ha_rapid;
 class RapidContext : public ShannonBaseContext {
 public:
   class extra_info_t{
@@ -83,9 +85,10 @@ public:
 
       //index scan info
       uint m_keynr{0};
-      double m_key_val {0};
+      double m_min_key_val {SHANNON_LOWEST_DOUBLE};
+      double m_max_key_val {SHANNON_LOWEST_DOUBLE};
       enum_field_types m_key_type;
-      ha_rkey_function m_find_flag {HA_READ_KEY_EXACT};
+      ha_rkey_function m_find_flag {HA_READ_INVALID};
   };
   RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}
   virtual ~RapidContext() = default;
@@ -98,6 +101,7 @@ public:
   //the dictionary for this DB.
   Compress::Dictionary* m_local_dict {nullptr};
   extra_info_t m_extra_info;
+  const ha_rapid* m_handler;
 };
 //used in optimization phase.
 class OptimizeContext : public ShannonBaseContext {

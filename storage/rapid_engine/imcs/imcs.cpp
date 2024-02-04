@@ -48,16 +48,20 @@ std::once_flag Imcs::one;
 
 Imcs::Imcs() {
 }
+
 Imcs::~Imcs() { 
 }
+
 uint Imcs::initialize() {
   DBUG_TRACE;
   return 0;
 }
+
 uint Imcs::deinitialize() {
   DBUG_TRACE;
   return 0;
 }
+
 Cu* Imcs::get_cu(std::string& key) {
   DBUG_TRACE;
   if (m_cus.find(key) != m_cus.end()) {
@@ -65,11 +69,13 @@ Cu* Imcs::get_cu(std::string& key) {
   }
   return nullptr;
 }
+
 void Imcs::add_cu(std::string key, std::unique_ptr<Cu>& cu) {
   DBUG_TRACE;
   m_cus.insert({key, std::move(cu)});
   return;
 }
+
 ha_rows Imcs::get_rows(TABLE* source_table) {
   ha_rows row_count{0};
   std::string key_part (source_table->s->db.str);
@@ -88,6 +94,7 @@ ha_rows Imcs::get_rows(TABLE* source_table) {
 
   return row_count;
 }
+
 uint Imcs::rnd_init(bool scan) {
   DBUG_TRACE;
   //ut::new_withkey<Compress::Dictionar>(UT_NEW_THIS_FILE_PSI_KEY);
@@ -98,6 +105,7 @@ uint Imcs::rnd_init(bool scan) {
   m_inited = handler::RND;
   return 0;
 }
+
 uint Imcs::rnd_end() {
   DBUG_TRACE;
   for(auto &cu: m_cus) {
@@ -107,6 +115,7 @@ uint Imcs::rnd_end() {
   m_inited = handler::NONE;
   return 0;
 }
+
 uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   DBUG_TRACE;
   ut_ad(context && field);
@@ -151,10 +160,12 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   if (!m_cus[key_name]->write_data_direct(context, data.get(), data_len)) return 1;
   return 0;
 }
+
 uint Imcs::read_direct(ShannonBase::RapidContext* context, Field* field) {
   ut_ad(context && field);
   return 0;
 }
+
 uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   DBUG_TRACE;
   ut_ad(context && buffer);
@@ -203,20 +214,23 @@ uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
               data_offset += SHANNON_SUMPTR_BYTE_LEN;
         double val = *(double*) (buff + data_offset);
         Compress::Dictionary* dict = m_cus[key]->local_dictionary();
-        Utils::Util::store_field_value(field_ptr, dict, val);
+        Utils::Util::store_field_value(context->m_table, field_ptr, dict, val);
       }
       if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
     #endif
   }
   return 0;
 }
+
 uint read_batch_direct(ShannonBase::RapidContext* context, uchar* buffer){
   ut_ad(context && buffer);
   return 0;
 }
+
 uint Imcs::delete_direct(ShannonBase::RapidContext* context, Field* field, uchar* rowid) {
   return 0;
 }
+
 uint Imcs::delete_all_direct(ShannonBase::RapidContext* context) {
   m_cus.clear();
   return 0;

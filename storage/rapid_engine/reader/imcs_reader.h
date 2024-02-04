@@ -73,6 +73,7 @@ private:
   //local buffer
   uchar m_rec_buff[SHANNON_ROW_TOTAL_LEN] = {0};
 };
+
 class ImcsReader : public Reader {
 public:
   ImcsReader(TABLE* table);
@@ -83,12 +84,16 @@ public:
   int read(ShannonBaseContext*, uchar*, size_t = 0) override;
   int write(ShannonBaseContext*, uchar*, size_t= 0) override;
   int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) override ;
-  int index_read(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
+  int index_next(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
   int get(ShannonBaseContext*, uchar*, size_t = 0) override;
   uchar* tell() override;
   uchar* seek(uchar* pos) override;
   uchar* seek(size_t offset) override;
   bool is_open() const { return m_start_of_scan; }
+private:
+  bool is_satisfied(ShannonBaseContext*, double);
 private:
   //local buffer.
   uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};

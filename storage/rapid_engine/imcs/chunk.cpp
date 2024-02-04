@@ -35,6 +35,7 @@
 #include "storage/innobase/include/univ.i"        //new_withkey
 #include "storage/innobase/include/ut0new.h"      //new_withkey
 
+#include "storage/rapid_engine/utils/utils.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/compress/algorithms.h"
 
@@ -101,6 +102,7 @@ Chunk::Chunk(Field* field) {
       break;
   }
 }
+
 Chunk::~Chunk() {
   std::scoped_lock lk(m_header_mutex);
   if (m_header) {
@@ -114,6 +116,7 @@ Chunk::~Chunk() {
     m_data_end = m_data_base;
   }
 }
+
 uint Chunk::rnd_init(bool scan){
   DBUG_TRACE;
   ut_ad(m_inited == handler::NONE);
@@ -121,6 +124,7 @@ uint Chunk::rnd_init(bool scan){
   m_inited = handler::RND;
   return 0;
 }
+
 uint Chunk::rnd_end(){
   DBUG_TRACE;
   ut_ad(m_inited == handler::RND);
@@ -128,6 +132,7 @@ uint Chunk::rnd_end(){
   m_inited = handler::NONE;
   return 0;
 }
+
 uchar* Chunk::write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length) {
   DBUG_TRACE;
   ut_ad(m_data_base || data);
@@ -152,6 +157,7 @@ uchar* Chunk::write_data_direct(ShannonBase::RapidContext* context, uchar* data,
   }
   return m_data;
 }
+
 uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   DBUG_TRACE;
   ut_ad(context && buffer);
@@ -205,15 +211,16 @@ uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer
  #endif
   return m_data_cursor;
 }
-ha_rows  Chunk::records_in_range(ShannonBase::RapidContext* context, key_range* min_key,
-                                 key_range* max_key) {
+
+ha_rows Chunk::records_in_range(ShannonBase::RapidContext* context, double& min_key,
+                                 double& max_key) {
   /**
    * in future, we will use sampling to get the nums in range, not to scan all data. it's
-   * a templ approach used here. */
+   * a templ approach used here.*/
   ha_rows count{0};
   uchar* cur_pos = m_data_base;
-  double data_val {0}, minkey{0}, maxkey{0};
-  auto find_flag = context->m_extra_info.m_find_flag;
+  double data_val {0};
+
   while (cur_pos < m_data.load(std::memory_order::memory_order_seq_cst)) {
     auto info = *(uint8*) cur_pos;
     if (info & DATA_DELETE_FLAG_MASK) { //deleted.
@@ -231,46 +238,32 @@ ha_rows  Chunk::records_in_range(ShannonBase::RapidContext* context, key_range* 
       cur_pos += SHANNON_ROW_TOTAL_LEN; //to the next value.
       continue;
     }
+
     data_val  = *(double*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
-
-    switch (m_header->m_chunk_type) {
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:{
-        minkey = min_key ? *(int*) min_key->key : std::numeric_limits <int>::lowest();
-        maxkey = max_key ? *(int*) max_key->key : std::numeric_limits <int>::max();
-      }break;
-      case MYSQL_TYPE_LONGLONG: {
-        minkey = min_key? *(longlong*) min_key->key : std::numeric_limits <longlong>::lowest();
-        maxkey = max_key? *(longlong*) max_key->key : std::numeric_limits <longlong>::max();
-      } break;
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL: {
-        minkey = min_key ? *(double*) min_key->key : std::numeric_limits <double>::lowest();
-        maxkey = max_key ? *(double*) max_key->key : std::numeric_limits <double>::max();;
-      }break;
-      default:
-        break;
-    }
-
-    assert (find_flag == HA_READ_KEY_EXACT);
-    if ((min_key && !max_key) && is_greater_than(data_val, minkey)) {
+    if ((is_valid(min_key) && !is_valid(max_key)) &&
+        is_greater_than(data_val, min_key)) {
       count ++;
-    } else if ((!min_key && max_key) && is_less_than(data_val, maxkey)){
+    } else if ((!is_valid(min_key) && is_valid(max_key)) &&
+               is_less_than_or_eq(data_val, max_key)){
       count ++;
-    } else if ((min_key && max_key) && are_equal(data_val, minkey))
+    } else if ((is_valid(min_key) && is_valid(max_key)) && are_equal(data_val, min_key))
       count ++;
 
     cur_pos += SHANNON_ROW_TOTAL_LEN;
   }
+
   return count;
 }
+
 uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
   assert(context && rowid && buffer);
   return nullptr;
 }
+
 uchar* Chunk::delete_data_direct(ShannonBase::RapidContext* context, uchar* rowid) {
   return nullptr;
 }
+
 uchar* Chunk::delete_all_direct() {
   if (m_data_base) {
     my_free(m_data_base);
