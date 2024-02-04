@@ -175,6 +175,7 @@ int Util::get_range_value(enum_field_types type, key_range* min_key, key_range* 
     case MYSQL_TYPE_YEAR:
     case MYSQL_TYPE_TIMESTAMP:
     case MYSQL_TYPE_TIME2: {
+      minkey = maxkey = SHANNON_LOWEST_DOUBLE;
       if (min_key) {
         Field_datetimef datetime_min(const_cast<uchar*>(min_key->key), nullptr, 0, 0,
                                      "start_datetime", 6);
@@ -189,8 +190,8 @@ int Util::get_range_value(enum_field_types type, key_range* min_key, key_range* 
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING: {
-      minkey = 0;
-      maxkey = 0;
+      minkey = SHANNON_LOWEST_DOUBLE;
+      maxkey = SHANNON_LOWEST_DOUBLE;
     } break;
     default: break;
   }

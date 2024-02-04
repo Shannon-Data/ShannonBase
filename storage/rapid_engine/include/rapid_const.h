@@ -77,6 +77,7 @@ constexpr uint8 SHANNON_ROW_TOTAL_LEN_UNALIGN = SHANNON_INFO_BYTE_LEN +
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
 constexpr uint8 SHANNON_ROW_TOTAL_LEN = ALIGN_WORD(SHANNON_ROW_TOTAL_LEN_UNALIGN, 8);
 
+//The lowest value, here, which means it's a invalid value. to describe its validity.
 constexpr double SHANNON_LOWEST_DOUBLE = std::numeric_limits <double>::lowest();
 constexpr double SHANNON_LOWEST_INT = std::numeric_limits <int>::lowest();
 
