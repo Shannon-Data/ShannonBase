@@ -124,6 +124,12 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
       meta info is stored into 'm_imcus'.
   */
   //the last imcu key_name.
+  if (!Utils::Util::is_support_type(field->type())) {
+    std::ostringstream err;
+    err << field->field_name << " type not allowed";
+    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
   std::string key_name = field->table->s->db.str;
   key_name += *field->table_name;
   key_name += field->field_name;
@@ -131,7 +137,7 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   auto elem = m_cus.find(key_name);
   if ( elem == m_cus.end()) { //a new field. not found
     auto [it, sucess] = m_cus.insert(std::pair{key_name, std::make_unique<Cu>(field)});
-    if (!sucess) return 1;
+    if (!sucess) return HA_ERR_GENERIC;
   }
   //start writing the data, at first, assemble the data we want to write. the layout of data
   //pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr| data]. And the string we dont

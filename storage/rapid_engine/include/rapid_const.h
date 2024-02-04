@@ -108,7 +108,6 @@ inline bool is_valid(double a) {
 inline bool is_valid(int a) {
     return are_equal(a, SHANNON_LOWEST_INT) ? false : true;
 }
-
 //This is use for Rapid cluster in future. in next, we will build up a AP clust for ShannonBase.
 enum class RPD_NODE_ROLE {
   //meta node and primary role, name node.

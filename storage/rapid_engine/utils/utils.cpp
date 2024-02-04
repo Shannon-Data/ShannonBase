@@ -34,9 +34,30 @@
 #include "storage/rapid_engine/compress/dictionary/dictionary.h" //Dictionary
 namespace ShannonBase {
 namespace Utils{
-double Util::get_value_mysql_type(enum_field_types& types, const uchar* key, uint key_len) {
+
+bool Util::is_support_type (enum_field_types type) {
+  switch (type) {
+    case MYSQL_TYPE_BIT:
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_GEOMETRY:
+    case MYSQL_TYPE_TYPED_ARRAY:
+    case MYSQL_TYPE_JSON:
+    case MYSQL_TYPE_ENUM:
+    case MYSQL_TYPE_SET:{
+      return false;
+    }break;
+    default:
+      return true;
+  }
+  return false;
+}
+double Util::get_value_mysql_type(enum_field_types& types, Compress::Dictionary*& dictionary,
+                                  const uchar* key, uint key_len) {
   double val{0};
-  if (!key || !key_len) return val;
+  if (!key || !key_len || !dictionary) return val;
 
   switch (types) {
     case MYSQL_TYPE_TINY:
@@ -65,6 +86,8 @@ double Util::get_value_mysql_type(enum_field_types& types, const uchar* key, uin
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING: {
+      uchar* key_ptr = const_cast<uchar*>(key);
+      val = dictionary->lookup(key_ptr);
     } break;
     case MYSQL_TYPE_DOUBLE:
     case MYSQL_TYPE_FLOAT: {
@@ -111,7 +134,7 @@ double Util::get_field_value (Field*& field, Compress::Dictionary*& dictionary) 
   }
   return data_val;
 }
-int Util::store_field_value(TABLE*& table, Field*& field, Compress::Dictionary*& dictionary, 
+int Util::store_field_value(TABLE*& table, Field*& field, Compress::Dictionary*& dictionary,
                             double& value) {
   ut_a(field && dictionary);
   my_bitmap_map *old_map = tmp_use_all_columns(table, table->write_set);
@@ -144,8 +167,9 @@ int Util::store_field_value(TABLE*& table, Field*& field, Compress::Dictionary*&
   if (old_map) tmp_restore_column_map(table->write_set, old_map);
   return 0;
 }
-int Util::get_range_value(enum_field_types type, key_range* min_key, key_range* max_key,
-                         double& minkey, double& maxkey) {
+int Util::get_range_value(enum_field_types type, Compress::Dictionary*& dictionary,
+                          key_range* min_key, key_range* max_key,
+                          double& minkey, double& maxkey) {
   switch (type) {
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_TINY:
@@ -190,8 +214,8 @@ int Util::get_range_value(enum_field_types type, key_range* min_key, key_range* 
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING: {
-      minkey = SHANNON_LOWEST_DOUBLE;
-      maxkey = SHANNON_LOWEST_DOUBLE;
+      minkey = 0;
+      maxkey = dictionary->content_size();
     } break;
     default: break;
   }
