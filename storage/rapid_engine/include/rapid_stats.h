@@ -26,6 +26,7 @@
 #ifndef __SHANNONBASE_RPD_STATS_H__
 #define __SHANNONBASE_RPD_STATS_H__
 namespace ShannonBase{
+  class ShannonLoadedTables;
   //All the stats of loaded table of rapid. 
   struct shannon_rpd_columns_info_t {
     shannon_rpd_columns_info_t() {
@@ -63,6 +64,7 @@ namespace ShannonBase{
   
   /** Global shannon rpd column information map, keep loaded table. */
   extern rpd_columns_container meta_rpd_columns_infos;
+  extern ShannonLoadedTables *shannon_loaded_tables;
 
 } //ns: ShannonBase
 #endif //__SHANNONBASE_RPD_STATS_H__

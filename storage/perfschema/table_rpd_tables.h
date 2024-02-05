@@ -51,14 +51,24 @@
   length field denoted by @<field_name@>_length.
 */
 struct st_row_rpd_tables {
-  //schema name
-  char schema_name [NAME_LEN] = {0};
-  //table name
-  char table_name [NAME_LEN] = {0};
-  //column name
-  char column_name [NAME_LEN] = {0};
-  //The average byte width of the column. The average value includes NULL values.
-  uint32 avg_byte_width_inc_null {0};
+  ulonglong id {0};
+  ulonglong snapshot_scn {0};
+  ulonglong persisted_scn {0};
+  ulonglong pool_type {0};
+  ulonglong data_placement_type{0};
+  ulonglong table_nrows{0};
+  ulonglong load_status{0};
+  ulonglong load_progress{0};
+  ulonglong size_byte{0};
+  ulonglong transformation_bytes{0};
+  ulonglong extranl_nrows{0};
+  ulonglong query_count{0};
+  double last_queried{0};
+  double load_start_timestamp{0};
+  double load_end_timestamp{0};
+  char recovery_source[NAME_LEN] {0};
+  double reconvery_start_timestamp{0};
+  double reconvery_end_timestamp{0};
 };
 
 /** Table PERFORMANCE_SCHEMA.RPD_TABLES. */
