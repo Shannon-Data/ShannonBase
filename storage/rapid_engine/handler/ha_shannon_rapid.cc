@@ -84,39 +84,43 @@ extern "C" const char* __asan_default_options() {
   return "detect_odr_violation=0";
 }
 
-namespace {
+namespace ShannonBase {
+
 // Map from (db_name, table_name) to the RapidShare with table state.
-class ShannonLoadedTables {
-  std::map<std::pair<std::string, std::string>, ShannonBase::RapidShare*> m_tables;
-  std::mutex m_mutex;
- public:
-  void add(const std::string &db, const std::string &table, ShannonBase::RapidShare* share) {
+void ShannonLoadedTables::add(const std::string &db, const std::string &table, ShannonBase::RapidShare* share) {
     std::lock_guard<std::mutex> guard(m_mutex);
     m_tables.insert({std::make_pair(db, table), share});
+}
+ShannonBase::RapidShare *ShannonLoadedTables::get(const std::string &db, const std::string &table) {
+  std::lock_guard<std::mutex> guard(m_mutex);
+  auto it = m_tables.find(std::make_pair(db, table));
+  return it == m_tables.end() ? nullptr : it->second;
+}
+void ShannonLoadedTables::erase(const std::string &db, const std::string &table) {
+  std::lock_guard<std::mutex> guard(m_mutex);
+  auto it = m_tables.find(std::make_pair(db, table));
+  auto ptr = it == m_tables.end() ? nullptr : it->second;
+  if (ptr)
+    delete it->second;
+  m_tables.erase(std::make_pair(db, table));
+}
+void ShannonLoadedTables::table_infos(uint index, ulonglong&tid, std::string& schema, std::string& table ) {
+  if (index > m_tables.size()) return;
+  uint count = 0;
+  for (auto& item : m_tables) {
+    if (count == index) {
+      schema= (item.first).first;
+      table = (item.first).second;
+      tid = (item.second)->m_tableid;
+    }
+    count ++;
   }
-  ShannonBase::RapidShare *get(const std::string &db, const std::string &table) {
-    std::lock_guard<std::mutex> guard(m_mutex);
-    auto it = m_tables.find(std::make_pair(db, table));
-    return it == m_tables.end() ? nullptr : it->second;
-  }
-  void erase(const std::string &db, const std::string &table) {
-    std::lock_guard<std::mutex> guard(m_mutex);
-    auto it = m_tables.find(std::make_pair(db, table));
-    auto ptr = it == m_tables.end() ? nullptr : it->second;
-    if (ptr)
-      delete it->second;
-    m_tables.erase(std::make_pair(db, table));
-  }
-};
+}  
 
 ShannonLoadedTables *shannon_loaded_tables{nullptr};
 static struct handlerton* shannon_rapid_hton_ptr {nullptr};
 static bool shannon_rpd_inited {false};
 ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::get_instance();;
-
-}  // namespace
-
-namespace ShannonBase {
 
 //global rpd meta infos
 rpd_columns_container meta_rpd_columns_infos;
@@ -661,6 +665,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
 
   m_share = new RapidShare ();
   m_share->file = this;
+  m_share->m_tableid = table_arg.s->table_map_id.id();
   shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) ==
       nullptr) {
@@ -833,14 +838,14 @@ static bool ShannonModifyAccessPathCost(THD *thd [[maybe_unused]],
 
 static handler *ShannonCreateHandler(handlerton *hton, TABLE_SHARE *table_share, bool partitioned,
                        MEM_ROOT *mem_root) {
-  assert(hton == shannon_rapid_hton_ptr);
+  assert(hton == ShannonBase::shannon_rapid_hton_ptr);
   if (partitioned) {
     //to do, partitioned rapid table will be supported in next.
   }
   return new (mem_root) ShannonBase::ha_rapid(hton, table_share);
 }
 static int ShannonStartConsistentSnapshot(handlerton* hton, THD* thd) {
-  assert(hton == shannon_rapid_hton_ptr);
+  assert(hton == ShannonBase::shannon_rapid_hton_ptr);
   trx_t* trx = thd_to_trx(thd);
   assert(trx);
   if (!trx_is_started(trx)) { //maybe the some error in primary engine. it should be started.
@@ -962,10 +967,10 @@ static struct SYS_VAR *shannonbase_rapid_system_variables[] = {
 
 /** Here, end of, we export shannonbase status variables to MySQL. */
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
-  shannon_loaded_tables = new ShannonLoadedTables();
+  ShannonBase::shannon_loaded_tables = new ShannonBase::ShannonLoadedTables();
 
   handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);
-  shannon_rapid_hton_ptr = shannon_rapid_hton;
+  ShannonBase::shannon_rapid_hton_ptr = shannon_rapid_hton;
   shannon_rapid_hton->create = ShannonCreateHandler;
   shannon_rapid_hton->state = SHOW_OPTION_YES;
   shannon_rapid_hton->flags = HTON_IS_SECONDARY_ENGINE;
@@ -981,24 +986,24 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   //shannon_rapid_hton->rollback = ;
 
   //MEM_ROOT* mem_root = current_thd->mem_root;
-  imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
-  if (!imcs_instance) {
+  ShannonBase::imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
+  if (!ShannonBase::imcs_instance) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Cannot get IMCS instance.");
     return 1;
   };
-  auto ret = imcs_instance->initialize();
-  if (!ret) shannon_rpd_inited = true;
+  auto ret = ShannonBase::imcs_instance->initialize();
+  if (!ret) ShannonBase::shannon_rpd_inited = true;
   return ret;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
-  if (shannon_loaded_tables) {
-    delete shannon_loaded_tables;
-    shannon_loaded_tables = nullptr;
+  if (ShannonBase::shannon_loaded_tables) {
+    delete ShannonBase::shannon_loaded_tables;
+    ShannonBase::shannon_loaded_tables = nullptr;
   }
-  shannon_rpd_inited = false;
-  return imcs_instance->deinitialize();
+  ShannonBase::shannon_rpd_inited = false;
+  return ShannonBase::imcs_instance->deinitialize();
 }
 
 static st_mysql_storage_engine shannonbase_rapid_storage_engine{

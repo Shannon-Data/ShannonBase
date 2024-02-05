@@ -57,10 +57,24 @@ Plugin_table table_rpd_tables::m_table_def(
     /* Name */
     "rpd_tables",
     /* Definition */
-    "  SCHEMA_NAME CHAR(64) collate utf8mb4_bin not null,\n"
-    "  TABLE_NAME CHAR(64) collate utf8mb4_bin not null,\n"
-    "  COLUMN_NAME CHAR(64) collate utf8mb4_bin not null,\n"
-    "  AVG_BYTE_WIDTH_INC_NULL BIGINT unsigned not null\n",
+    "  ID BIGINT unsigned not null,\n"
+    "  SNAPSHOT_SCN BIGINT unsigned not null,\n"
+    "  PERSISTED_SCN BIGINT unsigned not null,\n"
+    "  POOL_TYPE BIGINT unsigned not null,\n"
+    "  DATA_PLACEMENT_TYPE BIGINT unsigned not null,\n"
+    "  T_NROWS BIGINT unsigned not null,\n"
+    "  LOAD_STATUS BIGINT unsigned not null,\n"
+    "  LOAD_PROGRESS BIGINT unsigned not null,\n"
+    "  SIZE_BYTES BIGINT unsigned not null,\n"
+    "  TRANSFORMATION_BYTES BIGINT unsigned not null,\n"
+    "  E_NROWS BIGINT unsigned not null,\n"
+    "  QUERY_COUNT BIGINT unsigned not null,\n"
+    "  LAST_QUERIED timestamp not null,\n"
+    "  LOAD_START_TIMESTAMP timestamp not null,\n"
+    "  LOAD_END_TIMESTAMP timestamp not null,\n"
+    "  RECOVERY_SOURCE CHAR(128) collate utf8mb4_bin not null,\n"
+    "  RECOVERY_START_TIMESTAMP timestamp not null,\n"
+    "  RECOVERY_END_TIMESTAMP timestamp not null\n",
     /* Options */
     " ENGINE=PERFORMANCE_SCHEMA",
     /* Tablespace */
@@ -88,10 +102,24 @@ PFS_engine_table *table_rpd_tables::create(
 
 table_rpd_tables::table_rpd_tables()
     : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
-  m_row.avg_byte_width_inc_null = 0;
-  memset (m_row.column_name, 0x0, NAME_LEN);
-  memset (m_row.schema_name, 0x0, NAME_LEN);
-  memset (m_row.table_name, 0x0, NAME_LEN);
+  m_row.id = 0;
+  m_row.snapshot_scn = 0;
+  m_row.persisted_scn = 0;
+  m_row.pool_type = 0;
+  m_row.data_placement_type = 0;
+  m_row.table_nrows = 0;
+  m_row.load_status = 0;
+  m_row.load_progress = 0;
+  m_row.size_byte = 0;
+  m_row.transformation_bytes = 0;
+  m_row.extranl_nrows = 0;
+  m_row.query_count = 0;
+  m_row.last_queried = 0;
+  m_row.load_start_timestamp = 0;
+  m_row.load_end_timestamp = 0;
+  m_row.reconvery_start_timestamp = 0;
+  m_row.reconvery_end_timestamp = 0;
+  memset (m_row.recovery_source, 0x0, NAME_LEN);
 }
 
 table_rpd_tables::~table_rpd_tables() {
@@ -137,11 +165,24 @@ int table_rpd_tables::make_row(uint index[[maybe_unused]]) {
   if (index >= ShannonBase::meta_rpd_columns_infos.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.avg_byte_width_inc_null = ShannonBase::meta_rpd_columns_infos[index].avg_byte_width_inc_null;
-    strncpy(m_row.schema_name, ShannonBase::meta_rpd_columns_infos[index].schema_name,
-            strlen(ShannonBase::meta_rpd_columns_infos[index].schema_name));
-    strncpy(m_row.table_name, ShannonBase::meta_rpd_columns_infos[index].table_name,
-            strlen(ShannonBase::meta_rpd_columns_infos[index].table_name));
+    m_row.id = ShannonBase::meta_rpd_columns_infos[index].table_id;
+    m_row.snapshot_scn = 0;
+    m_row.persisted_scn = 0;
+    m_row.pool_type = 0;
+    m_row.data_placement_type = 0;
+    m_row.table_nrows = 0;
+    m_row.load_status = 0;
+    m_row.load_progress = 0;
+    m_row.size_byte = 0;
+    m_row.transformation_bytes = 0;
+    m_row.extranl_nrows = 0;
+    m_row.query_count = 0;
+    m_row.last_queried = 0;
+    m_row.load_start_timestamp = 0;
+    m_row.load_end_timestamp = 0;
+    m_row.reconvery_start_timestamp = 0;
+    m_row.reconvery_end_timestamp = 0;
+    strncpy(m_row.recovery_source, "InnoDB/ObjectStorage", strlen("InnoDB/ObjectStorage") + 1);
   }
 
   return 0;
@@ -159,17 +200,59 @@ int table_rpd_tables::read_row_values(TABLE *table,
   for (; (f = *fields); fields++) {
     if (read_all || bitmap_is_set(table->read_set, f->field_index())) {
       switch (f->field_index()) {
-        case 0: /** schema_name */
-          set_field_char_utf8mb4(f, m_row.schema_name, strlen(m_row.schema_name));
+        case 0: /** ID */
+          set_field_ulonglong(f, m_row.id);
           break;
-        case 1: /** table_name */
-          set_field_char_utf8mb4(f, m_row.table_name, strlen(m_row.table_name));
+        case 1: /** SNAPSHOT_SCN */
+          set_field_ulonglong(f, m_row.snapshot_scn);
           break;
-        case 2: /** full table name */
-          set_field_char_utf8mb4(f, m_row.column_name, strlen(m_row.column_name));
+        case 2: /** PERSISTED_SCN */
+          set_field_ulonglong(f, m_row.persisted_scn);
           break;
-        case 3: /** AVG_BYTE_WIDTH_INC_NULL */
-          set_field_ulonglong(f, m_row.avg_byte_width_inc_null);
+        case 3: /**pool_type */
+          set_field_ulonglong(f, m_row.pool_type);
+          break;
+        case 4: /**data_placement_type */
+          set_field_ulonglong(f, m_row.data_placement_type);
+          break;
+        case 5: /**table_nrows */
+          set_field_ulonglong(f, m_row.table_nrows);
+          break;
+        case 6: /**load_status */
+          set_field_ulonglong(f, m_row.load_status);
+          break;
+        case 7: /**load_progress */
+          set_field_ulonglong(f, m_row.load_progress);
+          break;
+        case 8: /**SIZE_BYTES */
+          set_field_ulonglong(f, m_row.size_byte);
+          break;
+        case 9: /**transformation_bytes */
+          set_field_ulonglong(f, m_row.transformation_bytes);
+          break;
+        case 10: /**extranl_nrows */
+          set_field_ulonglong(f, m_row.extranl_nrows);
+          break;
+        case 11: /**query_count */
+          set_field_ulonglong(f, m_row.query_count);
+          break;
+        case 12: /**last_queried */
+          set_field_timestamp(f, m_row.last_queried);
+          break;
+        case 13: /**load_start_timestamp */
+          set_field_timestamp(f, m_row.load_start_timestamp);
+          break;
+        case 14: /**load_end_timestamp */
+          set_field_timestamp(f, m_row.load_end_timestamp);
+          break;
+        case 15: /**RECOVERY_SOURCE */
+          set_field_char_utf8mb4(f, m_row.recovery_source, strlen(m_row.recovery_source));
+          break;
+        case 16: /**reconvery_start_timestamp */
+          set_field_timestamp(f, m_row.reconvery_start_timestamp);
+          break;
+        case 17: /**reconvery_end_timestamp */
+          set_field_timestamp(f, m_row.reconvery_end_timestamp);
           break;
         default:
           assert(false);

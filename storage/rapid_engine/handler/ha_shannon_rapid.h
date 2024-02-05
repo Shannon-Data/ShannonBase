@@ -57,9 +57,23 @@ struct RapidShare {
   RapidShare(const RapidShare &) = delete;
   THR_LOCK m_lock;
   RapidShare &operator=(const RapidShare &) = delete;
+  //source table.
+  ulonglong m_tableid;
   const char* m_db_name {nullptr};
   const char* m_table_name {nullptr};
   handler* file {nullptr};
+};
+
+class ShannonLoadedTables {
+  std::map<std::pair<std::string, std::string>, ShannonBase::RapidShare*> m_tables;
+  std::mutex m_mutex;
+ public:
+  void add(const std::string &db, const std::string &table, ShannonBase::RapidShare* share);
+  ShannonBase::RapidShare *get(const std::string &db, const std::string &table);
+  void erase(const std::string &db, const std::string &table);
+  uint size() const { return m_tables.size(); }
+
+  void table_infos(uint, ulonglong&, std::string&, std::string&);
 };
 
 /**
