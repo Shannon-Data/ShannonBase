@@ -149,7 +149,7 @@ int table_rpd_columns::make_row(uint index[[maybe_unused]]) {
     m_row.ndv = ShannonBase::meta_rpd_columns_infos[index].ndv;
     memset(m_row.encoding, 0x0, NAME_LEN);
     strncpy(m_row.encoding, ShannonBase::meta_rpd_columns_infos[index].encoding,
-            strlen(m_row.encoding));
+            strlen(ShannonBase::meta_rpd_columns_infos[index].encoding));
   }
   return 0;
 }
