@@ -255,6 +255,18 @@ ha_rows Chunk::records_in_range(ShannonBase::RapidContext* context, double& min_
   return count;
 }
 
+uchar* Chunk::where(uint offset) {
+  return (offset > SHANNON_ROWS_IN_CHUNK) ? nullptr :
+                                            (m_data_base + offset * SHANNON_ROW_TOTAL_LEN);
+}
+
+uchar* Chunk::seek(uint offset) {
+  auto current_pos = m_data_base + (offset * SHANNON_ROW_TOTAL_LEN);
+  m_data_cursor = (current_pos > m_data.load(std::memory_order_acq_rel)) ?
+                   m_data.load(std::memory_order_acq_rel) : current_pos;
+  return m_data_cursor;
+}
+
 uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
   assert(context && rowid && buffer);
   return nullptr;
@@ -274,7 +286,8 @@ uchar* Chunk::delete_all_direct() {
   return m_data_base; 
 }
 
-uchar* Chunk::update_date_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length) {
+uchar* Chunk::update_date_direct(ShannonBase::RapidContext* context, uchar* rowid,
+                                 uchar* data, uint length) {
   return nullptr;
 }
 

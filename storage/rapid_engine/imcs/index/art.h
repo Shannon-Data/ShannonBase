@@ -44,8 +44,6 @@ enum NodeType {
     NODE256
 };
 
-
-
 class Art_index {
 public:
   static constexpr uint MAX_PREFIX_LEN = 10;

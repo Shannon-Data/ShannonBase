@@ -56,19 +56,41 @@ public:
   int open();
   int close();
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
+  int read_index(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
   int records_in_range(ShannonBaseContext*, unsigned int , key_range *, key_range *);
   int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0);
   int get(ShannonBaseContext* context, uchar* buffer, size_t length= 0);
+
+  uchar* seek(size_t offset);
   inline Imcs::Cu* get_source() {return m_source_cu;}
 private:
   std::string m_key_name;
   TABLE* m_source_table{nullptr};
   Field* m_source_field {nullptr};
-  //reader info, includes: current_chunkid, pos.
-  std::atomic<uint> m_reader_chunk_id {0};
-  std::atomic<uint> m_writter_chunk_id {0};
-  std::atomic<uchar*> m_reader_pos {nullptr};
-  std::atomic<uchar*> m_writter_pos {nullptr};
+
+  //full table scan info.
+  //reader info, includes: current_chunkid, pos. read id
+  std::atomic<uint> m_rnd_chunk_rid {0};
+  //writer info, to which chunk be written. write id
+  std::atomic<uint> m_rnd_chunk_wid {0};
+  //where the data be written.
+  std::atomic<uchar*> m_rnd_wpos {nullptr};
+  //just like cursor. full table scan cursor.
+  std::atomic<uchar*> m_rnd_rpos {nullptr};
+
+  /**index scan cursor. index scan info. Now, we dont use any index to
+   * support real index, but to simulate index access by using sequential
+   * accessing. In the next, we will using ART(adaptive Radix Tree) to
+   * impl real index access. */
+  //chunk id of index read.
+  std::atomic<uint> m_index_chunk_rid {0};
+  //chunk id of index write.
+  std::atomic<uint> m_index_chunk_wid {0};
+  //read from where in chunk.
+  std::atomic<uchar*> m_index_rpos {nullptr};
+  //write to which chunk in index.
+  std::atomic<uchar*> m_index_wpos {nullptr};
+
   Imcs::Cu* m_source_cu{nullptr};
   //local buffer
   uchar m_rec_buff[SHANNON_ROW_TOTAL_LEN] = {0};
@@ -79,21 +101,31 @@ public:
   ImcsReader(TABLE* table);
   ImcsReader() = delete;
   virtual ~ImcsReader() {}
+  using CuViews_t = std::map<std::string, std::unique_ptr<CuView>>;
+
   int open() override;
   int close() override;
+  //seqential read. full table scan
   int read(ShannonBaseContext*, uchar*, size_t = 0) override;
+  //sequential write, full table scan.
   int write(ShannonBaseContext*, uchar*, size_t= 0) override;
+  //get the nums of rows in range.
   int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) override ;
+  //read a row via index with a key.
   int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
-  int index_next(ShannonBaseContext*, uchar*, size_t = 0) override;
+  //read the rows without a key value, just like travel over index tree.
   int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
+
   int get(ShannonBaseContext*, uchar*, size_t = 0) override;
-  uchar* tell() override;
-  uchar* seek(uchar* pos) override;
+  uchar* tell(uint = 0) override;
   uchar* seek(size_t offset) override;
   bool is_open() const { return m_start_of_scan; }
 private:
+  //test whether data is satisfied the condition or not.
   bool is_satisfied(ShannonBaseContext*, double);
+  //Read data via index.
+  int read_index(ShannonBaseContext*, uchar*);
+  int index_search(ShannonBaseContext*, uchar*, uchar*, size_t, ha_rkey_function);
 private:
   //local buffer.
   uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};

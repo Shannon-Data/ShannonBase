@@ -64,12 +64,10 @@ double Util::get_value_mysql_type(enum_field_types& types, Compress::Dictionary*
     case MYSQL_TYPE_SHORT:
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG:{
-      ut_a (sizeof(int) == key_len);
       val = *(int*) key;
     } break;
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL: {
-      ut_a (sizeof(double) == key_len);
       val = *(double*) key;
     } break;
     case MYSQL_TYPE_DATE:
@@ -91,7 +89,6 @@ double Util::get_value_mysql_type(enum_field_types& types, Compress::Dictionary*
     } break;
     case MYSQL_TYPE_DOUBLE:
     case MYSQL_TYPE_FLOAT: {
-      ut_a (sizeof(double) == key_len);
       val = *(double*) key;
     } break;
     default: break;
