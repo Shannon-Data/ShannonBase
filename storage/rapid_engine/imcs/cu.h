@@ -104,6 +104,8 @@ public:
  inline Chunk* get_first_chunk() { return get_chunk(0); }
  inline Chunk* get_last_chunk() { return get_chunk(m_chunks.size() -1); }
  inline size_t get_chunk_nums () {return m_chunks.size(); }
+
+ uchar* seek(size_t offset);
 private:
   uint m_magic{SHANNON_MAGIC_CU};
   //proctect header.

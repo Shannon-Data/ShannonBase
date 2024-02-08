@@ -115,6 +115,9 @@ class Chunk : public MemoryObject{
     inline uchar* get_data() const {return m_data;}
     bool is_full () {return (m_data == m_data_end)? true : false;}
     ha_rows records_in_range(ShannonBase::RapidContext* context, double& min_key, double& max_key);
+
+    uchar* where(uint offset);
+    uchar* seek(uint offset);
   private:
     std::mutex m_header_mutex;
     Chunk_header* m_header{nullptr};

@@ -93,7 +93,7 @@ class ShannonLoadedTables {
 class ha_rapid : public handler {
  public:
   ha_rapid(handlerton *hton, TABLE_SHARE *table_share);
-
+  virtual ~ha_rapid();
   const char *table_type() const override;
   enum ha_key_alg get_default_index_algorithm() const override {
     return HA_KEY_ALG_BTREE;
@@ -204,13 +204,13 @@ class ha_rapid : public handler {
       not yet fetched any row, else false */
   bool m_start_of_scan {false};
   /** information for MySQL table locking */
-  RapidShare *m_share;
-  std::unique_ptr<ShannonBase::RapidContext> m_rpd_context;
-  //imscs reader;
-  std::unique_ptr<ImcsReader> m_imcs_reader;
-
-  dict_index_t* m_primary_key;
-  enum_field_types m_key_type;
+  RapidShare *m_share {nullptr};
+  std::unique_ptr<ShannonBase::RapidContext> m_rpd_context{nullptr};
+  //imscs rnd reader;
+  std::unique_ptr<ImcsReader> m_imcs_reader {nullptr};
+  //primary key of this secondary engine.
+  dict_index_t* m_primary_key {nullptr};
+  enum_field_types m_key_type {MYSQL_TYPE_INVALID};
 };
 
 [[nodiscard]] ICP_RESULT shannon_rapid_index_cond(

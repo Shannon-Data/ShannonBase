@@ -175,6 +175,13 @@ uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
 #endif
 }
 
+uchar* Cu::seek(size_t offset)
+{
+  auto chunk_id = (offset / SHANNON_ROWS_IN_CHUNK);
+  auto offset_in_chunk = offset % SHANNON_ROWS_IN_CHUNK;
+
+  return m_chunks[chunk_id]->seek(offset_in_chunk);
+}
 uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
   if (!m_chunks.size()) return nullptr;
   //Chunk* chunk = m_chunks [m_chunks.size() - 1].get(); //to get the last chunk data.

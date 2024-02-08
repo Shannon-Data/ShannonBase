@@ -56,6 +56,7 @@
 #include "sql/sql_lex.h"
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
+#include "sql/opt_costmodel.h"
 #include "template_utils.h"
 #include "thr_lock.h"
 
@@ -144,8 +145,12 @@ bool Shannon_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
 }
 
 ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
-    : handler(hton, table_share_arg) {
+    : handler(hton, table_share_arg), m_rpd_thd(nullptr), m_start_of_scan(false),
+    m_share(nullptr), m_rpd_context(nullptr), m_imcs_reader(nullptr),
+    m_primary_key(nullptr), m_key_type(MYSQL_TYPE_INVALID) {
   m_rpd_thd = ha_thd();
+}
+ha_rapid::~ha_rapid() {
 }
 const char *ha_rapid::table_type() const { return (rapid_hton_name); }
 
@@ -176,7 +181,10 @@ int ha_rapid::close () {
 //refined cost model should be impl in future. here, it's a coarse one.
 double ha_rapid::scan_time() {
   //all memory operations.
-  return (estimate_rows_upper_bound() * 0.0000001);
+  const Cost_model_table *const cost_model = table->cost_model();
+  double blocks = (estimate_rows_upper_bound() * SHANNON_ROW_TOTAL_LEN) / UNIV_PAGE_SIZE;
+
+  return cost_model->buffer_block_read_cost(blocks ? blocks : 1);
 }
 
 /** Calculate the time it takes to read a set of ranges through an index
@@ -185,8 +193,18 @@ double ha_rapid::scan_time() {
 double ha_rapid::read_time(uint index, uint ranges, ha_rows rows) {
   ha_rows total_rows;
 
+  if (index != table->s->primary_key) {
+    /* Not clustered */
+    return (handler::read_time(index, ranges, rows));
+  }
+
+  if (rows <= 2) {
+    return ((double)rows);
+  }
+
   /* Assume that the read time is proportional to the scan time for all
   rows + at most one seek per range. */
+
   double time_for_scan = scan_time();
 
   if ((total_rows = estimate_rows_upper_bound()) < rows) {
@@ -233,10 +251,7 @@ int ha_rapid::rnd_init(bool scan) {
   m_rpd_context->m_local_dict = loaded_dictionaries[m_rpd_context->m_current_db].get();
 
   m_imcs_reader.reset(new ImcsReader(table)) ;
-  m_imcs_reader->open();
-
-  //imcs do initialization. scan: random read or scan.
-  return imcs_instance->initialized()? 0 : imcs_instance->rnd_init(scan);
+  return m_imcs_reader->open();
 }
 
 /** Ends a table scan.
@@ -251,8 +266,11 @@ int ha_rapid::rnd_end() {
          trx_commit(trx);
     }
     m_imcs_reader->close();
-    return imcs_instance->initialized()? imcs_instance->rnd_end() : 0;
+
+    m_rpd_context.reset(nullptr);
+    m_imcs_reader.reset(nullptr);
   }
+
   return 0;
 }
 
@@ -284,7 +302,7 @@ int ha_rapid::info(unsigned int flags) {
 handler::Table_flags ha_rapid::table_flags() const {
   ulong flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE |
                 HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
-  return ~HA_NO_INDEX_ACCESS || flags;
+  return /*~HA_NO_INDEX_ACCESS ||*/ flags;
 }
 
 int ha_rapid::key_cmp(KEY_PART_INFO *key_part, const uchar *key, uint key_length) {
@@ -698,7 +716,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
   shannon_loaded_tables->erase(db_name, table_name);
   return 0;
 }
-}  // namespace ShannonBase 
+}  // namespace ShannonBase
 
 static bool ShannonPrepareSecondaryEngine(THD *thd, LEX *lex) {
   DBUG_EXECUTE_IF("secondary_engine_rapid_prepare_error", {
@@ -785,6 +803,7 @@ static bool ShannonOptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) 
 #endif
   return false;
 }
+
 //to estimate the cost used  secondary engine.
 static bool ShannonCompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost,
                             bool *use_best_so_far, bool *cheaper,
