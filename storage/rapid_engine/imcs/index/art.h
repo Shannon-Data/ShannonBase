@@ -47,7 +47,7 @@ enum NodeType {
 class Art_index {
 public:
   static constexpr uint MAX_PREFIX_LEN = 10;
-  using ART_Func = std::function<int(void *data, const unsigned char *key, uint32 key_len, void *value)>;
+  using ART_Func = std::function<int(void *data, const unsigned char *key, uint32 key_len, void *value, uint32 value_len)>;
 
   typedef struct {
     uint32 partial_len;
@@ -87,6 +87,8 @@ public:
 
   typedef struct {
     Art_node *root;
+    Art_node* current_node;
+    uint8 current_node_idx;
     uint64 size;
   } Art_tree;
 
@@ -98,8 +100,8 @@ private:
  int Check_prefix(const Art_node *n, const unsigned char *key, int key_len, int depth);
  int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
 
- inline uint64 art_size(Art_tree *t) {
-    return t->size;
+ inline uint64 art_size() {
+    return m_tree->size;
  }
 
  Art_leaf* Minimum(const Art_node *n);
@@ -121,22 +123,26 @@ void Remove_child16(Art_node16 *n, Art_node **ref, Art_node **l);
 void Remove_child4(Art_node4 *n, Art_node **ref, Art_node **l);
 void Remove_child(Art_node *n, Art_node **ref, unsigned char c, Art_node **l);
 Art_leaf* Recursive_delete(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, int depth);
-int Recursive_iter(Art_node *n, ART_Func cb, void *data);
+int Recursive_iter(Art_node *n, ART_Func cb, void *data, int data_len);
 int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
 
+Art_tree* m_tree {nullptr};
+bool m_inited {false};
 public:
- int ART_tree_init(Art_tree *t);
- int ART_tree_destroy(Art_tree *t);
+ int ART_tree_init();
+ int ART_tree_destroy();
+ inline bool Art_initialized() { return m_inited; }
 
- void* ART_insert(Art_tree *t, const unsigned char *key, int key_len, void *value);
- void* ART_insert_no_replace(Art_tree *t, const unsigned char *key, int key_len, void *value);
- void* ART_delete(Art_tree *t, const unsigned char *key, int key_len);
- void* ART_search(const Art_tree *t, const unsigned char *key, int key_len);
+ void* ART_insert(const unsigned char *key, int key_len, void *value);
+ void* ART_insert_with_replace(const unsigned char *key, int key_len, void *value);
+ void* ART_delete(const unsigned char *key, int key_len);
+ void* ART_search(const unsigned char *key, int key_len);
+ void ART_reset_cursor();
+ Art_leaf* ART_minimum();
+ Art_leaf* ART_maximum();
 
- Art_leaf* ART_minimum(Art_tree *t);
- Art_leaf* ART_maximum(Art_tree *t);
- int ART_iter(Art_tree *t, ART_Func cb, void *data);
- int ART_iter_prefix(Art_tree *t, const unsigned char *key, int key_len, ART_Func cb, void *data);
+ int ART_iter(ART_Func cb, void *data, int data_len);
+ int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func cb, void *data, int data_len);
 };
 
 } // namespace imcs 

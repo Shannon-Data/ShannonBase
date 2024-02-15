@@ -66,6 +66,7 @@
 #include "storage/rapid_engine/include/rapid_stats.h"
 #include "storage/rapid_engine/utils/utils.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -225,8 +226,7 @@ int ha_rapid::read_range_next() {
   return (handler::read_range_next());
 }
 
-int ha_rapid::rnd_init(bool scan) {
-  DBUG_TRACE;
+int ha_rapid::rapid_initialize() {
   ut_ad(shannon_rpd_inited == true);
   ut_ad(m_start_of_scan == false);
   m_start_of_scan = true;
@@ -254,10 +254,7 @@ int ha_rapid::rnd_init(bool scan) {
   return m_imcs_reader->open();
 }
 
-/** Ends a table scan.
- @return 0 or error number */
-int ha_rapid::rnd_end() {
-  DBUG_TRACE;
+int ha_rapid::rapid_deinitialize() {
   if (m_start_of_scan) {
     m_start_of_scan = false;
     if (m_rpd_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) {
@@ -272,6 +269,20 @@ int ha_rapid::rnd_end() {
   }
 
   return 0;
+}
+
+int ha_rapid::rnd_init(bool scan) {
+  DBUG_TRACE;
+  inited = handler::RND;
+  return rapid_initialize();
+}
+
+/** Ends a table scan.
+ @return 0 or error number */
+int ha_rapid::rnd_end() {
+  DBUG_TRACE;
+  inited = handler::NONE;
+  return rapid_deinitialize();
 }
 
 /** Reads the next row in a table scan (also used to read the FIRST row
@@ -302,7 +313,7 @@ int ha_rapid::info(unsigned int flags) {
 handler::Table_flags ha_rapid::table_flags() const {
   ulong flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE |
                 HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
-  return /*~HA_NO_INDEX_ACCESS ||*/ flags;
+  return flags;
 }
 
 int ha_rapid::key_cmp(KEY_PART_INFO *key_part, const uchar *key, uint key_length) {
@@ -389,8 +400,6 @@ uint ha_rapid::max_supported_key_length() const {
 
 int ha_rapid::index_init(uint keynr, bool sorted) {
   DBUG_TRACE;
-  if (rnd_init(false))
-     return 0;
   active_index = keynr;
 
   m_primary_key = dynamic_cast<ha_innobase*>(ha_get_primary_handler())->innobase_get_index(keynr);
@@ -407,12 +416,14 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
      }
   }
 
+  auto ret = rapid_initialize();
   KEY *key_info = table->key_info + keynr;
   KEY_PART_INFO *key_part = key_info->key_part;
   m_rpd_context->m_extra_info.m_key_type = key_part->field->type();
   m_rpd_context->m_extra_info.m_keynr =  key_part->field->field_index();
   inited = handler::INDEX;
-  return 0;
+
+  return ret;
 }
 
 int ha_rapid::index_end() {
@@ -422,7 +433,8 @@ int ha_rapid::index_end() {
 
   in_range_check_pushed_down = false;
   inited = handler::NONE;
-  return rnd_end();
+
+  return rapid_deinitialize();
 }
 
 /** Positions an index cursor to the index specified in the handle. Fetches the
@@ -463,7 +475,9 @@ int ha_rapid::index_next_same(uchar *buf, const uchar *key, uint keylen) {
   ut_ad (m_start_of_scan && inited == handler::INDEX);
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  auto err = m_imcs_reader->index_general(m_rpd_context.get(), buf);
+  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf,
+                                      const_cast<uchar*>(key), keylen,
+                                      HA_READ_KEY_EXACT);
   return err;
 }
 
@@ -561,10 +575,10 @@ ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
    * due to the rows stored in imcs by primary key order, therefore, it should be in ordered.
    * it's friendly to purge the unsatisfied chunk as fast as possible.
   */
-  if (!m_imcs_reader.get()) {
-    m_imcs_reader.reset(new ImcsReader(table));
-    m_imcs_reader->open();
-  }
+  std::unique_ptr<ImcsReader> reader= std::make_unique<ImcsReader>(table);
+  if (!reader.get()) return 0;
+
+  reader->open();
   std::unique_ptr<RapidContext> rpd_context  = std::make_unique<RapidContext>();
   rpd_context->m_table = table;
   rpd_context->m_current_db = table->s->db.str;
@@ -577,8 +591,10 @@ ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
     trx_assign_read_view(trx);
   rpd_context->m_trx = trx;
 
-  auto nums = m_imcs_reader->records_in_range(rpd_context.get(), index, min_key, max_key);
+  auto nums = reader->records_in_range(rpd_context.get(), index, min_key, max_key);
+  reader->close();
   trx_commit(trx);
+
   return nums;
 }
 
@@ -621,21 +637,17 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   if (loaded_dictionaries.find(db_name) == loaded_dictionaries.end())
      loaded_dictionaries.insert(std::make_pair(db_name, std::make_unique<Compress::Dictionary>()));
 
+  ShannonBase::RapidContext context;
+  context.m_current_db = table_arg.s->db.str;
+  context.m_current_table = table_arg.s->table_name.str;
+  context.m_table = const_cast<TABLE *>(&table_arg);
+
   // check if primary key is missing. rapid engine must has at least one PK. 
   if (table_arg.s->is_missing_primary_key()) {
     my_error(ER_REQUIRES_PRIMARY_KEY, MYF(0));
     return HA_ERR_GENERIC;
-  } else {
-    KEY* key  = table_arg.s->key_info;
-    for (uint idx =0; idx < key->user_defined_key_parts; idx ++) {
-       Field* key_field = (key->key_part + idx)->field;
-       if (key_field->is_flag_set(NOT_SECONDARY_FLAG)) {////The key field MUST be set.
-         my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
-                  table_arg.s->db.str, table_arg.s->table_name.str);
-         return HA_ERR_GENERIC;
-       }
-    }
   }
+
   // Scan the primary table and read the records.
   if (table_arg.file->inited == NONE && table_arg.file->ha_rnd_init(true)) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str,
@@ -645,14 +657,26 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   //Start to write to IMCS. Do scan the primary table.
   m_rpd_thd->set_sent_row_count(0);
   int tmp {HA_ERR_GENERIC};
-  ShannonBase::RapidContext context;
-  context.m_current_db = table_arg.s->db.str;
-  context.m_current_table = table_arg.s->table_name.str;
-  context.m_table = const_cast<TABLE *>(&table_arg);
+
   while ((tmp = table_arg.file->ha_rnd_next(table_arg.record[0])) != HA_ERR_END_OF_FILE) {
    /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
     without locks. Now, do full scan, but multi-thread scan will impl in future. */
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+
+    KEY* key  = table_arg.s->key_info;
+    Field* key_field = (key->key_part + 0)->field;
+    if (key_field->is_flag_set(NOT_SECONDARY_FLAG)) {////The key field MUST be set.
+       my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
+                table_arg.s->db.str, table_arg.s->table_name.str);
+       return HA_ERR_GENERIC;
+    }
+    key_field = *(table_arg.field + key_field->field_index());
+    std::string key_strstr(context.m_current_db + context.m_current_table + key_field->field_name);
+    Compress::Dictionary* dict = imcs_instance->get_cu(key_strstr)->local_dictionary();
+    context.m_extra_info.m_key_val = Utils::Util::get_field_value(key_field, dict);
+    context.m_extra_info.m_key_type = key_field->type();
+    context.m_extra_info.m_keynr = key_field->field_index();
+
     uint32 field_count = table_arg.s->fields;
     Field *field_ptr = nullptr;
     uint32 primary_key_idx [[maybe_unused]] = field_count;

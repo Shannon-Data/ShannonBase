@@ -19,36 +19,47 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+
+   The fundmental code for imcs.
 */
-#ifndef __SHANNONBASE_UTILS_H__
-#define __SHANNONBASE_UTILS_H__
+#ifndef __SHANNONBASE_INDEX_H__
+#define __SHANNONBASE_INDEX_H__
 
-#include "include/field_types.h"
-#include "include/my_inttypes.h"
+#include <memory>
+#include "storage/rapid_engine/imcs/index/art.h"
 
-class TABLE;
-class Field;
-class key_range;
-namespace ShannonBase{
-namespace Compress{
-   class Dictionary;
-}
+namespace ShannonBase {
+namespace Imcs {
+class Art_index;
 
-namespace Utils{
-class Util {
-  public:
-    static bool is_support_type (enum_field_types type);
-    static double get_value_mysql_type(enum_field_types&, Compress::Dictionary*&, const uchar*, uint);
-    static double get_field_value (Field*&, Compress::Dictionary*&);
-    static int store_field_value(TABLE*& table, Field*&, Compress::Dictionary*&, double&);
-    static int get_range_value(enum_field_types, Compress::Dictionary*&,
-                               key_range*, key_range*, double&, double&);
-    static int get_value(enum_field_types, Compress::Dictionary*&, uchar*, uint, double&);
+class Index {
+public:
+  enum class IndexType{
+    ART = 0,
+    B_TREE
+  };
+  explicit Index(IndexType);
+  ~Index();
+  Index(Index&&) = delete;
+  Index& operator=(Index&&) = delete;
+
+  int insert(uchar* key, uint key_len, uchar* value);
+  int remove(uchar* key, uint key_len);
+  int lookup(uchar* key, uint key_len, uchar* value, uint value_len);
+  int maximum(uchar* value, uint value_len);
+  int minimum(uchar* value, uint value_len);
+  int next(Art_index::ART_Func& func, uchar* out);
+  int next_prefix();
+
+  void reset_pos();
+  IndexType type() { return m_type; }
+private:
+  IndexType m_type {IndexType::ART};
+  std::unique_ptr<Art_index> m_impl {nullptr};
+  bool m_start_scan {false};
 };
 
-} //ns:util
-} //ns::shannonbase
-#endif //__SHANNONBASE_UTILS_H__
+} //ns:imcs
+} //ns:shannonbase
+#endif //__SHANNONBASE_INDEX_H__

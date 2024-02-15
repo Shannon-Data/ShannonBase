@@ -155,7 +155,7 @@ uchar* Chunk::write_data_direct(ShannonBase::RapidContext* context, uchar* data,
     if (is_greater_than(m_header->m_min, val))
       m_header->m_min.store(val, std::memory_order::memory_order_relaxed);
   }
-  return m_data;
+  return (m_data - length);
 }
 
 uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
@@ -185,30 +185,9 @@ uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer
     if (diff > 0) return nullptr; //no data here.
     return m_data_cursor;
   }
- #ifdef SHANNON_ONLY_DATA_FETCH
-  uint32 sum_ptr_off;
-  uint64 pk, data;
-  //reads info field
-  info [[maybe_unused]] = *(m_data_cursor ++);
-  m_data_cursor += SHANNON_TRX_ID_BYTE_LEN;
-  //reads PK field
-  memcpy(&pk, m_data_cursor, SHANNON_ROWID_BYTE_LEN);
-  m_data_cursor += SHANNON_ROWID_BYTE_LEN;
-  //reads sum_ptr field
-  memcpy(&sum_ptr_off, m_data_cursor, SHANNON_SUMPTR_BYTE_LEN);
-  m_data_cursor +=SHANNON_SUMPTR_BYTE_LEN;
-  if (!sum_ptr_off) {
-  //To be impled.
-  }
-  //reads real data field. if it string type stores strid otherwise, real data.
-  memcpy(&data, m_data_cursor, SHANNON_DATA_BYTE_LEN);
-  m_data_cursor +=SHANNON_DATA_BYTE_LEN;
-  //cpy the data into buffer.
-  memcpy(buffer, &data, SHANNON_DATA_BYTE_LEN);
- #else
+
   memcpy(buffer, m_data_cursor, SHANNON_ROW_TOTAL_LEN);
   m_data_cursor += SHANNON_ROW_TOTAL_LEN; //go to the next.
- #endif
   return m_data_cursor;
 }
 

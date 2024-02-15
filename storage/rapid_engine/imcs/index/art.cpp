@@ -123,14 +123,29 @@ void Art_index::Destroy_node(Art_node *n) {
     free(n);    
 }
 
-int Art_index::ART_tree_init(Art_tree *t) {
-    t->root = NULL;
-    t->size = 0;
+int Art_index::ART_tree_init() {
+    if (!m_tree) {
+        m_tree = new Art_tree();
+    }
+    m_tree->root = nullptr;
+    m_tree->current_node = nullptr;
+    m_tree->size = 0;
+    m_inited = true;
+    ART_reset_cursor();
     return 0;
 }
-int Art_index::ART_tree_destroy(Art_tree *t) {
-    Destroy_node(t->root);
+int Art_index::ART_tree_destroy() {
+    Destroy_node(m_tree->root);
+    if (m_tree) {
+        delete m_tree;
+        m_tree = nullptr;
+        m_inited = false;
+    }
     return 0;
+}
+void Art_index::ART_reset_cursor() {
+    m_tree->current_node = m_tree->root;
+    m_tree->current_node_idx = 0;
 }
 Art_index::Art_node** Art_index::Find_child(Art_node *n, unsigned char c) {
     int i, mask, bitfield;
@@ -234,9 +249,9 @@ int Art_index::Leaf_matches(const Art_leaf *n, const unsigned char *key, int key
     return std::memcmp(n->key, key, key_len);
 }
 
-void* Art_index::ART_search(const Art_tree *t, const unsigned char *key, int key_len) {
+void* Art_index::ART_search(const unsigned char *key, int key_len) {
     Art_node **child;
-    Art_node *n = t->root;
+    Art_node *n = m_tree->root;
     int prefix_len, depth = 0;
     while (n) {
         // Might be a leaf
@@ -244,6 +259,7 @@ void* Art_index::ART_search(const Art_tree *t, const unsigned char *key, int key
             n = (Art_node*)LEAF_RAW(n);
             // Check if the expanded path matches
             if (!Leaf_matches((Art_leaf*)n, key, key_len, depth)) {
+                m_tree->current_node = n;
                 return ((Art_leaf*)n)->value;
             }
             return nullptr;
@@ -313,12 +329,14 @@ Art_index::Art_leaf* Art_index::Maximum(const Art_node *n) {
             abort();
     }
 }
-Art_index::Art_leaf* Art_index::ART_minimum(Art_tree *t) {
-   return Minimum((Art_node*)t->root);
+Art_index::Art_leaf* Art_index::ART_minimum() {
+   return Minimum((Art_node*)m_tree->root);
 }
-Art_index::Art_leaf* Art_index::ART_maximum(Art_tree *t) {
-  return  Maximum((Art_node*)t->root);
+
+Art_index::Art_leaf* Art_index::ART_maximum() {
+  return  Maximum((Art_node*)m_tree->root);
 }
+
 Art_index::Art_leaf* Art_index::Make_leaf(const unsigned char *key, int key_len, void *value) {
   Art_leaf *l = (Art_leaf*) calloc(1, sizeof(Art_leaf) + key_len);
   l->value = value;
@@ -342,11 +360,13 @@ void Art_index::Copy_header(Art_node *dest, Art_node *src) {
     dest->partial_len = src->partial_len;
     std::memcpy(dest->partial, src->partial, std::min(MAX_PREFIX_LEN, src->partial_len));
 }
+
 void Art_index::Add_child256(Art_node256 *n, Art_node **ref, unsigned char c, void *child) {
     (void)ref;
     n->n.num_children++;
     n->children[c] = (Art_node*)child;
 }
+
 void Art_index::Add_child48(Art_node48 *n, Art_node **ref, unsigned char c, void *child) {
   if (n->n.num_children < 48) {
     int pos = 0;
@@ -580,16 +600,16 @@ RECURSE_SEARCH:;
     Add_child(n, ref, key[depth], SET_LEAF(l));
     return nullptr;
 }
-void* Art_index::ART_insert(Art_tree *t, const unsigned char *key, int key_len, void *value) {
+void* Art_index::ART_insert(const unsigned char *key, int key_len, void *value) {
     int old_val = 0;
-    void *old = Recursive_insert(t->root, &t->root, key, key_len, value, 0, &old_val, 1);
-    if (!old_val) t->size++;
+    void *old = Recursive_insert(m_tree->root, &m_tree->root, key, key_len, value, 0, &old_val, 0);
+    if (!old_val) m_tree->size++;
     return old;
 }
-void* Art_index::ART_insert_no_replace(Art_tree *t, const unsigned char *key, int key_len, void *value){
+void* Art_index::ART_insert_with_replace(const unsigned char *key, int key_len, void *value){
     int old_val = 0;
-    void *old = Recursive_insert(t->root, &t->root, key, key_len, value, 0, &old_val, 0);
-    if (!old_val) t->size++;
+    void *old = Recursive_insert(m_tree->root, &m_tree->root, key, key_len, value, 0, &old_val, 1);
+    if (!old_val) m_tree->size++;
     return old;
 }
 void Art_index::Remove_child256(Art_node256 *n, Art_node **ref, unsigned char c) {
@@ -738,37 +758,47 @@ Art_index::Art_leaf* Art_index::Recursive_delete(Art_node *n, Art_node **ref, co
        return Recursive_delete(*child, child, key, key_len, depth+1);
     }
 }
-void* Art_index::ART_delete(Art_tree *t, const unsigned char *key, int key_len) {
-    Art_leaf *l = Recursive_delete(t->root, &t->root, key, key_len, 0);
+void* Art_index::ART_delete(const unsigned char *key, int key_len) {
+    Art_leaf *l = Recursive_delete(m_tree->root, &m_tree->root, key, key_len, 0);
     if (l) {
-        t->size--;
+        m_tree->size--;
         void *old = l->value;
         free(l);
         return old;
     }
     return nullptr;
 }
-int Art_index::Recursive_iter(Art_node *n, ART_Func cb, void *data) {
+int Art_index::Recursive_iter(Art_node *n, ART_Func cb, void *data, int data_len) {
     // Handle base cases
     if (!n) return 0;
     if (IS_LEAF(n)) {
         Art_leaf *l = LEAF_RAW(n);
-        return cb(data, (const unsigned char*)l->key, l->key_len, l->value);
+        m_tree->current_node = n;
+        m_tree->current_node_idx = 0;
+        return cb(data, (const unsigned char*)l->key, l->key_len, l->value, data_len);
     }
 
     int idx, res;
     switch (n->type) {
         case NodeType::NODE4:
-            for (int i=0; i < n->num_children; i++) {
-                res = Recursive_iter(((Art_node4*)n)->children[i], cb, data);
-                if (res) return res;
+            for (int i= m_tree->current_node_idx; i < n->num_children; i++) {
+                res = Recursive_iter(((Art_node4*)n)->children[i], cb, data, data_len);
+                if (res) {
+                    m_tree->current_node = n;
+                    m_tree->current_node_idx = (i + 1);
+                    return res;
+                }
             }
             break;
 
         case NodeType::NODE16:
             for (int i=0; i < n->num_children; i++) {
-                res = Recursive_iter(((Art_node16*)n)->children[i], cb, data);
-                if (res) return res;
+                res = Recursive_iter(((Art_node16*)n)->children[i], cb, data, data_len);
+                if (res) {
+                    m_tree->current_node = n;
+                    m_tree->current_node_idx = (i + 1);
+                    return res;
+                }
             }
             break;
 
@@ -777,16 +807,25 @@ int Art_index::Recursive_iter(Art_node *n, ART_Func cb, void *data) {
                 idx = ((Art_node48*)n)->keys[i];
                 if (!idx) continue;
 
-                res = Recursive_iter(((Art_node48*)n)->children[idx-1], cb, data);
-                if (res) return res;
+                res = Recursive_iter(((Art_node48*)n)->children[idx-1], cb, data, data_len);
+                if (res) {
+                    m_tree->current_node = n;
+                    m_tree->current_node_idx = (i + 1);
+                    return res;
+                };
             }
             break;
 
         case NodeType::NODE256:
             for (int i=0; i < 256; i++) {
                 if (!((Art_node256*)n)->children[i]) continue;
-                res = Recursive_iter(((Art_node256*)n)->children[i], cb, data);
-                if (res) return res;
+
+                res = Recursive_iter(((Art_node256*)n)->children[i], cb, data, data_len);
+                if (res) {
+                    m_tree->current_node = n;
+                    m_tree->current_node_idx = (i + 1);
+                    return res;
+                }
             }
             break;
         default:
@@ -795,8 +834,8 @@ int Art_index::Recursive_iter(Art_node *n, ART_Func cb, void *data) {
     return 0;
 }
 
-int Art_index::ART_iter(Art_tree *t, ART_Func cb, void *data) {
-    return Recursive_iter(t->root, cb, data);
+int Art_index::ART_iter(ART_Func cb, void *data, int data_len) {
+    return Recursive_iter(m_tree->current_node, cb, data, data_len);
 }
 int Art_index::Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len) {
     // Fail if the key length is too short
@@ -805,9 +844,9 @@ int Art_index::Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefi
     // Compare the keys
     return memcmp(n->key, prefix, prefix_len);
 }
-int Art_index::ART_iter_prefix(Art_tree *t, const unsigned char *key, int key_len, ART_Func cb, void *data) {
+int Art_index::ART_iter_prefix(const unsigned char *key, int key_len, ART_Func cb, void *data, int data_len) {
     Art_node **child;
-    Art_node *n = t->root;
+    Art_node *n = m_tree->root;
     int prefix_len, depth = 0;
     while (n) {
         // Might be a leaf
@@ -816,7 +855,7 @@ int Art_index::ART_iter_prefix(Art_tree *t, const unsigned char *key, int key_le
             // Check if the expanded path matches
             if (!Leaf_prefix_matches((Art_leaf*)n, key, key_len)) {
                 Art_leaf *l = (Art_leaf*)n;
-                return cb(data, (const unsigned char*)l->key, l->key_len, l->value);
+                return cb(data, (const unsigned char*)l->key, l->key_len, l->value, data_len);
             }
             return 0;
         }
@@ -825,7 +864,7 @@ int Art_index::ART_iter_prefix(Art_tree *t, const unsigned char *key, int key_le
         if (depth == key_len) {
             Art_leaf *l = Minimum(n);
             if (!Leaf_prefix_matches(l, key, key_len))
-               return Recursive_iter(n, cb, data);
+               return Recursive_iter(n, cb, data, data_len);
             return 0;
         }
 
@@ -844,7 +883,7 @@ int Art_index::ART_iter_prefix(Art_tree *t, const unsigned char *key, int key_le
 
             // If we've matched the prefix, iterate on this node
             } else if (depth + prefix_len == key_len) {
-                return Recursive_iter(n, cb, data);
+                return Recursive_iter(n, cb, data, data_len);
             }
 
             // if there is a full match, go deeper

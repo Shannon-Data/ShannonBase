@@ -38,6 +38,7 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/chunk.h"
+#include "storage/rapid_engine/imcs/index/index.h"  //index
 
 namespace ShannonBase {
 namespace Imcs {
@@ -76,6 +77,12 @@ Cu::Cu(Field* field) {
   m_header->m_local_dict = std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
   //the initial one chunk built.
   m_chunks.push_back(std::make_unique<Chunk>(field));
+
+  //here, we will add `index' to column comment as encoding does. now, we adds index mandatory
+  if ((comment.find("INDEXED") != std::string::npos))
+    m_index = std::make_unique<Index> (Index::IndexType::ART);
+  else
+    m_index = std::make_unique<Index> (Index::IndexType::ART);
 }
 
 Cu::~Cu() {
@@ -129,17 +136,17 @@ uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, ui
     m_chunks[m_chunks.size()-1].get()->get_header()->m_prev_chunk = chunk_ptr;
     chunk_ptr = m_chunks[m_chunks.size()-1].get();
     pos = chunk_ptr->write_data_direct(context, data, length);
-    //To update the metainfo.
-  }
-  //update the meta info.
-  if (m_header->m_cu_type == MYSQL_TYPE_BLOB || m_header->m_cu_type == MYSQL_TYPE_STRING ||
-      m_header->m_cu_type == MYSQL_TYPE_VARCHAR) { //string type, otherwise, update the meta info.
-      return pos;
   }
 
   double data_val{0};
   if (m_header->m_nullable)
     data_val = *(double*) (data + SHANNON_DATA_BYTE_OFFSET);
+
+  //update the meta info.
+  if (m_header->m_cu_type == MYSQL_TYPE_BLOB || m_header->m_cu_type == MYSQL_TYPE_STRING ||
+      m_header->m_cu_type == MYSQL_TYPE_VARCHAR) { //string type, otherwise, update the meta info.
+      return pos;
+  }
   m_header->m_rows++;
   m_header->m_sum = m_header->m_sum + data_val;
   m_header->m_avg.store(m_header->m_sum/m_header->m_rows, std::memory_order::memory_order_relaxed);

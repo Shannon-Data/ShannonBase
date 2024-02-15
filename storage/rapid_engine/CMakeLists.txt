@@ -49,6 +49,7 @@ SET(SHANNON_IMCS_SOURCES
    imcs/cu.cpp
    imcs/chunk.cpp
    imcs/index/art.cpp
+   imcs/index/index.cpp
    utils/utils.cpp
 )
 SET(SHANNON_POPULATE_SOURCES

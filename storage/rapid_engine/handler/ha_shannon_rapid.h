@@ -198,6 +198,10 @@ class ha_rapid : public handler {
 
   int unload_table(const char *db_name, const char *table_name,
                    bool error_if_not_loaded) override;
+
+  int rapid_initialize();
+  int rapid_deinitialize();
+
   THD* m_rpd_thd{nullptr};
   THR_LOCK_DATA m_lock;
   /** this is set to 1 when we are starting a table scan but have

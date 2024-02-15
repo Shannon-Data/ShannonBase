@@ -56,11 +56,10 @@ public:
   int open();
   int close();
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
-  int read_index(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
+  int read_index(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
+                 ha_rkey_function find_flag);
   int records_in_range(ShannonBaseContext*, unsigned int , key_range *, key_range *);
-  int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0);
-  int get(ShannonBaseContext* context, uchar* buffer, size_t length= 0);
-
+  uchar* write(ShannonBaseContext* context, uchar*buffer, size_t length = 0);
   uchar* seek(size_t offset);
   inline Imcs::Cu* get_source() {return m_source_cu;}
 private:
@@ -92,8 +91,6 @@ private:
   std::atomic<uchar*> m_index_wpos {nullptr};
 
   Imcs::Cu* m_source_cu{nullptr};
-  //local buffer
-  uchar m_rec_buff[SHANNON_ROW_TOTAL_LEN] = {0};
 };
 
 class ImcsReader : public Reader {
@@ -115,7 +112,7 @@ public:
   int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
   //read the rows without a key value, just like travel over index tree.
   int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
-
+  //get current pos data to buffer.
   int get(ShannonBaseContext*, uchar*, size_t = 0) override;
   uchar* tell(uint = 0) override;
   uchar* seek(size_t offset) override;
@@ -123,9 +120,6 @@ public:
 private:
   //test whether data is satisfied the condition or not.
   bool is_satisfied(ShannonBaseContext*, double);
-  //Read data via index.
-  int read_index(ShannonBaseContext*, uchar*);
-  int index_search(ShannonBaseContext*, uchar*, uchar*, size_t, ha_rkey_function);
 private:
   //local buffer.
   uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};
