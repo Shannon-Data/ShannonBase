@@ -75,10 +75,8 @@ class RapidContext : public ShannonBaseContext {
 public:
   class extra_info_t{
     public:
-      extra_info_t(): m_pk(0), m_trxid(0) {}
+      extra_info_t() {}
       ~extra_info_t() {}
-      //primary key of this innodb rows.
-      uint64 m_pk {0};
       //trxid of this innodb rows.
       uint64 m_trxid {0};
       Compress::Encoding_type m_algo {Compress::Encoding_type::SORTED};

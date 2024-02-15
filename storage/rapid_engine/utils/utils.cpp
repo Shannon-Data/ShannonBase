@@ -219,5 +219,49 @@ int Util::get_range_value(enum_field_types type, Compress::Dictionary*& dictiona
   return 0;
 }
 
+int Util::get_value(enum_field_types type, Compress::Dictionary*& dictionary,
+                          uchar* key, uint key_len, double& key_value) {
+  switch (type) {
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT: {
+        key_value = key ? *(int*) key : SHANNON_LOWEST_DOUBLE;
+    } break;
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG: {
+        key_value = key ? *(int*) key : SHANNON_LOWEST_DOUBLE;
+    } break;
+    case MYSQL_TYPE_DOUBLE:
+    case MYSQL_TYPE_FLOAT: {
+        key_value = key ? *(double*) key : SHANNON_LOWEST_DOUBLE;
+    } break;
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+        key_value = key ? *(double*) key : SHANNON_LOWEST_DOUBLE;
+    } break;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_TIME:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_NEWDATE:
+    case MYSQL_TYPE_YEAR:
+    case MYSQL_TYPE_TIMESTAMP:
+    case MYSQL_TYPE_TIME2: {
+      key_value = SHANNON_LOWEST_DOUBLE;
+      if (key) {
+        Field_datetimef datetime_min(const_cast<uchar*>(key), nullptr, 0, 0,
+                                     "start_datetime", 6);
+        key_value = datetime_min.val_real();
+      }
+    } break;
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING: {
+      key_value = dictionary->content_size();
+    } break;
+    default: break;
+  }
+  return 0;
+}
+
 } //ns:utils
 } //ns:shannonbase

@@ -155,7 +155,7 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   offset += SHANNON_INFO_BYTE_LEN;
   memcpy(data.get() + offset, &context->m_extra_info.m_trxid, SHANNON_TRX_ID_BYTE_LEN);
   offset += SHANNON_TRX_ID_BYTE_LEN;
-  memcpy(data.get() + offset, &context->m_extra_info.m_pk, SHANNON_ROWID_BYTE_LEN);
+  memcpy(data.get() + offset, &context->m_extra_info.m_key_val, SHANNON_ROWID_BYTE_LEN);
   offset += SHANNON_ROWID_BYTE_LEN;
   memcpy(data.get() + offset, &sum_ptr, SHANNON_SUMPTR_BYTE_LEN);
   offset += SHANNON_SUMPTR_BYTE_LEN;
@@ -190,40 +190,19 @@ uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
     if (!m_cus[key].get()->read_data_direct(context, buff))
        return HA_ERR_END_OF_FILE;
 
-    #ifdef SHANNON_ONLY_DATA_FETCH
-      long long data = *(long long*) buff;
-      my_bitmap_map *old_map = 0;
-      old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);
-      if (field_ptr->type() == MYSQL_TYPE_BLOB || field_ptr->type() == MYSQL_TYPE_STRING
-          || field_ptr->type() == MYSQL_TYPE_VARCHAR) { //read the data
-        String str;
-        Compress::Dictionary* dict = m_cus[key]->local_dictionary();
-        ut_ad(dict);
-        dict->get(data, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
-        if (str.length())
-          field_ptr->set_notnull();
-        field_ptr->store(str.c_ptr(), str.length(), &my_charset_bin);
-      } else {
-        field_ptr->store (data);
-      }
-      if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
-    #else
-      uint8 info = *(uint8*) buff;
-      if (info & DATA_DELETE_FLAG_MASK) continue;
-
-      my_bitmap_map *old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);      
-      if (info & DATA_NULL_FLAG_MASK)
-        field_ptr->set_null();
-      else {
-        field_ptr->set_notnull();
-        uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
-              data_offset += SHANNON_SUMPTR_BYTE_LEN;
-        double val = *(double*) (buff + data_offset);
-        Compress::Dictionary* dict = m_cus[key]->local_dictionary();
-        Utils::Util::store_field_value(context->m_table, field_ptr, dict, val);
-      }
-      if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
-    #endif
+    uint8 info = *(uint8*) buff;
+    my_bitmap_map *old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);
+    if (info & DATA_NULL_FLAG_MASK)
+      field_ptr->set_null();
+    else {
+      field_ptr->set_notnull();
+      uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
+            data_offset += SHANNON_SUMPTR_BYTE_LEN;
+      double val = *(double*) (buff + data_offset);
+      Compress::Dictionary* dict = m_cus[key]->local_dictionary();
+      Utils::Util::store_field_value(context->m_table, field_ptr, dict, val);
+    }
+    if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
   }
   return 0;
 }

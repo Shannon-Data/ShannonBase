@@ -41,7 +41,9 @@ class Field;
 namespace ShannonBase{
 class ShannonBaseContext;
 class RapidContext;
+
 namespace Imcs{
+class Index;
 class Dictionary;
 /**A Snapshot Metadata Unit (SMU) contains metadata and transactional information
  * for an associated IMCU.*/
@@ -106,16 +108,19 @@ public:
  inline size_t get_chunk_nums () {return m_chunks.size(); }
 
  uchar* seek(size_t offset);
+ inline Index* get_index() { return m_index.get(); }
 private:
   uint m_magic{SHANNON_MAGIC_CU};
   //proctect header.
   std::mutex m_header_mutex;
   //header info of this Cu.
-  std::unique_ptr<Cu_header> m_header;
+  std::unique_ptr<Cu_header> m_header{nullptr};
   //chunks in this cu.
   std::vector<std::unique_ptr<Chunk>> m_chunks;
   //current chunk read.
   std::atomic<uint32> m_current_chunk_id {0};
+  //index of Cu
+  std::unique_ptr<Index> m_index{nullptr};
 };
 
 } //ns:imcs
