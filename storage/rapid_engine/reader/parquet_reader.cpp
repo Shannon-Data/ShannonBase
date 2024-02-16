@@ -58,9 +58,6 @@ int ParquetReader::index_general(ShannonBaseContext* context, uchar* buff, size_
 int ParquetReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
   return 0;
 }
-int ParquetReader::get(ShannonBaseContext* context, uchar* buffer, size_t length) {
-  return 0;
-}
 uchar* ParquetReader::tell(uint field_index) {
   return nullptr;
 }

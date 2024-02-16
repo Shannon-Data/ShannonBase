@@ -444,9 +444,6 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len,
                  ha_rkey_function find_flag) {
   DBUG_TRACE;
   ut_ad (m_start_of_scan && inited == handler::INDEX);
-  if (pushed_idx_cond){ //icp
-    //TODO: evaluate condition item, and do condtion eval in scan.
-  }
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf,
@@ -455,11 +452,10 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len,
 }
 
 int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
-  return 0;
+  return HA_ERR_KEY_NOT_FOUND;
 }
 
-/** Reads the next row from a cursor, which must have previously been
- positioned using index_read.
+/** Reads the next row from a cursor.
  @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::index_next(uchar *buf) {
   ut_ad (m_start_of_scan && inited == handler::INDEX);
@@ -485,7 +481,7 @@ int ha_rapid::index_next_same(uchar *buf, const uchar *key, uint keylen) {
  positioned using index_read.
  @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::index_prev(uchar *buf) {
-  return 0;
+  return HA_ERR_END_OF_FILE;
 }
 
 /** Positions a cursor on the first record in an index and reads the
@@ -494,16 +490,15 @@ int ha_rapid::index_prev(uchar *buf) {
 int ha_rapid::index_first(uchar *buf) {
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
 
-  m_rpd_context->m_extra_info.m_find_flag = HA_READ_AFTER_KEY;
-  m_imcs_reader->index_general(m_rpd_context.get(), buf);
-  return 0;
+  //m_rpd_context->m_extra_info.m_find_flag = HA_READ_AFTER_KEY;
+  return m_imcs_reader->index_general(m_rpd_context.get(), buf);
 }
 
 /** Positions a cursor on the last record in an index and reads the
  corresponding row to buf.
  @return 0, HA_ERR_END_OF_FILE, or error code */
 int ha_rapid::index_last(uchar *buf) {
-  return 0;
+  return HA_ERR_END_OF_FILE;
 }
 
 #if 0

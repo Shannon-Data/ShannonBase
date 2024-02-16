@@ -131,7 +131,8 @@ double Util::get_field_value (Field*& field, Compress::Dictionary*& dictionary) 
   }
   return data_val;
 }
-int Util::store_field_value(TABLE*& table, Field*& field, Compress::Dictionary*& dictionary,
+
+double Util::store_field_value(TABLE*& table, Field*& field, Compress::Dictionary*& dictionary,
                             double& value) {
   ut_a(field && dictionary);
   my_bitmap_map *old_map = tmp_use_all_columns(table, table->write_set);
@@ -160,6 +161,56 @@ int Util::store_field_value(TABLE*& table, Field*& field, Compress::Dictionary*&
       field->store (value);
     } break;
     default: field->store (value);
+  }
+  if (old_map) tmp_restore_column_map(table->write_set, old_map);
+  return value;
+}
+
+double Util::store_field_value(TABLE*& table, Field*& field,
+                                   Compress::Dictionary*& dictionary,
+                                   const uchar* key, uint key_len)
+{
+  double val{0};
+  if (!key || !key_len || !dictionary) return val;
+  my_bitmap_map *old_map = tmp_use_all_columns(table, table->write_set);
+  switch (field->type()) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:{
+      val = *(int*) key;
+      field->store(val);
+    } break;
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+      val = *(double*) key;
+      field->store(val);
+    } break;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_TIME:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_NEWDATE:
+    case MYSQL_TYPE_YEAR:
+    case MYSQL_TYPE_TIMESTAMP:
+    case MYSQL_TYPE_TIME2: {
+      Field_datetimef datetime(const_cast<uchar*>(key), nullptr, 0, 0,
+                              "temp_datetime", 6);
+      val = datetime.val_real();
+      field->store(val);
+    } break;
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING: {
+      uchar* key_ptr = const_cast<uchar*>(key);
+      val = dictionary->lookup(key_ptr);
+      field->store(val);
+    } break;
+    case MYSQL_TYPE_DOUBLE:
+    case MYSQL_TYPE_FLOAT: {
+      val = *(double*) key;
+      field->store(val);
+    } break;
+    default: break;
   }
   if (old_map) tmp_restore_column_map(table->write_set, old_map);
   return 0;
@@ -213,50 +264,6 @@ int Util::get_range_value(enum_field_types type, Compress::Dictionary*& dictiona
     case MYSQL_TYPE_VAR_STRING: {
       minkey = 0;
       maxkey = dictionary->content_size();
-    } break;
-    default: break;
-  }
-  return 0;
-}
-
-int Util::get_value(enum_field_types type, Compress::Dictionary*& dictionary,
-                          uchar* key, uint key_len, double& key_value) {
-  switch (type) {
-    case MYSQL_TYPE_INT24:
-    case MYSQL_TYPE_TINY:
-    case MYSQL_TYPE_SHORT: {
-        key_value = key ? *(int*) key : SHANNON_LOWEST_DOUBLE;
-    } break;
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG: {
-        key_value = key ? *(int*) key : SHANNON_LOWEST_DOUBLE;
-    } break;
-    case MYSQL_TYPE_DOUBLE:
-    case MYSQL_TYPE_FLOAT: {
-        key_value = key ? *(double*) key : SHANNON_LOWEST_DOUBLE;
-    } break;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-        key_value = key ? *(double*) key : SHANNON_LOWEST_DOUBLE;
-    } break;
-    case MYSQL_TYPE_DATE:
-    case MYSQL_TYPE_TIME:
-    case MYSQL_TYPE_DATETIME:
-    case MYSQL_TYPE_NEWDATE:
-    case MYSQL_TYPE_YEAR:
-    case MYSQL_TYPE_TIMESTAMP:
-    case MYSQL_TYPE_TIME2: {
-      key_value = SHANNON_LOWEST_DOUBLE;
-      if (key) {
-        Field_datetimef datetime_min(const_cast<uchar*>(key), nullptr, 0, 0,
-                                     "start_datetime", 6);
-        key_value = datetime_min.val_real();
-      }
-    } break;
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_VAR_STRING: {
-      key_value = dictionary->content_size();
     } break;
     default: break;
   }

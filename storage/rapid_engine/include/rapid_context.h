@@ -82,10 +82,10 @@ public:
       Compress::Encoding_type m_algo {Compress::Encoding_type::SORTED};
 
       //index scan info
-      uint m_keynr{0};
-      double m_key_val {SHANNON_LOWEST_DOUBLE};
+      uint8 m_keynr{0};
       enum_field_types m_key_type;
       ha_rkey_function m_find_flag {HA_READ_INVALID};
+      double m_key_val {SHANNON_LOWEST_DOUBLE};
   };
   RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}
   virtual ~RapidContext() = default;

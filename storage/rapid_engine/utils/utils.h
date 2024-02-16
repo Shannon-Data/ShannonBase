@@ -43,10 +43,10 @@ class Util {
     static bool is_support_type (enum_field_types type);
     static double get_value_mysql_type(enum_field_types&, Compress::Dictionary*&, const uchar*, uint);
     static double get_field_value (Field*&, Compress::Dictionary*&);
-    static int store_field_value(TABLE*& table, Field*&, Compress::Dictionary*&, double&);
+    static double store_field_value(TABLE*& table, Field*&, Compress::Dictionary*&, double&);
+    static double store_field_value(TABLE*& table, Field*&, Compress::Dictionary*&, const uchar*, uint);
     static int get_range_value(enum_field_types, Compress::Dictionary*&,
                                key_range*, key_range*, double&, double&);
-    static int get_value(enum_field_types, Compress::Dictionary*&, uchar*, uint, double&);
 };
 
 } //ns:util
