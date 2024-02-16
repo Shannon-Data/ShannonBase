@@ -50,8 +50,6 @@ public:
   int records_in_range(ShannonBaseContext*, unsigned int , key_range *, key_range *) override;
   int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
   int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
-  //the current cursor data to buffer.
-  int get(ShannonBaseContext*, uchar*, size_t = 0) override;
   uchar* tell(uint = 0) override;
   uchar* seek(size_t offset) override;
 private:

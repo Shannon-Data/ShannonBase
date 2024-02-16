@@ -46,8 +46,6 @@ public:
   virtual int write(ShannonBaseContext*, uchar*, size_t = 0) = 0;
   virtual int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) = 0;
   virtual int index_general(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  //the current cursor data to buffer.
-  virtual int get(ShannonBaseContext*, uchar*, size_t = 0) = 0;
   virtual uchar* tell(uint = 0) = 0;
   virtual uchar* seek(size_t offset) = 0;
 };

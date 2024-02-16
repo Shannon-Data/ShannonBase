@@ -76,20 +76,7 @@ private:
   std::atomic<uchar*> m_rnd_wpos {nullptr};
   //just like cursor. full table scan cursor.
   std::atomic<uchar*> m_rnd_rpos {nullptr};
-
-  /**index scan cursor. index scan info. Now, we dont use any index to
-   * support real index, but to simulate index access by using sequential
-   * accessing. In the next, we will using ART(adaptive Radix Tree) to
-   * impl real index access. */
-  //chunk id of index read.
-  std::atomic<uint> m_index_chunk_rid {0};
-  //chunk id of index write.
-  std::atomic<uint> m_index_chunk_wid {0};
-  //read from where in chunk.
-  std::atomic<uchar*> m_index_rpos {nullptr};
-  //write to which chunk in index.
-  std::atomic<uchar*> m_index_wpos {nullptr};
-
+  //source Cu of this cu view.
   Imcs::Cu* m_source_cu{nullptr};
 };
 
@@ -112,14 +99,9 @@ public:
   int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
   //read the rows without a key value, just like travel over index tree.
   int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
-  //get current pos data to buffer.
-  int get(ShannonBaseContext*, uchar*, size_t = 0) override;
   uchar* tell(uint = 0) override;
   uchar* seek(size_t offset) override;
   bool is_open() const { return m_start_of_scan; }
-private:
-  //test whether data is satisfied the condition or not.
-  bool is_satisfied(ShannonBaseContext*, double);
 private:
   //local buffer.
   uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};
