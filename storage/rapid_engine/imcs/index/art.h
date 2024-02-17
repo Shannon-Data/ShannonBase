@@ -32,12 +32,14 @@
 
 #include <stdint.h>
 #include <functional>
+#include <stack>
 
 #include "my_inttypes.h"
 namespace ShannonBase {
 namespace Imcs {
 
 enum NodeType {
+    UNKNOWN = 0,
     NODE4 = 1,
     NODE16,
     NODE48,
@@ -50,9 +52,9 @@ public:
   using ART_Func = std::function<int(void *data, const unsigned char *key, uint32 key_len, void *value, uint32 value_len)>;
 
   typedef struct {
-    uint32 partial_len;
-    uint8 type;
-    uint8 num_children;
+    uint32 partial_len{0};
+    uint8 type {NodeType::UNKNOWN};
+    uint8 num_children {0};
     unsigned char partial[Art_index::MAX_PREFIX_LEN];
   } Art_node;
 
@@ -87,8 +89,6 @@ public:
 
   typedef struct {
     Art_node *root;
-    Art_node* current_node;
-    uint8 current_node_idx;
     uint64 size;
   } Art_tree;
 
@@ -123,11 +123,14 @@ void Remove_child16(Art_node16 *n, Art_node **ref, Art_node **l);
 void Remove_child4(Art_node4 *n, Art_node **ref, Art_node **l);
 void Remove_child(Art_node *n, Art_node **ref, unsigned char c, Art_node **l);
 Art_leaf* Recursive_delete(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, int depth);
-int Recursive_iter(Art_node *n, ART_Func cb, void *data, int data_len);
+int Recursive_iter(Art_node *n, ART_Func& cb, void *data, int data_len);
+int Cruise(ART_Func& cb, void *data, int data_len);
 int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
 
+private:
 Art_tree* m_tree {nullptr};
 bool m_inited {false};
+std::stack<Art_node*> m_current_nodes;
 public:
  int ART_tree_init();
  int ART_tree_destroy();
@@ -141,8 +144,8 @@ public:
  Art_leaf* ART_minimum();
  Art_leaf* ART_maximum();
 
- int ART_iter(ART_Func cb, void *data, int data_len);
- int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func cb, void *data, int data_len);
+ int ART_iter(ART_Func& cb, void *data, int data_len);
+ int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func& cb, void *data, int data_len);
 };
 
 } // namespace imcs 

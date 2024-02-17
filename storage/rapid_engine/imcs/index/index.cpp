@@ -95,11 +95,13 @@ int Index::minimum(uchar* value, uint value_len) {
 }
 
 int Index::next(Art_index::ART_Func& func, uchar* out) {
+  if (!m_impl->Art_initialized()) return 1;
+
   if (!m_start_scan) {
     m_impl->ART_reset_cursor();
     m_start_scan = true;
   }
-  if (!m_impl->Art_initialized()) return 1;
+
   return m_impl->ART_iter(func, out, ShannonBase::SHANNON_ROW_TOTAL_LEN);
 }
 
