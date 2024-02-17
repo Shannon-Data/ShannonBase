@@ -155,9 +155,8 @@ int CuView::read_index(ShannonBaseContext* context, uchar* key, size_t key_len, 
           const_cast<ha_rapid*>(rpd_context->m_handler));
         switch (result) {
           case ICP_MATCH:
-            /* Convert the remaining fields to MySQL format.
-            If this is a secondary index record, we must defer
-            this until we have fetched the clustered index record. */
+            /* Convert the remaining fields to MySQL format. If this is a secondary index record,
+            we must defer this until we have fetched the clustered index record. */
             memcpy(data, val, val_len);
             return 1;
           case ICP_NO_MATCH:

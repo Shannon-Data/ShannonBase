@@ -291,9 +291,6 @@ int ha_rapid::rnd_end() {
 int ha_rapid::rnd_next(unsigned char *buffer) {
   DBUG_TRACE;
   ut_ad (m_start_of_scan && inited == handler::RND);
-  if (pushed_idx_cond){ //icp
-    //TODO: evaluate condition item, and do condtion eval in scan.
-  }
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   auto err = m_imcs_reader->read(m_rpd_context.get(), buffer);
@@ -354,15 +351,29 @@ int ha_rapid::compare_key_icp(const key_range *range) {
   return cmp;
 }
 
+Item* ha_rapid::get_cond_item(Item* cond) {
+  /**
+   * In rapide, it's a column store, we only juse the first part of an index as we
+   * index when we insert the data into rapid, therefore, if we use comb index,
+   * such as we have an PK(cola, colb), and using cond as cond(cola, a) OP cond(colb,b).
+   * Therefore, in rapid, only the first part of cond used in pushed down condition.
+  */
+  if (cond->type() == Item::COND_ITEM) {
+  }
+
+  return cond;
+}
+
 Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
 {
   DBUG_TRACE;
   ut_ad(keyno != MAX_KEY);
   ut_ad(idx_cond != nullptr);
 
-  pushed_idx_cond = idx_cond;
+  pushed_idx_cond = get_cond_item(idx_cond);
   pushed_idx_cond_keyno = keyno;
   in_range_check_pushed_down = true;
+
   /* We will evaluate the condition entirely */
   return nullptr;
 }
