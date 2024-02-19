@@ -201,7 +201,7 @@ class ha_rapid : public handler {
 
   int rapid_initialize();
   int rapid_deinitialize();
-  Item* get_cond_item(Item* cond);
+  Item* get_cond_item(Item* cond, Field* key_field);
 
   THD* m_rpd_thd{nullptr};
   THR_LOCK_DATA m_lock;

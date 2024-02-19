@@ -53,7 +53,9 @@
 #include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/sql_class.h"
 #include "sql/sql_const.h"
+#include "sql/key.h"
 #include "sql/sql_lex.h"
+#include "sql/item.h"
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
 #include "sql/opt_costmodel.h"
@@ -249,7 +251,7 @@ int ha_rapid::rapid_initialize() {
     return HA_ERR_GENERIC;
   }
   m_rpd_context->m_local_dict = loaded_dictionaries[m_rpd_context->m_current_db].get();
-
+  m_rpd_context->m_extra_info.m_keynr = active_index;
   m_imcs_reader.reset(new ImcsReader(table)) ;
   return m_imcs_reader->open();
 }
@@ -351,7 +353,7 @@ int ha_rapid::compare_key_icp(const key_range *range) {
   return cmp;
 }
 
-Item* ha_rapid::get_cond_item(Item* cond) {
+Item* ha_rapid::get_cond_item(Item* cond, Field* key_field) {
   /**
    * In rapide, it's a column store, we only juse the first part of an index as we
    * index when we insert the data into rapid, therefore, if we use comb index,
@@ -359,9 +361,46 @@ Item* ha_rapid::get_cond_item(Item* cond) {
    * Therefore, in rapid, only the first part of cond used in pushed down condition.
   */
   if (cond->type() == Item::COND_ITEM) {
-  }
+    List_iterator<Item> li(*((Item_cond *)cond)->argument_list());
+    Item *item;
+    while ((item = li++)) {
+      if (item->type() == Item::COND_ITEM) {
+        //if ((Item_cond*)item)->functype() == Item_func::)
+        get_cond_item(item, key_field);
 
-  return cond;
+      } else if (item->type() == Item::FUNC_ITEM) {
+        Item_func *item_func = (Item_func *)item;
+        const Item_func::Functype func_type = item_func->functype();
+        ut_a(func_type != Item_func::TRIG_COND_FUNC ||
+            func_type != Item_func::DD_INTERNAL_FUNC);
+
+        if (item_func->argument_count() > 0) {
+        /* This is a function, apply condition recursively to arguments */
+          Item **item_end =
+              (item_func->arguments()) + item_func->argument_count();
+          for (Item **child = item_func->arguments(); child != item_end;
+              child++) {
+            auto arg = *child;
+            if (uses_index_fields_only(arg, table, 0, false))
+              return arg;
+            get_cond_item(arg, key_field);
+          }
+        }
+      } else {
+        switch (item->type()) {
+          case Item::FIELD_ITEM: {
+             Item_field* item_f = down_cast<Item_field*> (item);
+             if (item_f->field->table == table && item_f->field == key_field) return item_f;
+          } break;
+          case  Item::REF_ITEM: {
+            cond->real_item();
+          }break;
+          default: break;
+        }
+      }
+    }
+  }
+  return nullptr;
 }
 
 Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
@@ -370,7 +409,7 @@ Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
   ut_ad(keyno != MAX_KEY);
   ut_ad(idx_cond != nullptr);
 
-  pushed_idx_cond = get_cond_item(idx_cond);
+  pushed_idx_cond = idx_cond;
   pushed_idx_cond_keyno = keyno;
   in_range_check_pushed_down = true;
 
@@ -428,10 +467,6 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
   }
 
   auto ret = rapid_initialize();
-  KEY *key_info = table->key_info + keynr;
-  KEY_PART_INFO *key_part = key_info->key_part;
-  m_rpd_context->m_extra_info.m_key_type = key_part->field->type();
-  m_rpd_context->m_extra_info.m_keynr =  key_part->field->field_index();
   inited = handler::INDEX;
 
   return ret;
@@ -472,7 +507,7 @@ int ha_rapid::index_next(uchar *buf) {
   ut_ad (m_start_of_scan && inited == handler::INDEX);
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  auto err = m_imcs_reader->index_general(m_rpd_context.get(), buf);
+  auto err = m_imcs_reader->index_next(m_rpd_context.get(), buf);
   return err;
 }
 
@@ -502,7 +537,7 @@ int ha_rapid::index_first(uchar *buf) {
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
 
   //m_rpd_context->m_extra_info.m_find_flag = HA_READ_AFTER_KEY;
-  return m_imcs_reader->index_general(m_rpd_context.get(), buf);
+  return m_imcs_reader->index_next(m_rpd_context.get(), buf);
 }
 
 /** Positions a cursor on the last record in an index and reads the
@@ -647,13 +682,24 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   context.m_current_db = table_arg.s->db.str;
   context.m_current_table = table_arg.s->table_name.str;
   context.m_table = const_cast<TABLE *>(&table_arg);
-
   // check if primary key is missing. rapid engine must has at least one PK. 
   if (table_arg.s->is_missing_primary_key()) {
     my_error(ER_REQUIRES_PRIMARY_KEY, MYF(0));
     return HA_ERR_GENERIC;
   }
 
+  context.m_extra_info.m_keynr = 0;
+  auto key = (table_arg.key_info + 0);
+  for (uint keyid =0; keyid < key->user_defined_key_parts; keyid++) {
+    if (key->key_part[keyid].field->is_flag_set(NOT_SECONDARY_FLAG)) {
+      my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
+               table_arg.s->db.str, table_arg.s->table_name.str);
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  context.m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
+  context.m_extra_info.m_key_len = key->key_length;
   // Scan the primary table and read the records.
   if (table_arg.file->inited == NONE && table_arg.file->ha_rnd_init(true)) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str,
@@ -669,19 +715,13 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     without locks. Now, do full scan, but multi-thread scan will impl in future. */
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
-    KEY* key  = table_arg.s->key_info;
-    Field* key_field = (key->key_part + 0)->field;
-    if (key_field->is_flag_set(NOT_SECONDARY_FLAG)) {////The key field MUST be set.
-       my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
-                table_arg.s->db.str, table_arg.s->table_name.str);
-       return HA_ERR_GENERIC;
+    auto offset {0};
+    for (uint key_partid = 0; key_partid < key->user_defined_key_parts; key_partid++) {
+      memcpy(context.m_extra_info.m_key_buff.get() + offset,
+             key->key_part[key_partid].field->field_ptr(),
+             key->key_part[key_partid].store_length);
+      offset += key->key_part[key_partid].store_length;
     }
-    key_field = *(table_arg.field + key_field->field_index());
-    std::string key_strstr(context.m_current_db + context.m_current_table + key_field->field_name);
-    Compress::Dictionary* dict = imcs_instance->get_cu(key_strstr)->local_dictionary();
-    context.m_extra_info.m_key_val = Utils::Util::get_field_value(key_field, dict);
-    context.m_extra_info.m_key_type = key_field->type();
-    context.m_extra_info.m_keynr = key_field->field_index();
 
     uint32 field_count = table_arg.s->fields;
     Field *field_ptr = nullptr;
