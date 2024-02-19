@@ -99,9 +99,13 @@ public:
   int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
   //read the rows without a key value, just like travel over index tree.
   int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int index_next(ShannonBaseContext*, uchar*, size_t = 0) override;
+
   uchar* tell(uint = 0) override;
   uchar* seek(size_t offset) override;
   bool is_open() const { return m_start_of_scan; }
+private:
+  int cond_comp(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function);
 private:
   //local buffer.
   uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};

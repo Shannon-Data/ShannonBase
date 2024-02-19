@@ -151,11 +151,12 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   if (field->is_real_null())
    info |= DATA_NULL_FLAG_MASK;
 
+  double rowid{0};
   memcpy(data.get() + offset, &info, SHANNON_INFO_BYTE_LEN);
   offset += SHANNON_INFO_BYTE_LEN;
   memcpy(data.get() + offset, &context->m_extra_info.m_trxid, SHANNON_TRX_ID_BYTE_LEN);
   offset += SHANNON_TRX_ID_BYTE_LEN;
-  memcpy(data.get() + offset, &context->m_extra_info.m_key_val, SHANNON_ROWID_BYTE_LEN);
+  memcpy(data.get() + offset, &rowid, SHANNON_ROWID_BYTE_LEN);
   offset += SHANNON_ROWID_BYTE_LEN;
   memcpy(data.get() + offset, &sum_ptr, SHANNON_SUMPTR_BYTE_LEN);
   offset += SHANNON_SUMPTR_BYTE_LEN;
