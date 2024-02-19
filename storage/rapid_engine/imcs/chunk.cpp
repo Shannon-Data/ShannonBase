@@ -220,7 +220,7 @@ ha_rows Chunk::records_in_range(ShannonBase::RapidContext* context, double& min_
 
     data_val  = *(double*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
     if ((is_valid(min_key) && !is_valid(max_key)) &&
-        is_greater_than(data_val, min_key)) {
+        is_greater_than_or_eq(data_val, min_key)) {
       count ++;
     } else if ((!is_valid(min_key) && is_valid(max_key)) &&
                is_less_than_or_eq(data_val, max_key)){
