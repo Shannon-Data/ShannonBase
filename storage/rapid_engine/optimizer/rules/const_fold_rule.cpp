@@ -19,36 +19,23 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+
+   The fundmental code for imcs optimizer.
 */
-#ifndef __SHANNONBASE_UTILS_H__
-#define __SHANNONBASE_UTILS_H__
+#include "storage/rapid_engine/optimizer/rules/const_fold_rule.h"
 
-#include "include/field_types.h"
-#include "include/my_inttypes.h"
+#include "sql/sql_lex.h"  //query_expression
+namespace ShannonBase {
+namespace Optimizer {
 
-class TABLE;
-class Field;
-class key_range;
-namespace ShannonBase{
-namespace Compress{
-   class Dictionary;
+Const_fold::Const_fold(std::shared_ptr<Query_expression>& expression) : 
+                       m_query_expr(expression) {
+}
+Const_fold::~Const_fold() {
+}
+void Const_fold::apply() {
 }
 
-namespace Utils{
-class Util {
-  public:
-    static bool is_support_type (enum_field_types type);
-    static double get_value_mysql_type(enum_field_types&, Compress::Dictionary*&, const uchar*, uint);
-    static double get_field_value (Field*&, Compress::Dictionary*&);
-    static double store_field_value(TABLE*& table, Field*&, Compress::Dictionary*&, double&);
-    static double store_field_value(TABLE*& table, Field*&, Compress::Dictionary*&, const uchar*, uint);
-    static int get_range_value(enum_field_types, Compress::Dictionary*&,
-                               key_range*, key_range*, double&, double&);
-};
-
-} //ns:util
-} //ns::shannonbase
-#endif //__SHANNONBASE_UTILS_H__
+} //ns:optimizer
+} //ns:shannonbase

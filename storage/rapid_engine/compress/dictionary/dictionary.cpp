@@ -66,6 +66,7 @@ uint32 Dictionary::store(String& str, Encoding_type type) {
 
   return 0;
 }
+
 uint32 Dictionary::get(uint64 strid, String& val, CHARSET_INFO& charset) {
   compress_algos alg {compress_algos::NONE};
   switch (m_encoding_type) {
@@ -85,5 +86,54 @@ uint32 Dictionary::get(uint64 strid, String& val, CHARSET_INFO& charset) {
   }
   return 0;
 }
+int Dictionary::lookup (uchar*& str) {
+  DBUG_TRACE;
+  //returns dictionary id. //encoding alg pls ref to: heatwave document.
+  std::string origin_str;
+  origin_str.assign((const char*)str);
+  compress_algos alg {compress_algos::NONE};
+  switch (m_encoding_type) {
+    case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
+    case Encoding_type::VARLEN: alg = compress_algos::LZ4; break;
+    case Encoding_type::NONE: alg = compress_algos::NONE; break;
+    default: break;
+  }
+
+  std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
+  {
+    std::unique_lock lk(m_content_mtx);
+    if (m_content.find(compressed_str) == m_content.end()){ //not found, return -1.
+      return -1;
+    } else
+      return m_content[compressed_str];
+  }
+
+  return -1;
+}
+int Dictionary::lookup (String& str) {
+  DBUG_TRACE;
+  //returns dictionary id. //encoding alg pls ref to: heatwave document.
+  std::string origin_str(str.c_ptr());
+  compress_algos alg {compress_algos::NONE};
+  switch (m_encoding_type) {
+    case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
+    case Encoding_type::VARLEN: alg = compress_algos::LZ4; break;
+    case Encoding_type::NONE: alg = compress_algos::NONE; break;
+    default: break;
+  }
+
+  std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
+  {
+    std::unique_lock lk(m_content_mtx);
+    if (m_content.find(compressed_str) == m_content.end()){ //not found, return -1.
+      return -1;
+    } else
+      return m_content[compressed_str];
+  }
+
+  return -1;
+}
+
+
 } //ns:Compress
 } //ns::shannonbase

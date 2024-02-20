@@ -35,6 +35,7 @@
 #include "storage/innobase/include/univ.i"        //new_withkey
 #include "storage/innobase/include/ut0new.h"      //new_withkey
 
+#include "storage/rapid_engine/utils/utils.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/compress/algorithms.h"
 
@@ -101,6 +102,7 @@ Chunk::Chunk(Field* field) {
       break;
   }
 }
+
 Chunk::~Chunk() {
   std::scoped_lock lk(m_header_mutex);
   if (m_header) {
@@ -114,6 +116,7 @@ Chunk::~Chunk() {
     m_data_end = m_data_base;
   }
 }
+
 uint Chunk::rnd_init(bool scan){
   DBUG_TRACE;
   ut_ad(m_inited == handler::NONE);
@@ -121,6 +124,7 @@ uint Chunk::rnd_init(bool scan){
   m_inited = handler::RND;
   return 0;
 }
+
 uint Chunk::rnd_end(){
   DBUG_TRACE;
   ut_ad(m_inited == handler::RND);
@@ -128,6 +132,7 @@ uint Chunk::rnd_end(){
   m_inited = handler::NONE;
   return 0;
 }
+
 uchar* Chunk::write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length) {
   DBUG_TRACE;
   ut_ad(m_data_base || data);
@@ -150,8 +155,9 @@ uchar* Chunk::write_data_direct(ShannonBase::RapidContext* context, uchar* data,
     if (is_greater_than(m_header->m_min, val))
       m_header->m_min.store(val, std::memory_order::memory_order_relaxed);
   }
-  return m_data;
+  return (m_data - length);
 }
+
 uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   DBUG_TRACE;
   ut_ad(context && buffer);
@@ -179,79 +185,76 @@ uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer
     if (diff > 0) return nullptr; //no data here.
     return m_data_cursor;
   }
- #ifdef SHANNON_ONLY_DATA_FETCH
-  uint32 sum_ptr_off;
-  uint64 pk, data;
-  //reads info field
-  info [[maybe_unused]] = *(m_data_cursor ++);
-  m_data_cursor += SHANNON_TRX_ID_BYTE_LEN;
-  //reads PK field
-  memcpy(&pk, m_data_cursor, SHANNON_ROWID_BYTE_LEN);
-  m_data_cursor += SHANNON_ROWID_BYTE_LEN;
-  //reads sum_ptr field
-  memcpy(&sum_ptr_off, m_data_cursor, SHANNON_SUMPTR_BYTE_LEN);
-  m_data_cursor +=SHANNON_SUMPTR_BYTE_LEN;
-  if (!sum_ptr_off) {
-  //To be impled.
-  }
-  //reads real data field. if it string type stores strid otherwise, real data.
-  memcpy(&data, m_data_cursor, SHANNON_DATA_BYTE_LEN);
-  m_data_cursor +=SHANNON_DATA_BYTE_LEN;
-  //cpy the data into buffer.
-  memcpy(buffer, &data, SHANNON_DATA_BYTE_LEN);
- #else
+
   memcpy(buffer, m_data_cursor, SHANNON_ROW_TOTAL_LEN);
   m_data_cursor += SHANNON_ROW_TOTAL_LEN; //go to the next.
- #endif
   return m_data_cursor;
 }
-ha_rows  Chunk::records_in_range(ShannonBase::RapidContext* context, key_range* min_key,
-                                 key_range* max_key) {
+
+ha_rows Chunk::records_in_range(ShannonBase::RapidContext* context, double& min_key,
+                                 double& max_key) {
+  /**
+   * in future, we will use sampling to get the nums in range, not to scan all data. it's
+   * a templ approach used here.*/
   ha_rows count{0};
   uchar* cur_pos = m_data_base;
-  double data_val {0}, minkey{0}, maxkey{0};
+  double data_val {0};
+
   while (cur_pos < m_data.load(std::memory_order::memory_order_seq_cst)) {
     auto info = *(uint8*) cur_pos;
-    if (info & DATA_DELETE_FLAG_MASK || info & DATA_NULL_FLAG_MASK) { //deleted.
+    if (info & DATA_DELETE_FLAG_MASK) { //deleted.
       cur_pos += SHANNON_ROW_TOTAL_LEN;
       continue;
     }
 
-    switch (m_header->m_chunk_type) {
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:{
-        data_val  = *(int*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
-        minkey = min_key ? *(int*) min_key->key : std::numeric_limits <int>::lowest();
-        maxkey = max_key ? *(int*) max_key->key : std::numeric_limits <int>::max();
-      }break;
-      case MYSQL_TYPE_LONGLONG: {
-        data_val  = *(longlong*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
-        minkey = min_key? *(longlong*) min_key->key : std::numeric_limits <longlong>::lowest();
-        maxkey = max_key? *(longlong*) max_key->key : std::numeric_limits <longlong>::max();
-      } break;
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL: {
-        data_val  = *(double*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
-        minkey = min_key ? *(double*) min_key->key : std::numeric_limits <double>::lowest();
-        maxkey = max_key ? *(double*) max_key->key : std::numeric_limits <double>::max();;
-      }break;
-      default:
-        break;
+    uint64 trxid = *((uint64*)(cur_pos + SHANNON_TRX_ID_BYTE_OFFSET)); //trxid bytes
+    //visibility check at firt.
+    table_name_t name{const_cast<char*>(context->m_current_db.c_str())};
+    ReadView* read_view = trx_get_read_view(context->m_trx);
+    ut_ad(read_view);
+    if (!read_view->changes_visible(trxid, name) || (info & DATA_DELETE_FLAG_MASK)) {//invisible and deleted
+      //TODO: travel the change link to get the visibile version data.
+      cur_pos += SHANNON_ROW_TOTAL_LEN; //to the next value.
+      continue;
     }
-    if ((is_greater_than(data_val, minkey) || are_equal(data_val, minkey)) &&
-       (is_less_than(data_val, maxkey) || are_equal(data_val, maxkey)))
-      count++;
+
+    data_val  = *(double*) (cur_pos + SHANNON_DATA_BYTE_OFFSET);
+    if ((is_valid(min_key) && !is_valid(max_key)) &&
+        is_greater_than_or_eq(data_val, min_key)) {
+      count ++;
+    } else if ((!is_valid(min_key) && is_valid(max_key)) &&
+               is_less_than_or_eq(data_val, max_key)){
+      count ++;
+    } else if ((is_valid(min_key) && is_valid(max_key)) && are_equal(data_val, min_key))
+      count ++;
+
     cur_pos += SHANNON_ROW_TOTAL_LEN;
   }
+
   return count;
 }
+
+uchar* Chunk::where(uint offset) {
+  return (offset > SHANNON_ROWS_IN_CHUNK) ? nullptr :
+                                            (m_data_base + offset * SHANNON_ROW_TOTAL_LEN);
+}
+
+uchar* Chunk::seek(uint offset) {
+  auto current_pos = m_data_base + (offset * SHANNON_ROW_TOTAL_LEN);
+  m_data_cursor = (current_pos > m_data.load(std::memory_order_acq_rel)) ?
+                   m_data.load(std::memory_order_acq_rel) : current_pos;
+  return m_data_cursor;
+}
+
 uchar* Chunk::read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
   assert(context && rowid && buffer);
   return nullptr;
 }
+
 uchar* Chunk::delete_data_direct(ShannonBase::RapidContext* context, uchar* rowid) {
   return nullptr;
 }
+
 uchar* Chunk::delete_all_direct() {
   if (m_data_base) {
     my_free(m_data_base);
@@ -262,7 +265,8 @@ uchar* Chunk::delete_all_direct() {
   return m_data_base; 
 }
 
-uchar* Chunk::update_date_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length) {
+uchar* Chunk::update_date_direct(ShannonBase::RapidContext* context, uchar* rowid,
+                                 uchar* data, uint length) {
   return nullptr;
 }
 

@@ -19,38 +19,32 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
-   The fundmental code for imcs. The chunk is used to store the data which
-   transfer from row-based format to column-based format.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs optimizer.
 */
-#ifndef __SHANNONBASE_READER_READER_H__
-#define __SHANNONBASE_READER_READER_H__
-#include <string>
+#ifndef __SHANNONBASE_STATISTICS_H__
+#define __SHANNONBASE_STATISTICS_H__ 
+
 #include "include/my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/include/rapid_context.h"
-class key_range;
-namespace ShannonBase {
-//interface of reader, which is used to travel all data.
-class Reader : public MemoryObject{
+
+namespace ShannonBase{
+namespace Optimizer{
+
+class Statistics : public MemoryObject {
 public:
-  Reader() = default;
-  virtual ~Reader() = default;
-  virtual int open() = 0;
-  virtual int close() = 0;
-  virtual int read(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  virtual int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) = 0;
-  virtual int write(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  virtual int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) = 0;
-  virtual int index_general(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  virtual int index_next(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  virtual int index_next_same(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) = 0;
-  virtual uchar* tell(uint = 0) = 0;
-  virtual uchar* seek(size_t offset) = 0;
+  Statistics() = default;
+  virtual ~Statistics() = default;
+  virtual uint cost() = 0;
 };
 
+class CardinalityStatis : public Statistics {
+  CardinalityStatis() = default;
+  virtual ~CardinalityStatis() = default;
+  uint cost() override;
+};
+
+} //ns:optimizer
 } //ns:shannonbase
-#endif //__SHANNONBASE_READER_READER_H__
+#endif //__SHANNONBASE_STATISTICS_H__

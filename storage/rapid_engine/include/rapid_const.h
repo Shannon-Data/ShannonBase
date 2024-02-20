@@ -29,6 +29,10 @@
 
 #include "my_inttypes.h"
 namespace ShannonBase{
+/** Handler name for InnoDB */
+static constexpr char handler_name[] = "Rapid";
+static const char rapid_hton_name[] = "Rapid";
+
 
 //the version of shannonbase.
 constexpr uint SHANNONBASE_VERSION = 0x1;
@@ -73,17 +77,38 @@ constexpr uint8 SHANNON_ROW_TOTAL_LEN_UNALIGN = SHANNON_INFO_BYTE_LEN +
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
 constexpr uint8 SHANNON_ROW_TOTAL_LEN = ALIGN_WORD(SHANNON_ROW_TOTAL_LEN_UNALIGN, 8);
 
+constexpr uint SHANNON_ROWS_IN_CHUNK = SHANNON_CHUNK_SIZE / SHANNON_ROW_TOTAL_LEN;
+
+//The lowest value, here, which means it's a invalid value. to describe its validity.
+constexpr double SHANNON_LOWEST_DOUBLE = std::numeric_limits <double>::lowest();
+constexpr double SHANNON_LOWEST_INT = std::numeric_limits <int>::lowest();
+
 constexpr double SHANNON_EPSILON = 1e-10;
 inline bool are_equal(double a, double b, double epsilon = SHANNON_EPSILON) {
-    return std::fabs(a - b) < epsilon;
+    return (std::fabs(a - b) < epsilon) ? true : false;
 }
 
 inline bool is_less_than(double a, double b, double epsilon = SHANNON_EPSILON) {
-    return (b - a) > epsilon;
+    return ((b - a) > epsilon) ? true : false;
+}
+inline bool is_less_than_or_eq(double a, double b, double epsilon = SHANNON_EPSILON) {
+    return (((b - a) > epsilon) || are_equal(a, b))? true : false;
 }
 
 inline bool is_greater_than(double a, double b, double epsilon = SHANNON_EPSILON) {
-    return (a - b) > epsilon;
+    return ((a - b) > epsilon) ? true : false;
+}
+
+inline bool is_greater_than_or_eq(double a, double b, double epsilon = SHANNON_EPSILON) {
+    return (((a - b) > epsilon) || are_equal(a, b)) ? true : false;
+}
+
+inline bool is_valid(double a) {
+    return are_equal(a, SHANNON_LOWEST_DOUBLE) ? false : true;
+}
+
+inline bool is_valid(int a) {
+    return are_equal(a, SHANNON_LOWEST_INT) ? false : true;
 }
 //This is use for Rapid cluster in future. in next, we will build up a AP clust for ShannonBase.
 enum class RPD_NODE_ROLE {

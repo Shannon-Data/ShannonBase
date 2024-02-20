@@ -46,9 +46,11 @@
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
 #include "storage/rapid_engine/include/rapid_stats.h"
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 /*
   Callbacks implementation for RPD_TABLE_ID.
 */
+extern ShannonBase::ShannonLoadedTables *shannon_loaded_tables;
 
 THR_LOCK table_rpd_table_id::m_table_lock;
 
@@ -105,7 +107,7 @@ void table_rpd_table_id::reset_position() {
 }
 
 ha_rows table_rpd_table_id::get_row_count() {
-  return ShannonBase::meta_rpd_columns_infos.size();
+  return ShannonBase::shannon_loaded_tables->size();
 }
 
 int table_rpd_table_id::rnd_next() {
@@ -135,20 +137,17 @@ int table_rpd_table_id::rnd_pos(const void *pos) {
 int table_rpd_table_id::make_row(uint index[[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::meta_rpd_columns_infos.size()) {
+  if (index >= ShannonBase::shannon_loaded_tables->size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.table_id = ShannonBase::meta_rpd_columns_infos[index].table_id;
-
-    std::string full_name;
-    full_name += ShannonBase::meta_rpd_columns_infos[index].schema_name;
-    full_name += "\\";
-    full_name += ShannonBase::meta_rpd_columns_infos[index].table_name;
+    std::string schema, table, full_name;
+    ulonglong tableid;
+    ShannonBase::shannon_loaded_tables->table_infos(index, tableid, schema, table);
+    m_row.table_id = tableid;
+    full_name = schema + "\\" + table;
     strncpy(m_row.full_table_name, full_name.c_str(), full_name.length());
-    strncpy(m_row.schema_name, ShannonBase::meta_rpd_columns_infos[index].schema_name,
-            strlen(ShannonBase::meta_rpd_columns_infos[index].schema_name));
-    strncpy(m_row.table_name, ShannonBase::meta_rpd_columns_infos[index].table_name,
-            strlen(ShannonBase::meta_rpd_columns_infos[index].table_name));
+    strncpy(m_row.schema_name,schema.c_str(), schema.length());
+    strncpy(m_row.table_name, table.c_str(), table.length());
   }
   return 0;
 }

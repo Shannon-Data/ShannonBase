@@ -45,11 +45,14 @@ public:
 
   int open() override;
   int close() override;
-  int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0) override;
-  int write(ShannonBaseContext* context, uchar*buffer, size_t lenght = 0) override;
-  int records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) override;
-  uchar* tell() override;
-  uchar* seek(uchar* pos) override;
+  int read(ShannonBaseContext*, uchar*, size_t  = 0) override;
+  int write(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) override;
+  int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
+  int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int index_next(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int index_next_same(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
+  uchar* tell(uint = 0) override;
   uchar* seek(size_t offset) override;
 private:
   std::string m_path;

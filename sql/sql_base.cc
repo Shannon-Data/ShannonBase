@@ -6680,21 +6680,63 @@ static bool open_secondary_engine_tables(THD *thd, uint flags) {
   // The previous execution context should have been destroyed.
   assert(lex->secondary_engine_execution_context() == nullptr);
 
+  // If use of primary engine is requested, set state accordingly
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
+    if (lex->can_execute_only_in_secondary_engine()) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+               lex->get_not_supported_in_primary_reason());
+      return true;
+    }
+
+    thd->set_secondary_engine_optimization(
+        Secondary_engine_optimization::PRIMARY_ONLY);
+    return false;
+  }
   // If use of secondary engines has been disabled for the statement,
   // there is nothing to do.
-  if (sql_cmd == nullptr || sql_cmd->secondary_storage_engine_disabled())
+  // Statements without Sql_cmd representations are for primary engine only:
+  if (sql_cmd == nullptr) {
+    thd->set_secondary_engine_optimization(
+        Secondary_engine_optimization::PRIMARY_ONLY);
     return false;
-
+  }
+  /*
+    Only some SQL commands can be offloaded to secondary table offload.
+    Note that table-less queries are always executed in primary engine.
+  */
+  const bool offload_possible =
+      (lex->sql_command == SQLCOM_SELECT && lex->table_count > 0) ||
+      ((lex->sql_command == SQLCOM_INSERT_SELECT ||
+        lex->sql_command == SQLCOM_CREATE_TABLE) &&
+       lex->table_count > 1);
+  /*
+    If query can only execute in secondary engine, effectively set it as
+    a forced secondary execution.
+  */
+  if (lex->can_execute_only_in_secondary_engine()) {
+    thd->set_secondary_engine_forced(true);
+  }
   // If the user has requested the use of a secondary storage engine
   // for this statement, skip past the initial optimization for the
   // primary storage engine and go straight to the secondary engine.
   if (thd->secondary_engine_optimization() ==
           Secondary_engine_optimization::PRIMARY_TENTATIVELY &&
       thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) {
-    thd->set_secondary_engine_optimization(
-        Secondary_engine_optimization::SECONDARY);
-    mysql_thread_set_secondary_engine(true);
-    mysql_statement_set_secondary_engine(thd->m_statement_psi, true);
+    if (offload_possible) {
+      thd->set_secondary_engine_optimization(
+          Secondary_engine_optimization::SECONDARY);
+      mysql_thread_set_secondary_engine(true);
+      mysql_statement_set_secondary_engine(thd->m_statement_psi, true);
+    } else {
+      // Table-less queries cannot be executed in secondary engine
+      if (lex->can_execute_only_in_secondary_engine()) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+                 lex->get_not_supported_in_primary_reason());
+        return true;
+      }
+      thd->set_secondary_engine_optimization(
+          Secondary_engine_optimization::PRIMARY_ONLY);
+    }
   }
 
   // Only open secondary engine tables if use of a secondary engine

@@ -200,6 +200,8 @@
 #include "typelib.h"
 
 #include "storage/rapid_engine/include/rapid_stats.h" //meta_rpd_columns_infos
+#include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/imcs/cu.h"
 namespace dd {
 class View;
 }  // namespace dd
@@ -2732,10 +2734,16 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
     row_rpd_columns.table_id = static_cast<uint>(table.s->table_map_id.id());
     row_rpd_columns.column_id = field_ptr->field_index();
     strncpy(row_rpd_columns.column_name, field_ptr->field_name,
-            strlen(row_rpd_columns.column_name));
+            strlen(field_ptr->field_name));
     strncpy(row_rpd_columns.table_name, table.s->table_name.str,
-            strlen(row_rpd_columns.table_name));
-    row_rpd_columns.data_dict_bytes = 0;
+            strlen(table.s->table_name.str));
+    std::string key_name (table.s->db.str);
+    key_name += table.s->table_name.str;
+    key_name += field_ptr->field_name;
+    ShannonBase::Compress::Dictionary* dict =
+      ShannonBase::Imcs::Imcs::get_instance()->get_cu(key_name)->get_header()->m_local_dict.get();
+    if (dict)
+      row_rpd_columns.data_dict_bytes = dict->content_size();
     row_rpd_columns.data_placement_index = 0;
 
     std::string comment (field_ptr->comment.str);

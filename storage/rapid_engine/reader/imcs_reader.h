@@ -35,6 +35,7 @@
 #include "include/my_inttypes.h"
 #include "include/my_base.h" //HA_ERR_END_OF_FILE
 
+#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/reader/reader.h"
 
@@ -55,37 +56,64 @@ public:
   int open();
   int close();
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
+  int read_index(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
+                 ha_rkey_function find_flag);
+  int read_index_fast(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
+                 ha_rkey_function find_flag);
+  int index_lookup(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
+                 ha_rkey_function find_flag);
   int records_in_range(ShannonBaseContext*, unsigned int , key_range *, key_range *);
-  int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0);
+  uchar* write(ShannonBaseContext* context, uchar*buffer, size_t length = 0);
+  uchar* seek(size_t offset);
   inline Imcs::Cu* get_source() {return m_source_cu;}
 private:
   std::string m_key_name;
   TABLE* m_source_table{nullptr};
   Field* m_source_field {nullptr};
-  //reader info, includes: current_chunkid, pos.
-  std::atomic<uint> m_reader_chunk_id {0};
-  std::atomic<uint> m_writter_chunk_id {0};
-  std::atomic<uchar*> m_reader_pos {nullptr};
-  std::atomic<uchar*> m_writter_pos {nullptr};
+
+  //full table scan info.
+  //reader info, includes: current_chunkid, pos. read id
+  std::atomic<uint> m_rnd_chunk_rid {0};
+  //writer info, to which chunk be written. write id
+  std::atomic<uint> m_rnd_chunk_wid {0};
+  //where the data be written.
+  std::atomic<uchar*> m_rnd_wpos {nullptr};
+  //just like cursor. full table scan cursor.
+  std::atomic<uchar*> m_rnd_rpos {nullptr};
+  //source Cu of this cu view.
   Imcs::Cu* m_source_cu{nullptr};
 };
+
 class ImcsReader : public Reader {
 public:
   ImcsReader(TABLE* table);
   ImcsReader() = delete;
   virtual ~ImcsReader() {}
+  using CuViews_t = std::map<std::string, std::unique_ptr<CuView>>;
+
   int open() override;
   int close() override;
-  int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0) override;
-  int write(ShannonBaseContext* context, uchar*buffer, size_t length = 0) override;
+  //seqential read. full table scan
+  int read(ShannonBaseContext*, uchar*, size_t = 0) override;
+  //sequential write, full table scan.
+  int write(ShannonBaseContext*, uchar*, size_t= 0) override;
+  //get the nums of rows in range.
   int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) override ;
-  uchar* tell() override;
-  uchar* seek(uchar* pos) override;
+  //read a row via index with a key.
+  int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
+  //read the rows without a key value, just like travel over index tree.
+  int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int index_next(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int index_next_same(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
+  uchar* tell(uint = 0) override;
   uchar* seek(size_t offset) override;
   bool is_open() const { return m_start_of_scan; }
 private:
+  int cond_comp(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function);
+  int index_repos();
+private:
   //local buffer.
-  uchar m_buff[32] = {0};
+  uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};
   //viewer of cus.
   std::map<std::string, std::unique_ptr<CuView>> m_cu_views;
   //source table.

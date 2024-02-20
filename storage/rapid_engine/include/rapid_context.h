@@ -26,12 +26,41 @@
 #ifndef __SHANNONBASE_CONTEXT_H__
 #define __SHANNONBASE_CONTEXT_H__
 
+#include "sql/sql_lex.h" //Secondary_engine_execution_context
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/include/rapid_const.h"
+
 class trx_t;
 class ReadView;
 class TABLE;
+class JOIN;
+class THD;
 
 namespace ShannonBase {
+/**
+  Execution context class for the Rapid engine. It allocates some data
+  on the heap when it is constructed, and frees it when it is
+  destructed, so that LeakSanitizer and Valgrind can detect if the
+  server doesn't destroy the object when the query execution has
+  completed.
+*/
+class Shannon_execution_context : public Secondary_engine_execution_context {
+ public:
+  Shannon_execution_context() ;
+  /**
+    Checks if the specified cost is the lowest cost seen so far for executing
+    the given JOIN.
+  */
+  bool BestPlanSoFar(const JOIN &join, double cost);
+
+ private:
+  std::unique_ptr<char[]> m_data;
+  /// The JOIN currently being optimized.
+  const JOIN *m_current_join{nullptr};
+  /// The cost of the best plan seen so far for the current JOIN.
+  double m_best_cost;
+};
+
 class ShannonBaseContext {
 public:
   ShannonBaseContext() {}
@@ -40,19 +69,24 @@ public:
   ShannonBaseContext& operator=(const ShannonBaseContext&) = delete;
 };
 
+//used in imcs.
+class ha_rapid;
 class RapidContext : public ShannonBaseContext {
 public:
   class extra_info_t{
     public:
-      extra_info_t(): m_pk(0), m_trxid(0) {}
+      extra_info_t() {}
       ~extra_info_t() {}
-      //primary key of this innodb rows.
-      uint64 m_pk {0};
       //trxid of this innodb rows.
       uint64 m_trxid {0};
       Compress::Encoding_type m_algo {Compress::Encoding_type::SORTED};
-  };
 
+      //index scan info
+      ushort m_keynr{MAX_FIELDS};
+      ha_rkey_function m_find_flag {HA_READ_INVALID};
+      uint8 m_key_len {0};
+      std::unique_ptr<uchar[]> m_key_buff {nullptr};
+  };
   RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}
   virtual ~RapidContext() = default;
   //current transaction.
@@ -64,6 +98,14 @@ public:
   //the dictionary for this DB.
   Compress::Dictionary* m_local_dict {nullptr};
   extra_info_t m_extra_info;
+  const ha_rapid* m_handler;
+};
+//used in optimization phase.
+class OptimizeContext : public ShannonBaseContext {
+public:
+  OptimizeContext() = default;
+  virtual ~ OptimizeContext() = default;
+  THD* m_thd;
 };
 
 } //ns:shannonbase

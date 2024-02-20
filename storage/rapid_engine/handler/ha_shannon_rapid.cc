@@ -53,9 +53,12 @@
 #include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/sql_class.h"
 #include "sql/sql_const.h"
+#include "sql/key.h"
 #include "sql/sql_lex.h"
+#include "sql/item.h"
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
+#include "sql/opt_costmodel.h"
 #include "template_utils.h"
 #include "thr_lock.h"
 
@@ -63,11 +66,16 @@
 #include "storage/innobase/handler/ha_innodb.h"
 
 #include "storage/rapid_engine/include/rapid_stats.h"
+#include "storage/rapid_engine/utils/utils.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 
+#include "storage/rapid_engine/optimizer/optimizer.h" //optimizer
+#include "storage/rapid_engine/cost/cost.h"           //costestimator
+#include "storage/rapid_engine/optimizer/rules/rule.h"//Rule
 /* clang-format off */
 namespace dd {
 class Table;
@@ -80,50 +88,52 @@ extern "C" const char* __asan_default_options() {
   return "detect_odr_violation=0";
 }
 
-namespace {
+namespace ShannonBase {
+
 // Map from (db_name, table_name) to the RapidShare with table state.
-class ShannonLoadedTables {
-  std::map<std::pair<std::string, std::string>, ShannonBase::RapidShare*> m_tables;
-  std::mutex m_mutex;
- public:
-  void add(const std::string &db, const std::string &table, ShannonBase::RapidShare* share) {
+void ShannonLoadedTables::add(const std::string &db, const std::string &table, ShannonBase::RapidShare* share) {
     std::lock_guard<std::mutex> guard(m_mutex);
     m_tables.insert({std::make_pair(db, table), share});
+}
+ShannonBase::RapidShare *ShannonLoadedTables::get(const std::string &db, const std::string &table) {
+  std::lock_guard<std::mutex> guard(m_mutex);
+  auto it = m_tables.find(std::make_pair(db, table));
+  return it == m_tables.end() ? nullptr : it->second;
+}
+void ShannonLoadedTables::erase(const std::string &db, const std::string &table) {
+  std::lock_guard<std::mutex> guard(m_mutex);
+  auto it = m_tables.find(std::make_pair(db, table));
+  auto ptr = it == m_tables.end() ? nullptr : it->second;
+  if (ptr)
+    delete it->second;
+  m_tables.erase(std::make_pair(db, table));
+}
+void ShannonLoadedTables::table_infos(uint index, ulonglong&tid, std::string& schema, std::string& table ) {
+  if (index > m_tables.size()) return;
+  uint count = 0;
+  for (auto& item : m_tables) {
+    if (count == index) {
+      schema= (item.first).first;
+      table = (item.first).second;
+      tid = (item.second)->m_tableid;
+    }
+    count ++;
   }
-  ShannonBase::RapidShare *get(const std::string &db, const std::string &table) {
-    std::lock_guard<std::mutex> guard(m_mutex);
-    auto it = m_tables.find(std::make_pair(db, table));
-    return it == m_tables.end() ? nullptr : it->second;
-  }
-  void erase(const std::string &db, const std::string &table) {
-    std::lock_guard<std::mutex> guard(m_mutex);
-    auto it = m_tables.find(std::make_pair(db, table));
-    auto ptr = it == m_tables.end() ? nullptr : it->second;
-    if (ptr)
-      delete it->second;
-    m_tables.erase(std::make_pair(db, table));
-  }
-};
+}  
 
 ShannonLoadedTables *shannon_loaded_tables{nullptr};
 static struct handlerton* shannon_rapid_hton_ptr {nullptr};
 static bool shannon_rpd_inited {false};
 ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::get_instance();;
-/**
-  Execution context class for the Rapid engine. It allocates some data
-  on the heap when it is constructed, and frees it when it is
-  destructed, so that LeakSanitizer and Valgrind can detect if the
-  server doesn't destroy the object when the query execution has
-  completed.
-*/
-class Rapid_execution_context : public Secondary_engine_execution_context {
- public:
-  Rapid_execution_context() : m_data(std::make_unique<char[]>(10)) {}
-  /**
-    Checks if the specified cost is the lowest cost seen so far for executing
-    the given JOIN.
-  */
-  bool BestPlanSoFar(const JOIN &join, double cost) {
+
+//global rpd meta infos
+rpd_columns_container meta_rpd_columns_infos;
+std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
+
+Shannon_execution_context::Shannon_execution_context() : m_data(std::make_unique<char[]>(10)) {
+}
+
+bool Shannon_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
     if (&join != m_current_join) {
       // No plan has been seen for this join. The current one is best so far.
       m_current_join = &join;
@@ -135,30 +145,23 @@ class Rapid_execution_context : public Secondary_engine_execution_context {
     const bool cheaper = cost < m_best_cost;
     m_best_cost = std::min(m_best_cost, cost);
     return cheaper;
-  }
+}
 
- private:
-  std::unique_ptr<char[]> m_data;
-  /// The JOIN currently being optimized.
-  const JOIN *m_current_join{nullptr};
-  /// The cost of the best plan seen so far for the current JOIN.
-  double m_best_cost;
-};
-
-}  // namespace
-
-namespace ShannonBase {
-//global rpd meta infos
-rpd_columns_container meta_rpd_columns_infos;
-std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
 ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
-    : handler(hton, table_share_arg) {
+    : handler(hton, table_share_arg), m_rpd_thd(nullptr), m_start_of_scan(false),
+    m_share(nullptr), m_rpd_context(nullptr), m_imcs_reader(nullptr),
+    m_primary_key(nullptr), m_key_type(MYSQL_TYPE_INVALID) {
   m_rpd_thd = ha_thd();
 }
+ha_rapid::~ha_rapid() {
+}
+const char *ha_rapid::table_type() const { return (rapid_hton_name); }
+
 int ha_rapid::create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
   DBUG_TRACE;
   return HA_ERR_WRONG_COMMAND;
 }
+
 int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, const dd::Table * table_def) {
   DBUG_TRACE;
   m_share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
@@ -170,12 +173,62 @@ int ha_rapid::open(const char *name, int mode, unsigned int test_if_locked, cons
   thr_lock_data_init(&m_share->m_lock, &m_lock, nullptr);
   return 0;
 }
+
 int ha_rapid::close () {
   DBUG_TRACE;
   return 0;
 }
-int ha_rapid::rnd_init(bool scan) {
+
+/* Assume that the read time is proportional to the scan time for all
+  rows + at most one seek per range. */
+//refined cost model should be impl in future. here, it's a coarse one.
+double ha_rapid::scan_time() {
+  //all memory operations.
+  const Cost_model_table *const cost_model = table->cost_model();
+  double blocks = (estimate_rows_upper_bound() * SHANNON_ROW_TOTAL_LEN) / UNIV_PAGE_SIZE;
+
+  return cost_model->buffer_block_read_cost(blocks ? blocks : 1);
+}
+
+/** Calculate the time it takes to read a set of ranges through an index
+ This enables us to optimise reads for clustered indexes.
+ @return estimated time measured in disk seeks */
+double ha_rapid::read_time(uint index, uint ranges, ha_rows rows) {
+  ha_rows total_rows;
+
+  if (index != table->s->primary_key) {
+    /* Not clustered */
+    return (handler::read_time(index, ranges, rows));
+  }
+
+  if (rows <= 2) {
+    return ((double)rows);
+  }
+
+  /* Assume that the read time is proportional to the scan time for all
+  rows + at most one seek per range. */
+
+  double time_for_scan = scan_time();
+
+  if ((total_rows = estimate_rows_upper_bound()) < rows) {
+    return (time_for_scan);
+  }
+
+  return (ranges + (double)rows / (double)total_rows * time_for_scan);
+}
+
+int ha_rapid::read_range_first(const key_range *start_key,
+                               const key_range *end_key, bool eq_range_arg,
+                               bool sorted) {
   DBUG_TRACE;
+  return handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
+}
+
+int ha_rapid::read_range_next() {
+  return (handler::read_range_next());
+}
+
+int ha_rapid::rapid_initialize() {
   ut_ad(shannon_rpd_inited == true);
   ut_ad(m_start_of_scan == false);
   m_start_of_scan = true;
@@ -188,6 +241,7 @@ int ha_rapid::rnd_init(bool scan) {
 
   //init rapidcontext
   m_rpd_context.reset(new ShannonBase::RapidContext());
+  m_rpd_context->m_handler = this;
   m_rpd_context->m_table = table;
   m_rpd_context->m_current_db = table->s->db.str;
   m_rpd_context->m_current_table = table->s->table_name.str;
@@ -197,15 +251,12 @@ int ha_rapid::rnd_init(bool scan) {
     return HA_ERR_GENERIC;
   }
   m_rpd_context->m_local_dict = loaded_dictionaries[m_rpd_context->m_current_db].get();
-
+  m_rpd_context->m_extra_info.m_keynr = active_index;
   m_imcs_reader.reset(new ImcsReader(table)) ;
-  m_imcs_reader->open();
-
-  //imcs do initialization. scan: random read or scan.
-  return imcs_instance->initialized()? 0 : imcs_instance->rnd_init(scan);
+  return m_imcs_reader->open();
 }
-int ha_rapid::rnd_end() {
-  DBUG_TRACE;
+
+int ha_rapid::rapid_deinitialize() {
   if (m_start_of_scan) {
     m_start_of_scan = false;
     if (m_rpd_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) {
@@ -214,30 +265,40 @@ int ha_rapid::rnd_end() {
          trx_commit(trx);
     }
     m_imcs_reader->close();
-    return imcs_instance->initialized()? imcs_instance->rnd_end() : 0;
+
+    m_rpd_context.reset(nullptr);
+    m_imcs_reader.reset(nullptr);
   }
+
   return 0;
 }
-int ha_rapid::read_range_first(const key_range *start_key,
-                               const key_range *end_key, bool eq_range_arg,
-                               bool sorted) {
-  return handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
+
+int ha_rapid::rnd_init(bool scan) {
+  DBUG_TRACE;
+  inited = handler::RND;
+  return rapid_initialize();
 }
 
-int ha_rapid::read_range_next() {
-  return (handler::read_range_next());
+/** Ends a table scan.
+ @return 0 or error number */
+int ha_rapid::rnd_end() {
+  DBUG_TRACE;
+  inited = handler::NONE;
+  return rapid_deinitialize();
 }
+
+/** Reads the next row in a table scan (also used to read the FIRST row
+ in a table scan).
+ @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::rnd_next(unsigned char *buffer) {
   DBUG_TRACE;
   ut_ad (m_start_of_scan && inited == handler::RND);
-  if (pushed_idx_cond){ //icp
-    //TODO: evaluate condition item, and do condtion eval in scan.
-  }
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   auto err = m_imcs_reader->read(m_rpd_context.get(), buffer);
   return err;
 }
+
 int ha_rapid::info(unsigned int flags) {
   // Get the cardinality statistics from the primary storage engine.
   handler *primary = ha_get_primary_handler();
@@ -247,10 +308,99 @@ int ha_rapid::info(unsigned int flags) {
   }
   return ret;
 }
+
 handler::Table_flags ha_rapid::table_flags() const {
-  // Secondary engines do not support index access. Indexes are only used for
-  // cost estimates.
-  return HA_NO_INDEX_ACCESS;
+  ulong flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE |
+                HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
+  return flags;
+}
+
+int ha_rapid::key_cmp(KEY_PART_INFO *key_part, const uchar *key, uint key_length) {
+  uint store_length;
+
+  for (const uchar *end = key + key_length; key < end;
+       key += store_length, key_part++) {
+    int cmp;
+    const int res = (key_part->key_part_flag & HA_REVERSE_SORT) ? -1 : 1;
+    store_length = key_part->store_length;
+    if (key_part->null_bit) {
+      /* This key part allows null values; NULL is lower than everything */
+      const bool field_is_null = key_part->field->is_null();
+      if (*key)  // If range key is null
+      {
+        /* the range is expecting a null value */
+        if (!field_is_null) return res;  // Found key is > range
+        /* null -- exact match, go to next key part */
+        continue;
+      } else if (field_is_null)
+        return -res;  // NULL is less than any value
+      key++;          // Skip null byte
+      store_length--;
+    }
+    if ((cmp = key_part->field->key_cmp(key, key_part->length)) < 0)
+      return -res;
+    if (cmp > 0) return res;
+  }
+  return 0;  // Keys are equal
+}
+
+int ha_rapid::compare_key_icp(const key_range *range) {
+  int cmp;
+  if (!range) return 0;  // no max range
+  cmp = key_cmp(range_key_part, range->key, range->length);
+  if (!cmp) cmp = get_key_comp_result();
+  if (get_range_scan_direction() == RANGE_SCAN_DESC) cmp = -cmp;
+  return cmp;
+}
+
+Item* ha_rapid::get_cond_item(Item* cond, Field* key_field) {
+  /**
+   * In rapide, it's a column store, we only juse the first part of an index as we
+   * index when we insert the data into rapid, therefore, if we use comb index,
+   * such as we have an PK(cola, colb), and using cond as cond(cola, a) OP cond(colb,b).
+   * Therefore, in rapid, only the first part of cond used in pushed down condition.
+  */
+  if (cond->type() == Item::COND_ITEM) {
+    List_iterator<Item> li(*((Item_cond *)cond)->argument_list());
+    Item *item;
+    while ((item = li++)) {
+      if (item->type() == Item::COND_ITEM) {
+        //if ((Item_cond*)item)->functype() == Item_func::)
+        get_cond_item(item, key_field);
+
+      } else if (item->type() == Item::FUNC_ITEM) {
+        Item_func *item_func = (Item_func *)item;
+        const Item_func::Functype func_type = item_func->functype();
+        ut_a(func_type != Item_func::TRIG_COND_FUNC ||
+            func_type != Item_func::DD_INTERNAL_FUNC);
+
+        if (item_func->argument_count() > 0) {
+        /* This is a function, apply condition recursively to arguments */
+          Item **item_end =
+              (item_func->arguments()) + item_func->argument_count();
+          for (Item **child = item_func->arguments(); child != item_end;
+              child++) {
+            auto arg = *child;
+            if (uses_index_fields_only(arg, table, 0, false))
+              return arg;
+            get_cond_item(arg, key_field);
+          }
+        }
+      } else {
+        switch (item->type()) {
+          case Item::FIELD_ITEM: {
+             Item_field* item_f = down_cast<Item_field*> (item);
+             if (item_f->field->table == table && item_f->field == key_field) return item_f;
+          } break;
+          case  Item::REF_ITEM: {
+            cond->real_item();
+          }break;
+          default: break;
+        }
+      }
+    }
+  }
+  return nullptr;
 }
 
 Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
@@ -262,14 +412,18 @@ Item *ha_rapid::idx_cond_push(uint keyno, Item *idx_cond)
   pushed_idx_cond = idx_cond;
   pushed_idx_cond_keyno = keyno;
   in_range_check_pushed_down = true;
+
   /* We will evaluate the condition entirely */
   return nullptr;
 }
+
 unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part,
                                    bool all_parts) const {
+  //here, we support the same index flag as primary engine.
   const handler *primary = ha_get_primary_handler();
   const unsigned long primary_flags =
       primary == nullptr ? 0 : primary->index_flags(idx, part, all_parts);
+
   if(pushed_idx_cond) {}
   // Inherit the following index flags from the primary handler, if they are
   // set:
@@ -280,8 +434,119 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part,
   // HA_KEY_SCAN_NOT_ROR - to signal if the index returns records in rowid
   // order. Used to disable use of the index in the range optimizer if it is not
   // in rowid order.
-  return ((HA_READ_RANGE | HA_KEY_SCAN_NOT_ROR) & primary_flags);
+
+  return ((HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER |
+           HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN |
+           HA_READ_RANGE | HA_KEY_SCAN_NOT_ROR) & primary_flags);
 }
+
+uint ha_rapid::max_supported_keys() const {
+  return (MAX_KEY);
+}
+
+uint ha_rapid::max_supported_key_length() const {
+  return (MAX_KEY);
+}
+
+int ha_rapid::index_init(uint keynr, bool sorted) {
+  DBUG_TRACE;
+  active_index = keynr;
+
+  m_primary_key = dynamic_cast<ha_innobase*>(ha_get_primary_handler())->innobase_get_index(keynr);
+  bool index_usable {false};
+  if (m_primary_key == nullptr) {
+    index_usable = false;
+    return 1;
+  }
+
+  index_usable = m_primary_key->is_usable(thd_to_trx(ha_thd()));
+  if (!index_usable) {
+    if (m_primary_key->is_corrupted()) {
+      return m_primary_key->is_clustered() ?  HA_ERR_TABLE_CORRUPT : HA_ERR_INDEX_CORRUPT;
+     }
+  }
+
+  auto ret = rapid_initialize();
+  inited = handler::INDEX;
+
+  return ret;
+}
+
+int ha_rapid::index_end() {
+  DBUG_TRACE;
+
+  active_index = MAX_KEY;
+
+  in_range_check_pushed_down = false;
+  inited = handler::NONE;
+
+  return rapid_deinitialize();
+}
+
+/** Positions an index cursor to the index specified in the handle. Fetches the
+ row if any.
+ @return 0, HA_ERR_KEY_NOT_FOUND, or error number */
+int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len,
+                 ha_rkey_function find_flag) {
+  DBUG_TRACE;
+  ut_ad (m_start_of_scan && inited == handler::INDEX);
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf,
+                                       const_cast<uchar*>(key), key_len, find_flag);
+  return err;
+}
+
+int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
+  return HA_ERR_KEY_NOT_FOUND;
+}
+
+/** Reads the next row from a cursor.
+ @return 0, HA_ERR_END_OF_FILE, or error number */
+int ha_rapid::index_next(uchar *buf) {
+  ut_ad (m_start_of_scan && inited == handler::INDEX);
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  auto err = m_imcs_reader->index_next(m_rpd_context.get(), buf);
+  return err;
+}
+
+/** Reads the next row matching to the key value given as the parameter.
+ @return 0, HA_ERR_END_OF_FILE, or error number */
+int ha_rapid::index_next_same(uchar *buf, const uchar *key, uint keylen) {
+  ut_ad (m_start_of_scan && inited == handler::INDEX);
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  auto err = m_imcs_reader->index_next_same(m_rpd_context.get(), buf,
+                                      const_cast<uchar*>(key), keylen,
+                                      HA_READ_KEY_EXACT);
+  return err;
+}
+
+/** Reads the previous row from a cursor, which must have previously been
+ positioned using index_read.
+ @return 0, HA_ERR_END_OF_FILE, or error number */
+int ha_rapid::index_prev(uchar *buf) {
+  return HA_ERR_END_OF_FILE;
+}
+
+/** Positions a cursor on the first record in an index and reads the
+ corresponding row to buf.
+ @return 0, HA_ERR_END_OF_FILE, or error code */
+int ha_rapid::index_first(uchar *buf) {
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+
+  //m_rpd_context->m_extra_info.m_find_flag = HA_READ_AFTER_KEY;
+  return m_imcs_reader->index_general(m_rpd_context.get(), buf);
+}
+
+/** Positions a cursor on the last record in an index and reads the
+ corresponding row to buf.
+ @return 0, HA_ERR_END_OF_FILE, or error code */
+int ha_rapid::index_last(uchar *buf) {
+  return HA_ERR_END_OF_FILE;
+}
+
 #if 0
 int ha_rapid::multi_range_read_init(RANGE_SEQ_IF *seq, void *seq_init_param,
                           uint n_ranges, uint mode,
@@ -306,24 +571,55 @@ ha_rows ha_rapid::multi_range_read_info(uint keyno, uint n_ranges, uint keys,
   return 0;
 }
 #endif
+/**
+Index Condition Pushdown interface implementation */
+
+/** Shannon Rapid index push-down condition check
+ @return ICP_NO_MATCH, ICP_MATCH, or ICP_OUT_OF_RANGE */
+ICP_RESULT
+shannon_rapid_index_cond(ha_rapid *h) /*!< in/out: pointer to ha_rapid */
+{
+  DBUG_TRACE;
+
+  assert(h->pushed_idx_cond);
+  assert(h->pushed_idx_cond_keyno != MAX_KEY);
+
+  if (h->end_range && h->compare_key_icp(h->end_range) > 0) {
+    /* caller should return HA_ERR_END_OF_FILE already */
+    return ICP_OUT_OF_RANGE;
+  }
+
+  return h->pushed_idx_cond->val_int() ? ICP_MATCH : ICP_NO_MATCH;
+}
+
+ha_rows ha_rapid::estimate_rows_upper_bound() {
+  DBUG_TRACE;
+
+  /* Calculate a minimum length for a clustered index record and from
+  that an upper bound for the number of rows. Since we only calculate
+  new statistics in row0mysql.cc when a table has grown by a threshold
+  factor, we must add a safety factor 2 in front of the formula below. */
+  ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
+  assert(imcs_instance);
+  ha_rows estimate = imcs_instance->get_rows(table);
+
+  return (ha_rows)estimate;
+}
+
+/** Estimates the number of index records in a range.
+ @return estimated number of rows */
 ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
                                   key_range *max_key) {
   // Get the number of records in the range from the primary storage engine.
   DBUG_TRACE;
-
-  if (pushed_idx_cond){ //icp
-    //TODO: evaluate condition item, and do condtion eval in scan.
-  }
-
-  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   /**
    * due to the rows stored in imcs by primary key order, therefore, it should be in ordered.
    * it's friendly to purge the unsatisfied chunk as fast as possible.
   */
-  if (!m_imcs_reader.get()) {
-    m_imcs_reader.reset(new ImcsReader(table));
-    m_imcs_reader->open();
-  }
+  std::unique_ptr<ImcsReader> reader= std::make_unique<ImcsReader>(table);
+  if (!reader.get()) return 0;
+
+  reader->open();
   std::unique_ptr<RapidContext> rpd_context  = std::make_unique<RapidContext>();
   rpd_context->m_table = table;
   rpd_context->m_current_db = table->s->db.str;
@@ -336,10 +632,11 @@ ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key,
     trx_assign_read_view(trx);
   rpd_context->m_trx = trx;
 
-  auto nums = m_imcs_reader->records_in_range(rpd_context.get(), index, min_key, max_key);
+  auto nums = reader->records_in_range(rpd_context.get(), index, min_key, max_key);
+  reader->close();
   trx_commit(trx);
+
   return nums;
-  //return ha_get_primary_handler()->records_in_range(index, min_key, max_key);
 }
 
 THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to,
@@ -361,6 +658,16 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_GENERIC;
   }
 
+  for (uint idx =0; idx < table_arg.s->fields; idx ++) {
+    Field* key_field = *(table_arg.field + idx);
+    if (!Utils::Util::is_support_type(key_field->type())) {
+      std::ostringstream err;
+      err << key_field->field_name << " type not allowed";
+      my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+  }
+
   std::unique_ptr<ImcsReader> imcs_reader = std::make_unique<ImcsReader>(const_cast<TABLE*>(&table_arg));
   ut_a(imcs_reader.get());
   imcs_reader->open();
@@ -370,36 +677,29 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   std::string db_name(table_arg.s->db.str);
   if (loaded_dictionaries.find(db_name) == loaded_dictionaries.end())
      loaded_dictionaries.insert(std::make_pair(db_name, std::make_unique<Compress::Dictionary>()));
+
+  ShannonBase::RapidContext context;
+  context.m_current_db = table_arg.s->db.str;
+  context.m_current_table = table_arg.s->table_name.str;
+  context.m_table = const_cast<TABLE *>(&table_arg);
   // check if primary key is missing. rapid engine must has at least one PK. 
   if (table_arg.s->is_missing_primary_key()) {
     my_error(ER_REQUIRES_PRIMARY_KEY, MYF(0));
     return HA_ERR_GENERIC;
-  } else {
-    KEY* key  = table_arg.s->key_info;
-    for (uint idx =0; idx < key->user_defined_key_parts; idx ++) {
-       Field* key_field = (key->key_part + idx)->field;
-       if (key_field->is_flag_set(NOT_SECONDARY_FLAG)) {////The key field MUST be set.
-         my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
-                  table_arg.s->db.str, table_arg.s->table_name.str);
-         return HA_ERR_GENERIC;
-       }
-       //only numeric data type allowed.
-       switch (key_field->type()){
-        case MYSQL_TYPE_LONG:
-        case MYSQL_TYPE_LONGLONG:
-        case MYSQL_TYPE_DOUBLE:
-        case MYSQL_TYPE_DECIMAL:
-        case MYSQL_TYPE_NEWDECIMAL:
-        case MYSQL_TYPE_INT24:
-          break;
-        default:
-           std::ostringstream err;
-           err << table_arg.s->table_name.str << "." << key_field->field_name << " PK type not allowed";
-           my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
-           return HA_ERR_GENERIC;
-       }
+  }
+
+  context.m_extra_info.m_keynr = 0;
+  auto key = (table_arg.key_info + 0);
+  for (uint keyid =0; keyid < key->user_defined_key_parts; keyid++) {
+    if (key->key_part[keyid].field->is_flag_set(NOT_SECONDARY_FLAG)) {
+      my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
+               table_arg.s->db.str, table_arg.s->table_name.str);
+      return HA_ERR_GENERIC;
     }
   }
+
+  context.m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
+  context.m_extra_info.m_key_len = key->key_length;
   // Scan the primary table and read the records.
   if (table_arg.file->inited == NONE && table_arg.file->ha_rnd_init(true)) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str,
@@ -409,14 +709,20 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   //Start to write to IMCS. Do scan the primary table.
   m_rpd_thd->set_sent_row_count(0);
   int tmp {HA_ERR_GENERIC};
-  ShannonBase::RapidContext context;
-  context.m_current_db = table_arg.s->db.str;
-  context.m_current_table = table_arg.s->table_name.str;
-  context.m_table = const_cast<TABLE *>(&table_arg);
+
   while ((tmp = table_arg.file->ha_rnd_next(table_arg.record[0])) != HA_ERR_END_OF_FILE) {
    /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
     without locks. Now, do full scan, but multi-thread scan will impl in future. */
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+
+    auto offset {0};
+    for (uint key_partid = 0; key_partid < key->user_defined_key_parts; key_partid++) {
+      memcpy(context.m_extra_info.m_key_buff.get() + offset,
+             key->key_part[key_partid].field->field_ptr(),
+             key->key_part[key_partid].store_length);
+      offset += key->key_part[key_partid].store_length;
+    }
+
     uint32 field_count = table_arg.s->fields;
     Field *field_ptr = nullptr;
     uint32 primary_key_idx [[maybe_unused]] = field_count;
@@ -430,12 +736,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     if (context.m_trx->state == TRX_STATE_NOT_STARTED) {
       assert (false);
     }
-    context.m_extra_info.m_pk = 0;
-    for (uint32 index = 0; index < field_count; index++) {
-      field_ptr = *(table_arg.field + index);
-      if (field_ptr->is_flag_set(PRI_KEY_FLAG))
-         context.m_extra_info.m_pk += field_ptr->val_real();
-    }
+    //will used rowid as rapid pk.
     //if (imcs_instance->write_direct(&context, field_ptr)) {
     if (imcs_reader->write(&context, const_cast<TABLE*>(&table_arg)->record[0])) {
       table_arg.file->ha_rnd_end();
@@ -452,6 +753,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
 
   m_share = new RapidShare ();
   m_share->file = this;
+  m_share->m_tableid = table_arg.s->table_map_id.id();
   shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) ==
       nullptr) {
@@ -477,14 +779,14 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
   RapidContext context;
   context.m_current_db = std::string(db_name);
   context.m_current_table = std::string(table_name);
-  //int ret{0};
+
   if (auto ret = imcs_instance->delete_all_direct(&context)) {
     return ret;
   }
   shannon_loaded_tables->erase(db_name, table_name);
   return 0;
 }
-}  // namespace ShannonBase 
+}  // namespace ShannonBase
 
 static bool ShannonPrepareSecondaryEngine(THD *thd, LEX *lex) {
   DBUG_EXECUTE_IF("secondary_engine_rapid_prepare_error", {
@@ -492,7 +794,7 @@ static bool ShannonPrepareSecondaryEngine(THD *thd, LEX *lex) {
     return true;
   });
 
-  auto context = new (thd->mem_root) Rapid_execution_context;
+  auto context = new (thd->mem_root) ShannonBase::Shannon_execution_context();
   if (context == nullptr) return true;
   lex->set_secondary_engine_execution_context(context);
 
@@ -511,8 +813,6 @@ static void ShannonAssertSupportedPath(const AccessPath *path) {
     case AccessPath::NESTED_LOOP_JOIN: /* purecov: deadcode */
     case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
     case AccessPath::BKA_JOIN:
-    // Index access is disabled in ha_rapid::table_flags(), so we should see none
-    // of these access types.
     case AccessPath::INDEX_SCAN:
     case AccessPath::REF:
     case AccessPath::REF_OR_NULL:
@@ -554,10 +854,27 @@ static bool ShannonOptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) 
                       return false;
                     });
   }
+  /** Here, sql has been optimized with 'unit->optimize()'. hence, we just only use
+  rapid optimizer to do some necessaries optimization to adjust the best plan.*/
+#if 0
+  std::unique_ptr<ShannonBase::OptimizeContext> optimze_context =
+    std::make_unique<ShannonBase::OptimizeContext>();
+  optimze_context->m_thd = thd;
 
+  Query_expression* query_expr_second = lex->unit;
+  std::shared_ptr<Query_expression> query_expr(query_expr_second);
+
+  std::shared_ptr<ShannonBase::Optimizer::CostEstimator> cost_est;
+  cost_est.reset(new ShannonBase::Optimizer::CostEstimator());
+  std::unique_ptr<ShannonBase::Optimizer::Optimizer> optimizer =
+    std::make_unique<ShannonBase::Optimizer::Optimizer> (query_expr, cost_est);
+
+  auto ret = optimizer->optimize(optimze_context.get(), query_expr);
+#endif
   return false;
 }
 
+//to estimate the cost used  secondary engine.
 static bool ShannonCompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost,
                             bool *use_best_so_far, bool *cheaper,
                             double *secondary_engine_cost) {
@@ -591,7 +908,7 @@ static bool ShannonCompareJoinCost(THD *thd, const JOIN &join, double optimizer_
   });
 
   // Check if the calculated cost is cheaper than the best cost seen so far.
-  *cheaper = down_cast<Rapid_execution_context *>(
+  *cheaper = down_cast<ShannonBase::Shannon_execution_context *>(
                  thd->lex->secondary_engine_execution_context())
                  ->BestPlanSoFar(join, *secondary_engine_cost);
 
@@ -610,14 +927,14 @@ static bool ShannonModifyAccessPathCost(THD *thd [[maybe_unused]],
 
 static handler *ShannonCreateHandler(handlerton *hton, TABLE_SHARE *table_share, bool partitioned,
                        MEM_ROOT *mem_root) {
-  assert(hton == shannon_rapid_hton_ptr);
+  assert(hton == ShannonBase::shannon_rapid_hton_ptr);
   if (partitioned) {
     //to do, partitioned rapid table will be supported in next.
   }
   return new (mem_root) ShannonBase::ha_rapid(hton, table_share);
 }
 static int ShannonStartConsistentSnapshot(handlerton* hton, THD* thd) {
-  assert(hton == shannon_rapid_hton_ptr);
+  assert(hton == ShannonBase::shannon_rapid_hton_ptr);
   trx_t* trx = thd_to_trx(thd);
   assert(trx);
   if (!trx_is_started(trx)) { //maybe the some error in primary engine. it should be started.
@@ -739,10 +1056,10 @@ static struct SYS_VAR *shannonbase_rapid_system_variables[] = {
 
 /** Here, end of, we export shannonbase status variables to MySQL. */
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
-  shannon_loaded_tables = new ShannonLoadedTables();
+  ShannonBase::shannon_loaded_tables = new ShannonBase::ShannonLoadedTables();
 
   handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);
-  shannon_rapid_hton_ptr = shannon_rapid_hton;
+  ShannonBase::shannon_rapid_hton_ptr = shannon_rapid_hton;
   shannon_rapid_hton->create = ShannonCreateHandler;
   shannon_rapid_hton->state = SHOW_OPTION_YES;
   shannon_rapid_hton->flags = HTON_IS_SECONDARY_ENGINE;
@@ -758,24 +1075,24 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   //shannon_rapid_hton->rollback = ;
 
   //MEM_ROOT* mem_root = current_thd->mem_root;
-  imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
-  if (!imcs_instance) {
+  ShannonBase::imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
+  if (!ShannonBase::imcs_instance) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Cannot get IMCS instance.");
     return 1;
   };
-  auto ret = imcs_instance->initialize();
-  if (!ret) shannon_rpd_inited = true;
+  auto ret = ShannonBase::imcs_instance->initialize();
+  if (!ret) ShannonBase::shannon_rpd_inited = true;
   return ret;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
-  if (shannon_loaded_tables) {
-    delete shannon_loaded_tables;
-    shannon_loaded_tables = nullptr;
+  if (ShannonBase::shannon_loaded_tables) {
+    delete ShannonBase::shannon_loaded_tables;
+    ShannonBase::shannon_loaded_tables = nullptr;
   }
-  shannon_rpd_inited = false;
-  return imcs_instance->deinitialize();
+  ShannonBase::shannon_rpd_inited = false;
+  return ShannonBase::imcs_instance->deinitialize();
 }
 
 static st_mysql_storage_engine shannonbase_rapid_storage_engine{

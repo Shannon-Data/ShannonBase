@@ -33,6 +33,7 @@
 #include "sql/my_decimal.h"
 #include "storage/innobase/include/ut0dbg.h"   //ut_ad
 
+#include "storage/rapid_engine/utils/utils.h" //Utils
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/cu.h"
@@ -47,16 +48,20 @@ std::once_flag Imcs::one;
 
 Imcs::Imcs() {
 }
+
 Imcs::~Imcs() { 
 }
+
 uint Imcs::initialize() {
   DBUG_TRACE;
   return 0;
 }
+
 uint Imcs::deinitialize() {
   DBUG_TRACE;
   return 0;
 }
+
 Cu* Imcs::get_cu(std::string& key) {
   DBUG_TRACE;
   if (m_cus.find(key) != m_cus.end()) {
@@ -64,11 +69,32 @@ Cu* Imcs::get_cu(std::string& key) {
   }
   return nullptr;
 }
+
 void Imcs::add_cu(std::string key, std::unique_ptr<Cu>& cu) {
   DBUG_TRACE;
   m_cus.insert({key, std::move(cu)});
   return;
 }
+
+ha_rows Imcs::get_rows(TABLE* source_table) {
+  ha_rows row_count{0};
+  std::string key_part (source_table->s->db.str);
+  key_part += source_table->s->table_name.str;
+
+  for (uint index =0; index < source_table->s->fields; index++) {
+    Field* field_ptr = *(source_table->field + index);
+    ut_ad(field_ptr);
+    if (!bitmap_is_set(source_table->read_set, field_ptr->field_index()) ||
+        field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    std::string key = key_part + field_ptr->field_name;
+    if (m_cus.find(key) == m_cus.end()) continue; //not found this field.
+    row_count = m_cus[key].get()->get_header()->m_rows;
+    break;
+  }
+
+  return row_count;
+}
+
 uint Imcs::rnd_init(bool scan) {
   DBUG_TRACE;
   //ut::new_withkey<Compress::Dictionar>(UT_NEW_THIS_FILE_PSI_KEY);
@@ -79,6 +105,7 @@ uint Imcs::rnd_init(bool scan) {
   m_inited = handler::RND;
   return 0;
 }
+
 uint Imcs::rnd_end() {
   DBUG_TRACE;
   for(auto &cu: m_cus) {
@@ -88,6 +115,7 @@ uint Imcs::rnd_end() {
   m_inited = handler::NONE;
   return 0;
 }
+
 uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   DBUG_TRACE;
   ut_ad(context && field);
@@ -96,6 +124,12 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
       meta info is stored into 'm_imcus'.
   */
   //the last imcu key_name.
+  if (!Utils::Util::is_support_type(field->type())) {
+    std::ostringstream err;
+    err << field->field_name << " type not allowed";
+    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
   std::string key_name = field->table->s->db.str;
   key_name += *field->table_name;
   key_name += field->field_name;
@@ -103,7 +137,7 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   auto elem = m_cus.find(key_name);
   if ( elem == m_cus.end()) { //a new field. not found
     auto [it, sucess] = m_cus.insert(std::pair{key_name, std::make_unique<Cu>(field)});
-    if (!sucess) return 1;
+    if (!sucess) return HA_ERR_GENERIC;
   }
   //start writing the data, at first, assemble the data we want to write. the layout of data
   //pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr| data]. And the string we dont
@@ -116,57 +150,29 @@ uint Imcs::write_direct(ShannonBase::RapidContext* context, Field* field) {
   int64 sum_ptr{0}, offset{0};
   if (field->is_real_null())
    info |= DATA_NULL_FLAG_MASK;
+
+  double rowid{0};
   memcpy(data.get() + offset, &info, SHANNON_INFO_BYTE_LEN);
   offset += SHANNON_INFO_BYTE_LEN;
   memcpy(data.get() + offset, &context->m_extra_info.m_trxid, SHANNON_TRX_ID_BYTE_LEN);
   offset += SHANNON_TRX_ID_BYTE_LEN;
-  memcpy(data.get() + offset, &context->m_extra_info.m_pk, SHANNON_ROWID_BYTE_LEN);
+  memcpy(data.get() + offset, &rowid, SHANNON_ROWID_BYTE_LEN);
   offset += SHANNON_ROWID_BYTE_LEN;
   memcpy(data.get() + offset, &sum_ptr, SHANNON_SUMPTR_BYTE_LEN);
   offset += SHANNON_SUMPTR_BYTE_LEN;
-  double data_val {0};
-  if (!field->is_real_null()) {//not null
-    switch (field->type()) {
-      case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_STRING:
-      case MYSQL_TYPE_VARCHAR: {
-        String buf;
-        buf.set_charset(field->charset());
-        field->val_str(&buf);
-        Compress::Dictionary* dict = m_cus[key_name]->local_dictionary();
-        ut_ad(dict);
-        data_val = dict->store(buf);
-      } break;
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DOUBLE: {
-        data_val = field->val_real();
-      }break;
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL: {
-        my_decimal dval;
-        field->val_decimal(&dval);
-        my_decimal2double(10, &dval, &data_val);
-      } break;
-      case MYSQL_TYPE_DATE:
-      case MYSQL_TYPE_DATETIME:
-      case MYSQL_TYPE_TIME: {
-        data_val = field->val_real();
-      } break;
-      default: data_val = field->val_real();
-    }
-    memcpy(data.get() + offset, &data_val, SHANNON_DATA_BYTE_LEN);
-  }
+  Compress::Dictionary* dict = m_cus[key_name]->local_dictionary();
+  double data_val = Utils::Util::get_field_value(field, dict);
+  memcpy(data.get() + offset, &data_val, SHANNON_DATA_BYTE_LEN);
 
   if (!m_cus[key_name]->write_data_direct(context, data.get(), data_len)) return 1;
   return 0;
 }
+
 uint Imcs::read_direct(ShannonBase::RapidContext* context, Field* field) {
   ut_ad(context && field);
   return 0;
 }
+
 uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   DBUG_TRACE;
   ut_ad(context && buffer);
@@ -185,78 +191,47 @@ uint Imcs::read_direct(ShannonBase::RapidContext* context, uchar* buffer) {
     if (!m_cus[key].get()->read_data_direct(context, buff))
        return HA_ERR_END_OF_FILE;
 
-    #ifdef SHANNON_ONLY_DATA_FETCH
-      long long data = *(long long*) buff;
-      my_bitmap_map *old_map = 0;
-      old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);
-      if (field_ptr->type() == MYSQL_TYPE_BLOB || field_ptr->type() == MYSQL_TYPE_STRING
-          || field_ptr->type() == MYSQL_TYPE_VARCHAR) { //read the data
-        String str;
-        Compress::Dictionary* dict = m_cus[key]->local_dictionary();
-        ut_ad(dict);
-        dict->get(data, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
-        if (str.length())
-          field_ptr->set_notnull();
-        field_ptr->store(str.c_ptr(), str.length(), &my_charset_bin);
-      } else {
-        field_ptr->store (data);
-      }
-      if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
-    #else
-      uint8 info = *(uint8*) buff;
-      if (info & DATA_DELETE_FLAG_MASK) continue;
-
-      my_bitmap_map *old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);      
-      if (info & DATA_NULL_FLAG_MASK)
-        field_ptr->set_null();
-      else {
-        field_ptr->set_notnull();
-        uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
-              data_offset += SHANNON_SUMPTR_BYTE_LEN;
-        double val = *(double*) (buff + data_offset);
-        switch (field_ptr->type()) {
-          case MYSQL_TYPE_BLOB:
-          case MYSQL_TYPE_STRING:
-          case MYSQL_TYPE_VARCHAR: { //if string, stores its stringid, and gets from local dictionary.
-            String str;
-            Compress::Dictionary* dict = m_cus[key]->local_dictionary();
-            ut_ad(dict);
-            dict->get(val, str, *const_cast<CHARSET_INFO*>(field_ptr->charset()));
-            field_ptr->store(str.c_ptr(), str.length(), &my_charset_bin);
-          }break;
-          case MYSQL_TYPE_INT24:
-          case MYSQL_TYPE_LONG:
-          case MYSQL_TYPE_LONGLONG:
-          case MYSQL_TYPE_FLOAT:
-          case MYSQL_TYPE_DOUBLE: {
-            field_ptr->store(val);
-          }break;
-          case MYSQL_TYPE_DECIMAL:
-          case MYSQL_TYPE_NEWDECIMAL: {
-            field_ptr->store(val);
-          } break;
-          case MYSQL_TYPE_DATE:
-          case MYSQL_TYPE_DATETIME2:
-          case MYSQL_TYPE_DATETIME:{
-            field_ptr->store (val);
-          } break;
-          default: field_ptr->store (val);
-        }
-      }
-      if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
-    #endif
+    uint8 info = *(uint8*) buff;
+    my_bitmap_map *old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);
+    if (info & DATA_NULL_FLAG_MASK)
+      field_ptr->set_null();
+    else {
+      field_ptr->set_notnull();
+      uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
+            data_offset += SHANNON_SUMPTR_BYTE_LEN;
+      double val = *(double*) (buff + data_offset);
+      Compress::Dictionary* dict = m_cus[key]->local_dictionary();
+      Utils::Util::store_field_value(context->m_table, field_ptr, dict, val);
+    }
+    if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
   }
   return 0;
 }
+
 uint read_batch_direct(ShannonBase::RapidContext* context, uchar* buffer){
   ut_ad(context && buffer);
   return 0;
 }
+
 uint Imcs::delete_direct(ShannonBase::RapidContext* context, Field* field, uchar* rowid) {
+  if (!context || !field) return HA_ERR_GENERIC;
+
+  std::string key = context->m_current_db + context->m_current_table;
+  key += field->field_name;
+  m_cus.erase(key);
   return 0;
 }
+
 uint Imcs::delete_all_direct(ShannonBase::RapidContext* context) {
-  m_cus.clear();
+
+  std::string key = context->m_current_db;
+  key += context->m_current_table;
+
+  for (auto& item : m_cus){
+    if (item.first.compare(0, key.length(), key, 0, key.length()) == 0)
+      m_cus.erase(item.first);
+  }
+
   return 0;
 }
 } //ns:imcs 

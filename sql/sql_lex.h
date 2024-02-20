@@ -3663,6 +3663,12 @@ class LEX_GRANT_AS {
   List<LEX_USER> *role_list;
 };
 
+/*
+  Some queries can be executed only using the secondary engine. The enum
+  "execute_only_in_secondary_reasons" retains the explanations for queries that
+  cannot be executed using the primary engine.
+*/
+enum execute_only_in_secondary_reasons { SUPPORTED_IN_PRIMARY, CUBE };
 /**
   The LEX object currently serves three different purposes:
 
@@ -3726,6 +3732,9 @@ struct LEX : public Query_tables_list {
   /* current Query_block in parsing */
   Query_block *m_current_query_block;
 
+  bool m_can_execute_only_in_secondary_engine = false;
+  execute_only_in_secondary_reasons m_execute_only_in_secondary_engine_reason{
+      SUPPORTED_IN_PRIMARY};
  public:
   inline Query_block *current_query_block() const {
     return m_current_query_block;
@@ -3848,7 +3857,28 @@ struct LEX : public Query_tables_list {
   std::map<Item_field *, Field *>::iterator end_values_map() {
     return insert_update_values_map->end();
   }
+  bool can_execute_only_in_secondary_engine() const {
+    return m_can_execute_only_in_secondary_engine;
+  }
+  void set_execute_only_in_secondary_engine(
+      const bool execute_only_in_secondary_engine_param,
+      execute_only_in_secondary_reasons reason) {
+    m_can_execute_only_in_secondary_engine =
+        execute_only_in_secondary_engine_param;
+    m_execute_only_in_secondary_engine_reason = reason;
+    assert(m_can_execute_only_in_secondary_engine ||
+           reason == SUPPORTED_IN_PRIMARY);
+  }
 
+  const char *get_not_supported_in_primary_reason() {
+    assert(can_execute_only_in_secondary_engine());
+    switch (m_execute_only_in_secondary_engine_reason) {
+      case CUBE:
+        return "CUBE";
+      default:
+        return "UNDEFINED";
+    }
+  }
  private:
   /*
     With Visual Studio, an std::map will always allocate two small objects

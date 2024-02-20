@@ -38,6 +38,7 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/chunk.h"
+#include "storage/rapid_engine/imcs/index/index.h"  //index
 
 namespace ShannonBase {
 namespace Imcs {
@@ -76,19 +77,29 @@ Cu::Cu(Field* field) {
   m_header->m_local_dict = std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
   //the initial one chunk built.
   m_chunks.push_back(std::make_unique<Chunk>(field));
+
+  //here, we will add `index' to column comment as encoding does. now, we adds index mandatory
+  if ((comment.find("INDEXED") != std::string::npos))
+    m_index = std::make_unique<Index> (Index::IndexType::ART);
+  else
+    m_index = std::make_unique<Index> (Index::IndexType::ART);
 }
+
 Cu::~Cu() {
   m_chunks.clear();
 }
+
 uchar* Cu::get_base() {
   DBUG_TRACE;
   if (!m_chunks.size()) return nullptr;
   return m_chunks[0].get()->get_base();
 }
+
 void Cu::add_chunk(std::unique_ptr<Chunk>& chunk) {
   DBUG_TRACE;
   m_chunks.push_back(std::move(chunk));
 }
+
 uint Cu::rnd_init(bool scan) {
   DBUG_TRACE;
   if (!m_chunks.size()) return 0;
@@ -99,6 +110,7 @@ uint Cu::rnd_init(bool scan) {
   m_current_chunk_id.store(0, std::memory_order::memory_order_relaxed);
   return 0;
 }
+
 uint Cu::rnd_end() {
   DBUG_TRACE;
   if (!m_chunks.size()) return 0;
@@ -108,6 +120,7 @@ uint Cu::rnd_end() {
   }
   return 0;
 }
+
 uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, uint length) {
   DBUG_TRACE;
   ut_ad(m_header.get() && m_chunks.size());
@@ -123,17 +136,17 @@ uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, ui
     m_chunks[m_chunks.size()-1].get()->get_header()->m_prev_chunk = chunk_ptr;
     chunk_ptr = m_chunks[m_chunks.size()-1].get();
     pos = chunk_ptr->write_data_direct(context, data, length);
-    //To update the metainfo.
-  }
-  //update the meta info.
-  if (m_header->m_cu_type == MYSQL_TYPE_BLOB || m_header->m_cu_type == MYSQL_TYPE_STRING ||
-      m_header->m_cu_type == MYSQL_TYPE_VARCHAR) { //string type, otherwise, update the meta info.
-      return pos;
   }
 
   double data_val{0};
   if (m_header->m_nullable)
     data_val = *(double*) (data + SHANNON_DATA_BYTE_OFFSET);
+
+  //update the meta info.
+  if (m_header->m_cu_type == MYSQL_TYPE_BLOB || m_header->m_cu_type == MYSQL_TYPE_STRING ||
+      m_header->m_cu_type == MYSQL_TYPE_VARCHAR) { //string type, otherwise, update the meta info.
+      return pos;
+  }
   m_header->m_rows++;
   m_header->m_sum = m_header->m_sum + data_val;
   m_header->m_avg.store(m_header->m_sum/m_header->m_rows, std::memory_order::memory_order_relaxed);
@@ -143,6 +156,7 @@ uchar* Cu::write_data_direct(ShannonBase::RapidContext* context, uchar* data, ui
     m_header->m_min.store(data_val, std::memory_order::memory_order_relaxed);
   return pos;
 }
+
 uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   DBUG_TRACE;
   if (!m_chunks.size()) return nullptr;
@@ -167,15 +181,25 @@ uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* buffer) {
   return ret;
 #endif
 }
+
+uchar* Cu::seek(size_t offset)
+{
+  auto chunk_id = (offset / SHANNON_ROWS_IN_CHUNK);
+  auto offset_in_chunk = offset % SHANNON_ROWS_IN_CHUNK;
+
+  return m_chunks[chunk_id]->seek(offset_in_chunk);
+}
 uchar* Cu::read_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* buffer) {
   if (!m_chunks.size()) return nullptr;
   //Chunk* chunk = m_chunks [m_chunks.size() - 1].get(); //to get the last chunk data.
   //if (!chunk) return nullptr;
   return  nullptr;
 }
+
 uchar* Cu::delete_data_direct(ShannonBase::RapidContext* context, uchar* rowid) {
   return nullptr;
 }
+
 uchar* Cu::delete_all_direct(){
   uchar* base{nullptr};
   for(size_t index = 0; index < m_chunks.size(); index++) {
@@ -184,10 +208,12 @@ uchar* Cu::delete_all_direct(){
   }
   return base;
 }
+
 uchar* Cu::update_data_direct(ShannonBase::RapidContext* context, uchar* rowid, uchar* data, uint length){
   
   return nullptr;
 }
+
 uint Cu::flush_direct(ShannonBase::RapidContext* context, uchar* from, uchar* to) {
   assert(from ||to);
   return 0;
