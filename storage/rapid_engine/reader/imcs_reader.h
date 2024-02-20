@@ -58,6 +58,8 @@ public:
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
   int read_index(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
                  ha_rkey_function find_flag);
+  int index_lookup(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
+                 ha_rkey_function find_flag);
   int records_in_range(ShannonBaseContext*, unsigned int , key_range *, key_range *);
   uchar* write(ShannonBaseContext* context, uchar*buffer, size_t length = 0);
   uchar* seek(size_t offset);
@@ -100,12 +102,13 @@ public:
   //read the rows without a key value, just like travel over index tree.
   int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
   int index_next(ShannonBaseContext*, uchar*, size_t = 0) override;
-
+  int index_next_same(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
   uchar* tell(uint = 0) override;
   uchar* seek(size_t offset) override;
   bool is_open() const { return m_start_of_scan; }
 private:
   int cond_comp(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function);
+  int index_repos();
 private:
   //local buffer.
   uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};

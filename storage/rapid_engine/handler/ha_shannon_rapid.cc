@@ -517,7 +517,7 @@ int ha_rapid::index_next_same(uchar *buf, const uchar *key, uint keylen) {
   ut_ad (m_start_of_scan && inited == handler::INDEX);
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  auto err = m_imcs_reader->index_read(m_rpd_context.get(), buf,
+  auto err = m_imcs_reader->index_next_same(m_rpd_context.get(), buf,
                                       const_cast<uchar*>(key), keylen,
                                       HA_READ_KEY_EXACT);
   return err;
@@ -537,7 +537,7 @@ int ha_rapid::index_first(uchar *buf) {
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
 
   //m_rpd_context->m_extra_info.m_find_flag = HA_READ_AFTER_KEY;
-  return m_imcs_reader->index_next(m_rpd_context.get(), buf);
+  return m_imcs_reader->index_general(m_rpd_context.get(), buf);
 }
 
 /** Positions a cursor on the last record in an index and reads the
