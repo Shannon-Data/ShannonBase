@@ -99,7 +99,8 @@ private:
  Art_node** Find_child(Art_node *n, unsigned char c);
  int Check_prefix(const Art_node *n, const unsigned char *key, int key_len, int depth);
  int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
-
+ int Leaf_partial_matches(const Art_leaf *n, const unsigned char *key, uint key_offset, 
+                           int key_len, int depth);
  inline uint64 art_size() {
     return m_tree->size;
  }
@@ -125,6 +126,7 @@ void Remove_child(Art_node *n, Art_node **ref, unsigned char c, Art_node **l);
 Art_leaf* Recursive_delete(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, int depth);
 int Recursive_iter(Art_node *n, ART_Func& cb, void *data, int data_len);
 int Cruise(ART_Func& cb, void *data, int data_len);
+void* Cruise_fast(uint key_offset, unsigned char *key, int key_len);
 int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
 
 private:
@@ -145,6 +147,7 @@ public:
  Art_leaf* ART_maximum();
 
  int ART_iter(ART_Func& cb, void *data, int data_len);
+ void* ART_iter_fast(uint key_offset, unsigned char *key, int key_len);
  int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func& cb, void *data, int data_len);
 };
 

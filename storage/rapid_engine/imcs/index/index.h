@@ -50,6 +50,7 @@ public:
   int maximum(uchar* value, uint value_len);
   int minimum(uchar* value, uint value_len);
   int next(Art_index::ART_Func& func, uchar* out);
+  void* next_fast(uint key_offset, unsigned char* key, uint key_len);
   int next_prefix();
 
   void reset_pos();

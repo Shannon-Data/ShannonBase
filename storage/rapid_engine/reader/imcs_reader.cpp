@@ -153,6 +153,33 @@ int CuView::index_lookup(ShannonBaseContext* context, uchar* key, size_t key_len
   return 0;
 }
 
+int CuView::read_index_fast(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
+                       ha_rkey_function find_flag) {
+  DBUG_TRACE;
+  if (!m_source_cu) return HA_ERR_END_OF_FILE;
+
+  RapidContext* rpd_context = dynamic_cast<RapidContext*> (context);
+  //auto ret = m_source_cu->get_index()->lookup(key, key_len, value, SHANNON_ROW_TOTAL_LEN);
+  uint offset{0};
+  for (uint off_idx =0 ; off_idx < rpd_context->m_extra_info.m_keynr; off_idx++) {
+    offset += m_source_table->key_info->key_part[off_idx].store_length;
+  }
+
+  auto ret = m_source_cu->get_index()->next_fast(offset, key, key_len);
+  if (!ret) return HA_ERR_END_OF_FILE;
+  memcpy(value, ret, SHANNON_ROW_TOTAL_LEN);
+  uint8 info = *((uint8*)(value + SHANNON_INFO_BYTE_OFFSET));   //info byte
+  uint64 trxid = *((uint64*)(value + SHANNON_TRX_ID_BYTE_OFFSET)); //trxid bytes
+  //visibility check at firt.
+  table_name_t name{const_cast<char*>(m_source_table->s->table_name.str)};
+  ReadView* read_view = trx_get_read_view(rpd_context->m_trx);
+  ut_ad(read_view);
+  if (!read_view->changes_visible(trxid, name) || (info & DATA_DELETE_FLAG_MASK)) {//invisible and deleted
+    return HA_ERR_KEY_NOT_FOUND;
+  }
+  return 0;
+}
+
 int CuView::read_index(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
                        ha_rkey_function find_flag) {
   DBUG_TRACE;
@@ -429,7 +456,7 @@ int ImcsReader::index_read(ShannonBaseContext* context, uchar*buff, uchar* key,
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
     std::string key_name( m_db_name + m_table_name + field_ptr->field_name);
-    if (m_cu_views[key_name]->read_index(context, key, key_len, m_buff, find_flag))
+    if (m_cu_views[key_name]->read_index_fast(context, key, key_len, m_buff, find_flag))
       return HA_ERR_KEY_NOT_FOUND;
 
     uint8 info = *(uint8*) m_buff;
@@ -476,7 +503,7 @@ int ImcsReader::index_next_same(ShannonBaseContext* context, uchar*buff, uchar* 
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
     std::string key_name( m_db_name + m_table_name + field_ptr->field_name);
-    if (m_cu_views[key_name]->read_index(context, key, key_len, m_buff, find_flag))
+    if (m_cu_views[key_name]->read_index_fast(context, key, key_len, m_buff, find_flag))
       return HA_ERR_KEY_NOT_FOUND;
 
     uint8 info = *(uint8*) m_buff;

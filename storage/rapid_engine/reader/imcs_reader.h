@@ -58,6 +58,8 @@ public:
   int read(ShannonBaseContext* context, uchar* buffer, size_t length = 0);
   int read_index(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
                  ha_rkey_function find_flag);
+  int read_index_fast(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
+                 ha_rkey_function find_flag);
   int index_lookup(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
                  ha_rkey_function find_flag);
   int records_in_range(ShannonBaseContext*, unsigned int , key_range *, key_range *);
