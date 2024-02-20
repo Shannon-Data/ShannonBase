@@ -132,6 +132,27 @@ int CuView::read(ShannonBaseContext* context, uchar* buffer, size_t length){
   return HA_ERR_END_OF_FILE;
 }
 
+int CuView::index_lookup(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
+                       ha_rkey_function find_flag) {
+  DBUG_TRACE;
+  if (!m_source_cu) return HA_ERR_END_OF_FILE;
+
+  RapidContext* rpd_context = dynamic_cast<RapidContext*> (context);
+  auto ret = m_source_cu->get_index()->lookup(key, key_len, value, SHANNON_ROW_TOTAL_LEN);
+  if (!ret) return HA_ERR_END_OF_FILE;
+
+  uint8 info = *((uint8*)(value + SHANNON_INFO_BYTE_OFFSET));   //info byte
+  uint64 trxid = *((uint64*)(value + SHANNON_TRX_ID_BYTE_OFFSET)); //trxid bytes
+  //visibility check at firt.
+  table_name_t name{const_cast<char*>(m_source_table->s->table_name.str)};
+  ReadView* read_view = trx_get_read_view(rpd_context->m_trx);
+  ut_ad(read_view);
+  if (!read_view->changes_visible(trxid, name) || (info & DATA_DELETE_FLAG_MASK)) {//invisible and deleted
+    return HA_ERR_KEY_NOT_FOUND;
+  }
+  return 0;
+}
+
 int CuView::read_index(ShannonBaseContext* context, uchar* key, size_t key_len, uchar* value,
                        ha_rkey_function find_flag) {
   DBUG_TRACE;
@@ -286,6 +307,20 @@ int ImcsReader::close() {
   return 0;
 }
 
+int ImcsReader::index_repos() {
+  for (uint idx =0; idx < m_source_table->s->fields; idx++) {
+    Field* field_ptr = *(m_source_table->field + idx);
+    ut_a(field_ptr);
+    // Skip columns marked as NOT SECONDARY
+    if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
+        field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    std::string key_name( m_db_name + m_table_name + field_ptr->field_name);
+    m_cu_views[key_name]->get_source()->get_index()->reset_pos();
+  }
+  return 0;
+}
+
 int ImcsReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
   DBUG_TRACE;
   ut_a(context && buffer);
@@ -384,6 +419,7 @@ int ImcsReader::cond_comp (ShannonBaseContext* context, uchar*buff, uchar* key,
 int ImcsReader::index_read(ShannonBaseContext* context, uchar*buff, uchar* key,
                            uint key_len, ha_rkey_function find_flag) {
   ut_a(context);
+  index_repos();
 
   for (uint idx =0; idx < m_source_table->s->fields; idx++) {
     Field* field_ptr = *(m_source_table->field + idx);
@@ -408,8 +444,9 @@ int ImcsReader::index_read(ShannonBaseContext* context, uchar*buff, uchar* key,
     }
     if (old_map) tmp_restore_column_map(m_source_table->write_set, old_map);
   }
-  if (!cond_comp(context, buff, key, key_len, find_flag))
-   return HA_ERR_KEY_NOT_FOUND;
+
+  if (cond_comp(context, buff, key, key_len, find_flag)) //match
+   return 0;
 
   return 0;
 }
@@ -426,6 +463,41 @@ int ImcsReader::index_next(ShannonBaseContext* context, uchar* buffer, size_t le
   }
   return 0;
 }
+
+int ImcsReader::index_next_same(ShannonBaseContext* context, uchar*buff, uchar* key,
+                           uint key_len, ha_rkey_function find_flag) {
+  ut_a(context);
+
+  for (uint idx =0; idx < m_source_table->s->fields; idx++) {
+    Field* field_ptr = *(m_source_table->field + idx);
+    ut_a(field_ptr);
+    // Skip columns marked as NOT SECONDARY
+    if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
+        field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    std::string key_name( m_db_name + m_table_name + field_ptr->field_name);
+    if (m_cu_views[key_name]->read_index(context, key, key_len, m_buff, find_flag))
+      return HA_ERR_KEY_NOT_FOUND;
+
+    uint8 info = *(uint8*) m_buff;
+    my_bitmap_map *old_map = tmp_use_all_columns(m_source_table, m_source_table->write_set);
+    if (info & DATA_NULL_FLAG_MASK)
+      field_ptr->set_null();
+    else {
+      field_ptr->set_notnull();
+      double val = *(double*) (m_buff + SHANNON_DATA_BYTE_OFFSET);
+      Compress::Dictionary* dict = m_cu_views[key_name].get()->get_source()->local_dictionary();
+      Utils::Util::store_field_value(m_source_table, field_ptr, dict, val);
+    }
+    if (old_map) tmp_restore_column_map(m_source_table->write_set, old_map);
+  }
+
+  if (cond_comp(context, buff, key, key_len, find_flag)) //match
+   return 0;
+
+  return 0;
+}
+
 
 int ImcsReader::index_general(ShannonBaseContext* context, uchar* buffer, size_t length) {
   ut_a(context && buffer);

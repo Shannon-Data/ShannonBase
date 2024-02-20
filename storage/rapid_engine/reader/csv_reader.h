@@ -51,6 +51,7 @@ public:
   int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
   int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
   int index_next(ShannonBaseContext*, uchar*, size_t = 0) override;
+  int index_next_same(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
   uchar* tell(uint = 0) override;
   uchar* seek(size_t offset) override;
 private:
