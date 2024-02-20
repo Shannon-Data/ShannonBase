@@ -250,6 +250,17 @@ int Art_index::Leaf_matches(const Art_leaf *n, const unsigned char *key, int key
     return std::memcmp(n->key, key, key_len);
 }
 
+int Art_index::Leaf_partial_matches(const Art_leaf *n, const unsigned char *key, uint key_offset, 
+                                    int key_len, int depth) {
+    (void)depth;
+    // Fail if the key lengths are different
+    //if it's composite index, such as, (col1, colN). query xxx from where colN.
+    //if (n->key_len != (key_offset + (uint32)key_len)) return 1;
+
+    // Compare the keys starting at the depth
+    return std::memcmp((n->key + key_offset), key, key_len);
+}
+
 void* Art_index::ART_search(const unsigned char *key, int key_len) {
     Art_node **child;
     Art_node *n = m_tree->root;
@@ -281,6 +292,7 @@ void* Art_index::ART_search(const unsigned char *key, int key_len) {
     }
     return nullptr;
 }
+
 Art_index::Art_leaf* Art_index::Minimum(const Art_node *n) {
     // Handle base cases
     if (!n) return NULL;
@@ -769,6 +781,47 @@ void* Art_index::ART_delete(const unsigned char *key, int key_len) {
     return nullptr;
 }
 
+//return the value of this key.
+void* Art_index::Cruise_fast(uint key_offset, unsigned char *key, int key_len) {
+    Art_node **child;
+    //Art_node *n = m_tree->root;
+    int prefix_len, depth = 0;
+    while (!m_current_nodes.empty()) {
+        Art_node* n = m_current_nodes.top();
+        m_current_nodes.pop();
+        // Might be a leaf
+        if (IS_LEAF(n)) {
+            n = (Art_node*)LEAF_RAW(n);
+            // Check if the expanded path matches
+            if (!Leaf_partial_matches((Art_leaf*)n, key, key_offset, key_len, depth)) {
+                return ((Art_leaf*)n)->value;
+            }
+            //return nullptr;
+        }
+
+        // Bail if the prefix does not match
+        if (n->partial_len) {
+            prefix_len = Check_prefix(n, key, key_len, depth);
+            int min_v = std::min(MAX_PREFIX_LEN, n->partial_len);
+            if (prefix_len != min_v)
+                return nullptr;
+            depth = depth + n->partial_len;
+        }
+
+        while (depth < key_len) { // Recursively search
+          child = Find_child(n, key[depth]);
+          n = (child) ? *child : nullptr;
+          if (!n || IS_LEAF(n)) {
+            if (!n) break;  
+            m_current_nodes.emplace(n);
+            break;
+          }
+          depth++;
+        }
+    }
+    return nullptr;
+}
+
 int Art_index::Cruise(ART_Func& cb, void *data, int data_len) {
   while (!m_current_nodes.empty()) {
     Art_node* n = m_current_nodes.top();
@@ -880,10 +933,15 @@ int Art_index::Recursive_iter(Art_node *n, ART_Func& cb, void *data, int data_le
     return 0;
 }
 
+void* Art_index::ART_iter_fast(uint key_offset, unsigned char *key, int key_len) {
+    return Cruise_fast (key_offset, key, key_len);
+}
+
 int Art_index::ART_iter(ART_Func& cb, void *data, int data_len) {
     return Cruise (cb, data, data_len);
     //return Recursive_iter(m_tree->root, cb, data, data_len);
 }
+
 int Art_index::Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len) {
     // Fail if the key length is too short
     if (n->key_len < (uint32_t)prefix_len) return 1;

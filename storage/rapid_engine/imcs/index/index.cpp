@@ -94,6 +94,17 @@ int Index::minimum(uchar* value, uint value_len) {
   return 0;
 }
 
+void* Index::next_fast(uint key_offset,unsigned char* key, uint key_len) {
+  if (!m_impl->Art_initialized()) return nullptr;
+
+  if (!m_start_scan) {
+    m_impl->ART_reset_cursor();
+    m_start_scan = true;
+  }
+
+  return m_impl->ART_iter_fast(key_offset, key, key_len);
+}
+
 int Index::next(Art_index::ART_Func& func, uchar* out) {
   if (!m_impl->Art_initialized()) return 1;
 
