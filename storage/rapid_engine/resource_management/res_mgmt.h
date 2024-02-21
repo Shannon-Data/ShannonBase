@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs.
 
@@ -25,9 +25,7 @@
 */
 #ifndef __SHANNONBASE_RES_MGMT_H__
 #define __SHANNONBASE_RES_MGMT_H__
-namespace ShannonBase{
-namespace ResMgmt {
-   
-}
-}
-#endif //__SHANNONBASE_RES_MGMT_H__
+namespace ShannonBase {
+namespace ResMgmt {}
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_RES_MGMT_H__

@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -26,14 +26,14 @@
 
 #include <cstring>
 
-#include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/imcs/index/art.h"
+#include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
-namespace ShannonBase{
+namespace ShannonBase {
 namespace Imcs {
 
-Index::Index(IndexType type) :m_type(type) {
+Index::Index(IndexType type) : m_type(type) {
   if (m_type != IndexType::ART) return;
 
   m_impl = std::make_unique<Art_index>();
@@ -45,36 +45,33 @@ Index::~Index() {
   m_impl->ART_tree_destroy();
 }
 
-void Index::reset_pos() {
-  m_impl->ART_reset_cursor();
-}
+void Index::reset_pos() { m_impl->ART_reset_cursor(); }
 
-int Index::insert(uchar* key, uint key_len, uchar* value) {
+int Index::insert(uchar *key, uint key_len, uchar *value) {
   if (!m_impl->Art_initialized()) return 1;
 
-  m_impl->ART_insert(key, key_len, reinterpret_cast<void*>(value));
+  m_impl->ART_insert(key, key_len, reinterpret_cast<void *>(value));
   return 0;
 }
 
-int Index::remove(uchar* key, uint key_len)
-{
+int Index::remove(uchar *key, uint key_len) {
   if (!m_impl->Art_initialized()) return 1;
   auto value_ptr = m_impl->ART_delete(key, key_len);
   if (!value_ptr) return 1;
   return 0;
 }
 
-int Index::lookup(uchar* key, uint key_len, uchar* value, uint value_len) {
+int Index::lookup(uchar *key, uint key_len, uchar *value, uint value_len) {
   if (!m_impl->Art_initialized() || !key || !key_len) return 1;
-  
-  auto value_ptr = reinterpret_cast<uchar*> (m_impl->ART_search(key, key_len));
+
+  auto value_ptr = reinterpret_cast<uchar *>(m_impl->ART_search(key, key_len));
   if (!value_ptr) return 1;
   memcpy(value, value_ptr, value_len);
 
   return 0;
 }
 
-int Index::maximum(uchar* value, uint value_len) {
+int Index::maximum(uchar *value, uint value_len) {
   if (!m_impl->Art_initialized()) return 1;
 
   Art_index::Art_leaf *l = m_impl->ART_maximum();
@@ -84,7 +81,7 @@ int Index::maximum(uchar* value, uint value_len) {
   return 0;
 }
 
-int Index::minimum(uchar* value, uint value_len) {
+int Index::minimum(uchar *value, uint value_len) {
   if (!m_impl->Art_initialized()) return 1;
 
   Art_index::Art_leaf *l = m_impl->ART_minimum();
@@ -94,7 +91,7 @@ int Index::minimum(uchar* value, uint value_len) {
   return 0;
 }
 
-void* Index::next_fast(uint key_offset,unsigned char* key, uint key_len) {
+void *Index::next_fast(uint key_offset, unsigned char *key, uint key_len) {
   if (!m_impl->Art_initialized()) return nullptr;
 
   if (!m_start_scan) {
@@ -105,7 +102,7 @@ void* Index::next_fast(uint key_offset,unsigned char* key, uint key_len) {
   return m_impl->ART_iter_fast(key_offset, key, key_len);
 }
 
-int Index::next(Art_index::ART_Func& func, uchar* out) {
+int Index::next(Art_index::ART_Func &func, uchar *out) {
   if (!m_impl->Art_initialized()) return 1;
 
   if (!m_start_scan) {
@@ -116,10 +113,7 @@ int Index::next(Art_index::ART_Func& func, uchar* out) {
   return m_impl->ART_iter(func, out, ShannonBase::SHANNON_ROW_TOTAL_LEN);
 }
 
-int Index::next_prefix() {
-  
-  return 0;
-}
+int Index::next_prefix() { return 0; }
 
-} //ns:imcs
-} //ns:shannonbase
+}  // namespace Imcs
+}  // namespace ShannonBase

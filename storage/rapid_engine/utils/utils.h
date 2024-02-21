@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs.
 
@@ -32,23 +32,27 @@
 class TABLE;
 class Field;
 class key_range;
-namespace ShannonBase{
-namespace Compress{
-   class Dictionary;
+namespace ShannonBase {
+namespace Compress {
+class Dictionary;
 }
 
-namespace Utils{
+namespace Utils {
 class Util {
-  public:
-    static bool is_support_type (enum_field_types type);
-    static double get_value_mysql_type(enum_field_types&, Compress::Dictionary*&, const uchar*, uint);
-    static double get_field_value (Field*&, Compress::Dictionary*&);
-    static double store_field_value(TABLE*& table, Field*&, Compress::Dictionary*&, double&);
-    static double store_field_value(TABLE*& table, Field*&, Compress::Dictionary*&, const uchar*, uint);
-    static int get_range_value(enum_field_types, Compress::Dictionary*&,
-                               key_range*, key_range*, double&, double&);
+ public:
+  static bool is_support_type(enum_field_types type);
+  static double get_value_mysql_type(enum_field_types &,
+                                     Compress::Dictionary *&, const uchar *,
+                                     uint);
+  static double get_field_value(Field *&, Compress::Dictionary *&);
+  static double store_field_value(TABLE *&table, Field *&,
+                                  Compress::Dictionary *&, double &);
+  static double store_field_value(TABLE *&table, Field *&,
+                                  Compress::Dictionary *&, const uchar *, uint);
+  static int get_range_value(enum_field_types, Compress::Dictionary *&,
+                             key_range *, key_range *, double &, double &);
 };
 
-} //ns:util
-} //ns::shannonbase
-#endif //__SHANNONBASE_UTILS_H__
+}  // namespace Utils
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_UTILS_H__

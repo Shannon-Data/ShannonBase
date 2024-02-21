@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -34,33 +34,31 @@ namespace Imcs {
 class Art_index;
 
 class Index {
-public:
-  enum class IndexType{
-    ART = 0,
-    B_TREE
-  };
+ public:
+  enum class IndexType { ART = 0, B_TREE };
   explicit Index(IndexType);
   ~Index();
-  Index(Index&&) = delete;
-  Index& operator=(Index&&) = delete;
+  Index(Index &&) = delete;
+  Index &operator=(Index &&) = delete;
 
-  int insert(uchar* key, uint key_len, uchar* value);
-  int remove(uchar* key, uint key_len);
-  int lookup(uchar* key, uint key_len, uchar* value, uint value_len);
-  int maximum(uchar* value, uint value_len);
-  int minimum(uchar* value, uint value_len);
-  int next(Art_index::ART_Func& func, uchar* out);
-  void* next_fast(uint key_offset, unsigned char* key, uint key_len);
+  int insert(uchar *key, uint key_len, uchar *value);
+  int remove(uchar *key, uint key_len);
+  int lookup(uchar *key, uint key_len, uchar *value, uint value_len);
+  int maximum(uchar *value, uint value_len);
+  int minimum(uchar *value, uint value_len);
+  int next(Art_index::ART_Func &func, uchar *out);
+  void *next_fast(uint key_offset, unsigned char *key, uint key_len);
   int next_prefix();
 
   void reset_pos();
   IndexType type() { return m_type; }
-private:
-  IndexType m_type {IndexType::ART};
-  std::unique_ptr<Art_index> m_impl {nullptr};
-  bool m_start_scan {false};
+
+ private:
+  IndexType m_type{IndexType::ART};
+  std::unique_ptr<Art_index> m_impl{nullptr};
+  bool m_start_scan{false};
 };
 
-} //ns:imcs
-} //ns:shannonbase
-#endif //__SHANNONBASE_INDEX_H__
+}  // namespace Imcs
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_INDEX_H__

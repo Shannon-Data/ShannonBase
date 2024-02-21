@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -26,10 +26,10 @@
 #ifndef __SHANNONBASE_OPTIMIZER_H__
 #define __SHANNONBASE_OPTIMIZER_H__
 
-#include <memory>
-#include <vector>
 #include <chrono>
+#include <memory>
 #include <mutex>
+#include <vector>
 
 #include "storage/rapid_engine/include/rapid_object.h"
 class Query_expression;
@@ -40,19 +40,21 @@ class OptimizeContext;
 
 namespace Optimizer {
 class RuleMetrics {
-  public:
-    explicit RuleMetrics(const std::string& rule_name, 
-                         const std::chrono::nanoseconds duration) : m_rule_name{rule_name},
-                                                                    m_duration{duration} {}
-  private:
-    std::string m_rule_name;
-    std::chrono::nanoseconds m_duration;
+ public:
+  explicit RuleMetrics(const std::string &rule_name,
+                       const std::chrono::nanoseconds duration)
+      : m_rule_name{rule_name}, m_duration{duration} {}
+
+ private:
+  std::string m_rule_name;
+  std::chrono::nanoseconds m_duration;
 };
 class Timer final {
  public:
   Timer();
   std::chrono::nanoseconds lap();
   std::string lap_formatted();
+
  private:
   std::chrono::steady_clock::time_point m_begin;
 };
@@ -62,20 +64,22 @@ class CostEstimator;
 class CardinalityEstimator;
 
 class Optimizer : public MemoryObject {
-  public:
-    explicit Optimizer(std::shared_ptr<Query_expression>&, const std::shared_ptr<CostEstimator>&);
-    void add_rules();
-    std::unique_ptr<JOIN> optimize(ShannonBase::OptimizeContext*,
-                                   std::shared_ptr<Query_expression>&) const;
-  private:
-    void add_rule(std::unique_ptr<Rule>&);
-  
-    std::vector<std::unique_ptr<Rule>> m_rules;
-    std::shared_ptr<CostEstimator> m_cost_estimator;
-    std::shared_ptr<Query_expression> m_query_expr;
-    std::unique_ptr<JOIN> m_optimized_join{nullptr};
+ public:
+  explicit Optimizer(std::shared_ptr<Query_expression> &,
+                     const std::shared_ptr<CostEstimator> &);
+  void add_rules();
+  std::unique_ptr<JOIN> optimize(ShannonBase::OptimizeContext *,
+                                 std::shared_ptr<Query_expression> &) const;
+
+ private:
+  void add_rule(std::unique_ptr<Rule> &);
+
+  std::vector<std::unique_ptr<Rule>> m_rules;
+  std::shared_ptr<CostEstimator> m_cost_estimator;
+  std::shared_ptr<Query_expression> m_query_expr;
+  std::unique_ptr<JOIN> m_optimized_join{nullptr};
 };
 
-} //ns:optimize   
-} //ns:shannonbase
-#endif //__SHANNONBASE_OPTIMIZER_H__
+}  // namespace Optimizer
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_OPTIMIZER_H__
