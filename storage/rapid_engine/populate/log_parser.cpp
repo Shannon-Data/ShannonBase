@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -32,19 +32,18 @@
 
 #include "current_thd.h"
 
-#include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
-#include "storage/innobase/include/dict0dict.h"
 #include "storage/innobase/include/btr0pcur.h"  //for btr_pcur_t
 #include "storage/innobase/include/dict0dd.h"
-#include "storage/innobase/include/row0upd.h"
-#include "storage/innobase/include/row0ins.h"
-#include "storage/innobase/include/log0test.h"
-#include "storage/innobase/include/trx0rec.h"
+#include "storage/innobase/include/dict0dict.h"
+#include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
 #include "storage/innobase/include/ibuf0ibuf.h"
+#include "storage/innobase/include/log0test.h"
+#include "storage/innobase/include/row0ins.h"
+#include "storage/innobase/include/row0upd.h"
+#include "storage/innobase/include/trx0rec.h"
 
 #include "storage/innobase/include/row0mysql.h"
 #include "storage/innobase/rem/rec.h"
 namespace ShannonBase {
-namespace Populate {
-}  //ns:populate   
-}  //ns:shannonbase
+namespace Populate {}  // namespace Populate
+}  // namespace ShannonBase

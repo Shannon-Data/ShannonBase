@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -31,29 +31,37 @@
 
 #include "include/ut0dbg.h"
 
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/compress/algorithms.h"
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 
-namespace ShannonBase{
+namespace ShannonBase {
 namespace Compress {
 
-uint32 Dictionary::store(String& str, Encoding_type type) {
+uint32 Dictionary::store(String &str, Encoding_type type) {
   DBUG_TRACE;
-  //returns dictionary id. //encoding alg pls ref to: heatwave document.
+  // returns dictionary id. //encoding alg pls ref to: heatwave document.
   std::string orgin_str(str.c_ptr());
-  compress_algos alg {compress_algos::NONE};
+  compress_algos alg{compress_algos::NONE};
   switch (m_encoding_type) {
-    case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
-    case Encoding_type::VARLEN: alg = compress_algos::LZ4; break;
-    case Encoding_type::NONE: alg = compress_algos::NONE; break;
-    default: break;
+    case Encoding_type::SORTED:
+      alg = compress_algos::ZSTD;
+      break;
+    case Encoding_type::VARLEN:
+      alg = compress_algos::LZ4;
+      break;
+    case Encoding_type::NONE:
+      alg = compress_algos::NONE;
+      break;
+    default:
+      break;
   }
 
-  std::string compressed_str(CompressFactory::get_instance(alg)->compressString(orgin_str));
+  std::string compressed_str(
+      CompressFactory::get_instance(alg)->compressString(orgin_str));
   {
     std::unique_lock lk(m_content_mtx);
-    if (m_content.find(compressed_str) == m_content.end()){ //insert new one.
-      m_content_id.fetch_add(1,std::memory_order::memory_order_acq_rel);
+    if (m_content.find(compressed_str) == m_content.end()) {  // insert new one.
+      m_content_id.fetch_add(1, std::memory_order::memory_order_acq_rel);
       uint64 id = m_content_id.load(std::memory_order::memory_order_acq_rel);
       m_content.emplace(compressed_str, id);
       m_id2content.emplace(id, compressed_str);
@@ -67,42 +75,59 @@ uint32 Dictionary::store(String& str, Encoding_type type) {
   return 0;
 }
 
-uint32 Dictionary::get(uint64 strid, String& val, CHARSET_INFO& charset) {
-  compress_algos alg {compress_algos::NONE};
+uint32 Dictionary::get(uint64 strid, String &val, CHARSET_INFO &charset) {
+  compress_algos alg{compress_algos::NONE};
   switch (m_encoding_type) {
-    case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
-    case Encoding_type::VARLEN: alg = compress_algos::LZ4; break;
-    case Encoding_type::NONE: alg =  compress_algos::NONE; break;
-    default: break;
+    case Encoding_type::SORTED:
+      alg = compress_algos::ZSTD;
+      break;
+    case Encoding_type::VARLEN:
+      alg = compress_algos::LZ4;
+      break;
+    case Encoding_type::NONE:
+      alg = compress_algos::NONE;
+      break;
+    default:
+      break;
   }
 
   {
     std::shared_lock lk(m_content_mtx);
-    //if (m_id2content.find(strid) != m_id2content.end()) {
-      std::string decom_str(CompressFactory::get_instance(alg)->decompressString(m_id2content[strid]));
-      String strs (decom_str.c_str(), decom_str.length(), &charset);
-      copy_if_not_alloced(&val, &strs, strs.length());
+    // if (m_id2content.find(strid) != m_id2content.end()) {
+    std::string decom_str(CompressFactory::get_instance(alg)->decompressString(
+        m_id2content[strid]));
+    String strs(decom_str.c_str(), decom_str.length(), &charset);
+    copy_if_not_alloced(&val, &strs, strs.length());
     //}
   }
   return 0;
 }
-int Dictionary::lookup (uchar*& str) {
+int Dictionary::lookup(uchar *&str) {
   DBUG_TRACE;
-  //returns dictionary id. //encoding alg pls ref to: heatwave document.
+  // returns dictionary id. //encoding alg pls ref to: heatwave document.
   std::string origin_str;
-  origin_str.assign((const char*)str);
-  compress_algos alg {compress_algos::NONE};
+  origin_str.assign((const char *)str);
+  compress_algos alg{compress_algos::NONE};
   switch (m_encoding_type) {
-    case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
-    case Encoding_type::VARLEN: alg = compress_algos::LZ4; break;
-    case Encoding_type::NONE: alg = compress_algos::NONE; break;
-    default: break;
+    case Encoding_type::SORTED:
+      alg = compress_algos::ZSTD;
+      break;
+    case Encoding_type::VARLEN:
+      alg = compress_algos::LZ4;
+      break;
+    case Encoding_type::NONE:
+      alg = compress_algos::NONE;
+      break;
+    default:
+      break;
   }
 
-  std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
+  std::string compressed_str(
+      CompressFactory::get_instance(alg)->compressString(origin_str));
   {
     std::unique_lock lk(m_content_mtx);
-    if (m_content.find(compressed_str) == m_content.end()){ //not found, return -1.
+    if (m_content.find(compressed_str) ==
+        m_content.end()) {  // not found, return -1.
       return -1;
     } else
       return m_content[compressed_str];
@@ -110,22 +135,31 @@ int Dictionary::lookup (uchar*& str) {
 
   return -1;
 }
-int Dictionary::lookup (String& str) {
+int Dictionary::lookup(String &str) {
   DBUG_TRACE;
-  //returns dictionary id. //encoding alg pls ref to: heatwave document.
+  // returns dictionary id. //encoding alg pls ref to: heatwave document.
   std::string origin_str(str.c_ptr());
-  compress_algos alg {compress_algos::NONE};
+  compress_algos alg{compress_algos::NONE};
   switch (m_encoding_type) {
-    case Encoding_type::SORTED: alg = compress_algos::ZSTD; break;
-    case Encoding_type::VARLEN: alg = compress_algos::LZ4; break;
-    case Encoding_type::NONE: alg = compress_algos::NONE; break;
-    default: break;
+    case Encoding_type::SORTED:
+      alg = compress_algos::ZSTD;
+      break;
+    case Encoding_type::VARLEN:
+      alg = compress_algos::LZ4;
+      break;
+    case Encoding_type::NONE:
+      alg = compress_algos::NONE;
+      break;
+    default:
+      break;
   }
 
-  std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
+  std::string compressed_str(
+      CompressFactory::get_instance(alg)->compressString(origin_str));
   {
     std::unique_lock lk(m_content_mtx);
-    if (m_content.find(compressed_str) == m_content.end()){ //not found, return -1.
+    if (m_content.find(compressed_str) ==
+        m_content.end()) {  // not found, return -1.
       return -1;
     } else
       return m_content[compressed_str];
@@ -134,6 +168,5 @@ int Dictionary::lookup (String& str) {
   return -1;
 }
 
-
-} //ns:Compress
-} //ns::shannonbase
+}  // namespace Compress
+}  // namespace ShannonBase

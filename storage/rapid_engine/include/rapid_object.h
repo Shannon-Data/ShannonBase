@@ -25,11 +25,9 @@
 */
 #ifndef __SHANNONBASE_RPD_OBJECT_H__
 #define __SHANNONBASE_RPD_OBJECT_H__
-namespace ShannonBase{
+namespace ShannonBase {
 
-class MemoryObject{
+class MemoryObject {};
 
-};
-
-}
-#endif //__SHANNONBASE_RPD_OBJECT_H__
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_RPD_OBJECT_H__

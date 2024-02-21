@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs.
 
@@ -27,12 +27,12 @@
 
 #include <limits.h>
 
-#include "sql/sql_class.h"
 #include "sql/field.h"  //Field
+#include "sql/sql_class.h"
 
 namespace ShannonBase {
 namespace Imcs {
-Imcu::Imcu(const TABLE& table_arg) {
+Imcu::Imcu(const TABLE &table_arg) {
   m_version_num = SHANNON_MAGIC_IMCU;
   m_magic_num = SHANNON_MAGIC_IMCU;
 
@@ -47,19 +47,20 @@ Imcu::Imcu(const TABLE& table_arg) {
   m_headers.m_table = table_arg.s->table_name.str;
   m_headers.m_has_vcol = false;
 
-  uint fields {table_arg.s->fields};
+  uint fields{table_arg.s->fields};
   std::scoped_lock lk(m_mutex_cus);
-  for (uint index =0; index < fields; index ++) {
-    Field* col  = *(table_arg.s->field + index);
+  for (uint index = 0; index < fields; index++) {
+    Field *col = *(table_arg.s->field + index);
     if (col->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-    m_headers.m_fields ++;
+    m_headers.m_fields++;
     m_headers.m_field.push_back(col);
 
-    Cu* cu = new Cu (col);
-    auto ret = m_cus.insert (std::make_pair(col, cu));
-    if (!ret.second) { //if insert failed. the clear up all the inserted items.
+    Cu *cu = new Cu(col);
+    auto ret = m_cus.insert(std::make_pair(col, cu));
+    if (!ret.second) {  // if insert failed. the clear up all the inserted
+                        // items.
       m_cus.clear();
-      m_headers.m_fields =0;
+      m_headers.m_fields = 0;
       m_headers.m_field.clear();
     }
   }
@@ -68,26 +69,25 @@ Imcu::Imcu(const TABLE& table_arg) {
   m_next = nullptr;
 }
 
-Imcu::~Imcu() {
-  std::scoped_lock lk(m_mutex_cus);
-}
+Imcu::~Imcu() { std::scoped_lock lk(m_mutex_cus); }
 
 /**Gets a CU by field_name (aka: key)*/
-Cu* Imcu::get_cu(const Field* field) {
-  Cu* cu_ptr {nullptr};
+Cu *Imcu::get_cu(const Field *field) {
+  Cu *cu_ptr{nullptr};
   assert(field);
   return cu_ptr;
 }
 
 /**
- * Whether this imcu is full or not. Before wirte it will check the capacity of a imuc
- * 
-*/
+ * Whether this imcu is full or not. Before wirte it will check the capacity of
+ * a imuc
+ *
+ */
 bool Imcu::is_full() {
-  //if there're not imcu in, the we consider that it's full. return true.
+  // if there're not imcu in, the we consider that it's full. return true.
   if (!m_cus.size()) return true;
   return false;
 }
 
-} // ns:Imcs
-} // ns:ShannonBase
+}  // namespace Imcs
+}  // namespace ShannonBase

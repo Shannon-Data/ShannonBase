@@ -39,6 +39,21 @@ INCLUDE_DIRECTORIES(
 # STRING(REPLACE "-flto" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
 # STRING(REPLACE "-flto" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
+SET(CACHE_LINE_DEFAULT_VALUE "64")
+ADD_EXECUTABLE(get_cache_line_size  utils/cache_line.cpp)
+EXECUTE_PROCESS(
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/get_cache_line_size
+    OUTPUT_VARIABLE CACHE_LINE_SIZE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+MESSAGE(STATUS "L1 Cache Line Size: ${CACHE_LINE_SIZE} bytes")
+IF (DEFINED CACHE_LINE_SIZE AND  "${CACHE_LINE_SIZE}" STREQUAL "")
+  SET(CACHE_LINE_SIZE ${CACHE_LINE_DEFAULT_VALUE})
+  MESSAGE(STATUS "L1 Cache Line Size reset to: ${CACHE_LINE_SIZE} bytes")
+endif()
+
+CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/storage/rapid_engine/include/rapid_arch_inf.h.in ${CMAKE_SOURCE_DIR}/storage/rapid_engine/include/rapid_arch_inf.h)
+
 SET(SHANNON_RAPID_COMPRESS_SOURCES
   compress/algorithms.cpp
   compress/dictionary/dictionary.cpp
