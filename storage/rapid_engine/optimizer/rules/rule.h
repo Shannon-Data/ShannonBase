@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -33,24 +33,20 @@ class Query_expression;
 class Query_block;
 class CostEstimator;
 namespace ShannonBase {
-namespace Optimizer{
+namespace Optimizer {
 
-enum class OptimizeType {
-   DEFAULT_TYPE = 0,
-   CONST_FOLD_RULE,
-   END_TYPE
-};
+enum class OptimizeType { DEFAULT_TYPE = 0, CONST_FOLD_RULE, END_TYPE };
 
 class Rule : public MemoryObject {
-  public:
-    Rule() {}
-    virtual ~Rule() {}
+ public:
+  Rule() {}
+  virtual ~Rule() {}
 
-    virtual void apply() = 0;
-    virtual std::string name() = 0;
-    std::shared_ptr<CostEstimator> m_cost_estimator;
+  virtual void apply() = 0;
+  virtual std::string name() = 0;
+  std::shared_ptr<CostEstimator> m_cost_estimator;
 };
 
-} //ns:optimizer
-} //ns:shannonbase
-#endif //__SHANNONBASE_RULES_H__
+}  // namespace Optimizer
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_RULES_H__

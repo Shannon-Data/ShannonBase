@@ -25,46 +25,46 @@
 */
 #ifndef __SHANNONBASE_RPD_STATS_H__
 #define __SHANNONBASE_RPD_STATS_H__
-namespace ShannonBase{
-  class ShannonLoadedTables;
-  //All the stats of loaded table of rapid. 
-  struct shannon_rpd_columns_info_t {
-    shannon_rpd_columns_info_t() {
-      table_id = 0;
-      column_id = 0;
-      ndv = 0;
-      data_placement_index = 0;
-      data_dict_bytes = 0;
-      avg_byte_width_inc_null = 0 ;
-    }
-    //schema name
-    char schema_name [NAME_LEN] ={0};
-    /**table id of loaded table*/
-    uint table_id{0};
-    /**table_name loaded into rapid*/
-    char table_name[NAME_LEN] = {0};
-    /**cloumn name with charset info*/
-    char column_name[NAME_LEN] = {0};
-    /**columun id of loaded table*/
-    uint column_id {0};
-    /**The number of distinct values in the column.*/
-    longlong ndv {0};
-    /**The type of encoding used.*/
-    char encoding[NAME_LEN] = {0};
-    /**data placement index*/
-    uint data_placement_index {0};
-    /**The dictionary size per column, in bytes.*/
-    longlong data_dict_bytes {0};
-    /**avg width byte.*/
-    uint32 avg_byte_width_inc_null {0};
-  };
+namespace ShannonBase {
+class ShannonLoadedTables;
+// All the stats of loaded table of rapid.
+struct shannon_rpd_columns_info_t {
+  shannon_rpd_columns_info_t() {
+    table_id = 0;
+    column_id = 0;
+    ndv = 0;
+    data_placement_index = 0;
+    data_dict_bytes = 0;
+    avg_byte_width_inc_null = 0;
+  }
+  // schema name
+  char schema_name[NAME_LEN] = {0};
+  /**table id of loaded table*/
+  uint table_id{0};
+  /**table_name loaded into rapid*/
+  char table_name[NAME_LEN] = {0};
+  /**cloumn name with charset info*/
+  char column_name[NAME_LEN] = {0};
+  /**columun id of loaded table*/
+  uint column_id{0};
+  /**The number of distinct values in the column.*/
+  longlong ndv{0};
+  /**The type of encoding used.*/
+  char encoding[NAME_LEN] = {0};
+  /**data placement index*/
+  uint data_placement_index{0};
+  /**The dictionary size per column, in bytes.*/
+  longlong data_dict_bytes{0};
+  /**avg width byte.*/
+  uint32 avg_byte_width_inc_null{0};
+};
 
-  using rpd_columns_info = shannon_rpd_columns_info_t;
-  using rpd_columns_container = std::vector<rpd_columns_info>;
-  
-  /** Global shannon rpd column information map, keep loaded table. */
-  extern rpd_columns_container meta_rpd_columns_infos;
-  extern ShannonLoadedTables *shannon_loaded_tables;
+using rpd_columns_info = shannon_rpd_columns_info_t;
+using rpd_columns_container = std::vector<rpd_columns_info>;
 
-} //ns: ShannonBase
-#endif //__SHANNONBASE_RPD_STATS_H__
+/** Global shannon rpd column information map, keep loaded table. */
+extern rpd_columns_container meta_rpd_columns_infos;
+extern ShannonLoadedTables *shannon_loaded_tables;
+
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_RPD_STATS_H__

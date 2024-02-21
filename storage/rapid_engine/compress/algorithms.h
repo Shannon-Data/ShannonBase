@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -29,88 +29,90 @@
 #ifndef __SHANNONBASE_COMPRESS_ALGORITHMS_H__
 #define __SHANNONBASE_COMPRESS_ALGORITHMS_H__
 #include <atomic>
+#include <map>
 #include <memory>
 #include <mutex>
-#include <map>
 
-namespace ShannonBase{
-namespace Compress{
+namespace ShannonBase {
+namespace Compress {
 
-enum compress_algos{
-  NONE = 0,  
-  ZLIB,
-  ZSTD,
-  LZ4
-};
+enum compress_algos { NONE = 0, ZLIB, ZSTD, LZ4 };
 
-class Compress_algorithm{
-public:
+class Compress_algorithm {
+ public:
   Compress_algorithm() = default;
   virtual ~Compress_algorithm() = default;
-  virtual std::string& compressString(std::string& orginal) = 0;
-  virtual std::string& decompressString(std::string& compressed_str) = 0;
+  virtual std::string &compressString(std::string &orginal) = 0;
+  virtual std::string &decompressString(std::string &compressed_str) = 0;
   static constexpr uint MAX_BUFF_LEN = 65535;
 };
-class default_compress : public Compress_algorithm{
-  public:
-  virtual std::string& compressString(std::string& orginal) final;
-  virtual std::string& decompressString(std::string& compressed_str) final;
-private:
+class default_compress : public Compress_algorithm {
+ public:
+  virtual std::string &compressString(std::string &orginal) final;
+  virtual std::string &decompressString(std::string &compressed_str) final;
+
+ private:
   char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
   std::string m_result;
 };
 
-class zstd_compress : public Compress_algorithm{
-public:
+class zstd_compress : public Compress_algorithm {
+ public:
   zstd_compress();
-  virtual ~zstd_compress() =default;
-  virtual std::string& compressString(std::string& orginal) final;
-  virtual std::string& decompressString(std::string& compressed_str) final;
-private:
+  virtual ~zstd_compress() = default;
+  virtual std::string &compressString(std::string &orginal) final;
+  virtual std::string &decompressString(std::string &compressed_str) final;
+
+ private:
   char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
   std::string m_result;
 };
 
-class zlib_compress : public Compress_algorithm{
-public:
+class zlib_compress : public Compress_algorithm {
+ public:
   zlib_compress();
   virtual ~zlib_compress() = default;
-  virtual std::string& compressString(std::string& orginal) final;
-  virtual std::string& decompressString(std::string& compressed_str) final;
-private:
+  virtual std::string &compressString(std::string &orginal) final;
+  virtual std::string &decompressString(std::string &compressed_str) final;
+
+ private:
   char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
   std::string m_result;
 };
 
-class lz4_compress : public Compress_algorithm{
-public:
+class lz4_compress : public Compress_algorithm {
+ public:
   lz4_compress();
   virtual ~lz4_compress() = default;
-  virtual std::string& compressString(std::string& orginal) final;
-  virtual std::string& decompressString(std::string& compressed_str) final;
-private:
+  virtual std::string &compressString(std::string &orginal) final;
+  virtual std::string &decompressString(std::string &compressed_str) final;
+
+ private:
   char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
   std::string m_result;
 };
 
 class CompressFactory {
-public:
-  static Compress_algorithm* get_instance(compress_algos algo);
-  using AlgorithmFactoryT = std::map<compress_algos, std::unique_ptr<Compress_algorithm>>;
-private:
+ public:
+  static Compress_algorithm *get_instance(compress_algos algo);
+  using AlgorithmFactoryT =
+      std::map<compress_algos, std::unique_ptr<Compress_algorithm>>;
+
+ private:
   CompressFactory() = default;
   virtual ~CompressFactory() = delete;
-  CompressFactory(CompressFactory&& ) = delete;
-  CompressFactory(CompressFactory&) = delete;
-  CompressFactory& operator = (const CompressFactory&) = delete;
-  CompressFactory& operator = (const CompressFactory&&) = delete;
-private:
- static std::once_flag m_alg_once;
- static CompressFactory* m_factory_instance;
- AlgorithmFactoryT m_factory;
+  CompressFactory(CompressFactory &&) = delete;
+  CompressFactory(CompressFactory &) = delete;
+  CompressFactory &operator=(const CompressFactory &) = delete;
+  CompressFactory &operator=(const CompressFactory &&) = delete;
+
+ private:
+  static std::once_flag m_alg_once;
+  static CompressFactory *m_factory_instance;
+  AlgorithmFactoryT m_factory;
 };
 
-} //ns:compress
-} //ns:shannonbase
+}  // namespace Compress
+}  // namespace ShannonBase
 
-#endif //__SHANNONBASE_COMPRESS_ALGORITHMS_H__
+#endif  //__SHANNONBASE_COMPRESS_ALGORITHMS_H__

@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -36,28 +36,31 @@
 class key_range;
 namespace ShannonBase {
 class CSVReader : public Reader {
-public:
-  CSVReader(std::string& path) : m_path(path), m_csv_fd(nullptr){
-  }
-  CSVReader(CSVReader&) = delete;
-  CSVReader(CSVReader&&) = delete;
+ public:
+  CSVReader(std::string &path) : m_path(path), m_csv_fd(nullptr) {}
+  CSVReader(CSVReader &) = delete;
+  CSVReader(CSVReader &&) = delete;
   virtual ~CSVReader() = default;
 
   int open() override;
   int close() override;
-  int read(ShannonBaseContext*, uchar*, size_t  = 0) override;
-  int write(ShannonBaseContext*, uchar*, size_t = 0) override;
-  int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) override;
-  int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
-  int index_general(ShannonBaseContext*, uchar*, size_t = 0) override;
-  int index_next(ShannonBaseContext*, uchar*, size_t = 0) override;
-  int index_next_same(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) override;
-  uchar* tell(uint = 0) override;
-  uchar* seek(size_t offset) override;
-private:
+  int read(ShannonBaseContext *, uchar *, size_t = 0) override;
+  int write(ShannonBaseContext *, uchar *, size_t = 0) override;
+  int records_in_range(ShannonBaseContext *, unsigned int, key_range *,
+                       key_range *) override;
+  int index_read(ShannonBaseContext *, uchar *, uchar *, uint,
+                 ha_rkey_function) override;
+  int index_general(ShannonBaseContext *, uchar *, size_t = 0) override;
+  int index_next(ShannonBaseContext *, uchar *, size_t = 0) override;
+  int index_next_same(ShannonBaseContext *, uchar *, uchar *, uint,
+                      ha_rkey_function) override;
+  uchar *tell(uint = 0) override;
+  uchar *seek(size_t offset) override;
+
+ private:
   std::string m_path;
-  FILE* m_csv_fd;
+  FILE *m_csv_fd;
 };
 
-} //ns:shannonbase
-#endif //__SHANNONBASE_CSV_READER_H__
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_CSV_READER_H__

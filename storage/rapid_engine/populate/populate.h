@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -34,9 +34,9 @@
 #include "my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
-namespace ShannonBase{
-namespace Populate{
- uint64 population_buffer_size {ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};
-} //ns:populate
-} //ns:shannonbase
-#endif //__SHANNONBASE_POPULATE_H__
+namespace ShannonBase {
+namespace Populate {
+uint64 population_buffer_size{ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};
+}  // namespace Populate
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_POPULATE_H__

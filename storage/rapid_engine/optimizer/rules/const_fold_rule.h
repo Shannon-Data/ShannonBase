@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -26,8 +26,8 @@
 #ifndef __SHANNONBASE_CONST_FOLD_RULE_H__
 #define __SHANNONBASE_CONST_FOLD_RULE_H__
 
-#include <string>
 #include <memory>
+#include <string>
 
 #include "storage/rapid_engine/optimizer/rules/rule.h"
 class Query_expression;
@@ -37,15 +37,16 @@ namespace ShannonBase {
 namespace Optimizer {
 
 class Const_fold : public Rule {
-  public:
-    Const_fold(std::shared_ptr<Query_expression>& expression);
-    virtual ~Const_fold();
-    void apply() override;
-    std::string name() override { return std::string ("Const_fold");}
-  private:
-    std::shared_ptr<Query_expression> m_query_expr;
+ public:
+  Const_fold(std::shared_ptr<Query_expression> &expression);
+  virtual ~Const_fold();
+  void apply() override;
+  std::string name() override { return std::string("Const_fold"); }
+
+ private:
+  std::shared_ptr<Query_expression> m_query_expr;
 };
 
-} //ns:optimzer
-} //ns:shannonbase
-#endif //__SHANNONBASE_CONST_FOLD_RULE_H__
+}  // namespace Optimizer
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_CONST_FOLD_RULE_H__

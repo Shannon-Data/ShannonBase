@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -25,10 +25,7 @@
 */
 /** The basic iterator class for IMCS. All specific iterators are all inherited
  * from this.
-*/
+ */
 #include "storage/rapid_engine/iterators/iterator.h"
 
-namespace ShannonBase {
-
-} //ns:shannonbase
-
+namespace ShannonBase {}  // namespace ShannonBase
