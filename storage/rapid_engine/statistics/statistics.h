@@ -17,23 +17,23 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs optimizer.
 */
 #ifndef __SHANNONBASE_STATISTICS_H__
-#define __SHANNONBASE_STATISTICS_H__ 
+#define __SHANNONBASE_STATISTICS_H__
 
 #include "include/my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 
-namespace ShannonBase{
-namespace Optimizer{
+namespace ShannonBase {
+namespace Optimizer {
 
 class Statistics : public MemoryObject {
-public:
+ public:
   Statistics() = default;
   virtual ~Statistics() = default;
   virtual uint cost() = 0;
@@ -45,6 +45,6 @@ class CardinalityStatis : public Statistics {
   uint cost() override;
 };
 
-} //ns:optimizer
-} //ns:shannonbase
-#endif //__SHANNONBASE_STATISTICS_H__
+}  // namespace Optimizer
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_STATISTICS_H__

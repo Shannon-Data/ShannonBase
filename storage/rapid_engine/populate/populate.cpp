@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -32,13 +32,12 @@
 
 #include "storage/rapid_engine/populate/log_parser.h"
 
-#include "storage/innobase/include/mtr0types.h"
-#include "storage/innobase/include/mtr0log.h"
-#include "storage/innobase/include/univ.i"
 #include "storage/innobase/include/fil0fil.h"
 #include "storage/innobase/include/log0write.h"
+#include "storage/innobase/include/mtr0log.h"
+#include "storage/innobase/include/mtr0types.h"
+#include "storage/innobase/include/univ.i"
 
-namespace ShannonBase{
-namespace Populate{
-}  //ns:populate
-}  //ns:shannonbase    
+namespace ShannonBase {
+namespace Populate {}  // namespace Populate
+}  // namespace ShannonBase

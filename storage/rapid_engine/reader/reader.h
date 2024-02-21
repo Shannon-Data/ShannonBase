@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -30,27 +30,30 @@
 #define __SHANNONBASE_READER_READER_H__
 #include <string>
 #include "include/my_inttypes.h"
-#include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/include/rapid_object.h"
 class key_range;
 namespace ShannonBase {
-//interface of reader, which is used to travel all data.
-class Reader : public MemoryObject{
-public:
+// interface of reader, which is used to travel all data.
+class Reader : public MemoryObject {
+ public:
   Reader() = default;
   virtual ~Reader() = default;
   virtual int open() = 0;
   virtual int close() = 0;
-  virtual int read(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  virtual int records_in_range(ShannonBaseContext*, unsigned int, key_range *, key_range *) = 0;
-  virtual int write(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  virtual int index_read(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) = 0;
-  virtual int index_general(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  virtual int index_next(ShannonBaseContext*, uchar*, size_t = 0) = 0;
-  virtual int index_next_same(ShannonBaseContext*, uchar*, uchar*, uint, ha_rkey_function) = 0;
-  virtual uchar* tell(uint = 0) = 0;
-  virtual uchar* seek(size_t offset) = 0;
+  virtual int read(ShannonBaseContext *, uchar *, size_t = 0) = 0;
+  virtual int records_in_range(ShannonBaseContext *, unsigned int, key_range *,
+                               key_range *) = 0;
+  virtual int write(ShannonBaseContext *, uchar *, size_t = 0) = 0;
+  virtual int index_read(ShannonBaseContext *, uchar *, uchar *, uint,
+                         ha_rkey_function) = 0;
+  virtual int index_general(ShannonBaseContext *, uchar *, size_t = 0) = 0;
+  virtual int index_next(ShannonBaseContext *, uchar *, size_t = 0) = 0;
+  virtual int index_next_same(ShannonBaseContext *, uchar *, uchar *, uint,
+                              ha_rkey_function) = 0;
+  virtual uchar *tell(uint = 0) = 0;
+  virtual uchar *seek(size_t offset) = 0;
 };
 
-} //ns:shannonbase
-#endif //__SHANNONBASE_READER_READER_H__
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_READER_READER_H__

@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -26,7 +26,7 @@
 #ifndef __SHANNONBASE_CONTEXT_H__
 #define __SHANNONBASE_CONTEXT_H__
 
-#include "sql/sql_lex.h" //Secondary_engine_execution_context
+#include "sql/sql_lex.h"  //Secondary_engine_execution_context
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
@@ -46,7 +46,7 @@ namespace ShannonBase {
 */
 class Shannon_execution_context : public Secondary_engine_execution_context {
  public:
-  Shannon_execution_context() ;
+  Shannon_execution_context();
   /**
     Checks if the specified cost is the lowest cost seen so far for executing
     the given JOIN.
@@ -62,51 +62,51 @@ class Shannon_execution_context : public Secondary_engine_execution_context {
 };
 
 class ShannonBaseContext {
-public:
+ public:
   ShannonBaseContext() {}
   virtual ~ShannonBaseContext() {}
-  ShannonBaseContext(ShannonBaseContext&) = delete;
-  ShannonBaseContext& operator=(const ShannonBaseContext&) = delete;
+  ShannonBaseContext(ShannonBaseContext &) = delete;
+  ShannonBaseContext &operator=(const ShannonBaseContext &) = delete;
 };
 
-//used in imcs.
+// used in imcs.
 class ha_rapid;
 class RapidContext : public ShannonBaseContext {
-public:
-  class extra_info_t{
-    public:
-      extra_info_t() {}
-      ~extra_info_t() {}
-      //trxid of this innodb rows.
-      uint64 m_trxid {0};
-      Compress::Encoding_type m_algo {Compress::Encoding_type::SORTED};
+ public:
+  class extra_info_t {
+   public:
+    extra_info_t() {}
+    ~extra_info_t() {}
+    // trxid of this innodb rows.
+    uint64 m_trxid{0};
+    Compress::Encoding_type m_algo{Compress::Encoding_type::SORTED};
 
-      //index scan info
-      ushort m_keynr{MAX_FIELDS};
-      ha_rkey_function m_find_flag {HA_READ_INVALID};
-      uint8 m_key_len {0};
-      std::unique_ptr<uchar[]> m_key_buff {nullptr};
+    // index scan info
+    ushort m_keynr{MAX_FIELDS};
+    ha_rkey_function m_find_flag{HA_READ_INVALID};
+    uint8 m_key_len{0};
+    std::unique_ptr<uchar[]> m_key_buff{nullptr};
   };
-  RapidContext(): m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}
+  RapidContext() : m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr) {}
   virtual ~RapidContext() = default;
-  //current transaction.
-  trx_t* m_trx {nullptr};
-  //the current db and table name.
+  // current transaction.
+  trx_t *m_trx{nullptr};
+  // the current db and table name.
   std::string m_current_db, m_current_table;
-  //the primary key of this table.
-  TABLE* m_table {nullptr};
-  //the dictionary for this DB.
-  Compress::Dictionary* m_local_dict {nullptr};
+  // the primary key of this table.
+  TABLE *m_table{nullptr};
+  // the dictionary for this DB.
+  Compress::Dictionary *m_local_dict{nullptr};
   extra_info_t m_extra_info;
-  const ha_rapid* m_handler;
+  const ha_rapid *m_handler;
 };
-//used in optimization phase.
+// used in optimization phase.
 class OptimizeContext : public ShannonBaseContext {
-public:
+ public:
   OptimizeContext() = default;
-  virtual ~ OptimizeContext() = default;
-  THD* m_thd;
+  virtual ~OptimizeContext() = default;
+  THD *m_thd;
 };
 
-} //ns:shannonbase
+}  // namespace ShannonBase
 #endif

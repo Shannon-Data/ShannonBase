@@ -21,40 +21,12 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs. for transaction.
+   The fundmental code for imcs.
 */
-#include "include/my_inttypes.h"
-namespace ShannonBase {
-namespace Transaction {
 
-/**This class is used for an interface of real implementation of trans.
-Here, is used as an interface of innobase transaction. In future we can
-use any transaction impl to replace innobase's trx used here.
-*/
-class Transaction {
- public:
-  enum class ISOLATION_LEVEL : uint8 {
-    READ_UNCOMMITTED,
-    READ_COMMITTED,
-    READ_REPEATABLE,
-    SERIALIZABLE
-  };
-  enum class STATUS : uint8 {
-    NOT_START,
-    ACTIVE,
-    PREPARED,
-    COMMITTED_IN_MEMORY
-  };
-  Transaction() = default;
-  virtual ~Transaction() = default;
-  virtual int begin(
-      ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
-  virtual int commit();
-  virtual int rollback();
+#ifndef __SHANNON_RAPID_ARCH_INFO_H__
+#define __SHANNON_RAPID_ARCH_INFO_H__
+// cache L1 line size
+#define CACHE_LINE_SIZE 64
 
- private:
-  ISOLATION_LEVEL m_iso_level{ISOLATION_LEVEL::READ_REPEATABLE};
-};
-
-}  // namespace Transaction
-}  // namespace ShannonBase
+#endif  //__SHANNON_RAPID_ARCH_INFO_H__

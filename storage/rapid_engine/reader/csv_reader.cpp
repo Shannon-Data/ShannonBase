@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -30,45 +30,43 @@
 
 #include <string>
 
+#include "include/my_base.h"  //key_range
 #include "include/ut0dbg.h"
-#include "include/my_base.h" //key_range
 
 namespace ShannonBase {
 
-int CSVReader::open() {
+int CSVReader::open() { return 0; }
+int CSVReader::close() { return 0; }
+int CSVReader::read(ShannonBaseContext *context, uchar *buffer, size_t length) {
   return 0;
 }
-int CSVReader::close() {
+int CSVReader::records_in_range(ShannonBaseContext *, unsigned int index,
+                                key_range *, key_range *) {
   return 0;
 }
-int CSVReader::read(ShannonBaseContext* context, uchar* buffer, size_t length) {
+int CSVReader::index_read(ShannonBaseContext *context, uchar *buffer,
+                          uchar *key, uint key_len,
+                          ha_rkey_function find_flag) {
   return 0;
 }
-int CSVReader::records_in_range(ShannonBaseContext*, unsigned int index, key_range *, key_range *) {
+int CSVReader::index_general(ShannonBaseContext *context, uchar *buffer,
+                             size_t length) {
   return 0;
 }
-int CSVReader::index_read(ShannonBaseContext* context,  uchar*buffer, uchar* key,
-                          uint key_len, ha_rkey_function find_flag) {
+int CSVReader::index_next(ShannonBaseContext *context, uchar *buffer,
+                          size_t length) {
   return 0;
 }
-int CSVReader::index_general(ShannonBaseContext* context, uchar*buffer, size_t length) {
+int CSVReader::index_next_same(ShannonBaseContext *context, uchar *buffer,
+                               uchar *key, uint key_len,
+                               ha_rkey_function find_flag) {
   return 0;
 }
-int CSVReader::index_next(ShannonBaseContext* context, uchar*buffer, size_t length) {
+int CSVReader::write(ShannonBaseContext *context, uchar *buffer,
+                     size_t length) {
   return 0;
 }
-int CSVReader::index_next_same(ShannonBaseContext* context,  uchar*buffer, uchar* key,
-                          uint key_len, ha_rkey_function find_flag) {
-  return 0;
-}
-int CSVReader::write(ShannonBaseContext* context, uchar*buffer, size_t length) {
-  return 0;
-}
-uchar* CSVReader::tell(uint field_index) {
-  return nullptr;
-}
-uchar* CSVReader::seek(size_t offset) {
-  return nullptr;
-}
+uchar *CSVReader::tell(uint field_index) { return nullptr; }
+uchar *CSVReader::seek(size_t offset) { return nullptr; }
 
-} //ns:shannonbase
+}  // namespace ShannonBase

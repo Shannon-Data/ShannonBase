@@ -26,11 +26,11 @@
 #ifndef PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H_
 #define PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H_
 
+#include "include/field_types.h"  //field types.
+#include "include/my_icp.h"       //ICP_RESULT
 #include "my_base.h"
-#include "include/my_icp.h" //ICP_RESULT
 #include "sql/handler.h"
 #include "thr_lock.h"
-#include "include/field_types.h"  //field types.
 
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/reader/imcs_reader.h"

@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -32,11 +32,7 @@ int Transaction::begin(ISOLATION_LEVEL iso_level) {
   m_iso_level = iso_level;
   return 0;
 }
-int Transaction::commit () {
-  return 0;
-}
-int Transaction::rollback() {
-  return 0;
-}
-} //ns:transaction   
-} //ns:shannonbase
+int Transaction::commit() { return 0; }
+int Transaction::rollback() { return 0; }
+}  // namespace Transaction
+}  // namespace ShannonBase

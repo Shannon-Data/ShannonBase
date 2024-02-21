@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -29,13 +29,10 @@
 namespace ShannonBase {
 namespace Optimizer {
 
-Const_fold::Const_fold(std::shared_ptr<Query_expression>& expression) : 
-                       m_query_expr(expression) {
-}
-Const_fold::~Const_fold() {
-}
-void Const_fold::apply() {
-}
+Const_fold::Const_fold(std::shared_ptr<Query_expression> &expression)
+    : m_query_expr(expression) {}
+Const_fold::~Const_fold() {}
+void Const_fold::apply() {}
 
-} //ns:optimizer
-} //ns:shannonbase
+}  // namespace Optimizer
+}  // namespace ShannonBase
