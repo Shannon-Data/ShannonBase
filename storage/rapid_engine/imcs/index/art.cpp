@@ -122,31 +122,6 @@ void Art_index::Destroy_node(Art_node *n) {
   free(n);
 }
 
-int Art_index::ART_tree_init() {
-  if (!m_tree) {
-    m_tree = new Art_tree();
-  }
-  m_tree->root = nullptr;
-  m_tree->size = 0;
-  m_inited = true;
-  ART_reset_cursor();
-  return 0;
-}
-int Art_index::ART_tree_destroy() {
-  Destroy_node(m_tree->root);
-  if (m_tree) {
-    delete m_tree;
-    m_tree = nullptr;
-    m_inited = false;
-  }
-  return 0;
-}
-void Art_index::ART_reset_cursor() {
-  while (!m_current_nodes.empty()) {
-    m_current_nodes.pop();
-  }
-  m_current_nodes.emplace(m_tree->root);
-}
 Art_index::Art_node **Art_index::Find_child(Art_node *n, unsigned char c) {
   int i, mask, bitfield;
   union {
@@ -201,7 +176,6 @@ Art_index::Art_node **Art_index::Find_child(Art_node *n, unsigned char c) {
           bitfield &= mask;
 #endif
 #endif
-
           /*
            * If we have a match (any bit set) then we can
            * return the pointer match using ctz to get
@@ -224,6 +198,7 @@ Art_index::Art_node **Art_index::Find_child(Art_node *n, unsigned char c) {
   }
   return nullptr;
 }
+
 int Art_index::Check_prefix(const Art_node *n, const unsigned char *key,
                             int key_len, int depth) {
   int min_tmp = std::min(n->partial_len, Art_index::MAX_PREFIX_LEN);
@@ -311,6 +286,7 @@ Art_index::Art_leaf *Art_index::Minimum(const Art_node *n) {
       abort();
   }
 }
+
 Art_index::Art_leaf *Art_index::Maximum(const Art_node *n) {
   // Handle base cases
   if (!n) return NULL;
@@ -335,6 +311,7 @@ Art_index::Art_leaf *Art_index::Maximum(const Art_node *n) {
       abort();
   }
 }
+
 Art_index::Art_leaf *Art_index::ART_minimum() {
   return Minimum((Art_node *)m_tree->root);
 }
@@ -459,6 +436,7 @@ void Art_index::Add_child16(Art_node16 *n, Art_node **ref, unsigned char c,
     Add_child48(new_node, ref, c, child);
   }
 }
+
 void Art_index::Add_child4(Art_node4 *n, Art_node **ref, unsigned char c,
                            void *child) {
   if (n->n.num_children < 4) {
@@ -488,6 +466,7 @@ void Art_index::Add_child4(Art_node4 *n, Art_node **ref, unsigned char c,
     Add_child16(new_node, ref, c, child);
   }
 }
+
 void Art_index::Add_child(Art_node *n, Art_node **ref, unsigned char c,
                           void *child) {
   switch (n->type) {
@@ -503,6 +482,7 @@ void Art_index::Add_child(Art_node *n, Art_node **ref, unsigned char c,
       abort();
   }
 }
+
 int Art_index::Prefix_mismatch(const Art_node *n, const unsigned char *key,
                                int key_len, int depth) {
   int min_tmp = std::min(MAX_PREFIX_LEN, n->partial_len);
@@ -524,6 +504,7 @@ int Art_index::Prefix_mismatch(const Art_node *n, const unsigned char *key,
   }
   return idx;
 }
+
 void *Art_index::Recursive_insert(Art_node *n, Art_node **ref,
                                   const unsigned char *key, int key_len,
                                   void *value, int depth, int *old,
@@ -613,6 +594,7 @@ RECURSE_SEARCH:;
   Add_child(n, ref, key[depth], SET_LEAF(l));
   return nullptr;
 }
+
 void *Art_index::ART_insert(const unsigned char *key, int key_len,
                             void *value) {
   int old_val = 0;
@@ -621,6 +603,7 @@ void *Art_index::ART_insert(const unsigned char *key, int key_len,
   if (!old_val) m_tree->size++;
   return old;
 }
+
 void *Art_index::ART_insert_with_replace(const unsigned char *key, int key_len,
                                          void *value) {
   int old_val = 0;
@@ -629,6 +612,7 @@ void *Art_index::ART_insert_with_replace(const unsigned char *key, int key_len,
   if (!old_val) m_tree->size++;
   return old;
 }
+
 void Art_index::Remove_child256(Art_node256 *n, Art_node **ref,
                                 unsigned char c) {
   n->children[c] = NULL;
@@ -652,6 +636,7 @@ void Art_index::Remove_child256(Art_node256 *n, Art_node **ref,
     free(n);
   }
 }
+
 void Art_index::Remove_child48(Art_node48 *n, Art_node **ref, unsigned char c) {
   int pos = n->keys[c];
   n->keys[c] = 0;
@@ -675,6 +660,7 @@ void Art_index::Remove_child48(Art_node48 *n, Art_node **ref, unsigned char c) {
     free(n);
   }
 }
+
 void Art_index::Remove_child16(Art_node16 *n, Art_node **ref, Art_node **l) {
   int pos = l - n->children;
   memmove(n->keys + pos, n->keys + pos + 1, n->n.num_children - 1 - pos);
@@ -691,6 +677,7 @@ void Art_index::Remove_child16(Art_node16 *n, Art_node **ref, Art_node **l) {
     free(n);
   }
 }
+
 void Art_index::Remove_child4(Art_node4 *n, Art_node **ref, Art_node **l) {
   int pos = l - n->children;
   memmove(n->keys + pos, n->keys + pos + 1, n->n.num_children - 1 - pos);
@@ -740,6 +727,7 @@ void Art_index::Remove_child(Art_node *n, Art_node **ref, unsigned char c,
       abort();
   }
 }
+
 Art_index::Art_leaf *Art_index::Recursive_delete(Art_node *n, Art_node **ref,
                                                  const unsigned char *key,
                                                  int key_len, int depth) {
@@ -784,6 +772,7 @@ Art_index::Art_leaf *Art_index::Recursive_delete(Art_node *n, Art_node **ref,
     return Recursive_delete(*child, child, key, key_len, depth + 1);
   }
 }
+
 void *Art_index::ART_delete(const unsigned char *key, int key_len) {
   Art_leaf *l = Recursive_delete(m_tree->root, &m_tree->root, key, key_len, 0);
   if (l) {
@@ -1027,5 +1016,6 @@ int Art_index::ART_iter_prefix(const unsigned char *key, int key_len,
   }
   return 0;
 }
+
 }  // namespace Imcs
 }  // namespace ShannonBase

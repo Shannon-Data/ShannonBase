@@ -122,7 +122,7 @@ class ImcsReader : public Reader {
   // local buffer.
   uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};
   // viewer of cus.
-  std::map<std::string, std::unique_ptr<CuView>> m_cu_views;
+  std::unordered_map<std::string, std::unique_ptr<CuView>> m_cu_views;
   // source table.
   TABLE *m_source_table{nullptr};
   // source name info.

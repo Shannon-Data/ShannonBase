@@ -51,7 +51,7 @@ class Cu;
 class Imcu;
 class Imcs : public MemoryObject {
  public:
-  using Cu_map_t = std::map<std::string, std::unique_ptr<Cu>>;
+  using Cu_map_t = std::unordered_map<std::string, std::unique_ptr<Cu>>;
   using Imcu_map_t = std::multimap<std::string, std::unique_ptr<Imcu>>;
   inline static Imcs *get_instance() {
     std::call_once(one, [&] { m_instance = new Imcs(); });

@@ -124,9 +124,10 @@ uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, uchar *data,
                              uint length) {
   DBUG_TRACE;
   ut_ad(m_header.get() && m_chunks.size());
-  uchar *pos{nullptr};
+
   Chunk *chunk_ptr = m_chunks[m_chunks.size() - 1].get();
-  if (!(pos = chunk_ptr->write_data_direct(context, data, length))) {
+  uchar *pos = chunk_ptr->write_data_direct(context, data, length);
+  if (unlikely(!pos)) {
     // the prev chunk is full, then allocate a new chunk to write.
     std::scoped_lock lk(m_header_mutex);
     Field *field = *(context->m_table->field + m_header->m_field_no);
@@ -171,14 +172,16 @@ uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, uchar *buffer) {
   return chunk->Read_data(context, buffer);
 #else
   if (m_current_chunk_id >= m_chunks.size()) return nullptr;
+
   Chunk *chunk = m_chunks[m_current_chunk_id].get();
-  if (!chunk) return nullptr;
+  if (unlikely(!chunk)) return nullptr;
+
   auto ret = chunk->read_data_direct(context, buffer);
-  if (!ret) {  // to the end of this chunk, then start to read the next chunk.
+  if (unlikely(!ret)) {  // to the end of this chunk, then start to read the next chunk.
     m_current_chunk_id.fetch_add(1, std::memory_order::memory_order_seq_cst);
     if (m_current_chunk_id >= m_chunks.size()) return nullptr;
     chunk = m_chunks[m_current_chunk_id].get();
-    if (!chunk) return nullptr;
+    if (unlikely(!chunk)) return nullptr;
     ret = chunk->read_data_direct(context, buffer);
   }
   return ret;

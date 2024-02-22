@@ -148,23 +148,23 @@ uint Imcs::write_direct(ShannonBase::RapidContext *context, Field *field) {
   data_len += SHANNON_SUMPTR_BYTE_LEN + SHANNON_DATA_BYTE_LEN;
   // start to pack the data, then writes into memory.
   std::unique_ptr<uchar[]> data(new uchar[data_len]);
-  int8 info{0};
-  int64 sum_ptr{0}, offset{0};
+  uint8 info{0};
+  uint32 sum_ptr{0};
   if (field->is_real_null()) info |= DATA_NULL_FLAG_MASK;
 
   double rowid{0};
-  memcpy(data.get() + offset, &info, SHANNON_INFO_BYTE_LEN);
-  offset += SHANNON_INFO_BYTE_LEN;
-  memcpy(data.get() + offset, &context->m_extra_info.m_trxid,
-         SHANNON_TRX_ID_BYTE_LEN);
-  offset += SHANNON_TRX_ID_BYTE_LEN;
-  memcpy(data.get() + offset, &rowid, SHANNON_ROWID_BYTE_LEN);
-  offset += SHANNON_ROWID_BYTE_LEN;
-  memcpy(data.get() + offset, &sum_ptr, SHANNON_SUMPTR_BYTE_LEN);
-  offset += SHANNON_SUMPTR_BYTE_LEN;
+  //byte info
+  *(uint8*)(data.get() + SHANNON_INFO_BYTE_OFFSET) = info;
+  //trxid
+  *(uint64*)(data.get() + SHANNON_TRX_ID_BYTE_OFFSET) = context->m_extra_info.m_trxid;
+  // write rowid
+  *(uint64*)(data.get() + SHANNON_ROW_ID_BYTE_OFFSET) = rowid;
+  //sum_ptr
+  *(uint32*)(data.get() + SHANNON_SUMPTR_BYTE_OFFSET) = sum_ptr;
+
   Compress::Dictionary *dict = m_cus[key_name]->local_dictionary();
   double data_val = Utils::Util::get_field_value(field, dict);
-  memcpy(data.get() + offset, &data_val, SHANNON_DATA_BYTE_LEN);
+  *(double*)(data.get() + SHANNON_DATA_BYTE_OFFSET) = data_val;
 
   if (!m_cus[key_name]->write_data_direct(context, data.get(), data_len))
     return 1;
