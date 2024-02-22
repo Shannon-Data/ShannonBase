@@ -54,12 +54,17 @@ Chunk::Chunk(Field *field) {
    * operations, it's an effiecient memory utils. it has been initialized in
    * ha_innodb.cc: ut_new_boot();
    */
-  if (rapid_allocated_mem_size + ShannonBase::SHANNON_CHUNK_SIZE <=
-      rapid_memory_size) {
-    m_data_base = static_cast<uchar *>(ut::malloc_large_page_withkey(
-        ut::make_psi_memory_key(mem_key_buf_buf_pool),
-        ShannonBase::SHANNON_CHUNK_SIZE, ut::fallback_to_normal_page_t{}));
-    if (!m_data_base) {
+  if (likely(rapid_allocated_mem_size + ShannonBase::SHANNON_CHUNK_SIZE <=
+      rapid_memory_size)) {
+    m_data_base = static_cast<uchar *>(ut::aligned_alloc_withkey(
+        ut::make_psi_memory_key(mem_key_buf_buf_pool), SHANNON_ROW_TOTAL_LEN,
+        ShannonBase::SHANNON_CHUNK_SIZE));
+
+    //m_data_base = static_cast<uchar *>(ut::malloc_large_page_withkey(
+    //    ut::make_psi_memory_key(mem_key_buf_buf_pool),
+    //    ShannonBase::SHANNON_CHUNK_SIZE, ut::fallback_to_normal_page_t{}));
+
+    if (unlikely(!m_data_base)) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
       return;
     }
@@ -75,8 +80,6 @@ Chunk::Chunk(Field *field) {
   }
 
   m_header = ut::new_withkey<Chunk_header>(UT_NEW_THIS_FILE_PSI_KEY);
-  // m_header =
-  // ut::make_unique<Chunk_header>(ut::make_psi_memory_key(mem_key_buf_buf_pool));
   if (!m_header) return;
 
   m_header->m_avg = 0;
@@ -116,8 +119,8 @@ Chunk::~Chunk() {
     m_header = nullptr;
   }
 
-  if (!m_data_base &&
-      ut::free_large_page(m_data_base, ut::fallback_to_normal_page_t{})) {
+  if (!m_data_base) {
+    ut::aligned_free(m_data_base);
     m_data_base = nullptr;
     m_data_cursor = m_data_base;
     m_data_end = m_data_base;
@@ -145,7 +148,7 @@ uchar *Chunk::write_data_direct(ShannonBase::RapidContext *context, uchar *data,
   DBUG_TRACE;
   ut_ad(m_data_base || data);
   std::scoped_lock lk(m_data_mutex);
-  if (m_data + length > m_data_end) return nullptr;
+  if (unlikely(m_data + length > m_data_end)) return nullptr;
 
   double val{0};
   memcpy(m_data, data, length);
@@ -177,7 +180,7 @@ uchar *Chunk::read_data_direct(ShannonBase::RapidContext *context,
 
   uint8 info =
       *((uint8 *)(m_data_cursor + SHANNON_INFO_BYTE_OFFSET));  // info byte
-  if (info & DATA_DELETE_FLAG_MASK) {                          // deleted.
+  if (unlikely(info & DATA_DELETE_FLAG_MASK)) {                // deleted.
     m_data_cursor += SHANNON_ROW_TOTAL_LEN;
     memcpy(buffer, m_data_cursor, SHANNON_ROW_TOTAL_LEN);
     m_data_cursor += SHANNON_ROW_TOTAL_LEN;  // go to the next.

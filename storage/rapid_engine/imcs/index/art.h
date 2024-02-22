@@ -30,6 +30,7 @@
 #ifndef __SHANNONBASE_ART_H__
 #define __SHANNONBASE_ART_H__
 
+#include <assert.h>
 #include <stdint.h>
 #include <functional>
 #include <stack>
@@ -137,8 +138,25 @@ class Art_index {
   std::stack<Art_node *> m_current_nodes;
 
  public:
-  int ART_tree_init();
-  int ART_tree_destroy();
+  inline int ART_tree_init() {
+    if (!m_tree) {
+      m_tree = new Art_tree();
+    }
+    m_tree->root = nullptr;
+    m_tree->size = 0;
+    m_inited = true;
+    ART_reset_cursor();
+    return 0;
+  }
+  inline int ART_tree_destroy() {
+    Destroy_node(m_tree->root);
+    if (m_tree) {
+      delete m_tree;
+      m_tree = nullptr;
+      m_inited = false;
+    }
+    return 0;
+  }
   inline bool Art_initialized() { return m_inited; }
 
   void *ART_insert(const unsigned char *key, int key_len, void *value);
@@ -146,7 +164,11 @@ class Art_index {
                                 void *value);
   void *ART_delete(const unsigned char *key, int key_len);
   void *ART_search(const unsigned char *key, int key_len);
-  void ART_reset_cursor();
+  inline void ART_reset_cursor() {
+    while(!m_current_nodes.empty())
+        m_current_nodes.pop();
+    m_current_nodes.emplace(m_tree->root);
+  }
   Art_leaf *ART_minimum();
   Art_leaf *ART_maximum();
 
