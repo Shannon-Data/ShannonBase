@@ -91,8 +91,9 @@ class ImcsReader : public Reader {
   ImcsReader(TABLE *table);
   ImcsReader() = delete;
   virtual ~ImcsReader() {}
-  using CuViews_t = std::map<std::string, std::unique_ptr<CuView>>;
 
+  //field index <----> std::unique_ptr<CuView>, for fast acess.
+  using TableCuViews = std::unordered_map<uint, std::unique_ptr<CuView>>;
   int open() override;
   int close() override;
   // seqential read. full table scan
@@ -121,14 +122,13 @@ class ImcsReader : public Reader {
  private:
   // local buffer.
   uchar m_buff[SHANNON_ROW_TOTAL_LEN] = {0};
-  // viewer of cus.
-  std::unordered_map<std::string, std::unique_ptr<CuView>> m_cu_views;
+  /** for fast acess the (field index) <---> (CuViews) pairs. and due to dont allow
+   * "DDLs on a table with a secondary engine defined are not allowed", therefore,
+   *  we can use an arrary to keep CuView.
+  */
+  std::vector<std::unique_ptr<CuView>> m_cu_views;
   // source table.
   TABLE *m_source_table{nullptr};
-  // source name info.
-  std::string m_db_name, m_table_name;
-  // key part1
-  std::string m_key_name_part;
   // row nums has read.
   ha_rows m_rows_read{0};
   // whether start to read or not.
