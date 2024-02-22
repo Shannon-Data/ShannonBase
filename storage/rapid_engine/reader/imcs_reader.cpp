@@ -332,29 +332,29 @@ uchar *CuView::seek(size_t offset) {
 }
 
 ImcsReader::ImcsReader(TABLE *table)
-    : m_source_table(table),
-      m_db_name(table->s->db.str),
-      m_table_name(table->s->table_name.str) {
+    : m_source_table(table) {
   m_rows_read = 0;
   m_start_of_scan = false;
-  m_key_name_part = m_db_name + m_table_name;
+
   for (uint idx = 0; idx < m_source_table->s->fields; idx++) {
     Field *field_ptr = *(m_source_table->field + idx);
     ut_a(field_ptr);
     // Skip columns marked as NOT SECONDARY.
     if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
-      continue;
-    m_cu_views.emplace(m_key_name_part + field_ptr->field_name,
-                       std::make_unique<CuView>(table, field_ptr));
+      m_cu_views.push_back(nullptr); //placeholder.
+    else
+      m_cu_views.push_back(std::make_unique<CuView>(table, field_ptr));
   }
 }
 
 int ImcsReader::open() {
   DBUG_TRACE;
   for (auto &item : m_cu_views) {
-    item.second->open();
+    if (!item) continue;
+    item->open();
   }
+
   m_start_of_scan = true;
   return 0;
 }
@@ -362,8 +362,10 @@ int ImcsReader::open() {
 int ImcsReader::close() {
   DBUG_TRACE;
   for (auto &item : m_cu_views) {
-    item.second->close();
+    if (!item) continue;
+    item->close();
   }
+
   m_start_of_scan = false;
   return 0;
 }
@@ -377,7 +379,8 @@ int ImcsReader::index_repos() {
     if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
       continue;
-    m_cu_views[m_key_name_part + field_ptr->field_name]->get_source()->get_index()
+
+    m_cu_views[field_ptr->field_index()]->get_source()->get_index()
         ->reset_pos();
   }
 
@@ -398,8 +401,7 @@ int ImcsReader::read(ShannonBaseContext *context, uchar *buffer,
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
       continue;
 
-    auto ret =
-            m_cu_views[m_key_name_part + field_ptr->field_name]->read(context, m_buff);
+    auto ret = m_cu_views[field_ptr->field_index()]->read(context, m_buff);
     if (unlikely(ret))
       return ret;
     uint8 info = *(uint8 *)m_buff;
@@ -413,7 +415,7 @@ int ImcsReader::read(ShannonBaseContext *context, uchar *buffer,
       field_ptr->set_notnull();
       double val = *(double *)(m_buff + SHANNON_DATA_BYTE_OFFSET);
       Compress::Dictionary *dict =
-          m_cu_views[m_key_name_part + field_ptr->field_name]->get_source()->local_dictionary();
+          m_cu_views[field_ptr->field_index()]->get_source()->local_dictionary();
       Utils::Util::store_field_value(m_source_table, field_ptr, dict, val);
     }
     if (old_map) tmp_restore_column_map(m_source_table->write_set, old_map);
@@ -435,10 +437,9 @@ int ImcsReader::records_in_range(ShannonBaseContext *context,
 
   auto field_ptr = *(m_source_table->field + field_nr);
   ut_a(field_ptr);
-  if (m_cu_views.find(m_key_name_part + field_ptr->field_name) ==
-      m_cu_views.end())
+  if (field_ptr->field_index() > m_cu_views.size())
     return 0;
-  CuView *cu_view = m_cu_views[m_key_name_part + field_ptr->field_name].get();
+  CuView *cu_view = m_cu_views[field_ptr->field_index()].get();
   if (likely(cu_view))
     return cu_view->records_in_range(context, index, min_key, max_key);
 
@@ -496,7 +497,7 @@ int ImcsReader::index_read(ShannonBaseContext *context, uchar *buff, uchar *key,
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
       continue;
 
-    auto ret = m_cu_views[m_key_name_part + field_ptr->field_name]->read_index_fast(
+    auto ret = m_cu_views[field_ptr->field_index()]->read_index_fast(
             context, key, key_len, m_buff, find_flag);
     if (unlikely(ret))
       return HA_ERR_KEY_NOT_FOUND;
@@ -509,8 +510,7 @@ int ImcsReader::index_read(ShannonBaseContext *context, uchar *buff, uchar *key,
     else {
       field_ptr->set_notnull();
       double val = *(double *)(m_buff + SHANNON_DATA_BYTE_OFFSET);
-      Compress::Dictionary *dict =
-          m_cu_views[m_key_name_part + field_ptr->field_name]->get_source()
+      Compress::Dictionary *dict = m_cu_views[field_ptr->field_index()]->get_source()
               ->local_dictionary();
       Utils::Util::store_field_value(m_source_table, field_ptr, dict, val);
     }
@@ -554,7 +554,7 @@ int ImcsReader::index_next_same(ShannonBaseContext *context, uchar *buff,
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
       continue;
 
-    if (m_cu_views[m_key_name_part + field_ptr->field_name]->read_index_fast(
+    if (m_cu_views[field_ptr->field_index()]->read_index_fast(
             context, key, key_len, m_buff, find_flag))
       return HA_ERR_KEY_NOT_FOUND;
 
@@ -566,8 +566,7 @@ int ImcsReader::index_next_same(ShannonBaseContext *context, uchar *buff,
     else {
       field_ptr->set_notnull();
       double val = *(double *)(m_buff + SHANNON_DATA_BYTE_OFFSET);
-      Compress::Dictionary *dict =
-          m_cu_views[m_key_name_part + field_ptr->field_name]->get_source()
+      Compress::Dictionary *dict = m_cu_views[field_ptr->field_index()]->get_source()
               ->local_dictionary();
       Utils::Util::store_field_value(m_source_table, field_ptr, dict, val);
     }
@@ -596,7 +595,7 @@ int ImcsReader::index_general(ShannonBaseContext *context, uchar *buffer,
     /**
      * index key and find flag was set in index_read. Here, we just only do
      * index cursor to next index records.*/
-    if (m_cu_views[m_key_name_part + field_ptr->field_name]->read_index(
+    if (m_cu_views[field_ptr->field_index()]->read_index(
             context, rpd_context->m_extra_info.m_key_buff.get(),
             rpd_context->m_extra_info.m_key_len, m_buff,
             rpd_context->m_extra_info.m_find_flag))
@@ -611,7 +610,7 @@ int ImcsReader::index_general(ShannonBaseContext *context, uchar *buffer,
       field_ptr->set_notnull();
       double val = *(double *)(m_buff + SHANNON_DATA_BYTE_OFFSET);
       Compress::Dictionary *dict =
-          m_cu_views[m_key_name_part + field_ptr->field_name]->get_source()
+          m_cu_views[field_ptr->field_index()]->get_source()
               ->local_dictionary();
       Utils::Util::store_field_value(m_source_table, field_ptr, dict, val);
     }
@@ -638,8 +637,7 @@ int ImcsReader::write(ShannonBaseContext *context, uchar *buffer,
     // Skip columns marked as NOT SECONDARY.
     if ((field)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    if (m_cu_views.find(m_key_name_part + field->field_name) ==
-        m_cu_views.end())
+    if (field->field_index() > m_cu_views.size())
       return HA_ERR_END_OF_FILE;
 
     // start writing the data, at first, assemble the data we want to write. the
@@ -663,13 +661,13 @@ int ImcsReader::write(ShannonBaseContext *context, uchar *buffer,
     double data_val{0};
     if (likely(!field->is_real_null())) {  // not null
       Compress::Dictionary *dict =
-          m_cu_views[m_key_name_part + field->field_name]->get_source()
+          m_cu_views[field->field_index()]->get_source()
               ->local_dictionary();
       data_val = Utils::Util::get_field_value(field, dict);
       // write data
       *(double*)(m_buff + SHANNON_DATA_BYTE_OFFSET) = data_val;
     }
-    auto ret = m_cu_views[m_key_name_part + field->field_name]->write(
+    auto ret = m_cu_views[field->field_index()]->write(
         context, m_buff, SHANNON_ROW_TOTAL_LEN);
     if (!ret) return 1;
   }
