@@ -27,6 +27,8 @@
 #define __SHANNONBASE_INDEX_H__
 
 #include <memory>
+#include <vector>
+
 #include "storage/rapid_engine/imcs/index/art.h"
 
 namespace ShannonBase {
@@ -40,23 +42,30 @@ class Index {
   ~Index();
   Index(Index &&) = delete;
   Index &operator=(Index &&) = delete;
-
+  inline bool initialized() { return m_inited; }
   int insert(uchar *key, uint key_len, uchar *value);
   int remove(uchar *key, uint key_len);
-  int lookup(uchar *key, uint key_len, uchar *value, uint value_len);
+
+  void* lookup(uchar *key, uint key_len);
+
+  void* first(uint key_offset, uchar *key, uint key_len);
+  void* next();
+
+  void* read_index(Art_index::ART_Func2 &func);
+
   int maximum(uchar *value, uint value_len);
   int minimum(uchar *value, uint value_len);
-  int next(Art_index::ART_Func &func, uchar *out);
-  void *next_fast(uint key_offset, unsigned char *key, uint key_len);
-  int next_prefix();
 
   void reset_pos();
   IndexType type() { return m_type; }
 
  private:
+  bool m_inited {false};
   IndexType m_type{IndexType::ART};
   std::unique_ptr<Art_index> m_impl{nullptr};
   bool m_start_scan{false};
+
+  std::vector<void*> m_values;
 };
 
 }  // namespace Imcs

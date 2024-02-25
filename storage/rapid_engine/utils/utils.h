@@ -26,6 +26,8 @@
 #ifndef __SHANNONBASE_UTILS_H__
 #define __SHANNONBASE_UTILS_H__
 
+#include <string>
+
 #include "include/field_types.h"
 #include "include/my_inttypes.h"
 
@@ -51,6 +53,7 @@ class Util {
                                   Compress::Dictionary *&, const uchar *, uint);
   static int get_range_value(enum_field_types, Compress::Dictionary *&,
                              key_range *, key_range *, double &, double &);
+  static int mem2string (uchar* buff, uint length, std::string& result);
 };
 
 }  // namespace Utils

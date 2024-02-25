@@ -103,8 +103,9 @@ int CuView::read(ShannonBaseContext *context, uchar *buffer, size_t length) {
   while (chunk) {
     ptrdiff_t diff = m_rnd_rpos - chunk->get_data();
     if (unlikely(diff >= 0)) {  // to the next
-      chunk = m_source_cu->get_chunk(m_rnd_chunk_rid.fetch_add(1,
-          std::memory_order::memory_order_acq_rel));
+      m_rnd_chunk_rid.fetch_add(1,
+          std::memory_order::memory_order_acq_rel);
+      chunk = m_source_cu->get_chunk(m_rnd_chunk_rid);
       if (!chunk) return HA_ERR_END_OF_FILE;
       m_rnd_rpos.store(chunk->get_base(), std::memory_order_acq_rel);
       continue;
@@ -148,9 +149,9 @@ int CuView::index_lookup(ShannonBaseContext *context, uchar *key,
   if (!m_source_cu) return HA_ERR_END_OF_FILE;
 
   RapidContext *rpd_context = dynamic_cast<RapidContext *>(context);
-  auto ret = m_source_cu->get_index()->lookup(key, key_len, value,
-                                              SHANNON_ROW_TOTAL_LEN);
+  auto ret = m_source_cu->get_index()->lookup(key, key_len);
   if (!ret) return HA_ERR_END_OF_FILE;
+  memcpy(value, ret,SHANNON_ROW_TOTAL_LEN);
 
   uint8 info = *((uint8 *)(value + SHANNON_INFO_BYTE_OFFSET));  // info byte
   uint64 trxid =
@@ -179,7 +180,7 @@ int CuView::read_index_fast(ShannonBaseContext *context, uchar *key,
     offset += m_source_table->key_info->key_part[off_idx].store_length;
   }
 
-  auto ret = m_source_cu->get_index()->next_fast(offset, key, key_len);
+  auto ret = m_source_cu->get_index()->first(offset, key, key_len);
   if (unlikely(!ret)) return HA_ERR_END_OF_FILE;
 
   memcpy(value, ret, SHANNON_ROW_TOTAL_LEN);
@@ -198,37 +199,15 @@ int CuView::read_index_fast(ShannonBaseContext *context, uchar *key,
   return 0;
 }
 
-int CuView::read_index(ShannonBaseContext *context, uchar *key, size_t key_len,
-                       uchar *value, ha_rkey_function find_flag) {
+int CuView::read_index_next(ShannonBaseContext *context, uchar *value) {
   DBUG_TRACE;
   if (!m_source_cu) return HA_ERR_END_OF_FILE;
 
   RapidContext *rpd_context = dynamic_cast<RapidContext *>(context);
-  // auto ret = m_source_cu->get_index()->lookup(key, key_len, value,
-  // SHANNON_ROW_TOTAL_LEN);
-  Imcs::Art_index::ART_Func callback =
-      [&](void *data, const unsigned char *artkey, uint32_t artkey_len,
-          void *val, uint val_len) -> int {
-    if (!const_cast<ha_rapid *>(rpd_context->m_handler)->is_push_down()) {
-      uint offset{0};
-      for (uint off_idx = 0; off_idx < rpd_context->m_extra_info.m_keynr;
-           off_idx++) {
-        offset += m_source_table->key_info->key_part[off_idx].store_length;
-      }
+  auto ret = m_source_cu->get_index()->next();
+  if (unlikely(!ret)) return HA_ERR_END_OF_FILE;
 
-      if (unlikely(!memcmp(const_cast<unsigned char *>(artkey + offset), key, key_len))) {
-        memcpy(data, val, val_len);
-        return 1;
-      }
-      return 0;
-    } else {  // push-down cond check in ImcsReader::index_read
-      memcpy(data, val, val_len);
-      return 1;
-    }
-  };
-  auto ret = m_source_cu->get_index()->next(callback, value);
-  if (!ret) return HA_ERR_END_OF_FILE;
-
+  memcpy(value, ret, SHANNON_ROW_TOTAL_LEN);
   uint8 info = *((uint8 *)(value + SHANNON_INFO_BYTE_OFFSET));  // info byte
   uint64 trxid =
       *((uint64 *)(value + SHANNON_TRX_ID_BYTE_OFFSET));  // trxid bytes
@@ -241,6 +220,66 @@ int CuView::read_index(ShannonBaseContext *context, uchar *key, size_t key_len,
     return HA_ERR_KEY_NOT_FOUND;
   }
 
+  return 0;
+}
+
+int CuView::read_index(ShannonBaseContext *context, uchar* value) {
+  DBUG_TRACE;
+  if (!m_source_cu) return HA_ERR_END_OF_FILE;
+
+  RapidContext *rpd_context = dynamic_cast<RapidContext *>(context);
+
+  Imcs::Art_index::ART_Func2 callback =
+      [&](Imcs::Art_index::Art_leaf* l, std::vector<Imcs::Art_index::Art_leaf*>& result) -> int {
+
+      auto key_info = m_source_table->key_info;
+      auto key_offset{0u};
+      uchar* old_ptr[MAX_KEY] = {nullptr}; //to store the field ptr of keys.
+      //set the new pointer to the key.
+      for (auto key_id =0u; key_id < key_info->user_defined_key_parts; key_id++) {
+        auto key_field = (key_info->key_part + key_id)->field;
+        old_ptr[key_id] = key_field->field_ptr();
+        key_field->set_field_ptr(reinterpret_cast<uchar*>(l->key) + key_offset);
+        key_offset += (key_info->key_part + key_id)->store_length;
+      }
+
+      if (const_cast<ha_rapid *>(rpd_context->m_handler)->is_push_down()) {
+          ICP_RESULT match_result;
+          match_result = shannon_rapid_index_cond(
+              const_cast<ha_rapid *>(rpd_context->m_handler));
+          if (match_result == ICP_MATCH) {
+            /* Convert the remaining fields to MySQL format. If this is a secondary
+            index record, we must defer this until we have fetched the clustered
+            index record. */
+            result.emplace_back(l);
+          }
+      } else assert(false);
+
+      //restore the field pinter.
+      for (auto key_id =0u; key_id < key_info->user_defined_key_parts; key_id++) {
+         auto key_field = (key_info->key_part + key_id)->field;
+         key_field->set_field_ptr(old_ptr[key_id]);
+      }
+
+      return 0;
+  };
+
+  auto key_value = (uchar*)m_source_cu->get_index()->read_index(callback);
+  if (!key_value) return HA_ERR_END_OF_FILE;
+
+  uint8 info = *((uint8 *)(key_value + SHANNON_INFO_BYTE_OFFSET));  // info byte
+  uint64 trxid =
+      *((uint64 *)(key_value + SHANNON_TRX_ID_BYTE_OFFSET));  // trxid bytes
+  // visibility check at firt.
+  table_name_t name{const_cast<char *>(m_source_table->s->table_name.str)};
+  ReadView *read_view = trx_get_read_view(rpd_context->m_trx);
+  ut_ad(read_view);
+  if (!read_view->changes_visible(trxid, name) ||
+      (info & DATA_DELETE_FLAG_MASK)) {  // invisible and deleted
+    return HA_ERR_KEY_NOT_FOUND;
+  }
+
+  memcpy(value, key_value, SHANNON_ROW_TOTAL_LEN);
   return 0;
 }
 
@@ -370,23 +409,6 @@ int ImcsReader::close() {
   return 0;
 }
 
-int ImcsReader::index_repos() {
-  DBUG_TRACE;
-  for (uint idx = 0; idx < m_source_table->s->fields; idx++) {
-    Field *field_ptr = *(m_source_table->field + idx);
-    ut_a(field_ptr);
-    // Skip columns marked as NOT SECONDARY
-    if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
-        field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
-      continue;
-
-    m_cu_views[field_ptr->field_index()]->get_source()->get_index()
-        ->reset_pos();
-  }
-
-  return 0;
-}
-
 int ImcsReader::read(ShannonBaseContext *context, uchar *buffer,
                      size_t length) {
   DBUG_TRACE;
@@ -487,7 +509,6 @@ int ImcsReader::cond_comp(ShannonBaseContext *context, uchar *buff, uchar *key,
 int ImcsReader::index_read(ShannonBaseContext *context, uchar *buff, uchar *key,
                            uint key_len, ha_rkey_function find_flag) {
   ut_a(context);
-  index_repos();
 
   for (uint idx = 0; idx < m_source_table->s->fields; idx++) {
     Field *field_ptr = *(m_source_table->field + idx);
@@ -496,9 +517,12 @@ int ImcsReader::index_read(ShannonBaseContext *context, uchar *buff, uchar *key,
     if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
       continue;
-
-    auto ret = m_cu_views[field_ptr->field_index()]->read_index_fast(
-            context, key, key_len, m_buff, find_flag);
+    auto ret {0};
+    if (find_flag == HA_READ_KEY_EXACT)
+      ret = m_cu_views[field_ptr->field_index()]->read_index_fast(
+              context, key, key_len, m_buff, find_flag);
+    else
+      ret = m_cu_views[field_ptr->field_index()]->read_index(context, m_buff);
     if (unlikely(ret))
       return HA_ERR_KEY_NOT_FOUND;
 
@@ -517,25 +541,41 @@ int ImcsReader::index_read(ShannonBaseContext *context, uchar *buff, uchar *key,
     if (old_map) tmp_restore_column_map(m_source_table->write_set, old_map);
   }
 
-  if (cond_comp(context, buff, key, key_len, find_flag))  // match
-    return 0;
-
   return 0;
 }
 
 int ImcsReader::index_next(ShannonBaseContext *context, uchar *buffer,
                            size_t length) {
   ut_a(context && buffer);
-  auto rpd_context = dynamic_cast<RapidContext *>(context);
-  for (;;) {
-    if (unlikely(index_general(context, buffer, length)))
-       return HA_ERR_KEY_NOT_FOUND;
 
-    if (cond_comp(context, buffer,
-                  rpd_context->m_extra_info.m_key_buff.get(),  // matched record
-                  rpd_context->m_extra_info.m_key_len,
-                  rpd_context->m_extra_info.m_find_flag))
-      return 0;
+  for (uint idx = 0; idx < m_source_table->s->fields; idx++) {
+    Field *field_ptr = *(m_source_table->field + idx);
+    ut_a(field_ptr);
+    // Skip columns marked as NOT SECONDARY
+    if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
+        field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
+      continue;
+
+    /**
+     * index key and find flag was set in index_read. Here, we just only do
+     * index cursor to next index records.*/
+    if (m_cu_views[field_ptr->field_index()]->read_index_next(context, m_buff))
+      return HA_ERR_KEY_NOT_FOUND;
+
+    uint8 info = *(uint8 *)m_buff;
+    my_bitmap_map *old_map =
+        tmp_use_all_columns(m_source_table, m_source_table->write_set);
+    if (unlikely(info & DATA_NULL_FLAG_MASK))
+      field_ptr->set_null();
+    else {
+      field_ptr->set_notnull();
+      double val = *(double *)(m_buff + SHANNON_DATA_BYTE_OFFSET);
+      Compress::Dictionary *dict =
+          m_cu_views[field_ptr->field_index()]->get_source()
+              ->local_dictionary();
+      Utils::Util::store_field_value(m_source_table, field_ptr, dict, val);
+    }
+    if (old_map) tmp_restore_column_map(m_source_table->write_set, old_map);
   }
 
   return 0;
@@ -554,8 +594,7 @@ int ImcsReader::index_next_same(ShannonBaseContext *context, uchar *buff,
         field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
       continue;
 
-    if (m_cu_views[field_ptr->field_index()]->read_index_fast(
-            context, key, key_len, m_buff, find_flag))
+    if (m_cu_views[field_ptr->field_index()]->read_index_next(context,m_buff))
       return HA_ERR_KEY_NOT_FOUND;
 
     uint8 info = *(uint8 *)m_buff;
@@ -573,16 +612,12 @@ int ImcsReader::index_next_same(ShannonBaseContext *context, uchar *buff,
     if (old_map) tmp_restore_column_map(m_source_table->write_set, old_map);
   }
 
-  if (cond_comp(context, buff, key, key_len, find_flag))  // match
-    return 0;
-
   return 0;
 }
 
 int ImcsReader::index_general(ShannonBaseContext *context, uchar *buffer,
                               size_t length) {
   ut_a(context && buffer);
-  auto rpd_context = dynamic_cast<RapidContext *>(context);
 
   for (uint idx = 0; idx < m_source_table->s->fields; idx++) {
     Field *field_ptr = *(m_source_table->field + idx);
@@ -595,10 +630,7 @@ int ImcsReader::index_general(ShannonBaseContext *context, uchar *buffer,
     /**
      * index key and find flag was set in index_read. Here, we just only do
      * index cursor to next index records.*/
-    if (m_cu_views[field_ptr->field_index()]->read_index(
-            context, rpd_context->m_extra_info.m_key_buff.get(),
-            rpd_context->m_extra_info.m_key_len, m_buff,
-            rpd_context->m_extra_info.m_find_flag))
+    if (m_cu_views[field_ptr->field_index()]->read_index(context, m_buff))
       return HA_ERR_KEY_NOT_FOUND;
 
     uint8 info = *(uint8 *)m_buff;

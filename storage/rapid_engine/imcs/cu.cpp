@@ -88,7 +88,8 @@ Cu::Cu(Field *field) {
     m_index = std::make_unique<Index>(Index::IndexType::ART);
 }
 
-Cu::~Cu() { m_chunks.clear(); }
+Cu::~Cu() {
+}
 
 uchar *Cu::get_base() {
   DBUG_TRACE;

@@ -32,8 +32,10 @@
 
 #include <assert.h>
 #include <stdint.h>
+
 #include <functional>
-#include <stack>
+#include <vector>
+#include <memory>
 
 #include "my_inttypes.h"
 namespace ShannonBase {
@@ -45,9 +47,8 @@ class Art_index {
  public:
   static constexpr uint MAX_PREFIX_LEN = 10;
   using ART_Func =
-      std::function<int(void *data, const unsigned char *key, uint32 key_len,
+       std::function<int(void *data, const unsigned char *key, uint32 key_len,
                         void *value, uint32 value_len)>;
-
   typedef struct {
     uint32 partial_len{0};
     uint8 type{NodeType::UNKNOWN};
@@ -92,15 +93,18 @@ class Art_index {
   Art_node *Alloc_node(NodeType type);
   void Destroy_node(Art_node *n);
 
+  using ART_Func2 =
+       std::function<int(Art_leaf* l, std::vector<Art_leaf*>& results)>;
  private:
   // 0 sucess.
   Art_node **Find_child(Art_node *n, unsigned char c);
+  void Find_children(Art_node *n, unsigned char c, std::vector<Art_node *>& children);
   int Check_prefix(const Art_node *n, const unsigned char *key, int key_len,
                    int depth);
   int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len,
                    int depth);
   int Leaf_partial_matches(const Art_leaf *n, const unsigned char *key,
-                           uint key_offset, int key_len, int depth);
+                           int key_len, int depth);
   inline uint64 art_size() { return m_tree->size; }
 
   Art_leaf *Minimum(const Art_node *n);
@@ -127,16 +131,18 @@ class Art_index {
   Art_leaf *Recursive_delete(Art_node *n, Art_node **ref,
                              const unsigned char *key, int key_len, int depth);
   int Recursive_iter(Art_node *n, ART_Func &cb, void *data, int data_len);
-  int Cruise(ART_Func &cb, void *data, int data_len);
-  void *Cruise_fast(uint key_offset, unsigned char *key, int key_len);
+  int Recursive_iter2(Art_node *n, ART_Func2 &cb);
+  int Recursive_iter_ex(Art_node *n, const unsigned char *key, int key_len);
+  int Cruise_fast(uint key_offset, unsigned char *key, int key_len);
   int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix,
                           int prefix_len);
+  int Leaf_prefix_matches2(const Art_leaf *n, const unsigned char *prefix,
+                          int prefix_len, uint offset);
 
  private:
   Art_tree *m_tree{nullptr};
   bool m_inited{false};
-  std::stack<Art_node *> m_current_nodes;
-
+  std::vector<Art_leaf *> m_current_values;
  public:
   inline int ART_tree_init() {
     if (!m_tree) {
@@ -145,9 +151,11 @@ class Art_index {
     m_tree->root = nullptr;
     m_tree->size = 0;
     m_inited = true;
+
     ART_reset_cursor();
     return 0;
   }
+
   inline int ART_tree_destroy() {
     Destroy_node(m_tree->root);
     if (m_tree) {
@@ -157,6 +165,7 @@ class Art_index {
     }
     return 0;
   }
+
   inline bool Art_initialized() { return m_inited; }
 
   void *ART_insert(const unsigned char *key, int key_len, void *value);
@@ -165,15 +174,15 @@ class Art_index {
   void *ART_delete(const unsigned char *key, int key_len);
   void *ART_search(const unsigned char *key, int key_len);
   inline void ART_reset_cursor() {
-    while(!m_current_nodes.empty())
-        m_current_nodes.pop();
-    m_current_nodes.emplace(m_tree->root);
+    m_current_values.clear();
   }
+
   Art_leaf *ART_minimum();
   Art_leaf *ART_maximum();
 
-  int ART_iter(ART_Func &cb, void *data, int data_len);
-  void *ART_iter_fast(uint key_offset, unsigned char *key, int key_len);
+  void* ART_iter_next();
+  void* ART_iter(ART_Func2 &cb);
+  void *ART_iter_first(uint key_offset, unsigned char *key, int key_len);
   int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb,
                       void *data, int data_len);
 };
