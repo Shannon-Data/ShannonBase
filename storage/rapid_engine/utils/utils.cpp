@@ -25,6 +25,10 @@
 */
 #include "storage/rapid_engine/utils/utils.h"
 
+#include <iostream>
+#include <iomanip>
+#include <sstream>
+
 #include "sql/field.h"                        //Field
 #include "sql/my_decimal.h"                   //my_decimal
 #include "sql/table.h"                        //TABLE
@@ -275,6 +279,18 @@ int Util::get_range_value(enum_field_types type,
     default:
       break;
   }
+  return 0;
+}
+
+int Util::mem2string (uchar* buff, uint length, std::string& result) {
+  const char* data = static_cast<const char*>((char*)buff);
+  std::ostringstream oss;
+  oss << std::hex << std::setfill('0');
+
+  for (size_t i = 0; i < length; ++i) {
+      oss << std::setw(2) << static_cast<unsigned>(static_cast<unsigned char>(data[i]));
+  }
+  result = oss.str();
   return 0;
 }
 

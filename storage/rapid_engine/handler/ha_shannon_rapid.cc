@@ -699,7 +699,6 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   }
 
   context.m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
-  context.m_extra_info.m_key_len = key->key_length;
   // Scan the primary table and read the records.
   if (table_arg.file->inited == NONE && table_arg.file->ha_rnd_init(true)) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str,
@@ -716,12 +715,14 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
     auto offset {0};
+    memset(context.m_extra_info.m_key_buff.get(), 0x0, key->key_length);
     for (uint key_partid = 0; key_partid < key->user_defined_key_parts; key_partid++) {
       memcpy(context.m_extra_info.m_key_buff.get() + offset,
              key->key_part[key_partid].field->field_ptr(),
              key->key_part[key_partid].store_length);
       offset += key->key_part[key_partid].store_length;
     }
+    context.m_extra_info.m_key_len = offset;
 
     uint32 field_count = table_arg.s->fields;
     Field *field_ptr = nullptr;

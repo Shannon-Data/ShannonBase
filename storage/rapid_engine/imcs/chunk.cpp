@@ -119,7 +119,7 @@ Chunk::~Chunk() {
     m_header = nullptr;
   }
 
-  if (!m_data_base) {
+  if (m_data_base) {
     ut::aligned_free(m_data_base);
     m_data_base = nullptr;
     m_data_cursor = m_data_base;

@@ -56,10 +56,10 @@ class CuView {
   int open();
   int close();
   int read(ShannonBaseContext *context, uchar *buffer, size_t length = 0);
-  int read_index(ShannonBaseContext *context, uchar *key, size_t key_len,
-                 uchar *value, ha_rkey_function find_flag);
+  int read_index(ShannonBaseContext *context, uchar* value);
   int read_index_fast(ShannonBaseContext *context, uchar *key, size_t key_len,
                       uchar *value, ha_rkey_function find_flag);
+  int read_index_next(ShannonBaseContext *context, uchar *value);
   int index_lookup(ShannonBaseContext *context, uchar *key, size_t key_len,
                    uchar *value, ha_rkey_function find_flag);
   int records_in_range(ShannonBaseContext *, unsigned int, key_range *,
@@ -117,7 +117,6 @@ class ImcsReader : public Reader {
 
  private:
   int cond_comp(ShannonBaseContext *, uchar *, uchar *, uint, ha_rkey_function);
-  int index_repos();
 
  private:
   // local buffer.

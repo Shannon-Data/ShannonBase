@@ -233,9 +233,11 @@ uint Imcs::delete_all_direct(ShannonBase::RapidContext *context) {
   std::string key = context->m_current_db;
   key += context->m_current_table;
 
-  for (auto &item : m_cus) {
-    if (item.first.compare(0, key.length(), key, 0, key.length()) == 0)
-      m_cus.erase(item.first);
+  for (auto it = m_cus.begin(); it != m_cus.end();) {
+    if (it->first.compare(0, key.length(), key, 0, key.length()) == 0) {
+      it = m_cus.erase(it);
+    } else
+      ++it;
   }
 
   return 0;
