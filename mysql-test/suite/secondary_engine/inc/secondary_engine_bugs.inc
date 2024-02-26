@@ -1,7 +1,6 @@
 --source include/elide_costs.inc
 
 --disable_query_log
-eval INSTALL PLUGIN mock SONAME '$MOCK_PLUGIN';
 --enable_query_log
 
 --echo #
@@ -13,7 +12,7 @@ CREATE TABLE t1 (
   col_varchar_255_key varchar(255),
   PRIMARY KEY (pk),
   KEY col_varchar_255_key (col_varchar_255_key)
-) ENGINE=InnoDB SECONDARY_ENGINE=mock;
+) ENGINE=InnoDB SECONDARY_ENGINE=rapid;
 
 ALTER TABLE t1 SECONDARY_LOAD;
 ANALYZE TABLE t1;
@@ -55,5 +54,4 @@ SET optimizer_max_subgraph_pairs = DEFAULT;
 DROP TABLE t;
 
 --disable_query_log
-UNINSTALL PLUGIN mock;
 --enable_query_log

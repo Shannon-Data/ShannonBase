@@ -1,7 +1,14 @@
+##############################################################################
 # Tests for the SECONDARY_ENGINE table option.
 # Most DDLs are allowed on tables with SECONDARY_ENGINE when
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+#
+# ShannonBase copyright 2023-
+##############################################################################
+
+create database shannon_define_db;
+use shannon_define_db;
 
 --echo #
 --echo # Attempt to load table into an undefined secondary engine.
@@ -230,3 +237,5 @@ CREATE TABLE t2 AS SELECT * FROM t1;
 SHOW CREATE TABLE t1;
 SHOW CREATE TABLE t2;
 DROP TABLE t1, t2;
+
+drop database shannon_define_db;
