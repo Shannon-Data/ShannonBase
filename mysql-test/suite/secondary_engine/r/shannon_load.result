@@ -1,21 +1,20 @@
 #
 # Load into and unload from secondary engine.
 #
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 ALTER TABLE t1 SECONDARY_LOAD;
-ERROR 42000: This table type requires a primary key
 ALTER TABLE t1 SECONDARY_UNLOAD;
-Got one of the listed errors
 SHOW CREATE TABLE t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
-  `a` int DEFAULT NULL
+  `a` int NOT NULL,
+  PRIMARY KEY (`a`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci SECONDARY_ENGINE=RAPID
 DROP TABLE t1;
 #
 # Attempt to load and unload table with no secondary engine.
 #
-CREATE TABLE t1 (a INT);
+CREATE TABLE t1 (a INT PRIMARY KEY);
 ALTER TABLE t1 SECONDARY_LOAD;
 ERROR HY000: Secondary engine operation failed. No secondary engine defined.
 ALTER TABLE t1 SECONDARY_UNLOAD;
@@ -25,7 +24,7 @@ DROP TABLE t1;
 #
 # Attempt to unload temporary table with no secondary engine.
 #
-CREATE TEMPORARY TABLE t1 (a INT);
+CREATE TEMPORARY TABLE t1 (a INT PRIMARY KEY);
 ALTER TABLE t1 SECONDARY_LOAD;
 ERROR HY000: Secondary engine operation failed. No secondary engine defined.
 ALTER TABLE t1 SECONDARY_UNLOAD;
@@ -36,7 +35,7 @@ DROP TABLE t1;
 # Attempt to load into secondary engine in conjunction with other DDL
 # operations.
 #
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 ALTER TABLE t1 SECONDARY_LOAD, FORCE;
 ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near ', FORCE' at line 1
 DROP TABLE t1;
@@ -44,7 +43,7 @@ DROP TABLE t1;
 # Perform alterations related to secondary engine using differing
 # algorithms.
 #
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 ALTER TABLE t1 SECONDARY_LOAD, ALGORITHM=INPLACE;
 ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near ', ALGORITHM=INPLACE' at line 1
 ALTER TABLE t1 SECONDARY_UNLOAD, ALGORITHM=INPLACE;
@@ -60,7 +59,8 @@ ALTER TABLE t1 SECONDARY_ENGINE RAPID, ALGORITHM=COPY;
 SHOW CREATE TABLE t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
-  `a` int DEFAULT NULL
+  `a` int NOT NULL,
+  PRIMARY KEY (`a`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci SECONDARY_ENGINE=RAPID
 DROP TABLE t1;
 #

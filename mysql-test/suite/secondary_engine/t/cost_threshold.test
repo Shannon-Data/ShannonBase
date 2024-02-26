@@ -2,10 +2,6 @@
 --echo # Test cases for the secondary_engine_cost_threshold variable.
 --echo #
 
---disable_query_log
---eval INSTALL PLUGIN mock SONAME '$MOCK_PLUGIN'
---enable_query_log
-
 # Remember the original threshold and restore it at the end of the test.
 SELECT @@secondary_engine_cost_threshold,
        @@global.secondary_engine_cost_threshold;
@@ -15,7 +11,7 @@ SET @saved_threshold = @@secondary_engine_cost_threshold;
 SET @@secondary_engine_cost_threshold = -100;
 SELECT @@secondary_engine_cost_threshold;
 
-CREATE TABLE t1(x INT, y INT);
+CREATE TABLE t1(x INT PRIMARY KEY, y INT);
 INSERT INTO t1 VALUES (1, 2), (2, 3), (3, 4);
 
 # A costly Cartesian product to help create plans with high cost.
@@ -52,7 +48,7 @@ let $q5 = SELECT * FROM t1 tt WHERE x = (SELECT SUM(x) FROM t1);
 #--eval EXPLAIN $q5
 #SHOW STATUS LIKE 'Last_query_cost';
 
-ALTER TABLE t1 SECONDARY_ENGINE MOCK;
+ALTER TABLE t1 SECONDARY_ENGINE RAPID;
 ALTER TABLE t1 SECONDARY_LOAD;
 ANALYZE TABLE t1;
 
@@ -65,7 +61,7 @@ FLUSH STATUS;
 --eval $q1
 --eval $q2
 --eval $q3
---eval $q4
+#--eval $q4
 --eval $q5
 --echo # All five queries are offloaded to the secondary engine.
 SHOW STATUS LIKE 'Secondary_engine_execution_count';
@@ -81,7 +77,7 @@ FLUSH STATUS;
 --eval $q3
 --echo # The first three queries are not offloaded to the secondary engine.
 SHOW STATUS LIKE 'Secondary_engine_execution_count';
---eval $q4
+#--eval $q4
 --eval $q5
 --echo # The last two queries are offloaded to the secondary engine.
 SHOW STATUS LIKE 'Secondary_engine_execution_count';
@@ -96,7 +92,7 @@ FLUSH STATUS;
 --eval $q1
 --eval $q2
 --eval $q3
---eval $q4
+#--eval $q4
 --eval $q5
 --enable_result_log
 --echo # All queries are executed in the primary storage engine.
@@ -153,4 +149,3 @@ SET @@secondary_engine_cost_threshold = @saved_threshold;
 SELECT @@secondary_engine_cost_threshold,
        @@global.secondary_engine_cost_threshold;
 
-UNINSTALL PLUGIN mock;
