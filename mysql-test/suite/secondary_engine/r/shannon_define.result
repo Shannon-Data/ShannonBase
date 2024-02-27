@@ -1,3 +1,5 @@
+create database shannon_define_db;
+use shannon_define_db;
 #
 # Attempt to load table into an undefined secondary engine.
 #
@@ -335,3 +337,4 @@ t2	CREATE TABLE `t2` (
   `c` int NOT SECONDARY DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 DROP TABLE t1, t2;
+drop database shannon_define_db;

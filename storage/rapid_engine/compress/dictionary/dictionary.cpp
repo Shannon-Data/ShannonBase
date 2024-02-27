@@ -40,7 +40,8 @@ namespace Compress {
 uint32 Dictionary::store(String &str, Encoding_type type) {
   DBUG_TRACE;
   // returns dictionary id. //encoding alg pls ref to: heatwave document.
-  std::string orgin_str(str.c_ptr());
+  if (!str.c_ptr() || str.is_empty()) return 0;
+
   compress_algos alg{compress_algos::NONE};
   switch (m_encoding_type) {
     case Encoding_type::SORTED:
@@ -56,10 +57,11 @@ uint32 Dictionary::store(String &str, Encoding_type type) {
       break;
   }
 
-  std::string compressed_str(
-      CompressFactory::get_instance(alg)->compressString(orgin_str));
+  std::unique_lock lk(m_content_mtx);
+  std::string orgin_str(str.c_ptr());
+  std::unique_ptr<Compress_algorithm> algr = std::move(CompressFactory::get_instance(alg));
+  std::string compressed_str(algr.get()->compressString(orgin_str));
   {
-    std::unique_lock lk(m_content_mtx);
     if (m_content.find(compressed_str) == m_content.end()) {  // insert new one.
       m_content_id.fetch_add(1, std::memory_order::memory_order_acq_rel);
       uint64 id = m_content_id.load(std::memory_order::memory_order_acq_rel);

@@ -47,19 +47,25 @@ Chunk::Chunk(Field *field) {
   ut_ad(field);
   ut_ad(ShannonBase::SHANNON_CHUNK_SIZE < rapid_memory_size);
   m_inited = handler::NONE;
+
+  m_header = std::make_unique<Chunk_header> ();
+  if (!m_header.get()) {
+    assert(false);
+    return ;
+  }
+
   /**m_data_base，here, we use the same psi key with buffer pool which used in
    * innodb page allocation. Here, we use ut::xxx to manage memory allocation
    * and free as innobase doese. In SQL lay, we will use MEM_ROOT to manage the
-   * memory management. In IMCS, all modules use ut:: to manage memory
-   * operations, it's an effiecient memory utils. it has been initialized in
-   * ha_innodb.cc: ut_new_boot();
-   */
-  if (rapid_allocated_mem_size + ShannonBase::SHANNON_CHUNK_SIZE <=
-      rapid_memory_size) {
-    m_data_base = static_cast<uchar *>(ut::malloc_large_page_withkey(
-        ut::make_psi_memory_key(mem_key_buf_buf_pool),
-        ShannonBase::SHANNON_CHUNK_SIZE, ut::fallback_to_normal_page_t{}));
-    if (!m_data_base) {
+   * memory management. In IMCS, all modules use ut:: to manage memory operations,
+   * it's an effiecient memory utils. it has been initialized in
+   * ha_innodb.cc: ut_new_boot(); */
+  if (likely(rapid_allocated_mem_size + ShannonBase::SHANNON_CHUNK_SIZE <=
+      rapid_memory_size)) {
+    m_data_base = static_cast<uchar *>(ut::aligned_alloc(ShannonBase::SHANNON_CHUNK_SIZE,
+        ALIGN_WORD(ShannonBase::SHANNON_CHUNK_SIZE, SHANNON_ROW_TOTAL_LEN)));
+
+    if (unlikely(!m_data_base)) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
       return;
     }
@@ -68,59 +74,50 @@ Chunk::Chunk(Field *field) {
     m_data_end =
         m_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
     rapid_allocated_mem_size += ShannonBase::SHANNON_CHUNK_SIZE;
+
+    m_header->m_avg = 0;
+    m_header->m_sum = 0;
+    m_header->m_rows = 0;
+
+    m_header->m_max = std::numeric_limits<long long>::lowest();
+    m_header->m_min = std::numeric_limits<long long>::max();
+    m_header->m_median = std::numeric_limits<long long>::lowest();
+    m_header->m_middle = std::numeric_limits<long long>::lowest();
+
+    m_header->m_field_no = field->field_index();
+    m_header->m_chunk_type = field->type();
+    m_header->m_null = field->is_nullable();
+    switch (m_header->m_chunk_type) {
+      case MYSQL_TYPE_VARCHAR:
+      case MYSQL_TYPE_BIT:
+      case MYSQL_TYPE_JSON:
+      case MYSQL_TYPE_TINY_BLOB:
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_MEDIUM_BLOB:
+      case MYSQL_TYPE_VAR_STRING:
+      case MYSQL_TYPE_STRING:
+      case MYSQL_TYPE_GEOMETRY:
+        m_header->m_varlen = true;
+        break;
+      default:
+        m_header->m_varlen = false;
+        break;
+    }
   } else {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
              "Rapid allocated memory exceeds over the maximum");
     return;
   }
-
-  m_header = ut::new_withkey<Chunk_header>(UT_NEW_THIS_FILE_PSI_KEY);
-  // m_header =
-  // ut::make_unique<Chunk_header>(ut::make_psi_memory_key(mem_key_buf_buf_pool));
-  if (!m_header) return;
-
-  m_header->m_avg = 0;
-  m_header->m_sum = 0;
-  m_header->m_rows = 0;
-
-  m_header->m_max = std::numeric_limits<long long>::lowest();
-  m_header->m_min = std::numeric_limits<long long>::max();
-  m_header->m_median = std::numeric_limits<long long>::lowest();
-  m_header->m_middle = std::numeric_limits<long long>::lowest();
-
-  m_header->m_field_no = field->field_index();
-  m_header->m_chunk_type = field->type();
-  m_header->m_null = field->is_nullable();
-  switch (m_header->m_chunk_type) {
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_BIT:
-    case MYSQL_TYPE_JSON:
-    case MYSQL_TYPE_TINY_BLOB:
-    case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_MEDIUM_BLOB:
-    case MYSQL_TYPE_VAR_STRING:
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_GEOMETRY:
-      m_header->m_varlen = true;
-      break;
-    default:
-      m_header->m_varlen = false;
-      break;
-  }
 }
 
 Chunk::~Chunk() {
   std::scoped_lock lk(m_header_mutex);
-  if (m_header) {
-    ut::delete_(m_header);
-    m_header = nullptr;
-  }
 
-  if (!m_data_base &&
-      ut::free_large_page(m_data_base, ut::fallback_to_normal_page_t{})) {
+  if (m_data_base) {
+    ut::aligned_free(m_data_base);
     m_data_base = nullptr;
-    m_data_cursor = m_data_base;
-    m_data_end = m_data_base;
+    m_data_cursor = nullptr;
+    m_data_end = nullptr;
   }
 }
 
@@ -143,9 +140,11 @@ uint Chunk::rnd_end() {
 uchar *Chunk::write_data_direct(ShannonBase::RapidContext *context, uchar *data,
                                 uint length) {
   DBUG_TRACE;
-  ut_ad(m_data_base || data);
+  ut_ad(m_data_base || data || m_data);
+  ut_ad(length == SHANNON_ROW_TOTAL_LEN);
+
   std::scoped_lock lk(m_data_mutex);
-  if (m_data + length > m_data_end) return nullptr;
+  if (unlikely(m_data + length > m_data_end)) return nullptr;
 
   double val{0};
   memcpy(m_data, data, length);
@@ -177,7 +176,7 @@ uchar *Chunk::read_data_direct(ShannonBase::RapidContext *context,
 
   uint8 info =
       *((uint8 *)(m_data_cursor + SHANNON_INFO_BYTE_OFFSET));  // info byte
-  if (info & DATA_DELETE_FLAG_MASK) {                          // deleted.
+  if (unlikely(info & DATA_DELETE_FLAG_MASK)) {                // deleted.
     m_data_cursor += SHANNON_ROW_TOTAL_LEN;
     memcpy(buffer, m_data_cursor, SHANNON_ROW_TOTAL_LEN);
     m_data_cursor += SHANNON_ROW_TOTAL_LEN;  // go to the next.

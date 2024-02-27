@@ -1,12 +1,15 @@
+##############################################################################
+# ShannonBase test case for loading data.
+# ShannonBase copyright 2023-
+##############################################################################
+
 --source include/no_ps_protocol.inc 
 
 --echo #
 --echo # Load into and unload from secondary engine.
 --echo #
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
---error ER_REQUIRES_PRIMARY_KEY
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 ALTER TABLE t1 SECONDARY_LOAD;
---error ER_SECONDARY_ENGINE,ER_SECONDARY_ENGINE_PLUGIN
 ALTER TABLE t1 SECONDARY_UNLOAD;
 SHOW CREATE TABLE t1;
 DROP TABLE t1;
@@ -14,7 +17,7 @@ DROP TABLE t1;
 --echo #
 --echo # Attempt to load and unload table with no secondary engine.
 --echo #
-CREATE TABLE t1 (a INT);
+CREATE TABLE t1 (a INT PRIMARY KEY);
 --error ER_SECONDARY_ENGINE
 ALTER TABLE t1 SECONDARY_LOAD;
 --error ER_SECONDARY_ENGINE
@@ -25,7 +28,7 @@ DROP TABLE t1;
 --echo #
 --echo # Attempt to unload temporary table with no secondary engine.
 --echo #
-CREATE TEMPORARY TABLE t1 (a INT);
+CREATE TEMPORARY TABLE t1 (a INT PRIMARY KEY);
 --error ER_SECONDARY_ENGINE
 ALTER TABLE t1 SECONDARY_LOAD;
 --error ER_SECONDARY_ENGINE
@@ -37,7 +40,7 @@ DROP TABLE t1;
 --echo # Attempt to load into secondary engine in conjunction with other DDL
 --echo # operations.
 --echo #
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 --error ER_PARSE_ERROR
 ALTER TABLE t1 SECONDARY_LOAD, FORCE;
 DROP TABLE t1;
@@ -46,7 +49,7 @@ DROP TABLE t1;
 --echo # Perform alterations related to secondary engine using differing
 --echo # algorithms.
 --echo #
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
 --error ER_PARSE_ERROR
 ALTER TABLE t1 SECONDARY_LOAD, ALGORITHM=INPLACE;
 --error ER_PARSE_ERROR
@@ -145,3 +148,4 @@ ALTER TABLE t1 SECONDARY_LOAD;
 --error ER_SECONDARY_ENGINE
 ALTER TABLE t2 SECONDARY_LOAD;
 DROP TABLE t1, t2;
+

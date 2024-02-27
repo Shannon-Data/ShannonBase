@@ -51,7 +51,7 @@ class Cu;
 class Imcu;
 class Imcs : public MemoryObject {
  public:
-  using Cu_map_t = std::map<std::string, std::unique_ptr<Cu>>;
+  using Cu_map_t = std::unordered_map<std::string, std::unique_ptr<Cu>>;
   using Imcu_map_t = std::multimap<std::string, std::unique_ptr<Imcu>>;
   inline static Imcs *get_instance() {
     std::call_once(one, [&] { m_instance = new Imcs(); });
@@ -77,8 +77,7 @@ class Imcs : public MemoryObject {
   uint read_direct(ShannonBase::RapidContext *context, uchar *buffer);
   uint read_batch_direct(ShannonBase::RapidContext *context, uchar *buffer);
   // deletes the data by a rowid
-  uint delete_direct(ShannonBase::RapidContext *context, Field *field,
-                     uchar *rowid);
+  uint delete_direct(ShannonBase::RapidContext *context, Field *field);
   // deletes all the data.
   uint delete_all_direct(ShannonBase::RapidContext *context);
   Cu *get_cu(std::string &key);
