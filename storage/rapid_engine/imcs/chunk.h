@@ -87,7 +87,7 @@ class Chunk : public MemoryObject {
 
   Chunk_header *get_header() {
     std::scoped_lock lk(m_header_mutex);
-    return m_header;
+    return m_header.get();
   }
   // initial the read opers.
   uint rnd_init(bool scan);
@@ -126,7 +126,7 @@ class Chunk : public MemoryObject {
 
  private:
   std::mutex m_header_mutex;
-  Chunk_header *m_header{nullptr};
+  std::unique_ptr<Chunk_header> m_header{nullptr};
   // started or not
   std::atomic<uint8> m_inited;
   std::mutex m_data_mutex;
