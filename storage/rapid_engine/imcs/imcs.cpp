@@ -219,8 +219,7 @@ uint read_batch_direct(ShannonBase::RapidContext *context, uchar *buffer) {
   return 0;
 }
 
-uint Imcs::delete_direct(ShannonBase::RapidContext *context, Field *field,
-                         uchar *rowid) {
+uint Imcs::delete_direct(ShannonBase::RapidContext *context, Field *field) {
   if (!context || !field) return HA_ERR_GENERIC;
 
   std::string key = context->m_current_db + context->m_current_table;
