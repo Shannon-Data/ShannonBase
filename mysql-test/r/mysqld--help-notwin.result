@@ -1103,10 +1103,12 @@ The following options may be given as the first argument:
  optimization of a query, index range scan will not be
  considered for this query. A value of 0 means range
  optimizer does not have any cap on memory. 
- --rapid-rapid-memory-size[=#] 
+ --rapid-rapid-chunk-size-max[=#] 
+ Number of chunk memory size that used for rapid engine.
+ --rapid-rapid-memory-size-max[=#] 
  Number of memory size that used for rapid engine, and it
  must not be oversize half of physical mem size.
- --rapid-rapid-populate-buffer-size=# 
+ --rapid-rapid-populate-buffer-size-max[=#] 
  Number of populate buffer size that must not be 10%
  rapid_populate_buffer size.
  --read-buffer-size=# 
@@ -1959,8 +1961,9 @@ query-alloc-block-size 8192
 query-prealloc-size 8192
 range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
-rapid-rapid-memory-size 134217728
-rapid-rapid-populate-buffer-size 8388608
+rapid-rapid-chunk-size-max 67108864
+rapid-rapid-memory-size-max 8589934592
+rapid-rapid-populate-buffer-size-max 8388608
 read-buffer-size 131072
 read-only FALSE
 read-rnd-buffer-size 262144
