@@ -14,11 +14,11 @@
 -- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
 -- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-DROP PROCEDURE IF EXISTS ml_model_unload;
+DROP PROCEDURE IF EXISTS sys.ml_model_unload;
 
 DELIMITER $$
 
-CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_model_unload (
+CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE sys.ml_model_unload (
         IN in_table_name VARCHAR(64), 
         IN in_target_name VARCHAR(64),
         IN in_option JSON,

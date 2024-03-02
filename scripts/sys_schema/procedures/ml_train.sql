@@ -14,10 +14,10 @@
 -- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
 -- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-DROP PROCEDURE IF EXISTS ml_train;
+DROP PROCEDURE IF EXISTS sys.ml_train;
 DELIMITER $$
 
-CREATE PROCEDURE ml_train (
+CREATE PROCEDURE sys.ml_train (
         IN in_table_name VARCHAR(64), IN in_target_name VARCHAR(64), IN in_option JSON, IN in_model_handle VARCHAR(64)
     )
     COMMENT '
@@ -115,6 +115,11 @@ BEGIN
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;
     END IF;
-
+    SELECT ml_train(in_table_name, in_target_name, in_option, in_model_handle) INTO v_train_obj_check;
+    IF v_train_obj_check != 0 THEN
+        SET v_db_err_msg = CONCAT('ML_TRAIN failed.');
+        SIGNAL SQLSTATE 'HY000'
+            SET MESSAGE_TEXT = v_db_err_msg;
+    END IF; 
 END$$
 DELIMITER ;
