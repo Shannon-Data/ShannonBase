@@ -10027,3 +10027,56 @@ longlong Item_func_internal_is_enabled_role::val_int() {
 
   return 0;
 }
+
+longlong Item_func_ml_train::val_int() {
+  DBUG_TRACE;
+  longlong result;
+  /**To invoke ML libs to train ML models*/
+  return result;
+}
+
+longlong Item_func_ml_model_load::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_model_unload::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_model_import::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_score::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_predicte_row::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_predicte_table::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_explain::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_explain_row::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+
+longlong Item_func_ml_explain_table::val_int() {
+  assert(fixed);
+  return 0;
+}

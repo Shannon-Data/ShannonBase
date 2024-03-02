@@ -14,11 +14,11 @@
 -- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
 -- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-DROP PROCEDURE IF EXISTS ml_predict_row;
+DROP PROCEDURE IF EXISTS sys.ml_predict_row;
 
 DELIMITER $$
 
-CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_predict_row (
+CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE sys.ml_predict_row (
         IN in_table_name VARCHAR(64), 
         IN in_target_name VARCHAR(64),
         IN in_option JSON,

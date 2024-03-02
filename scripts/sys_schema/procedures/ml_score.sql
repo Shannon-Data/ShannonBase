@@ -14,10 +14,10 @@
 -- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
 -- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-DROP PROCEDURE IF EXISTS ml_score;
+DROP PROCEDURE IF EXISTS sys.ml_score;
 DELIMITER $$
 
-CREATE PROCEDURE ml_score (
+CREATE PROCEDURE sys.ml_score (
         IN in_table_name VARCHAR(64), IN in_target_name VARCHAR(64), IN in_option JSON, IN in_model_handle VARCHAR(64)
     )
     COMMENT '
