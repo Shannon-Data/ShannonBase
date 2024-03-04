@@ -10030,8 +10030,30 @@ longlong Item_func_internal_is_enabled_role::val_int() {
 
 longlong Item_func_ml_train::val_int() {
   DBUG_TRACE;
-  longlong result;
+  assert(arg_count>= 3 && arg_count <=4 );
+  THD* thd = current_thd;
+  
+  String sch_tb_name;
+  String * sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
+
+  String target_col_name;
+  String* target_col_name_ptr = args[1]->val_str(&target_col_name);
+
+  String handle_name;
+  String* handle_name_ptr{nullptr};
+  if (arg_count> 3) {
+    Json_wrapper options;
+    auto ret = args[2]->val_json(&options);
+    if (ret) //cannot get the options.
+      return 1;
+
+  } else{
+    handle_name_ptr  = args[3]->val_str(&handle_name);
+  }
+
+  longlong result {0};
   /**To invoke ML libs to train ML models*/
+  
   return result;
 }
 
