@@ -80,6 +80,7 @@
 #include "mysql/strings/int2str.h"
 #include "mysql/strings/m_ctype.h"
 #include "mysql/strings/my_strtoll10.h"
+#include "ml/auto_ml.h"  //auto-ml
 #include "prealloced_array.h"
 #include "sql-common/json_dom.h"  // Json_wrapper
 #include "sql/auth/auth_acls.h"
@@ -10031,29 +10032,40 @@ longlong Item_func_internal_is_enabled_role::val_int() {
 longlong Item_func_ml_train::val_int() {
   DBUG_TRACE;
   assert(arg_count>= 3 && arg_count <=4 );
-  THD* thd = current_thd;
-  
+  THD* thd [[maybe_unused]] = current_thd;
+
+  /**schema_table_name can not be empty, it checked in ML_train SP. and the format of that
+   * is `schema_name.table_name`
+  */
   String sch_tb_name;
-  String * sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
+  auto sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
+  auto sch_tb_name_cptr = sch_tb_name_ptr->c_ptr_safe();
+  auto pos = std::strstr(sch_tb_name_cptr, ".") - sch_tb_name_cptr;
+  std::string schema_name(sch_tb_name_cptr, pos);
+  std::string table_name(sch_tb_name_cptr + pos +1, sch_tb_name_ptr->length() - pos);
 
   String target_col_name;
-  String* target_col_name_ptr = args[1]->val_str(&target_col_name);
+  auto target_col_name_ptr = args[1]->val_str(&target_col_name);
 
-  String handle_name;
-  String* handle_name_ptr{nullptr};
+  String handle_name, *handle_name_ptr;
+  Json_wrapper options;
   if (arg_count> 3) {
-    Json_wrapper options;
     auto ret = args[2]->val_json(&options);
     if (ret) //cannot get the options.
       return 1;
-
+    handle_name_ptr = args[3]->val_str(&handle_name);
   } else{
-    handle_name_ptr  = args[3]->val_str(&handle_name);
+    handle_name_ptr = args[2]->val_str(&handle_name);
   }
 
-  longlong result {0};
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>(schema_name,
+                                                table_name,
+                                                std::string(target_col_name_ptr->c_ptr()),
+                                                options,
+                                                std::string(handle_name_ptr->c_ptr()));
   /**To invoke ML libs to train ML models*/
-  
+  auto result = auto_ml->train();
   return result;
 }
 

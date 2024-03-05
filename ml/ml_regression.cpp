@@ -23,27 +23,82 @@
 
    Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 */
+#include "ml_regression.h"
 
 #include <string>
-#include "ml_regression.h"
+
+#include "include/thr_lock.h" //TL_READ
+#include "include/my_inttypes.h"
+
+#include "sql/current_thd.h"
+#include "sql/sql_base.h"
+#include "sql/table.h"
+#include "sql/handler.h"
+
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
+// clang-format off
+//if move this head file to upperstair, will issue an `unlikely` error.
+#include "lightgbm/include/LightGBM/application.h"
+// clang-format on
 
 namespace ShannonBase {
 namespace ML {
 
-//Application(char *model_filename,char *config_file);
-ML_regress::ML_regress() {
-  std::string model_name("");
-  std::string config_path("");
-
-  m_app = std::make_unique<LightGBM::Application> (1, nullptr);
-  m_app->Run();
+ML_regression::ML_regression(std::string sch_name, std::string table_name,
+                             std::string target_name) : m_sch_name(sch_name),
+                                                        m_table_name(table_name),
+                                                        m_target_name(target_name) {
 }
 
-ML_regress::~ML_regress() {
+ML_regression::~ML_regression() {
 }
 
-int ML_regress::train() {
-  m_app->Run();
+int ML_regression::train() {
+  //will moved to my.cnf
+  const char* config[1] = {"train.conf"};
+  m_app = std::make_unique<LightGBM::Application>(1, const_cast<char**>(config));
+
+  THD* thd = current_thd;
+  Open_table_context table_ctx(thd, 0);
+  thr_lock_type lock_mode (TL_READ);
+
+  auto share = ShannonBase::shannon_loaded_tables->get(m_sch_name.c_str(), m_table_name.c_str());
+  if (!share) {
+    std::ostringstream err;
+    err << m_sch_name.c_str() << "." << m_table_name.c_str() << " NOT loaded into rapid engine.";
+    my_error(0, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  Table_ref table_ref(m_sch_name.c_str(), strlen(m_sch_name.c_str()),
+                   m_table_name.c_str(), strlen( m_table_name.c_str()),
+                   m_table_name.c_str(), lock_mode);
+
+  MDL_REQUEST_INIT(&table_ref.mdl_request, MDL_key::TABLE,
+                  m_sch_name.c_str(),  m_table_name.c_str(),
+                  (lock_mode > TL_READ) ? MDL_SHARED_WRITE : MDL_SHARED_READ,
+                  MDL_TRANSACTION);
+
+  if (open_table(thd, &table_ref, &table_ctx)) {
+    return HA_ERR_GENERIC;
+  }
+
+  //read the traning data from rapid engine, then do train.
+  auto tb_handler = table_ref.table->file;
+  if (!tb_handler) return 1;
+
+  if (tb_handler->inited == handler::NONE && tb_handler->ha_rnd_init(true)) {
+    return HA_ERR_GENERIC;
+  }
+  //table full scan to train the model.
+  while (tb_handler->ha_rnd_next(table_ref.table->record[0])) {
+  }
+
+  tb_handler->ha_rnd_end();
+  return 0;
+}
+
+int ML_regression::predict() {
   return 0;
 }
 

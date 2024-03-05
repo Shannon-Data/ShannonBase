@@ -27,18 +27,35 @@
 #define __SHANNONBASE_ML_REGRESSION_H__
 
 #include <memory>
-#include "lightgbm/include/LightGBM/application.h"
+#include <string>
 
-class LightGBM::Application;
+#include "ml_algorithm.h"
+
+namespace LightGBM{
+   class Application;
+}
 
 namespace ShannonBase {
 namespace ML {
 
-class ML_regress {
-  ML_regress();
-  ~ML_regress();
-  int train();
+enum class STAGE {
+   UNKNOWN,
+   TRAINED,
+   PREDICT
+};
+class ML_regression : public ML_algorithm {
+  public:
+    ML_regression(std::string sch_name, std::string table_name,
+                  std::string target_name);
+    ~ML_regression();
+    int train() override;
+    int predict() override;
  private:
+   std::string m_sch_name;
+   std::string m_table_name;
+   std::string m_target_name;
+
+   STAGE m_stage {STAGE::UNKNOWN};
    std::unique_ptr<LightGBM::Application> m_app;
 };
 
