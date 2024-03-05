@@ -119,7 +119,7 @@ void ShannonLoadedTables::table_infos(uint index, ulonglong&tid, std::string& sc
     }
     count ++;
   }
-}  
+}
 
 ShannonLoadedTables *shannon_loaded_tables{nullptr};
 static struct handlerton* shannon_rapid_hton_ptr {nullptr};

@@ -1,1 +1,7 @@
 4.3.0.99
+
+using the following command to compiling LightGBM from source code.
+"cmake . -DUSE_OPENMP=OFF -DBUILD_STATIC_LIB=ON -DCMAKE_INSTALL_PREFIX=/path-to-install/install_dir"
+
+after compilation finished, the copy the "lib_lightgbm.a" from "install_dir" to ${SHANNONBASE_SOURCE}/ml/lightgbm/lib"
+to update the libary file.
