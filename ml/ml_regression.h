@@ -26,13 +26,19 @@
 #ifndef __SHANNONBASE_ML_REGRESSION_H__
 #define __SHANNONBASE_ML_REGRESSION_H__
 
-#include <memory>
-#include <string>
-
 #include "ml_algorithm.h"
 
+#include <memory>
+#include <string>
+#include <vector>
+
 namespace LightGBM{
-   class Application;
+   class DatasetLoader;
+   class Dataset;
+   class Boosting;
+   class ObjectiveFunction;
+   class Metric;
+   class Config;
 }
 
 namespace ShannonBase {
@@ -43,20 +49,24 @@ enum class STAGE {
    TRAINED,
    PREDICT
 };
+enum class DATA_FROMAT {
+  ORDER_COLUMN = 0,
+  ORDER_ROW =1
+};
+
+
 class ML_regression : public ML_algorithm {
   public:
-    ML_regression(std::string sch_name, std::string table_name,
-                  std::string target_name);
-    ~ML_regression();
-    int train() override;
-    int predict() override;
+   using Traing_data_t = std::vector<std::vector<double>>;
+   ML_regression(std::string sch_name, std::string table_name,
+                 std::string target_name);
+   ~ML_regression();
+   int train() override;
+   int predict() override;
  private:
    std::string m_sch_name;
    std::string m_table_name;
    std::string m_target_name;
-
-   STAGE m_stage {STAGE::UNKNOWN};
-   std::unique_ptr<LightGBM::Application> m_app;
 };
 
 } //ML

@@ -29,18 +29,16 @@
 
 #include "include/thr_lock.h" //TL_READ
 #include "include/my_inttypes.h"
-
+#include "sql/derror.h" //ER_TH
+#include "sql/mysqld.h"
 #include "sql/current_thd.h"
 #include "sql/sql_base.h"
 #include "sql/table.h"
 #include "sql/handler.h"
-
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
-// clang-format off
-//if move this head file to upperstair, will issue an `unlikely` error.
-#include "lightgbm/include/LightGBM/application.h"
-// clang-format on
 
+// clang-format off
+// clang-format on
 namespace ShannonBase {
 namespace ML {
 
@@ -54,9 +52,6 @@ ML_regression::~ML_regression() {
 }
 
 int ML_regression::train() {
-  //will moved to my.cnf
-  const char* config[1] = {"train.conf"};
-  m_app = std::make_unique<LightGBM::Application>(1, const_cast<char**>(config));
 
   THD* thd = current_thd;
   Open_table_context table_ctx(thd, 0);
@@ -66,10 +61,9 @@ int ML_regression::train() {
   if (!share) {
     std::ostringstream err;
     err << m_sch_name.c_str() << "." << m_table_name.c_str() << " NOT loaded into rapid engine.";
-    my_error(0, MYF(0), err.str().c_str());
+    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
-
   Table_ref table_ref(m_sch_name.c_str(), strlen(m_sch_name.c_str()),
                    m_table_name.c_str(), strlen( m_table_name.c_str()),
                    m_table_name.c_str(), lock_mode);
@@ -78,23 +72,80 @@ int ML_regression::train() {
                   m_sch_name.c_str(),  m_table_name.c_str(),
                   (lock_mode > TL_READ) ? MDL_SHARED_WRITE : MDL_SHARED_READ,
                   MDL_TRANSACTION);
-
   if (open_table(thd, &table_ref, &table_ctx)) {
     return HA_ERR_GENERIC;
   }
+  auto num_data =  table_ref.table->file->stats.records;
+  auto cols = table_ref.table->s->fields;
+  Traing_data_t train_data((size_t)num_data, std::vector<double>(cols));
 
-  //read the traning data from rapid engine, then do train.
-  auto tb_handler = table_ref.table->file;
-  if (!tb_handler) return 1;
+  // The defined secondary engine must be the name of a valid storage engine.
+  plugin_ref plugin =
+      ha_resolve_by_name(thd, &table_ref.table->s->secondary_engine, false);
+  if ((plugin == nullptr) || !plugin_is_ready(table_ref.table->s->secondary_engine,
+                                              MYSQL_STORAGE_ENGINE_PLUGIN)) {
+    push_warning_printf(
+        thd, Sql_condition::SL_WARNING, ER_UNKNOWN_STORAGE_ENGINE,
+        ER_THD(thd, ER_UNKNOWN_STORAGE_ENGINE), table_ref.table->s->secondary_engine.str);
+    return false;
+  }
 
-  if (tb_handler->inited == handler::NONE && tb_handler->ha_rnd_init(true)) {
+  // The engine must support being used as a secondary engine.
+  handlerton *hton = plugin_data<handlerton *>(plugin);
+  if (!(hton->flags & HTON_IS_SECONDARY_ENGINE)) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0),
+             "Unsupported secondary storage engine");
+    return true;
+  }
+
+  // Get handler to the secondary engine into which the table will be loaded.
+  const bool is_partitioned = table_ref.table->s->m_part_info != nullptr;
+  unique_ptr_destroy_only<handler> tb_handler(
+      get_new_handler(table_ref.table->s, is_partitioned, thd->mem_root, hton));
+
+  /* Read the traning data into train_data vector from rapid engine. here,
+  we use training data as lablels too */
+  my_bitmap_map *old_map =
+  tmp_use_all_columns(table_ref.table, table_ref.table->read_set);
+  tb_handler->ha_open(table_ref.table, table_ref.table->s->table_name.str, O_RDONLY,
+                      HA_OPEN_IGNORE_IF_LOCKED, table_ref.table->s->tmp_table_def);
+  if (tb_handler && tb_handler->ha_external_lock(thd, F_RDLCK))
+    return HA_ERR_GENERIC;
+  if (tb_handler->ha_rnd_init(true)) {
     return HA_ERR_GENERIC;
   }
   //table full scan to train the model.
-  while (tb_handler->ha_rnd_next(table_ref.table->record[0])) {
+  auto index = 0;
+  while (tb_handler->ha_rnd_next(table_ref.table->record[0]) == 0) {
+    for (auto field_id = 0u; field_id < table_ref.table->s->fields; field_id++) {
+      Field* field_ptr = *(table_ref.table->field + field_id);
+        double data_val{0.0};
+        switch (field_ptr->type()) {
+          case MYSQL_TYPE_INT24:
+          case MYSQL_TYPE_LONG:
+          case MYSQL_TYPE_LONGLONG:
+          case MYSQL_TYPE_FLOAT:
+          case MYSQL_TYPE_DOUBLE: {
+            data_val = field_ptr->val_real();
+          } break;
+          case MYSQL_TYPE_DECIMAL:
+          case MYSQL_TYPE_NEWDECIMAL: {
+            my_decimal dval;
+            field_ptr->val_decimal(&dval);
+            my_decimal2double(10, &dval, &data_val);
+          } break;
+          default: break;
+        }
+        train_data[index][field_id] = data_val;
+    }
+    index++;
   }
-
+  if (old_map) tmp_restore_column_map(table_ref.table->read_set, old_map);
+  assert((int)num_data == index);
   tb_handler->ha_rnd_end();
+  tb_handler->ha_external_lock(thd, F_UNLCK);
+  tb_handler->ha_close();
+  //TODO: using the data to train the model by the specific ML libs.
   return 0;
 }
 
