@@ -32,6 +32,10 @@
 
 #include "ml_algorithm.h"
 #include "ml_regression.h"
+#include "ml_recommendation.h"
+#include "ml_forecasting.h"
+#include "ml_classification.h"
+#include "ml_anomaly_detection.h"
 
 namespace ShannonBase {
 namespace ML {
@@ -39,6 +43,7 @@ namespace ML {
 Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_name,
                  Json_wrapper options, std::string handler) : m_schema_name(schema),
                                                               m_table_name(table_name),
+                                                              m_target_name(target_name),
                                                               m_options(options),
                                                               m_handler(handler) {
   init_task_map();
@@ -128,10 +133,13 @@ Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_
       m_ml_task = std::make_unique<ML_regression>(m_schema_name, m_table_name, m_target_name);
       break;
     case ML_TASK_TYPE::FORECASTING:
+      m_ml_task = std::make_unique<ML_forecasting>();
       break;
     case ML_TASK_TYPE::ANOMALY_DETECTION:
+      m_ml_task = std::make_unique<ML_anomaly_detection>();
       break;
     case ML_TASK_TYPE::RECOMMENDATION:
+      m_ml_task = std::make_unique<ML_recommendation>();
       break;
   }
 }

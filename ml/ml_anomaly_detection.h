@@ -23,18 +23,18 @@
 
    Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 */
-#ifndef __SHANNONBASE_ML_CLASSICIFICATION_H__
-#define __SHANNONBASE_ML_CLASSICIFICATION_H__
+#ifndef __SHANNONBASE_ML_ANOMALY_DECTION_H__
+#define __SHANNONBASE_ML_ANOMALY_DECTION_H__
 
 #include "ml_algorithm.h"
 
 namespace ShannonBase {
 namespace ML {
 
-class ML_classification : public ML_algorithm {
+class ML_anomaly_detection : public ML_algorithm {
   public:
-    ML_classification();
-    ~ML_classification();
+    ML_anomaly_detection();
+    ~ML_anomaly_detection();
     int train() override;
     int predict() override;
  private:
@@ -43,4 +43,4 @@ class ML_classification : public ML_algorithm {
 } //ML
 } //shannonbase
 
-#endif //__SHANNONBASE_ML_CLASSICIFICATION_H__
+#endif //__SHANNONBASE_ML_ANOMALY_DECTION_H__

@@ -125,6 +125,9 @@ SET(ML_SOURCES
   ../ml/ml_algorithm.h
   ../ml/ml_regression.cpp
   ../ml/ml_classification.cpp
+  ../ml/ml_forecasting.cpp
+  ../ml/ml_anomaly_detection.cpp
+  ../ml/ml_recommendation.cpp
 )
 
 SET(DD_SOURCES
