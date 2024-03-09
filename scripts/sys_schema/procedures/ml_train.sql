@@ -75,7 +75,7 @@ BEGIN
 
         SET @create_tb_stmt = CONCAT(' CREATE TABLE ', v_sys_schema_name, '.MODEL_CATALOG(
                                         MODEL_ID INT NOT NULL AUTO_INCREMENT,
-                                        MODEL_HANDLE VARCHAR(255),
+                                        MODEL_HANDLE VARCHAR(255) UNIQUE,
                                         MODEL_OBJECT JSON,
                                         MODEL_OWNER VARCHAR(64),
                                         BUILD_TIMESTAMP TIMESTAMP,
