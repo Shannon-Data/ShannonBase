@@ -10070,6 +10070,7 @@ longlong Item_func_ml_train::val_int() {
 }
 
 longlong Item_func_ml_model_load::val_int() {
+
   assert(fixed);
   return 0;
 }

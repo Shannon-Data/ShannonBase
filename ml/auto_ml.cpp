@@ -130,7 +130,8 @@ Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_
     case ML_TASK_TYPE::CLASSIFICATION:
       break;
     case ML_TASK_TYPE::REGRESSION:
-      m_ml_task = std::make_unique<ML_regression>(m_schema_name, m_table_name, m_target_name);
+      m_ml_task = std::make_unique<ML_regression>(m_schema_name, m_table_name,
+                                                  m_target_name, m_handler, &m_options);
       break;
     case ML_TASK_TYPE::FORECASTING:
       m_ml_task = std::make_unique<ML_forecasting>();
@@ -150,8 +151,7 @@ std::string Auto_ML::get_array_string (Json_array* array) {
   std::string ret_val;
   if (!array) return ret_val;
 
-  auto sz = array->size();
-  for (auto id =0; id < sz; id++) {
+  for (auto id = 0u; id <  array->size(); id++) {
      Json_dom* it = (*array)[id];
      if (it && it->json_type() == enum_json_type::J_STRING) {
         ret_val += down_cast<Json_string*> (it)->value() + ",";
@@ -173,7 +173,6 @@ int Auto_ML::train() {
 
   return 0;
 }
-
 
 } //ML
 } //shannonbase

@@ -41,6 +41,7 @@ namespace LightGBM{
    class Config;
 }
 
+class Json_wrapper;
 namespace ShannonBase {
 namespace ML {
 
@@ -54,12 +55,12 @@ enum class DATA_FROMAT {
   ORDER_ROW =1
 };
 
-
 class ML_regression : public ML_algorithm {
   public:
    using Traing_data_t = std::vector<std::vector<double>>;
    ML_regression(std::string sch_name, std::string table_name,
-                 std::string target_name);
+                 std::string target_name, std::string handler_name,
+                 Json_wrapper* options);
    ~ML_regression();
    int train() override;
    int predict() override;
@@ -67,6 +68,12 @@ class ML_regression : public ML_algorithm {
    std::string m_sch_name;
    std::string m_table_name;
    std::string m_target_name;
+   std::string m_handler_name;
+   Json_wrapper *m_options;
+
+   std::unique_ptr<char[]> m_model_buffer;
+   int64_t m_model_content_length{1024};
+   std::string m_model_content_str;
 };
 
 } //ML
