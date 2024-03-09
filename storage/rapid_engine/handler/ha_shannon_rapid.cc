@@ -230,8 +230,6 @@ int ha_rapid::read_range_next() {
 
 int ha_rapid::rapid_initialize() {
   ut_ad(shannon_rpd_inited == true);
-  ut_ad(m_start_of_scan == false);
-  m_start_of_scan = true;
 
   trx_t* trx = check_trx_exists (m_rpd_thd);
   TrxInInnoDB trx_in_innodb(trx);
@@ -257,25 +255,19 @@ int ha_rapid::rapid_initialize() {
 }
 
 int ha_rapid::rapid_deinitialize() {
-  if (m_start_of_scan) {
-    m_start_of_scan = false;
-    if (m_rpd_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) {
-       trx_t* trx = thd_to_trx (m_rpd_thd);
-       if (trx->state == TRX_STATE_ACTIVE)
-         trx_commit(trx);
-    }
-    m_imcs_reader->close();
+  ut_a(m_rpd_context->m_trx == thd_to_trx (m_rpd_thd));
+  trx_commit(m_rpd_context->m_trx);
 
-    m_rpd_context.reset(nullptr);
-    m_imcs_reader.reset(nullptr);
-  }
-
+  m_imcs_reader->close();
+  m_rpd_context.reset(nullptr);
+  m_imcs_reader.reset(nullptr);
   return 0;
 }
 
 int ha_rapid::rnd_init(bool scan) {
   DBUG_TRACE;
   inited = handler::RND;
+  m_start_of_scan = true;
   return rapid_initialize();
 }
 
@@ -284,6 +276,7 @@ int ha_rapid::rnd_init(bool scan) {
 int ha_rapid::rnd_end() {
   DBUG_TRACE;
   inited = handler::NONE;
+  m_start_of_scan = false;
   return rapid_deinitialize();
 }
 
@@ -465,7 +458,7 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
       return m_primary_key->is_clustered() ?  HA_ERR_TABLE_CORRUPT : HA_ERR_INDEX_CORRUPT;
      }
   }
-
+  m_start_of_scan = true;
   auto ret = rapid_initialize();
   inited = handler::INDEX;
 
@@ -479,7 +472,7 @@ int ha_rapid::index_end() {
 
   in_range_check_pushed_down = false;
   inited = handler::NONE;
-
+  m_start_of_scan = false;
   return rapid_deinitialize();
 }
 
