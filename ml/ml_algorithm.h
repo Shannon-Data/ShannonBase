@@ -26,6 +26,8 @@
 #ifndef __SHANNONBASE_ML_ALGORITHM_H__
 #define __SHANNONBASE_ML_ALGORITHM_H__
 
+#include <string>
+
 namespace ShannonBase {
 namespace ML {
 //the interface of ml tasks.
@@ -36,6 +38,14 @@ class ML_algorithm {
 
     virtual int train() = 0;
     virtual int predict() = 0;
+    virtual int load(std::string model_handle_name, std::string user_name) = 0;
+    virtual int unload(std::string model_handle_name) = 0;
+    virtual int import() = 0;
+    virtual double score() = 0;
+    virtual int explain_row() = 0;
+    virtual int explain_table() = 0;
+    virtual int predict_row() = 0;
+    virtual int predict_table() =0;
 };
 
 } //ml

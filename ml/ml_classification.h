@@ -37,6 +37,14 @@ class ML_classification : public ML_algorithm {
     ~ML_classification();
     int train() override;
     int predict() override;
+    int load(std::string model_handle_name, std::string user_name) override;
+    int unload(std::string model_handle_name) override;
+    int import() override;
+    double score() override;
+    int explain_row() override;
+    int explain_table() override;
+    int predict_row() override;
+    int predict_table() override;
  private:
 };
 

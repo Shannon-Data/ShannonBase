@@ -52,6 +52,8 @@ class Auto_ML {
             Json_wrapper options, std::string handler);
     ~Auto_ML();
     int train();
+    int load();
+    int unload();
   private:
      std::string get_array_string (Json_array* array);
      void init_task_map();
@@ -95,7 +97,7 @@ class Auto_ML {
      // 'threshold'
      double m_opt_feedback_threshold{1.0f};
 
-     std::unique_ptr<ML_algorithm> m_ml_task{nullptr};
+     static std::unique_ptr<ML_algorithm> m_ml_task;
 };
 
 } //ML

@@ -46,9 +46,27 @@ namespace ShannonBase {
 namespace ML {
 
 enum class STAGE {
-   UNKNOWN,
-   TRAINED,
-   PREDICT
+  UNKNOWN,
+  TRAINED,
+  PREDICT
+};
+
+enum class FIELD_INDEX : int {
+  MODEL_ID = 0,
+  MODEL_HANDLE,
+  MODEL_OBJECT,
+  MODEL_OWNER,
+  BUILD_TIMESTAMP,
+  TARGET_COLUMN_NAME,
+  TRAIN_TABLE_NAME,
+  MODEL_OBJECT_SIZE,
+  MODEL_TYPE,
+  TASK,
+  COLUMN_NAMES,
+  MODEL_EXPLANATION,
+  LAST_ACCESSED,
+  MODEL_METADATA,
+  NOTES
 };
 enum class DATA_FROMAT {
   ORDER_COLUMN = 0,
@@ -64,6 +82,14 @@ class ML_regression : public ML_algorithm {
    ~ML_regression();
    int train() override;
    int predict() override;
+   int load(std::string model_handle_name, std::string user_name) override;
+   int unload(std::string model_handle_name) override;
+   int import() override;
+   double score() override;
+   int explain_row() override;
+   int explain_table() override;
+   int predict_row() override;
+   int predict_table() override;
  private:
    std::string m_sch_name;
    std::string m_table_name;

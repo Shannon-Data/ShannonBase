@@ -43,5 +43,38 @@ int ML_forecasting::predict() {
   return 0;
 }
 
+int ML_forecasting::load(std::string model_handle_name, std::string user_name) {
+  return 0;
+}
+
+int ML_forecasting::unload(std::string model_handle_name) {
+  return 0;
+}
+
+int ML_forecasting::import() {
+  return 0;
+}
+
+double ML_forecasting::score() {
+  return 0;
+}
+
+int ML_forecasting::explain_row() {
+  return 0;
+}
+
+int ML_forecasting::explain_table() {
+  return 0;
+}
+
+int ML_forecasting::predict_row() {
+  return 0;
+}
+
+int ML_forecasting::predict_table() {
+  return 0;
+}
+
+
 } //ml
 } //shannonbase

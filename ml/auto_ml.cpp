@@ -39,6 +39,7 @@
 
 namespace ShannonBase {
 namespace ML {
+std::unique_ptr<ShannonBase::ML::ML_algorithm> Auto_ML::m_ml_task = nullptr;
 
 Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_name,
                  Json_wrapper options, std::string handler) : m_schema_name(schema),
@@ -130,23 +131,28 @@ Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_
     case ML_TASK_TYPE::CLASSIFICATION:
       break;
     case ML_TASK_TYPE::REGRESSION:
-      m_ml_task = std::make_unique<ML_regression>(m_schema_name, m_table_name,
-                                                  m_target_name, m_handler, &m_options);
+      if (m_ml_task.get() == nullptr)
+        m_ml_task = std::make_unique<ML_regression>(m_schema_name, m_table_name,
+                                                    m_target_name, m_handler, &m_options);
       break;
     case ML_TASK_TYPE::FORECASTING:
-      m_ml_task = std::make_unique<ML_forecasting>();
+      if (m_ml_task.get() == nullptr)
+        m_ml_task = std::make_unique<ML_forecasting>();
       break;
     case ML_TASK_TYPE::ANOMALY_DETECTION:
-      m_ml_task = std::make_unique<ML_anomaly_detection>();
+      if (m_ml_task.get() == nullptr)
+        m_ml_task = std::make_unique<ML_anomaly_detection>();
       break;
     case ML_TASK_TYPE::RECOMMENDATION:
-      m_ml_task = std::make_unique<ML_recommendation>();
+      if (m_ml_task.get() == nullptr)
+        m_ml_task = std::make_unique<ML_recommendation>();
       break;
   }
 }
 
 Auto_ML::~Auto_ML() {
 }
+
 std::string Auto_ML::get_array_string (Json_array* array) {
   std::string ret_val;
   if (!array) return ret_val;
@@ -159,6 +165,7 @@ std::string Auto_ML::get_array_string (Json_array* array) {
   }
   return ret_val;
 }
+
 void Auto_ML::init_task_map() {
   m_opt_task_map.insert({"CLASSIFICATION", ML_TASK_TYPE::CLASSIFICATION});
   m_opt_task_map.insert({"REGRESSION", ML_TASK_TYPE::REGRESSION});
@@ -171,6 +178,22 @@ int Auto_ML::train() {
   if (m_ml_task)
      return m_ml_task->train();
 
+  return 0;
+}
+
+int Auto_ML::load() {
+  //in load, the schem_name means user name.
+  std::string model_user_name = m_schema_name;
+  if (m_ml_task)
+     return m_ml_task->load(m_handler, model_user_name);
+  return 0;
+}
+
+int Auto_ML::unload() {
+  if (m_ml_task)
+     return m_ml_task->unload(m_handler);
+
+  m_ml_task.reset(nullptr);
   return 0;
 }
 
