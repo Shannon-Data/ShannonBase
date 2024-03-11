@@ -10070,12 +10070,48 @@ longlong Item_func_ml_train::val_int() {
 }
 
 longlong Item_func_ml_model_load::val_int() {
+  //CALL sys.ML_MODEL_LOAD('heatwaveml_bench.census_train_user1_1636729526', user1);
+  assert(arg_count ==2);
+  String sch_tb_name;
+  auto sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
+  auto sch_tb_name_cptr = sch_tb_name_ptr->c_ptr_safe();
 
-  assert(fixed);
-  return 0;
+  auto pos = std::strstr(sch_tb_name_cptr, ".") - sch_tb_name_cptr;
+  if (pos == 0) { //menas using session var handle name
+  } else { //before mysql 8.1.0, using full quali
+    std::string schema_name(sch_tb_name_cptr, pos);
+    std::string table_name(sch_tb_name_cptr + pos +1, sch_tb_name_ptr->length() - pos);
+  }
+
+  String model_user_name;
+  auto model_user_name_cptr = args[1]->val_str(&model_user_name)->c_ptr_safe();
+
+  Json_wrapper options;
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>(std::string(model_user_name_cptr),
+                                                std::string(""),
+                                                std::string(""),
+                                                options,
+                                                std::string(sch_tb_name_cptr));
+  auto result = auto_ml->load();
+  return result;
 }
 
 longlong Item_func_ml_model_unload::val_int() {
+  assert(arg_count == 1);
+  String model_handle_name;
+  auto model_handle_name_cptr = args[0]->val_str(&model_handle_name)->c_ptr_safe();
+
+  Json_wrapper options;
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>(std::string(""),
+                                                std::string(""),
+                                                std::string(""),
+                                                options,
+                                                std::string(model_handle_name_cptr));
+  auto result = auto_ml->load();
+  return result;
+
   assert(fixed);
   return 0;
 }
