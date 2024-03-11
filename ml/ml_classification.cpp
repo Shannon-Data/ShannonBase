@@ -43,5 +43,37 @@ int ML_classification::predict() {
   return 0;
 }
 
+int ML_classification::load(std::string model_handle_name, std::string user_name)  {
+  return 0;
+}
+
+int ML_classification::unload(std::string model_handle_name)  {
+  return 0;
+}
+
+int ML_classification::import() {
+  return 0;
+}
+
+double ML_classification::score() {
+  return 0;
+}
+
+int ML_classification::explain_row() {
+  return 0;
+}
+
+int ML_classification::explain_table() {
+  return 0;
+}
+
+int ML_classification::predict_row() {
+  return 0;
+}
+
+int ML_classification::predict_table() {
+  return 0;
+}
+
 } //ml
 } //shannonbase

@@ -43,5 +43,37 @@ int ML_recommendation::predict() {
   return 0;
 }
 
+int ML_recommendation::load(std::string model_handle_name, std::string user_name) {
+  return 0;
+}
+
+int ML_recommendation::unload(std::string model_handle_name) {
+  return 0;
+}
+
+int ML_recommendation::import() {
+  return 0;
+}
+
+double ML_recommendation::score() {
+  return 0;
+}
+
+int ML_recommendation::explain_row() {
+  return 0;
+}
+
+int ML_recommendation::explain_table() {
+  return 0;
+}
+
+int ML_recommendation::predict_row() {
+  return 0;
+}
+
+int ML_recommendation::predict_table() {
+  return 0;
+}
+
 } //ml
 } //shannonbase

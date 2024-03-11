@@ -182,13 +182,15 @@ int ML_regression::train() {
   m_model_buffer.reset(new char[m_model_content_length+1]);
   LGBM_BoosterDumpModel(booster, 0, -1, 0, m_model_content_length, &out_len, m_model_buffer.get());
 
-  std::string catalog_schema_name = "ML_SCHEMA_" + user_name; //the definition of this table, ref: `ml_train.sql`
+  //the definition of this table, ref: `ml_train.sql`
+  std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
   std::string cat_table_name = "MODEL_CATALOG";
   Table_ref cat_table_ref(catalog_schema_name.c_str(), catalog_schema_name.length(),
                   cat_table_name.c_str(), cat_table_name.length(), cat_table_name.c_str(), TL_WRITE);
   Open_table_context cat_table_ctx(thd, 0);
   MDL_REQUEST_INIT(&cat_table_ref.mdl_request, MDL_key::TABLE,
-                  catalog_schema_name.c_str(),  cat_table_name.c_str(), MDL_SHARED_WRITE, MDL_TRANSACTION);
+                  catalog_schema_name.c_str(),
+                  cat_table_name.c_str(), MDL_SHARED_WRITE, MDL_TRANSACTION);
   if (open_table(thd, &cat_table_ref, &cat_table_ctx) || !cat_table_ref.table->file) {
     return HA_ERR_GENERIC;
   }
@@ -199,65 +201,65 @@ int ML_regression::train() {
   cat_table_ref.table->file->ha_index_last(cat_table_ref.table->record[0]);
   int64_t next_id  = (*(cat_table_ref.table->field))->val_int() + 1;
   cat_table_ref.table->file->ha_index_end();
-  Field* field_ptr = *(cat_table_ref.table->field + 0);
+  Field* field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::MODEL_ID)];
   field_ptr->set_notnull();
   field_ptr->store(next_id);
 
-  field_ptr = *(cat_table_ref.table->field + 1);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::MODEL_HANDLE)];
   field_ptr->set_notnull();
   field_ptr->store(m_handler_name.c_str(), m_handler_name.length(), &my_charset_utf8mb4_general_ci);
 
-  field_ptr = *(cat_table_ref.table->field + 2);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::MODEL_OBJECT)];
   field_ptr->set_notnull();
   field_ptr->store(m_model_buffer.get(), m_model_content_length, &my_charset_utf8mb4_general_ci);
 
-  field_ptr = *(cat_table_ref.table->field + 3);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::MODEL_OWNER)];
   field_ptr->set_notnull();
   field_ptr->store(user_name.c_str(), user_name.length(), &my_charset_utf8mb4_general_ci);
 
   std::time_t timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
   const my_timeval tm = {static_cast<int64_t>(timestamp), 0};
-  field_ptr = *(cat_table_ref.table->field + 4);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::BUILD_TIMESTAMP)];
   field_ptr->set_notnull();
   field_ptr->store_timestamp(&tm);
 
-  field_ptr = *(cat_table_ref.table->field + 5);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::TARGET_COLUMN_NAME)];
   field_ptr->set_notnull();
   field_ptr->store(m_target_name.c_str(), m_target_name.length(), &my_charset_utf8mb4_general_ci);
 
-  field_ptr = *(cat_table_ref.table->field + 6);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::TRAIN_TABLE_NAME)];
   field_ptr->set_notnull();
   field_ptr->store(m_table_name.c_str(), m_table_name.length(), &my_charset_utf8mb4_general_ci);
 
-  field_ptr = *(cat_table_ref.table->field + 7);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::MODEL_OBJECT_SIZE)];
   field_ptr->set_notnull();
   field_ptr->store(m_model_content_length);
 
-  field_ptr = *(cat_table_ref.table->field + 8);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::MODEL_TYPE)];
   field_ptr->set_notnull();
   field_ptr->store("regression", 10, &my_charset_utf8mb4_general_ci);
 
-  field_ptr = *(cat_table_ref.table->field + 9);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::TASK)];
   field_ptr->set_notnull();
   field_ptr->store("train", 5, &my_charset_utf8mb4_general_ci);
 
-  field_ptr = *(cat_table_ref.table->field + 10);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::COLUMN_NAMES)];
   field_ptr->set_notnull();
   field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci); //columns
 
-  field_ptr = *(cat_table_ref.table->field + 11);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::MODEL_EXPLANATION)];
   field_ptr->set_notnull();
   field_ptr->store(1.0);
 
-  field_ptr = *(cat_table_ref.table->field + 12);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::LAST_ACCESSED)];
   field_ptr->set_notnull();
   field_ptr->store_timestamp(&tm);
 
-  field_ptr = *(cat_table_ref.table->field + 13);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::MODEL_METADATA)];
   field_ptr->set_notnull();
   down_cast<Field_json*>(field_ptr)->store_json(m_options);
 
-  field_ptr = *(cat_table_ref.table->field + 14);
+  field_ptr = cat_table_ref.table->field[static_cast<int>(FIELD_INDEX::NOTES)];
   field_ptr->set_notnull();
   field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci);
   //???binlog???
@@ -267,6 +269,37 @@ int ML_regression::train() {
 }
 
 int ML_regression::predict() {
+  return 0;
+}
+
+int ML_regression::load(std::string model_handle_name, std::string user_name) {
+  return 0;
+}
+
+int ML_regression::unload(std::string model_handle_name) {
+  return 0;
+}
+int ML_regression::import() {
+  return 0;
+}
+
+double ML_regression::score() {
+  return 0;
+}
+
+int ML_regression::explain_row() {
+  return 0;
+}
+
+int ML_regression::explain_table() {
+  return 0;
+}
+
+int ML_regression::predict_row() {
+  return 0;
+}
+
+int ML_regression::predict_table() {
   return 0;
 }
 

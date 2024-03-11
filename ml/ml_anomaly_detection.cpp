@@ -43,5 +43,38 @@ int ML_anomaly_detection::predict() {
   return 0;
 }
 
+int ML_anomaly_detection::load(std::string model_handle_name, std::string user_name) {
+  return 0;
+}
+
+int ML_anomaly_detection::unload(std::string model_handle_name) {
+  return 0;
+}
+
+int ML_anomaly_detection::import() {
+  return 0;
+}
+
+double ML_anomaly_detection::score() {
+  return 0;
+}
+
+int ML_anomaly_detection::explain_row() {
+  return 0;
+}
+
+int ML_anomaly_detection::explain_table() {
+  return 0;
+}
+
+int ML_anomaly_detection::predict_row() {
+  return 0;
+}
+
+int ML_anomaly_detection::predict_table() {
+  return 0;
+}
+
+
 } //ml
 } //shannonbase
