@@ -56,7 +56,7 @@ int ML_classification::unload(std::string model_handle_name)  {
   return 0;
 }
 
-int ML_classification::import() {
+int ML_classification::import(std::string model_handle_name, std::string user_name, std::string& content) {
   return 0;
 }
 

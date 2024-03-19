@@ -302,11 +302,103 @@ int  ML_regression::load_from_file (std::string modle_file_full_path, std::strin
 }
 
 int ML_regression::unload(std::string model_handle_name) {
+  if (m_handler->get()) {
+    BoosterHandle bt_handler = m_handler->get();
+    LGBM_BoosterFree(bt_handler);
+    m_handler->set(nullptr);
+  }
   return 0;
 }
 
-int ML_regression::import() {
-  return 0;
+int ML_regression::import(std::string model_handle_name, std::string user_name, std::string& content) {
+  THD* thd = current_thd;
+
+  BoosterHandle bt_handler;
+  int out_num_iterations;
+  if (LGBM_BoosterLoadModelFromString(content.c_str(), &out_num_iterations, &bt_handler) == -1)
+    return HA_ERR_GENERIC;
+
+  m_handler->set(bt_handler);
+
+  TABLE* cat_tale_ptr{nullptr};
+  std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
+  std::string cat_table_name = "MODEL_CATALOG";
+  if (Utils::open_table_by_name(catalog_schema_name, cat_table_name, TL_WRITE, &cat_tale_ptr))
+    return HA_ERR_GENERIC;
+
+  cat_tale_ptr->file->ha_external_lock(thd, F_WRLCK | F_RDLCK);
+  cat_tale_ptr->use_all_columns();
+
+  cat_tale_ptr->file->ha_index_init(0, true);
+  cat_tale_ptr->file->ha_index_last(cat_tale_ptr->record[0]);
+  int64_t next_id  = (*(cat_tale_ptr->field))->val_int() + 1;
+  cat_tale_ptr->file->ha_index_end();
+  Field* field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_ID)];
+  field_ptr->set_notnull();
+  field_ptr->store(next_id);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
+  field_ptr->set_notnull();
+  field_ptr->store(model_handle_name.c_str(), model_handle_name.length(), &my_charset_utf8mb4_general_ci);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
+  field_ptr->set_notnull();
+  field_ptr->store(content.c_str(), content.size(), &my_charset_utf8mb4_general_ci);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OWNER)];
+  field_ptr->set_notnull();
+  field_ptr->store(user_name.c_str(), user_name.length(), &my_charset_utf8mb4_general_ci);
+
+  std::time_t timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  const my_timeval tm = {static_cast<int64_t>(timestamp), 0};
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::BUILD_TIMESTAMP)];
+  field_ptr->set_notnull();
+  field_ptr->store_timestamp(&tm);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TARGET_COLUMN_NAME)];
+  field_ptr->set_notnull();
+  field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TRAIN_TABLE_NAME)];
+  field_ptr->set_notnull();
+  field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT_SIZE)];
+  field_ptr->set_notnull();
+  field_ptr->store(content.size());
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_TYPE)];
+  field_ptr->set_notnull();
+  field_ptr->store("regression", 10, &my_charset_utf8mb4_general_ci);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TASK)];
+  field_ptr->set_notnull();
+  field_ptr->store("import", 6, &my_charset_utf8mb4_general_ci);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::COLUMN_NAMES)];
+  field_ptr->set_notnull();
+  field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci); //columns
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_EXPLANATION)];
+  field_ptr->set_notnull();
+  field_ptr->store(1.0);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::LAST_ACCESSED)];
+  field_ptr->set_notnull();
+  field_ptr->store_timestamp(&tm);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_METADATA)];
+  field_ptr->set_notnull();
+  down_cast<Field_json*>(field_ptr)->store_json(m_options);
+
+  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::NOTES)];
+  field_ptr->set_notnull();
+  field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci);
+  //???binlog???
+  auto ret = cat_tale_ptr->file->ha_write_row(cat_tale_ptr->record[0]);
+  cat_tale_ptr->file->ha_external_lock(thd, F_UNLCK);
+
+  return ret;
 }
 
 double ML_regression::score() {

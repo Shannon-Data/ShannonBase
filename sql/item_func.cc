@@ -10095,18 +10095,22 @@ longlong Item_func_ml_model_load::val_int() {
 }
 
 longlong Item_func_ml_model_unload::val_int() {
-  assert(arg_count == 1);
+  assert(arg_count == 2);
   String model_handle_name;
   auto model_handle_name_cptr = args[0]->val_str(&model_handle_name)->c_ptr_safe();
 
   Json_wrapper options;
+  auto ret = args[1]->val_json(&options);
+  if (ret) //cannot get the options.
+    return 1;
+
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>(std::string(""),
                                                 std::string(""),
                                                 std::string(""),
                                                 options,
                                                 std::string(model_handle_name_cptr));
-  auto result = auto_ml->load();
+  auto result = auto_ml->unload();
   return result;
 
   assert(fixed);
@@ -10114,6 +10118,30 @@ longlong Item_func_ml_model_unload::val_int() {
 }
 
 longlong Item_func_ml_model_import::val_int() {
+  assert(arg_count == 4);
+  String model_handle_name;
+  auto model_handle_name_cptr = args[0]->val_str(&model_handle_name)->c_ptr_safe();
+
+  String model_user_name;
+  auto model_user_name_cptr = args[1]->val_str(&model_user_name)->c_ptr_safe();
+
+  Json_wrapper options;
+  auto ret = args[2]->val_json(&options);
+  if (ret) //cannot get the options.
+    return 1;
+
+  String model_content;
+  auto model_content_cptr = args[3]->val_str(&model_content)->c_ptr_safe();
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>(std::string(model_user_name_cptr),
+                                                std::string(""),
+                                                std::string(model_content_cptr),
+                                                options,
+                                                std::string(model_handle_name_cptr));
+  auto result = auto_ml->import();
+  return result;
+
   assert(fixed);
   return 0;
 }

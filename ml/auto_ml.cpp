@@ -183,6 +183,7 @@ std::string Auto_ML::get_array_string (Json_array* array) {
 }
 
 void Auto_ML::init_task_map() {
+  m_opt_task_map.insert({"", ML_TASK_TYPE::UNKNOWN});
   m_opt_task_map.insert({"CLASSIFICATION", ML_TASK_TYPE::CLASSIFICATION});
   m_opt_task_map.insert({"REGRESSION", ML_TASK_TYPE::REGRESSION});
   m_opt_task_map.insert({"FORECASTING", ML_TASK_TYPE::FORECASTING});
@@ -207,9 +208,17 @@ int Auto_ML::load() {
 
 int Auto_ML::unload() {
   if (m_ml_task)
-     return m_ml_task->unload(m_handler);
-
+     m_ml_task->unload(m_handler);
   m_ml_task.reset(nullptr);
+  return 0;
+}
+
+int Auto_ML::import() {
+  std::string model_user_name = m_schema_name;
+  std::string model_content = m_target_name;
+  if (m_ml_task)
+     return m_ml_task->import(m_handler, model_user_name, model_content);
+
   return 0;
 }
 

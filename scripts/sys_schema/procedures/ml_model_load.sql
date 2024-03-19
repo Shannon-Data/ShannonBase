@@ -61,6 +61,7 @@ BEGIN
      SET v_sys_schema_name = CONCAT('ML_SCHEMA_', in_user_name);
    END IF;
 
+   SET @MODEL_META = NULL;
    SET @select_model_stm = CONCAT('SELECT MODEL_METADATA INTO  @MODEL_META FROM ',  v_sys_schema_name,
                                   '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle_name, '\";');
    PREPARE select_model_stmt FROM @select_model_stm;

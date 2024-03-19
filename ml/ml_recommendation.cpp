@@ -56,7 +56,7 @@ int ML_recommendation::unload(std::string model_handle_name) {
   return 0;
 }
 
-int ML_recommendation::import() {
+int ML_recommendation::import(std::string model_handle_name, std::string user_name, std::string& content) {
   return 0;
 }
 

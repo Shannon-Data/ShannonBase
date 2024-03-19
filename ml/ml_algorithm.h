@@ -80,7 +80,7 @@ class ML_algorithm {
     virtual int load(std::string model_handle_name, std::string user_name) = 0;
     virtual int load_from_file (std::string modle_file_full_path, std::string model_handle_name) = 0;
     virtual int unload(std::string model_handle_name) = 0;
-    virtual int import() = 0;
+    virtual int import(std::string model_handle_name, std::string user_name, std::string& content) = 0;
     virtual double score() = 0;
     virtual int explain_row() = 0;
     virtual int explain_table() = 0;
