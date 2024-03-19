@@ -46,6 +46,7 @@ class Auto_ML {
     int train();
     int load();
     int unload();
+    int import();
     ML_TASK_TYPE type();
   private:
      std::string get_array_string (Json_array* array);
