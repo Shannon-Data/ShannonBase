@@ -38,14 +38,6 @@
 namespace ShannonBase {
 namespace ML {
 
-enum class ML_TASK_TYPE : uint16 {
-  CLASSIFICATION = 0,
-  REGRESSION,
-  FORECASTING,
-  ANOMALY_DETECTION,
-  RECOMMENDATION
-};
-
 class Auto_ML {
   public:
     Auto_ML(std::string schema, std::string table_name, std::string target_name,
@@ -54,6 +46,7 @@ class Auto_ML {
     int train();
     int load();
     int unload();
+    ML_TASK_TYPE type();
   private:
      std::string get_array_string (Json_array* array);
      void init_task_map();

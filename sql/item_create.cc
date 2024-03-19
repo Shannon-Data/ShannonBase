@@ -1510,7 +1510,7 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"MBRWITHIN", SQL_FN(Item_func_mbrwithin, 2)},
     {"MD5", SQL_FN(Item_func_md5, 1)},
     {"ML_TRAIN", SQL_FN_V_LIST(Item_func_ml_train, 3, 4)},
-    {"ML_MODEL_LOAD", SQL_FN_LIST(Item_func_ml_model_load, 2)},
+    {"ML_MODEL_LOAD", SQL_FN_LIST(Item_func_ml_model_load, 3)},
     {"ML_MODEL_UNLOAD", SQL_FN_LIST(Item_func_ml_model_unload, 1)},
     {"ML_MODEL_IMPORT", SQL_FN_LIST(Item_func_ml_model_import, 3)},
     {"ML_SCORE", SQL_FN_V_LIST(Item_func_ml_score, 5, 6)},

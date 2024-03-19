@@ -59,6 +59,7 @@ BEGIN
     DECLARE v_train_obj_check INT;
     DECLARE v_train_schema_name VARCHAR(64);
     DECLARE v_train_table_name VARCHAR(64);
+    DECLARE v_model_name VARCHAR(255);
 
     SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;  
     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
@@ -76,7 +77,7 @@ BEGIN
         SET @create_tb_stmt = CONCAT(' CREATE TABLE ', v_sys_schema_name, '.MODEL_CATALOG(
                                         MODEL_ID INT NOT NULL AUTO_INCREMENT,
                                         MODEL_HANDLE VARCHAR(255) UNIQUE,
-                                        MODEL_OBJECT JSON,
+                                        MODEL_OBJECT LONGTEXT,
                                         MODEL_OWNER VARCHAR(64),
                                         BUILD_TIMESTAMP TIMESTAMP,
                                         TARGET_COLUMN_NAME VARCHAR(64),
@@ -106,7 +107,20 @@ BEGIN
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;
     END IF;
-  
+
+    IF in_model_handle IS NOT NULL THEN
+      SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_HANDLE) INTO @MODEL_HANDLE_COUNT  FROM ',  v_sys_schema_name, '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle, '\";');
+      PREPARE select_model_stmt FROM @select_model_stm;
+      EXECUTE select_model_stmt;
+      SELECT @MODEL_HANDLE_COUNT INTO v_train_obj_check;
+      DEALLOCATE PREPARE select_model_stmt;
+
+      IF v_train_obj_check > 0 THEN
+        SIGNAL SQLSTATE 'HY000'
+            SET MESSAGE_TEXT = "The model has already existed.";
+      END IF;
+    END IF;
+
     SELECT COUNT(COLUMN_NAME) INTO v_train_obj_check
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = v_train_schema_name AND TABLE_NAME = v_train_table_name AND COLUMN_NAME = in_target_name;
@@ -115,7 +129,7 @@ BEGIN
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;
     END IF;
-    SELECT ml_train(in_table_name, in_target_name, in_option, in_model_handle) INTO v_train_obj_check;
+    SELECT ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle) INTO v_train_obj_check;
     IF v_train_obj_check != 0 THEN
         SET v_db_err_msg = CONCAT('ML_TRAIN failed.');
         SIGNAL SQLSTATE 'HY000'

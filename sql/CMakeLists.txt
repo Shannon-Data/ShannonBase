@@ -128,6 +128,7 @@ SET(ML_SOURCES
   ../ml/ml_forecasting.cpp
   ../ml/ml_anomaly_detection.cpp
   ../ml/ml_recommendation.cpp
+  ../ml/ml_utils.cpp
 )
 
 SET(DD_SOURCES

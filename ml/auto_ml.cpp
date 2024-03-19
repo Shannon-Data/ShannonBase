@@ -104,7 +104,7 @@ Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_
     }
     auto contamination_dom = json_obj->get("contamination");
     if (contamination_dom && contamination_dom->json_type() == enum_json_type::J_DOUBLE) {
-     m_opt_contamination = down_cast<Json_double *>(exclude_column_list_dom)->value();
+      m_opt_contamination = down_cast<Json_double *>(exclude_column_list_dom)->value();
     }
     auto users_dom =  json_obj->get("users");
     if (users_dom && users_dom->json_type() == enum_json_type::J_STRING) {
@@ -127,30 +127,46 @@ Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_
       m_opt_feedback_threshold = down_cast<Json_double *>(feedback_threshold_dom)->value();
     }
   }
+
   switch (m_opt_task_map[m_opt_task]) {
+    //if we have already had an instance of cf task, then do nothing, using the old instance.
     case ML_TASK_TYPE::CLASSIFICATION:
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::CLASSIFICATION)
+        m_ml_task.reset(new ML_classification());
       break;
     case ML_TASK_TYPE::REGRESSION:
-      if (m_ml_task.get() == nullptr)
-        m_ml_task = std::make_unique<ML_regression>(m_schema_name, m_table_name,
-                                                    m_target_name, m_handler, &m_options);
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::REGRESSION)
+        m_ml_task.reset(new ML_regression(m_schema_name, m_table_name,
+                                                  m_target_name, m_handler, &m_options));
+      else {
+        down_cast<ML_regression*>(m_ml_task.get())->set_schema(m_schema_name);
+        down_cast<ML_regression*>(m_ml_task.get())->set_table(m_table_name);
+        down_cast<ML_regression*>(m_ml_task.get())->set_target(m_target_name);
+        down_cast<ML_regression*>(m_ml_task.get())->set_options(&m_options);
+        down_cast<ML_regression*>(m_ml_task.get())->set_handle_name(m_handler);
+      }
       break;
     case ML_TASK_TYPE::FORECASTING:
-      if (m_ml_task.get() == nullptr)
-        m_ml_task = std::make_unique<ML_forecasting>();
+       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::FORECASTING)
+        m_ml_task.reset (new ML_forecasting());
       break;
     case ML_TASK_TYPE::ANOMALY_DETECTION:
-      if (m_ml_task.get() == nullptr)
-        m_ml_task = std::make_unique<ML_anomaly_detection>();
+       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::ANOMALY_DETECTION)
+        m_ml_task.reset(new ML_anomaly_detection());
       break;
     case ML_TASK_TYPE::RECOMMENDATION:
-      if (m_ml_task.get() == nullptr)
-        m_ml_task = std::make_unique<ML_recommendation>();
+        if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::RECOMMENDATION)
+        m_ml_task.reset (new ML_recommendation());
       break;
+    default: assert(false);
   }
 }
 
 Auto_ML::~Auto_ML() {
+}
+
+ML_TASK_TYPE Auto_ML::type() {
+  return (m_ml_task) ? m_ml_task->type() : ML_TASK_TYPE::UNKNOWN;
 }
 
 std::string Auto_ML::get_array_string (Json_array* array) {

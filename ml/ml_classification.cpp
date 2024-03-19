@@ -47,6 +47,11 @@ int ML_classification::load(std::string model_handle_name, std::string user_name
   return 0;
 }
 
+int ML_classification::load_from_file (std::string modle_file_full_path,
+                                       std::string model_handle_name) {
+  return 0;
+}
+
 int ML_classification::unload(std::string model_handle_name)  {
   return 0;
 }
@@ -73,6 +78,10 @@ int ML_classification::predict_row() {
 
 int ML_classification::predict_table() {
   return 0;
+}
+
+ML_TASK_TYPE ML_classification::type() {
+  return ML_TASK_TYPE::CLASSIFICATION;
 }
 
 } //ml
