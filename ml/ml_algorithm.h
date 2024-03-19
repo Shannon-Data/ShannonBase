@@ -30,6 +30,45 @@
 
 namespace ShannonBase {
 namespace ML {
+
+enum class ML_TASK_TYPE : int {
+  UNKNOWN = -1,
+  CLASSIFICATION,
+  REGRESSION,
+  FORECASTING,
+  ANOMALY_DETECTION,
+  RECOMMENDATION
+};
+
+enum class MODEL_CATALOG_FIELD_INDEX : int {
+  MODEL_ID = 0,
+  MODEL_HANDLE,
+  MODEL_OBJECT,
+  MODEL_OWNER,
+  BUILD_TIMESTAMP,
+  TARGET_COLUMN_NAME,
+  TRAIN_TABLE_NAME,
+  MODEL_OBJECT_SIZE,
+  MODEL_TYPE,
+  TASK,
+  COLUMN_NAMES,
+  MODEL_EXPLANATION,
+  LAST_ACCESSED,
+  MODEL_METADATA,
+  NOTES
+};
+
+class ML_handler {
+  public:
+    explicit ML_handler(void* handler) : m_handler(handler) {}
+    ML_handler() {}
+    virtual ~ML_handler() {}
+    void set(void* handler) { m_handler = handler; }
+    void* get() { return m_handler; }
+  private:
+    void* m_handler{nullptr};
+};
+
 //the interface of ml tasks.
 class ML_algorithm {
   public:
@@ -39,6 +78,7 @@ class ML_algorithm {
     virtual int train() = 0;
     virtual int predict() = 0;
     virtual int load(std::string model_handle_name, std::string user_name) = 0;
+    virtual int load_from_file (std::string modle_file_full_path, std::string model_handle_name) = 0;
     virtual int unload(std::string model_handle_name) = 0;
     virtual int import() = 0;
     virtual double score() = 0;
@@ -46,6 +86,7 @@ class ML_algorithm {
     virtual int explain_table() = 0;
     virtual int predict_row() = 0;
     virtual int predict_table() =0;
+    virtual ML_TASK_TYPE type() =0;
 };
 
 } //ml

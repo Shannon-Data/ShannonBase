@@ -23,67 +23,30 @@
 
    Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 */
+#ifndef __SHANNONBASE_ML_UTILS_H__
+#define __SHANNONBASE_ML_UTILS_H__
 
-#include "ml_forecasting.h"
+#include <string>
+
+#include "include/thr_lock.h" //TL_READ
+
+class TABLE;
+class handler;
 
 namespace ShannonBase {
 namespace ML {
 
-ML_forecasting::ML_forecasting() {
-}
+class Utils {
+public:
+  static int open_table_by_name (std::string schema_name, std::string table_name, thr_lock_type mode, TABLE** table_ptr);
+  static handler* get_secondary_handler(TABLE* source_table_ptr);
+  static int close_table(TABLE* table);
+private:
+  Utils() = delete;
+  virtual ~Utils() = delete;
+  //disable copy ctor, operator=, etc.
+};
 
-ML_forecasting::~ML_forecasting() {
-}
-
-int ML_forecasting::train() {
-  return 0;
-}
-
-int ML_forecasting::predict() {
-  return 0;
-}
-
-int ML_forecasting::load(std::string model_handle_name, std::string user_name) {
-  return 0;
-}
-
-int ML_forecasting::load_from_file (std::string modle_file_full_path,
-                                    std::string model_handle_name) {
-  return 0;
-}
-
-int ML_forecasting::unload(std::string model_handle_name) {
-  return 0;
-}
-
-int ML_forecasting::import() {
-  return 0;
-}
-
-double ML_forecasting::score() {
-  return 0;
-}
-
-int ML_forecasting::explain_row() {
-  return 0;
-}
-
-int ML_forecasting::explain_table() {
-  return 0;
-}
-
-int ML_forecasting::predict_row() {
-  return 0;
-}
-
-int ML_forecasting::predict_table() {
-  return 0;
-}
-
-ML_TASK_TYPE ML_forecasting::type() {
-  return ML_TASK_TYPE::FORECASTING;
-}
-
-
-} //ml
-} //shannonbase
+} //ns:ml
+} //ns:shannonbase
+#endif // __SHANNONBASE_ML_REGRESSION_H__

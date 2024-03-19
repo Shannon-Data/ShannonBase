@@ -47,6 +47,11 @@ int ML_anomaly_detection::load(std::string model_handle_name, std::string user_n
   return 0;
 }
 
+int ML_anomaly_detection::load_from_file (std::string modle_file_full_path,
+                                       std::string model_handle_name) {
+  return 0;
+}
+
 int ML_anomaly_detection::unload(std::string model_handle_name) {
   return 0;
 }
@@ -73,6 +78,10 @@ int ML_anomaly_detection::predict_row() {
 
 int ML_anomaly_detection::predict_table() {
   return 0;
+}
+
+ML_TASK_TYPE ML_anomaly_detection::type() {
+  return ML_TASK_TYPE::ANOMALY_DETECTION;
 }
 
 

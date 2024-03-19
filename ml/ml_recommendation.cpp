@@ -47,6 +47,11 @@ int ML_recommendation::load(std::string model_handle_name, std::string user_name
   return 0;
 }
 
+int ML_recommendation::load_from_file (std::string modle_file_full_path,
+                                       std::string model_handle_name) {
+  return 0;
+}
+
 int ML_recommendation::unload(std::string model_handle_name) {
   return 0;
 }
@@ -73,6 +78,10 @@ int ML_recommendation::predict_row() {
 
 int ML_recommendation::predict_table() {
   return 0;
+}
+
+ML_TASK_TYPE ML_recommendation::type() {
+  return ML_TASK_TYPE::RECOMMENDATION;
 }
 
 } //ml

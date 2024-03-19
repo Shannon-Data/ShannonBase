@@ -51,23 +51,6 @@ enum class STAGE {
   PREDICT
 };
 
-enum class FIELD_INDEX : int {
-  MODEL_ID = 0,
-  MODEL_HANDLE,
-  MODEL_OBJECT,
-  MODEL_OWNER,
-  BUILD_TIMESTAMP,
-  TARGET_COLUMN_NAME,
-  TRAIN_TABLE_NAME,
-  MODEL_OBJECT_SIZE,
-  MODEL_TYPE,
-  TASK,
-  COLUMN_NAMES,
-  MODEL_EXPLANATION,
-  LAST_ACCESSED,
-  MODEL_METADATA,
-  NOTES
-};
 enum class DATA_FROMAT {
   ORDER_COLUMN = 0,
   ORDER_ROW =1
@@ -83,6 +66,8 @@ class ML_regression : public ML_algorithm {
    int train() override;
    int predict() override;
    int load(std::string model_handle_name, std::string user_name) override;
+   int load_from_file (std::string modle_file_full_path,
+                       std::string model_handle_name) override;
    int unload(std::string model_handle_name) override;
    int import() override;
    double score() override;
@@ -90,6 +75,17 @@ class ML_regression : public ML_algorithm {
    int explain_table() override;
    int predict_row() override;
    int predict_table() override;
+   ML_TASK_TYPE type() override;
+   void set_schema (std::string schema_name) { m_sch_name = schema_name; }
+   std::string get_schema () const { return m_sch_name; }
+   void set_table (std::string table_name) { m_table_name = table_name; }
+   std::string get_table() const { return m_table_name; }
+   void set_target (std::string target_name) { m_target_name = target_name; }
+   std::string get_target() const { return m_target_name; }
+   void set_handle_name (std::string handle_name) { m_handler_name= handle_name; }
+   std::string get_handle_name() const { return m_handler_name; }
+   void set_options (Json_wrapper* options) { m_options = options;}
+   Json_wrapper* get_options() const { return m_options; }
  private:
    std::string m_sch_name;
    std::string m_table_name;
@@ -97,9 +93,7 @@ class ML_regression : public ML_algorithm {
    std::string m_handler_name;
    Json_wrapper *m_options;
 
-   std::unique_ptr<char[]> m_model_buffer;
-   int64_t m_model_content_length{1024};
-   std::string m_model_content_str;
+   std::unique_ptr<ML_handler> m_handler {nullptr};
 };
 
 } //ML

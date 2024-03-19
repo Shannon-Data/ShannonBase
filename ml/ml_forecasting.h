@@ -38,6 +38,8 @@ class ML_forecasting : public ML_algorithm {
     int train() override;
     int predict() override;
     int load(std::string model_handle_name, std::string user_name) override;
+    int load_from_file (std::string modle_file_full_path,
+                        std::string model_handle_name) override;
     int unload(std::string model_handle_name) override;
     int import() override;
     double score() override;
@@ -45,6 +47,7 @@ class ML_forecasting : public ML_algorithm {
     int explain_table() override;
     int predict_row() override;
     int predict_table() override;
+    ML_TASK_TYPE type() override;
  private:
 };
 
