@@ -76,6 +76,8 @@
 #include "storage/rapid_engine/optimizer/optimizer.h" //optimizer
 #include "storage/rapid_engine/cost/cost.h"           //costestimator
 #include "storage/rapid_engine/optimizer/rules/rule.h"//Rule
+
+#include "storage/rapid_engine/populate/populate.h"
 /* clang-format off */
 namespace dd {
 class Table;
@@ -1083,6 +1085,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
     return 1;
   };
   auto ret = ShannonBase::imcs_instance->initialize();
+  ShannonBase::Populate::Populator::start_change_populate_threads(*log_sys);
   if (!ret) ShannonBase::shannon_rpd_inited = true;
   return ret;
 }

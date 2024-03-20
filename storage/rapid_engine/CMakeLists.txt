@@ -75,6 +75,9 @@ SET(SHANNON_IMCS_SOURCES
 SET(SHANNON_ML_SOURCES
 )
 SET(SHANNON_POPULATE_SOURCES
+   populate/log_parser.cpp
+   populate/log_reader.cpp
+   populate/populate.cpp
 )
 SET (SHANNON_TRX_SOURCES
     trx/transaction.cpp

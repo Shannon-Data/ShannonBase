@@ -32,11 +32,19 @@
 #define __SHANNONBASE_POPULATE_H__
 
 #include "my_inttypes.h"
+#include "storage/innobase/include/log0types.h"
+
 #include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase {
 namespace Populate {
-uint64 population_buffer_size{ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};
+extern uint64 population_buffer_size;
+class Populator {
+ public:
+  static void start_change_populate_threads(log_t &log);
+  static IB_thread log_rapid_thread;
+};
+
 }  // namespace Populate
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_POPULATE_H__

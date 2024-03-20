@@ -31,13 +31,27 @@
 #include "storage/rapid_engine/populate/populate.h"
 
 #include "storage/rapid_engine/populate/log_parser.h"
-
-#include "storage/innobase/include/fil0fil.h"
-#include "storage/innobase/include/log0write.h"
-#include "storage/innobase/include/mtr0log.h"
-#include "storage/innobase/include/mtr0types.h"
-#include "storage/innobase/include/univ.i"
+#include "storage/innobase/include/os0thread-create.h"
 
 namespace ShannonBase {
-namespace Populate {}  // namespace Populate
+namespace Populate {
+
+uint64 population_buffer_size{SHANNON_MAX_POPULATION_BUFFER_SIZE};
+
+IB_thread Populator::log_rapid_thread;
+mysql_pfs_key_t log_rapid_thread_key;
+
+static LogParser parse_log;
+static void parse_log_func (log_t *log_ptr, lsn_t target_lsn, lsn_t rapid_lsn) {
+   parse_log.parse_redo(log_ptr, target_lsn, rapid_lsn);
+}
+
+void Populator::start_change_populate_threads(log_t &log) {
+  Populator::log_rapid_thread =
+      os_thread_create(log_rapid_thread_key, 0, parse_log_func, &log, 0, 0);
+
+  Populator::log_rapid_thread.start();
+}
+
+}  // namespace Populate
 }  // namespace ShannonBase
