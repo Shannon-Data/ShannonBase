@@ -1576,6 +1576,7 @@ dberr_t log_files_create(log_t &log, lsn_t flushed_lsn) {
   }
 
   log.last_checkpoint_lsn.store(flushed_lsn);
+  log.rapid_lsn.store(log.last_checkpoint_lsn); //start here to repop.
 
   /* If the redo log is set to be encrypted,
   initialize encryption information. */

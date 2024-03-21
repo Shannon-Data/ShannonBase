@@ -33,22 +33,24 @@
 #include "storage/rapid_engine/populate/log_parser.h"
 #include "storage/innobase/include/os0thread-create.h"
 
+#ifdef UNIV_PFS_THREAD
+mysql_pfs_key_t rapid_populate_thread_key;
+#endif /* UNIV_PFS_THREAD */
+
 namespace ShannonBase {
 namespace Populate {
 
-uint64 population_buffer_size{SHANNON_MAX_POPULATION_BUFFER_SIZE};
-
 IB_thread Populator::log_rapid_thread;
-mysql_pfs_key_t log_rapid_thread_key;
-
+uint64 population_buffer_size{SHANNON_MAX_POPULATION_BUFFER_SIZE};
 static LogParser parse_log;
-static void parse_log_func (log_t *log_ptr, lsn_t target_lsn, lsn_t rapid_lsn) {
-   parse_log.parse_redo(log_ptr, target_lsn, rapid_lsn);
+static void parse_log_func (log_t *log_ptr, lsn_t rapid_start_lsn) {
+
+   parse_log.parse_redo(log_ptr, rapid_start_lsn, log_ptr->flushed_to_disk_lsn);
 }
 
 void Populator::start_change_populate_threads(log_t &log) {
   Populator::log_rapid_thread =
-      os_thread_create(log_rapid_thread_key, 0, parse_log_func, &log, 0, 0);
+      os_thread_create(rapid_populate_thread_key, 0, parse_log_func, &log, 0);
 
   Populator::log_rapid_thread.start();
 }

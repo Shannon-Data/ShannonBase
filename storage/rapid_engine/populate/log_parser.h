@@ -46,7 +46,7 @@ namespace Populate {
  */
 class LogParser {
  public:
-  bool parse_redo(log_t *log_ptr, lsn_t target_lsn, lsn_t rapid_lsn);
+  bool parse_redo(log_t *log_ptr, lsn_t rapid_from_lsn, lsn_t rapid_to_lsn);
  private:
   int handle_multi_rec(byte *ptr, byte *end_ptr, size_t *len, lsn_t start_lsn);
   size_t compute_rapid_event_slot(lsn_t lsn) {

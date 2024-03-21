@@ -51,7 +51,7 @@ namespace ShannonBase {
 extern ShannonLoadedTables* shannon_loaded_tables;
 
 namespace Populate {
-bool LogParser::parse_redo(log_t *log_ptr, lsn_t target_lsn, lsn_t rapid_lsn) {
+bool LogParser::parse_redo(log_t *log_ptr, lsn_t rapid_from_lsn, lsn_t rapid_to_lsn) {
   assert(log_ptr != nullptr);
   // adapt for redo log parse
   recv_sys_init();
@@ -61,15 +61,17 @@ bool LogParser::parse_redo(log_t *log_ptr, lsn_t target_lsn, lsn_t rapid_lsn) {
 
   log_allocate_rapid_events(*log_ptr);
 
-  while (rapid_lsn >= target_lsn) {
-    log_write_up_to(*log_ptr, rapid_lsn, true);
-    target_lsn = log_ptr->flushed_to_disk_lsn.load(std::memory_order_relaxed);
+  rapid_from_lsn = log_ptr->rapid_lsn.load();
+
+  while (rapid_from_lsn >= rapid_to_lsn) {
+    log_write_up_to(*log_ptr, rapid_from_lsn, true);
+    rapid_to_lsn = log_ptr->flushed_to_disk_lsn.load(std::memory_order_relaxed);
   }
 
-  lsn_t next_lsn = parse_redo_and_apply(log_ptr, rapid_lsn, target_lsn);
+  lsn_t next_lsn = parse_redo_and_apply(log_ptr, rapid_from_lsn, rapid_to_lsn);
 
-  if (next_lsn > rapid_lsn) {
-    lsn_t lsn = rapid_lsn;
+  if (next_lsn > rapid_from_lsn) {
+    lsn_t lsn = rapid_from_lsn;
     const lsn_t notified_up_to_lsn =
         ut_uint64_align_up(next_lsn, OS_FILE_LOG_BLOCK_SIZE);
     while (lsn <= notified_up_to_lsn) {
@@ -79,7 +81,7 @@ bool LogParser::parse_redo(log_t *log_ptr, lsn_t target_lsn, lsn_t rapid_lsn) {
     }
   }
 
-  if (!log_ptr->rapid_lsn.compare_exchange_strong(rapid_lsn, next_lsn)) {
+  if (!log_ptr->rapid_lsn.compare_exchange_strong(rapid_from_lsn, next_lsn)) {
     // only one thread can update the lsn
     assert(0);
   }

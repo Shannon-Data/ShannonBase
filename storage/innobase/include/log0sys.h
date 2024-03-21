@@ -171,6 +171,7 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) log_t {
 
   size_t rapid_events_size;
 
+  mutable ib_mutex_t rapid_populator_mutex;
   /** @} */
 
   /**************************************************/ /**

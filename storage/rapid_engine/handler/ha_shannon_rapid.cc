@@ -1085,7 +1085,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
     return 1;
   };
   auto ret = ShannonBase::imcs_instance->initialize();
-  ShannonBase::Populate::Populator::start_change_populate_threads(*log_sys);
+  //ShannonBase::Populate::Populator::start_change_populate_threads(*log_sys);
   if (!ret) ShannonBase::shannon_rpd_inited = true;
   return ret;
 }
