@@ -194,7 +194,7 @@ static bool log_test_init() {
 
   lsn_t flushed_lsn = LOG_START_LSN + LOG_BLOCK_HDR_SIZE;
 
-  dberr_t err = log_sys_init(true, flushed_lsn, flushed_lsn);
+  dberr_t err = log_sys_init(true, flushed_lsn, flushed_lsn, flushed_lsn);
   ut_a(err == DB_SUCCESS);
 
   ut_a(log_sys != nullptr);
@@ -221,7 +221,7 @@ static bool log_test_recovery() {
   lsn_t flushed_lsn = LOG_START_LSN + LOG_BLOCK_HDR_SIZE;
   lsn_t new_files_lsn;
 
-  dberr_t err = log_sys_init(false, flushed_lsn, new_files_lsn);
+  dberr_t err = log_sys_init(false, flushed_lsn, flushed_lsn, new_files_lsn);
   ut_a(err == DB_SUCCESS);
 
   EXPECT_EQ(0, new_files_lsn);

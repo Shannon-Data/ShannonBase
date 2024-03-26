@@ -31,17 +31,34 @@
 #ifndef __SHANNONBASE_POPULATE_H__
 #define __SHANNONBASE_POPULATE_H__
 
+#include <memory>
 #include "my_inttypes.h"
-#include "storage/innobase/include/log0types.h"
-
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/populate/log_commons.h"
+#include "storage/innobase/include/os0thread-create.h"
 
+class log_t;
 namespace ShannonBase {
 namespace Populate {
+
+#define log_rapid_pop_mutex_enter(log) mutex_enter(&((log).rapid_populator_mutex))
+
+#define log_rapid_pop_mutex_enter_nowait(log) \
+  mutex_enter_nowait(&((log).rapid_populator_mutex))
+
+#define log_rapid_pop_mutex_exit(log) mutex_exit(&((log).rapid_populator_mutex))
+
+#define log_rapid_pop_mutex_own(log) \
+  (mutex_own(&((log).rapid_populator_mutex)) || !Populator::log_rapid_is_active())
+
+
 extern uint64 population_buffer_size;
+extern std::unique_ptr<Ringbuffer<byte>> population_buffer;
+extern std::atomic<bool> pop_started;
 class Populator {
  public:
-  static void start_change_populate_threads(log_t &log);
+  static bool log_rapid_is_active();
+  static void start_change_populate_threads(log_t* log);
   static IB_thread log_rapid_thread;
 };
 

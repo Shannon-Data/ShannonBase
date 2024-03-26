@@ -30,8 +30,11 @@
 
 #include "storage/rapid_engine/populate/populate.h"
 
+#include "current_thd.h"
+#include "sql/sql_class.h"
+#include "include/os0event.h"
+
 #include "storage/rapid_engine/populate/log_parser.h"
-#include "storage/innobase/include/os0thread-create.h"
 
 #ifdef UNIV_PFS_THREAD
 mysql_pfs_key_t rapid_populate_thread_key;
@@ -40,19 +43,40 @@ mysql_pfs_key_t rapid_populate_thread_key;
 namespace ShannonBase {
 namespace Populate {
 
+std::atomic<bool> pop_started {false};
 IB_thread Populator::log_rapid_thread;
-uint64 population_buffer_size{SHANNON_MAX_POPULATION_BUFFER_SIZE};
-static LogParser parse_log;
-static void parse_log_func (log_t *log_ptr, lsn_t rapid_start_lsn) {
+uint64 population_buffer_size = m_pop_buff_size;
+std::unique_ptr<Ringbuffer<byte>> population_buffer {nullptr};
 
-   parse_log.parse_redo(log_ptr, rapid_start_lsn, log_ptr->flushed_to_disk_lsn);
+static LogParser parse_log;
+
+static void parse_log_func (log_t *log_ptr) {
+  current_thd = (current_thd == nullptr) ? new THD(false) : current_thd;
+  THR_MALLOC = (THR_MALLOC == nullptr) ? &current_thd->mem_root : THR_MALLOC;
+  os_event_reset(log_ptr->rapid_events[0]);
+
+  for (;;) { //here we have a notifiyer, when checkpoint_lsn/flushed_lsn > rapid_lsn to start pop
+    if (population_buffer->readAvailable()) {
+        byte* from_ptr = population_buffer->peek();
+        byte* end_ptr = from_ptr + population_buffer->readAvailable();
+
+        uint parsed_bytes = parse_log.parse_redo(from_ptr, end_ptr);
+        population_buffer->remove(parsed_bytes);
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds{100});
+  }
 }
 
-void Populator::start_change_populate_threads(log_t &log) {
+bool Populator::log_rapid_is_active() {
+   return (thread_is_active(Populator::log_rapid_thread)); 
+}
+
+void Populator::start_change_populate_threads(log_t* log) {
   Populator::log_rapid_thread =
-      os_thread_create(rapid_populate_thread_key, 0, parse_log_func, &log, 0);
+      os_thread_create(rapid_populate_thread_key, 0, parse_log_func, log);
 
   Populator::log_rapid_thread.start();
+  //log_rapid_thread.join();
 }
 
 }  // namespace Populate

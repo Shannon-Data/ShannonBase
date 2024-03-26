@@ -648,7 +648,7 @@ static void log_sys_create() {
   mutex_create(LATCH_ID_LOG_LIMITS, &log.limits_mutex);
   mutex_create(LATCH_ID_LOG_FILES, &log.m_files_mutex);
   mutex_create(LATCH_ID_LOG_SN_MUTEX, &log.sn_x_lock_mutex);
-  //mutex_create(LATCH_ID_LOG_RAPID_REPOPULATE_MUTEX, &log.rapid_populator_mutex);
+  mutex_create(LATCH_ID_LOG_RAPID_POP, &log.rapid_populator_mutex);
 
 #ifdef UNIV_PFS_RWLOCK
   /* pfs_psi is separated from sn_lock_inst,
@@ -838,6 +838,7 @@ static void log_sys_free() {
   }
 #endif /* UNIV_PFS_RWLOCK */
 
+  mutex_free(&log.rapid_populator_mutex);
   mutex_free(&log.m_files_mutex);
   mutex_free(&log.sn_x_lock_mutex);
   mutex_free(&log.limits_mutex);
@@ -1686,7 +1687,7 @@ static dberr_t log_sys_check_directory(const Log_files_context &ctx,
 }
 
 dberr_t log_sys_init(bool expect_no_files, lsn_t flushed_lsn,
-                     lsn_t &new_files_lsn) {
+                     lsn_t rapid_lsn, lsn_t &new_files_lsn) {
   ut_a(log_is_data_lsn(flushed_lsn));
   ut_a(log_sys == nullptr);
 
@@ -1948,6 +1949,7 @@ dberr_t log_sys_init(bool expect_no_files, lsn_t flushed_lsn,
     ut_a(result == 0);
     srv_redo_log = false;
   }
+  log.rapid_lsn = rapid_lsn;
 
   return DB_SUCCESS;
 }

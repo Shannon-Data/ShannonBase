@@ -866,13 +866,13 @@ dberr_t SysTablespace::open_or_create(bool is_temp, bool create_new_db,
   if (flush_lsn != nullptr) {
     if (create_new_db) {
       /* There are no data files, so we assign the initial value
-      to flush_lsn instead of reading it from disk. */
+      to flush_lsn instead of reading it from disk, and rapid_lsn so on. */
       *flush_lsn = LOG_START_LSN + LOG_BLOCK_HDR_SIZE;
-      *rapid_lsn = *flush_lsn;
+      *rapid_lsn = LOG_START_LSN + LOG_BLOCK_HDR_SIZE;
     } else {
       /* Validate the header page in the first datafile in the
       system tablespace and read flush_lsn from the validated
-      header page. */
+      header page, rapid_lsn so does. */
       err = read_lsn_and_check_flags(flush_lsn, rapid_lsn);
       if (err != DB_SUCCESS) {
         return (err);

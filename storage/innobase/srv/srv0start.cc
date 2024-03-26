@@ -1525,7 +1525,7 @@ static dberr_t recreate_redo_files(lsn_t &flushed_lsn) {
                 LOG_BLOCK_HDR_SIZE;
 
   /* `true` parameter makes sure new files are created */
-  dberr_t err = log_sys_init(true, flushed_lsn, flushed_lsn);
+  dberr_t err = log_sys_init(true, flushed_lsn, flushed_lsn, flushed_lsn);
   if (err != DB_SUCCESS) {
     return err;
   }
@@ -1854,7 +1854,7 @@ dberr_t srv_start(bool create_new_db) {
 
   lsn_t new_files_lsn;
 
-  err = log_sys_init(create_new_db, flushed_lsn, new_files_lsn);
+  err = log_sys_init(create_new_db, flushed_lsn, rapid_lsn, new_files_lsn);
 
   if (err != DB_SUCCESS) {
     return srv_init_abort(err);

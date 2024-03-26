@@ -46,63 +46,38 @@ namespace Populate {
  */
 class LogParser {
  public:
-  bool parse_redo(log_t *log_ptr, lsn_t rapid_from_lsn, lsn_t rapid_to_lsn);
- private:
-  int handle_multi_rec(byte *ptr, byte *end_ptr, size_t *len, lsn_t start_lsn);
-  size_t compute_rapid_event_slot(lsn_t lsn) {
-    return ((lsn - 1) / OS_FILE_LOG_BLOCK_SIZE) &
-           (INNODB_LOG_EVENTS_DEFAULT - 1);
+  uint parse_redo(byte* ptr, byte* end_ptr);
+private:
+  uint parse_single_rec(byte *ptr, byte *end_ptr);
+  bool parse_multi_rec(byte *ptr, byte *end_ptr);
+  byte *parse_parse_or_apply_log_rec_body(
+      mlog_id_t type, byte *ptr, byte *end_ptr, space_id_t space_id,
+      page_no_t page_no, buf_block_t *block, mtr_t *mtr, lsn_t start_lsn);
+
+  ulint parse_parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
+                                space_id_t *space_id, page_no_t *page_no,
+                                byte **body);
+
+  inline bool get_record_type(const unsigned char *ptr, mlog_id_t *type, bool* single_flag) {  
+    *single_flag = (*ptr & MLOG_SINGLE_REC_FLAG) ? true : false;
+    *type = mlog_id_t(*ptr & ~MLOG_SINGLE_REC_FLAG);
+    if (UNIV_UNLIKELY(*type > MLOG_BIGGEST_TYPE)) {
+      // PRINT_ERR << "Found an invalid redo log record type at offset: " <<
+      return true;
+    }
+    return false;
   }
-  ulint parse_single_redo(mlog_id_t *type, byte *ptr, byte *end_ptr,
-                          space_id_t *space_id, page_no_t *page_no, byte **body,
-                          lsn_t start_lsn, bool apply_to_rapid);
 
-  int handle_single_rec(byte *ptr, byte *end_ptr, size_t *len, lsn_t start_lsn);
-  void log_allocate_rapid_events(log_t &log);
-  lsn_t parse_redo_and_apply(log_t *log_ptr, lsn_t start_lsn, lsn_t target_lsn);
-  byte *parse_log_body(mlog_id_t type, byte *ptr, byte *end_ptr,
-                       space_id_t space_id, page_no_t page_no,
-                       ulint parsed_bytes, lsn_t start_lsn,
-                       bool apply_to_rapid);
+  byte *parse_cur_parse_and_apply_insert_rec(
+    bool is_short,       /*!< in: true if short inserts */
+    const byte *ptr,     /*!< in: buffer */
+    const byte *end_ptr, /*!< in: buffer end */
+    buf_block_t *block,  /*!< in: page or NULL */
+    dict_index_t *index, /*!< in: record descriptor */
+    mtr_t *mtr);          /*!< in: mtr or NULL */
 
-  bool check_encryption(page_no_t page_no, space_id_t space_id,
-                        const byte *start, const byte *end);
-
-  byte *parse_insert_rec(bool is_short,       /*!< in: true if short inserts */
-                         const byte *ptr,     /*!< in: buffer */
-                         const byte *end_ptr, /*!< in: buffer end */
-                         buf_block_t *block,  /*!< in: page or NULL */
-                         dict_index_t *index, /*!< in: record descriptor */
-                         bool apply_to_rapid, mtr_t &mtr);
-
-  byte *parse_delete_rec(
-      byte *ptr,                /*!< in: buffer */
-      byte *end_ptr,            /*!< in: buffer end */
-      page_t *page,             /*!< in/out: page or NULL */
-      page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
-      buf_block_t *block,
-      dict_index_t *index, /*!< in: index corresponding to page */
-      bool apply_to_rapid, mtr_t &mtr);
-
-  void find_index(uint64 idx_id, const dict_index_t **index);
-  int apply_insert(const byte *rec, dict_index_t *index, ulint *offsets,
-                   const dict_index_t *real_index);
-  int apply_delete(const byte *rec, const dict_index_t *index, ulint *offsets);
-
-  uint64 get_trx_id(const rec_t *rec, const dict_index_t *rec_index,
-                    const ulint *offsets);
-  const byte *rec_get_nth_field(const rec_t *rec, const ulint *offsets, ulint n,
-                                ulint *len);
-  void innodb_rec_convert_to_mysql_rec(const rec_t *rec,
-                                       const dict_index_t *rec_index,
-                                       const ulint *offsets, TABLE *table,
-                                       uint32 n_fields);
-  ulint rec_get_nth_field_offs(const ulint *offsets, ulint n, ulint *len);
-  uint32 find_col_in_index(const dict_index_t *index, const dict_col_t *col);
-
-  void innodb_field_convert_to_mysql_field(byte *dest, const byte *data,
-                                           ulint len, dict_col_t *col,
-                                           Field *field);
+  //only user's index be retrieved from dd_table.
+  const dict_index_t* find_index(uint64 idx_id);
 };
 
 }  // namespace Populate

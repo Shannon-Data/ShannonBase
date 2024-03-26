@@ -38,6 +38,7 @@
 #include "storage/innobase/include/trx0types.h"
 #include "storage/innobase/include/univ.i"
 
+#include "storage/rapid_engine/populate/log_commons.h"
 namespace ShannonBase {
 namespace Populate {
 

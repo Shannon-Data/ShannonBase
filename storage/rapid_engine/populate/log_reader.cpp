@@ -51,7 +51,8 @@ namespace Populate {
 /*** how to use LogReader to read the red log files.
   int main () {
     LogReader logReader("../mysql-replication/primary/data/",
-  "../mysql-replication/primary/data/ib_logfile0"); if (!logReader.init()) {
+  "../mysql-replication/primary/data/ib_logfile0");
+   if (!logReader.init()) {
         std::cout << "[ERROR] Error initializing the log reader!" << std::endl;
         return -1;
     }

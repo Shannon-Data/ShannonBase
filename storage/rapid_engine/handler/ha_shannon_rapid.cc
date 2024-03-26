@@ -764,6 +764,15 @@ int ha_rapid::load_table(const TABLE &table_arg) {
              table_arg.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
   }
+
+  /***we star the background thread to repopulate the chagnes here not in log_start_background_threads()
+   * that makes the logics more independent.
+  */
+  if (!ShannonBase::Populate::Populator::log_rapid_is_active()) {
+    ShannonBase::Populate::Populator::start_change_populate_threads(log_sys);
+    ShannonBase::Populate::pop_started = true;
+  }
+
   return 0;
 }
 
@@ -1085,8 +1094,9 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
     return 1;
   };
   auto ret = ShannonBase::imcs_instance->initialize();
-  //ShannonBase::Populate::Populator::start_change_populate_threads(*log_sys);
   if (!ret) ShannonBase::shannon_rpd_inited = true;
+
+  ShannonBase::Populate::population_buffer.reset(new ShannonBase::Populate::Ringbuffer<byte>());
   return ret;
 }
 
