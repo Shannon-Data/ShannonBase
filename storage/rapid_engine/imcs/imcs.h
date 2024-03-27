@@ -70,7 +70,11 @@ class Imcs : public MemoryObject {
   // end of scanning
   uint rnd_end();
   // writes a row of a column in.
-  uint write_direct(ShannonBase::RapidContext *context, Field *fields);
+  uint write_direct(ShannonBase::RapidContext *context, Field *field);
+  // writes a row of a column in.
+  uint write_direct(ShannonBase::RapidContext *context, const char* schema_name,
+                    const char* table_name, const char*field_name,
+                    const uchar* data, uint len);
   // reads the data by a rowid into a field.
   uint read_direct(ShannonBase::RapidContext *context, Field *field);
   // reads the data by a rowid into buffer.

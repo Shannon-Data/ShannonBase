@@ -22,7 +22,7 @@
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -38,6 +38,7 @@
 #include "storage/innobase/include/univ.i"
 
 class Field;
+class TABLE;
 namespace ShannonBase {
 namespace Populate {
 /**
@@ -48,8 +49,9 @@ class LogParser {
  public:
   uint parse_redo(byte* ptr, byte* end_ptr);
 private:
-  uint parse_single_rec(byte *ptr, byte *end_ptr);
-  bool parse_multi_rec(byte *ptr, byte *end_ptr);
+  int page_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
+                                    const ulint *offsets, mlog_id_t type);
+
   byte *parse_parse_or_apply_log_rec_body(
       mlog_id_t type, byte *ptr, byte *end_ptr, space_id_t space_id,
       page_no_t page_no, buf_block_t *block, mtr_t *mtr, lsn_t start_lsn);
@@ -57,17 +59,7 @@ private:
   ulint parse_parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
                                 space_id_t *space_id, page_no_t *page_no,
                                 byte **body);
-
-  inline bool get_record_type(const unsigned char *ptr, mlog_id_t *type, bool* single_flag) {  
-    *single_flag = (*ptr & MLOG_SINGLE_REC_FLAG) ? true : false;
-    *type = mlog_id_t(*ptr & ~MLOG_SINGLE_REC_FLAG);
-    if (UNIV_UNLIKELY(*type > MLOG_BIGGEST_TYPE)) {
-      // PRINT_ERR << "Found an invalid redo log record type at offset: " <<
-      return true;
-    }
-    return false;
-  }
-
+  //parses the insert log and apply insertion to rapid.
   byte *parse_cur_parse_and_apply_insert_rec(
     bool is_short,       /*!< in: true if short inserts */
     const byte *ptr,     /*!< in: buffer */
@@ -78,6 +70,20 @@ private:
 
   //only user's index be retrieved from dd_table.
   const dict_index_t* find_index(uint64 idx_id);
+  //gets the log type
+  inline bool get_record_type(const unsigned char *ptr, mlog_id_t *type, bool* single_flag) {
+    *single_flag = (*ptr & MLOG_SINGLE_REC_FLAG) ? true : false;
+    *type = mlog_id_t(*ptr & ~MLOG_SINGLE_REC_FLAG);
+    if (UNIV_UNLIKELY(*type > MLOG_BIGGEST_TYPE)) {
+      // PRINT_ERR << "Found an invalid redo log record type at offset: " <<
+      return true;
+    }
+    return false;
+  }
+  //parse the signle log rec.
+  uint parse_single_rec(byte *ptr, byte *end_ptr);
+  ////parse the multi log rec.
+  bool parse_multi_rec(byte *ptr, byte *end_ptr);
 };
 
 }  // namespace Populate

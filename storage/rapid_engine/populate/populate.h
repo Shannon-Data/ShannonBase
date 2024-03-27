@@ -55,6 +55,7 @@ namespace Populate {
 extern uint64 population_buffer_size;
 extern std::unique_ptr<Ringbuffer<byte>> population_buffer;
 extern std::atomic<bool> pop_started;
+
 class Populator {
  public:
   static bool log_rapid_is_active();

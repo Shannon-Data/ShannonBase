@@ -22,7 +22,7 @@
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -43,6 +43,8 @@
 namespace ShannonBase {
 namespace Populate{
    constexpr int m_pop_buff_size = ALIGN_WORD(SHANNON_MAX_POPULATION_BUFFER_SIZE, OS_FILE_LOG_BLOCK_SIZE);
+   constexpr uint MAX_LOG_POP_SPIN_COUNT = 100000;
+
  ///jnk0le/Ring-Buffer
 	/*!
 	 * \brief Lock free, with no wasted slots ringbuffer implementation
@@ -493,7 +495,6 @@ namespace Populate{
 
 		return read;
 	}
-
 
 }    
 }

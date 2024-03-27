@@ -53,17 +53,36 @@ static LogParser parse_log;
 static void parse_log_func (log_t *log_ptr) {
   current_thd = (current_thd == nullptr) ? new THD(false) : current_thd;
   THR_MALLOC = (THR_MALLOC == nullptr) ? &current_thd->mem_root : THR_MALLOC;
+
   os_event_reset(log_ptr->rapid_events[0]);
+   //here we have a notifiyer, when checkpoint_lsn/flushed_lsn > rapid_lsn to start pop
+  while (pop_started.load(std::memory_order_seq_cst)) {
+    auto stop_condition = [&](bool wait) {
+      if (population_buffer->readAvailable()) {
+        return true;
+      }
 
-  for (;;) { //here we have a notifiyer, when checkpoint_lsn/flushed_lsn > rapid_lsn to start pop
-    if (population_buffer->readAvailable()) {
-        byte* from_ptr = population_buffer->peek();
-        byte* end_ptr = from_ptr + population_buffer->readAvailable();
+      if (wait) { //do somthing in waiting
+      }
 
-        uint parsed_bytes = parse_log.parse_redo(from_ptr, end_ptr);
-        population_buffer->remove(parsed_bytes);
-    }
-    std::this_thread::sleep_for(std::chrono::microseconds{100});
+      return false;
+    };
+
+    os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT,
+                      std::chrono::microseconds{100}, stop_condition);
+
+    byte* from_ptr = population_buffer->peek();
+    byte* end_ptr = from_ptr + population_buffer->readAvailable();
+
+    uint parsed_bytes = parse_log.parse_redo(from_ptr, end_ptr);
+    population_buffer->remove(parsed_bytes);
+  } //wile(pop_started)
+
+  pop_started.store(!pop_started, std::memory_order_seq_cst);
+  THR_MALLOC = nullptr;
+  if (current_thd) {
+    delete current_thd;
+    current_thd = nullptr;
   }
 }
 
@@ -75,8 +94,8 @@ void Populator::start_change_populate_threads(log_t* log) {
   Populator::log_rapid_thread =
       os_thread_create(rapid_populate_thread_key, 0, parse_log_func, log);
 
+  ShannonBase::Populate::pop_started = true;
   Populator::log_rapid_thread.start();
-  //log_rapid_thread.join();
 }
 
 }  // namespace Populate

@@ -22,7 +22,7 @@
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -41,6 +41,7 @@
 #include "storage/innobase/include/log0test.h"
 #include "storage/innobase/include/log0write.h"
 #include "storage/innobase/include/row0ins.h"
+#include "storage/innobase/include/row0sel.h"
 #include "storage/innobase/include/row0mysql.h"
 #include "storage/innobase/include/row0upd.h"
 #include "storage/innobase/include/trx0rec.h"
@@ -49,11 +50,93 @@
 #include "storage/innobase/include/mtr0mtr.h"
 #include "storage/innobase/rem/rec.h"
 
+#include "sql/table.h"
+
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 namespace ShannonBase {
 extern ShannonLoadedTables* shannon_loaded_tables;
 
 namespace Populate {
+
+int LogParser::page_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
+                                            const ulint *offsets, mlog_id_t type) {
+  ut_a(index);
+  assert(index->n_def == offsets[1]);
+  std::string db_name, table_name;
+  index->table->get_table_name(db_name, table_name);
+
+  uchar trxid[DATA_TRX_ID_LEN] = {0};
+  for (auto idx = 0; idx < index->n_fields; idx++) {
+    auto idx_col  = index->get_field(idx);
+    if (strncmp(idx_col->name, "DB_TRX_ID", 9)) continue;
+
+    auto col_mask = idx_col->col->prtype & DATA_SYS_PRTYPE_MASK;
+    if (idx_col->col->mtype == DATA_SYS && col_mask == DATA_TRX_ID) {
+        mysql_row_templ_t templ;
+        templ.type = DATA_SYS;
+        templ.is_virtual = false;
+        templ.is_multi_val = false;
+        templ.mysql_col_len = DATA_TRX_ID_LEN;
+        ulint len{0};
+        byte *data = rec_get_nth_field(index, rec, offsets, idx_col->col->get_phy_pos(), &len);
+        ut_a(len ==DATA_TRX_ID_LEN);
+        row_sel_field_store_in_mysql_format(trxid, &templ, index, idx_col->col->get_phy_pos(),
+                                            data, len, ULINT_UNDEFINED);
+    }
+    break;
+  }
+
+  for (auto idx = 0; idx < index->n_fields; idx++) {
+    auto idx_col  = index->get_field(idx);
+    if (idx_col->col->mtype == DATA_SYS || idx_col->col->mtype == DATA_SYS_CHILD) continue;
+
+    ulint len{0};
+    byte *data = rec_get_nth_field(index, rec, offsets, idx_col->col->get_phy_pos(), &len);
+    auto field_data = std::make_unique<uchar[]>(ALIGN_WORD(len, 8));
+
+    if (len == UNIV_SQL_NULL) { // is null.
+    } else {
+      mysql_row_templ_t templ;
+      templ.type = idx_col->col->mtype;
+      templ.is_virtual = templ.is_multi_val = false;
+      templ.mysql_col_len = idx_col->col->len;
+      templ.mysql_type = idx_col->col->mtype;
+
+      if (templ.mysql_type == DATA_MYSQL_TRUE_VARCHAR) {
+        templ.mysql_length_bytes = (idx_col->col->len > 255) ? 2 : 1; //field->get_length_bytes();
+      } else {
+        templ.mysql_length_bytes = 0;
+      }
+      templ.charset = dtype_get_charset_coll(idx_col->col->prtype);
+      templ.mbminlen = idx_col->col->get_mbminlen();
+      templ.mbmaxlen = idx_col->col->get_mbmaxlen();
+      templ.is_unsigned = idx_col->col->prtype & DATA_UNSIGNED;
+
+      row_sel_field_store_in_mysql_format(field_data.get(), &templ, index,
+                                          idx_col->col->get_phy_pos(), data, len, ULINT_UNDEFINED);
+    }
+    const char* field_name = index->get_field(idx)->name;
+    auto imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
+    ShannonBase::RapidContext context;
+    context.m_current_db = db_name;
+    context.m_current_table = table_name;
+    context.m_extra_info.m_trxid = *(reinterpret_cast<uint64*>(trxid));
+
+    switch (type) {
+      case MLOG_REC_INSERT:
+        imcs_instance->write_direct(&context, db_name.c_str(), table_name.c_str(), field_name,
+                                    field_data.get(),
+                                    (len == UNIV_SQL_NULL)? UNIV_SQL_NULL: idx_col->col->len);
+        break;
+      case MLOG_REC_DELETE: break;
+      case MLOG_REC_UPDATE_IN_PLACE: break;
+      default:
+        break;
+    }
+  }
+
+  return 0;
+}
 
 const dict_index_t* LogParser::find_index(uint64 idx_id) {
   btr_pcur_t pcur;
@@ -282,14 +365,18 @@ byte *LogParser::parse_cur_parse_and_apply_insert_rec(
   if (tb_index){
     offsets = rec_get_offsets(buf + origin_offset, index, offsets,
                               ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
-    //if (UNIV_UNLIKELY(!page_cur_rec_insert(&cursor, buf + origin_offset, index,
-    //                                       offsets, mtr))) {
-      /* The redo log record should only have been written
-      after the write was successful. */
-    //  ut_error;
-    //}
-  }
 
+    std::string db_name, table_name;
+    tb_index->table->get_table_name(db_name, table_name);
+    // get field length from rapid
+    auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
+    if (!share) //was not loaded table, return
+      goto finish;
+    
+    page_cur_rec_change_apply_low(buf + origin_offset, tb_index,
+                                  offsets, MLOG_REC_INSERT);
+  }
+finish:
   if (buf != buf1) {
     ut::free(buf);
   }

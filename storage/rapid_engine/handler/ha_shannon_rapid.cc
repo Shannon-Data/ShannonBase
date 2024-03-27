@@ -754,7 +754,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   }
   table_arg.file->ha_rnd_end();
 
-  m_share = new RapidShare ();
+  m_share = new RapidShare (table_arg);
   m_share->file = this;
   m_share->m_tableid = table_arg.s->table_map_id.id();
   shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
@@ -770,7 +770,6 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   */
   if (!ShannonBase::Populate::Populator::log_rapid_is_active()) {
     ShannonBase::Populate::Populator::start_change_populate_threads(log_sys);
-    ShannonBase::Populate::pop_started = true;
   }
 
   return 0;

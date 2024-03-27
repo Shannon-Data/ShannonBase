@@ -29,8 +29,11 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 
 #include <mutex>
+#include <string>
+
 #include "sql/field.h"
 #include "sql/my_decimal.h"
+#include "storage/innobase/include/univ.i" //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
 
 #include "storage/rapid_engine/imcs/cu.h"
@@ -38,6 +41,7 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
+#include "boost/format.hpp"
 namespace ShannonBase {
 namespace Imcs {
 
@@ -112,6 +116,24 @@ uint Imcs::rnd_end() {
     if (ret) return ret;
   }
   m_inited = handler::NONE;
+  return 0;
+}
+
+uint Imcs::write_direct(ShannonBase::RapidContext *context, const char* schema_name,
+                       const char* table_name, const char*field_name,
+                        const uchar* data, uint len) {
+  ut_a(table_name && field_name);
+  boost::format fmt ("%s1%%2%%3%");
+  fmt %schema_name  %table_name %field_name;
+  auto elem = m_cus.find(fmt.str());
+  if (elem == m_cus.end()) {  // a new field. not found. not  be loaded.
+    return 1;
+  }
+
+
+  if (len == UNIV_SQL_NULL) { // is null.
+  } else {
+  }
   return 0;
 }
 
