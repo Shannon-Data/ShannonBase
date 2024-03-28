@@ -70,6 +70,7 @@ class Cu : public MemoryObject {
     std::atomic<double> m_max{0}, m_min{0}, m_middle{0}, m_median{0}, m_avg{0},
         m_sum{0};
     std::atomic<uint64> m_rows{0};
+    const CHARSET_INFO* m_charset;
   };
 
   explicit Cu(Field *field);

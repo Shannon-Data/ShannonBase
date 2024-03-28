@@ -74,7 +74,7 @@ class Imcs : public MemoryObject {
   // writes a row of a column in.
   uint write_direct(ShannonBase::RapidContext *context, const char* schema_name,
                     const char* table_name, const char*field_name,
-                    const uchar* data, uint len);
+                    const uchar* field_value, uint val_len);
   // reads the data by a rowid into a field.
   uint read_direct(ShannonBase::RapidContext *context, Field *field);
   // reads the data by a rowid into buffer.

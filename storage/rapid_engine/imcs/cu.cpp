@@ -60,6 +60,7 @@ Cu::Cu(Field *field) {
   m_header->m_median = std::numeric_limits<double>::lowest();
 
   m_header->m_cu_type = field->type();
+  m_header->m_charset = field->charset();
   m_header->m_nullable = field->is_real_null();
 
   std::string comment(field->comment.str);
@@ -140,8 +141,12 @@ uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, uchar *data,
     pos = chunk_ptr->write_data_direct(context, data, length);
   }
 
+  auto ret = m_index->insert((uchar *)context->m_extra_info.m_key_buff.get(),
+                             context->m_extra_info.m_key_len, pos);
+  if (unlikely(ret)) return nullptr;
+
   double data_val{0};
-  if (m_header->m_nullable)
+  if (!m_header->m_nullable)
     data_val = *(double *)(data + SHANNON_DATA_BYTE_OFFSET);
 
   // update the meta info.

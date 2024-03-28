@@ -68,8 +68,45 @@ private:
     dict_index_t *index, /*!< in: record descriptor */
     mtr_t *mtr);          /*!< in: mtr or NULL */
 
+  byte *parse_cur_parse_del_mark_and_apply_clust_rec(
+    byte *ptr,                /*!< in: buffer */
+    byte *end_ptr,            /*!< in: buffer end */
+    page_t *page,             /*!< in/out: page or NULL */
+    page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
+    dict_index_t *index);     /*!< in: index corresponding to page */
+
+  byte *parse_cur_parse_del_mark_and_apply_sec_rec(
+    byte *ptr,                /*!< in: buffer */
+    byte *end_ptr,            /*!< in: buffer end */
+    page_t *page,             /*!< in/out: page or NULL */
+    page_zip_des_t *page_zip); /*!< in/out: compressed page, or NULL */
+
+  byte *parse_cur_parse_update_in_place_and_apply(
+    byte *ptr,                /*!< in: buffer */
+    byte *end_ptr,            /*!< in: buffer end */
+    page_t *page,             /*!< in/out: page or NULL */
+    page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
+    dict_index_t *index);      /*!< in: index corresponding to page */
+
+  //get the field value from innodb format to mysql format. return 0 success.
+  int store_field_in_mysql_format(const dict_index_t*index, const dict_field_t* col,
+                                  const byte *dest, const byte* src, ulint len);
+
   //only user's index be retrieved from dd_table.
   const dict_index_t* find_index(uint64 idx_id);
+
+  //get the trxid in byte fmt and returns the length of PK found.
+  inline uint get_trxid(const rec_t *rec, const dict_index_t *index, const ulint *offsets, uchar* trx_id);
+
+  //get pk in byte fmt, and returns the length of PK.
+  inline uint get_PK(const rec_t *rec, const dict_index_t *index, const ulint *offsets, uchar* pk);
+
+  //parse the signle log rec.
+  uint parse_single_rec(byte *ptr, byte *end_ptr);
+
+  ////parse the multi log rec.
+  bool parse_multi_rec(byte *ptr, byte *end_ptr);
+
   //gets the log type
   inline bool get_record_type(const unsigned char *ptr, mlog_id_t *type, bool* single_flag) {
     *single_flag = (*ptr & MLOG_SINGLE_REC_FLAG) ? true : false;
@@ -80,10 +117,6 @@ private:
     }
     return false;
   }
-  //parse the signle log rec.
-  uint parse_single_rec(byte *ptr, byte *end_ptr);
-  ////parse the multi log rec.
-  bool parse_multi_rec(byte *ptr, byte *end_ptr);
 };
 
 }  // namespace Populate

@@ -48,8 +48,6 @@ IB_thread Populator::log_rapid_thread;
 uint64 population_buffer_size = m_pop_buff_size;
 std::unique_ptr<Ringbuffer<byte>> population_buffer {nullptr};
 
-static LogParser parse_log;
-
 static void parse_log_func (log_t *log_ptr) {
   current_thd = (current_thd == nullptr) ? new THD(false) : current_thd;
   THR_MALLOC = (THR_MALLOC == nullptr) ? &current_thd->mem_root : THR_MALLOC;
@@ -61,20 +59,18 @@ static void parse_log_func (log_t *log_ptr) {
       if (population_buffer->readAvailable()) {
         return true;
       }
-
       if (wait) { //do somthing in waiting
       }
-
       return false;
     };
 
     os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT,
                       std::chrono::microseconds{100}, stop_condition);
 
+    auto size = population_buffer->readAvailable();
     byte* from_ptr = population_buffer->peek();
-    byte* end_ptr = from_ptr + population_buffer->readAvailable();
-
-    uint parsed_bytes = parse_log.parse_redo(from_ptr, end_ptr);
+    LogParser parse_log;
+    uint parsed_bytes = parse_log.parse_redo(from_ptr, from_ptr + size);
     population_buffer->remove(parsed_bytes);
   } //wile(pop_started)
 
