@@ -25,27 +25,10 @@
 */
 
 #include <string>
-#include "ml_regression.h"
 
 namespace ShannonBase {
 namespace ML {
 
-//Application(char *model_filename,char *config_file);
-ML_regress::ML_regress() {
-  std::string model_name("");
-  std::string config_path("");
-
-  m_app = std::make_unique<LightGBM::Application> (1, nullptr);
-  m_app->Run();
-}
-
-ML_regress::~ML_regress() {
-}
-
-int ML_regress::train() {
-  m_app->Run();
-  return 0;
-}
 
 } //ML
 } //shannonbase

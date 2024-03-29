@@ -24,9 +24,9 @@ INCLUDE_DIRECTORIES(SYSTEM ${BOOST_PATCHES_DIR} ${BOOST_INCLUDE_DIR})
 
 ADD_WSHADOW_WARNING()
 
-INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/lightgbm/include)
-link_directories(${CMAKE_SOURCE_DIR}/ml/lightgbm/lib)
-link_directories(${CMAKE_SOURCE_DIR}/ml/)
+#INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/lightgbm/include)
+#link_directories(${CMAKE_SOURCE_DIR}/ml/lightgbm/lib)
+#link_directories(${CMAKE_SOURCE_DIR}/ml/)
 
 # Lots of warnings about -Walloc-size-larger-than= from my_malloc.cc
 # but it is basically impossible to trace the actual origin.
@@ -985,7 +985,7 @@ TARGET_LINK_LIBRARIES(sql_dd sql_gis sql_main)
 SET_TARGET_PROPERTIES(sql_dd PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 ADD_LIBRARY(auto_ml STATIC ${ML_SOURCES})
-TARGET_LINK_LIBRARIES(auto_ml _lightgbm)
+#TARGET_LINK_LIBRARIES(auto_ml _lightgbm)
 SET_TARGET_PROPERTIES(auto_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 #

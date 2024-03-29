@@ -27,9 +27,6 @@
 #define __SHANNONBASE_AUTO_ML_H__
 
 #include <memory>
-#include "lightgbm/include/LightGBM/application.h"
-
-class LightGBM::Application;
 
 namespace ShannonBase {
 namespace ML {

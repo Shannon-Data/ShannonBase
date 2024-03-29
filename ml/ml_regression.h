@@ -27,20 +27,12 @@
 #define __SHANNONBASE_ML_REGRESSION_H__
 
 #include <memory>
-#include "lightgbm/include/LightGBM/application.h"
 
 class LightGBM::Application;
 
 namespace ShannonBase {
 namespace ML {
 
-class ML_regress {
-  ML_regress();
-  ~ML_regress();
-  int train();
- private:
-   std::unique_ptr<LightGBM::Application> m_app;
-};
 
 } //ML
 } //shannonbase

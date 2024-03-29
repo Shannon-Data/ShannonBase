@@ -35,8 +35,8 @@ INCLUDE_DIRECTORIES(
 )
 
 #FOR AUTO-ML MODELS
-INCLUDE_DIRECTORIES( ${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/include/)
-LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/lib/)
+#INCLUDE_DIRECTORIES( ${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/include/)
+#LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/lib/)
 
 # Conflicting YYSTYPE, because we have multiple Bison grammars.
 # WL#11100 Migrate to Bison 3.x should fix this.
