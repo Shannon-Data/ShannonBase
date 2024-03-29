@@ -109,6 +109,12 @@ constexpr uint32_t FIL_PAGE_SPACE_ID = FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID;
 /** start of the data on the page */
 constexpr uint32_t FIL_PAGE_DATA = 38;
 
+/** this is only defined for the first page of the system tablespace: the change
+has been populated to rapid at least up to this LSN. 8 bytes, at the frist plance
+of data on page 0. it's only valid in system tablespace (0,0), whic page type is
+TRX_SYS_SPACE */
+constexpr uint32_t FIL_PAGE_FILE_RAPID_LSN = FIL_PAGE_DATA;
+
 /** File page trailer */
 /** the low 4 bytes of this are used to store the page checksum, the
 last 4 bytes should be identical to the last 4 bytes of FIL_PAGE_LSN */

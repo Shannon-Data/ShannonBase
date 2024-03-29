@@ -24,6 +24,10 @@ INCLUDE_DIRECTORIES(SYSTEM ${BOOST_PATCHES_DIR} ${BOOST_INCLUDE_DIR})
 
 ADD_WSHADOW_WARNING()
 
+#INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/lightgbm/include)
+#link_directories(${CMAKE_SOURCE_DIR}/ml/lightgbm/lib)
+#link_directories(${CMAKE_SOURCE_DIR}/ml/)
+
 # Lots of warnings about -Walloc-size-larger-than= from my_malloc.cc
 # but it is basically impossible to trace the actual origin.
 IF(FPROFILE_GENERATE OR FPROFILE_USE)
@@ -115,6 +119,11 @@ ADD_CUSTOM_COMMAND(
 ADD_DEFINITIONS(-DMYSQL_SERVER)
 ADD_SUBDIRECTORY(server_component)
 ADD_SUBDIRECTORY(protobuf)
+
+SET(ML_SOURCES
+  ../ml/auto_ml.cpp
+  ../ml/ml_regression.cpp
+)
 
 SET(DD_SOURCES
   dd/collection.cc
@@ -975,6 +984,10 @@ ADD_DEPENDENCIES(sql_dd GenKeywordList)
 TARGET_LINK_LIBRARIES(sql_dd sql_gis sql_main)
 SET_TARGET_PROPERTIES(sql_dd PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
+ADD_LIBRARY(auto_ml STATIC ${ML_SOURCES})
+#TARGET_LINK_LIBRARIES(auto_ml _lightgbm)
+SET_TARGET_PROPERTIES(auto_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
+
 #
 # On Windows platform we compile in the client-side Windows Native Authentication
 # plugin which is used by the client connection code included in the server.
@@ -1240,7 +1253,7 @@ ENDIF()
 SET_TARGET_PROPERTIES(mysqld PROPERTIES ENABLE_EXPORTS TRUE)
 TARGET_LINK_LIBRARIES(mysqld
   sql_main sql_gis binlog rpl rpl_source rpl_replica sql_dd mysys
-  minchassis binlogevents_static ext::icu)
+  minchassis binlogevents_static auto_ml ext::icu)
 
 # Add dependency on ldap library, to ensure it is not unloaded
 # when we shutdown the authentication plugin.

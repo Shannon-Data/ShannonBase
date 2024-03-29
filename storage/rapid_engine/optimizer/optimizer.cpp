@@ -51,34 +51,8 @@ std::string Timer::lap_formatted() {
 // ctor
 Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr,
                      const std::shared_ptr<CostEstimator> &cost_estimator)
-    : m_query_expr(expr), m_cost_estimator(cost_estimator) {
-  this->add_rules();
-}
-
-void Optimizer::add_rule(std::unique_ptr<Rule> &rule) {
-  rule->m_cost_estimator = this->m_cost_estimator;
-  m_rules.emplace_back(std::move(rule));
-}
-void Optimizer::add_rules() {
-  m_rules.push_back(std::make_unique<Const_fold>(m_query_expr));
-}
-
-// start to do optimization.
-std::unique_ptr<JOIN> Optimizer::optimize(
-    ShannonBase::OptimizeContext *context,
-    std::shared_ptr<Query_expression> &root) const {
-  // start to optimize
-
-  // copy a query expression and do transfer freely.
-  std::shared_ptr<Query_expression> query_expr;
-  // query_expr.reset(root->clone());
-
-  for (const auto &rule : m_rules) {  // apply the rules to query block.
-    auto rule_timer = Timer{};
-  }
-
-  std::unique_ptr<JOIN> m_optimized_join;
-  return std::move(m_optimized_join);
+ {
+  
 }
 
 }  // namespace Optimizer

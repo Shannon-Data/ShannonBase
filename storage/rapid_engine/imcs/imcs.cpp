@@ -29,8 +29,12 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 
 #include <mutex>
+#include <string>
+#include <sstream>
+
 #include "sql/field.h"
 #include "sql/my_decimal.h"
+#include "storage/innobase/include/univ.i" //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
 
 #include "storage/rapid_engine/imcs/cu.h"
@@ -112,6 +116,54 @@ uint Imcs::rnd_end() {
     if (ret) return ret;
   }
   m_inited = handler::NONE;
+  return 0;
+}
+
+uint Imcs::write_direct(ShannonBase::RapidContext *context, const char* schema_name,
+                       const char* table_name, const char*field_name,
+                        const uchar* field_value, uint val_len) {
+  ut_a(table_name && field_name);
+	std::ostringstream ostr;
+	ostr << schema_name << table_name << field_name;
+  std::string key_name = ostr.str();
+  auto elem = m_cus.find(key_name);
+  if (elem == m_cus.end()) {  // a new field. not found. not  be loaded.
+    return 1;
+  }
+
+  bool is_null = (val_len == UNIV_SQL_NULL) ? true : false;
+  // start writing the data, at first, assemble the data we want to write. the
+  // layout of data pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr|
+  // data]. And the string we dont store the string but using string id instead.
+  // offset[] = {0, 1, 9, 17, 21, 29}
+  // start to pack the data, then writes into memory.
+  std::unique_ptr<uchar[]> data(new uchar[SHANNON_ROW_TOTAL_LEN]);
+  uint8 info{0};
+  uint32 sum_ptr{0};
+  if (is_null) info |= DATA_NULL_FLAG_MASK;
+
+  double rowid{0};
+  //byte info
+  *(uint8*)(data.get() + SHANNON_INFO_BYTE_OFFSET) = info;
+  //trxid
+  *(uint64*)(data.get() + SHANNON_TRX_ID_BYTE_OFFSET) = context->m_extra_info.m_trxid;
+  // write rowid
+  *(uint64*)(data.get() + SHANNON_ROW_ID_BYTE_OFFSET) = rowid;
+  //sum_ptr
+  *(uint32*)(data.get() + SHANNON_SUMPTR_BYTE_OFFSET) = sum_ptr;
+
+  double data_val = Utils::Util::get_field_value(m_cus[key_name]->get_header()->m_cu_type,
+                                                 field_value,
+                                                 val_len,
+                                                 m_cus[key_name]->local_dictionary(),
+                                                 const_cast<CHARSET_INFO*>(m_cus[key_name]->get_header()->m_charset)
+                                                 );
+
+  *(double*)(data.get() + SHANNON_DATA_BYTE_OFFSET) = data_val;
+
+  if (!m_cus[key_name]->write_data_direct(context, data.get(), SHANNON_ROW_TOTAL_LEN))
+    return 1;
+
   return 0;
 }
 
@@ -227,6 +279,34 @@ uint Imcs::delete_direct(ShannonBase::RapidContext *context, Field *field) {
   m_cus.erase(key);
   return 0;
 }
+
+uint Imcs::delete_direct(ShannonBase::RapidContext *context, const char* schema_name,
+                       const char* table_name, const char*field_name,
+                        const uchar* pk_value, uint pk_len) {
+  ut_a(table_name && field_name);
+  ut_a(pk_len);
+
+	std::ostringstream ostr;
+	ostr << schema_name << table_name << field_name;
+  std::string key_name = ostr.str();
+  auto elem = m_cus.find(key_name);
+  if (elem == m_cus.end()) {  // a new field. not found. not  be loaded.
+    return 1;
+  }
+
+  ut_a(pk_len != UNIV_SQL_NULL);
+  // start writing the data, at first, assemble the data we want to write. the
+  // layout of data pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr|
+  // data]. And the string we dont store the string but using string id instead.
+  // offset[] = {0, 1, 9, 17, 21, 29}
+  // start to pack the data, then writes into memory.
+
+  if (!m_cus[key_name]->delete_data_direct(context, pk_value, pk_len))
+    return 1;
+
+  return 0;
+}
+
 
 uint Imcs::delete_all_direct(ShannonBase::RapidContext *context) {
   std::string key = context->m_current_db;

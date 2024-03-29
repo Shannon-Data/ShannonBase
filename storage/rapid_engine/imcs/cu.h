@@ -70,6 +70,7 @@ class Cu : public MemoryObject {
     std::atomic<double> m_max{0}, m_min{0}, m_middle{0}, m_median{0}, m_avg{0},
         m_sum{0};
     std::atomic<uint64> m_rows{0};
+    const CHARSET_INFO* m_charset;
   };
 
   explicit Cu(Field *field);
@@ -91,6 +92,8 @@ class Cu : public MemoryObject {
                           uchar *buffer);
   // deletes the data by rowid
   uchar *delete_data_direct(ShannonBase::RapidContext *context, uchar *rowid);
+  // deletes the data by pk
+  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len);
   // deletes all
   uchar *delete_all_direct();
   // updates the data with rowid with the new data.

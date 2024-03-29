@@ -153,13 +153,13 @@ class SysTablespace : public Tablespace {
   @return DB_SUCCESS or error code */
   [[nodiscard]] dberr_t open_or_create(bool is_temp, bool create_new_db,
                                        page_no_t *sum_new_sizes,
-                                       lsn_t *flush_lsn);
+                                       lsn_t *flush_lsn, lsn_t* rapid_lsn);
 
  private:
   /** Check the tablespace header for this tablespace.
   @param[out]   flushed_lsn     value stored at offset FIL_PAGE_FILE_FLUSH_LSN
   @return DB_SUCCESS or error code */
-  dberr_t read_lsn_and_check_flags(lsn_t *flushed_lsn);
+  dberr_t read_lsn_and_check_flags(lsn_t *flushed_lsn, lsn_t* rapid_lsn);
 
   /** Note that the data file was not found.
   @param[in]    file            data file object

@@ -67,17 +67,6 @@ class Optimizer : public MemoryObject {
  public:
   explicit Optimizer(std::shared_ptr<Query_expression> &,
                      const std::shared_ptr<CostEstimator> &);
-  void add_rules();
-  std::unique_ptr<JOIN> optimize(ShannonBase::OptimizeContext *,
-                                 std::shared_ptr<Query_expression> &) const;
-
- private:
-  void add_rule(std::unique_ptr<Rule> &);
-
-  std::vector<std::unique_ptr<Rule>> m_rules;
-  std::shared_ptr<CostEstimator> m_cost_estimator;
-  std::shared_ptr<Query_expression> m_query_expr;
-  std::unique_ptr<JOIN> m_optimized_join{nullptr};
 };
 
 }  // namespace Optimizer

@@ -83,6 +83,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 /* ut_uint64_align_down */
 #include "ut0byte.h"
 
+#include "storage/rapid_engine/populate/populate.h"
 // clang-format off
 /**************************************************/ /**
  @page PAGE_INNODB_REDO_LOG_BUF Redo log buffer
@@ -1001,6 +1002,18 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
     /* This is the critical memcpy operation, which copies data
     from internal mtr's buffer to the shared log buffer. */
     std::memcpy(ptr, str, len);
+    auto type = mlog_id_t(*ptr & ~MLOG_SINGLE_REC_FLAG);
+    if (ShannonBase::Populate::pop_started &&
+        ShannonBase::Populate::population_buffer && (
+        type == MLOG_REC_INSERT ||
+        type == MLOG_REC_INSERT_8027 ||
+        type == MLOG_COMP_REC_INSERT_8027 ||
+        type == MLOG_REC_DELETE ||
+        type == MLOG_REC_DELETE_8027 ||
+        type == MLOG_COMP_REC_DELETE_8027)) {
+      ShannonBase::Populate::population_buffer->writeBuff(str, len);
+      os_event_set(log.rapid_events[0]);
+    }
 
     ut_a(len <= str_len);
 

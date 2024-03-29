@@ -3972,6 +3972,32 @@ dberr_t fil_write_flushed_lsn(lsn_t lsn) {
   return err;
 }
 
+/** Write the rapid LSN to the first page in the system tablespace.
+@param[in]      lsn             rapid LSN
+@return DB_SUCCESS or error number */
+dberr_t fil_write_rapid_lsn(lsn_t lsn) {
+  dberr_t err;
+
+  auto buf =
+      static_cast<byte *>(ut::aligned_alloc(UNIV_PAGE_SIZE, UNIV_PAGE_SIZE));
+
+  const page_id_t page_id(TRX_SYS_SPACE, 0);
+
+  err = fil_read(page_id, univ_page_size, 0, univ_page_size.physical(), buf);
+
+  if (err == DB_SUCCESS) {
+    mach_write_to_8(buf + FIL_PAGE_FILE_RAPID_LSN, lsn);
+
+    err = fil_write(page_id, univ_page_size, 0, univ_page_size.physical(), buf);
+
+    fil_system->flush_file_spaces();
+  }
+
+  ut::aligned_free(buf);
+
+  return err;
+}
+
 /** Acquire a tablespace when it could be dropped concurrently.
 Used by background threads that do not necessarily hold proper locks
 for concurrency control.

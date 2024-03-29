@@ -394,7 +394,7 @@ dberr_t Datafile::validate_to_dd(space_id_t space_id, uint32_t flags,
   /* Validate this single-table-tablespace with the data dictionary,
   but do not compare the DATA_DIR flag, in case the tablespace was
   remotely located. */
-  err = validate_first_page(space_id, nullptr, for_import);
+  err = validate_first_page(space_id, nullptr, nullptr, for_import);
   if (err != DB_SUCCESS) {
     return (err);
   }
@@ -463,7 +463,7 @@ dberr_t Datafile::validate_for_recovery(space_id_t space_id) {
   ut_ad(!srv_read_only_mode);
   ut_ad(is_open());
 
-  err = validate_first_page(space_id, nullptr, false);
+  err = validate_first_page(space_id, nullptr, nullptr, false);
 
   switch (err) {
     case DB_SUCCESS:
@@ -510,7 +510,7 @@ dberr_t Datafile::validate_for_recovery(space_id_t space_id) {
       /* Free the previously read first page and then re-validate. */
       free_first_page();
 
-      err = validate_first_page(space_id, nullptr, false);
+      err = validate_first_page(space_id, nullptr, nullptr, false);
   }
 
   if (err == DB_SUCCESS || err == DB_INVALID_ENCRYPTION_META) {
@@ -521,7 +521,7 @@ dberr_t Datafile::validate_for_recovery(space_id_t space_id) {
 }
 
 dberr_t Datafile::validate_first_page(space_id_t space_id, lsn_t *flush_lsn,
-                                      bool for_import) {
+                                      lsn_t* rapid_lsn, bool for_import) {
   char *prev_name;
   char *prev_filepath;
   const char *error_txt = nullptr;
@@ -542,6 +542,10 @@ dberr_t Datafile::validate_first_page(space_id_t space_id, lsn_t *flush_lsn,
 
     if (flush_lsn != nullptr) {
       *flush_lsn = mach_read_from_8(m_first_page + FIL_PAGE_FILE_FLUSH_LSN);
+    }
+
+    if (rapid_lsn != nullptr) {
+      *rapid_lsn = mach_read_from_8(m_first_page + FIL_PAGE_FILE_RAPID_LSN);
     }
   }
 

@@ -238,7 +238,7 @@ with remaining logic of the srv_start())
                                 are created; else: 0
 @return DB_SUCCESS or error */
 dberr_t log_sys_init(bool expect_no_files, lsn_t flushed_lsn,
-                     lsn_t &new_files_lsn);
+                      lsn_t rapid_lsn, lsn_t &new_files_lsn);
 
 /** Starts the initialized redo log system using a provided
 checkpoint_lsn and current lsn. Block for current_lsn must

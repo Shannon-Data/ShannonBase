@@ -46,10 +46,7 @@ class Table;
 
 namespace ShannonBase {
 struct RapidShare {
-  RapidShare() { thr_lock_init(&m_lock);}
-  RapidShare(const char* db_name,
-             const char* table_name) : m_db_name(db_name), m_table_name(table_name)
-            { thr_lock_init(&m_lock); }
+  RapidShare(const TABLE& table) { thr_lock_init(&m_lock); m_source_table = &table;}
   ~RapidShare() { thr_lock_delete(&m_lock); }
 
   // Not copyable. The THR_LOCK object must stay where it is in memory
@@ -62,6 +59,7 @@ struct RapidShare {
   const char* m_db_name {nullptr};
   const char* m_table_name {nullptr};
   handler* file {nullptr};
+  const TABLE* m_source_table;
 };
 
 class ShannonLoadedTables {

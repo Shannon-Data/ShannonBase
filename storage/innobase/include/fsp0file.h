@@ -293,8 +293,8 @@ class Datafile {
   @retval DB_INVALID_ENCRYPTION_META if the encryption meta data
           is not readable
   @retval DB_TABLESPACE_EXISTS if there is a duplicate space_id */
-  [[nodiscard]] dberr_t validate_first_page(space_id_t space_id,
-                                            lsn_t *flush_lsn, bool for_import);
+  [[nodiscard]] dberr_t validate_first_page(space_id_t space_id, lsn_t *flush_lsn,
+                                            lsn_t* rapid_lsn, bool for_import);
 
   /** Get LSN of first page */
   lsn_t get_flush_lsn() {

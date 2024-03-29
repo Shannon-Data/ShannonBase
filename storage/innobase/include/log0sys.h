@@ -159,6 +159,23 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) log_t {
 
   /**************************************************/ /**
 
+   @name  shannonbase rapid engine
+
+   *******************************************************/
+
+  /** @{ */
+
+  alignas(ut::INNODB_CACHE_LINE_SIZE) atomic_lsn_t rapid_lsn;
+
+  alignas(ut::INNODB_CACHE_LINE_SIZE) os_event_t *rapid_events;
+
+  size_t rapid_events_size;
+
+  mutable ib_mutex_t rapid_populator_mutex;
+  /** @} */
+
+  /**************************************************/ /**
+
    @name Users <=> writer
 
    *******************************************************/

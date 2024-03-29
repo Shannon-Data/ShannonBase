@@ -76,6 +76,8 @@
 #include "storage/rapid_engine/optimizer/optimizer.h" //optimizer
 #include "storage/rapid_engine/cost/cost.h"           //costestimator
 #include "storage/rapid_engine/optimizer/rules/rule.h"//Rule
+
+#include "storage/rapid_engine/populate/populate.h"
 /* clang-format off */
 namespace dd {
 class Table;
@@ -752,7 +754,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   }
   table_arg.file->ha_rnd_end();
 
-  m_share = new RapidShare ();
+  m_share = new RapidShare (table_arg);
   m_share->file = this;
   m_share->m_tableid = table_arg.s->table_map_id.id();
   shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
@@ -762,6 +764,14 @@ int ha_rapid::load_table(const TABLE &table_arg) {
              table_arg.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
   }
+
+  /***we star the background thread to repopulate the chagnes here not in log_start_background_threads()
+   * that makes the logics more independent.
+  */
+  if (!ShannonBase::Populate::Populator::log_rapid_is_active()) {
+    ShannonBase::Populate::Populator::start_change_populate_threads(log_sys);
+  }
+
   return 0;
 }
 
@@ -785,6 +795,10 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
     return ret;
   }
   shannon_loaded_tables->erase(db_name, table_name);
+
+  if (!shannon_loaded_tables->size()) { //none loaded table, then stop the rapid pop thread
+    ShannonBase::Populate::Populator::end_change_populate_threads();
+  }
   return 0;
 }
 }  // namespace ShannonBase
@@ -1084,6 +1098,8 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   };
   auto ret = ShannonBase::imcs_instance->initialize();
   if (!ret) ShannonBase::shannon_rpd_inited = true;
+
+  ShannonBase::Populate::population_buffer.reset(new ShannonBase::Populate::Ringbuffer<byte>());
   return ret;
 }
 

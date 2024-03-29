@@ -160,6 +160,16 @@ SET(SYS_SCHEMA_SOURCES
 
   procedures/create_synonym_db.sql
   procedures/execute_prepared_stmt.sql
+  procedures/ml_explain_row.sql
+  procedures/ml_explain_table.sql
+  procedures/ml_explain.sql
+  procedures/ml_model_import.sql
+  procedures/ml_model_load.sql
+  procedures/ml_model_unload.sql
+  procedures/ml_predict_row.sql
+  procedures/ml_predict_table.sql
+  procedures/ml_score.sql
+  procedures/ml_train.sql
   procedures/diagnostics.sql
   procedures/ps_statement_avg_latency_histogram.sql
   procedures/ps_trace_statement_digest.sql

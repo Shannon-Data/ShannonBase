@@ -1491,6 +1491,12 @@ system tablespace.
 @return DB_SUCCESS or error number */
 [[nodiscard]] dberr_t fil_write_flushed_lsn(lsn_t lsn);
 
+/** Write the rapid LSN to the first page in the
+system tablespace.
+@param[in]      lsn             rapid LSN
+@return DB_SUCCESS or error number */
+[[nodiscard]] dberr_t fil_write_rapid_lsn(lsn_t lsn);
+
 #else /* !UNIV_HOTBACKUP */
 /** Frees a space object from the tablespace memory cache.
 Closes a tablespaces' files but does not delete them.
