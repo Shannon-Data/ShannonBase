@@ -82,6 +82,9 @@ class Imcs : public MemoryObject {
   uint read_batch_direct(ShannonBase::RapidContext *context, uchar *buffer);
   // deletes the data by a rowid
   uint delete_direct(ShannonBase::RapidContext *context, Field *field);
+  uint delete_direct(ShannonBase::RapidContext *context, const char* schema_name,
+                    const char* table_name, const char*field_name,
+                    const uchar* pk_value, uint pk_len);
   // deletes all the data.
   uint delete_all_direct(ShannonBase::RapidContext *context);
   Cu *get_cu(std::string &key);

@@ -1420,6 +1420,11 @@ static monitor_info_t innodb_counter_info[] = {
     {"dblwr_flush_wait_events", "dblwr", "Total flush wait events",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_DBLWR_FLUSH_WAIT_EVENTS},
 
+    /* ========== To rapid counters ========== */
+    {"rapid_loops", "rapid",
+     "Number of times rapid log pop thread performs its tasks",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LOG_RAPID_MAIN_LOOPS},
+
     /* ========== To turn on/off reset all counters ========== */
     {"all", "All Counters", "Turn on/off and reset all counters",
      MONITOR_MODULE, MONITOR_DEFAULT_START, MONITOR_ALL_COUNTER},

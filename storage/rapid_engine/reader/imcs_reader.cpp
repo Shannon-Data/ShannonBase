@@ -132,12 +132,12 @@ int CuView::read(ShannonBaseContext *context, uchar *buffer, size_t length) {
         m_rnd_rpos.store(chunk->get_base(), std::memory_order_acq_rel);
         continue;
       }  // no data here to the next.
+    } else {
+      memcpy(buffer, m_rnd_rpos, SHANNON_ROW_TOTAL_LEN);
+      m_rnd_rpos.fetch_add(SHANNON_ROW_TOTAL_LEN,
+                          std::memory_order_acq_rel);  // go to the next.
+      return 0;
     }
-
-    memcpy(buffer, m_rnd_rpos, SHANNON_ROW_TOTAL_LEN);
-    m_rnd_rpos.fetch_add(SHANNON_ROW_TOTAL_LEN,
-                         std::memory_order_acq_rel);  // go to the next.
-    return 0;
   }
   return HA_ERR_END_OF_FILE;
 }

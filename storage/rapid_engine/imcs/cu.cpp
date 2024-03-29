@@ -212,6 +212,18 @@ uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context,
                               uchar *rowid) {
   return nullptr;
 }
+uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len) {
+  auto data_pos = (uchar*)m_index->lookup(const_cast<uchar*>(pk), pk_len);
+
+  uint8 info = *(uint8*)(data_pos + SHANNON_INFO_BYTE_OFFSET);
+  info |= DATA_DELETE_FLAG_MASK;
+  *(uint8*)(data_pos + SHANNON_INFO_BYTE_OFFSET) = info;
+
+  auto data_val = *(double*) (data_pos +SHANNON_DATA_BYTE_OFFSET);
+  ut_a(data_val);
+
+  return data_pos;
+}
 
 uchar *Cu::delete_all_direct() {
   uchar *base{nullptr};

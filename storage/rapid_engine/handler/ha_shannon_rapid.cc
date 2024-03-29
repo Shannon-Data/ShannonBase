@@ -795,6 +795,10 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
     return ret;
   }
   shannon_loaded_tables->erase(db_name, table_name);
+
+  if (!shannon_loaded_tables->size()) { //none loaded table, then stop the rapid pop thread
+    ShannonBase::Populate::Populator::end_change_populate_threads();
+  }
   return 0;
 }
 }  // namespace ShannonBase

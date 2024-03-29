@@ -92,6 +92,8 @@ class Cu : public MemoryObject {
                           uchar *buffer);
   // deletes the data by rowid
   uchar *delete_data_direct(ShannonBase::RapidContext *context, uchar *rowid);
+  // deletes the data by pk
+  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len);
   // deletes all
   uchar *delete_all_direct();
   // updates the data with rowid with the new data.

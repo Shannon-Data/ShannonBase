@@ -60,6 +60,9 @@ class Populator {
  public:
   static bool log_rapid_is_active();
   static void start_change_populate_threads(log_t* log);
+  static void end_change_populate_threads();
+
+  static void rapid_print_thread_info(FILE *file);
   static IB_thread log_rapid_thread;
 };
 

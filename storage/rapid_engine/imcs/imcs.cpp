@@ -280,6 +280,34 @@ uint Imcs::delete_direct(ShannonBase::RapidContext *context, Field *field) {
   return 0;
 }
 
+uint Imcs::delete_direct(ShannonBase::RapidContext *context, const char* schema_name,
+                       const char* table_name, const char*field_name,
+                        const uchar* pk_value, uint pk_len) {
+  ut_a(table_name && field_name);
+  ut_a(pk_len);
+
+	std::ostringstream ostr;
+	ostr << schema_name << table_name << field_name;
+  std::string key_name = ostr.str();
+  auto elem = m_cus.find(key_name);
+  if (elem == m_cus.end()) {  // a new field. not found. not  be loaded.
+    return 1;
+  }
+
+  ut_a(pk_len != UNIV_SQL_NULL);
+  // start writing the data, at first, assemble the data we want to write. the
+  // layout of data pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr|
+  // data]. And the string we dont store the string but using string id instead.
+  // offset[] = {0, 1, 9, 17, 21, 29}
+  // start to pack the data, then writes into memory.
+
+  if (!m_cus[key_name]->delete_data_direct(context, pk_value, pk_len))
+    return 1;
+
+  return 0;
+}
+
+
 uint Imcs::delete_all_direct(ShannonBase::RapidContext *context) {
   std::string key = context->m_current_db;
   key += context->m_current_table;

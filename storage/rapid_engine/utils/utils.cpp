@@ -165,12 +165,21 @@ double Util::get_field_value(enum_field_types type, const uchar* buf, uint len,
       break;
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL: {
-      data_val = *(double*)buf;
+      const int prec = 60;
+      const int scale = 0;
+      my_decimal dv;
+      auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW,
+                        buf, &dv, prec, scale);
+      if (!ret) {
+         my_decimal2double(0, &dv, &data_val);
+      }
     } break;
     case MYSQL_TYPE_DATE:
     case MYSQL_TYPE_DATETIME:
     case MYSQL_TYPE_TIME: {
-      data_val = *(double*)buf;
+      MYSQL_TIME ltime;
+      TIME_from_longlong_datetime_packed(&ltime, my_datetime_packed_from_binary(buf, 0));
+      data_val = TIME_to_ulonglong_datetime(ltime);
     } break;
     default:
       data_val = *(double*)buf;

@@ -49,7 +49,7 @@ class LogParser {
  public:
   uint parse_redo(byte* ptr, byte* end_ptr);
 private:
-  int page_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
+  int parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
                                     const ulint *offsets, mlog_id_t type);
 
   byte *parse_parse_or_apply_log_rec_body(
@@ -68,7 +68,14 @@ private:
     dict_index_t *index, /*!< in: record descriptor */
     mtr_t *mtr);          /*!< in: mtr or NULL */
 
-  byte *parse_cur_parse_del_mark_and_apply_clust_rec(
+  byte *parse_cur_parse_delete_rec(
+    byte *ptr,           /*!< in: buffer */
+    byte *end_ptr,       /*!< in: buffer end */
+    buf_block_t *block,  /*!< in: page or NULL */
+    dict_index_t *index, /*!< in: record descriptor */
+    mtr_t *mtr);          /*!< in: mtr or NULL */
+
+  byte *parse_cur_del_mark_and_apply_clust_rec(
     byte *ptr,                /*!< in: buffer */
     byte *end_ptr,            /*!< in: buffer end */
     page_t *page,             /*!< in/out: page or NULL */
@@ -107,6 +114,9 @@ private:
   ////parse the multi log rec.
   bool parse_multi_rec(byte *ptr, byte *end_ptr);
 
+  //gets blocks by page no and space id
+  inline buf_block_t* get_block(space_id_t, page_no_t);
+  
   //gets the log type
   inline bool get_record_type(const unsigned char *ptr, mlog_id_t *type, bool* single_flag) {
     *single_flag = (*ptr & MLOG_SINGLE_REC_FLAG) ? true : false;

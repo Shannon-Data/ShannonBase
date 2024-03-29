@@ -58,7 +58,7 @@ extern ShannonLoadedTables* shannon_loaded_tables;
 
 namespace Populate {
 
-int LogParser::page_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
+int LogParser::parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
                                             const ulint *offsets, mlog_id_t type) {
   ut_a(index);
   assert(index->n_def == offsets[1]);
@@ -88,25 +88,29 @@ int LogParser::page_cur_rec_change_apply_low(const rec_t *rec, const dict_index_
     auto idx_col  = index->get_field(idx);
     if (idx_col->col->mtype == DATA_SYS || idx_col->col->mtype == DATA_SYS_CHILD) continue;
 
-    ulint len{0};
-    byte *data = rec_get_nth_field(index, rec, offsets, idx_col->col->get_phy_pos(), &len);
-    ut_a(idx_col->col->len >= len);
-    auto field_data = std::make_unique<uchar[]>(idx_col->col->len + 1);
-
-    if (len == UNIV_SQL_NULL) { // is null.
-    } else {
-      store_field_in_mysql_format(index, idx_col, field_data.get(), data, len);
-    }
-
     const char* field_name = index->get_field(idx)->name;
     switch (type) {
-      case MLOG_REC_INSERT:
+      case MLOG_REC_INSERT:{
+        ulint len{0};
+        byte *data = rec_get_nth_field(index, rec, offsets, idx_col->col->get_phy_pos(), &len);
+        ut_a(idx_col->col->len >= len);
+        auto field_data = std::make_unique<uchar[]>(idx_col->col->len + 1);
+
+        if (len == UNIV_SQL_NULL) { // is null.
+        } else {
+          store_field_in_mysql_format(index, idx_col, field_data.get(), data, len);
+        }
+
         ret = imcs_instance->write_direct(context.get(), db_name.c_str(), table_name.c_str(), field_name,
                                     field_data.get(),
                                     (len == UNIV_SQL_NULL)? UNIV_SQL_NULL: idx_col->col->len);
         if (ret) return ret;
-        break;
-      case MLOG_REC_DELETE: break;
+      } break;
+      case MLOG_REC_DELETE:{
+        ret = imcs_instance->delete_direct(context.get(), db_name.c_str(), table_name.c_str(), field_name,
+                                    context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len);
+        if (ret) return ret;
+      } break;
       case MLOG_REC_UPDATE_IN_PLACE: break;
       default:
         break;
@@ -259,14 +263,30 @@ const dict_index_t* LogParser::find_index(uint64 idx_id) {
   return nullptr;
 }
 
-byte *LogParser::parse_cur_parse_del_mark_and_apply_clust_rec(
+buf_block_t* LogParser::get_block(space_id_t space_id, page_no_t page_no) {
+  buf_block_t*block {nullptr};
+  const page_id_t page_id(space_id, page_no);
+  bool found;
+  const page_size_t page_size = fil_space_get_page_size(space_id, &found);
+  if (found && buf_page_peek(page_id)) {
+    mtr_t mtr_p;
+    mtr_start(&mtr_p);
+    block =
+       buf_page_get(page_id, page_size, RW_X_LATCH, UT_LOCATION_HERE, &mtr_p);
+    mtr_commit(&mtr_p);
+  }
+
+  return block;
+}
+
+byte *LogParser::parse_cur_del_mark_and_apply_clust_rec(
     byte *ptr,                /*!< in: buffer */
     byte *end_ptr,            /*!< in: buffer end */
     page_t *page,             /*!< in/out: page or NULL */
     page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
     dict_index_t *index) {     /*!< in: index corresponding to page */
 
-  return nullptr;
+  return (nullptr);
 }
 
 byte *LogParser::parse_cur_parse_del_mark_and_apply_sec_rec(
@@ -286,6 +306,61 @@ byte *LogParser::parse_cur_parse_update_in_place_and_apply(
     dict_index_t *index) {     /*!< in: index corresponding to page */
 
   return nullptr;
+}
+
+byte *LogParser::parse_cur_parse_delete_rec(
+    byte *ptr,           /*!< in: buffer */
+    byte *end_ptr,       /*!< in: buffer end */
+    buf_block_t *block,  /*!< in: page or NULL */
+    dict_index_t *index, /*!< in: record descriptor */
+    mtr_t *mtr)  {         /*!< in: mtr or NULL */
+  ulint offset;
+  page_cur_t cursor;
+
+  if (end_ptr < ptr + 2) {
+    return (nullptr);
+  }
+
+  /* Read the cursor rec offset as a 2-byte ulint */
+  offset = mach_read_from_2(ptr);
+  ptr += 2;
+
+  ut_a(offset <= UNIV_PAGE_SIZE);
+
+  if (block) {
+    page_t *page = block ? ((buf_frame_t *)block->frame) : nullptr;
+    mem_heap_t *heap = nullptr;
+    ulint offsets_[REC_OFFS_NORMAL_SIZE];
+    rec_t *rec = page + offset;
+    rec_offs_init(offsets_);
+
+    auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
+    const dict_index_t* tb_index = find_index(index_id);
+
+    //page_cur_position(rec, block, &cursor);
+#ifdef UNIV_HOTBACKUP
+    ib::trace_1() << "page_cur_parse_delete_rec: offset " << offset;
+#endif /* UNIV_HOTBACKUP */
+    ut_ad(!buf_block_get_page_zip(block) || page_is_comp(page));
+
+    std::string db_name, table_name;
+    tb_index->table->get_table_name(db_name, table_name);
+    // get field length from rapid
+    auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
+    if (!share) //was not loaded table, return
+      goto finish;
+
+    parse_cur_rec_change_apply_low(rec, tb_index,
+                                   rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED,
+                                        UT_LOCATION_HERE, &heap),
+                                  MLOG_REC_DELETE);
+finish:
+    if (UNIV_LIKELY_NULL(heap)) {
+      mem_heap_free(heap);
+    }
+  }
+
+  return (ptr);
 }
 
 byte *LogParser::parse_cur_parse_and_apply_insert_rec(
@@ -438,7 +513,6 @@ byte *LogParser::parse_cur_parse_and_apply_insert_rec(
 
   page = page_align(cursor_rec);
   auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
-
   const dict_index_t* tb_index = find_index(index_id);
   if (tb_index){
     offsets = rec_get_offsets(buf + origin_offset, index, offsets,
@@ -451,7 +525,7 @@ byte *LogParser::parse_cur_parse_and_apply_insert_rec(
     if (!share) //was not loaded table, return
       goto finish;
     
-    page_cur_rec_change_apply_low(buf + origin_offset, tb_index, offsets,
+    parse_cur_rec_change_apply_low(buf + origin_offset, tb_index, offsets,
                                   MLOG_REC_INSERT);
   }
 finish:
@@ -718,20 +792,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        buf_block_t*block;
-        const page_id_t page_id(space_id, page_no);
-        bool found;
-        const page_size_t page_size = fil_space_get_page_size(space_id, &found);
-        if (buf_page_peek(page_id)) {
-          mtr_t mtr_p;
-          mtr_start(&mtr_p);
-          block =
-              buf_page_get(page_id, page_size, RW_X_LATCH, UT_LOCATION_HERE, &mtr_p);
-          mtr_commit(&mtr_p);
-        } else {
-          assert(false);
-        }
-
+        buf_block_t*block = get_block(space_id, page_no);
         ptr = parse_cur_parse_and_apply_insert_rec(false, ptr, end_ptr, block, index, mtr);
       }
       break;
@@ -746,6 +807,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
                ptr, end_ptr, type == MLOG_COMP_REC_INSERT_8027, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
+        buf_block_t*block = get_block(space_id, page_no);
         ptr = parse_cur_parse_and_apply_insert_rec(false, ptr, end_ptr, block, index, mtr);
       }
       break;
@@ -757,7 +819,8 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_parse_del_mark_and_apply_clust_rec(ptr, end_ptr, page, page_zip,
+        //buf_block_t*block = get_block(space_id, page_no);
+        ptr = parse_cur_del_mark_and_apply_clust_rec(ptr, end_ptr, page, page_zip,
                                                    index);
       }
 
@@ -774,7 +837,8 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
                &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_parse_del_mark_and_apply_clust_rec(ptr, end_ptr, page, page_zip,
+        //buf_block_t*block = get_block(space_id, page_no);
+        ptr = parse_cur_del_mark_and_apply_clust_rec(ptr, end_ptr, page, page_zip,
                                                    index);
       }
 
@@ -1031,7 +1095,8 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = page_cur_parse_delete_rec(ptr, end_ptr, block, index, mtr);
+        buf_block_t*block = get_block(space_id, page_no);
+        ptr = parse_cur_parse_delete_rec(ptr, end_ptr, block, index, mtr);
       }
 
       break;
@@ -1046,7 +1111,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
                ptr, end_ptr, type == MLOG_COMP_REC_DELETE_8027, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = page_cur_parse_delete_rec(ptr, end_ptr, block, index, mtr);
+        ptr = parse_cur_parse_delete_rec(ptr, end_ptr, block, index, mtr);
       }
 
       break;
