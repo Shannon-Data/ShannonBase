@@ -123,13 +123,8 @@ uint Imcs::write_direct(ShannonBase::RapidContext *context, const char* schema_n
                        const char* table_name, const char*field_name,
                         const uchar* field_value, uint val_len) {
   ut_a(table_name && field_name);
-	std::ostringstream ostr;
-	ostr << schema_name << table_name << field_name;
-  std::string key_name = ostr.str();
-  auto elem = m_cus.find(key_name);
-  if (elem == m_cus.end()) {  // a new field. not found. not  be loaded.
-    return 1;
-  }
+  std::string key_name = get_key_name(schema_name, table_name, field_name);
+  if (!key_name.length()) return HA_ERR_GENERIC;
 
   bool is_null = (val_len == UNIV_SQL_NULL) ? true : false;
   // start writing the data, at first, assemble the data we want to write. the
@@ -181,12 +176,9 @@ uint Imcs::write_direct(ShannonBase::RapidContext *context, Field *field) {
     my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
-  std::string key_name = field->table->s->db.str;
-  key_name += *field->table_name;
-  key_name += field->field_name;
-
-  auto elem = m_cus.find(key_name);
-  if (elem == m_cus.end()) {  // a new field. not found
+  std::string key_name = get_key_name (field->table->s->db.str, *field->table_name,
+                                       field->field_name);
+  if (!key_name.length()) {  // a new field. not found
     auto [it, sucess] =
         m_cus.insert(std::pair{key_name, std::make_unique<Cu>(field)});
     if (!sucess) return HA_ERR_GENERIC;
@@ -286,13 +278,9 @@ uint Imcs::delete_direct(ShannonBase::RapidContext *context, const char* schema_
   ut_a(table_name && field_name);
   ut_a(pk_len);
 
-	std::ostringstream ostr;
-	ostr << schema_name << table_name << field_name;
-  std::string key_name = ostr.str();
-  auto elem = m_cus.find(key_name);
-  if (elem == m_cus.end()) {  // a new field. not found. not  be loaded.
-    return 1;
-  }
+  std::string key_name = get_key_name(schema_name, table_name, field_name);
+  if (!key_name.length())
+    return HA_ERR_GENERIC;
 
   ut_a(pk_len != UNIV_SQL_NULL);
   // start writing the data, at first, assemble the data we want to write. the
@@ -302,11 +290,10 @@ uint Imcs::delete_direct(ShannonBase::RapidContext *context, const char* schema_
   // start to pack the data, then writes into memory.
 
   if (!m_cus[key_name]->delete_data_direct(context, pk_value, pk_len))
-    return 1;
+    return HA_ERR_GENERIC;
 
   return 0;
 }
-
 
 uint Imcs::delete_all_direct(ShannonBase::RapidContext *context) {
   std::string key = context->m_current_db;
@@ -321,5 +308,31 @@ uint Imcs::delete_all_direct(ShannonBase::RapidContext *context) {
 
   return 0;
 }
+
+uint Imcs::update_direct(ShannonBase::RapidContext *context, const char* schema_name,
+                    const char* table_name, const char*field_name,
+                    const uchar* new_value, uint new_value_len, bool in_place_update) {
+  //Here we not use in place update,
+
+  ut_a(context);
+  ut_a(schema_name && table_name && field_name);
+  ut_a(context->m_extra_info.m_key_buff.get() && context->m_extra_info.m_key_len);
+
+  std::string key_name = get_key_name(schema_name, table_name, field_name);
+
+  if (!in_place_update) {
+    delete_direct(context, schema_name, table_name, field_name,
+                  context->m_extra_info.m_key_buff.get(),
+                  context->m_extra_info.m_key_len);
+    write_direct(context, schema_name, table_name, field_name,
+                 new_value, new_value_len);
+  } else {
+    if (!m_cus[key_name]->update_data_direct(context, nullptr, new_value, new_value_len))
+      return HA_ERR_GENERIC;
+  }
+
+  return 0;
+}
+
 }  // namespace Imcs
 }  // namespace ShannonBase

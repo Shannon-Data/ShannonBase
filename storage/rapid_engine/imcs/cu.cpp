@@ -44,10 +44,28 @@ namespace ShannonBase {
 namespace Imcs {
 
 Cu::Cu(Field *field) {
+
+  init_header_info(field);
+
+  // the initial one chunk built.
+  m_chunks.push_back(std::make_unique<Chunk>(field));
+
+  std::string comment(field->comment.str);
+  std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
+  if ((comment.find("INDEXED") != std::string::npos))
+    m_index = std::make_unique<Index>(Index::IndexType::ART);
+  else
+    m_index = std::make_unique<Index>(Index::IndexType::ART);
+}
+
+Cu::~Cu() {
+}
+
+bool Cu::init_header_info(const Field* field) {
   std::scoped_lock lk(m_header_mutex);
-  // m_header = ut::new_withkey<Cu_header>(UT_NEW_THIS_FILE_PSI_KEY);
+
   m_header = std::make_unique<Cu_header>();
-  if (!m_header.get()) return;
+  if (!m_header.get()) return true;
 
   m_header->m_field_no = field->field_index();
   m_header->m_rows = 0;
@@ -76,20 +94,76 @@ Cu::Cu(Field *field) {
       m_header->m_encoding_type = Compress::Encoding_type::VARLEN;
   } else
     m_header->m_encoding_type = Compress::Encoding_type::NONE;
+
   m_header->m_local_dict =
       std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
-  // the initial one chunk built.
-  m_chunks.push_back(std::make_unique<Chunk>(field));
 
-  // here, we will add `index' to column comment as encoding does. now, we adds
-  // index mandatory
-  if ((comment.find("INDEXED") != std::string::npos))
-    m_index = std::make_unique<Index>(Index::IndexType::ART);
-  else
-    m_index = std::make_unique<Index>(Index::IndexType::ART);
+  return true;
 }
 
-Cu::~Cu() {
+bool Cu::update_header_info(double old_v, double new_v, OPER_TYPE type) {
+  std::scoped_lock lk(m_header_mutex);
+  if (!m_header.get()) return false;
+
+  // update the meta info.
+  if (m_header->m_cu_type == MYSQL_TYPE_BLOB ||
+      m_header->m_cu_type == MYSQL_TYPE_STRING ||
+      m_header->m_cu_type == MYSQL_TYPE_VARCHAR) {  // string type, otherwise,
+                                                    // update the meta info.
+    return true;
+  }
+
+  switch (type) {
+    case OPER_TYPE::OPER_INSERT: {
+      m_header->m_rows.fetch_add(1, std::memory_order_seq_cst);
+      m_header->m_sum = m_header->m_sum + new_v;
+      m_header->m_avg = m_header->m_sum / m_header->m_rows;
+
+      if (is_less_than(m_header->m_max, new_v))
+        m_header->m_max.store(new_v, std::memory_order::memory_order_relaxed);
+      if (is_greater_than(m_header->m_min, new_v))
+        m_header->m_min.store(new_v, std::memory_order::memory_order_relaxed);
+    } break;
+    case OPER_TYPE::OPER_UPDATE: {
+      m_header->m_sum = m_header->m_sum - old_v + new_v;
+      m_header->m_avg = m_header->m_sum / m_header->m_rows;
+
+      double value = is_greater_than_or_eq(old_v, new_v) ? old_v : new_v;
+      if (is_less_than_or_eq(m_header->m_max, value))
+        m_header->m_max.store(value, std::memory_order::memory_order_relaxed);
+      if (is_greater_than_or_eq(m_header->m_min, value))
+        m_header->m_min.store(value, std::memory_order::memory_order_relaxed);
+    }break;
+    case OPER_TYPE::OPER_DELETE: {
+      m_header->m_rows.fetch_sub(1, std::memory_order_seq_cst);
+      m_header->m_sum = m_header->m_sum - old_v;
+      m_header->m_avg = m_header->m_sum / m_header->m_rows;
+    } break;
+  }
+
+  return true;
+}
+
+bool Cu::reset_header_info() {
+  std::scoped_lock lk(m_header_mutex);
+  if (!m_header.get()) return true;
+
+  m_header->m_field_no = 0;
+  m_header->m_rows = 0;
+  m_header->m_sum = m_header->m_avg = 0;
+
+  m_header->m_max = std::numeric_limits<double>::lowest();
+  m_header->m_min = std::numeric_limits<double>::max();
+  m_header->m_middle = std::numeric_limits<double>::lowest();
+  m_header->m_median = std::numeric_limits<double>::lowest();
+
+  m_header->m_cu_type = MYSQL_TYPE_NULL;
+  m_header->m_charset = nullptr;
+  m_header->m_nullable = false;
+
+  m_header->m_encoding_type = Compress::Encoding_type::NONE;
+  m_header->m_local_dict = nullptr;
+  return true;
 }
 
 uchar *Cu::get_base() {
@@ -122,7 +196,13 @@ uint Cu::rnd_end() {
   return 0;
 }
 
-uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, uchar *data,
+uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, const uchar* pos,
+                           const uchar *data, uint length) {
+
+  return nullptr;
+}
+
+uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, const uchar *data,
                              uint length) {
   DBUG_TRACE;
   ut_ad(m_header.get() && m_chunks.size());
@@ -150,20 +230,7 @@ uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, uchar *data,
     data_val = *(double *)(data + SHANNON_DATA_BYTE_OFFSET);
 
   // update the meta info.
-  if (m_header->m_cu_type == MYSQL_TYPE_BLOB ||
-      m_header->m_cu_type == MYSQL_TYPE_STRING ||
-      m_header->m_cu_type == MYSQL_TYPE_VARCHAR) {  // string type, otherwise,
-                                                    // update the meta info.
-    return pos;
-  }
-  m_header->m_rows++;
-  m_header->m_sum = m_header->m_sum + data_val;
-  m_header->m_avg.store(m_header->m_sum / m_header->m_rows,
-                        std::memory_order::memory_order_relaxed);
-  if (data_val > m_header->m_max)
-    m_header->m_max.store(data_val, std::memory_order::memory_order_relaxed);
-  if (data_val < m_header->m_min)
-    m_header->m_min.store(data_val, std::memory_order::memory_order_relaxed);
+  update_header_info(data_val, data_val, OPER_TYPE::OPER_INSERT);
   return pos;
 }
 
@@ -200,18 +267,28 @@ uchar *Cu::seek(size_t offset) {
 
   return m_chunks[chunk_id]->seek(offset_in_chunk);
 }
-uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, uchar *rowid,
+
+uchar* Cu::lookup(const uchar* pk, uint pk_len){
+  if (!m_index || !pk || !pk_len) return nullptr;
+
+  return reinterpret_cast<uchar*>(m_index->lookup(const_cast<uchar*>(pk), pk_len));
+}
+
+uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid,
                             uchar *buffer) {
   if (!m_chunks.size()) return nullptr;
   // Chunk* chunk = m_chunks [m_chunks.size() - 1].get(); //to get the last
   // chunk data. if (!chunk) return nullptr;
+  ut_a(false);
   return nullptr;
 }
 
 uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context,
-                              uchar *rowid) {
+                              const uchar *rowid) {
+  ut_a(false);
   return nullptr;
 }
+
 uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len) {
   auto data_pos = (uchar*)m_index->lookup(const_cast<uchar*>(pk), pk_len);
 
@@ -221,6 +298,7 @@ uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context, const uchar *p
 
   auto data_val = *(double*) (data_pos +SHANNON_DATA_BYTE_OFFSET);
   ut_a(data_val);
+  update_header_info(data_val, data_val, OPER_TYPE::OPER_DELETE);
 
   return data_pos;
 }
@@ -231,16 +309,23 @@ uchar *Cu::delete_all_direct() {
     if (index == 0) base = m_chunks[index]->get_base();
     m_chunks[index]->delete_all_direct();
   }
+
+  reset_header_info();
   return base;
 }
 
-uchar *Cu::update_data_direct(ShannonBase::RapidContext *context, uchar *rowid,
-                              uchar *data, uint length) {
+uchar *Cu::update_data_direct(ShannonBase::RapidContext *context, const uchar* rowid,
+                              const uchar *data, uint length) {
+  
+  const uchar* pos = (rowid) ? rowid : 
+                         (uchar*)m_index->lookup(context->m_extra_info.m_key_buff.get(),
+                                         context->m_extra_info.m_key_len);
+  
   return nullptr;
 }
 
-uint Cu::flush_direct(ShannonBase::RapidContext *context, uchar *from,
-                      uchar *to) {
+uint Cu::flush_direct(ShannonBase::RapidContext *context, const uchar *from,
+                      const uchar *to) {
   assert(from || to);
   return 0;
 }

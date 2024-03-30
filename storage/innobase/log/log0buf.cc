@@ -1010,7 +1010,9 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
         type == MLOG_COMP_REC_INSERT_8027 ||
         type == MLOG_REC_DELETE ||
         type == MLOG_REC_DELETE_8027 ||
-        type == MLOG_COMP_REC_DELETE_8027)) {
+        type == MLOG_COMP_REC_DELETE_8027||
+        type == MLOG_COMP_REC_UPDATE_IN_PLACE_8027 ||
+        type == MLOG_REC_UPDATE_IN_PLACE)) {
       ShannonBase::Populate::population_buffer->writeBuff(str, len);
       os_event_set(log.rapid_events[0]);
     }

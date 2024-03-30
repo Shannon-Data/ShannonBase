@@ -50,7 +50,8 @@ class LogParser {
   uint parse_redo(byte* ptr, byte* end_ptr);
 private:
   int parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
-                                    const ulint *offsets, mlog_id_t type);
+                                    const ulint *offsets, mlog_id_t type,
+                                    page_zip_des_t *page_zip = nullptr);
 
   byte *parse_parse_or_apply_log_rec_body(
       mlog_id_t type, byte *ptr, byte *end_ptr, space_id_t space_id,
@@ -111,8 +112,8 @@ private:
   //parse the signle log rec.
   uint parse_single_rec(byte *ptr, byte *end_ptr);
 
-  ////parse the multi log rec.
-  bool parse_multi_rec(byte *ptr, byte *end_ptr);
+  ////parse the multi log rec. retunr parsed byte size.
+  uint parse_multi_rec(byte *ptr, byte *end_ptr);
 
   //gets blocks by page no and space id
   inline buf_block_t* get_block(space_id_t, page_no_t);
