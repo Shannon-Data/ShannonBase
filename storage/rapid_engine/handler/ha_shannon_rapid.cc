@@ -69,15 +69,14 @@
 #include "storage/rapid_engine/utils/utils.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/cu.h"
-#include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 
 #include "storage/rapid_engine/optimizer/optimizer.h" //optimizer
 #include "storage/rapid_engine/cost/cost.h"           //costestimator
 #include "storage/rapid_engine/optimizer/rules/rule.h"//Rule
-
 #include "storage/rapid_engine/populate/populate.h"
+
 /* clang-format off */
 namespace dd {
 class Table;
@@ -91,7 +90,6 @@ extern "C" const char* __asan_default_options() {
 }
 
 namespace ShannonBase {
-
 // Map from (db_name, table_name) to the RapidShare with table state.
 void ShannonLoadedTables::add(const std::string &db, const std::string &table, ShannonBase::RapidShare* share) {
     std::lock_guard<std::mutex> guard(m_mutex);
@@ -765,13 +763,6 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_KEY_NOT_FOUND;
   }
 
-  /***we star the background thread to repopulate the chagnes here not in log_start_background_threads()
-   * that makes the logics more independent.
-  */
-  if (!ShannonBase::Populate::Populator::log_rapid_is_active()) {
-    ShannonBase::Populate::Populator::start_change_populate_threads(log_sys);
-  }
-
   return 0;
 }
 
@@ -1099,7 +1090,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   auto ret = ShannonBase::imcs_instance->initialize();
   if (!ret) ShannonBase::shannon_rpd_inited = true;
 
-  ShannonBase::Populate::population_buffer.reset(new ShannonBase::Populate::Ringbuffer<byte>());
+  ShannonBase::Populate::sys_population_buffer.reset(new ShannonBase::Populate::Ringbuffer<byte>());
   return ret;
 }
 

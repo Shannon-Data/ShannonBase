@@ -51,7 +51,8 @@ class LogParser {
 private:
   int parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
                                     const ulint *offsets, mlog_id_t type,
-                                    page_zip_des_t *page_zip = nullptr);
+                                    page_zip_des_t *page_zip = nullptr, /**used for upd*/
+                                    const upd_t * upd = nullptr); /**upd vector for upd*/
 
   byte *parse_parse_or_apply_log_rec_body(
       mlog_id_t type, byte *ptr, byte *end_ptr, space_id_t space_id,
@@ -60,6 +61,16 @@ private:
   ulint parse_parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
                                 space_id_t *space_id, page_no_t *page_no,
                                 byte **body);
+  //parses the update log and apply.
+  byte* parse_row_and_apply_upd_rec_in_place(
+    rec_t *rec,                /*!< in/out: record where replaced */
+    const dict_index_t *index, /*!< in: the index the record belongs to */
+    const ulint *offsets,      /*!< in: array returned by rec_get_offsets() */
+    const upd_t *update,       /*!< in: update vector */
+    page_zip_des_t *page_zip,  /*!< in: compressed page with enough space
+                                         available, or NULL */
+    trx_id_t trx_id);          /*!< in: new trx id*/
+
   //parses the insert log and apply insertion to rapid.
   byte *parse_cur_parse_and_apply_insert_rec(
     bool is_short,       /*!< in: true if short inserts */
@@ -69,7 +80,7 @@ private:
     dict_index_t *index, /*!< in: record descriptor */
     mtr_t *mtr);          /*!< in: mtr or NULL */
 
-  byte *parse_cur_parse_delete_rec(
+  byte *parse_cur_parse_and_apply_delete_rec(
     byte *ptr,           /*!< in: buffer */
     byte *end_ptr,       /*!< in: buffer end */
     buf_block_t *block,  /*!< in: page or NULL */
@@ -92,7 +103,7 @@ private:
   byte *parse_cur_parse_update_in_place_and_apply(
     byte *ptr,                /*!< in: buffer */
     byte *end_ptr,            /*!< in: buffer end */
-    page_t *page,             /*!< in/out: page or NULL */
+    buf_block_t *block,             /*!< in/out: page or NULL */
     page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
     dict_index_t *index);      /*!< in: index corresponding to page */
 
