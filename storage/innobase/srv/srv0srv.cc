@@ -1553,9 +1553,9 @@ bool srv_printf_innodb_monitor(FILE *file, bool nowait, ulint *trx_start_pos,
   srv_n_system_rows_read_old = srv_stats.n_system_rows_read;
 
   fputs(
-      "---\n"
+      "-----\n"
       "RAPID\n"
-      "---\n",
+      "-----\n",
       file);
   ShannonBase::Populate::Populator::rapid_print_thread_info(file);
 

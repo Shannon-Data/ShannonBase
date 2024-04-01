@@ -80,6 +80,7 @@ class Chunk : public MemoryObject {
         m_sum{0};
     std::atomic<uint64> m_rows{0};
   };
+
   explicit Chunk(Field *field);
   virtual ~Chunk();
   Chunk(Chunk &&) = delete;
@@ -94,23 +95,26 @@ class Chunk : public MemoryObject {
   // End of Rnd scan.
   uint rnd_end();
   // writes the data into this chunk. length unspecify means calc by chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context, uchar *data,
+  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *data,
                            uint length = 0);
+  // writes the data into this chunk at pos. length unspecify means calc by chunk.
+  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar* pos,
+                           const uchar *data, uint length = 0);
   // reads the data by from address .
   uchar *read_data_direct(ShannonBase::RapidContext *context, uchar *buffer);
   // reads the data by rowid.
-  uchar *read_data_direct(ShannonBase::RapidContext *context, uchar *rowid,
+  uchar *read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid,
                           uchar *buffer);
   // deletes the data by rowid.
-  uchar *delete_data_direct(ShannonBase::RapidContext *context, uchar *rowid);
+  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *rowid);
   // deletes all.
   uchar *delete_all_direct();
-  // updates the data.
-  uchar *update_date_direct(ShannonBase::RapidContext *context, uchar *rowid,
-                            uchar *data, uint length = 0);
+  // updates the data. rowid is pos of where the data will be updated.
+  uchar *update_data_direct(ShannonBase::RapidContext *context, const uchar *rowid,
+                            const uchar *data, uint length = 0);
   // flush the data to disk. by now, we cannot impl this part.
-  uint flush_direct(RapidContext *context, uchar *from = nullptr,
-                    uchar *to = nullptr);
+  uint flush_direct(RapidContext *context, const uchar *from = nullptr,
+                    const uchar *to = nullptr);
   // the start loc of chunk. where the data wrtes from.
   inline uchar *get_base() const { return m_data_base; }
   // the end loc of chunk. is base + chunk_size
@@ -123,7 +127,16 @@ class Chunk : public MemoryObject {
 
   uchar *where(uint offset);
   uchar *seek(uint offset);
+  uchar* GC();
+ private:
+  inline bool init_header_info(const Field* field);
+  inline bool update_header_info(double old_v, double new_v, OPER_TYPE type);
+  inline bool reset_header_info();
 
+  //value is marked as deleted return true, or false.
+  inline bool deleted (const uchar* data);
+  //value is null return true, or false
+  inline bool is_null(const uchar* data);
  private:
   std::mutex m_header_mutex;
   std::unique_ptr<Chunk_header> m_header{nullptr};

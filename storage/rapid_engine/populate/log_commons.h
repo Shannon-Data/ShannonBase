@@ -36,13 +36,13 @@
 #include <limits>
 #include <atomic>
 
-#include "storage/innobase/include/os0file.h"
+//#include "storage/innobase/include/os0file.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase {
 namespace Populate{
-   constexpr int m_pop_buff_size = ALIGN_WORD(SHANNON_MAX_POPULATION_BUFFER_SIZE, OS_FILE_LOG_BLOCK_SIZE);
+   constexpr int m_pop_buff_size = ALIGN_WORD(SHANNON_MAX_POPULATION_BUFFER_SIZE, 512);
    constexpr uint MAX_LOG_POP_SPIN_COUNT = 100000;
 
  ///jnk0le/Ring-Buffer
