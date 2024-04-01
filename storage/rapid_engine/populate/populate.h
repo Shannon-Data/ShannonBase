@@ -52,7 +52,7 @@ namespace Populate {
   (mutex_own(&((log).rapid_populator_mutex)) || !Populator::log_rapid_is_active())
 
 
-extern uint64 population_buffer_size;
+extern uint64 sys_population_buffer_sz;
 extern std::atomic<bool> sys_pop_started;
 extern std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer;
 
@@ -62,8 +62,6 @@ class Populator {
   static void start_change_populate_threads();
   static void end_change_populate_threads();
   static void rapid_print_thread_info(FILE *file);
- private:
-  static std::unique_ptr<IB_thread> log_rapid_thread;
 };
 
 }  // namespace Populate

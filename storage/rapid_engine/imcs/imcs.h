@@ -82,6 +82,7 @@ class Imcs : public MemoryObject {
   uint read_batch_direct(ShannonBase::RapidContext *context, uchar *buffer);
   // deletes the data by a rowid
   uint delete_direct(ShannonBase::RapidContext *context, Field *field);
+  //deletes the data by key. pk_value is key value of row you want to delete.
   uint delete_direct(ShannonBase::RapidContext *context, const char* schema_name,
                     const char* table_name, const char*field_name,
                     const uchar* pk_value, uint pk_len);
@@ -93,7 +94,7 @@ class Imcs : public MemoryObject {
   Cu *get_cu(std::string &key);
   void add_cu(std::string key, std::unique_ptr<Cu> &cu);
   ha_rows get_rows(TABLE *source_table);
-
+  bool is_empty() { return m_cus.empty(); }
  private:
   // make ctor and dctor private.
   Imcs();

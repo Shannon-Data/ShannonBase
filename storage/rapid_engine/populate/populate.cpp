@@ -45,11 +45,11 @@ namespace ShannonBase {
 namespace Populate {
 
 std::atomic<bool> sys_pop_started {false};
-std::unique_ptr<IB_thread> Populator::log_rapid_thread {nullptr};
+static IB_thread sys_log_rapid_thread;
 
-uint64 population_buffer_size = m_pop_buff_size;
+uint64 sys_population_buffer_sz = m_pop_buff_size;
 std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer {nullptr};
-static ulint rapid_loop_count;
+static ulint sys_rapid_loop_count;
 
 static void parse_log_func (log_t *log_ptr) {
   std::unique_ptr<THD> log_pop_thread {nullptr};
@@ -74,7 +74,7 @@ static void parse_log_func (log_t *log_ptr) {
     os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT,
                       std::chrono::microseconds{100}, stop_condition);
 
-    rapid_loop_count++;
+    sys_rapid_loop_count++;
     MONITOR_INC(MONITOR_LOG_RAPID_MAIN_LOOPS);
 
     auto size = sys_population_buffer->readAvailable();
@@ -88,18 +88,15 @@ static void parse_log_func (log_t *log_ptr) {
 }
 
 bool Populator::log_pop_thread_is_active() {
-   return Populator::log_rapid_thread ?
-          (thread_is_active(*Populator::log_rapid_thread)) : false;
+   return  thread_is_active(sys_log_rapid_thread);
 }
 
 void Populator::start_change_populate_threads() {
   if (!Populator::log_pop_thread_is_active()) {
-    IB_thread log_pop_thread = 
+    sys_log_rapid_thread =
       os_thread_create(rapid_populate_thread_key, 0, parse_log_func, log_sys);
-    Populator::log_rapid_thread.reset(std::move(&log_pop_thread));
-
     ShannonBase::Populate::sys_pop_started = true;
-    Populator::log_rapid_thread->start();
+    sys_log_rapid_thread.start();
   }
 }
 
@@ -111,7 +108,7 @@ void Populator::rapid_print_thread_info(FILE *file){ /* in: output stream */
   fprintf(file, "rapid log pop thread : %s \n"
          "rapid log pop thread loops: " ULINTPF "\n",
          ShannonBase::Populate::sys_pop_started ? "running" : "stopped",
-         ShannonBase::Populate::rapid_loop_count);
+         ShannonBase::Populate::sys_rapid_loop_count);
 }
 
 }  // namespace Populate

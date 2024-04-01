@@ -787,9 +787,6 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
   }
   shannon_loaded_tables->erase(db_name, table_name);
 
-  if (!shannon_loaded_tables->size()) { //none loaded table, then stop the rapid pop thread
-    ShannonBase::Populate::Populator::end_change_populate_threads();
-  }
   return 0;
 }
 }  // namespace ShannonBase
@@ -963,17 +960,17 @@ static void shannonbase_rapid_populate_buffer_size_update [[maybe_unused]](
 {
   ulong in_val = *static_cast<const ulong *>(save);
   //set to in_val;
-  if (in_val < ShannonBase::Populate::population_buffer_size) {
-    in_val = ShannonBase::Populate::population_buffer_size;
+  if (in_val < ShannonBase::Populate::sys_population_buffer_sz) {
+    in_val = ShannonBase::Populate::sys_population_buffer_sz;
     push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
                         "population_buffer_size cannot be"
                         " set more than rapid_memory_size.");
     push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
                         "Setting population_buffer_size to %lu",
-                        ShannonBase::Populate::population_buffer_size);
+                        ShannonBase::Populate::sys_population_buffer_sz);
   }
 
-  ShannonBase::Populate::population_buffer_size = in_val;
+  ShannonBase::Populate::sys_population_buffer_sz = in_val;
 }
 
 static void rapid_memory_size_update [[maybe_unused]](
@@ -1003,7 +1000,7 @@ static SHOW_VAR shannonbase_rapid_status_variables[] = {
     {"rapid_memory_size_max", (char*)&ShannonBase::Imcs::rapid_memory_size,
                           SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
-    {"rapid_populate_buffer_size_max", (char*)&ShannonBase::Populate::population_buffer_size,
+    {"rapid_populate_buffer_size_max", (char*)&ShannonBase::Populate::sys_population_buffer_sz,
                                   SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
     {"rapid_chunk_size_max", (char*)&ShannonBase::Imcs::rapid_chunk_size,
@@ -1035,7 +1032,7 @@ static MYSQL_SYSVAR_ULONG(
     ShannonBase::SHANNON_MAX_MEMRORY_SIZE, 0);
 
 static MYSQL_SYSVAR_ULONG(rapid_populate_buffer_size_max,
-                          ShannonBase::Populate::population_buffer_size,
+                          ShannonBase::Populate::sys_population_buffer_sz,
                           PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                           "Number of populate buffer size that must not be 10% "
                           "rapid_populate_buffer size.",

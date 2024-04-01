@@ -317,8 +317,32 @@ uint Imcs::update_direct(ShannonBase::RapidContext *context, const char* schema_
   ut_a(context);
   ut_a(schema_name && table_name && field_name);
   ut_a(context->m_extra_info.m_key_buff.get() && context->m_extra_info.m_key_len);
+  bool is_null = (new_value_len == UNIV_SQL_NULL) ? true : false;
 
   std::string key_name = get_key_name(schema_name, table_name, field_name);
+  std::unique_ptr<uchar[]> data(new uchar[SHANNON_ROW_TOTAL_LEN]);
+  uint8 info{0};
+  uint32 sum_ptr{0};
+  if (is_null) info |= DATA_NULL_FLAG_MASK;
+
+  double rowid{0};
+  //byte info
+  *(uint8*)(data.get() + SHANNON_INFO_BYTE_OFFSET) = info;
+  //trxid
+  *(uint64*)(data.get() + SHANNON_TRX_ID_BYTE_OFFSET) = context->m_extra_info.m_trxid;
+  // write rowid
+  *(uint64*)(data.get() + SHANNON_ROW_ID_BYTE_OFFSET) = rowid;
+  //sum_ptr
+  *(uint32*)(data.get() + SHANNON_SUMPTR_BYTE_OFFSET) = sum_ptr;
+
+
+  double data_val = Utils::Util::get_field_value(m_cus[key_name]->get_header()->m_cu_type,
+                                                 new_value,
+                                                 new_value_len,
+                                                 m_cus[key_name]->local_dictionary(),
+                                                 const_cast<CHARSET_INFO*>(m_cus[key_name]->get_header()->m_charset)
+                                                 );
+  *(double*)(data.get() + SHANNON_DATA_BYTE_OFFSET) = data_val;
 
   if (!in_place_update) {
     delete_direct(context, schema_name, table_name, field_name,
@@ -327,7 +351,7 @@ uint Imcs::update_direct(ShannonBase::RapidContext *context, const char* schema_
     write_direct(context, schema_name, table_name, field_name,
                  new_value, new_value_len);
   } else {
-    if (!m_cus[key_name]->update_data_direct(context, nullptr, new_value, new_value_len))
+    if (!m_cus[key_name]->update_data_direct(context, nullptr, data.get(), SHANNON_ROW_TOTAL_LEN))
       return HA_ERR_GENERIC;
   }
 

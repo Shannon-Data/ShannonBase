@@ -317,11 +317,14 @@ uchar *Cu::delete_all_direct() {
 uchar *Cu::update_data_direct(ShannonBase::RapidContext *context, const uchar* rowid,
                               const uchar *data, uint length) {
   
-  const uchar* pos = (rowid) ? rowid : 
+  const uchar* data_pos = (rowid) ? rowid :
                          (uchar*)m_index->lookup(context->m_extra_info.m_key_buff.get(),
                                          context->m_extra_info.m_key_len);
-  
-  return nullptr;
+  if (!data_pos) return nullptr;
+  //in future, the old data will be added to version link.
+  memcpy(const_cast<uchar*>(data_pos), data, length);
+
+  return const_cast<uchar*>(data_pos);
 }
 
 uint Cu::flush_direct(ShannonBase::RapidContext *context, const uchar *from,

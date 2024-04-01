@@ -11744,6 +11744,9 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
      * that makes the logics more independent.
     */
     ShannonBase::Populate::Populator::start_change_populate_threads();
+  } else {
+    if (ShannonBase::Imcs::Imcs::get_instance()->is_empty()) //none loaded table.
+      ShannonBase::Populate::Populator::end_change_populate_threads();
   }
 
   my_ok(thd, thd->get_sent_row_count());
