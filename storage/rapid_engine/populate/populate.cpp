@@ -52,11 +52,10 @@ std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer {nullptr};
 static ulint sys_rapid_loop_count;
 
 static void parse_log_func (log_t *log_ptr) {
-  std::unique_ptr<THD> log_pop_thread {nullptr};
+  std::unique_ptr<THD> log_pop_thread_thd {nullptr};
   if (current_thd == nullptr) {
-    log_pop_thread.reset(new THD(false));
-    current_thd = log_pop_thread.get();
-    THR_MALLOC = &current_thd->mem_root;
+    log_pop_thread_thd.reset(create_internal_thd());
+    ut_ad(current_thd == log_pop_thread_thd.get());
   }
   
   os_event_reset(log_ptr->rapid_events[0]);
@@ -84,6 +83,8 @@ static void parse_log_func (log_t *log_ptr) {
     sys_population_buffer->remove(parsed_bytes);
   } //wile(pop_started)
 
+  destroy_internal_thd(current_thd);
+  log_pop_thread_thd.reset(nullptr);
   sys_pop_started.store(false, std::memory_order_seq_cst);
 }
 
