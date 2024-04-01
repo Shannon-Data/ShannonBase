@@ -35,9 +35,9 @@
 #include "my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/populate/log_commons.h"
-#include "storage/innobase/include/os0thread-create.h"
 
-class log_t;
+class IB_thread;
+
 namespace ShannonBase {
 namespace Populate {
 
@@ -52,18 +52,16 @@ namespace Populate {
   (mutex_own(&((log).rapid_populator_mutex)) || !Populator::log_rapid_is_active())
 
 
-extern uint64 population_buffer_size;
-extern std::unique_ptr<Ringbuffer<byte>> population_buffer;
-extern std::atomic<bool> pop_started;
+extern uint64 sys_population_buffer_sz;
+extern std::atomic<bool> sys_pop_started;
+extern std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer;
 
 class Populator {
  public:
-  static bool log_rapid_is_active();
-  static void start_change_populate_threads(log_t* log);
+  static bool log_pop_thread_is_active();
+  static void start_change_populate_threads();
   static void end_change_populate_threads();
-
   static void rapid_print_thread_info(FILE *file);
-  static IB_thread log_rapid_thread;
 };
 
 }  // namespace Populate

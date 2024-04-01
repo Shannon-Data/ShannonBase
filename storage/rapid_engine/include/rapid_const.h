@@ -123,5 +123,11 @@ enum class RPD_NODE_ROLE {
   NODE_SECONDARY_NODE
 };
 
+enum class OPER_TYPE :uint8 {
+   OPER_INSERT,
+   OPER_UPDATE,
+   OPER_DELETE
+};
+
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CONST_H__
