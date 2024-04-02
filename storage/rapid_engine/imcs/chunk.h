@@ -61,6 +61,7 @@ struct chunk_deleter_helper {
   }
 };
 
+class Index;
 class Chunk : public MemoryObject {
  public:
   using Chunk_header = struct alignas(CACHE_LINE_SIZE) Chunk_header_t {
@@ -78,7 +79,7 @@ class Chunk : public MemoryObject {
     // statistics data.
     std::atomic<double> m_max{0}, m_min{0}, m_median{0}, m_middle{0}, m_avg{0},
         m_sum{0};
-    std::atomic<uint64> m_rows{0};
+    std::atomic<uint64> m_rows{0}, m_delete_marked{0};
   };
 
   explicit Chunk(Field *field);
@@ -121,13 +122,28 @@ class Chunk : public MemoryObject {
   inline uchar *get_end() const { return m_data_end; }
   // gets the max valid loc of current the data has written to.
   inline uchar *get_data() const { return m_data; }
-  bool is_full() { return (m_data == m_data_end) ? true : false; }
+  //the free size of this chunk.
+  inline uint free_size() { return m_data_end - m_data; }
+  //whether is full or not.
+  inline bool is_full() { return (m_data == m_data_end) ? true : false; }
+  inline bool is_empty() {return (m_data == m_data_base)? true : false; }
+  inline uint data_size() { return (m_data - m_data_base); }
+
+  //how many rows are in this range of min and max?
   ha_rows records_in_range(ShannonBase::RapidContext *context, double &min_key,
                            double &max_key);
-
-  uchar *where(uint offset);
-  uchar *seek(uint offset);
-  uchar* GC();
+  //get the phy address of offset.
+  uchar *where(ShannonBase::RapidContext *context, uint offset);
+  //set to the offset in physical address format, return the address.
+  uchar *seek(ShannonBase::RapidContext *context, uint offset);
+  //return the next available address in new chunk. you SHOULD set the GC trxid in context.
+  uchar* GC(ShannonBase::RapidContext *context);
+  //relocate the chunk to specific address[address should be in this chunk].
+  uchar* reshift(ShannonBase::RapidContext *context, const uchar* from,
+                  const uchar* to);
+  //to set this chunk to a empty chunk.
+  uchar* set_empty();
+  uchar* set_full();
  private:
   inline bool init_header_info(const Field* field);
   inline bool update_header_info(double old_v, double new_v, OPER_TYPE type);
