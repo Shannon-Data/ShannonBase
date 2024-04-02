@@ -509,7 +509,7 @@ dberr_t SysTablespace::open_file(Datafile &file) {
 
 #ifndef UNIV_HOTBACKUP
 
-dberr_t SysTablespace::read_lsn_and_check_flags(lsn_t *flushed_lsn) {
+dberr_t SysTablespace::read_lsn_and_check_flags(lsn_t *flushed_lsn, lsn_t* rapid_lsn) {
   /* Only relevant for the system tablespace. */
   ut_ad(space_id() == TRX_SYS_SPACE);
 
@@ -541,7 +541,7 @@ dberr_t SysTablespace::read_lsn_and_check_flags(lsn_t *flushed_lsn) {
 
   /* Check the contents of the first page of the first datafile. */
   for (int retry = 0; retry < 2; ++retry) {
-    err = it->validate_first_page(it->m_space_id, flushed_lsn, false);
+    err = it->validate_first_page(it->m_space_id, flushed_lsn, rapid_lsn, false);
 
     if (err != DB_SUCCESS &&
         (retry == 1 || it->open_or_create(srv_read_only_mode) != DB_SUCCESS ||
@@ -796,7 +796,7 @@ dberr_t SysTablespace::check_file_spec(bool create_new_db,
 
 dberr_t SysTablespace::open_or_create(bool is_temp, bool create_new_db,
                                       page_no_t *sum_new_sizes,
-                                      lsn_t *flush_lsn) {
+                                      lsn_t *flush_lsn, lsn_t* rapid_lsn) {
   dberr_t err = DB_SUCCESS;
   fil_space_t *space = nullptr;
 
@@ -866,13 +866,14 @@ dberr_t SysTablespace::open_or_create(bool is_temp, bool create_new_db,
   if (flush_lsn != nullptr) {
     if (create_new_db) {
       /* There are no data files, so we assign the initial value
-      to flush_lsn instead of reading it from disk. */
+      to flush_lsn instead of reading it from disk, and rapid_lsn so on. */
       *flush_lsn = LOG_START_LSN + LOG_BLOCK_HDR_SIZE;
+      *rapid_lsn = LOG_START_LSN + LOG_BLOCK_HDR_SIZE;
     } else {
       /* Validate the header page in the first datafile in the
       system tablespace and read flush_lsn from the validated
-      header page. */
-      err = read_lsn_and_check_flags(flush_lsn);
+      header page, rapid_lsn so does. */
+      err = read_lsn_and_check_flags(flush_lsn, rapid_lsn);
       if (err != DB_SUCCESS) {
         return (err);
       }

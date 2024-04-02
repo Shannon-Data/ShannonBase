@@ -79,6 +79,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "row0mysql.h"
 #include "sql_thd_internal_api.h"
 #include "srv0mon.h"
+#include "storage/rapid_engine/populate/populate.h"
 
 #include "my_dbug.h"
 #include "my_psi_config.h"
@@ -1550,6 +1551,13 @@ bool srv_printf_innodb_monitor(FILE *file, bool nowait, ulint *trx_start_pos,
   srv_n_system_rows_updated_old = srv_stats.n_system_rows_updated;
   srv_n_system_rows_deleted_old = srv_stats.n_system_rows_deleted;
   srv_n_system_rows_read_old = srv_stats.n_system_rows_read;
+
+  fputs(
+      "-----\n"
+      "RAPID\n"
+      "-----\n",
+      file);
+  ShannonBase::Populate::Populator::rapid_print_thread_info(file);
 
   fputs(
       "----------------------------\n"

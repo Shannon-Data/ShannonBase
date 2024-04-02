@@ -31,7 +31,12 @@ ADD_DEFINITIONS(-DLOG_SUBSYSTEM_TAG="Rapid")
 INCLUDE_DIRECTORIES(
   ${CMAKE_SOURCE_DIR}/sql
   ${CMAKE_SOURCE_DIR}/include 
+ 
 )
+
+#FOR AUTO-ML MODELS
+#INCLUDE_DIRECTORIES( ${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/include/)
+#LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/lib/)
 
 # Conflicting YYSTYPE, because we have multiple Bison grammars.
 # WL#11100 Migrate to Bison 3.x should fix this.
@@ -67,7 +72,12 @@ SET(SHANNON_IMCS_SOURCES
    imcs/index/index.cpp
    utils/utils.cpp
 )
+SET(SHANNON_ML_SOURCES
+)
 SET(SHANNON_POPULATE_SOURCES
+   populate/log_parser.cpp
+   populate/log_reader.cpp
+   populate/populate.cpp
 )
 SET (SHANNON_TRX_SOURCES
     trx/transaction.cpp
@@ -90,6 +100,7 @@ set (SHANNON_OPTIMIZE
 SET(SHANNON_RAPID_SOURCES
     handler/ha_shannon_rapid.cc
     ${SHANNON_IMCS_SOURCES}
+    ${SHANNON_ML_SOURCES}
     ${SHANNON_POPULATE_SOURCES}
     ${SHANNON_TRX_SOURCES}
     ${SHANNON_ITERATOR_SOURCES}

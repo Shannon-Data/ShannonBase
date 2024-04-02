@@ -199,9 +199,11 @@
 #include "thr_lock.h"
 #include "typelib.h"
 
+#include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/include/rapid_stats.h" //meta_rpd_columns_infos
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/cu.h"
+
 namespace dd {
 class View;
 }  // namespace dd
@@ -11737,6 +11739,15 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
   rollback_guard.commit();
 
   if (cleanup()) return true;
+  if (is_load){
+    /***we star the background thread to repopulate the chagnes here
+     * that makes the logics more independent.
+    */
+    ShannonBase::Populate::Populator::start_change_populate_threads();
+  } else {
+    if (ShannonBase::Imcs::Imcs::get_instance()->is_empty()) //none loaded table.
+      ShannonBase::Populate::Populator::end_change_populate_threads();
+  }
 
   my_ok(thd, thd->get_sent_row_count());
   return false;

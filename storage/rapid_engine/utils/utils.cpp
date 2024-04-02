@@ -32,10 +32,12 @@
 #include "sql/field.h"                        //Field
 #include "sql/my_decimal.h"                   //my_decimal
 #include "sql/table.h"                        //TABLE
+
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
 #include "storage/rapid_engine/include/rapid_const.h"
+
 namespace ShannonBase {
 namespace Utils {
 
@@ -136,6 +138,53 @@ double Util::get_field_value(Field *&field, Compress::Dictionary *&dictionary) {
         data_val = field->val_real();
     }
   }
+  return data_val;
+}
+
+double Util::get_field_value(enum_field_types type, const uchar* buf, uint len,
+                            Compress::Dictionary *dictionary, CHARSET_INFO* charset) {
+  ut_ad(buf && dictionary);
+  double data_val{0};
+  switch (type) {
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_VARCHAR: {
+      String str_str((const char*)buf, len, charset);
+      data_val = dictionary->store(str_str);
+    } break;
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+      data_val = *(int*)buf;
+      break;
+    case MYSQL_TYPE_FLOAT:
+      data_val = *(float*) buf;
+      break;
+    case MYSQL_TYPE_DOUBLE:
+      data_val = *(double*)buf;
+      break;
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL: {
+      const int prec = 60;
+      const int scale = 0;
+      my_decimal dv;
+      auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW,
+                        buf, &dv, prec, scale);
+      if (!ret) {
+         my_decimal2double(0, &dv, &data_val);
+      }
+    } break;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_TIME: {
+      MYSQL_TIME ltime;
+      TIME_from_longlong_datetime_packed(&ltime, my_datetime_packed_from_binary(buf, 0));
+      data_val = TIME_to_ulonglong_datetime(ltime);
+    } break;
+    default:
+      data_val = *(double*)buf;
+  }
+
   return data_val;
 }
 

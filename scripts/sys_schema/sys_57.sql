@@ -159,6 +159,17 @@ SOURCE ./views/p_s/session_ssl_status.sql
 
 SOURCE ./procedures/create_synonym_db.sql
 SOURCE ./procedures/execute_prepared_stmt.sql
+SOURCE ./procedures/ml_explain_row.sql
+SOURCE ./procedures/ml_explain_table.sql
+SOURCE ./procedures/ml_explain.sql
+SOURCE ./procedures/ml_model_import.sql
+SOURCE ./procedures/ml_model_load.sql
+SOURCE ./procedures/ml_model_unload.sql
+SOURCE ./procedures/ml_predict_row.sql
+SOURCE ./procedures/ml_predict_table.sql
+SOURCE ./procedures/ml_score.sql
+SOURCE ./procedures/ml_train.sql
+
 
 SOURCE ./procedures/diagnostics.sql
 

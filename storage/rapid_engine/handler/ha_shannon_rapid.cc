@@ -69,13 +69,14 @@
 #include "storage/rapid_engine/utils/utils.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/cu.h"
-#include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 
 #include "storage/rapid_engine/optimizer/optimizer.h" //optimizer
 #include "storage/rapid_engine/cost/cost.h"           //costestimator
 #include "storage/rapid_engine/optimizer/rules/rule.h"//Rule
+#include "storage/rapid_engine/populate/populate.h"
+
 /* clang-format off */
 namespace dd {
 class Table;
@@ -89,7 +90,6 @@ extern "C" const char* __asan_default_options() {
 }
 
 namespace ShannonBase {
-
 // Map from (db_name, table_name) to the RapidShare with table state.
 void ShannonLoadedTables::add(const std::string &db, const std::string &table, ShannonBase::RapidShare* share) {
     std::lock_guard<std::mutex> guard(m_mutex);
@@ -752,7 +752,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   }
   table_arg.file->ha_rnd_end();
 
-  m_share = new RapidShare ();
+  m_share = new RapidShare (table_arg);
   m_share->file = this;
   m_share->m_tableid = table_arg.s->table_map_id.id();
   shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
@@ -762,6 +762,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
              table_arg.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
   }
+
   return 0;
 }
 
@@ -785,6 +786,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
     return ret;
   }
   shannon_loaded_tables->erase(db_name, table_name);
+
   return 0;
 }
 }  // namespace ShannonBase
@@ -958,17 +960,17 @@ static void shannonbase_rapid_populate_buffer_size_update [[maybe_unused]](
 {
   ulong in_val = *static_cast<const ulong *>(save);
   //set to in_val;
-  if (in_val < ShannonBase::Populate::population_buffer_size) {
-    in_val = ShannonBase::Populate::population_buffer_size;
+  if (in_val < ShannonBase::Populate::sys_population_buffer_sz) {
+    in_val = ShannonBase::Populate::sys_population_buffer_sz;
     push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
                         "population_buffer_size cannot be"
                         " set more than rapid_memory_size.");
     push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
                         "Setting population_buffer_size to %lu",
-                        ShannonBase::Populate::population_buffer_size);
+                        ShannonBase::Populate::sys_population_buffer_sz);
   }
 
-  ShannonBase::Populate::population_buffer_size = in_val;
+  ShannonBase::Populate::sys_population_buffer_sz = in_val;
 }
 
 static void rapid_memory_size_update [[maybe_unused]](
@@ -998,7 +1000,7 @@ static SHOW_VAR shannonbase_rapid_status_variables[] = {
     {"rapid_memory_size_max", (char*)&ShannonBase::Imcs::rapid_memory_size,
                           SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
-    {"rapid_populate_buffer_size_max", (char*)&ShannonBase::Populate::population_buffer_size,
+    {"rapid_populate_buffer_size_max", (char*)&ShannonBase::Populate::sys_population_buffer_sz,
                                   SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
     {"rapid_chunk_size_max", (char*)&ShannonBase::Imcs::rapid_chunk_size,
@@ -1084,6 +1086,8 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   };
   auto ret = ShannonBase::imcs_instance->initialize();
   if (!ret) ShannonBase::shannon_rpd_inited = true;
+
+  ShannonBase::Populate::sys_population_buffer.reset(new ShannonBase::Populate::Ringbuffer<byte>());
   return ret;
 }
 

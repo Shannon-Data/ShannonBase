@@ -19,41 +19,25 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023 - 2024, Shannon Data AI and/or its affiliates.
+   The fundmental code for ML.
 
-   The fundmental code for imcs optimizer.
+   Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 */
-#include "storage/rapid_engine/optimizer/optimizer.h"
+#ifndef __SHANNONBASE_AUTO_ML_H__
+#define __SHANNONBASE_AUTO_ML_H__
 
-#include "sql/sql_lex.h"                      //Query_expression
-#include "sql/sql_optimizer.h"                //JOIN
-#include "storage/innobase/include/ut0dbg.h"  //ut_a
-
-#include "storage/rapid_engine/cost/cost.h"
-#include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/optimizer/rules/const_fold_rule.h"
+#include <memory>
 
 namespace ShannonBase {
-namespace Optimizer {
+namespace ML {
 
-Timer::Timer() { m_begin = std::chrono::steady_clock::now(); }
-std::chrono::nanoseconds Timer::lap() {
-  const auto now = std::chrono::steady_clock::now();
-  const auto lap_duration = std::chrono::nanoseconds{now - m_begin};
-  m_begin = now;
-  return lap_duration;
-}
-std::string Timer::lap_formatted() {
-  auto stream = std::stringstream{};
-  return stream.str();
-}
+class Auto_ML {
+  Auto_ML();
+  ~Auto_ML();
+  int train();
+};
 
-// ctor
-Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr,
-                     const std::shared_ptr<CostEstimator> &cost_estimator)
- {
-  
-}
 
-}  // namespace Optimizer
-}  // namespace ShannonBase
+} //ML
+} //shannonbase
+#endif //__SHANNONBASE_AUTO_ML_H__

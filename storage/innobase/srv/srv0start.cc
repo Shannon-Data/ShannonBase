@@ -1270,7 +1270,7 @@ static dberr_t srv_open_tmp_tablespace(bool create_new_db,
     ib::error(ER_IB_MSG_1100, tmp_space->name());
 
   } else if ((err = tmp_space->open_or_create(true, create_new_db,
-                                              &sum_of_new_sizes, nullptr)) !=
+                                              &sum_of_new_sizes, nullptr, nullptr)) !=
              DB_SUCCESS) {
     ib::error(ER_IB_MSG_1101, tmp_space->name());
 
@@ -1525,7 +1525,7 @@ static dberr_t recreate_redo_files(lsn_t &flushed_lsn) {
                 LOG_BLOCK_HDR_SIZE;
 
   /* `true` parameter makes sure new files are created */
-  dberr_t err = log_sys_init(true, flushed_lsn, flushed_lsn);
+  dberr_t err = log_sys_init(true, flushed_lsn, flushed_lsn, flushed_lsn);
   if (err != DB_SUCCESS) {
     return err;
   }
@@ -1816,10 +1816,10 @@ dberr_t srv_start(bool create_new_db) {
 
   /* Open or create the data files. */
   page_no_t sum_of_new_sizes;
-  lsn_t flushed_lsn;
+  lsn_t flushed_lsn, rapid_lsn;
 
   err = srv_sys_space.open_or_create(false, create_new_db, &sum_of_new_sizes,
-                                     &flushed_lsn);
+                                     &flushed_lsn, &rapid_lsn);
 
   switch (err) {
     case DB_SUCCESS:
@@ -1854,7 +1854,7 @@ dberr_t srv_start(bool create_new_db) {
 
   lsn_t new_files_lsn;
 
-  err = log_sys_init(create_new_db, flushed_lsn, new_files_lsn);
+  err = log_sys_init(create_new_db, flushed_lsn, rapid_lsn, new_files_lsn);
 
   if (err != DB_SUCCESS) {
     return srv_init_abort(err);

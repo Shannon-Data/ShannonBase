@@ -70,6 +70,7 @@ class Cu : public MemoryObject {
     std::atomic<double> m_max{0}, m_min{0}, m_middle{0}, m_median{0}, m_avg{0},
         m_sum{0};
     std::atomic<uint64> m_rows{0};
+    const CHARSET_INFO* m_charset;
   };
 
   explicit Cu(Field *field);
@@ -82,23 +83,28 @@ class Cu : public MemoryObject {
   // End of Rnd scan
   uint rnd_end();
   // writes the data into this chunk. length unspecify means calc by chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context, uchar *data,
+  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *data,
                            uint length = 0);
+  // writes the data into this chunk at pos. length unspecify means calc by chunk.
+  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar* pos,
+                           const uchar *data, uint length = 0);
   // reads the data by from address.
   uchar *read_data_direct(ShannonBase::RapidContext *context, uchar *buffer);
   // reads the data by rowid to buffer.
-  uchar *read_data_direct(ShannonBase::RapidContext *context, uchar *rowid,
+  uchar *read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid,
                           uchar *buffer);
   // deletes the data by rowid
-  uchar *delete_data_direct(ShannonBase::RapidContext *context, uchar *rowid);
+  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *rowid);
+  // deletes the data by pk
+  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len);
   // deletes all
   uchar *delete_all_direct();
   // updates the data with rowid with the new data.
-  uchar *update_data_direct(ShannonBase::RapidContext *context, uchar *rowid,
-                            uchar *data, uint length = 0);
+  uchar *update_data_direct(ShannonBase::RapidContext *context, const uchar* rowid,
+                            const uchar *data, uint length = 0);
   // flush the data to disk. by now, we cannot impl this part.
-  uint flush_direct(ShannonBase::RapidContext *context, uchar *from = nullptr,
-                    uchar *to = nullptr);
+  uint flush_direct(ShannonBase::RapidContext *context, const uchar *from = nullptr,
+                    const uchar *to = nullptr);
   inline Compress::Dictionary *local_dictionary() const {
     return m_header->m_local_dict.get();
   }
@@ -113,9 +119,13 @@ class Cu : public MemoryObject {
   inline Chunk *get_last_chunk() { return get_chunk(m_chunks.size() - 1); }
   inline size_t get_chunk_nums() { return m_chunks.size(); }
 
-  uchar *seek(size_t offset);
+  inline uchar *seek(size_t offset);
+  inline uchar* lookup(const uchar* pk, uint pk_len);
   inline Index *get_index() { return m_index.get(); }
-
+ private:
+  bool init_header_info(const Field* field);
+  bool update_header_info(double old_v, double new_v, OPER_TYPE type);
+  bool reset_header_info();
  private:
   uint m_magic{SHANNON_MAGIC_CU};
   // proctect header.

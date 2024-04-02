@@ -34,6 +34,7 @@
 class TABLE;
 class Field;
 class key_range;
+class CHARSET_INFO;
 namespace ShannonBase {
 namespace Compress {
 class Dictionary;
@@ -42,11 +43,19 @@ class Dictionary;
 namespace Utils {
 class Util {
  public:
+  //to check whether this type is supported or not.
   static bool is_support_type(enum_field_types type);
+
+  //get the data value.
   static double get_value_mysql_type(enum_field_types &,
                                      Compress::Dictionary *&, const uchar *,
                                      uint);
   static double get_field_value(Field *&, Compress::Dictionary *&);
+
+  static double get_field_value(enum_field_types , const uchar*, uint,
+                                Compress::Dictionary *,
+                                CHARSET_INFO* charset);
+
   static double store_field_value(TABLE *&table, Field *&,
                                   Compress::Dictionary *&, double &);
   static double store_field_value(TABLE *&table, Field *&,

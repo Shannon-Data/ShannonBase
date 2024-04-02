@@ -90,6 +90,7 @@ mysql_pfs_key_t log_files_mutex_key;
 mysql_pfs_key_t log_cmdq_mutex_key;
 mysql_pfs_key_t log_sn_lock_key;
 mysql_pfs_key_t log_sn_mutex_key;
+mysql_pfs_key_t log_rapid_pop_mutex_key;
 mysql_pfs_key_t log_sys_arch_mutex_key;
 mysql_pfs_key_t page_sys_arch_mutex_key;
 mysql_pfs_key_t page_sys_arch_oper_mutex_key;
