@@ -244,6 +244,8 @@ TRUNCATE mysql.general_log;
 CREATE USER power_user;
 GRANT ALL PRIVILEGES ON *.* TO power_user;
 CREATE USER ''@'' IDENTIFIED WITH 'test_plugin_server' AS 'power_user';
+Warnings:
+Warning	4005	User ''@'' is referenced as a definer account in a stored routine.
 GRANT USAGE ON anonymous_db.* TO ''@'';
 GRANT PROXY ON power_user TO ''@'';
 CREATE DATABASE confidential_db;
@@ -252,9 +254,13 @@ user()	current_user()	@@proxy_user
 test_login_user@localhost	power_user@%	''@''
 DROP USER power_user;
 DROP USER ''@'';
+Warnings:
+Warning	4005	User ''@'' is referenced as a definer account in a stored routine.
 DROP DATABASE confidential_db;
 # Test case #2 (crash with double grant proxy)
 CREATE USER ''@'' IDENTIFIED WITH 'test_plugin_server' AS 'standard_user';
+Warnings:
+Warning	4005	User ''@'' is referenced as a definer account in a stored routine.
 CREATE USER standard_user;
 CREATE DATABASE shared;
 GRANT ALL PRIVILEGES ON shared.* TO standard_user;
@@ -262,6 +268,8 @@ GRANT PROXY ON standard_user TO ''@'';
 #should not crash
 GRANT PROXY ON standard_user TO ''@'';
 DROP USER ''@'';
+Warnings:
+Warning	4005	User ''@'' is referenced as a definer account in a stored routine.
 DROP USER standard_user;
 DROP DATABASE shared;
 #
