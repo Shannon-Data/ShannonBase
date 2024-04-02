@@ -966,7 +966,7 @@ static void shannonbase_rapid_populate_buffer_size_update [[maybe_unused]](
                         "population_buffer_size cannot be"
                         " set more than rapid_memory_size.");
     push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
-                        "Setting population_buffer_size to %lu",
+                        "Setting population_buffer_size to %llu",
                         ShannonBase::Populate::sys_population_buffer_sz);
   }
 
