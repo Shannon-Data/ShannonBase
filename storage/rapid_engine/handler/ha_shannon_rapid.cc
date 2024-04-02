@@ -1032,7 +1032,7 @@ static MYSQL_SYSVAR_ULONG(
     ShannonBase::SHANNON_MAX_MEMRORY_SIZE, 0);
 
 static MYSQL_SYSVAR_ULONGLONG(rapid_populate_buffer_size_max,
-                          ShannonBase::Populate::population_buffer_size,
+                          ShannonBase::Populate::sys_population_buffer_sz,
                           PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                           "Number of populate buffer size that must not be 10% "
                           "rapid_populate_buffer size.",

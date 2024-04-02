@@ -27,16 +27,72 @@
 #define __SHANNONBASE_AUTO_ML_H__
 
 #include <memory>
+#include <map>
+#include <string>
+
+#include "include/my_inttypes.h"
+#include "sql-common/json_dom.h" //Json_wrapper.
+
+#include "ml_algorithm.h"
 
 namespace ShannonBase {
 namespace ML {
 
 class Auto_ML {
-  Auto_ML();
-  ~Auto_ML();
-  int train();
-};
+  public:
+    Auto_ML(std::string schema, std::string table_name, std::string target_name,
+            Json_wrapper options, std::string handler);
+    ~Auto_ML();
+    int train();
+    int load();
+    int unload();
+    int import();
+    ML_TASK_TYPE type();
+  private:
+     std::string get_array_string (Json_array* array);
+     void init_task_map();
+   private:
+     std::string m_schema_name;
+     std::string m_table_name;
+     std::string m_target_name;
+     Json_wrapper m_options;
+     std::string m_handler;
 
+     //the followings are parsed from m_options.
+     // {'classification'|'regression'|'forecasting'|'anomaly_detection'|'recommendation'}|NULL
+     std::string m_opt_task;
+     std::map<std::string, ML_TASK_TYPE> m_opt_task_map;
+     //'column'
+     std::string m_opt_datetime_index;
+     // JSON_ARRAY('column'[,'column'] ...), to string.
+     std::string m_opt_endogenous_variables;
+     //JSON_ARRAY('column'[,'column'] ...)
+     std::string m_opt_exogenous_variables;
+     //JSON_ARRAY('model'[,'model'] ...)
+     std::string m_opt_model_list;
+     //JSON_ARRAY('model'[,'model'] ...)
+     std::string m_opt_exclude_model_list;
+     //'metric'
+     std::string m_opt_optimization_metric;
+     //JSON_ARRAY('column'[,'column'] ...)
+     std::string m_opt_include_column_list;
+     //JSON_ARRAY('column'[,'column'] ...)
+     std::string m_opt_exclude_column_list;
+     //'contamination factor', 0< xx < 0.5, default 0.1
+     double m_opt_contamination{0.1f};
+     // 'users_column'
+     std::string m_opt_users;
+     //'items_column'
+     std::string m_opt_item;
+     //'notes_text'
+     std::string m_opt_notes;
+     // {'explicit'|'implicit'}
+     std::string m_opt_feedback{"explicit"};
+     // 'threshold'
+     double m_opt_feedback_threshold{1.0f};
+
+     static std::unique_ptr<ML_algorithm> m_ml_task;
+};
 
 } //ML
 } //shannonbase

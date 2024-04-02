@@ -68,7 +68,7 @@ bool Cu::init_header_info(const Field* field) {
   if (!m_header.get()) return true;
 
   m_header->m_field_no = field->field_index();
-  m_header->m_rows = 0;
+  m_header->m_rows = m_header->m_deleted_mark = 0;
   m_header->m_sum = 0;
   m_header->m_avg = 0;
 
@@ -136,6 +136,7 @@ bool Cu::update_header_info(double old_v, double new_v, OPER_TYPE type) {
     }break;
     case OPER_TYPE::OPER_DELETE: {
       m_header->m_rows.fetch_sub(1, std::memory_order_seq_cst);
+      m_header->m_deleted_mark.fetch_sub(1, std::memory_order_seq_cst);
       m_header->m_sum = m_header->m_sum - old_v;
       m_header->m_avg = m_header->m_sum / m_header->m_rows;
     } break;
@@ -261,14 +262,14 @@ uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, uchar *buffer) {
 #endif
 }
 
-uchar *Cu::seek(size_t offset) {
+uchar *Cu::seek(ShannonBase::RapidContext *context, size_t offset) {
   auto chunk_id = (offset / SHANNON_ROWS_IN_CHUNK);
   auto offset_in_chunk = offset % SHANNON_ROWS_IN_CHUNK;
 
-  return m_chunks[chunk_id]->seek(offset_in_chunk);
+  return m_chunks[chunk_id]->seek(context, offset_in_chunk);
 }
 
-uchar* Cu::lookup(const uchar* pk, uint pk_len){
+uchar* Cu::lookup(ShannonBase::RapidContext *context, const uchar* pk, uint pk_len){
   if (!m_index || !pk || !pk_len) return nullptr;
 
   return reinterpret_cast<uchar*>(m_index->lookup(const_cast<uchar*>(pk), pk_len));
@@ -316,7 +317,6 @@ uchar *Cu::delete_all_direct() {
 
 uchar *Cu::update_data_direct(ShannonBase::RapidContext *context, const uchar* rowid,
                               const uchar *data, uint length) {
-  
   const uchar* data_pos = (rowid) ? rowid :
                          (uchar*)m_index->lookup(context->m_extra_info.m_key_buff.get(),
                                          context->m_extra_info.m_key_len);
@@ -332,6 +332,45 @@ uint Cu::flush_direct(ShannonBase::RapidContext *context, const uchar *from,
   assert(from || to);
   return 0;
 }
+
+uchar* Cu::GC(ShannonBase::RapidContext *context) {
+  //step 1: all chunks do GC, to rebuild its index.
+  if (m_chunks.empty()) return nullptr;
+  for (auto index =0u; index < m_chunks.size(); index++){
+    m_chunks[index]->GC(context);
+  }
+
+  //step 2: merge all the chunks.
+  for(auto index =1u; index < m_chunks.size(); ) {
+    auto mv_size = m_chunks[index-1]->free_size();
+     //the next data size is larger than pre free space.
+    if (m_chunks[index]->data_size() > mv_size) {
+      std::memcpy(m_chunks[index-1]->get_data(),
+                  m_chunks[index]->get_base(),
+                  mv_size);
+      m_chunks[index-1]->set_full();
+      m_chunks[index]->reshift(context,
+                               m_chunks[index]->get_base(),
+                               m_chunks[index]->get_base() + mv_size);
+      index++;
+    } else {
+      mv_size = m_chunks[index]->data_size();
+      std::memcpy(m_chunks[index-1]->get_data(),
+                  m_chunks[index]->get_base(),
+                  mv_size);
+      m_chunks[index]->reshift(context, m_chunks[index]->get_base(),
+                               m_chunks[index]->get_base() + mv_size);
+      if (m_chunks[index]->is_empty()){
+        m_chunks[index].reset(nullptr);
+        m_chunks.erase(m_chunks.begin() + index -1);
+      } else index ++;
+    }
+  }
+  //step 3: rebuild the index.
+
+  return nullptr;
+}
+
 
 }  // namespace Imcs
 }  // namespace ShannonBase

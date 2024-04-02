@@ -52,7 +52,7 @@ namespace Populate {
   (mutex_own(&((log).rapid_populator_mutex)) || !Populator::log_rapid_is_active())
 
 
-extern uint64 sys_population_buffer_sz;
+extern ulonglong sys_population_buffer_sz;
 extern std::atomic<bool> sys_pop_started;
 extern std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer;
 

@@ -69,7 +69,7 @@ class Cu : public MemoryObject {
     // statistics info.
     std::atomic<double> m_max{0}, m_min{0}, m_middle{0}, m_median{0}, m_avg{0},
         m_sum{0};
-    std::atomic<uint64> m_rows{0};
+    std::atomic<uint64> m_rows{0}, m_deleted_mark{0};
     const CHARSET_INFO* m_charset;
   };
 
@@ -105,23 +105,34 @@ class Cu : public MemoryObject {
   // flush the data to disk. by now, we cannot impl this part.
   uint flush_direct(ShannonBase::RapidContext *context, const uchar *from = nullptr,
                     const uchar *to = nullptr);
+  //does a gc operation of this CU.
+  uchar* GC(ShannonBase::RapidContext *context);
   inline Compress::Dictionary *local_dictionary() const {
     return m_header->m_local_dict.get();
   }
+  //gets its header.
   Cu_header *get_header() { return m_header.get(); }
   // gets the base address of chunks.
   uchar *get_base();
+  // adds a new chunk into this cu.
   void add_chunk(std::unique_ptr<Chunk> &chunk);
+  //gets the chunk with chunk id.
   inline Chunk *get_chunk(uint chunkid) {
     return (chunkid < m_chunks.size()) ? m_chunks[chunkid].get() : nullptr;
   }
+  //gets the first chunk in this cu.
   inline Chunk *get_first_chunk() { return get_chunk(0); }
+  //gets the last chunk in this cu
   inline Chunk *get_last_chunk() { return get_chunk(m_chunks.size() - 1); }
+  //gets the how many chunks in this cu.
   inline size_t get_chunk_nums() { return m_chunks.size(); }
-
-  inline uchar *seek(size_t offset);
-  inline uchar* lookup(const uchar* pk, uint pk_len);
+  //seek to the real logical physical addr by offset.
+  inline uchar *seek(ShannonBase::RapidContext *context, size_t offset);
+  //get the address by a PK.
+  inline uchar* lookup(ShannonBase::RapidContext *context, const uchar* pk, uint pk_len);
+  //the its index of this cu.
   inline Index *get_index() { return m_index.get(); }
+
  private:
   bool init_header_info(const Field* field);
   bool update_header_info(double old_v, double new_v, OPER_TYPE type);

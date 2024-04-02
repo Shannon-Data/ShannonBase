@@ -47,7 +47,7 @@ namespace Populate {
 std::atomic<bool> sys_pop_started {false};
 static IB_thread sys_log_rapid_thread;
 
-uint64 sys_population_buffer_sz = m_pop_buff_size;
+ulonglong sys_population_buffer_sz = m_pop_buff_size;
 std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer {nullptr};
 static ulint sys_rapid_loop_count;
 
