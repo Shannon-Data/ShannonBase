@@ -74,7 +74,6 @@ static void parse_log_func (log_t *log_ptr) {
                       std::chrono::microseconds{100}, stop_condition);
 
     sys_rapid_loop_count++;
-    MONITOR_INC(MONITOR_LOG_RAPID_MAIN_LOOPS);
 
     auto size = sys_population_buffer->readAvailable();
     byte* from_ptr = sys_population_buffer->peek();
