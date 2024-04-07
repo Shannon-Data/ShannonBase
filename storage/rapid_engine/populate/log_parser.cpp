@@ -59,14 +59,14 @@ extern ShannonLoadedTables* shannon_loaded_tables;
 namespace Populate {
 
 int LogParser::parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
-                                            const ulint *offsets, mlog_id_t type,
-                                            page_zip_des_t *page_zip, const upd_t * upd,
-                                            trx_id_t trxid) {
+                                              const ulint *offsets, mlog_id_t type, bool all,
+                                              page_zip_des_t *page_zip, const upd_t * upd,
+                                              trx_id_t trxid) {
   ut_a(index);
   assert(index->n_def == offsets[1]);
+  ut_ad(rec_offs_validate(rec, nullptr, offsets));
   std::string db_name, table_name;
   index->table->get_table_name(db_name, table_name);
-
 
   std::unique_ptr<ShannonBase::RapidContext> context = std::make_unique<ShannonBase::RapidContext>();
   context->m_current_db = db_name;
@@ -95,7 +95,7 @@ int LogParser::parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index
         if (idx_col->col->mtype == DATA_SYS || idx_col->col->mtype == DATA_SYS_CHILD) continue;
 
         if (type == MLOG_REC_INSERT) {
-          ulint len{0};
+          ulint len {0};
           byte *data = rec_get_nth_field(index, rec, offsets, idx_col->col->get_phy_pos(), &len);
           ut_a(idx_col->col->len >= len);
           auto field_data = std::make_unique<uchar[]>(idx_col->col->len + 1);
@@ -104,15 +104,14 @@ int LogParser::parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index
           } else {
             store_field_in_mysql_format(index, idx_col, field_data.get(), data, len);
           }
-
           ret = imcs_instance->write_direct(context.get(), db_name.c_str(), table_name.c_str(), field_name,
                                             field_data.get(),
                                             (len == UNIV_SQL_NULL)? UNIV_SQL_NULL: idx_col->col->len);
-
         } else{
-          ret = imcs_instance->delete_direct(context.get(), db_name.c_str(), table_name.c_str(), field_name,
-                                             context->m_extra_info.m_key_buff.get(),
-                                             context->m_extra_info.m_key_len);
+          ret = imcs_instance->delete_direct(context.get(), db_name.c_str(), table_name.c_str(),
+                                             field_name,
+                                             all ? nullptr : context->m_extra_info.m_key_buff.get(),
+                                             all ? 0 : context->m_extra_info.m_key_len);
         }
         if (ret) return ret;
       } //for
@@ -143,7 +142,6 @@ int LogParser::parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index
         const char* field_name = index->get_field(field_no)->name;
         ret = imcs_instance->update_direct(context.get(), db_name.c_str(), table_name.c_str(), field_name,
                                            field_data.get(), dfield_get_len(new_val), true);
-
         if (ret) return ret;
       }
     } break;
@@ -313,6 +311,83 @@ buf_block_t* LogParser::get_block(space_id_t space_id, page_no_t page_no) {
   return block;
 }
 
+byte *LogParser::parse_cur_and_apply_delete_mark_rec(
+    byte *ptr,           /*!< in: buffer */
+    byte *end_ptr,       /*!< in: buffer end */
+    buf_block_t *block,  /*!< in: page or NULL */
+    dict_index_t *index, /*!< in: record descriptor */
+    mtr_t *mtr)  {         /*!< in: mtr or NULL */
+  ulint pos;
+  trx_id_t trx_id;
+  roll_ptr_t roll_ptr;
+  ulint offset;
+  rec_t *rec;
+  //may the page in this block not used by any one, it could be evicted.???
+  page_t *page = block ? ((buf_frame_t *)block->frame) : nullptr;
+  ut_ad(!page || page_is_comp(page) == dict_table_is_comp(index->table));
+
+  auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
+  const dict_index_t* tb_index = find_index(index_id);
+
+  if (end_ptr < ptr + 2) {
+    return (nullptr);
+  }
+
+  auto flags = mach_read_from_1(ptr);
+  ptr++;
+  auto val[[maybe_unused]] = mach_read_from_1(ptr);
+  ptr++;
+
+  ptr = row_upd_parse_sys_vals(ptr, end_ptr, &pos, &trx_id, &roll_ptr);
+
+  if (ptr == nullptr) {
+    return (nullptr);
+  }
+
+  if (end_ptr < ptr + 2) {
+    return (nullptr);
+  }
+
+  offset = mach_read_from_2(ptr);
+  ptr += 2;
+
+  ut_a(offset <= UNIV_PAGE_SIZE);
+
+  if (page) {
+    rec = page + offset;
+
+    /* We do not need to reserve search latch, as the page
+    is only being recovered, and there cannot be a hash index to
+    it. Besides, these fields are being updated in place
+    and the adaptive hash index does not depend on them. */
+    //btr_rec_set_deleted_flag(rec, page_zip, val);
+
+    if (!(flags & BTR_KEEP_SYS_FLAG)) {
+      mem_heap_t *heap = nullptr;
+      ulint offsets_[REC_OFFS_NORMAL_SIZE];
+      rec_offs_init(offsets_);
+
+      std::string db_name, table_name;
+      tb_index->table->get_table_name(db_name, table_name);
+      // get field length from rapid
+      auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
+      if (share) { //was not loaded table, return
+        auto all = (page[PAGE_HEADER + PAGE_N_HEAP + 1] == PAGE_HEAP_NO_USER_LOW) ? true : false;
+        parse_cur_rec_change_apply_low(rec, tb_index,
+                                       rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED,
+                                       UT_LOCATION_HERE, &heap),
+                                       MLOG_REC_DELETE, all,
+                                       nullptr, nullptr, trx_id);
+      }
+      if (UNIV_LIKELY_NULL(heap)) {
+        mem_heap_free(heap);
+      }
+    }
+  }
+
+  return (ptr);
+}
+
 byte *LogParser::parse_cur_and_apply_delete_rec(
     byte *ptr,           /*!< in: buffer */
     byte *end_ptr,       /*!< in: buffer end */
@@ -332,8 +407,9 @@ byte *LogParser::parse_cur_and_apply_delete_rec(
 
   ut_a(offset <= UNIV_PAGE_SIZE);
 
-  if (block) {
-    page_t *page = block ? ((buf_frame_t *)block->frame) : nullptr;
+  //may the page in this block not used by any one, it could be evicted.???
+  page_t *page = block ? ((buf_frame_t *)block->frame) : nullptr;
+  if (page) {
     mem_heap_t *heap = nullptr;
     ulint offsets_[REC_OFFS_NORMAL_SIZE];
     rec_t *rec = page + offset;
@@ -342,7 +418,6 @@ byte *LogParser::parse_cur_and_apply_delete_rec(
     auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
     const dict_index_t* tb_index = find_index(index_id);
 
-    //page_cur_position(rec, block, &cursor);
 #ifdef UNIV_HOTBACKUP
     ib::trace_1() << "page_cur_parse_delete_rec: offset " << offset;
 #endif /* UNIV_HOTBACKUP */
@@ -356,8 +431,8 @@ byte *LogParser::parse_cur_and_apply_delete_rec(
       goto finish;
 
     parse_cur_rec_change_apply_low(rec, tb_index,
-                                   rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED,
-                                        UT_LOCATION_HERE, &heap), MLOG_REC_DELETE);
+                                  rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED,
+                                  UT_LOCATION_HERE, &heap), MLOG_REC_DELETE, false);
 finish:
     if (UNIV_LIKELY_NULL(heap)) {
       mem_heap_free(heap);
@@ -530,7 +605,7 @@ byte *LogParser::parse_cur_and_apply_insert_rec(
       goto finish;
     
     parse_cur_rec_change_apply_low(buf + origin_offset, tb_index, offsets,
-                                  MLOG_REC_INSERT);
+                                  MLOG_REC_INSERT, false);
   }
 finish:
   if (buf != buf1) {
@@ -555,7 +630,7 @@ byte* LogParser::parse_row_and_apply_upd_rec_in_place(
   ut_ad(rec_offs_validate(rec, index, offsets));
   ut_ad(!index->table->skip_alter_undo);
 
-  parse_cur_rec_change_apply_low(rec, index, offsets, MLOG_REC_UPDATE_IN_PLACE,
+  parse_cur_rec_change_apply_low(rec, index, offsets, MLOG_REC_UPDATE_IN_PLACE, false,
                                  page_zip, update, trx_id);
 
   /*now, we dont want to support zipped page now. how to deal with pls ref to:
@@ -696,6 +771,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 #endif /* UNIV_LOG_LSN_DEBUG */
     case MLOG_4BYTES:
 
+      ut_a(false);
       ut_ad(page == nullptr || end_ptr > ptr + 2);
 
       /* Most FSP flags can only be changed by CREATE or ALTER with
@@ -729,6 +805,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
       [[fallthrough]];
 
     case MLOG_1BYTE:
+      ut_a(false);
       /* If 'ALTER TABLESPACE ... ENCRYPTION' was in progress and page 0 has
       REDO entry for this, now while applying this entry, set
       encryption_op_in_progress flag now so that any other page of this
@@ -765,6 +842,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_2BYTES:
     case MLOG_8BYTES:
+      ut_a(false);
 #ifdef UNIV_DEBUG
       if (page && page_type == FIL_PAGE_TYPE_ALLOCATED && end_ptr >= ptr + 2) {
         /* It is OK to set FIL_PAGE_TYPE and certain
@@ -919,9 +997,8 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        //buf_block_t*block = get_block(space_id, page_no);
-        ptr = btr_cur_parse_del_mark_set_clust_rec(ptr, end_ptr, page, page_zip,
-                                                   index);
+        buf_block_t*block = get_block(space_id, page_no);
+        ptr = parse_cur_and_apply_delete_mark_rec(ptr, end_ptr, block, index, mtr);
       }
 
       break;
@@ -937,15 +1014,15 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
                &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        //buf_block_t*block = get_block(space_id, page_no);
-        ptr = btr_cur_parse_del_mark_set_clust_rec(ptr, end_ptr, page, page_zip,
-                                                   index);
+        buf_block_t*block = get_block(space_id, page_no);
+        ptr = parse_cur_and_apply_delete_mark_rec(ptr, end_ptr, block, index, mtr);
       }
 
       break;
 
     case MLOG_COMP_REC_SEC_DELETE_MARK:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       /* This log record type is obsolete, but we process it for
@@ -964,6 +1041,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_REC_SEC_DELETE_MARK:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       ptr = btr_cur_parse_del_mark_set_sec_rec(ptr, end_ptr, page, page_zip);
@@ -986,6 +1064,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_REC_UPDATE_IN_PLACE_8027:
     case MLOG_COMP_REC_UPDATE_IN_PLACE_8027:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
@@ -1004,6 +1083,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_LIST_END_DELETE:
     case MLOG_LIST_START_DELETE:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
@@ -1019,6 +1099,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_LIST_START_DELETE_8027:
     case MLOG_COMP_LIST_START_DELETE_8027:
 
+     ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index_8027(
@@ -1035,6 +1116,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_LIST_END_COPY_CREATED:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
@@ -1049,6 +1131,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_LIST_END_COPY_CREATED_8027:
     case MLOG_COMP_LIST_END_COPY_CREATED_8027:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
@@ -1065,6 +1148,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_PAGE_REORGANIZE:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
@@ -1078,6 +1162,8 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
       break;
 
     case MLOG_PAGE_REORGANIZE_8027:
+
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
       /* Uncompressed pages don't have any payload in the
       MTR so ptr and end_ptr can be, and are nullptr */
@@ -1090,6 +1176,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_ZIP_PAGE_REORGANIZE:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
@@ -1103,6 +1190,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_COMP_PAGE_REORGANIZE_8027:
     case MLOG_ZIP_PAGE_REORGANIZE_8027:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
@@ -1119,6 +1207,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_PAGE_CREATE:
     case MLOG_COMP_PAGE_CREATE:
 
+      ut_a(false);
       /* Allow anything in page_type when creating a page. */
       ut_a(!page_zip);
 
@@ -1129,6 +1218,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_PAGE_CREATE_RTREE:
     case MLOG_COMP_PAGE_CREATE_RTREE:
 
+      ut_a(false);
       page_parse_create(block, type == MLOG_COMP_PAGE_CREATE_RTREE,
                         FIL_PAGE_RTREE);
 
@@ -1137,12 +1227,14 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_PAGE_CREATE_SDI:
     case MLOG_COMP_PAGE_CREATE_SDI:
 
+      ut_a(false);
       page_parse_create(block, type == MLOG_COMP_PAGE_CREATE_SDI, FIL_PAGE_SDI);
 
       break;
 
     case MLOG_UNDO_INSERT:
 
+      ut_a(false);
       ut_ad(!page || page_type == FIL_PAGE_UNDO_LOG);
 
       ptr = trx_undo_parse_add_undo_rec(ptr, end_ptr, page);
@@ -1151,6 +1243,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_UNDO_ERASE_END:
 
+      ut_a(false);
       ut_ad(!page || page_type == FIL_PAGE_UNDO_LOG);
 
       ptr = trx_undo_parse_erase_page_end(ptr, end_ptr, page, mtr);
@@ -1159,6 +1252,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_UNDO_INIT:
 
+      ut_a(false);
       /* Allow anything in page_type when creating a page. */
 
       ptr = trx_undo_parse_page_init(ptr, end_ptr, page, mtr);
@@ -1167,6 +1261,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_UNDO_HDR_CREATE:
     case MLOG_UNDO_HDR_REUSE:
 
+      ut_a(false);
       ut_ad(!page || page_type == FIL_PAGE_UNDO_LOG);
 
       ptr = trx_undo_parse_page_header(type, ptr, end_ptr, page, mtr);
@@ -1176,6 +1271,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_REC_MIN_MARK:
     case MLOG_COMP_REC_MIN_MARK:
 
+      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       /* On a compressed page, MLOG_COMP_REC_MIN_MARK
@@ -1210,6 +1306,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
       if (nullptr !=
           (ptr = mlog_parse_index_8027(
+
                ptr, end_ptr, type == MLOG_COMP_REC_DELETE_8027, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
@@ -1220,6 +1317,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_IBUF_BITMAP_INIT:
 
+      ut_a(false);
       /* Allow anything in page_type when creating a page. */
 
       ptr = ibuf_parse_bitmap_init(ptr, end_ptr, block, mtr);

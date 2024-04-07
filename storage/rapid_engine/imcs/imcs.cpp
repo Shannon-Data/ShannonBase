@@ -147,12 +147,10 @@ uint Imcs::write_direct(ShannonBase::RapidContext *context, const char* schema_n
   //sum_ptr
   *(uint32*)(data.get() + SHANNON_SUMPTR_BYTE_OFFSET) = sum_ptr;
 
-  double data_val = Utils::Util::get_field_value(m_cus[key_name]->get_header()->m_cu_type,
-                                                 field_value,
-                                                 val_len,
-                                                 m_cus[key_name]->local_dictionary(),
-                                                 const_cast<CHARSET_INFO*>(m_cus[key_name]->get_header()->m_charset)
-                                                 );
+  double data_val = (is_null) ? 0 :
+         Utils::Util::get_field_value(m_cus[key_name]->get_header()->m_cu_type, field_value,
+                            val_len, m_cus[key_name]->local_dictionary(),
+                            const_cast<CHARSET_INFO*>(m_cus[key_name]->get_header()->m_charset));
 
   *(double*)(data.get() + SHANNON_DATA_BYTE_OFFSET) = data_val;
 
@@ -276,7 +274,6 @@ uint Imcs::delete_direct(ShannonBase::RapidContext *context, const char* schema_
                        const char* table_name, const char*field_name,
                         const uchar* pk_value, uint pk_len) {
   ut_a(table_name && field_name);
-  ut_a(pk_len);
 
   std::string key_name = get_key_name(schema_name, table_name, field_name);
   if (!key_name.length())
@@ -288,10 +285,8 @@ uint Imcs::delete_direct(ShannonBase::RapidContext *context, const char* schema_
   // data]. And the string we dont store the string but using string id instead.
   // offset[] = {0, 1, 9, 17, 21, 29}
   // start to pack the data, then writes into memory.
-
-  if (!m_cus[key_name]->delete_data_direct(context, pk_value, pk_len))
+  if (m_cus[key_name].get() && !m_cus[key_name]->delete_data_direct(context, pk_value, pk_len))
     return HA_ERR_GENERIC;
-
   return 0;
 }
 
