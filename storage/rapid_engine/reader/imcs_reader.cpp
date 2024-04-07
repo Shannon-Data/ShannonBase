@@ -66,6 +66,8 @@ CuView::CuView(TABLE *table, Field *field)
 
 int CuView::open() {
   DBUG_TRACE;
+  if (!m_source_cu->get_chunk_nums()) return 0;
+
   auto rnd_chunk = m_source_cu->get_chunk(m_rnd_chunk_rid);
   ut_a(rnd_chunk);
 
@@ -95,6 +97,8 @@ int CuView::close() {
 int CuView::read(ShannonBaseContext *context, uchar *buffer, size_t length) {
   DBUG_TRACE;
   ut_a(context && buffer);
+  if(!m_source_cu || !m_source_cu->get_chunk_nums()) return HA_ERR_END_OF_FILE;
+
   RapidContext *rpd_context = dynamic_cast<RapidContext *>(context);
   if (!m_source_cu) return HA_ERR_END_OF_FILE;
 
@@ -146,7 +150,7 @@ int CuView::index_lookup(ShannonBaseContext *context, uchar *key,
                          size_t key_len, uchar *value,
                          ha_rkey_function find_flag) {
   DBUG_TRACE;
-  if (!m_source_cu) return HA_ERR_END_OF_FILE;
+  if(!m_source_cu || !m_source_cu->get_chunk_nums()) return HA_ERR_END_OF_FILE;
 
   RapidContext *rpd_context = dynamic_cast<RapidContext *>(context);
   auto ret = m_source_cu->get_index()->lookup(key, key_len);
@@ -171,7 +175,7 @@ int CuView::read_index_fast(ShannonBaseContext *context, uchar *key,
                             size_t key_len, uchar *value,
                             ha_rkey_function find_flag) {
   DBUG_TRACE;
-  if (!m_source_cu) return HA_ERR_END_OF_FILE;
+  if(!m_source_cu || !m_source_cu->get_chunk_nums()) return HA_ERR_END_OF_FILE;
 
   RapidContext *rpd_context = dynamic_cast<RapidContext *>(context);
   uint offset{0};
@@ -201,7 +205,7 @@ int CuView::read_index_fast(ShannonBaseContext *context, uchar *key,
 
 int CuView::read_index_next(ShannonBaseContext *context, uchar *value) {
   DBUG_TRACE;
-  if (!m_source_cu) return HA_ERR_END_OF_FILE;
+  if(!m_source_cu || !m_source_cu->get_chunk_nums()) return HA_ERR_END_OF_FILE;
 
   RapidContext *rpd_context = dynamic_cast<RapidContext *>(context);
   auto ret = m_source_cu->get_index()->next();
@@ -225,7 +229,7 @@ int CuView::read_index_next(ShannonBaseContext *context, uchar *value) {
 
 int CuView::read_index(ShannonBaseContext *context, uchar* value) {
   DBUG_TRACE;
-  if (!m_source_cu) return HA_ERR_END_OF_FILE;
+  if(!m_source_cu || !m_source_cu->get_chunk_nums()) return HA_ERR_END_OF_FILE;
 
   RapidContext *rpd_context = dynamic_cast<RapidContext *>(context);
 

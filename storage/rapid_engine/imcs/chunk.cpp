@@ -146,7 +146,7 @@ bool Chunk::init_header_info(const Field* field){
   return true;
 }
 
-bool Chunk::update_header_info(double old_v, double new_v, OPER_TYPE type) {
+bool Chunk::update_statistics(double old_v, double new_v, OPER_TYPE type) {
   std::scoped_lock lk(m_header_mutex);
   //string type do nothing. will build up the histogram in next.
   if (m_header->m_chunk_type == MYSQL_TYPE_BLOB ||
@@ -191,7 +191,7 @@ bool Chunk::update_header_info(double old_v, double new_v, OPER_TYPE type) {
   return true;
 }
 
-bool Chunk::reset_header_info() {
+bool Chunk::reset_statistics() {
   std::scoped_lock lk(m_header_mutex);
   m_header->m_avg = 0;
   m_header->m_sum = 0;
@@ -203,9 +203,6 @@ bool Chunk::reset_header_info() {
   m_header->m_middle = std::numeric_limits<long long>::lowest();
 
   m_header->m_field_no = 0;
-  m_header->m_chunk_type = MYSQL_TYPE_NULL;
-  m_header->m_null = false;
-  m_header->m_varlen = false;
   return true;
 }
 
@@ -250,7 +247,7 @@ uchar *Chunk::write_data_direct(ShannonBase::RapidContext *context, const uchar 
   m_data += length;
 
   auto val = *(double *)(m_data - length + SHANNON_DATA_BYTE_OFFSET);
-  update_header_info(val, val, OPER_TYPE::OPER_INSERT);
+  update_statistics(val, val, OPER_TYPE::OPER_INSERT);
   return (m_data - length);
 }
 
@@ -362,13 +359,13 @@ uchar *Chunk::delete_data_direct(ShannonBase::RapidContext *context,
 uchar *Chunk::delete_all_direct() {
   std::scoped_lock lk(m_data_mutex);
   if (m_data_base) {
-    my_free(m_data_base);
+    ut::aligned_free(m_data_base);
     m_data_base = nullptr;
   }
   m_data = m_data_base;
   m_data_end = m_data_base;
 
-  reset_header_info();
+  reset_statistics();
   return m_data_base;
 }
 
@@ -383,7 +380,7 @@ uchar *Chunk::update_data_direct(ShannonBase::RapidContext *context, const uchar
 
   std::memcpy(const_cast<uchar*>(rowid), data, length);
   auto val = *(double *)(data + SHANNON_DATA_BYTE_OFFSET);
-  update_header_info(old, val, OPER_TYPE::OPER_UPDATE);
+  update_statistics(old, val, OPER_TYPE::OPER_UPDATE);
   return const_cast<uchar*>(rowid);
 }
 

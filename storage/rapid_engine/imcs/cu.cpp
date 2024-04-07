@@ -101,7 +101,7 @@ bool Cu::init_header_info(const Field* field) {
   return true;
 }
 
-bool Cu::update_header_info(double old_v, double new_v, OPER_TYPE type) {
+bool Cu::update_statistics(double old_v, double new_v, OPER_TYPE type) {
   std::scoped_lock lk(m_header_mutex);
   if (!m_header.get()) return false;
 
@@ -145,7 +145,7 @@ bool Cu::update_header_info(double old_v, double new_v, OPER_TYPE type) {
   return true;
 }
 
-bool Cu::reset_header_info() {
+bool Cu::reset_statistics() {
   std::scoped_lock lk(m_header_mutex);
   if (!m_header.get()) return true;
 
@@ -157,13 +157,6 @@ bool Cu::reset_header_info() {
   m_header->m_min = std::numeric_limits<double>::max();
   m_header->m_middle = std::numeric_limits<double>::lowest();
   m_header->m_median = std::numeric_limits<double>::lowest();
-
-  m_header->m_cu_type = MYSQL_TYPE_NULL;
-  m_header->m_charset = nullptr;
-  m_header->m_nullable = false;
-
-  m_header->m_encoding_type = Compress::Encoding_type::NONE;
-  m_header->m_local_dict = nullptr;
   return true;
 }
 
@@ -231,7 +224,7 @@ uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, const uchar *da
     data_val = *(double *)(data + SHANNON_DATA_BYTE_OFFSET);
 
   // update the meta info.
-  update_header_info(data_val, data_val, OPER_TYPE::OPER_INSERT);
+  update_statistics(data_val, data_val, OPER_TYPE::OPER_INSERT);
   return pos;
 }
 
@@ -291,28 +284,28 @@ uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context,
 }
 
 uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len) {
-  auto data_pos = (uchar*)m_index->lookup(const_cast<uchar*>(pk), pk_len);
+  uchar* data_pos {nullptr};
+  if (!pk && !pk_len) { //delete all
+    data_pos = delete_all_direct();
+  } else {
+    data_pos = (uchar*)m_index->lookup(const_cast<uchar*>(pk), pk_len);
+    if (!data_pos) return nullptr;
+    uint8 info = *(uint8*)(data_pos + SHANNON_INFO_BYTE_OFFSET);
+    info |= DATA_DELETE_FLAG_MASK;
+    *(uint8*)(data_pos + SHANNON_INFO_BYTE_OFFSET) = info;
 
-  uint8 info = *(uint8*)(data_pos + SHANNON_INFO_BYTE_OFFSET);
-  info |= DATA_DELETE_FLAG_MASK;
-  *(uint8*)(data_pos + SHANNON_INFO_BYTE_OFFSET) = info;
-
-  auto data_val = *(double*) (data_pos +SHANNON_DATA_BYTE_OFFSET);
-  ut_a(data_val);
-  update_header_info(data_val, data_val, OPER_TYPE::OPER_DELETE);
+    auto data_val = *(double*) (data_pos +SHANNON_DATA_BYTE_OFFSET);
+    ut_a(data_val);
+    update_statistics(data_val, data_val, OPER_TYPE::OPER_DELETE);
+  }
 
   return data_pos;
 }
 
 uchar *Cu::delete_all_direct() {
-  uchar *base{nullptr};
-  for (size_t index = 0; index < m_chunks.size(); index++) {
-    if (index == 0) base = m_chunks[index]->get_base();
-    m_chunks[index]->delete_all_direct();
-  }
-
-  reset_header_info();
-  return base;
+  m_chunks.clear();
+  reset_statistics();
+  return (uchar*)m_header.get();
 }
 
 uchar *Cu::update_data_direct(ShannonBase::RapidContext *context, const uchar* rowid,

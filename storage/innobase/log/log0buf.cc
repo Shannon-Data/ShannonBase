@@ -1004,16 +1004,16 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
     std::memcpy(ptr, str, len);
     auto type = mlog_id_t(*ptr & ~MLOG_SINGLE_REC_FLAG);
     if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+        !recv_recovery_is_on() &&
         (type == MLOG_REC_INSERT ||
         type == MLOG_REC_INSERT_8027 ||
         type == MLOG_COMP_REC_INSERT_8027 ||
-        type == MLOG_REC_DELETE ||
-        type == MLOG_REC_DELETE_8027 ||
-        type == MLOG_COMP_REC_DELETE_8027||
+        type == MLOG_REC_CLUST_DELETE_MARK ||
+        type == MLOG_REC_CLUST_DELETE_MARK_8027 ||
         type == MLOG_COMP_REC_UPDATE_IN_PLACE_8027 ||
         type == MLOG_REC_UPDATE_IN_PLACE)) {
-      ShannonBase::Populate::sys_population_buffer->writeBuff(str, len);
-      os_event_set(log.rapid_events[0]);
+        ShannonBase::Populate::sys_population_buffer->writeBuff(str, len);
+        //os_event_set(log.rapid_events[0]);
     }
 
     ut_a(len <= str_len);
@@ -1133,6 +1133,7 @@ void log_buffer_write_completed(log_t &log, lsn_t start_lsn, lsn_t end_lsn) {
     }
     log_closer_mutex_exit(log);
   }
+  os_event_set(log.rapid_events[0]);
 }
 
 void log_wait_for_space_in_log_recent_closed(log_t &log, lsn_t lsn) {
