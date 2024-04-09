@@ -405,39 +405,7 @@ byte *LogParser::parse_cur_and_apply_delete_rec(
   ptr += 2;
 
   ut_a(offset <= UNIV_PAGE_SIZE);
-
-  //may the page in this block not used by any one, it could be evicted.???
-  page_t *page = block ? ((buf_frame_t *)block->frame) : nullptr;
-  if (page) {
-    mem_heap_t *heap = nullptr;
-    ulint offsets_[REC_OFFS_NORMAL_SIZE];
-    rec_t *rec = page + offset;
-    rec_offs_init(offsets_);
-
-    auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
-    const dict_index_t* tb_index = find_index(index_id);
-#ifdef UNIV_HOTBACKUP
-    ib::trace_1() << "page_cur_parse_delete_rec: offset " << offset;
-#endif /* UNIV_HOTBACKUP */
-    ut_ad(!buf_block_get_page_zip(block) || page_is_comp(page));
-    std::string db_name, table_name;
-    if (tb_index) {
-      tb_index->table->get_table_name(db_name, table_name);
-    }
-    // get field length from rapid
-    auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
-    if (!share) //was not loaded table, return
-      goto finish;
-
-    parse_cur_rec_change_apply_low(rec, tb_index,
-                                  rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED,
-                                  UT_LOCATION_HERE, &heap), MLOG_REC_DELETE, false);
-finish:
-    if (UNIV_LIKELY_NULL(heap)) {
-      mem_heap_free(heap);
-    }
-  }
-
+  //we delete the in `delete_mark`, therefore, we just advance the ptr.
   return (ptr);
 }
 
@@ -1212,7 +1180,6 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_REC_DELETE:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
@@ -1227,7 +1194,6 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_REC_DELETE_8027:
     case MLOG_COMP_REC_DELETE_8027:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=

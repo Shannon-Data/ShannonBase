@@ -1002,18 +1002,9 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
     /* This is the critical memcpy operation, which copies data
     from internal mtr's buffer to the shared log buffer. */
     std::memcpy(ptr, str, len);
-    auto type = mlog_id_t(*ptr & ~MLOG_SINGLE_REC_FLAG);
     if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-        !recv_recovery_is_on() &&
-        (type == MLOG_REC_INSERT ||
-        type == MLOG_REC_INSERT_8027 ||
-        type == MLOG_COMP_REC_INSERT_8027 ||
-        type == MLOG_REC_CLUST_DELETE_MARK ||
-        type == MLOG_REC_CLUST_DELETE_MARK_8027 ||
-        type == MLOG_COMP_REC_UPDATE_IN_PLACE_8027 ||
-        type == MLOG_REC_UPDATE_IN_PLACE)) {
+        !recv_recovery_is_on()) {
         ShannonBase::Populate::sys_population_buffer->writeBuff(str, len);
-        //os_event_set(log.rapid_events[0]);
     }
 
     ut_a(len <= str_len);
