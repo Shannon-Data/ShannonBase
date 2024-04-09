@@ -51,7 +51,7 @@
 #include "storage/innobase/rem/rec.h"
 
 #include "sql/table.h"
-
+#include "sql/locking_service.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 namespace ShannonBase {
 extern ShannonLoadedTables* shannon_loaded_tables;
@@ -231,7 +231,7 @@ const dict_index_t* LogParser::find_index(uint64 idx_id) {
   MDL_ticket *mdl = nullptr;
   dict_table_t *dd_indexes;
   THD* thd = current_thd;
-  const dict_index_t *index_rec{nullptr};
+  const dict_index_t *index_rec{nullptr}, *ret_index_rec{nullptr};
 
   DBUG_TRACE;
 
@@ -242,34 +242,35 @@ const dict_index_t* LogParser::find_index(uint64 idx_id) {
   /* Start scan the mysql.indexes */
   rec = dd_startscan_system(thd, &mdl, &pcur, &mtr, dd_indexes_name.c_str(),
                             &dd_indexes);
+
   /* Process each record in the table */
   while (rec) {
-
     MDL_ticket *mdl_on_tab = nullptr;
     dict_table_t *parent = nullptr;
     MDL_ticket *mdl_on_parent = nullptr;
 
     /* Populate a dict_index_t structure with information from
     a INNODB_INDEXES row */
-    dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent,
+    auto ret = dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent,
                                     &mdl_on_parent, dd_indexes, &mtr);
 
     dict_sys_mutex_exit();
+
+    if (ret && index_rec->id  == idx_id)
+       ret_index_rec = index_rec;
 
     mem_heap_empty(heap);
 
     /* Get the next record */
     dict_sys_mutex_enter();
 
-    if (index_rec != nullptr && index_rec->id  == idx_id) {
+    if (index_rec != nullptr) {
       dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
 
       /* Close parent table if it's a fts aux table. */
       if (index_rec->table->is_fts_aux() && parent) {
         dd_table_close(parent, thd, &mdl_on_parent, true);
       }
-      mtr_start(&mtr);
-      break;
     }
 
     mtr_start(&mtr);
@@ -280,7 +281,8 @@ const dict_index_t* LogParser::find_index(uint64 idx_id) {
   dd_table_close(dd_indexes, thd, &mdl, true);
   dict_sys_mutex_exit();
   mem_heap_free(heap);
-  return index_rec;
+
+  return ret_index_rec;
 }
 
 buf_block_t* LogParser::get_block(space_id_t space_id, page_no_t page_no) {
