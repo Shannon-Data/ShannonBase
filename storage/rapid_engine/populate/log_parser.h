@@ -58,7 +58,7 @@ private:
       page_no_t page_no, buf_block_t *block, mtr_t *mtr, lsn_t start_lsn);
 
   int parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
-                                    const ulint *offsets, mlog_id_t type,
+                                    const ulint *offsets, mlog_id_t type, bool all,
                                     page_zip_des_t *page_zip = nullptr, /**used for upd*/
                                     const upd_t * upd = nullptr,
                                     trx_id_t trxid =0); /**upd vector for upd*/
@@ -83,6 +83,13 @@ private:
     mtr_t *mtr);          /*!< in: mtr or NULL */
 
   byte *parse_cur_and_apply_delete_rec(
+    byte *ptr,           /*!< in: buffer */
+    byte *end_ptr,       /*!< in: buffer end */
+    buf_block_t *block,  /*!< in: page or NULL */
+    dict_index_t *index, /*!< in: record descriptor */
+    mtr_t *mtr);          /*!< in: mtr or NULL */
+
+  byte *parse_cur_and_apply_delete_mark_rec(
     byte *ptr,           /*!< in: buffer */
     byte *end_ptr,       /*!< in: buffer end */
     buf_block_t *block,  /*!< in: page or NULL */

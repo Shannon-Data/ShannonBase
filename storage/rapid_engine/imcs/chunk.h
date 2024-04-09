@@ -146,8 +146,8 @@ class Chunk : public MemoryObject {
   uchar* set_full();
  private:
   inline bool init_header_info(const Field* field);
-  inline bool update_header_info(double old_v, double new_v, OPER_TYPE type);
-  inline bool reset_header_info();
+  inline bool update_statistics(double old_v, double new_v, OPER_TYPE type);
+  inline bool reset_statistics();
 
   //value is marked as deleted return true, or false.
   inline bool deleted (const uchar* data);

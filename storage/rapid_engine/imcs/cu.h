@@ -135,8 +135,8 @@ class Cu : public MemoryObject {
 
  private:
   bool init_header_info(const Field* field);
-  bool update_header_info(double old_v, double new_v, OPER_TYPE type);
-  bool reset_header_info();
+  bool update_statistics(double old_v, double new_v, OPER_TYPE type);
+  bool reset_statistics();
  private:
   uint m_magic{SHANNON_MAGIC_CU};
   // proctect header.

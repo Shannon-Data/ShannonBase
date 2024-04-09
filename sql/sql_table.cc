@@ -11743,7 +11743,8 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
     /***we star the background thread to repopulate the chagnes here
      * that makes the logics more independent.
     */
-    ShannonBase::Populate::Populator::start_change_populate_threads();
+    if (!ShannonBase::Populate::Populator::log_pop_thread_is_active())
+      ShannonBase::Populate::Populator::start_change_populate_threads();
   } else {
     if (ShannonBase::Imcs::Imcs::get_instance()->is_empty()) //none loaded table.
       ShannonBase::Populate::Populator::end_change_populate_threads();

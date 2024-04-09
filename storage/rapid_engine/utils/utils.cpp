@@ -152,6 +152,7 @@ double Util::get_field_value(enum_field_types type, const uchar* buf, uint len,
       String str_str((const char*)buf, len, charset);
       data_val = dictionary->store(str_str);
     } break;
+    case MYSQL_TYPE_SHORT:
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG:
@@ -182,7 +183,7 @@ double Util::get_field_value(enum_field_types type, const uchar* buf, uint len,
       data_val = TIME_to_ulonglong_datetime(ltime);
     } break;
     default:
-      data_val = *(double*)buf;
+      assert(false);
   }
 
   return data_val;
