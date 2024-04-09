@@ -51,7 +51,7 @@
 #include "storage/innobase/rem/rec.h"
 
 #include "sql/table.h"
-
+#include "sql/locking_service.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 namespace ShannonBase {
 extern ShannonLoadedTables* shannon_loaded_tables;
@@ -231,7 +231,7 @@ const dict_index_t* LogParser::find_index(uint64 idx_id) {
   MDL_ticket *mdl = nullptr;
   dict_table_t *dd_indexes;
   THD* thd = current_thd;
-  bool ret;
+  const dict_index_t *index_rec{nullptr}, *ret_index_rec{nullptr};
 
   DBUG_TRACE;
 
@@ -245,30 +245,19 @@ const dict_index_t* LogParser::find_index(uint64 idx_id) {
 
   /* Process each record in the table */
   while (rec) {
-    const dict_index_t *index_rec;
     MDL_ticket *mdl_on_tab = nullptr;
     dict_table_t *parent = nullptr;
     MDL_ticket *mdl_on_parent = nullptr;
 
     /* Populate a dict_index_t structure with information from
     a INNODB_INDEXES row */
-    ret = dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent,
+    auto ret = dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent,
                                     &mdl_on_parent, dd_indexes, &mtr);
 
     dict_sys_mutex_exit();
 
-    if (ret && (index_rec->id  == idx_id)) {
-      mem_heap_empty(heap);
-      dict_sys_mutex_enter();
-      dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
-
-      /* Close parent table if it's a fts aux table. */
-      if (index_rec->table->is_fts_aux() && parent) {
-        dd_table_close(parent, thd, &mdl_on_parent, true);
-      }
-      dict_sys_mutex_exit();
-      return  index_rec;
-    }
+    if (ret && index_rec->id  == idx_id)
+       ret_index_rec = index_rec;
 
     mem_heap_empty(heap);
 
@@ -292,7 +281,8 @@ const dict_index_t* LogParser::find_index(uint64 idx_id) {
   dd_table_close(dd_indexes, thd, &mdl, true);
   dict_sys_mutex_exit();
   mem_heap_free(heap);
-  return nullptr;
+
+  return ret_index_rec;
 }
 
 buf_block_t* LogParser::get_block(space_id_t space_id, page_no_t page_no) {
@@ -924,7 +914,6 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_COMP_REC_SEC_DELETE_MARK:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       /* This log record type is obsolete, but we process it for
@@ -941,13 +930,24 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
       [[fallthrough]];
 
-    case MLOG_REC_SEC_DELETE_MARK:
+    case MLOG_REC_SEC_DELETE_MARK: {
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      ptr = btr_cur_parse_del_mark_set_sec_rec(ptr, end_ptr, page, page_zip);
+      if (end_ptr < ptr + 3) {
+        return (nullptr);
+      }
+
+      //value
+      ptr++;
+      //offset
+      auto offset = mach_read_from_2(ptr);
+      ptr += 2;
+
+      ut_a(offset <= UNIV_PAGE_SIZE);
+      //pop the changes to rapid ???? ref to `btr_rec_set_deleted_flag()`
       break;
+    }
 
     case MLOG_REC_UPDATE_IN_PLACE:
 
@@ -966,7 +966,6 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_REC_UPDATE_IN_PLACE_8027:
     case MLOG_COMP_REC_UPDATE_IN_PLACE_8027:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
@@ -985,13 +984,16 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_LIST_END_DELETE:
     case MLOG_LIST_START_DELETE:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = page_parse_delete_rec_list(type, ptr, end_ptr, block, index, mtr);
+        /* Read the record offset as a 2-byte ulint */
+        if (end_ptr < ptr + 2) {
+          return nullptr;
+        }
+        ptr += 2;
       }
 
       break;
@@ -1001,7 +1003,6 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_LIST_START_DELETE_8027:
     case MLOG_COMP_LIST_START_DELETE_8027:
 
-     ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index_8027(
@@ -1011,21 +1012,36 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
                           &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = page_parse_delete_rec_list(type, ptr, end_ptr, block, index, mtr);
+        /* Read the record offset as a 2-byte ulint */
+        if (end_ptr < ptr + 2) {
+          return nullptr;
+        }
+        ptr += 2;
       }
 
       break;
 
     case MLOG_LIST_END_COPY_CREATED:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = page_parse_copy_rec_list_to_created_page(ptr, end_ptr, block,
-                                                       index, mtr);
+        if (ptr + 4 > end_ptr) {
+          return nullptr;
+        }
+        ulint log_data_len;
+        log_data_len = mach_read_from_4(ptr);
+        ptr += 4;
+
+        auto rec_end = ptr + log_data_len;
+
+        if (rec_end > end_ptr) {
+          return nullptr;
+        }
+
+        ptr = rec_end;
       }
 
       break;
@@ -1033,7 +1049,6 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_LIST_END_COPY_CREATED_8027:
     case MLOG_COMP_LIST_END_COPY_CREATED_8027:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
@@ -1042,49 +1057,80 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
                &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = page_parse_copy_rec_list_to_created_page(ptr, end_ptr, block,
-                                                       index, mtr);
+        if (ptr + 4 > end_ptr) {
+          return nullptr;
+        }
+        ulint log_data_len;
+        log_data_len = mach_read_from_4(ptr);
+        ptr += 4;
+
+        auto rec_end = ptr + log_data_len;
+
+        if (rec_end > end_ptr) {
+          return nullptr;
+        }
+
+        ptr = rec_end;
       }
 
       break;
 
     case MLOG_PAGE_REORGANIZE:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
+        bool compressed = (type == MLOG_ZIP_PAGE_REORGANIZE_8027)? true : false;
+        ulint level;
+        if (compressed) {
+          if (ptr == end_ptr) {
+            return nullptr;
+          }
 
-        ptr = btr_parse_page_reorganize(ptr, end_ptr, index,
-                                        type == MLOG_ZIP_PAGE_REORGANIZE_8027,
-                                        block, mtr);
+          level = mach_read_from_1(ptr);
+
+          ut_a(level <= 9);
+          ++ptr;
+        }
       }
 
       break;
 
     case MLOG_PAGE_REORGANIZE_8027:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
       /* Uncompressed pages don't have any payload in the
       MTR so ptr and end_ptr can be, and are nullptr */
       mlog_parse_index_8027(ptr, end_ptr, false, &index);
       ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-      ptr = btr_parse_page_reorganize(ptr, end_ptr, index, false, block, mtr);
-
+      //ptr = btr_parse_page_reorganize(ptr, end_ptr, index, false, block, mtr);
+      //for non-compressed, do nothing.
       break;
 
     case MLOG_ZIP_PAGE_REORGANIZE:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = btr_parse_page_reorganize(ptr, end_ptr, index, true, block, mtr);
+        /* If dealing with a compressed page the record has the
+        compression level used during original compression written in
+        one byte. Otherwise record is empty. */
+        ulint level;
+        bool compressed = true;
+        if (compressed) {
+          if (ptr == end_ptr) {
+            return nullptr;
+          }
+
+          level = mach_read_from_1(ptr);
+
+          ut_a(level <= 9);
+          ++ptr;
+        }
       }
 
       break;
@@ -1092,68 +1138,79 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_COMP_PAGE_REORGANIZE_8027:
     case MLOG_ZIP_PAGE_REORGANIZE_8027:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
           (ptr = mlog_parse_index_8027(ptr, end_ptr, true, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
+        bool compressed = (type == MLOG_ZIP_PAGE_REORGANIZE_8027) ? true : false;
 
-        ptr = btr_parse_page_reorganize(ptr, end_ptr, index,
-                                        type == MLOG_ZIP_PAGE_REORGANIZE_8027,
-                                        block, mtr);
+        /* If dealing with a compressed page the record has the
+        compression level used during original compression written in
+        one byte. Otherwise record is empty. */
+        ulint level;
+        if (compressed) {
+          if (ptr == end_ptr) {
+            return nullptr;
+          }
+
+          level = mach_read_from_1(ptr);
+
+          ut_a(level <= 9);
+          ++ptr;
+        }
       }
-
       break;
 
     case MLOG_PAGE_CREATE:
     case MLOG_COMP_PAGE_CREATE:
 
-      ut_a(false);
       /* Allow anything in page_type when creating a page. */
-      ut_a(!page_zip);
       break;
 
     case MLOG_PAGE_CREATE_RTREE:
     case MLOG_COMP_PAGE_CREATE_RTREE:
-
-      ut_a(false);
-      page_parse_create(block, type == MLOG_COMP_PAGE_CREATE_RTREE,
-                        FIL_PAGE_RTREE);
-
+      //do nothing for pop changes to rapid
       break;
 
     case MLOG_PAGE_CREATE_SDI:
     case MLOG_COMP_PAGE_CREATE_SDI:
-
-      ut_a(false);
-      page_parse_create(block, type == MLOG_COMP_PAGE_CREATE_SDI, FIL_PAGE_SDI);
-
+      //do nothing for pop changes to rapid
       break;
 
-    case MLOG_UNDO_INSERT:
+    case MLOG_UNDO_INSERT: {
 
-      ptr = trx_undo_parse_add_undo_rec(ptr, end_ptr, nullptr);
+      ulint len;
+      if (end_ptr < ptr + 2) {
+        return nullptr;
+      }
 
+      len = mach_read_from_2(ptr);
+      ptr += 2;
+
+      if (end_ptr < ptr + len) {
+        return nullptr;
+      }
+
+      ptr = (ptr + len);
       break;
+    }
 
     case MLOG_UNDO_ERASE_END:
 
-      ut_a(false);
       ut_ad(!page || page_type == FIL_PAGE_UNDO_LOG);
-
-      ptr = trx_undo_parse_erase_page_end(ptr, end_ptr, page, mtr);
-
+      //do nothing.
       break;
 
-    case MLOG_UNDO_INIT:
+    case MLOG_UNDO_INIT: {
 
-      ut_a(false);
       /* Allow anything in page_type when creating a page. */
-
-      ptr = trx_undo_parse_page_init(ptr, end_ptr, page, mtr);
-
+      mach_parse_compressed((const byte**)&ptr, end_ptr);
+      if (ptr == nullptr) {
+        return nullptr;
+      }
       break;
+    }
     case MLOG_UNDO_HDR_CREATE:
     case MLOG_UNDO_HDR_REUSE:
       //just only advance the pointer.
@@ -1163,19 +1220,14 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
     case MLOG_REC_MIN_MARK:
     case MLOG_COMP_REC_MIN_MARK:
 
-      ut_a(false);
-      ut_ad(!page || fil_page_type_is_index(page_type));
-
       /* On a compressed page, MLOG_COMP_REC_MIN_MARK
       will be followed by MLOG_COMP_REC_DELETE
       or MLOG_ZIP_WRITE_HEADER(FIL_PAGE_PREV, FIL_nullptr)
       in the same mini-transaction. */
-
-      ut_a(type == MLOG_COMP_REC_MIN_MARK || !page_zip);
-
-      ptr = btr_parse_set_min_rec_mark(
-          ptr, end_ptr, type == MLOG_COMP_REC_MIN_MARK, page, mtr);
-
+      if (end_ptr < ptr + 2) {
+        return nullptr;
+      }
+      ptr = (ptr + 2);
       break;
 
     case MLOG_REC_DELETE:
@@ -1209,11 +1261,8 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 
     case MLOG_IBUF_BITMAP_INIT:
 
-      ut_a(false);
       /* Allow anything in page_type when creating a page. */
-
-      ptr = ibuf_parse_bitmap_init(ptr, end_ptr, block, mtr);
-
+      //do nothing.
       break;
 
     case MLOG_INIT_FILE_PAGE:
@@ -1222,13 +1271,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
       initialized. This is to avoid erasing encryption information. We cannot
       update encryption information later with redo logged information for
       clone. Please check comments in MLOG_WRITE_STRING. */
-      ut_a(false);
-      bool skip_init = (recv_sys->is_cloned_db && page_no == 0);
-
-      if (!skip_init) {
-        /* Allow anything in page_type when creating a page. */
-        ptr = fsp_parse_init_file_page(ptr, end_ptr, block);
-      }
+      //here, do nothing.
       break;
     }
 
@@ -1250,7 +1293,7 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
 #endif
       //just advance the pointer
       if (end_ptr < ptr + 4) {
-        return (nullptr);
+        return nullptr;
       }
 
       auto offset = mach_read_from_2(ptr);
@@ -1259,74 +1302,117 @@ byte *LogParser::parse_parse_or_apply_log_rec_body(
       ptr += 2;
 
       if (offset >= UNIV_PAGE_SIZE || len + offset > UNIV_PAGE_SIZE) {
-        ut_a(false);
+        return nullptr;
       }
 
       if (end_ptr < ptr + len) {
-        ut_a(false);
+        return nullptr;
       }
 
       ptr += len;
       break;
     }
 
-    case MLOG_ZIP_WRITE_NODE_PTR:
+    case MLOG_ZIP_WRITE_NODE_PTR: {
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      ptr = page_zip_parse_write_node_ptr(ptr, end_ptr, page, page_zip);
+      /*all come from page_zip_parse_write_node_ptr with creating the page,
+        just advance the ptr.
+      */
+      if (UNIV_UNLIKELY(end_ptr < ptr + (2 + 2 + REC_NODE_PTR_SIZE))) {
+        return nullptr;
+      }
 
+      auto offset = mach_read_from_2(ptr);
+      auto z_offset = mach_read_from_2(ptr + 2);
+
+      if (offset < PAGE_ZIP_START || offset >= UNIV_PAGE_SIZE ||
+          z_offset >= UNIV_PAGE_SIZE) {
+        //corrupt log
+        return nullptr;
+      }
+      ptr = (ptr + (2 + 2 + REC_NODE_PTR_SIZE));
       break;
+    }
 
     case MLOG_ZIP_WRITE_BLOB_PTR:
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      ptr = page_zip_parse_write_blob_ptr(ptr, end_ptr, page, page_zip);
+      //just advance the ptr, do nothing. no need to pop to rapid.
+      ptr =  (ptr + (2 + 2 + BTR_EXTERN_FIELD_REF_SIZE));
 
       break;
 
-    case MLOG_ZIP_WRITE_HEADER:
+    case MLOG_ZIP_WRITE_HEADER: {
 
-      ut_a(false);
       ut_ad(!page || fil_page_type_is_index(page_type));
+      if (UNIV_UNLIKELY(end_ptr < ptr + (1 + 1))) {
+        return nullptr;
+      }
 
-      ptr = page_zip_parse_write_header(ptr, end_ptr, page, page_zip);
+      auto offset = (ulint)*ptr++;
+      auto len = (ulint)*ptr++;
+
+      if (len == 0 || offset + len >= PAGE_DATA) {
+        //corrupt log
+        return nullptr;
+      }
+
+      if (end_ptr < ptr + len) {
+        return nullptr;
+      }
+
+      ptr = (ptr + len);
 
       break;
+    }
 
-    case MLOG_ZIP_PAGE_COMPRESS:
+    case MLOG_ZIP_PAGE_COMPRESS: {
 
-      ut_a(false);
       /* Allow anything in page_type when creating a page. */
-      ptr = page_zip_parse_compress(ptr, end_ptr, page, page_zip);
+      //ptr = page_zip_parse_compress(ptr, end_ptr, page, page_zip);
+      if (UNIV_UNLIKELY(ptr + (2 + 2) > end_ptr)) {
+         return nullptr;
+      }
+
+      auto size = mach_read_from_2(ptr);
+      ptr += 2;
+      auto trailer_size = mach_read_from_2(ptr);
+      ptr += 2;
+
+      if (UNIV_UNLIKELY(ptr + 8 + size + trailer_size > end_ptr)) {
+         return nullptr;
+      }
+      ptr = (ptr + 8 + size + trailer_size);
       break;
+    }
 
     case MLOG_ZIP_PAGE_COMPRESS_NO_DATA:
 
-      ut_a(false);
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || (page_is_comp(page) == dict_table_is_comp(index->table)));
+        if (end_ptr == ptr) {
+           return nullptr;
+        }
 
-        ptr = page_zip_parse_compress_no_data(ptr, end_ptr, page, page_zip,
-                                              index);
+        ptr = (ptr + 1);
       }
-
       break;
 
     case MLOG_ZIP_PAGE_COMPRESS_NO_DATA_8027:
 
-      ut_a(false);
       if (nullptr !=
           (ptr = mlog_parse_index_8027(ptr, end_ptr, true, &index))) {
         ut_a(!page || (page_is_comp(page) == dict_table_is_comp(index->table)));
 
-        ptr = page_zip_parse_compress_no_data(ptr, end_ptr, page, page_zip,
-                                              index);
-      }
+        if (end_ptr == ptr) {
+           return nullptr;
+        }
 
+        ptr = (ptr + 1);
+      }
       break;
 
     case MLOG_TEST:

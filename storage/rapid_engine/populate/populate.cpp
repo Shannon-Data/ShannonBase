@@ -52,12 +52,12 @@ std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer {nullptr};
 static ulint sys_rapid_loop_count;
 
 static void parse_log_func (log_t *log_ptr) {
-  std::unique_ptr<THD> log_pop_thread_thd {nullptr};
+  THD* log_pop_thread_thd {nullptr};
   if (current_thd == nullptr) {
-    log_pop_thread_thd.reset(create_internal_thd());
-    ut_ad(current_thd == log_pop_thread_thd.get());
+    log_pop_thread_thd = create_internal_thd();
+    if (!log_pop_thread_thd) return;
   }
-  
+
   os_event_reset(log_ptr->rapid_events[0]);
    //here we have a notifiyer, when checkpoint_lsn/flushed_lsn > rapid_lsn to start pop
   while (sys_pop_started.load(std::memory_order_seq_cst)) {
@@ -82,8 +82,11 @@ static void parse_log_func (log_t *log_ptr) {
     sys_population_buffer->remove(parsed_bytes);
   } //wile(pop_started)
 
-  destroy_internal_thd(current_thd);
-  log_pop_thread_thd.reset(nullptr);
+  os_event_set(log_ptr->rapid_events[0]);
+  if (log_pop_thread_thd) {
+    destroy_internal_thd(log_pop_thread_thd);
+    log_pop_thread_thd = nullptr;
+  }
   sys_pop_started.store(false, std::memory_order_seq_cst);
 }
 
