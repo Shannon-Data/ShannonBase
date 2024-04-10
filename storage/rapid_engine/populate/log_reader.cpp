@@ -298,7 +298,7 @@ int64_t RecordHandler::handle_mlog_file_x(const mlog_id_t &type,
       return (2 + handle_mlog_file_rename2(buffer, space_id, page_id, len,
                                            end_ptr));
     default: {
-      assert(false);
+      return 0;
     }
   }
 }
@@ -330,7 +330,7 @@ int64_t RecordHandler::handle_mlog_nbytes(const mlog_id_t &type,
                                                  space_id, page_id, page_offset,
                                                  end_ptr));
     default:
-      assert(false);
+      return 0;
   }
 }
 

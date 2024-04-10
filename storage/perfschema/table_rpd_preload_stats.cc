@@ -139,15 +139,15 @@ int table_rpd_preload_stats::make_row(uint index[[maybe_unused]]) {
 
     memset(m_row.table_schema, 0x0, NAME_LEN);
     strncpy(m_row.table_schema, ShannonBase::meta_rpd_columns_infos[index].schema_name,
-            strlen(ShannonBase::meta_rpd_columns_infos[index].schema_name));
+            sizeof(m_row.table_schema));
 
     memset(m_row.table_name, 0x0, NAME_LEN);
     strncpy(m_row.table_name, ShannonBase::meta_rpd_columns_infos[index].table_name,
-            strlen(ShannonBase::meta_rpd_columns_infos[index].table_name));
+            sizeof(m_row.table_name));
 
     memset(m_row.column_name, 0x0, NAME_LEN);
     strncpy(m_row.column_name, ShannonBase::meta_rpd_columns_infos[index].column_name,
-            strlen(ShannonBase::meta_rpd_columns_infos[index].column_name));
+            sizeof(m_row.column_name));
   }
   return 0;
 }
