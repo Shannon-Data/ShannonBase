@@ -51,7 +51,6 @@
 #include "storage/innobase/rem/rec.h"
 
 #include "sql/table.h"
-#include "sql/locking_service.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 namespace ShannonBase {
 extern ShannonLoadedTables* shannon_loaded_tables;

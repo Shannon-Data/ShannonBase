@@ -2736,9 +2736,9 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
     row_rpd_columns.table_id = static_cast<uint>(table.s->table_map_id.id());
     row_rpd_columns.column_id = field_ptr->field_index();
     strncpy(row_rpd_columns.column_name, field_ptr->field_name,
-            strlen(field_ptr->field_name));
+            sizeof (row_rpd_columns.column_name)-1);
     strncpy(row_rpd_columns.table_name, table.s->table_name.str,
-            strlen(table.s->table_name.str));
+            sizeof(row_rpd_columns.table_name)-1);
     std::string key_name (table.s->db.str);
     key_name += table.s->table_name.str;
     key_name += field_ptr->field_name;
