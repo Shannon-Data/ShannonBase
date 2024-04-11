@@ -52,6 +52,20 @@ score	name	id	gender
 #[conn_1]
 select * from tt;
 score	name	id	gender
+#[conn_2]
+begin;
+insert into tt values(10, 'n10', 10, 'm');
+insert into tt values(11, 'n11', 11, 'f');
+#[conn_1]
+select * from tt;
+score	name	id	gender
+#[conn_2]
+commit;
+#[conn_1]
+select * from tt;
+score	name	id	gender
+10	n10	10	m
+11	n11	11	f
 #[conn_1]
 set use_secondary_engine=off;
 alter table tt secondary_unload;

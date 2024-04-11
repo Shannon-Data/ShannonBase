@@ -61,6 +61,27 @@ select * from tt;
 --sleep 1
 select * from tt;
 
+--echo #[conn_2]
+--connection connection_2
+begin;
+insert into tt values(10, 'n10', 10, 'm');
+insert into tt values(11, 'n11', 11, 'f');
+
+--echo #[conn_1]
+--connection connection_1
+--sleep 1
+select * from tt;
+
+--echo #[conn_2]
+--connection connection_2
+commit;
+
+--echo #[conn_1]
+--connection connection_1
+--sleep 1
+select * from tt;
+
+
 --echo #[conn_1]
 --connection connection_1
 set use_secondary_engine=off;
