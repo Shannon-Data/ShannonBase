@@ -1330,4 +1330,5 @@ after DDL
 @param[in,out]  thd     THD object
 @param[in,out]  table   InnoDB table object */
 void innobase_discard_table(THD *thd, dict_table_t *table);
+
 #endif /* ha_innodb_h */

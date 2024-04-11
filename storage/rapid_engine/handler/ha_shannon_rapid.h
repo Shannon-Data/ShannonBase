@@ -45,6 +45,8 @@ class Table;
 }
 
 namespace ShannonBase {
+extern handlerton* shannon_rapid_hton_ptr;
+
 struct RapidShare {
   RapidShare(const TABLE& table) { thr_lock_init(&m_lock); m_source_table = &table;}
   ~RapidShare() { thr_lock_delete(&m_lock); }

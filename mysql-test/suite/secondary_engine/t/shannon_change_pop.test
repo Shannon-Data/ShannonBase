@@ -1,0 +1,73 @@
+##############################################################################
+# ShannonBase test case for query data.
+# ShannonBase copyright 2023-
+##############################################################################
+
+# Tests for the SECONDARY_ENGINE rapid changs pop.
+
+create database test_query;
+use test_query;
+create table tt (score int, name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
+
+--echo #connection_1 and cconnection_2
+--connect(connection_1,localhost,root,,test_query)
+--connect(connection_2,localhost,root,,test_query)
+
+--echo #[conn_1]
+--connection connection_1
+alter table tt secondary_load;
+set use_secondary_engine=forced;
+select * from tt;
+
+--echo #[conn_2]
+--connection connection_2
+insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+--sleep 1
+select * from tt;
+
+--echo #[conn_1] after insertion in conn2
+--connection connection_1
+--sleep 1
+select * from tt;
+
+--echo #[conn_2]
+--connection connection_2
+update tt set gender ='a' where id >=1 and id <3;
+select * from tt;
+
+--echo #[conn_1]
+--connection connection_1
+--sleep 1
+select * from tt;
+
+--echo #[conn_2]
+--connection connection_2
+delete from tt where id >=1  and id < 3;
+insert into tt values (9,'n9', 9, 'f');
+select * from tt;
+
+--echo #[conn_1]
+--connection connection_1
+--sleep 1
+select * from tt;
+
+--echo #[conn_2]
+--connection connection_2
+delete from tt;
+select * from tt;
+
+--echo #[conn_1]
+--connection connection_1
+--sleep 1
+select * from tt;
+
+--echo #[conn_1]
+--connection connection_1
+set use_secondary_engine=off;
+alter table tt secondary_unload;
+
+--connection default
+drop table tt;
+drop database test_query;
+disconnect connection_1;
+disconnect connection_2;
