@@ -62,7 +62,9 @@
 #include "template_utils.h"
 #include "thr_lock.h"
 
+#include "storage/innobase/include/lock0lock.h"
 #include "storage/innobase/include/trx0trx.h"
+#include "storage/innobase/include/dict0dd.h"
 #include "storage/innobase/handler/ha_innodb.h"
 
 #include "storage/rapid_engine/include/rapid_stats.h"
@@ -122,7 +124,7 @@ void ShannonLoadedTables::table_infos(uint index, ulonglong&tid, std::string& sc
 }  
 
 ShannonLoadedTables *shannon_loaded_tables{nullptr};
-static struct handlerton* shannon_rapid_hton_ptr {nullptr};
+handlerton* shannon_rapid_hton_ptr {nullptr};
 static bool shannon_rpd_inited {false};
 ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::get_instance();;
 
@@ -234,10 +236,10 @@ int ha_rapid::rapid_initialize() {
   m_start_of_scan = true;
 
   trx_t* trx = check_trx_exists (m_rpd_thd);
-  TrxInInnoDB trx_in_innodb(trx);
   trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
-  if (trx->isolation_level > TRX_ISO_READ_UNCOMMITTED)
+  if (trx->isolation_level > TRX_ISO_READ_UNCOMMITTED) {
     trx_assign_read_view(trx);
+  }
 
   //init rapidcontext
   m_rpd_context.reset(new ShannonBase::RapidContext());
@@ -253,19 +255,21 @@ int ha_rapid::rapid_initialize() {
   m_rpd_context->m_local_dict = loaded_dictionaries[m_rpd_context->m_current_db].get();
   m_rpd_context->m_extra_info.m_keynr = active_index;
   m_imcs_reader.reset(new ImcsReader(table)) ;
+
   return m_imcs_reader->open();
 }
 
 int ha_rapid::rapid_deinitialize() {
   if (m_start_of_scan) {
     m_start_of_scan = false;
-    if (m_rpd_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) {
-       trx_t* trx = thd_to_trx (m_rpd_thd);
-       if (trx->state == TRX_STATE_ACTIVE)
-         trx_commit(trx);
+    trx_t* trx = thd_to_trx (m_rpd_thd);
+    if (trx_is_started(trx)) {
+      const dberr_t error [[maybe_unused]] = trx_commit_for_mysql(trx);
+      ut_ad(DB_SUCCESS == error);
     }
-    m_imcs_reader->close();
+    trx->will_lock = 0;
 
+    m_imcs_reader->close();
     m_rpd_context.reset(nullptr);
     m_imcs_reader.reset(nullptr);
   }
@@ -948,6 +952,86 @@ static int ShannonStartConsistentSnapshot(handlerton* hton, THD* thd) {
   }
   return 0;
 }
+/** Frees a possible trx object associated with the current THD.
+ @return 0 or error number */
+static int ShannonCloseConnection(
+    handlerton *hton, /*!< in: handlerton */
+    THD *thd)         /*!< in: handle to the MySQL thread of the user
+                      whose resources should be free'd */
+{
+  DBUG_TRACE;
+  assert(hton == ShannonBase::shannon_rapid_hton_ptr);
+  trx_t* trx = thd_to_trx (thd);
+  if (trx && trx_is_started(trx)) {
+     //const dberr_t error [[maybe_unused]] = trx_commit_for_mysql(trx);
+     //ut_ad(DB_SUCCESS == error);
+     trx_commit(trx);
+     trx->will_lock = 0;
+  }
+
+  return 0;
+}
+/** Cancel any pending lock request associated with the current THD. */
+static void ShannonKillConnection(
+    handlerton *hton, /*!< in:  innobase handlerton */
+    THD *thd){         /*!< in: handle to the MySQL thread being
+                      killed */
+  DBUG_TRACE;
+  assert(hton == ShannonBase::shannon_rapid_hton_ptr);
+}
+
+/** Commits a transaction in an database or marks an SQL statement
+ ended.
+ @return 0 or deadlock error if the transaction was aborted by another
+         higher priority transaction. */
+static int ShannonCommit(handlerton *hton, /*!< in: handlerton */
+                         THD *thd,         /*!< in: MySQL thread handle of the
+                                             user for whom the transaction should
+                                             be committed */
+                         bool commit_trx) { /*!< in: true - commit transaction
+                                             false - the current SQL statement
+                                             ended */
+
+  return 0;
+}
+
+/** Rolls back a transaction or the latest SQL statement.
+ @return 0 or error number */
+static int ShannonRollback(handlerton *hton, /*!< in: handlerton */
+                           THD *thd, /*!< in: handle to the MySQL thread
+                                       of the user whose transaction should
+                                       be rolled back */
+                            bool rollback_trx) { /*!< in: true - rollback entire
+                                                transaction false - rollback the
+                                                current statement only */
+   return 0;
+}
+
+/** This function is used to prepare an X/Open XA distributed transaction.
+ @return 0 or error number */
+static int ShannonXAPrepare(handlerton *hton, /*!< in: handlerton */
+                               THD *thd, /*!< in: handle to the MySQL thread of
+                                         the user whose XA transaction should
+                                         be prepared */
+                               bool prepare_trx){ /*!< in: true - prepare
+                                                 transaction false - the current
+                                                 SQL statement ended */
+
+  return 0;
+}
+
+/** This function is used to recover X/Open XA distributed transactions.
+ @return number of prepared transactions stored in xid_list */
+static int ShannonXAReconver (
+    handlerton *hton,         /*!< in:  handlerton */
+    XA_recover_txn *txn_list, /*!< in/out: prepared transactions */
+    uint len,                 /*!< in: number of slots in xid_list */
+    MEM_ROOT *mem_root) {      /*!< in: memory for table names */
+
+
+  return 0;
+}
+
 /*********************************************************************
  *  Start to define the sys var for shannonbase rapid.
  *********************************************************************/
@@ -1066,7 +1150,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->create = ShannonCreateHandler;
   shannon_rapid_hton->state = SHOW_OPTION_YES;
   shannon_rapid_hton->flags = HTON_IS_SECONDARY_ENGINE;
-  shannon_rapid_hton->db_type = DB_TYPE_UNKNOWN;
+  shannon_rapid_hton->db_type = DB_TYPE_RAPID;
   shannon_rapid_hton->prepare_secondary_engine = ShannonPrepareSecondaryEngine;
   shannon_rapid_hton->optimize_secondary_engine = ShannonOptimizeSecondaryEngine;
   shannon_rapid_hton->compare_secondary_engine_cost = ShannonCompareJoinCost;
@@ -1074,8 +1158,13 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
       MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN);
   shannon_rapid_hton->secondary_engine_modify_access_path_cost = ShannonModifyAccessPathCost;
   shannon_rapid_hton->start_consistent_snapshot = ShannonStartConsistentSnapshot;
-  //shannon_rapid_hton->commit = ;
-  //shannon_rapid_hton->rollback = ;
+  shannon_rapid_hton->close_connection = ShannonCloseConnection;
+  shannon_rapid_hton->kill_connection = ShannonKillConnection;
+
+  shannon_rapid_hton->commit = ShannonCommit;
+  shannon_rapid_hton->rollback = ShannonRollback;
+  shannon_rapid_hton->prepare = ShannonXAPrepare;
+  shannon_rapid_hton->recover = ShannonXAReconver;
 
   //MEM_ROOT* mem_root = current_thd->mem_root;
   ShannonBase::imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
@@ -1110,12 +1199,12 @@ mysql_declare_plugin(shannon_rapid){
     PLUGIN_AUTHOR_SHANNON,
     "Shannon Rapid storage engine",
     PLUGIN_LICENSE_GPL,
-    Shannonbase_Rapid_Init,
-    nullptr,
-    Shannonbase_Rapid_Deinit,
+    Shannonbase_Rapid_Init,  /* Plugin Init */
+    nullptr,                 /* Plugin Check uninstall */
+    Shannonbase_Rapid_Deinit,/* Plugin Deinit */
     ShannonBase::SHANNON_RAPID_VERSION,
-    shannonbase_rapid_status_variables_export,
-    shannonbase_rapid_system_variables,
-    nullptr,
-    0,
+    shannonbase_rapid_status_variables_export,/* status variables */
+    shannonbase_rapid_system_variables,       /* system variables */
+    nullptr,                                   /* reserved */
+    0,                                         /* flags */
 } mysql_declare_plugin_end;
