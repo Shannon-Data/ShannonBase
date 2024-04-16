@@ -352,6 +352,13 @@ SET(SQL_GIS_SOURCES
   item_geofunc_relchecks.cc
   options_parser.cc
 )
+SET(SQL_VECTOR_SOURCES
+  vector/vector.cpp
+  vector/bitvector.cpp
+  vector/vector_comm.cpp
+  vector/bitvector.cpp
+  vector/halfutils.cpp
+)
 
 SET(SQL_SHARED_SOURCES
   auth/auth_acls.cc
@@ -995,6 +1002,10 @@ TARGET_INCLUDE_DIRECTORIES(auto_ml PUBLIC ${CMAKE_SOURCE_DIR}/extra/rapidjson/in
 #TARGET_LINK_LIBRARIES(auto_ml _lightgbm)
 TARGET_LINK_LIBRARIES(auto_ml)
 SET_TARGET_PROPERTIES(auto_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
+
+ADD_LIBRARY(sql_vector STATIC ${SQL_VECTOR_SOURCES})
+TARGET_LINK_LIBRARIES(sql_vector sql_dd sql_main)
+SET_TARGET_PROPERTIES(sql_vector PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 #
 # On Windows platform we compile in the client-side Windows Native Authentication
