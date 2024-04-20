@@ -46,12 +46,14 @@ class RapidContext;
 namespace Imcs {
 class Index;
 class Dictionary;
-/**A Snapshot Metadata Unit (SMU) contains metadata and transactional
- * information for an associated IMCU.*/
-class Snapshot_meta_unit {};
 class Chunk;
 class Cu : public MemoryObject {
  public:
+  /**A Snapshot Metadata Unit (SMU) contains metadata and transactional
+   * information for an associated IMCU.*/
+  class Snapshot_meta_unit {
+  };
+
   using Cu_header = struct alignas(CACHE_LINE_SIZE) Cu_header_t {
    public:
     // whether the is not null or not.
@@ -71,6 +73,7 @@ class Cu : public MemoryObject {
         m_sum{0};
     std::atomic<uint64> m_rows{0}, m_deleted_mark{0};
     const CHARSET_INFO* m_charset;
+    std::unique_ptr<Snapshot_meta_unit> m_smu;
   };
 
   explicit Cu(Field *field);

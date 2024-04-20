@@ -28,7 +28,7 @@
 #include <string>
 
 #include "sql-common/json_error_handler.h"
-//#include "lightgbm/include/LightGBM/application.h"
+#include "LightGBM/application.h"
 
 #include "ml_algorithm.h"
 #include "ml_regression.h"
