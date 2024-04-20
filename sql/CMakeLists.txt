@@ -24,10 +24,6 @@ INCLUDE_DIRECTORIES(SYSTEM ${BOOST_PATCHES_DIR} ${BOOST_INCLUDE_DIR})
 
 ADD_WSHADOW_WARNING()
 
-#INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/lightgbm/include)
-#LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/lightgbm/lib)
-LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/)
-
 # Lots of warnings about -Walloc-size-larger-than= from my_malloc.cc
 # but it is basically impossible to trace the actual origin.
 IF(FPROFILE_GENERATE OR FPROFILE_USE)
@@ -997,10 +993,14 @@ ADD_DEPENDENCIES(sql_dd GenKeywordList)
 TARGET_LINK_LIBRARIES(sql_dd sql_gis sql_main)
 SET_TARGET_PROPERTIES(sql_dd PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
+INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/include/)
+LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/lib)
 ADD_LIBRARY(auto_ml STATIC ${ML_SOURCES})
-TARGET_INCLUDE_DIRECTORIES(auto_ml PUBLIC ${CMAKE_SOURCE_DIR}/extra/rapidjson/include)
-#TARGET_LINK_LIBRARIES(auto_ml _lightgbm)
-TARGET_LINK_LIBRARIES(auto_ml)
+#LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/)
+TARGET_INCLUDE_DIRECTORIES(auto_ml PUBLIC
+                          ${CMAKE_SOURCE_DIR}/extra/rapidjson/include
+                          ${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/include/)
+TARGET_LINK_LIBRARIES(auto_ml _lightgbm)
 SET_TARGET_PROPERTIES(auto_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 ADD_LIBRARY(sql_vector STATIC ${SQL_VECTOR_SOURCES})
