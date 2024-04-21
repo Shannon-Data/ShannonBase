@@ -13,8 +13,8 @@ on:
       - '.devcontainer/**'
       - '.github/ISSUE_TEMPLATE/**'
   pull_request:
-    branches-ignore:
-      - main
+    # branches-ignore:
+    #   - main
         # wait for mergify to ignore
     paths-ignore:
       - 'Docs/**'
