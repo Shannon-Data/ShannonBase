@@ -1,0 +1,96 @@
+name: ShannonBase Compile & MTR
+
+on:
+  push:
+    branches-ignore:
+      - main
+    paths-ignore:
+      - 'Docs/**'
+      - 'docs/**'
+      - 'website/**'
+      - '**.md'
+      - 'scripts/setup/**'
+      - '.devcontainer/**'
+      - '.github/ISSUE_TEMPLATE/**'
+  pull_request:
+    branches-ignore:
+      - main
+        # wait for mergify to ignore
+    paths-ignore:
+      - 'Docs/**'
+      - 'docs/**'
+      - 'website/**'
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PROTOC: protoc
+
+defaults:
+  run:
+    shell: bash
+  
+
+jobs:
+  lint:
+    name: lint
+    # if: ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-testing') && github.event.pull_request.merged != true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      - uses: actions/checkout@v3
+        with:
+          clean: false
+      # - name: Check License Header
+      #   uses: apache/skywalking-eyes/header@main 
+      - name: Ensure clang-format-10 is available
+        run: |
+          command -v clang-format-10 > /dev/null || (apt-get update && apt-get install -y clang-format-10)
+      - name: Format check
+        run: |
+          git diff -U0 --no-color ${{ github.event.pull_request.base.sha }} HEAD storage/tianmu | /usr/share/clang/clang-format-10/clang-format-diff.py -p1 | tee /tmp/.clang-format-diff
+          [ -s /tmp/.clang-format-diff ] && exit 1 || true 
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: install_lib
+      run: apt update -y && apt upgrade -y && apt install -y libssl-dev libncurses-dev  libudev-dev   g++ libbison-dev flex clang-format lcov pkg-config cmake  zlib1g-dev wget build-essential   libldap-dev  libisl-dev libmpfr-dev patchelf libevent-dev -y && apt install libsasl2-dev -y
+    - name: install_gcc
+      run: apt install  bison texinfo libgmp3-dev   zlib1g-dev  -y && apt install gcc-10 g++-10 -y && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
+    - name: install_cmake
+      run: cd /tmp && wget https://github.com/Kitware/CMake/releases/download/v3.29.0-rc1/cmake-3.29.0-rc1.tar.gz && tar zxvf cmake-3.29.0-rc1.tar.gz && cd cmake-3.29.0-rc1 && ./bootstrap --prefix=/usr/local/cmake && make -j$(nproc) && make install
+    - name: install_boost
+      run: cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && ./b2 install
+    - name: cmake
+      run: cd - && /usr/local/cmake/bin/cmake ../ \
+  -DWITH_BOOST=/usr/local/boost/include \
+  -DCMAKE_BUILD_TYPE=Debug  \
+  -DCMAKE_INSTALL_PREFIX=/usr/local/shannon-bin/bin \
+  -DMYSQL_DATADIR=/var/lib/shannon-bin/data \
+  -DSYSCONFDIR=. \
+  -DMYSQL_UNIX_ADDR=/var/lib/shannon-bin/mysql.sock \
+  -DWITH_EMBEDDED_SERVER=OFF \
+  -DWITH_MYISAM_STORAGE_ENGINE=1 \
+  -DWITH_INNOBASE_STORAGE_ENGINE=1 \
+  -DWITH_PARTITION_STORAGE_ENGINE=1 \
+  -DMYSQL_TCP_PORT=3306 \
+  -DENABLED_LOCAL_INFILE=1 \
+  -DWITH_LIBEVENT=bundled \
+  -DEXTRA_CHARSETS=all \
+  -DWITH_PROTOBUF=bundled \
+  -DWITH_SSL_PATH=/usr/include/openssl/ \
+  -DDEFAULT_SET=community \
+  -DWITH_UNIT_TESTS=OFF \
+  -DENABLE_GCOV=1 \
+  -DWITH_DEBUG=1 \
+  -DWITH_ASAN=1 \
+  -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)"
