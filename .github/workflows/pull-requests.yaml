@@ -71,26 +71,30 @@ jobs:
     - name: install_boost
       run: cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && ./b2 install
     - name: cmake
-      run: cd - && /usr/local/cmake/bin/cmake ../ \
-  -DWITH_BOOST=/usr/local/boost/include \
-  -DCMAKE_BUILD_TYPE=Debug  \
-  -DCMAKE_INSTALL_PREFIX=/usr/local/shannon-bin/bin \
-  -DMYSQL_DATADIR=/var/lib/shannon-bin/data \
-  -DSYSCONFDIR=. \
-  -DMYSQL_UNIX_ADDR=/var/lib/shannon-bin/mysql.sock \
-  -DWITH_EMBEDDED_SERVER=OFF \
-  -DWITH_MYISAM_STORAGE_ENGINE=1 \
-  -DWITH_INNOBASE_STORAGE_ENGINE=1 \
-  -DWITH_PARTITION_STORAGE_ENGINE=1 \
-  -DMYSQL_TCP_PORT=3306 \
-  -DENABLED_LOCAL_INFILE=1 \
-  -DWITH_LIBEVENT=bundled \
-  -DEXTRA_CHARSETS=all \
-  -DWITH_PROTOBUF=bundled \
-  -DWITH_SSL_PATH=/usr/include/openssl/ \
-  -DDEFAULT_SET=community \
-  -DWITH_UNIT_TESTS=OFF \
-  -DENABLE_GCOV=1 \
-  -DWITH_DEBUG=1 \
-  -DWITH_ASAN=1 \
-  -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)"
+      run: |
+        mkdir build && cd build
+        git config --global --add safe.directory /__w/stonedb/stonedb
+        git fetch --tags -f
+        /usr/local/cmake/bin/cmake ../ \
+        -DWITH_BOOST=/usr/local/boost/include \
+        -DCMAKE_BUILD_TYPE=Debug  \
+        -DCMAKE_INSTALL_PREFIX=/usr/local/shannon-bin/bin \
+        -DMYSQL_DATADIR=/var/lib/shannon-bin/data \
+        -DSYSCONFDIR=. \
+        -DMYSQL_UNIX_ADDR=/var/lib/shannon-bin/mysql.sock \
+        -DWITH_EMBEDDED_SERVER=OFF \
+        -DWITH_MYISAM_STORAGE_ENGINE=1 \
+        -DWITH_INNOBASE_STORAGE_ENGINE=1 \
+        -DWITH_PARTITION_STORAGE_ENGINE=1 \
+        -DMYSQL_TCP_PORT=3306 \
+        -DENABLED_LOCAL_INFILE=1 \
+        -DWITH_LIBEVENT=bundled \
+        -DEXTRA_CHARSETS=all \
+        -DWITH_PROTOBUF=bundled \
+        -DWITH_SSL_PATH=/usr/include/openssl/ \
+        -DDEFAULT_SET=community \
+        -DWITH_UNIT_TESTS=OFF \
+        -DENABLE_GCOV=1 \
+        -DWITH_DEBUG=1 \
+        -DWITH_ASAN=1 \
+        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)"
