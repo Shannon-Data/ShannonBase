@@ -996,11 +996,11 @@ SET_TARGET_PROPERTIES(sql_dd PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/include/)
 LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/lib)
 ADD_LIBRARY(auto_ml STATIC ${ML_SOURCES})
-#LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/)
+LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/)
 TARGET_INCLUDE_DIRECTORIES(auto_ml PUBLIC
                           ${CMAKE_SOURCE_DIR}/extra/rapidjson/include
                           ${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/include/)
-TARGET_LINK_LIBRARIES(auto_ml _lightgbm)
+TARGET_LINK_LIBRARIES(auto_ml _lightgbm gomp)
 SET_TARGET_PROPERTIES(auto_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 ADD_LIBRARY(sql_vector STATIC ${SQL_VECTOR_SOURCES})
@@ -1272,7 +1272,7 @@ ENDIF()
 SET_TARGET_PROPERTIES(mysqld PROPERTIES ENABLE_EXPORTS TRUE)
 TARGET_LINK_LIBRARIES(mysqld
   sql_main sql_gis binlog rpl rpl_source rpl_replica sql_dd mysys
-  minchassis binlogevents_static auto_ml ext::icu)
+  minchassis binlogevents_static auto_ml sql_vector ext::icu)
 
 # Add dependency on ldap library, to ensure it is not unloaded
 # when we shutdown the authentication plugin.

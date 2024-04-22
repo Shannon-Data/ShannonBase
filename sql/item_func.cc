@@ -150,6 +150,7 @@
 #include "template_utils.h"  // pointer_cast
 #include "thr_mutex.h"
 
+#include "ml/auto_ml.h" //auto_ml
 using std::max;
 using std::min;
 
@@ -10029,8 +10030,38 @@ longlong Item_func_internal_is_enabled_role::val_int() {
 }
 
 longlong Item_func_ml_train::val_int() {
-  
-  return 0;
+  assert(fixed == 1);
+  //ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle)
+
+  String schema_name;
+  String in_target_name;
+  String in_model_handle;
+
+  String *schema_name_ptr = args[0]->val_str(&schema_name);
+  size_t dot_pos = std::strstr(schema_name.c_ptr(), ".") - schema_name.c_ptr();
+  std::string sch_name_str(schema_name.c_ptr(), dot_pos -1 );
+  std::string table_str(schema_name.c_ptr() + dot_pos +1, schema_name.length() - dot_pos );
+
+  String *target_name_ptr = args[1]->val_str(&in_target_name);
+  std::string targ_name_str(in_target_name.c_ptr());
+
+  Json_wrapper in_option;
+  bool option_flag = args[2]->val_json(&in_option);
+
+  String *model_handler_ptr = args[3]->val_str(&in_model_handle);
+  std::string model_handler_str(in_model_handle.c_ptr());
+
+  if (schema_name_ptr == nullptr || target_name_ptr == nullptr ||
+      option_flag == false || model_handler_ptr == nullptr) {
+    return 0;
+  }
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml_ptr =
+    std::make_unique<ShannonBase::ML::Auto_ML>(sch_name_str,
+                                               table_str,
+                                               targ_name_str,
+                                               in_option, model_handler_str);
+  return auto_ml_ptr->train();
 }
 
 longlong Item_func_ml_model_load::val_int() {
