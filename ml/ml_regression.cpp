@@ -36,10 +36,12 @@
 #include "sql/table.h"
 #include "sql/handler.h"
 #include "sql-common/json_dom.h" //Json_wrapper.
-#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 
+#include "storage/innobase/include/ut0dbg.h" //ut_a
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "ml_utils.h"
 
+#include "LightGBM/c_api.h"
 // clang-format off
 // clang-format on
 namespace ShannonBase {
@@ -76,13 +78,13 @@ int ML_regression::train() {
   if (Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ, &source_table_ptr))
     return HA_ERR_GENERIC;
 
-  auto feature_num = source_table_ptr->file->stats.records;
-  auto sample_num = source_table_ptr->s->fields;
-  Traing_data_t train_data((size_t)feature_num, std::vector<double>(sample_num));
+  auto n_rows = source_table_ptr->file->stats.records;
+  auto  n_cols = source_table_ptr->s->fields;
+  Traing_data_t train_data(n_rows, std::vector<double>(n_cols));
 
   unique_ptr_destroy_only<handler> tb_handler(Utils::get_secondary_handler(source_table_ptr));
-  /* Read the traning data into train_data vector from rapid engine. here,
-  we use training data as lablels too */
+  /* Read the traning data into train_data vector from rapid engine. here, we use training data
+  as lablels too */
   my_bitmap_map *old_map =
   tmp_use_all_columns(source_table_ptr, source_table_ptr->read_set);
   tb_handler->ha_open(source_table_ptr, source_table_ptr->s->table_name.str, O_RDONLY,
@@ -93,10 +95,13 @@ int ML_regression::train() {
     return HA_ERR_GENERIC;
   }
   //table full scan to train the model. the cols means `sample data` and row menas `feature number`
-  auto index = 0;
+  ha_rows index = 0;
+  char feature_names[MAX_FIELDS][MAX_FIELD_CHARLENGTH]={0}; //here can specicify multi-features.
   while (tb_handler->ha_rnd_next(source_table_ptr->record[0]) == 0) {
     for (auto field_id = 0u; field_id < source_table_ptr->s->fields; field_id++) {
       Field* field_ptr = *(source_table_ptr->field + field_id);
+      std::memcpy((feature_names + index), field_ptr->field_name, strlen(field_ptr->field_name));
+
       double data_val{0.0};
       switch (field_ptr->type()) {
         case MYSQL_TYPE_INT24:
@@ -118,31 +123,36 @@ int ML_regression::train() {
     }
     index++;
   }
+  ut_a(n_rows == index);
+
   if (old_map) tmp_restore_column_map(source_table_ptr->read_set, old_map);
   tb_handler->ha_rnd_end();
   tb_handler->ha_external_lock(thd, F_UNLCK);
   tb_handler->ha_close();
   Utils::close_table(source_table_ptr);
 
-  feature_num = index;
-  //TODO: using the data to train the model by the specific ML libs.
-  //DatasetHandle train_dataset_handler;
-  std::string parameters = "";
-  //auto ret = LGBM_DatasetCreateFromMat(reinterpret_cast<const void*>(train_data.data()), C_API_DTYPE_FLOAT64,
-  //                          sample_num, feature_num, 1, parameters.c_str(), nullptr, &train_dataset_handler);
-  int ret{0};
+  std::string parameters ="max_bin=254 ";
+  DatasetHandle train_dataset_handler{nullptr};
+  auto ret = LGBM_DatasetCreateFromMat(reinterpret_cast<const void*>(train_data.data()), C_API_DTYPE_FLOAT64,
+                            n_rows, n_cols, 1, parameters.c_str(), nullptr, &train_dataset_handler);
+  ret = LGBM_DatasetSetFeatureNames(train_dataset_handler, reinterpret_cast<const char**>(feature_names), n_rows);
+  int num_data{0}, feat_nums{0};
+  ret = LGBM_DatasetGetNumData(train_dataset_handler, &num_data);
+  ret = LGBM_DatasetGetNumFeature(train_dataset_handler, &feat_nums);
+
   if (ret == -1)
     return HA_ERR_GENERIC;
 
-  std::string mode_params = "objective=regression";
-  //BoosterHandle booster;
-  //ret = LGBM_BoosterCreate(train_dataset_handler, mode_params.c_str(), &booster);
+  std::string mode_params = "task=train objective=regression num_leaves=31 verbose=0";
+  BoosterHandle booster;
+  ret = LGBM_BoosterCreate(train_dataset_handler, mode_params.c_str(), &booster);
+  ret = LGBM_BoosterAddValidData(booster, train_dataset_handler);
   if (ret == -1)
     return HA_ERR_GENERIC;
 
-  int finished;
+  int finished{0};
   for (auto iter = 0; iter < 100; ++iter) {
-    //ret = LGBM_BoosterUpdateOneIter(booster, &finished);
+    ret = LGBM_BoosterUpdateOneIter(booster, &finished);
     if (ret == -1)
       return HA_ERR_GENERIC;
     if (finished) break;
@@ -150,18 +160,24 @@ int ML_regression::train() {
 
   int64_t bufflen(1024), out_len{0};
   std::unique_ptr<char[]> model_buffer = std::make_unique<char[]>(out_len);
-  //ret = LGBM_BoosterSaveModelToString(booster, 0, -1, 0, bufflen, &out_len, model_buffer.get());
+  ret = LGBM_BoosterSaveModelToString(booster, 0, -1, 0, bufflen, &out_len, model_buffer.get());
   if (ret ==-1)
     return HA_ERR_GENERIC;
 
   if (out_len > bufflen) {
     bufflen = out_len;
-    model_buffer.reset(new char[bufflen]);
-    //ret = LGBM_BoosterSaveModelToString(booster, 0, -1, 0, bufflen, &out_len, model_buffer.get());
+    model_buffer.reset(new char[bufflen + 1]);
+    ret = LGBM_BoosterSaveModelToString(booster,
+                                       0, //start iter idx
+                                       -1,//end inter idx
+                                       C_API_FEATURE_IMPORTANCE_GAIN, //feature_importance_type
+                                       bufflen, //buff len
+                                       &out_len, //out len
+                                       model_buffer.get());
   }
 
-  //LGBM_DatasetFree(train_dataset_handler);
-  //LGBM_BoosterFree(booster);
+  ret = LGBM_DatasetFree(train_dataset_handler);
+  ret = LGBM_BoosterFree(booster);
   //the definition of this table, ref: `ml_train.sql`
   TABLE* cat_tale_ptr{nullptr};
   std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
@@ -241,7 +257,7 @@ int ML_regression::train() {
   ret = cat_tale_ptr->file->ha_write_row(cat_tale_ptr->record[0]);
   cat_tale_ptr->file->ha_external_lock(thd, F_UNLCK);
 
-  //m_handler->set(booster);
+  m_handler->set(booster);
   return ret;
 }
 
