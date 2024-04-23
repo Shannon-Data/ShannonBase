@@ -41,124 +41,12 @@ namespace ML {
 std::unique_ptr<ShannonBase::ML::ML_algorithm> Auto_ML::m_ml_task = nullptr;
 
 Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_name,
-                 Json_wrapper options, std::string handler) : m_schema_name(schema),
+                 Json_wrapper* options, std::string handler) : m_schema_name(schema),
                                                               m_table_name(table_name),
                                                               m_target_name(target_name),
                                                               m_options(options),
                                                               m_handler(handler) {
   init_task_map();
-
-  auto dom_ptr = m_options.clone_dom();
-  if (dom_ptr) { //parse the options.
-    Json_object *json_obj = down_cast<Json_object *>(dom_ptr.get());
-
-    auto task_dom = json_obj->get("task");
-    if (task_dom && task_dom->json_type() == enum_json_type::J_STRING) {
-      m_opt_task = down_cast<Json_string *>(task_dom)->value();
-      std::transform(m_opt_task.begin(), m_opt_task.end(), m_opt_task.begin(), ::toupper);
-    }
-    auto datetime_index_dom = json_obj->get("datetime_index");
-    if (datetime_index_dom && datetime_index_dom->json_type() == enum_json_type::J_STRING) {
-       m_opt_datetime_index = down_cast<Json_string *>(datetime_index_dom)->value();
-    }
-    auto endogenous_variables_dom = json_obj->get("endogenous_variables");
-    if (endogenous_variables_dom &&
-        endogenous_variables_dom->json_type() == enum_json_type::J_ARRAY) {
-      auto var_arrary =  down_cast<Json_array *>(endogenous_variables_dom);
-      m_opt_endogenous_variables = get_array_string(var_arrary);
-    }
-    auto exogenous_variables_dom = json_obj->get("exogenous_variables");
-    if (exogenous_variables_dom &&
-        exogenous_variables_dom->json_type() == enum_json_type::J_ARRAY) {
-      auto var_arrary =  down_cast<Json_array *>(exogenous_variables_dom);
-      m_opt_exogenous_variables = get_array_string(var_arrary);
-    }
-    auto model_list_dom = json_obj->get("model_list");
-    if (model_list_dom && model_list_dom->json_type() == enum_json_type::J_ARRAY) {
-      auto var_arrary =  down_cast<Json_array *>(model_list_dom);
-      m_opt_model_list = get_array_string(var_arrary);
-    }
-    auto exclude_model_list_dom = json_obj->get("exclude_model_list");
-    if (exclude_model_list_dom &&
-        exclude_model_list_dom->json_type() == enum_json_type::J_ARRAY) {
-      auto var_arrary =  down_cast<Json_array *>(exclude_model_list_dom);
-      m_opt_exclude_model_list = get_array_string(var_arrary);
-    }
-    auto optimization_metric_dom = json_obj->get("optimization_metric");
-    if (optimization_metric_dom &&
-        optimization_metric_dom->json_type() == enum_json_type::J_STRING) {
-      m_opt_optimization_metric = down_cast<Json_string *>(optimization_metric_dom)->value();
-    }
-    auto include_column_list_dom = json_obj->get("include_column_list");
-    if (include_column_list_dom &&
-        include_column_list_dom->json_type() == enum_json_type::J_ARRAY) {
-      auto var_arrary =  down_cast<Json_array *>(include_column_list_dom);
-      m_opt_include_column_list = get_array_string(var_arrary);
-    }
-    auto exclude_column_list_dom = json_obj->get("exclude_column_list");
-    if (exclude_column_list_dom &&
-        exclude_column_list_dom->json_type() == enum_json_type::J_ARRAY) {
-      auto var_arrary =  down_cast<Json_array *>(exclude_column_list_dom);
-      m_opt_exclude_column_list = get_array_string(var_arrary);
-    }
-    auto contamination_dom = json_obj->get("contamination");
-    if (contamination_dom && contamination_dom->json_type() == enum_json_type::J_DOUBLE) {
-      m_opt_contamination = down_cast<Json_double *>(exclude_column_list_dom)->value();
-    }
-    auto users_dom =  json_obj->get("users");
-    if (users_dom && users_dom->json_type() == enum_json_type::J_STRING) {
-      m_opt_users = down_cast<Json_string *>(users_dom)->value();
-    }
-    auto items_dom =  json_obj->get("items");
-    if (items_dom && items_dom->json_type() == enum_json_type::J_STRING) {
-      m_opt_item = down_cast<Json_string *>(items_dom)->value();
-    }
-    auto notes_dom =  json_obj->get("notes");
-    if (notes_dom && notes_dom->json_type() == enum_json_type::J_STRING) {
-      m_opt_notes = down_cast<Json_string *>(notes_dom)->value();
-    }
-    auto feedback_dom =  json_obj->get("feedback");
-    if (feedback_dom && feedback_dom->json_type() == enum_json_type::J_STRING) {
-      m_opt_feedback = down_cast<Json_string *>(feedback_dom)->value();
-    }
-    auto feedback_threshold_dom =  json_obj->get("feedback_threshold");
-    if (feedback_threshold_dom && feedback_dom->json_type() == enum_json_type::J_STRING) {
-      m_opt_feedback_threshold = down_cast<Json_double *>(feedback_threshold_dom)->value();
-    }
-  }
-
-  switch (m_opt_task_map[m_opt_task]) {
-    //if we have already had an instance of cf task, then do nothing, using the old instance.
-    case ML_TASK_TYPE::CLASSIFICATION:
-      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::CLASSIFICATION)
-        m_ml_task.reset(new ML_classification());
-      break;
-    case ML_TASK_TYPE::REGRESSION:
-      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::REGRESSION)
-        m_ml_task.reset(new ML_regression(m_schema_name, m_table_name,
-                                                  m_target_name, m_handler, &m_options));
-      else {
-        down_cast<ML_regression*>(m_ml_task.get())->set_schema(m_schema_name);
-        down_cast<ML_regression*>(m_ml_task.get())->set_table(m_table_name);
-        down_cast<ML_regression*>(m_ml_task.get())->set_target(m_target_name);
-        down_cast<ML_regression*>(m_ml_task.get())->set_options(&m_options);
-        down_cast<ML_regression*>(m_ml_task.get())->set_handle_name(m_handler);
-      }
-      break;
-    case ML_TASK_TYPE::FORECASTING:
-       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::FORECASTING)
-        m_ml_task.reset (new ML_forecasting());
-      break;
-    case ML_TASK_TYPE::ANOMALY_DETECTION:
-       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::ANOMALY_DETECTION)
-        m_ml_task.reset(new ML_anomaly_detection());
-      break;
-    case ML_TASK_TYPE::RECOMMENDATION:
-        if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::RECOMMENDATION)
-        m_ml_task.reset (new ML_recommendation());
-      break;
-    default: assert(false);
-  }
 }
 
 Auto_ML::~Auto_ML() {
@@ -188,6 +76,113 @@ void Auto_ML::init_task_map() {
   m_opt_task_map.insert({"FORECASTING", ML_TASK_TYPE::FORECASTING});
   m_opt_task_map.insert({"ANOMALY_DETECTION", ML_TASK_TYPE::ANOMALY_DETECTION});
   m_opt_task_map.insert({"RECOMMENDATION", ML_TASK_TYPE::RECOMMENDATION});
+
+  auto dom_ptr = m_options->clone_dom();
+  if (dom_ptr) { //parse the options.
+    Json_object *json_obj = down_cast<Json_object *>(dom_ptr.get());
+
+    Json_dom* value_dom_ptr{nullptr};
+    value_dom_ptr = json_obj->get("task");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+      m_opt_task = down_cast<Json_string *>(value_dom_ptr)->value();
+      std::transform(m_opt_task.begin(), m_opt_task.end(), m_opt_task.begin(), ::toupper);
+    }
+    value_dom_ptr = json_obj->get("datetime_index");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+       m_opt_datetime_index = down_cast<Json_string *>(value_dom_ptr)->value();
+    }
+    value_dom_ptr = json_obj->get("endogenous_variables");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
+      auto var_arrary =  down_cast<Json_array *>(value_dom_ptr);
+      m_opt_endogenous_variables = get_array_string(var_arrary);
+    }
+    value_dom_ptr = json_obj->get("exogenous_variables");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
+      auto var_arrary =  down_cast<Json_array *>(value_dom_ptr);
+      m_opt_exogenous_variables = get_array_string(var_arrary);
+    }
+    value_dom_ptr = json_obj->get("model_list");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
+      auto var_arrary =  down_cast<Json_array *>(value_dom_ptr);
+      m_opt_model_list = get_array_string(var_arrary);
+    }
+    value_dom_ptr = json_obj->get("exclude_model_list");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
+      auto var_arrary =  down_cast<Json_array *>(value_dom_ptr);
+      m_opt_exclude_model_list = get_array_string(var_arrary);
+    }
+    value_dom_ptr = json_obj->get("optimization_metric");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+      m_opt_optimization_metric = down_cast<Json_string *>(value_dom_ptr)->value();
+    }
+    value_dom_ptr = json_obj->get("include_column_list");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
+      auto var_arrary =  down_cast<Json_array *>(value_dom_ptr);
+      m_opt_include_column_list = get_array_string(var_arrary);
+    }
+    value_dom_ptr = json_obj->get("exclude_column_list");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
+      auto var_arrary =  down_cast<Json_array *>(value_dom_ptr);
+      m_opt_exclude_column_list = get_array_string(var_arrary);
+    }
+    value_dom_ptr = json_obj->get("contamination");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_DOUBLE) {
+      m_opt_contamination = down_cast<Json_double *>(value_dom_ptr)->value();
+    }
+    value_dom_ptr =  json_obj->get("users");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+      m_opt_users = down_cast<Json_string *>(value_dom_ptr)->value();
+    }
+    value_dom_ptr =  json_obj->get("items");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+      m_opt_item = down_cast<Json_string *>(value_dom_ptr)->value();
+    }
+    value_dom_ptr =  json_obj->get("notes");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+      m_opt_notes = down_cast<Json_string *>(value_dom_ptr)->value();
+    }
+    value_dom_ptr =  json_obj->get("feedback");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+      m_opt_feedback = down_cast<Json_string *>(value_dom_ptr)->value();
+    }
+    value_dom_ptr =  json_obj->get("feedback_threshold");
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+      m_opt_feedback_threshold = down_cast<Json_double *>(value_dom_ptr)->value();
+    }
+  }
+
+  switch (m_opt_task_map[m_opt_task]) {
+    //if we have already had an instance of cf task, then do nothing, using the old instance.
+    case ML_TASK_TYPE::CLASSIFICATION:
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::CLASSIFICATION)
+        m_ml_task.reset(new ML_classification());
+      break;
+    case ML_TASK_TYPE::REGRESSION:
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::REGRESSION)
+        m_ml_task.reset(new ML_regression(m_schema_name, m_table_name,
+                                          m_target_name, m_handler, m_options));
+      else {
+        down_cast<ML_regression*>(m_ml_task.get())->set_schema(m_schema_name);
+        down_cast<ML_regression*>(m_ml_task.get())->set_table(m_table_name);
+        down_cast<ML_regression*>(m_ml_task.get())->set_target(m_target_name);
+        down_cast<ML_regression*>(m_ml_task.get())->set_options(m_options);
+        down_cast<ML_regression*>(m_ml_task.get())->set_handle_name(m_handler);
+      }
+      break;
+    case ML_TASK_TYPE::FORECASTING:
+       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::FORECASTING)
+        m_ml_task.reset (new ML_forecasting());
+      break;
+    case ML_TASK_TYPE::ANOMALY_DETECTION:
+       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::ANOMALY_DETECTION)
+        m_ml_task.reset(new ML_anomaly_detection());
+      break;
+    case ML_TASK_TYPE::RECOMMENDATION:
+        if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::RECOMMENDATION)
+        m_ml_task.reset (new ML_recommendation());
+      break;
+    default: assert(false);
+  }
 }
 
 int Auto_ML::train() {

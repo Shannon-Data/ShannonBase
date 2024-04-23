@@ -301,16 +301,17 @@ int ML_regression::load(std::string model_handle_name, std::string user_name) {
   cat_table_ptr->file->ha_external_lock(thd, F_UNLCK);
   Utils::close_table(cat_table_ptr);
 
-  //BoosterHandle bt_handler;
+  BoosterHandle bt_handler;
   int out_num_iterations;
-  //if (LGBM_BoosterLoadModelFromString(model_content.c_ptr(), &out_num_iterations, &bt_handler) == -1)
-  //  return HA_ERR_GENERIC;
+  if (LGBM_BoosterLoadModelFromString(model_content.c_ptr(), &out_num_iterations, &bt_handler) == -1)
+    return HA_ERR_GENERIC;
 
-  //m_handler->set(bt_handler);
+  m_handler->set(bt_handler);
   return 0;
 }
 
-int  ML_regression::load_from_file (std::string modle_file_full_path, std::string model_handle_name) {
+int  ML_regression::load_from_file (std::string modle_file_full_path,
+                                    std::string model_handle_name[[maybe_unused]]) {
   //to update the `MODEL_CATALOG.MODEL_OBJECT`
   if (check_valid_path(modle_file_full_path.c_str(), modle_file_full_path.length()))
     return HA_ERR_GENERIC;
@@ -318,10 +319,10 @@ int  ML_regression::load_from_file (std::string modle_file_full_path, std::strin
   return 0;
 }
 
-int ML_regression::unload(std::string model_handle_name) {
+int ML_regression::unload(std::string model_handle_name[[maybe_unused]]) {
   if (m_handler->get()) {
-    //BoosterHandle bt_handler = m_handler->get();
-    //LGBM_BoosterFree(bt_handler);
+    BoosterHandle bt_handler = m_handler->get();
+    LGBM_BoosterFree(bt_handler);
     m_handler->set(nullptr);
   }
   return 0;
@@ -330,12 +331,12 @@ int ML_regression::unload(std::string model_handle_name) {
 int ML_regression::import(std::string model_handle_name, std::string user_name, std::string& content) {
   THD* thd = current_thd;
 
-  //BoosterHandle bt_handler;
+  BoosterHandle bt_handler;
   int out_num_iterations;
-  //if (LGBM_BoosterLoadModelFromString(content.c_str(), &out_num_iterations, &bt_handler) == -1)
-  //  return HA_ERR_GENERIC;
+  if (LGBM_BoosterLoadModelFromString(content.c_str(), &out_num_iterations, &bt_handler) == -1)
+    return HA_ERR_GENERIC;
 
-  //m_handler->set(bt_handler);
+  m_handler->set(bt_handler);
 
   TABLE* cat_tale_ptr{nullptr};
   std::string catalog_schema_name = "ML_SCHEMA_" + user_name;

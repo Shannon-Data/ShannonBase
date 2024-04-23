@@ -10030,38 +10030,43 @@ longlong Item_func_internal_is_enabled_role::val_int() {
 }
 
 longlong Item_func_ml_train::val_int() {
-  assert(fixed == 1);
+  DBUG_TRACE;
   //ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle)
+  assert(arg_count>= 3 && arg_count <= 4 );
+  THD* thd [[maybe_unused]] = current_thd;
 
-  String schema_name;
-  String in_target_name;
-  String in_model_handle;
+  /**schema_table_name can not be empty, it checked in ML_train SP. and the format of that
+   * is `schema_name.table_name`  */
+  String sch_tb_name;
+  auto sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
+  auto sch_tb_name_cptr = sch_tb_name_ptr->c_ptr_safe();
+  auto pos = std::strstr(sch_tb_name_cptr, ".") - sch_tb_name_cptr;
+  std::string schema_name(sch_tb_name_cptr, pos);
+  std::string table_name(sch_tb_name_cptr + pos +1, sch_tb_name_ptr->length() - pos);
 
-  String *schema_name_ptr = args[0]->val_str(&schema_name);
-  size_t dot_pos = std::strstr(schema_name.c_ptr(), ".") - schema_name.c_ptr();
-  std::string sch_name_str(schema_name.c_ptr(), dot_pos -1 );
-  std::string table_str(schema_name.c_ptr() + dot_pos +1, schema_name.length() - dot_pos );
+  String target_col_name;
+  auto target_col_name_ptr = args[1]->val_str(&target_col_name);
 
-  String *target_name_ptr = args[1]->val_str(&in_target_name);
-  std::string targ_name_str(in_target_name.c_ptr());
-
-  Json_wrapper in_option;
-  bool option_flag = args[2]->val_json(&in_option);
-
-  String *model_handler_ptr = args[3]->val_str(&in_model_handle);
-  std::string model_handler_str(in_model_handle.c_ptr());
-
-  if (schema_name_ptr == nullptr || target_name_ptr == nullptr ||
-      option_flag == false || model_handler_ptr == nullptr) {
-    return 0;
+  String handle_name, *handle_name_ptr;
+  Json_wrapper options;
+  if (arg_count> 3) {
+    auto ret = args[2]->val_json(&options);
+    if (ret) //cannot get the options.
+      return 1;
+    handle_name_ptr = args[3]->val_str(&handle_name);
+  } else{
+    handle_name_ptr = args[2]->val_str(&handle_name);
   }
 
-  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml_ptr =
-    std::make_unique<ShannonBase::ML::Auto_ML>(sch_name_str,
-                                               table_str,
-                                               targ_name_str,
-                                               in_option, model_handler_str);
-  return auto_ml_ptr->train();
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>(schema_name,
+                                                table_name,
+                                                std::string(target_col_name_ptr->c_ptr()),
+                                                &options,
+                                                std::string(handle_name_ptr->c_ptr()));
+  /**To invoke ML libs to train ML models*/
+  auto result = auto_ml->train();
+  return result;
 }
 
 longlong Item_func_ml_model_load::val_int() {
