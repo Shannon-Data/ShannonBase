@@ -41,7 +41,7 @@ namespace ML {
 class Auto_ML {
   public:
     Auto_ML(std::string schema, std::string table_name, std::string target_name,
-            Json_wrapper options, std::string handler);
+            Json_wrapper* options, std::string handler);
     ~Auto_ML();
     int train();
     int load();
@@ -55,7 +55,7 @@ class Auto_ML {
      std::string m_schema_name;
      std::string m_table_name;
      std::string m_target_name;
-     Json_wrapper m_options;
+     Json_wrapper* m_options;
      std::string m_handler;
 
      //the followings are parsed from m_options.

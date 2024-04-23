@@ -88,7 +88,7 @@ handler* Utils::get_secondary_handler(TABLE* source_table_ptr) {
   return get_new_handler(source_table_ptr->s, is_partitioned, thd->mem_root, hton);
 }
 
-int Utils::close_table(TABLE* table) {
+int Utils::close_table(TABLE* table[[maybe_unused]]) {
   return 0;
 }
 } //ns:ml

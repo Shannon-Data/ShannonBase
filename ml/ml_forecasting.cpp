@@ -43,20 +43,23 @@ int ML_forecasting::predict() {
   return 0;
 }
 
-int ML_forecasting::load(std::string model_handle_name, std::string user_name) {
+int ML_forecasting::load(std::string model_handle_name [[maybe_unused]],
+                         std::string user_name [[maybe_unused]]) {
   return 0;
 }
 
-int ML_forecasting::load_from_file (std::string modle_file_full_path,
-                                    std::string model_handle_name) {
+int ML_forecasting::load_from_file (std::string modle_file_full_path [[maybe_unused]],
+                                    std::string model_handle_name [[maybe_unused]]) {
   return 0;
 }
 
-int ML_forecasting::unload(std::string model_handle_name) {
+int ML_forecasting::unload(std::string model_handle_name [[maybe_unused]]) {
   return 0;
 }
 
-int ML_forecasting::import(std::string model_handle_name, std::string user_name, std::string& content) {
+int ML_forecasting::import(std::string model_handle_name [[maybe_unused]],
+                          std::string user_name [[maybe_unused]],
+                          std::string& content [[maybe_unused]]) {
   return 0;
 }
 

@@ -67,7 +67,9 @@ bool Utils::f2d_small_int(const uint32 ieeeMantissa, const uint32 ieeeExponent,
   return false;
 }
 
-int Utils::float_to_shortest_decimal_bufn(float f, char *result) { return 0; }
+int Utils::float_to_shortest_decimal_bufn(float f[[maybe_unused]], char *result[[maybe_unused]]) {
+   return 0; 
+}
 
 }  // namespace Vector
 }  // namespace ShannonBase
