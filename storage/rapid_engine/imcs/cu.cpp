@@ -81,6 +81,8 @@ bool Cu::init_header_info(const Field* field) {
   m_header->m_charset = field->charset();
   m_header->m_nullable = field->is_real_null();
 
+  m_header->m_smu = std::make_unique<Snapshot_meta_unit>();
+
   std::string comment(field->comment.str);
   std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
   const char *const patt_str =

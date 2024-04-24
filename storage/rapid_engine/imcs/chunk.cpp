@@ -211,7 +211,7 @@ bool Chunk::deleted (const uchar* data) {
 
   uint8 info =
       *((uint8 *)(m_data_cursor + SHANNON_INFO_BYTE_OFFSET));  // info byte
-  return (info & DATA_DELETE_FLAG_MASK) ? true : false;
+  return (info & DATA_DELETE_FLAG_MASK);
 }
 
 bool Chunk::is_null(const uchar* data) {
@@ -219,7 +219,7 @@ bool Chunk::is_null(const uchar* data) {
 
   uint8 info =
       *((uint8 *)(m_data_cursor + SHANNON_INFO_BYTE_OFFSET));  // info byte
-  return (info & DATA_NULL_FLAG_MASK) ? true : false;
+  return (info & DATA_NULL_FLAG_MASK);
 }
 
 uchar *Chunk::write_data_direct(ShannonBase::RapidContext *context, const uchar* pos,
@@ -291,18 +291,13 @@ ha_rows Chunk::records_in_range(ShannonBase::RapidContext *context,
   double data_val{0};
 
   while (cur_pos < m_data.load(std::memory_order::memory_order_seq_cst)) {
-    if (deleted(cur_pos)) {  // deleted.
-      cur_pos += SHANNON_ROW_TOTAL_LEN;
-      continue;
-    }
-
     trx_id_t trxid =
         *((trx_id_t *)(cur_pos + SHANNON_TRX_ID_BYTE_OFFSET));  // trxid bytes
     // visibility check at firt.
     table_name_t name{const_cast<char *>(context->m_current_db.c_str())};
     ReadView *read_view = trx_get_read_view(context->m_trx);
     ut_ad(read_view);
-    if (!read_view->changes_visible(trxid, name) || deleted(cur_pos)) {  // invisible and deleted
+    if (deleted(cur_pos) || !read_view->changes_visible(trxid, name)) {  // invisible and deleted
       // TODO: travel the change link to get the visibile version data.
       cur_pos += SHANNON_ROW_TOTAL_LEN;  // to the next value.
       continue;
@@ -310,11 +305,11 @@ ha_rows Chunk::records_in_range(ShannonBase::RapidContext *context,
 
     data_val = *(double *)(cur_pos + SHANNON_DATA_BYTE_OFFSET);
     if ((is_valid(min_key) && !is_valid(max_key)) &&
-        is_greater_than_or_eq(data_val, min_key)) {
+        is_greater_than(data_val, min_key)) {
       count++;
-    } else if ((!is_valid(min_key) && is_valid(max_key)) && is_less_than_or_eq(data_val, max_key)) {
+    } else if ((!is_valid(min_key) && is_valid(max_key)) && is_less_than(data_val, max_key)) {
       count++;
-    } else if ((is_valid(min_key) && is_valid(max_key)) &&  are_equal(data_val, min_key))
+    } else
       count++;
 
     cur_pos += SHANNON_ROW_TOTAL_LEN;

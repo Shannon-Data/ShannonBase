@@ -43,20 +43,23 @@ int ML_recommendation::predict() {
   return 0;
 }
 
-int ML_recommendation::load(std::string model_handle_name, std::string user_name) {
+int ML_recommendation::load(std::string model_handle_name [[maybe_unused]],
+                            std::string user_name[[maybe_unused]]) {
   return 0;
 }
 
-int ML_recommendation::load_from_file (std::string modle_file_full_path,
-                                       std::string model_handle_name) {
+int ML_recommendation::load_from_file (std::string modle_file_full_path [[maybe_unused]],
+                                       std::string model_handle_name[[maybe_unused]]) {
   return 0;
 }
 
-int ML_recommendation::unload(std::string model_handle_name) {
+int ML_recommendation::unload(std::string model_handle_name[[maybe_unused]]) {
   return 0;
 }
 
-int ML_recommendation::import(std::string model_handle_name, std::string user_name, std::string& content) {
+int ML_recommendation::import(std::string model_handle_name[[maybe_unused]],
+                              std::string user_name[[maybe_unused]],
+                              std::string& content[[maybe_unused]]) {
   return 0;
 }
 

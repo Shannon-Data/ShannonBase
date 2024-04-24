@@ -24,10 +24,6 @@ INCLUDE_DIRECTORIES(SYSTEM ${BOOST_PATCHES_DIR} ${BOOST_INCLUDE_DIR})
 
 ADD_WSHADOW_WARNING()
 
-#INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/lightgbm/include)
-#LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/lightgbm/lib)
-LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/)
-
 # Lots of warnings about -Walloc-size-larger-than= from my_malloc.cc
 # but it is basically impossible to trace the actual origin.
 IF(FPROFILE_GENERATE OR FPROFILE_USE)
@@ -351,6 +347,13 @@ SET(SQL_GIS_SOURCES
   item_geofunc_internal.cc
   item_geofunc_relchecks.cc
   options_parser.cc
+)
+SET(SQL_VECTOR_SOURCES
+  vector/vector.cpp
+  vector/bitvector.cpp
+  vector/vector_comm.cpp
+  vector/bitvector.cpp
+  vector/halfutils.cpp
 )
 
 SET(SQL_SHARED_SOURCES
@@ -990,11 +993,19 @@ ADD_DEPENDENCIES(sql_dd GenKeywordList)
 TARGET_LINK_LIBRARIES(sql_dd sql_gis sql_main)
 SET_TARGET_PROPERTIES(sql_dd PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
-ADD_LIBRARY(auto_ml STATIC ${ML_SOURCES})
-TARGET_INCLUDE_DIRECTORIES(auto_ml PUBLIC ${CMAKE_SOURCE_DIR}/extra/rapidjson/include)
-#TARGET_LINK_LIBRARIES(auto_ml _lightgbm)
-TARGET_LINK_LIBRARIES(auto_ml)
-SET_TARGET_PROPERTIES(auto_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
+INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/include/)
+LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/lib)
+ADD_LIBRARY(sql_ml STATIC ${ML_SOURCES})
+LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/)
+TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC
+                          ${CMAKE_SOURCE_DIR}/extra/rapidjson/include
+                          ${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/include/)
+TARGET_LINK_LIBRARIES(sql_ml _lightgbm)
+SET_TARGET_PROPERTIES(sql_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
+
+ADD_LIBRARY(sql_vector STATIC ${SQL_VECTOR_SOURCES})
+TARGET_LINK_LIBRARIES(sql_vector sql_dd sql_main)
+SET_TARGET_PROPERTIES(sql_vector PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 #
 # On Windows platform we compile in the client-side Windows Native Authentication
@@ -1261,7 +1272,7 @@ ENDIF()
 SET_TARGET_PROPERTIES(mysqld PROPERTIES ENABLE_EXPORTS TRUE)
 TARGET_LINK_LIBRARIES(mysqld
   sql_main sql_gis binlog rpl rpl_source rpl_replica sql_dd mysys
-  minchassis binlogevents_static auto_ml ext::icu)
+  minchassis binlogevents_static sql_ml sql_vector ext::icu)
 
 # Add dependency on ldap library, to ensure it is not unloaded
 # when we shutdown the authentication plugin.
