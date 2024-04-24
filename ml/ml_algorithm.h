@@ -58,17 +58,6 @@ enum class MODEL_CATALOG_FIELD_INDEX : int {
   NOTES
 };
 
-class ML_handler {
-  public:
-    explicit ML_handler(void* handler) : m_handler(handler) {}
-    ML_handler() {}
-    virtual ~ML_handler() {}
-    void set(void* handler) { m_handler = handler; }
-    void* get() { return m_handler; }
-  private:
-    void* m_handler{nullptr};
-};
-
 //the interface of ml tasks.
 class ML_algorithm {
   public:

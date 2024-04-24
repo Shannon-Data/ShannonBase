@@ -48,20 +48,6 @@ namespace ShannonBase {
 extern ShannonLoadedTables* shannon_loaded_tables;
 
 namespace ML {
-ML_regression::ML_regression(std::string sch_name, std::string table_name,
-                             std::string target_name, std::string handler_name,
-                             Json_wrapper* options)
-                                                  : m_sch_name(sch_name),
-                                                  m_table_name(table_name),
-                                                  m_target_name(target_name),
-                                                  m_handler_name(handler_name),
-                                                  m_options(options) {
-  m_handler  = std::make_unique<ML_handler>();
-}
-
-ML_regression::~ML_regression() {
-}
-
 int ML_regression::train() {
   THD* thd = current_thd;
   std::string user_name(thd->security_context()->user().str);
@@ -78,10 +64,7 @@ int ML_regression::train() {
   if (Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ, &source_table_ptr))
     return HA_ERR_GENERIC;
 
-  auto n_rows = source_table_ptr->file->stats.records;
   auto  n_cols = source_table_ptr->s->fields;
-  Traing_data_t train_data(n_rows, std::vector<double>(n_cols));
-
   unique_ptr_destroy_only<handler> tb_handler(Utils::get_secondary_handler(source_table_ptr));
   /* Read the traning data into train_data vector from rapid engine. here, we use training data
   as lablels too */
@@ -94,13 +77,13 @@ int ML_regression::train() {
   if (tb_handler->ha_rnd_init(true)) {
     return HA_ERR_GENERIC;
   }
+
   //table full scan to train the model. the cols means `sample data` and row menas `feature number`
-  ha_rows index = 0;
-  char feature_names[MAX_FIELDS][MAX_FIELD_CHARLENGTH]={0}; //here can specicify multi-features.
+  ha_rows r_index = 0;
+  Traing_data_t train_data;
   while (tb_handler->ha_rnd_next(source_table_ptr->record[0]) == 0) {
     for (auto field_id = 0u; field_id < source_table_ptr->s->fields; field_id++) {
       Field* field_ptr = *(source_table_ptr->field + field_id);
-      std::memcpy((feature_names + index), field_ptr->field_name, strlen(field_ptr->field_name));
 
       double data_val{0.0};
       switch (field_ptr->type()) {
@@ -119,11 +102,10 @@ int ML_regression::train() {
         } break;
         default: break;
       }
-      train_data[index][field_id] = data_val;
+      train_data[r_index][field_id] = data_val;
     }
-    index++;
+    r_index++;
   }
-  ut_a(n_rows == index);
 
   if (old_map) tmp_restore_column_map(source_table_ptr->read_set, old_map);
   tb_handler->ha_rnd_end();
@@ -134,8 +116,7 @@ int ML_regression::train() {
   std::string parameters ="max_bin=254 ";
   DatasetHandle train_dataset_handler{nullptr};
   auto ret = LGBM_DatasetCreateFromMat(reinterpret_cast<const void*>(train_data.data()), C_API_DTYPE_FLOAT64,
-                            n_rows, n_cols, 1, parameters.c_str(), nullptr, &train_dataset_handler);
-  ret = LGBM_DatasetSetFeatureNames(train_dataset_handler, reinterpret_cast<const char**>(feature_names), n_rows);
+                            r_index, n_cols, 1, parameters.c_str(), nullptr, &train_dataset_handler);
   int num_data{0}, feat_nums{0};
   ret = LGBM_DatasetGetNumData(train_dataset_handler, &num_data);
   ret = LGBM_DatasetGetNumFeature(train_dataset_handler, &feat_nums);
@@ -257,7 +238,7 @@ int ML_regression::train() {
   ret = cat_tale_ptr->file->ha_write_row(cat_tale_ptr->record[0]);
   cat_tale_ptr->file->ha_external_lock(thd, F_UNLCK);
 
-  m_handler->set(booster);
+  m_handler = booster;
   return ret;
 }
 
@@ -306,24 +287,29 @@ int ML_regression::load(std::string model_handle_name, std::string user_name) {
   if (LGBM_BoosterLoadModelFromString(model_content.c_ptr(), &out_num_iterations, &bt_handler) == -1)
     return HA_ERR_GENERIC;
 
-  m_handler->set(bt_handler);
+  m_handler = bt_handler;
   return 0;
 }
 
-int  ML_regression::load_from_file (std::string modle_file_full_path,
-                                    std::string model_handle_name[[maybe_unused]]) {
+int ML_regression::load_from_file (std::string modle_file_full_path,
+                                   std::string model_handle_name) {
   //to update the `MODEL_CATALOG.MODEL_OBJECT`
-  if (check_valid_path(modle_file_full_path.c_str(), modle_file_full_path.length()))
+  if (check_valid_path(modle_file_full_path.c_str(), modle_file_full_path.length())
+     ||!model_handle_name.length())
     return HA_ERR_GENERIC;
 
   return 0;
 }
 
-int ML_regression::unload(std::string model_handle_name[[maybe_unused]]) {
-  if (m_handler->get()) {
-    BoosterHandle bt_handler = m_handler->get();
+int ML_regression::unload(std::string model_handle_name){
+  if (!model_handle_name.length()) {
+    return HA_ERR_GENERIC;
+  }
+
+  if (m_handler) {
+    BoosterHandle bt_handler = m_handler;
     LGBM_BoosterFree(bt_handler);
-    m_handler->set(nullptr);
+    m_handler = nullptr;
   }
   return 0;
 }
@@ -336,7 +322,7 @@ int ML_regression::import(std::string model_handle_name, std::string user_name, 
   if (LGBM_BoosterLoadModelFromString(content.c_str(), &out_num_iterations, &bt_handler) == -1)
     return HA_ERR_GENERIC;
 
-  m_handler->set(bt_handler);
+  m_handler = bt_handler;
 
   TABLE* cat_tale_ptr{nullptr};
   std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
