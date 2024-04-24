@@ -10037,17 +10037,16 @@ longlong Item_func_ml_train::val_int() {
 
   /**schema_table_name can not be empty, it checked in ML_train SP. and the format of that
    * is `schema_name.table_name`  */
-  String sch_tb_name;
+  String sch_tb_name, target_col_name, handle_name;
+  String *handle_name_ptr;
   auto sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
   auto sch_tb_name_cptr = sch_tb_name_ptr->c_ptr_safe();
   auto pos = std::strstr(sch_tb_name_cptr, ".") - sch_tb_name_cptr;
   std::string schema_name(sch_tb_name_cptr, pos);
   std::string table_name(sch_tb_name_cptr + pos +1, sch_tb_name_ptr->length() - pos);
 
-  String target_col_name;
   auto target_col_name_ptr = args[1]->val_str(&target_col_name);
 
-  String handle_name, *handle_name_ptr;
   Json_wrapper options;
   if (arg_count> 3) {
     auto ret = args[2]->val_json(&options);

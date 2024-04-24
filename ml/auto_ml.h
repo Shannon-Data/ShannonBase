@@ -51,6 +51,7 @@ class Auto_ML {
   private:
      std::string get_array_string (Json_array* array);
      void init_task_map();
+     void build_task (std::string task_str);
    private:
      std::string m_schema_name;
      std::string m_table_name;
@@ -60,7 +61,7 @@ class Auto_ML {
 
      //the followings are parsed from m_options.
      // {'classification'|'regression'|'forecasting'|'anomaly_detection'|'recommendation'}|NULL
-     std::string m_opt_task;
+     std::string m_task_type_str;
      std::map<std::string, ML_TASK_TYPE> m_opt_task_map;
      //'column'
      std::string m_opt_datetime_index;
@@ -91,7 +92,7 @@ class Auto_ML {
      // 'threshold'
      double m_opt_feedback_threshold{1.0f};
 
-     static std::unique_ptr<ML_algorithm> m_ml_task;
+     std::unique_ptr<ML_algorithm> m_ml_task{nullptr};
 };
 
 } //ML

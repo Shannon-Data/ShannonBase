@@ -38,15 +38,12 @@
 
 namespace ShannonBase {
 namespace ML {
-std::unique_ptr<ShannonBase::ML::ML_algorithm> Auto_ML::m_ml_task = nullptr;
-
 Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_name,
                  Json_wrapper* options, std::string handler) : m_schema_name(schema),
                                                               m_table_name(table_name),
                                                               m_target_name(target_name),
                                                               m_options(options),
                                                               m_handler(handler) {
-  init_task_map();
 }
 
 Auto_ML::~Auto_ML() {
@@ -60,7 +57,7 @@ std::string Auto_ML::get_array_string (Json_array* array) {
   std::string ret_val;
   if (!array) return ret_val;
 
-  for (auto id = 0u; id <  array->size(); id++) {
+  for (auto id = 0u; id < array->size(); id++) {
      Json_dom* it = (*array)[id];
      if (it && it->json_type() == enum_json_type::J_STRING) {
         ret_val += down_cast<Json_string*> (it)->value() + ",";
@@ -80,13 +77,13 @@ void Auto_ML::init_task_map() {
   auto dom_ptr = m_options->clone_dom();
   if (dom_ptr) { //parse the options.
     Json_object *json_obj = down_cast<Json_object *>(dom_ptr.get());
-
     Json_dom* value_dom_ptr{nullptr};
     value_dom_ptr = json_obj->get("task");
     if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
-      m_opt_task = down_cast<Json_string *>(value_dom_ptr)->value();
-      std::transform(m_opt_task.begin(), m_opt_task.end(), m_opt_task.begin(), ::toupper);
+      m_task_type_str = down_cast<Json_string *>(value_dom_ptr)->value();
+      std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
     }
+
     value_dom_ptr = json_obj->get("datetime_index");
     if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
        m_opt_datetime_index = down_cast<Json_string *>(value_dom_ptr)->value();
@@ -146,12 +143,18 @@ void Auto_ML::init_task_map() {
       m_opt_feedback = down_cast<Json_string *>(value_dom_ptr)->value();
     }
     value_dom_ptr =  json_obj->get("feedback_threshold");
-    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+    if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_DOUBLE) {
       m_opt_feedback_threshold = down_cast<Json_double *>(value_dom_ptr)->value();
     }
   }
 
-  switch (m_opt_task_map[m_opt_task]) {
+  build_task(m_task_type_str);
+}
+
+void Auto_ML::build_task (std::string task_str) {
+  if (!m_opt_task_map.size()) return;
+
+  switch (m_opt_task_map[task_str]) {
     //if we have already had an instance of cf task, then do nothing, using the old instance.
     case ML_TASK_TYPE::CLASSIFICATION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::CLASSIFICATION)
@@ -159,15 +162,13 @@ void Auto_ML::init_task_map() {
       break;
     case ML_TASK_TYPE::REGRESSION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::REGRESSION)
-        m_ml_task.reset(new ML_regression(m_schema_name, m_table_name,
-                                          m_target_name, m_handler, m_options));
-      else {
-        down_cast<ML_regression*>(m_ml_task.get())->set_schema(m_schema_name);
-        down_cast<ML_regression*>(m_ml_task.get())->set_table(m_table_name);
-        down_cast<ML_regression*>(m_ml_task.get())->set_target(m_target_name);
-        down_cast<ML_regression*>(m_ml_task.get())->set_options(m_options);
-        down_cast<ML_regression*>(m_ml_task.get())->set_handle_name(m_handler);
-      }
+        m_ml_task.reset(new ML_regression());
+
+      down_cast<ML_regression*>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_regression*>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_regression*>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_regression*>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_regression*>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     case ML_TASK_TYPE::FORECASTING:
        if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::FORECASTING)
@@ -181,14 +182,17 @@ void Auto_ML::init_task_map() {
         if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::RECOMMENDATION)
         m_ml_task.reset (new ML_recommendation());
       break;
-    default: assert(false);
+    default: break;
   }
+  return ;
 }
 
 int Auto_ML::train() {
-  if (m_ml_task)
-     return m_ml_task->train();
+  if (!m_opt_task_map.size()) {
+    init_task_map();
+  }
 
+  auto ret = m_ml_task? m_ml_task->train() : 1;
   return 0;
 }
 
