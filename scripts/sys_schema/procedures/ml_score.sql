@@ -24,7 +24,7 @@ CREATE PROCEDURE sys.ml_score (
 Description
 -----------
 
-Run the ML_TRAIN routine on a labeled training dataset to produce a trained machine learning model.
+Run the ml_score routine on a labeled training dataset to produce a trained machine learning model.
 
 Parameters
 -----------
@@ -41,7 +41,7 @@ in_model_handle (VARCHAR(64))
 Example
 -----------
 mysql> SET @iris_model = \'iris_manual\';
-mysql> CALL sys.ML_TRAIN(\'ml_data.iris_train\', \'class\', 
+mysql> CALL sys.ml_score(\'ml_data.iris_train\', \'class\', 
           JSON_OBJECT(\'task\', \'classification\'), 
           @iris_model);
 ...    
