@@ -64,7 +64,8 @@ int ML_regression::train() {
   if (Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ, &source_table_ptr))
     return HA_ERR_GENERIC;
 
-  auto  n_cols = source_table_ptr->s->fields;
+  auto n_sample = source_table_ptr->file->stats.records;
+  auto n_feature = source_table_ptr->s->fields;
   unique_ptr_destroy_only<handler> tb_handler(Utils::get_secondary_handler(source_table_ptr));
   /* Read the traning data into train_data vector from rapid engine. here, we use training data
   as lablels too */
@@ -80,7 +81,7 @@ int ML_regression::train() {
 
   //table full scan to train the model. the cols means `sample data` and row menas `feature number`
   ha_rows r_index = 0;
-  Traing_data_t train_data;
+  Traing_data_t train_data(n_sample, std::vector<double>(n_feature));
   while (tb_handler->ha_rnd_next(source_table_ptr->record[0]) == 0) {
     for (auto field_id = 0u; field_id < source_table_ptr->s->fields; field_id++) {
       Field* field_ptr = *(source_table_ptr->field + field_id);
@@ -106,6 +107,7 @@ int ML_regression::train() {
     }
     r_index++;
   }
+  ut_a(n_sample == r_index);
 
   if (old_map) tmp_restore_column_map(source_table_ptr->read_set, old_map);
   tb_handler->ha_rnd_end();
@@ -116,7 +118,7 @@ int ML_regression::train() {
   std::string parameters ="max_bin=254 ";
   DatasetHandle train_dataset_handler{nullptr};
   auto ret = LGBM_DatasetCreateFromMat(reinterpret_cast<const void*>(train_data.data()), C_API_DTYPE_FLOAT64,
-                            r_index, n_cols, 1, parameters.c_str(), nullptr, &train_dataset_handler);
+                            n_sample, n_feature, 1, parameters.c_str(), nullptr, &train_dataset_handler);
   int num_data{0}, feat_nums{0};
   ret = LGBM_DatasetGetNumData(train_dataset_handler, &num_data);
   ret = LGBM_DatasetGetNumFeature(train_dataset_handler, &feat_nums);
@@ -234,7 +236,7 @@ int ML_regression::train() {
   field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::NOTES)];
   field_ptr->set_notnull();
   field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci);
-  //???binlog???
+  //???binlog??? pop thread is running ????
   ret = cat_tale_ptr->file->ha_write_row(cat_tale_ptr->record[0]);
   cat_tale_ptr->file->ha_external_lock(thd, F_UNLCK);
 

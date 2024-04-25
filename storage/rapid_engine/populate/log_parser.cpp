@@ -1501,6 +1501,7 @@ ulint LogParser::parse_parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
 
       table_id_t id;
       uint64_t version;
+      bool corrupt;
 
       *page_no = FIL_NULL;
       *space_id = SPACE_UNKNOWN;
@@ -1509,10 +1510,39 @@ ulint LogParser::parse_parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
           mlog_parse_initial_dict_log_record(ptr, end_ptr, type, &id, &version);
 
       if (new_ptr != nullptr) {
-        new_ptr = recv_sys->metadata_recover->parseMetadataLog(
-            id, version, new_ptr, end_ptr);
-      }
+        //new_ptr = recv_sys->metadata_recover->parseMetadataLog(
+        //    id, version, new_ptr, end_ptr);
+        if (ptr + 2 > end_ptr) {
+          /* At least we should get type byte and another one byte
+          for data, if not, it's an incomplete log */
+          new_ptr = nullptr;
+          goto next_ptr_meta_parse;
+        }
 
+        persistent_type_t type = static_cast<persistent_type_t>(ptr[0]);
+
+        ut_ad(dict_persist->persisters != nullptr);
+
+        Persister *persister = dict_persist->persisters->get(type);
+        if (persister == nullptr) {
+          new_ptr = ptr;
+          goto next_ptr_meta_parse;
+        }
+        ptr++;
+
+        PersistentTableMetadata new_entry{id, version};
+        ulint consumed = persister->read(new_entry, ptr, end_ptr - ptr, &corrupt);
+        if (corrupt) {
+          new_ptr = ptr + consumed;
+          goto next_ptr_meta_parse;
+        }
+        if (consumed == 0) {
+          new_ptr = nullptr;
+          goto next_ptr_meta_parse;
+        }
+        new_ptr = ptr + consumed;
+      }
+next_ptr_meta_parse:
       return new_ptr == nullptr ? 0 : new_ptr - ptr;
   }
 
