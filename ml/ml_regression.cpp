@@ -66,6 +66,14 @@ int ML_regression::train() {
 
   auto n_sample = source_table_ptr->file->stats.records;
   auto n_feature = source_table_ptr->s->fields;
+
+  std::vector<const char*> feature_name_vec(n_feature);
+  for(auto idx = 0u; idx < n_feature; idx++) {
+    auto field_ptr = *(source_table_ptr->s->field + idx);
+    feature_name_vec.emplace_back(field_ptr->field_name);
+  }
+
+
   unique_ptr_destroy_only<handler> tb_handler(Utils::get_secondary_handler(source_table_ptr));
   /* Read the traning data into train_data vector from rapid engine. here, we use training data
   as lablels too */
@@ -120,6 +128,7 @@ int ML_regression::train() {
   auto ret = LGBM_DatasetCreateFromMat(reinterpret_cast<const void*>(train_data.data()), C_API_DTYPE_FLOAT64,
                             n_sample, n_feature, 1, parameters.c_str(), nullptr, &train_dataset_handler);
   int num_data{0}, feat_nums{0};
+  ret = LGBM_DatasetSetFeatureNames(train_dataset_handler, (const char **)feature_name_vec.data(), n_feature);
   ret = LGBM_DatasetGetNumData(train_dataset_handler, &num_data);
   ret = LGBM_DatasetGetNumFeature(train_dataset_handler, &feat_nums);
 
@@ -248,45 +257,11 @@ int ML_regression::predict() {
   return 0;
 }
 
-int ML_regression::load(std::string model_handle_name, std::string user_name) {
+int ML_regression::load(std::string& model_content) {
   //the definition of this table, ref: `ml_train.sql`
-  THD* thd = current_thd;
-  std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
-
-  std::string cat_table_name = "MODEL_CATALOG";
-  TABLE* cat_table_ptr{nullptr};
-  if (Utils::open_table_by_name(catalog_schema_name, cat_table_name, TL_WRITE, &cat_table_ptr))
-    return HA_ERR_GENERIC;
-
-  cat_table_ptr->file->ha_external_lock(thd, F_WRLCK | F_RDLCK);
-  cat_table_ptr->use_all_columns();
-  cat_table_ptr->file->ha_rnd_init(true);
-
-  String modle_handle_name_str, model_user_name_str, model_content;
-  modle_handle_name_str.set_charset(&my_charset_utf8mb4_general_ci);
-  model_user_name_str.set_charset(&my_charset_utf8mb4_general_ci);
-  model_content.set_charset(&my_charset_utf8mb4_general_ci);
-  Field* field_ptr {nullptr};
-  while (cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]) == 0) { //to get the data.
-    field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
-    field_ptr->val_str(&modle_handle_name_str);
-
-    field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OWNER)];
-    field_ptr->val_str(&model_user_name_str);
-    if (!strcmp(modle_handle_name_str.c_ptr(), model_handle_name.c_str()) &&
-        !strcmp(model_user_name_str.c_ptr(), user_name.c_str())) { //
-        field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
-        field_ptr->val_str(&model_content);
-        break;
-    }
-  }
-  cat_table_ptr->file->ha_rnd_end();
-  cat_table_ptr->file->ha_external_lock(thd, F_UNLCK);
-  Utils::close_table(cat_table_ptr);
-
   BoosterHandle bt_handler;
   int out_num_iterations;
-  if (LGBM_BoosterLoadModelFromString(model_content.c_ptr(), &out_num_iterations, &bt_handler) == -1)
+  if (LGBM_BoosterLoadModelFromString(model_content.c_str(), &out_num_iterations, &bt_handler) == -1)
     return HA_ERR_GENERIC;
 
   m_handler = bt_handler;
