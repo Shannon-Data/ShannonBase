@@ -37,7 +37,7 @@ class ML_anomaly_detection : public ML_algorithm {
     ~ML_anomaly_detection();
     int train() override;
     int predict() override;
-    int load(std::string model_handle_name, std::string user_name) override;
+    int load(std::string& model_content) override;
     int load_from_file (std::string modle_file_full_path,
                         std::string model_handle_name) override;
     int unload(std::string model_handle_name) override;

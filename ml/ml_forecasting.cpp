@@ -43,8 +43,7 @@ int ML_forecasting::predict() {
   return 0;
 }
 
-int ML_forecasting::load(std::string model_handle_name [[maybe_unused]],
-                         std::string user_name [[maybe_unused]]) {
+int ML_forecasting::load(std::string& model_content [[maybe_unused]]) {
   return 0;
 }
 

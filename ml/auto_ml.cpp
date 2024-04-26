@@ -27,6 +27,7 @@
 
 #include <string>
 
+#include "include/sql_string.h" //String
 #include "sql-common/json_error_handler.h"
 
 #include "ml_algorithm.h"
@@ -193,29 +194,39 @@ int Auto_ML::train() {
   }
 
   auto ret = m_ml_task? m_ml_task->train() : 1;
-  return 0;
+  return ret;
 }
 
-int Auto_ML::load() {
+int Auto_ML::load(Json_wrapper* model_meta, String* model_content) {
   //in load, the schem_name means user name.
-  std::string model_user_name = m_schema_name;
+  assert(model_meta && model_content);
+  std::string model_content_str(model_content->ptr());
+
   if (m_ml_task)
-     return m_ml_task->load(m_handler, model_user_name);
+     return m_ml_task->load(model_content_str);
   return 0;
 }
 
-int Auto_ML::unload() {
+int Auto_ML::unload(String* model_handler_name, Json_wrapper* model_meta){
+  assert(model_handler_name && model_meta);
+
   if (m_ml_task)
      m_ml_task->unload(m_handler);
+
   m_ml_task.reset(nullptr);
   return 0;
 }
 
-int Auto_ML::import() {
-  std::string model_user_name = m_schema_name;
-  std::string model_content = m_target_name;
+int Auto_ML::import(String* model_handler_name, String* user_name, Json_wrapper* model_meta,
+                    String* model_content) {
+  assert(model_handler_name && user_name && model_meta && model_content);
+
+  std::string model_user_name_str(user_name->ptr());
+  std::string handler_name_str(model_handler_name->ptr());
+  std::string model_content_str(model_content->ptr());
+
   if (m_ml_task)
-     return m_ml_task->import(m_handler, model_user_name, model_content);
+     return m_ml_task->import(model_user_name_str, handler_name_str, model_content_str);
 
   return 0;
 }

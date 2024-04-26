@@ -42,11 +42,13 @@ class Auto_ML {
   public:
     Auto_ML(std::string schema, std::string table_name, std::string target_name,
             Json_wrapper* options, std::string handler);
+    Auto_ML() = default;            
     ~Auto_ML();
     int train();
-    int load();
-    int unload();
-    int import();
+    int load(Json_wrapper* model_meta, String* model_content);
+    int unload(String* model_handler_name, Json_wrapper* model_meta);
+    int import(String* model_handler_name, String* user_name, Json_wrapper* model_meta,
+               String* model_content);
     ML_TASK_TYPE type();
   private:
      std::string get_array_string (Json_array* array);

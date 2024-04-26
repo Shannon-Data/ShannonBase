@@ -43,7 +43,7 @@ int ML_classification::predict() {
   return 0;
 }
 
-int ML_classification::load(std::string model_handle_name [[maybe_unused]], std::string user_name [[maybe_unused]])  {
+int ML_classification::load(std::string& model_content [[maybe_unused]])  {
   return 0;
 }
 

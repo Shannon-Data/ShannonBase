@@ -135,6 +135,8 @@ private:
     }
     return false;
   }
+
+  byte *advance_parseMetadataLog(table_id_t id, uint64_t version, byte *ptr, byte *end);
 };
 
 }  // namespace Populate
