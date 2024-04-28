@@ -37,9 +37,9 @@
 #include "sql/handler.h"
 #include "sql-common/json_dom.h" //Json_wrapper.
 
-#include "storage/innobase/include/ut0dbg.h" //ut_a
-#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
-#include "ml_utils.h"
+#include "storage/innobase/include/ut0dbg.h" //for ut_a
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h" //shannon rapid
+#include "ml_utils.h" //ml utils
 
 #include "LightGBM/c_api.h"
 // clang-format off

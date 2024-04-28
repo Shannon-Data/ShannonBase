@@ -70,18 +70,18 @@ jobs:
       run: cd /tmp && wget https://github.com/Kitware/CMake/releases/download/v3.29.0-rc1/cmake-3.29.0-rc1.tar.gz && tar zxvf cmake-3.29.0-rc1.tar.gz && cd cmake-3.29.0-rc1 && ./bootstrap --prefix=/usr/local/cmake && make -j$(nproc) && sudo make install
     - name: install_boost
       run: cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && sudo ./b2 install
-    - name: cmake
+    - name: build_shannonbase
       run: |
-        mkdir build && cd build
-        git config --global --add safe.directory /__w/stonedb/stonedb
+        mkdir cmake_build && cd cmake_build
+        git config --global --add safe.directory /__w/shannonbase/shannonbase
         git fetch --tags -f
         /usr/local/cmake/bin/cmake ../ \
         -DWITH_BOOST=/usr/local/boost/include \
-        -DCMAKE_BUILD_TYPE=Debug  \
-        -DCMAKE_INSTALL_PREFIX=/usr/local/shannon-bin/bin \
-        -DMYSQL_DATADIR=/var/lib/shannon-bin/data \
+        -DCMAKE_BUILD_TYPE=Release  \
+        -DCMAKE_INSTALL_PREFIX=/usr/local/shannon-bin/ \
+        -DMYSQL_DATADIR=/usr/local/shannon-bin/data \
         -DSYSCONFDIR=. \
-        -DMYSQL_UNIX_ADDR=/var/lib/shannon-bin/mysql.sock \
+        -DMYSQL_UNIX_ADDR=/usr/local/shannon-bin/mysql.sock \
         -DWITH_EMBEDDED_SERVER=OFF \
         -DWITH_MYISAM_STORAGE_ENGINE=1 \
         -DWITH_INNOBASE_STORAGE_ENGINE=1 \
@@ -97,4 +97,19 @@ jobs:
         -DENABLE_GCOV=1 \
         -DWITH_DEBUG=1 \
         -DWITH_ASAN=1 \
-        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)"
+        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j`nproc` && make -j`nproc` install
+      - name: mtr test
+        run: |
+          mkdir -p /usr/local/shannon-bin/install/log
+          groupadd mysql && useradd -g mysql mysql
+          chown -R mysql:mysql /usr/local/shannon-bin/ && chown -R mysql:mysql ./cmake_build
+          cd /usr/local/shannon-bin/mysql-test
+          ./mysql-test-run.pl --suite=innodb,main,secondary_engine --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --do-test-list=./suite/innodb/include/innodb_testlist --parallel=5
+
+      - name: create coverage.info
+        run: |
+          cat codecov.yml | curl --data-binary @- https://codecov.io/validate
+          cd build
+          lcov --capture --directory . --output-file coverage.info --test-name coverage
+      - name: Codecov
+        uses: codecov/codecov-action@v3.1.4
