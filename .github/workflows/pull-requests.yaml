@@ -102,4 +102,4 @@ jobs:
       run: |
         sudo mkdir -p /shannon-bin/log
         sudo chown -R mysql:mysql /shannon-bin/ && sudo chown -R mysql:mysql ./build
-        sudo chmod +x /shannon-bin/mysql-test/mtr && sudo /shannon-bin/mysql-test/mtr --suite=main,innodb,secondary_engine --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=5
+        cd /shannon-bin/mysql-test/ && sudo chmod +x ./mtr && sudo ./mtr --suite=main,innodb,secondary_engine --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=5
