@@ -63,25 +63,27 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: install_lib
-      run: sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev  libudev-dev g++ libbison-dev flex clang-format lcov pkg-config cmake  zlib1g-dev wget build-essential   libldap-dev  libisl-dev libmpfr-dev patchelf libevent-dev -y && sudo apt install libsasl2-dev -y
+      run: sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev libudev-dev g++ libbison-dev flex clang-format lcov pkg-config cmake zlib1g-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev -y
     - name: install_gcc
-      run: sudo apt install  bison texinfo libgmp3-dev   zlib1g-dev  -y && sudo apt install gcc-10 g++-10 -y && sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
-    - name: install_cmake
-      run: cd /tmp && wget https://github.com/Kitware/CMake/releases/download/v3.29.0-rc1/cmake-3.29.0-rc1.tar.gz && tar zxvf cmake-3.29.0-rc1.tar.gz && cd cmake-3.29.0-rc1 && ./bootstrap --prefix=/usr/local/cmake && make -j$(nproc) && sudo make install
+      run: sudo apt install  bison texinfo libgmp3-dev zlib1g-dev -y && sudo apt install gcc-10 g++-10 -y && sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
+    #- name: install_cmake
+    #  run: cd /tmp && wget https://github.com/Kitware/CMake/releases/download/v3.29.0-rc1/cmake-3.29.0-rc1.tar.gz && tar zxvf cmake-3.29.0-rc1.tar.gz && cd cmake-3.29.0-rc1 &&\
+    # ./bootstrap --prefix=/usr/local/cmake && make -j$(nproc) && sudo make install
     - name: install_boost
       run: cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && sudo ./b2 install
-    - name: build_shannonbase
+      #sed -i '61s/^/#/' cmake_install.cmake to disable can not find openssl_executeable error. removes it when it fixed.
+    - name: build_shannon
       run: |
-        mkdir cmake_build && cd cmake_build
-        git config --global --add safe.directory /__w/shannonbase/shannonbase
+        mkdir build && cd build
+        git config --global --add safe.directory /__w/ShannonBase/ShannonBase
         git fetch --tags -f
-        /usr/local/cmake/bin/cmake ../ \
+        cmake ../ \
         -DWITH_BOOST=/usr/local/boost/include \
         -DCMAKE_BUILD_TYPE=Release  \
-        -DCMAKE_INSTALL_PREFIX=/usr/local/shannon-bin/ \
-        -DMYSQL_DATADIR=/usr/local/shannon-bin/data \
+        -DCMAKE_INSTALL_PREFIX=/shannon-bin/ \
+        -DMYSQL_DATADIR=/shannon-bin/ \
         -DSYSCONFDIR=. \
-        -DMYSQL_UNIX_ADDR=/usr/local/shannon-bin/mysql.sock \
+        -DMYSQL_UNIX_ADDR=/shannon-bin/mysql.sock \
         -DWITH_EMBEDDED_SERVER=OFF \
         -DWITH_MYISAM_STORAGE_ENGINE=1 \
         -DWITH_INNOBASE_STORAGE_ENGINE=1 \
@@ -94,22 +96,10 @@ jobs:
         -DWITH_SSL_PATH=/usr/include/openssl/ \
         -DDEFAULT_SET=community \
         -DWITH_UNIT_TESTS=OFF \
-        -DENABLE_GCOV=1 \
-        -DWITH_DEBUG=1 \
         -DWITH_ASAN=1 \
-        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j`nproc` && make -j`nproc` install
-      - name: mtr test
-        run: |
-          mkdir -p /usr/local/shannon-bin/install/log
-          groupadd mysql && useradd -g mysql mysql
-          chown -R mysql:mysql /usr/local/shannon-bin/ && chown -R mysql:mysql ./cmake_build
-          cd /usr/local/shannon-bin/mysql-test
-          ./mysql-test-run.pl --suite=innodb,main,secondary_engine --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --do-test-list=./suite/innodb/include/innodb_testlist --parallel=5
-
-      - name: create coverage.info
-        run: |
-          cat codecov.yml | curl --data-binary @- https://codecov.io/validate
-          cd build
-          lcov --capture --directory . --output-file coverage.info --test-name coverage
-      - name: Codecov
-        uses: codecov/codecov-action@v3.1.4
+        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j5 && sed -i '61s/^/#/' cmake_install.cmake && sed -i '62s/^/#/' cmake_install.cmake && sed -i '63s/^/#/' cmake_install.cmake && sudo make -j`nproc` install
+    - name: run_mtr_test
+      run: |
+        sudo mkdir -p /shannon-bin/log
+        sudo chown -R mysql:mysql /shannon-bin/ && sudo chown -R mysql:mysql ./build
+        sudo chmod +x /shannon-bin/mysql-test/mtr && sudo /shannon-bin/mysql-test/mtr --suite=main,innodb,secondary_engine --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=5
