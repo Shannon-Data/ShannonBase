@@ -74,16 +74,16 @@ jobs:
       #sed -i '61s/^/#/' cmake_install.cmake to disable can not find openssl_executeable error. removes it when it fixed.
     - name: build_shannon
       run: |
-        mkdir build && cd build
+        mkdir cmake_build && cd cmake_build
         git config --global --add safe.directory /__w/ShannonBase/ShannonBase
         git fetch --tags -f
         cmake ../ \
         -DWITH_BOOST=/usr/local/boost/include \
         -DCMAKE_BUILD_TYPE=Release  \
-        -DCMAKE_INSTALL_PREFIX=/shannon-bin/ \
-        -DMYSQL_DATADIR=/shannon-bin/ \
-        -DSYSCONFDIR=. \
-        -DMYSQL_UNIX_ADDR=/shannon-bin/mysql.sock \
+        -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
+        -DMYSQL_DATADIR=/home/shannon-bin/ \
+        -DSYSCONFDIR=/home/shannon-bin/ \
+        -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
         -DWITH_EMBEDDED_SERVER=OFF \
         -DWITH_MYISAM_STORAGE_ENGINE=1 \
         -DWITH_INNOBASE_STORAGE_ENGINE=1 \
@@ -96,10 +96,9 @@ jobs:
         -DWITH_SSL_PATH=/usr/include/openssl/ \
         -DDEFAULT_SET=community \
         -DWITH_UNIT_TESTS=OFF \
-        -DWITH_ASAN=1 \
-        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j5 && sed -i '61s/^/#/' cmake_install.cmake && sed -i '62s/^/#/' cmake_install.cmake && sed -i '63s/^/#/' cmake_install.cmake && sudo make -j`nproc` install
+        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j5 && sed -i '61s/^/#/' cmake_install.cmake && sed -i '62s/^/#/' cmake_install.cmake && sed -i '63s/^/#/' cmake_install.cmake && sudo make install
     - name: run_mtr_test
       run: |
-        sudo mkdir -p /shannon-bin/log
-        sudo chown -R mysql:mysql /shannon-bin/ && sudo chown -R mysql:mysql ./build
-        cd /shannon-bin/mysql-test/ && sudo chmod +x ./mtr && sudo ./mtr --suite=main,innodb,secondary_engine --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=5
+        mkdir -p /home/shannon-bin/log
+        cd /home/shannon-bin/mysql-test/
+        ./mysql-test-run.pl --suite=main,innodb,secondary_engine --mysqld=--user=mysql --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=5

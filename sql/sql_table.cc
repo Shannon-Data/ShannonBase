@@ -11739,17 +11739,6 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
   rollback_guard.commit();
 
   if (cleanup()) return true;
-  if (is_load){
-    /***we star the background thread to repopulate the chagnes here
-     * that makes the logics more independent.
-    */
-    if (!ShannonBase::Populate::Populator::log_pop_thread_is_active())
-      ShannonBase::Populate::Populator::start_change_populate_threads();
-  } else {
-    if (ShannonBase::Imcs::Imcs::get_instance()->is_empty()) //none loaded table.
-      ShannonBase::Populate::Populator::end_change_populate_threads();
-  }
-
   my_ok(thd, thd->get_sent_row_count());
   return false;
 }

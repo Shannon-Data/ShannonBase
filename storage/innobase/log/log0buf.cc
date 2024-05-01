@@ -1002,10 +1002,13 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
     /* This is the critical memcpy operation, which copies data
     from internal mtr's buffer to the shared log buffer. */
     std::memcpy(ptr, str, len);
+    mutex_enter(&(log.rapid_populator_mutex));
     if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-        !recv_recovery_is_on()) {
+        !recv_recovery_is_on() &&
+        !ShannonBase::Populate::sys_population_buffer->isFull()) {
         ShannonBase::Populate::sys_population_buffer->writeBuff(str, len);
     }
+    mutex_exit(&(log.rapid_populator_mutex));
 
     ut_a(len <= str_len);
 

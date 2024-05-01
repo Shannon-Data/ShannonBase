@@ -46,12 +46,12 @@ class Index {
   int insert(uchar *key, uint key_len, uchar *value);
   int remove(uchar *key, uint key_len);
 
-  void* lookup(uchar *key, uint key_len);
+  void *lookup(uchar *key, uint key_len);
 
-  void* first(uint key_offset, uchar *key, uint key_len);
-  void* next();
+  void *first(uint key_offset, uchar *key, uint key_len);
+  void *next();
 
-  void* read_index(Art_index::ART_Func2 &func);
+  void *read_index(Art_index::ART_Func2 &func);
 
   int maximum(uchar *value, uint value_len);
   int minimum(uchar *value, uint value_len);
@@ -60,12 +60,12 @@ class Index {
   IndexType type() { return m_type; }
 
  private:
-  bool m_inited {false};
+  bool m_inited{false};
   IndexType m_type{IndexType::ART};
   std::unique_ptr<Art_index> m_impl{nullptr};
   bool m_start_scan{false};
 
-  std::vector<void*> m_values;
+  std::vector<void *> m_values;
 };
 
 }  // namespace Imcs

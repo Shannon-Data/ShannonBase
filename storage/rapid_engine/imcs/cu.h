@@ -51,8 +51,7 @@ class Cu : public MemoryObject {
  public:
   /**A Snapshot Metadata Unit (SMU) contains metadata and transactional
    * information for an associated IMCU.*/
-  class Snapshot_meta_unit {
-  };
+  class Snapshot_meta_unit {};
 
   using Cu_header = struct alignas(CACHE_LINE_SIZE) Cu_header_t {
    public:
@@ -72,7 +71,7 @@ class Cu : public MemoryObject {
     std::atomic<double> m_max{0}, m_min{0}, m_middle{0}, m_median{0}, m_avg{0},
         m_sum{0};
     std::atomic<uint64> m_rows{0}, m_deleted_mark{0};
-    const CHARSET_INFO* m_charset;
+    const CHARSET_INFO *m_charset;
     std::unique_ptr<Snapshot_meta_unit> m_smu;
   };
 
@@ -86,60 +85,67 @@ class Cu : public MemoryObject {
   // End of Rnd scan
   uint rnd_end();
   // writes the data into this chunk. length unspecify means calc by chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *data,
-                           uint length = 0);
-  // writes the data into this chunk at pos. length unspecify means calc by chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar* pos,
+  uchar *write_data_direct(ShannonBase::RapidContext *context,
+                           const uchar *data, uint length = 0);
+  // writes the data into this chunk at pos. length unspecify means calc by
+  // chunk.
+  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *pos,
                            const uchar *data, uint length = 0);
   // reads the data by from address.
   uchar *read_data_direct(ShannonBase::RapidContext *context, uchar *buffer);
   // reads the data by rowid to buffer.
-  uchar *read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid,
-                          uchar *buffer);
+  uchar *read_data_direct(ShannonBase::RapidContext *context,
+                          const uchar *rowid, uchar *buffer);
   // deletes the data by rowid
-  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *rowid);
+  uchar *delete_data_direct(ShannonBase::RapidContext *context,
+                            const uchar *rowid);
   // deletes the data by pk
-  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len);
+  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk,
+                            uint pk_len);
   // deletes all
   uchar *delete_all_direct();
   // updates the data with rowid with the new data.
-  uchar *update_data_direct(ShannonBase::RapidContext *context, const uchar* rowid,
-                            const uchar *data, uint length = 0);
+  uchar *update_data_direct(ShannonBase::RapidContext *context,
+                            const uchar *rowid, const uchar *data,
+                            uint length = 0);
   // flush the data to disk. by now, we cannot impl this part.
-  uint flush_direct(ShannonBase::RapidContext *context, const uchar *from = nullptr,
-                    const uchar *to = nullptr);
-  //does a gc operation of this CU.
-  uchar* GC(ShannonBase::RapidContext *context);
+  uint flush_direct(ShannonBase::RapidContext *context,
+                    const uchar *from = nullptr, const uchar *to = nullptr);
+  // does a gc operation of this CU.
+  uchar *GC(ShannonBase::RapidContext *context);
   inline Compress::Dictionary *local_dictionary() const {
     return m_header->m_local_dict.get();
   }
-  //gets its header.
+  // gets its header.
   Cu_header *get_header() { return m_header.get(); }
   // gets the base address of chunks.
   uchar *get_base();
   // adds a new chunk into this cu.
   void add_chunk(std::unique_ptr<Chunk> &chunk);
-  //gets the chunk with chunk id.
+  // gets the chunk with chunk id.
   inline Chunk *get_chunk(uint chunkid) {
     return (chunkid < m_chunks.size()) ? m_chunks[chunkid].get() : nullptr;
   }
-  //gets the first chunk in this cu.
+  // gets the first chunk in this cu.
   inline Chunk *get_first_chunk() { return get_chunk(0); }
-  //gets the last chunk in this cu
+  // gets the last chunk in this cu
   inline Chunk *get_last_chunk() { return get_chunk(m_chunks.size() - 1); }
-  //gets the how many chunks in this cu.
+  // gets the how many chunks in this cu.
   inline size_t get_chunk_nums() { return m_chunks.size(); }
-  //seek to the real logical physical addr by offset.
+  // seek to the real logical physical addr by offset.
   inline uchar *seek(ShannonBase::RapidContext *context, size_t offset);
-  //get the address by a PK.
-  inline uchar* lookup(ShannonBase::RapidContext *context, const uchar* pk, uint pk_len);
-  //the its index of this cu.
+  // get the address by a PK.
+  inline uchar *lookup(ShannonBase::RapidContext *context, const uchar *pk,
+                       uint pk_len);
+  // the its index of this cu.
   inline Index *get_index() { return m_index.get(); }
 
  private:
-  bool init_header_info(const Field* field);
+  bool init_header_info(const Field *field);
+  bool init_body_info(const Field *field);
   bool update_statistics(double old_v, double new_v, OPER_TYPE type);
   bool reset_statistics();
+
  private:
   uint m_magic{SHANNON_MAGIC_CU};
   // proctect header.

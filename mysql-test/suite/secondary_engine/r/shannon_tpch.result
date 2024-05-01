@@ -115,14 +115,6 @@ alter table PART change P_NAME P_NAME VARCHAR(55) NOT NULL COMMENT 'RAPID_COLUMN
 alter table PART change P_TYPE P_TYPE VARCHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
 alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
 alter table LINEITEM change L_ORDERKEY L_ORDERKEY BIGINT NOT NULL COMMENT 'RAPID_COLUMN=DATA_PLACEMENT_KEY=1';
-LOAD DATA INFILE '/home/lihao/workshop/shannon-bin/mysql-test/var/std_data/nation.tbl' INTO TABLE NATION FIELDS TERMINATED BY '|' ;;
-LOAD DATA INFILE '/home/lihao/workshop/shannon-bin/mysql-test/var/std_data/supplier.tbl' INTO TABLE SUPPLIER  FIELDS TERMINATED BY '|' ;;
-LOAD DATA INFILE '/home/lihao/workshop/shannon-bin/mysql-test/var/std_data/partsupp.tbl' INTO TABLE PARTSUPP FIELDS TERMINATED BY '|' ;;
-LOAD DATA INFILE '/home/lihao/workshop/shannon-bin/mysql-test/var/std_data/region.tbl' INTO TABLE REGION  FIELDS TERMINATED BY '|' ;;
-LOAD DATA INFILE '/home/lihao/workshop/shannon-bin/mysql-test/var/std_data/part.tbl' INTO TABLE PART FIELDS TERMINATED BY '|' ;;
-LOAD DATA INFILE '/home/lihao/workshop/shannon-bin/mysql-test/var/std_data/customer.tbl' INTO TABLE CUSTOMER FIELDS TERMINATED BY '|' ;;
-LOAD DATA INFILE '/home/lihao/workshop/shannon-bin/mysql-test/var/std_data/orders.tbl' INTO TABLE ORDERS FIELDS TERMINATED BY '|' ;;
-LOAD DATA INFILE '/home/lihao/workshop/shannon-bin/mysql-test/var/std_data/lineitem.tbl' INTO TABLE LINEITEM FIELDS TERMINATED BY '|' ;;
 alter table NATION secondary_engine RAPID;
 alter table REGION secondary_engine RAPID;
 alter table LINEITEM secondary_engine RAPID;
