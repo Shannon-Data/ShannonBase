@@ -96,23 +96,26 @@ class Chunk : public MemoryObject {
   // End of Rnd scan.
   uint rnd_end();
   // writes the data into this chunk. length unspecify means calc by chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *data,
-                           uint length = 0);
-  // writes the data into this chunk at pos. length unspecify means calc by chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar* pos,
+  uchar *write_data_direct(ShannonBase::RapidContext *context,
+                           const uchar *data, uint length = 0);
+  // writes the data into this chunk at pos. length unspecify means calc by
+  // chunk.
+  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *pos,
                            const uchar *data, uint length = 0);
   // reads the data by from address .
   uchar *read_data_direct(ShannonBase::RapidContext *context, uchar *buffer);
   // reads the data by rowid.
-  uchar *read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid,
-                          uchar *buffer);
+  uchar *read_data_direct(ShannonBase::RapidContext *context,
+                          const uchar *rowid, uchar *buffer);
   // deletes the data by rowid.
-  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *rowid);
+  uchar *delete_data_direct(ShannonBase::RapidContext *context,
+                            const uchar *rowid);
   // deletes all.
   uchar *delete_all_direct();
   // updates the data. rowid is pos of where the data will be updated.
-  uchar *update_data_direct(ShannonBase::RapidContext *context, const uchar *rowid,
-                            const uchar *data, uint length = 0);
+  uchar *update_data_direct(ShannonBase::RapidContext *context,
+                            const uchar *rowid, const uchar *data,
+                            uint length = 0);
   // flush the data to disk. by now, we cannot impl this part.
   uint flush_direct(RapidContext *context, const uchar *from = nullptr,
                     const uchar *to = nullptr);
@@ -122,37 +125,40 @@ class Chunk : public MemoryObject {
   inline uchar *get_end() const { return m_data_end; }
   // gets the max valid loc of current the data has written to.
   inline uchar *get_data() const { return m_data; }
-  //the free size of this chunk.
+  // the free size of this chunk.
   inline uint free_size() { return m_data_end - m_data; }
-  //whether is full or not.
+  // whether is full or not.
   inline bool is_full() { return (m_data == m_data_end) ? true : false; }
-  inline bool is_empty() {return (m_data == m_data_base)? true : false; }
+  inline bool is_empty() { return (m_data == m_data_base) ? true : false; }
   inline uint data_size() { return (m_data - m_data_base); }
 
-  //how many rows are in this range of min and max?
+  // how many rows are in this range of min and max?
   ha_rows records_in_range(ShannonBase::RapidContext *context, double &min_key,
                            double &max_key);
-  //get the phy address of offset.
+  // get the phy address of offset.
   uchar *where(ShannonBase::RapidContext *context, uint offset);
-  //set to the offset in physical address format, return the address.
+  // set to the offset in physical address format, return the address.
   uchar *seek(ShannonBase::RapidContext *context, uint offset);
-  //return the next available address in new chunk. you SHOULD set the GC trxid in context.
-  uchar* GC(ShannonBase::RapidContext *context);
-  //relocate the chunk to specific address[address should be in this chunk].
-  uchar* reshift(ShannonBase::RapidContext *context, const uchar* from,
-                  const uchar* to);
-  //to set this chunk to a empty chunk.
-  uchar* set_empty();
-  uchar* set_full();
+  // return the next available address in new chunk. you SHOULD set the GC trxid
+  // in context.
+  uchar *GC(ShannonBase::RapidContext *context);
+  // relocate the chunk to specific address[address should be in this chunk].
+  uchar *reshift(ShannonBase::RapidContext *context, const uchar *from,
+                 const uchar *to);
+  // to set this chunk to a empty chunk.
+  uchar *set_empty();
+  uchar *set_full();
+
  private:
-  inline bool init_header_info(const Field* field);
+  inline bool init_header_info(const Field *field);
   inline bool update_statistics(double old_v, double new_v, OPER_TYPE type);
   inline bool reset_statistics();
 
-  //value is marked as deleted return true, or false.
-  inline bool deleted (const uchar* data);
-  //value is null return true, or false
-  inline bool is_null(const uchar* data);
+  // value is marked as deleted return true, or false.
+  inline bool deleted(const uchar *data);
+  // value is null return true, or false
+  inline bool is_null(const uchar *data);
+
  private:
   std::mutex m_header_mutex;
   std::unique_ptr<Chunk_header> m_header{nullptr};

@@ -33,13 +33,13 @@
 namespace ShannonBase {
 namespace Imcs {
 
-Index::Index(IndexType type) : m_inited(false),m_type(type) {
+Index::Index(IndexType type) : m_inited(false), m_type(type) {
   if (m_type != IndexType::ART) return;
   m_impl = std::make_unique<Art_index>();
 
   if (!m_inited) {
-   m_impl->ART_tree_init();
-   m_inited = true;
+    m_impl->ART_tree_init();
+    m_inited = true;
   }
 }
 Index::~Index() {
@@ -65,9 +65,8 @@ int Index::remove(uchar *key, uint key_len) {
   return 0;
 }
 
-void* Index::lookup(uchar *key, uint key_len) {
-  if (!initialized() || !key || !key_len)
-    return nullptr;
+void *Index::lookup(uchar *key, uint key_len) {
+  if (!initialized() || !key || !key_len) return nullptr;
 
   return reinterpret_cast<uchar *>(m_impl->ART_search(key, key_len));
 }
@@ -92,7 +91,7 @@ int Index::minimum(uchar *value, uint value_len) {
   return 0;
 }
 
-void* Index::first(uint key_offset, uchar *key, uint key_len) {
+void *Index::first(uint key_offset, uchar *key, uint key_len) {
   if (!initialized()) return nullptr;
   m_start_scan = true;
   m_impl->ART_reset_cursor();
@@ -100,13 +99,13 @@ void* Index::first(uint key_offset, uchar *key, uint key_len) {
   return m_impl->ART_iter_first(key_offset, key, key_len);
 }
 
-void* Index::next() {
+void *Index::next() {
   if (!initialized() || !m_start_scan) return nullptr;
 
   return m_impl->ART_iter_next();
 }
 
-void* Index::read_index(Art_index::ART_Func2 &func) {
+void *Index::read_index(Art_index::ART_Func2 &func) {
   if (!initialized()) return nullptr;
   m_impl->ART_reset_cursor();
   m_start_scan = true;

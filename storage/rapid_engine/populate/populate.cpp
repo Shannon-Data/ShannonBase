@@ -31,8 +31,8 @@
 #include "storage/rapid_engine/populate/populate.h"
 
 #include "current_thd.h"
-#include "sql/sql_class.h"
 #include "include/os0event.h"
+#include "sql/sql_class.h"
 #include "storage/innobase/include/os0thread-create.h"
 
 #include "storage/rapid_engine/populate/log_parser.h"
@@ -43,46 +43,54 @@ mysql_pfs_key_t rapid_populate_thread_key;
 
 namespace ShannonBase {
 namespace Populate {
-
-std::atomic<bool> sys_pop_started {false};
-static IB_thread sys_log_rapid_thread;
+// should be pay more attention to syc relation between this thread
+// and log_buffer write. if we stop changes poping, should stop writing
+// firstly, then stop this thread.
+std::atomic<bool> sys_pop_started{false};
 
 ulonglong sys_population_buffer_sz = m_pop_buff_size;
-std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer {nullptr};
+std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer{nullptr};
+
 static ulint sys_rapid_loop_count;
 
-static void parse_log_func (log_t *log_ptr) {
-  THD* log_pop_thread_thd {nullptr};
+static void parse_log_func(log_t *log_ptr) {
+  THD *log_pop_thread_thd{nullptr};
   if (current_thd == nullptr) {
     log_pop_thread_thd = create_internal_thd();
     if (!log_pop_thread_thd) return;
   }
 
-  os_event_reset(log_ptr->rapid_events[0]);
-   //here we have a notifiyer, when checkpoint_lsn/flushed_lsn > rapid_lsn to start pop
-  while (sys_pop_started.load(std::memory_order_seq_cst)) {
+  // here we have a notifiyer, when checkpoint_lsn/flushed_lsn > rapid_lsn to
+  // start pop
+  LogParser parse_log;
+  while (srv_shutdown_state.load(std::memory_order_seq_cst) ==
+             SRV_SHUTDOWN_NONE &&
+         sys_pop_started.load(std::memory_order_seq_cst)) {
     auto stop_condition = [&](bool wait) {
       if (sys_population_buffer->readAvailable()) {
         return true;
       }
-      if (wait) { //do somthing in waiting
-      }
       return false;
     };
 
+    // waiting until the new data coming in.
     os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT,
-                      std::chrono::microseconds{100}, stop_condition);
+                      std::chrono::microseconds{1000}, stop_condition);
 
     sys_rapid_loop_count++;
 
+    mutex_enter(&(log_sys->rapid_populator_mutex));
     auto size = sys_population_buffer->readAvailable();
-    byte* from_ptr = sys_population_buffer->peek();
-    LogParser parse_log;
-    uint parsed_bytes = parse_log.parse_redo(from_ptr, from_ptr + size);
-    sys_population_buffer->remove(parsed_bytes);
-  } //wile(pop_started)
+    byte *from_ptr = sys_population_buffer->peek();
+    mutex_exit(&(log_sys->rapid_populator_mutex));
 
-  os_event_set(log_ptr->rapid_events[0]);
+    auto parsed_bytes = parse_log.parse_redo(from_ptr, from_ptr + size);
+
+    mutex_enter(&(log_sys->rapid_populator_mutex));
+    if (parsed_bytes) sys_population_buffer->remove(parsed_bytes);
+    mutex_exit(&(log_sys->rapid_populator_mutex));
+  }  // wile(pop_started)
+
   if (log_pop_thread_thd) {
     destroy_internal_thd(log_pop_thread_thd);
     log_pop_thread_thd = nullptr;
@@ -91,27 +99,32 @@ static void parse_log_func (log_t *log_ptr) {
 }
 
 bool Populator::log_pop_thread_is_active() {
-   return  thread_is_active(sys_log_rapid_thread);
+  return thread_is_active(srv_threads.m_change_pop);
 }
 
 void Populator::start_change_populate_threads() {
   if (!Populator::log_pop_thread_is_active()) {
-    sys_log_rapid_thread =
-      os_thread_create(rapid_populate_thread_key, 0, parse_log_func, log_sys);
+    os_event_reset(log_sys->rapid_events[0]);
+    srv_threads.m_change_pop =
+        os_thread_create(rapid_populate_thread_key, 0, parse_log_func, log_sys);
     ShannonBase::Populate::sys_pop_started = true;
-    sys_log_rapid_thread.start();
+    srv_threads.m_change_pop.start();
   }
 }
 
 void Populator::end_change_populate_threads() {
   sys_pop_started.store(false, std::memory_order_seq_cst);
+  // clean up the buffer.
+  sys_population_buffer->clearUp();
+  sys_rapid_loop_count = 0;
 }
 
-void Populator::rapid_print_thread_info(FILE *file){ /* in: output stream */
-  fprintf(file, "rapid log pop thread : %s \n"
-         "rapid log pop thread loops: " ULINTPF "\n",
-         ShannonBase::Populate::sys_pop_started ? "running" : "stopped",
-         ShannonBase::Populate::sys_rapid_loop_count);
+void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */
+  fprintf(file,
+          "rapid log pop thread : %s \n"
+          "rapid log pop thread loops: " ULINTPF "\n",
+          ShannonBase::Populate::sys_pop_started ? "running" : "stopped",
+          ShannonBase::Populate::sys_rapid_loop_count);
 }
 
 }  // namespace Populate

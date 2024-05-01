@@ -44,24 +44,13 @@ namespace ShannonBase {
 namespace Imcs {
 
 Cu::Cu(Field *field) {
-
   init_header_info(field);
-
-  // the initial one chunk built.
-  m_chunks.push_back(std::make_unique<Chunk>(field));
-
-  std::string comment(field->comment.str);
-  std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
-  if ((comment.find("INDEXED") != std::string::npos))
-    m_index = std::make_unique<Index>(Index::IndexType::ART);
-  else
-    m_index = std::make_unique<Index>(Index::IndexType::ART);
+  init_body_info(field);
 }
 
-Cu::~Cu() {
-}
+Cu::~Cu() {}
 
-bool Cu::init_header_info(const Field* field) {
+bool Cu::init_header_info(const Field *field) {
   std::scoped_lock lk(m_header_mutex);
 
   m_header = std::make_unique<Cu_header>();
@@ -99,8 +88,20 @@ bool Cu::init_header_info(const Field* field) {
 
   m_header->m_local_dict =
       std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
+  return false;
+}
 
-  return true;
+bool Cu::init_body_info(const Field *field) {
+  // the initial one chunk built.
+  m_chunks.push_back(std::make_unique<Chunk>(const_cast<Field *>(field)));
+
+  std::string comment(field->comment.str);
+  std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
+  if ((comment.find("INDEXED") != std::string::npos))
+    m_index = std::make_unique<Index>(Index::IndexType::ART);
+  else
+    m_index = std::make_unique<Index>(Index::IndexType::ART);
+  return false;
 }
 
 bool Cu::update_statistics(double old_v, double new_v, OPER_TYPE type) {
@@ -135,7 +136,7 @@ bool Cu::update_statistics(double old_v, double new_v, OPER_TYPE type) {
         m_header->m_max.store(value, std::memory_order::memory_order_relaxed);
       if (is_greater_than_or_eq(m_header->m_min, value))
         m_header->m_min.store(value, std::memory_order::memory_order_relaxed);
-    }break;
+    } break;
     case OPER_TYPE::OPER_DELETE: {
       m_header->m_rows.fetch_sub(1, std::memory_order_seq_cst);
       m_header->m_deleted_mark.fetch_sub(1, std::memory_order_seq_cst);
@@ -192,14 +193,13 @@ uint Cu::rnd_end() {
   return 0;
 }
 
-uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, const uchar* pos,
-                           const uchar *data, uint length) {
-
+uchar *Cu::write_data_direct(ShannonBase::RapidContext *context,
+                             const uchar *pos, const uchar *data, uint length) {
   return nullptr;
 }
 
-uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, const uchar *data,
-                             uint length) {
+uchar *Cu::write_data_direct(ShannonBase::RapidContext *context,
+                             const uchar *data, uint length) {
   DBUG_TRACE;
   ut_ad(m_header.get() && m_chunks.size());
 
@@ -246,7 +246,8 @@ uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, uchar *buffer) {
   if (unlikely(!chunk)) return nullptr;
 
   auto ret = chunk->read_data_direct(context, buffer);
-  if (unlikely(!ret)) {  // to the end of this chunk, then start to read the next chunk.
+  if (unlikely(!ret)) {  // to the end of this chunk, then start to read the
+                         // next chunk.
     m_current_chunk_id.fetch_add(1, std::memory_order::memory_order_seq_cst);
     if (m_current_chunk_id >= m_chunks.size()) return nullptr;
     chunk = m_chunks[m_current_chunk_id].get();
@@ -264,14 +265,16 @@ uchar *Cu::seek(ShannonBase::RapidContext *context, size_t offset) {
   return m_chunks[chunk_id]->seek(context, offset_in_chunk);
 }
 
-uchar* Cu::lookup(ShannonBase::RapidContext *context, const uchar* pk, uint pk_len){
+uchar *Cu::lookup(ShannonBase::RapidContext *context, const uchar *pk,
+                  uint pk_len) {
   if (!m_index || !pk || !pk_len) return nullptr;
 
-  return reinterpret_cast<uchar*>(m_index->lookup(const_cast<uchar*>(pk), pk_len));
+  return reinterpret_cast<uchar *>(
+      m_index->lookup(const_cast<uchar *>(pk), pk_len));
 }
 
-uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid,
-                            uchar *buffer) {
+uchar *Cu::read_data_direct(ShannonBase::RapidContext *context,
+                            const uchar *rowid, uchar *buffer) {
   if (!m_chunks.size()) return nullptr;
   // Chunk* chunk = m_chunks [m_chunks.size() - 1].get(); //to get the last
   // chunk data. if (!chunk) return nullptr;
@@ -285,18 +288,19 @@ uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context,
   return nullptr;
 }
 
-uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len) {
-  uchar* data_pos {nullptr};
-  if (!pk && !pk_len) { //delete all
+uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context,
+                              const uchar *pk, uint pk_len) {
+  uchar *data_pos{nullptr};
+  if (!pk && !pk_len) {  // delete all
     data_pos = delete_all_direct();
   } else {
-    data_pos = (uchar*)m_index->lookup(const_cast<uchar*>(pk), pk_len);
+    data_pos = (uchar *)m_index->lookup(const_cast<uchar *>(pk), pk_len);
     if (!data_pos) return nullptr;
-    uint8 info = *(uint8*)(data_pos + SHANNON_INFO_BYTE_OFFSET);
+    uint8 info = *(uint8 *)(data_pos + SHANNON_INFO_BYTE_OFFSET);
     info |= DATA_DELETE_FLAG_MASK;
-    *(uint8*)(data_pos + SHANNON_INFO_BYTE_OFFSET) = info;
+    *(uint8 *)(data_pos + SHANNON_INFO_BYTE_OFFSET) = info;
 
-    auto data_val = *(double*) (data_pos +SHANNON_DATA_BYTE_OFFSET);
+    auto data_val = *(double *)(data_pos + SHANNON_DATA_BYTE_OFFSET);
     ut_a(data_val);
     update_statistics(data_val, data_val, OPER_TYPE::OPER_DELETE);
   }
@@ -305,21 +309,29 @@ uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context, const uchar *p
 }
 
 uchar *Cu::delete_all_direct() {
-  m_chunks.clear();
+  ut_a(m_chunks.size() >= 1);
+
+  if (m_chunks.size() > 1) {
+    m_chunks.erase(m_chunks.begin() + 1, m_chunks.end());
+  }
+
+  m_chunks[0]->set_empty();
   reset_statistics();
-  return (uchar*)m_header.get();
+  return (uchar *)m_header.get();
 }
 
-uchar *Cu::update_data_direct(ShannonBase::RapidContext *context, const uchar* rowid,
-                              const uchar *data, uint length) {
-  const uchar* data_pos = (rowid) ? rowid :
-                         (uchar*)m_index->lookup(context->m_extra_info.m_key_buff.get(),
+uchar *Cu::update_data_direct(ShannonBase::RapidContext *context,
+                              const uchar *rowid, const uchar *data,
+                              uint length) {
+  const uchar *data_pos =
+      (rowid) ? rowid
+              : (uchar *)m_index->lookup(context->m_extra_info.m_key_buff.get(),
                                          context->m_extra_info.m_key_len);
   if (!data_pos) return nullptr;
-  //in future, the old data will be added to version link.
-  memcpy(const_cast<uchar*>(data_pos), data, length);
+  // in future, the old data will be added to version link.
+  memcpy(const_cast<uchar *>(data_pos), data, length);
 
-  return const_cast<uchar*>(data_pos);
+  return const_cast<uchar *>(data_pos);
 }
 
 uint Cu::flush_direct(ShannonBase::RapidContext *context, const uchar *from,
@@ -328,44 +340,41 @@ uint Cu::flush_direct(ShannonBase::RapidContext *context, const uchar *from,
   return 0;
 }
 
-uchar* Cu::GC(ShannonBase::RapidContext *context) {
-  //step 1: all chunks do GC, to rebuild its index.
+uchar *Cu::GC(ShannonBase::RapidContext *context) {
+  // step 1: all chunks do GC, to rebuild its index.
   if (m_chunks.empty()) return nullptr;
-  for (auto index =0u; index < m_chunks.size(); index++){
+  for (auto index = 0u; index < m_chunks.size(); index++) {
     m_chunks[index]->GC(context);
   }
 
-  //step 2: merge all the chunks.
-  for(auto index =1u; index < m_chunks.size(); ) {
-    auto mv_size = m_chunks[index-1]->free_size();
-     //the next data size is larger than pre free space.
+  // step 2: merge all the chunks.
+  for (auto index = 1u; index < m_chunks.size();) {
+    auto mv_size = m_chunks[index - 1]->free_size();
+    // the next data size is larger than pre free space.
     if (m_chunks[index]->data_size() > mv_size) {
-      std::memcpy(m_chunks[index-1]->get_data(),
-                  m_chunks[index]->get_base(),
+      std::memcpy(m_chunks[index - 1]->get_data(), m_chunks[index]->get_base(),
                   mv_size);
-      m_chunks[index-1]->set_full();
-      m_chunks[index]->reshift(context,
-                               m_chunks[index]->get_base(),
+      m_chunks[index - 1]->set_full();
+      m_chunks[index]->reshift(context, m_chunks[index]->get_base(),
                                m_chunks[index]->get_base() + mv_size);
       index++;
     } else {
       mv_size = m_chunks[index]->data_size();
-      std::memcpy(m_chunks[index-1]->get_data(),
-                  m_chunks[index]->get_base(),
+      std::memcpy(m_chunks[index - 1]->get_data(), m_chunks[index]->get_base(),
                   mv_size);
       m_chunks[index]->reshift(context, m_chunks[index]->get_base(),
                                m_chunks[index]->get_base() + mv_size);
-      if (m_chunks[index]->is_empty()){
+      if (m_chunks[index]->is_empty()) {
         m_chunks[index].reset(nullptr);
-        m_chunks.erase(m_chunks.begin() + index -1);
-      } else index ++;
+        m_chunks.erase(m_chunks.begin() + index - 1);
+      } else
+        index++;
     }
   }
-  //step 3: rebuild the index.
+  // step 3: rebuild the index.
 
   return nullptr;
 }
-
 
 }  // namespace Imcs
 }  // namespace ShannonBase

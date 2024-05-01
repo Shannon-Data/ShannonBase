@@ -72,9 +72,9 @@ class Imcs : public MemoryObject {
   // writes a row of a column in.
   uint write_direct(ShannonBase::RapidContext *context, Field *field);
   // writes a row of a column in.
-  uint write_direct(ShannonBase::RapidContext *context, const char* schema_name,
-                    const char* table_name, const char*field_name,
-                    const uchar* field_value, uint val_len);
+  uint write_direct(ShannonBase::RapidContext *context, const char *schema_name,
+                    const char *table_name, const char *field_name,
+                    const uchar *field_value, uint val_len);
   // reads the data by a rowid into a field.
   uint read_direct(ShannonBase::RapidContext *context, Field *field);
   // reads the data by a rowid into buffer.
@@ -82,19 +82,22 @@ class Imcs : public MemoryObject {
   uint read_batch_direct(ShannonBase::RapidContext *context, uchar *buffer);
   // deletes the data by a rowid
   uint delete_direct(ShannonBase::RapidContext *context, Field *field);
-  //deletes the data by key. pk_value is key value of row you want to delete.
-  uint delete_direct(ShannonBase::RapidContext *context, const char* schema_name,
-                    const char* table_name, const char*field_name,
-                    const uchar* pk_value, uint pk_len);
+  // deletes the data by key. pk_value is key value of row you want to delete.
+  uint delete_direct(ShannonBase::RapidContext *context,
+                     const char *schema_name, const char *table_name,
+                     const char *field_name, const uchar *pk_value,
+                     uint pk_len);
   // deletes all the data.
   uint delete_all_direct(ShannonBase::RapidContext *context);
-  uint update_direct(ShannonBase::RapidContext *context, const char* schema_name,
-                    const char* table_name, const char*field_name,
-                    const uchar* new_value, uint new_value_len, bool in_place_update = false);
+  uint update_direct(ShannonBase::RapidContext *context,
+                     const char *schema_name, const char *table_name,
+                     const char *field_name, const uchar *new_value,
+                     uint new_value_len, bool in_place_update = false);
   Cu *get_cu(std::string &key);
   void add_cu(std::string key, std::unique_ptr<Cu> &cu);
   ha_rows get_rows(TABLE *source_table);
   bool is_empty() { return m_cus.empty(); }
+
  private:
   // make ctor and dctor private.
   Imcs();
@@ -107,17 +110,20 @@ class Imcs : public MemoryObject {
 
   /*if this field has been loaded into rapid, then return its key,
   or return empty string*/
-  inline std::string get_key_name(const char* schema, const char* table, const char* field) {
+  inline std::string get_key_name(const char *schema, const char *table,
+                                  const char *field) {
     std::ostringstream ostr;
     ostr << schema << table << field;
     std::string key_name = ostr.str();
     auto elem = m_cus.find(key_name);
     if (elem == m_cus.end()) {  // a new field. not found. not  be loaded.
       return "";
-    } else return key_name;
+    } else
+      return key_name;
 
     return "";
   }
+
  private:
   // imcs instance
   static Imcs *m_instance;

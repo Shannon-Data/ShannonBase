@@ -28,12 +28,12 @@
 #include <stddef.h>
 #include <algorithm>
 #include <cassert>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <string>
-#include <iostream>
 #include <sstream>
+#include <string>
 #include <tuple>
 #include <utility>
 
@@ -45,38 +45,38 @@
 #include "my_sys.h"
 #include "mysql/plugin.h"
 #include "mysqld_error.h"
-#include "sql/current_thd.h" //current_thd
+#include "sql/current_thd.h"  //current_thd
 #include "sql/debug_sync.h"
 #include "sql/handler.h"
+#include "sql/item.h"
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/walk_access_paths.h"
+#include "sql/key.h"
+#include "sql/opt_costmodel.h"
 #include "sql/sql_class.h"
 #include "sql/sql_const.h"
-#include "sql/key.h"
 #include "sql/sql_lex.h"
-#include "sql/item.h"
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
-#include "sql/opt_costmodel.h"
 #include "template_utils.h"
 #include "thr_lock.h"
 
+#include "storage/innobase/handler/ha_innodb.h"
+#include "storage/innobase/include/dict0dd.h"
 #include "storage/innobase/include/lock0lock.h"
 #include "storage/innobase/include/trx0trx.h"
-#include "storage/innobase/include/dict0dd.h"
-#include "storage/innobase/handler/ha_innodb.h"
 
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_stats.h"
 #include "storage/rapid_engine/utils/utils.h"
-#include "storage/rapid_engine/imcs/imcs.h"
-#include "storage/rapid_engine/imcs/cu.h"
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
-#include "storage/rapid_engine/include/rapid_context.h"
 
-#include "storage/rapid_engine/optimizer/optimizer.h" //optimizer
-#include "storage/rapid_engine/cost/cost.h"           //costestimator
-#include "storage/rapid_engine/optimizer/rules/rule.h"//Rule
+#include "storage/rapid_engine/cost/cost.h"             //costestimator
+#include "storage/rapid_engine/optimizer/optimizer.h"   //optimizer
+#include "storage/rapid_engine/optimizer/rules/rule.h"  //Rule
 #include "storage/rapid_engine/populate/populate.h"
 
 /* clang-format off */
@@ -767,6 +767,10 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_KEY_NOT_FOUND;
   }
 
+  if (!ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+      shannon_loaded_tables->size()) {
+    ShannonBase::Populate::Populator::start_change_populate_threads();
+  }
   return 0;
 }
 
@@ -791,6 +795,10 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
   }
   shannon_loaded_tables->erase(db_name, table_name);
 
+  if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+      !shannon_loaded_tables->size()) {//none loaded table.
+    ShannonBase::Populate::Populator::end_change_populate_threads();
+  }
   return 0;
 }
 }  // namespace ShannonBase
