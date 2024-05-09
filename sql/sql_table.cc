@@ -203,7 +203,7 @@
 #include "storage/rapid_engine/include/rapid_stats.h" //meta_rpd_columns_infos
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/cu.h"
-
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 namespace dd {
 class View;
 }  // namespace dd
@@ -11737,6 +11737,12 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
               (is_load ? "load" : "unload")));
   // Transaction committed successfully, no rollback will be necessary.
   rollback_guard.commit();
+
+  if (is_load){
+     ShannonBase::Populate::Populator::start_change_populate_threads();
+  } else {
+     ShannonBase::Populate::Populator::end_change_populate_threads();
+  }
 
   if (cleanup()) return true;
   my_ok(thd, thd->get_sent_row_count());

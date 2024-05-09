@@ -767,10 +767,6 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     return HA_ERR_KEY_NOT_FOUND;
   }
 
-  if (!ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-      shannon_loaded_tables->size()) {
-    ShannonBase::Populate::Populator::start_change_populate_threads();
-  }
   return 0;
 }
 
@@ -783,7 +779,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
              "Table is not loaded on a secondary engine");
     return HA_ERR_GENERIC;
   }
-  
+
   ShannonBase::Imcs::Imcs* imcs_instance = ShannonBase::Imcs::Imcs::get_instance();
   assert(imcs_instance);
   RapidContext context;
@@ -794,11 +790,6 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
     return ret;
   }
   shannon_loaded_tables->erase(db_name, table_name);
-
-  if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-      !shannon_loaded_tables->size()) {//none loaded table.
-    ShannonBase::Populate::Populator::end_change_populate_threads();
-  }
   return 0;
 }
 }  // namespace ShannonBase

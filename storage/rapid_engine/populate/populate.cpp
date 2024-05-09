@@ -35,6 +35,7 @@
 #include "sql/sql_class.h"
 #include "storage/innobase/include/os0thread-create.h"
 
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/populate/log_parser.h"
 
 #ifdef UNIV_PFS_THREAD
@@ -42,6 +43,7 @@ mysql_pfs_key_t rapid_populate_thread_key;
 #endif /* UNIV_PFS_THREAD */
 
 namespace ShannonBase {
+extern ShannonLoadedTables *shannon_loaded_tables;
 namespace Populate {
 // should be pay more attention to syc relation between this thread
 // and log_buffer write. if we stop changes poping, should stop writing
@@ -63,13 +65,13 @@ static void parse_log_func(log_t *log_ptr) {
   // here we have a notifiyer, when checkpoint_lsn/flushed_lsn > rapid_lsn to
   // start pop
   LogParser parse_log;
-  while (srv_shutdown_state.load(std::memory_order_seq_cst) ==
-             SRV_SHUTDOWN_NONE &&
+  while (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
          sys_pop_started.load(std::memory_order_seq_cst)) {
     auto stop_condition = [&](bool wait) {
       if (sys_population_buffer->readAvailable()) {
         return true;
       }
+
       return false;
     };
 
@@ -89,6 +91,8 @@ static void parse_log_func(log_t *log_ptr) {
     mutex_enter(&(log_sys->rapid_populator_mutex));
     if (parsed_bytes) sys_population_buffer->remove(parsed_bytes);
     mutex_exit(&(log_sys->rapid_populator_mutex));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(0));
   }  // wile(pop_started)
 
   if (log_pop_thread_thd) {
@@ -103,7 +107,7 @@ bool Populator::log_pop_thread_is_active() {
 }
 
 void Populator::start_change_populate_threads() {
-  if (!Populator::log_pop_thread_is_active()) {
+  if (!Populator::log_pop_thread_is_active() && shannon_loaded_tables->size()) {
     os_event_reset(log_sys->rapid_events[0]);
     srv_threads.m_change_pop =
         os_thread_create(rapid_populate_thread_key, 0, parse_log_func, log_sys);
@@ -113,10 +117,12 @@ void Populator::start_change_populate_threads() {
 }
 
 void Populator::end_change_populate_threads() {
-  sys_pop_started.store(false, std::memory_order_seq_cst);
-  // clean up the buffer.
-  sys_population_buffer->clearUp();
-  sys_rapid_loop_count = 0;
+  if (Populator::log_pop_thread_is_active() && !shannon_loaded_tables->size()) {
+    os_event_reset(log_sys->rapid_events[0]);
+    sys_pop_started.store(false, std::memory_order_seq_cst);
+    sys_rapid_loop_count = 0;
+    sys_population_buffer->clearUp();
+  }
 }
 
 void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */

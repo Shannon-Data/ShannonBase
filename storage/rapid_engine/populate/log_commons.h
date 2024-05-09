@@ -102,8 +102,6 @@ class Ringbuffer {
   void clearUp(void) {
     tail.store(0, index_release_barrier);
     head.store(0, index_release_barrier);
-
-    std::memset(data_buff, 0x0, buffer_size);
   }
 
   /*!

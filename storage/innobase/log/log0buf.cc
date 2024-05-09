@@ -938,7 +938,8 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
   /* We neither write with holes, nor overwrite any fragments of data. */
   ut_ad(log.write_lsn.load() <= start_lsn);
   ut_ad(log_buffer_ready_for_write_lsn(log) <= start_lsn);
-
+  const byte* pop_ptr = str;
+  size_t pop_size = str_len;
   /* That's only used in the assertion at the very end. */
   const sn_t end_sn = log_translate_lsn_to_sn(start_lsn) + sn_t{str_len};
 
@@ -1002,14 +1003,6 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
     /* This is the critical memcpy operation, which copies data
     from internal mtr's buffer to the shared log buffer. */
     std::memcpy(ptr, str, len);
-    mutex_enter(&(log.rapid_populator_mutex));
-    if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-        !recv_recovery_is_on() &&
-        !ShannonBase::Populate::sys_population_buffer->isFull()) {
-        ShannonBase::Populate::sys_population_buffer->writeBuff(str, len);
-    }
-    mutex_exit(&(log.rapid_populator_mutex));
-
     ut_a(len <= str_len);
 
     str_len -= len;
@@ -1055,6 +1048,15 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
       /* Nothing more to copy - we have finished! */
       break;
     }
+  }
+
+  /* Pointer to next data byte to set within the log buffer. */
+  if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
+      ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+      !recv_recovery_is_on() &&
+      !ShannonBase::Populate::sys_population_buffer->isFull()){
+      auto inserted = ShannonBase::Populate::sys_population_buffer->writeBuff(pop_ptr, pop_size);
+      ut_a(inserted == pop_size);
   }
 
   ut_a(ptr >= log.buf);
@@ -1127,7 +1129,6 @@ void log_buffer_write_completed(log_t &log, lsn_t start_lsn, lsn_t end_lsn) {
     }
     log_closer_mutex_exit(log);
   }
-  os_event_set(log.rapid_events[0]);
 }
 
 void log_wait_for_space_in_log_recent_closed(log_t &log, lsn_t lsn) {
