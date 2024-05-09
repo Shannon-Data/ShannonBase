@@ -36,7 +36,7 @@
 #include "storage/innobase/include/mtr0types.h"
 #include "storage/innobase/include/trx0types.h"
 #include "storage/innobase/include/univ.i"
-
+// clang-format off
 class Field;
 class TABLE;
 namespace ShannonBase {
@@ -50,25 +50,27 @@ class LogParser {
   uint parse_redo(byte *ptr, byte *end_ptr);
 
  private:
-  ulint parse_parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
+  ulint parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
                             space_id_t *space_id, page_no_t *page_no,
                             byte **body);
 
-  byte *parse_parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr,
+  byte *parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr,
                                           byte *end_ptr, space_id_t space_id,
                                           page_no_t page_no, buf_block_t *block,
                                           mtr_t *mtr, lsn_t start_lsn);
 
   int parse_cur_rec_change_apply_low(
-      const rec_t *rec, const dict_index_t *index, const ulint *offsets,
-      mlog_id_t type, bool all,
+      const rec_t *rec, const dict_index_t *index,
+      const dict_index_t *real_index,
+      const ulint *offsets, mlog_id_t type, bool all,
       page_zip_des_t *page_zip = nullptr,              /**used for upd*/
       const upd_t *upd = nullptr, trx_id_t trxid = 0); /**upd vector for upd*/
 
   // parses the update log and apply.
-  byte *parse_row_and_apply_upd_rec_in_place(
+  byte *parse_and_apply_upd_rec_in_place(
       rec_t *rec,                /*!< in/out: record where replaced */
       const dict_index_t *index, /*!< in: the index the record belongs to */
+      const dict_index_t *real_index, /*!< in: the real index the record belongs to */
       const ulint *offsets,      /*!< in: array returned by rec_get_offsets() */
       const upd_t *update,       /*!< in: update vector */
       page_zip_des_t *page_zip,  /*!< in: compressed page with enough space
@@ -107,7 +109,7 @@ class LogParser {
 
   /** Parses a log record of copying a record list end to a new created page.
   @return end of log record or NULL */
-  byte *parse_page_parse_copy_rec_list_to_created_page(
+  byte *parse_page_copy_rec_list_to_created_page(
       byte *ptr,           /*!< in: buffer */
       byte *end_ptr,       /*!< in: buffer end */
       buf_block_t *block,  /*!< in: page or NULL */
@@ -133,13 +135,18 @@ class LogParser {
       page_t *page,  /*!< in/out: page or NULL */
       page_zip_des_t *page_zip);
 
+  byte *parse_trx_undo_add_undo_rec(
+      byte *ptr,   /*!< in: buffer */
+      byte *end_ptr, /*!< in: buffer end */
+      page_t *page);  /*!< in: page or NULL */
+
   byte *parse_page_header(mlog_id_t type, const byte *ptr, const byte *end_ptr,
                           page_t *page, mtr_t *mtr);
 
   // get the field value from innodb format to mysql format. return 0 success.
-  int store_field_in_mysql_format(const dict_index_t *index,
-                                  const dict_field_t *col, const byte *dest,
-                                  const byte *src, ulint len);
+  int store_field_in_mysql_format(const dict_index_t *index, const dict_col_t* col,
+                                  const dict_col_t* real_col,
+                                  const byte *dest, const byte *src, ulint len);
 
   // only user's index be retrieved from dd_table.
   const dict_index_t *find_index(uint64 idx_id);
@@ -150,7 +157,7 @@ class LogParser {
 
   // get pk in byte fmt, and returns the length of PK.
   inline uint get_PK(const rec_t *rec, const dict_index_t *index,
-                     const ulint *offsets, uchar *pk);
+                     const dict_index_t *real_index, const ulint *offsets, uchar *pk);
 
   // parse the signle log rec.
   uint parse_single_rec(byte *ptr, byte *end_ptr);
@@ -168,3 +175,4 @@ class LogParser {
 }  // namespace Populate
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_LOG_PARSER_H__
+// clang-format on
