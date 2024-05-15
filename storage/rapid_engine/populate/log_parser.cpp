@@ -363,6 +363,254 @@ byte *LogParser::advance_parseMetadataLog(table_id_t id, uint64_t version,
   return ptr + consumed;
 }
 
+byte *LogParser::parse_tablespace_redo_rename(byte *ptr, const byte *end,
+                                 const page_id_t &page_id, ulint parsed_bytes,
+                                 bool parse_only [[maybe_unused]]) {
+  ut_a(parse_only);
+  //in mlog pageid == 0. see `fil_op_write_log`
+  /* We never recreate the system tablespace. */
+  ut_a(page_id.space() != TRX_SYS_SPACE);
+
+  ut_a(parsed_bytes != ULINT_UNDEFINED);
+
+  /* Where 2 = from name len (uint16_t). */
+  if (end <= ptr + 2) {
+    return nullptr;
+  }
+
+  /* Read and check the RENAME FROM_NAME. */
+  ulint from_len = mach_read_from_2(ptr);
+  ptr += 2;
+  char *from_name = reinterpret_cast<char *>(ptr);
+
+  /* Check if the 'from' file name is valid. */
+  if (end < ptr + from_len) {
+    return nullptr;
+  }
+
+  std::string whats_wrong;
+  constexpr char more_than_five[] = "The length must be >= 5.";
+  constexpr char end_with_ibd[] = "The file suffix must be '.ibd'.";
+  bool err_found{false};
+  if (from_len < 5) {
+    err_found = true;
+    whats_wrong.assign(more_than_five);
+  } else {
+    std::string name{from_name};
+
+    if (!Fil_path::has_suffix(IBD, name)) {
+      err_found = true;
+      whats_wrong.assign(end_with_ibd);
+    }
+  }
+
+  if (err_found) {
+    ib::info(ER_IB_MSG_357) << "MLOG_FILE_RENAME: Invalid {from} file name: '"
+                            << from_name << "'. " << whats_wrong;
+
+    return nullptr;
+  }
+
+  ptr += from_len;
+  Fil_path::normalize(from_name);
+
+  /* Read and check the RENAME TO_NAME. */
+  ulint to_len = mach_read_from_2(ptr);
+  ptr += 2;
+  char *to_name = reinterpret_cast<char *>(ptr);
+
+  /* Check if the 'to' file name is valid. */
+  if (end < ptr + to_len) {
+    return nullptr;
+  }
+
+  if (to_len < 5) {
+    err_found = true;
+    whats_wrong.assign(more_than_five);
+  } else {
+    std::string name{to_name};
+
+    if (!Fil_path::has_suffix(IBD, name)) {
+      err_found = true;
+      whats_wrong.assign(end_with_ibd);
+    }
+  }
+
+  if (err_found) {
+    ib::info(ER_IB_MSG_357) << "MLOG_FILE_RENAME: Invalid {to} file name: '"
+                            << to_name << "'. " << whats_wrong;
+
+    return nullptr;
+  }
+
+  ptr += to_len;
+  Fil_path::normalize(to_name);
+
+  /* Update filename with correct partition case, if needed. */
+  std::string to_name_str(to_name);
+  std::string space_name;
+
+  if (from_len == to_len && strncmp(to_name, from_name, to_len) == 0) {
+    ib::error(ER_IB_MSG_360)
+        << "MLOG_FILE_RENAME: The from and to name are the"
+        << " same: '" << from_name << "', '" << to_name << "'";
+
+    return nullptr;
+  }
+
+ return ptr;
+}
+
+byte *LogParser::parse_tablespace_redo_delete(byte *ptr, const byte *end,
+                                              const page_id_t &page_id, ulint parsed_bytes,
+                                              bool parse_only) {
+  ut_a(parse_only);
+  /* We never recreate the system tablespace. */
+  ut_a(page_id.space() != TRX_SYS_SPACE);
+
+  ut_a(parsed_bytes != ULINT_UNDEFINED);
+
+  /* Where 2 =  len (uint16_t). */
+  if (end <= ptr + 2) {
+    return nullptr;
+  }
+
+  ulint len = mach_read_from_2(ptr);
+
+  ptr += 2;
+
+  /* Do we have the full/valid file name. */
+  if (end < ptr + len || len < 5) {
+    if (len < 5) {
+      char name[6];
+
+      snprintf(name, sizeof(name), "%.*s", (int)len, ptr);
+
+      ib::error(ER_IB_MSG_362) << "MLOG_FILE_DELETE : Invalid file name."
+                               << " Length (" << len << ") must be >= 5"
+                               << " and end in '.ibd'. File name in the"
+                               << " redo log is '" << name << "'";
+    }
+
+    return nullptr;
+  }
+
+  char *name = reinterpret_cast<char *>(ptr);
+
+  Fil_path::normalize(name);
+
+  ptr += len;
+
+  if (!(Fil_path::has_suffix(IBD, name) ||
+        fsp_is_undo_tablespace(page_id.space()))) {
+
+    return nullptr;
+  }
+
+  if (parse_only) {
+    return ptr;
+  }
+
+  return ptr;
+}
+
+byte *LogParser::parse_tablespace_redo_create(byte *ptr, const byte *end,
+                                 const page_id_t &page_id, ulint parsed_bytes,
+                                 bool parse_only) {
+  ut_a(parse_only);
+  /* We never recreate the system tablespace. */
+  ut_a(page_id.space() != TRX_SYS_SPACE);
+
+  ut_a(parsed_bytes != ULINT_UNDEFINED);
+
+  /* Where 6 = flags (uint32_t) + name len (uint16_t). */
+  if (end <= ptr + 6) {
+    return nullptr;
+  }
+
+#ifdef UNIV_HOTBACKUP
+  uint32_t flags = mach_read_from_4(ptr);
+#else
+  /* Skip the flags, not used here. */
+#endif /* UNIV_HOTBACKUP */
+
+  ptr += 4;
+
+  ulint len = mach_read_from_2(ptr);
+
+  ptr += 2;
+
+  /* Do we have the full/valid file name. */
+  if (end < ptr + len || len < 5) {
+    if (len < 5) {
+      char name[6];
+
+      snprintf(name, sizeof(name), "%.*s", (int)len, ptr);
+
+      ib::error(ER_IB_MSG_355) << "MLOG_FILE_CREATE : Invalid file name."
+                               << " Length (" << len << ") must be >= 5"
+                               << " and end in '.ibd'. File name in the"
+                               << " redo log is '" << name << "'";
+
+    }
+
+    return nullptr;
+  }
+
+  char *name = reinterpret_cast<char *>(ptr);
+
+  Fil_path::normalize(name);
+
+  ptr += len;
+
+  if (!(Fil_path::has_suffix(IBD, name))) {
+    return nullptr;
+  }
+
+  if (parse_only) {
+    return ptr;
+  }
+
+  return ptr;
+}
+
+byte *LogParser::parse_tablespace_redo_extend(byte *ptr, const byte *end,
+                                           const page_id_t &page_id, ulint parsed_bytes,
+                                           bool parse_only) {
+  ut_a(parse_only);
+  /* We never recreate the system tablespace. */
+  ut_a(page_id.space() != TRX_SYS_SPACE);
+
+  ut_a(parsed_bytes != ULINT_UNDEFINED);
+
+  /* Check for valid offset and size values */
+  if (end < ptr + 16) {
+    return nullptr;
+  }
+
+  /* Offset within the file to start writing zeros */
+  os_offset_t offset [[maybe_unused]] = mach_read_from_8(ptr);
+  ptr += 8;
+
+  /* Size of the space which needs to be initialized by
+  writing zeros */
+  os_offset_t size = mach_read_from_8(ptr);
+  ptr += 8;
+
+  if (size == 0) {
+    ib::error(ER_IB_MSG_INCORRECT_SIZE)
+        << "MLOG_FILE_EXTEND: Incorrect value for size encountered."
+        << "Redo log corruption found.";
+    return nullptr;
+  }
+
+  if (parse_only) {
+    return ptr;
+  }
+
+  return ptr;
+}
+
 byte *LogParser::parse_cur_and_apply_delete_mark_rec(
     byte *ptr,           /*!< in: buffer */
     byte *end_ptr,       /*!< in: buffer end */
@@ -515,7 +763,7 @@ byte *LogParser::parse_cur_and_apply_insert_rec(
     return (nullptr);
   }
 
-  if (end_seg_len & 0x1UL) {
+  if (end_seg_len & 0x1UL) {//with extra storage.
     /* Read the info bits */
 
     if (end_ptr < ptr + 1) {
@@ -585,7 +833,7 @@ byte *LogParser::parse_cur_and_apply_insert_rec(
     ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_859)
         << "is_short " << is_short << ", "
         << "info_and_status_bits " << info_and_status_bits << ", offset "
-        << page_offset(cursor_rec)
+        << page_offset(cursor_rec) << ", rec_offset_size " << rec_offs_size(offsets)
         << ","
            " o_offset "
         << origin_offset << ", mismatch index " << mismatch_index
@@ -818,7 +1066,7 @@ byte *LogParser::parse_btr_cur_del_mark_set_sec_rec(
   auto offset = mach_read_from_2(ptr);
   ptr += 2;
 
-  ut_a(offset <= UNIV_PAGE_SIZE);
+  //ut_a(offset <= UNIV_PAGE_SIZE);
 
   if (page) {
     auto rec [[maybe_unused]] = page + offset;
@@ -890,22 +1138,22 @@ byte *LogParser::parse_or_apply_log_rec_body(
 #ifndef UNIV_HOTBACKUP
     case MLOG_FILE_DELETE:
 
-      return fil_tablespace_redo_delete(ptr, end_ptr,
+      return parse_tablespace_redo_delete(ptr, end_ptr,
                                         page_id_t(space_id, page_no), 0, true);
 
     case MLOG_FILE_CREATE:
 
-      return fil_tablespace_redo_create(ptr, end_ptr,
+      return parse_tablespace_redo_create(ptr, end_ptr,
                                         page_id_t(space_id, page_no), 0, true);
 
     case MLOG_FILE_RENAME:
 
-      return fil_tablespace_redo_rename(ptr, end_ptr,
-                                        page_id_t(space_id, page_no), 0, true);
+      return parse_tablespace_redo_rename(ptr, end_ptr,
+                                         page_id_t(space_id, page_no), 0, true);
 
     case MLOG_FILE_EXTEND:
 
-      return fil_tablespace_redo_extend(ptr, end_ptr,
+      return parse_tablespace_redo_extend(ptr, end_ptr,
                                         page_id_t(space_id, page_no), 0, true);
 #else  /* !UNIV_HOTBACKUP */
       // Mysqlbackup does not execute file operations. It cares for all
@@ -914,22 +1162,22 @@ byte *LogParser::parse_or_apply_log_rec_body(
       // backup.
     case MLOG_FILE_DELETE:
 
-      return fil_tablespace_redo_delete(ptr, end_ptr,
+      return parse_tablespace_redo_delete(ptr, end_ptr,
                                         page_id_t(space_id, page_no), 0, true);
 
     case MLOG_FILE_CREATE:
 
-      return fil_tablespace_redo_create(ptr, end_ptr,
+      return parse_tablespace_redo_create(ptr, end_ptr,
                                         page_id_t(space_id, page_no), 0, true);
 
     case MLOG_FILE_RENAME:
 
-      return fil_tablespace_redo_rename(ptr, end_ptr,
+      return parse_tablespace_redo_rename(ptr, end_ptr,
                                         page_id_t(space_id, page_no), 0, true);
 
     case MLOG_FILE_EXTEND:
 
-      return fil_tablespace_redo_extend(ptr, end_ptr,
+      return parse_tablespace_redo_extend(ptr, end_ptr,
                                         page_id_t(space_id, page_no), 0, true);
 #endif /* !UNIV_HOTBACKUP */
 
@@ -1161,7 +1409,7 @@ byte *LogParser::parse_or_apply_log_rec_body(
 
     case MLOG_REC_CLUST_DELETE_MARK_8027:
     case MLOG_COMP_REC_CLUST_DELETE_MARK_8027:
-      ut_a(false);
+
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
@@ -1271,7 +1519,7 @@ byte *LogParser::parse_or_apply_log_rec_body(
       break;
 
     case MLOG_LIST_END_COPY_CREATED:
-      ut_a(false);
+
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
@@ -1279,14 +1527,14 @@ byte *LogParser::parse_or_apply_log_rec_body(
 
         buf_block_t *block = get_block(space_id, page_no);
         ptr = parse_page_copy_rec_list_to_created_page(ptr, end_ptr,
-                                                             block, index, mtr);
+                                                       block, index, mtr);
       }
 
       break;
 
     case MLOG_LIST_END_COPY_CREATED_8027:
     case MLOG_COMP_LIST_END_COPY_CREATED_8027:
-      ut_a(false);
+
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
@@ -1371,19 +1619,20 @@ byte *LogParser::parse_or_apply_log_rec_body(
       break;
 
     case MLOG_UNDO_ERASE_END:
-      ut_ad(false);
+
       ut_ad(!page || page_type == FIL_PAGE_UNDO_LOG);
-      // do nothing.
+
       break;
 
-    case MLOG_UNDO_INIT: {
+    case MLOG_UNDO_INIT:
       /* Allow anything in page_type when creating a page. */
       mach_parse_compressed((const byte **)&ptr, end_ptr);
       if (ptr == nullptr) {
         return nullptr;
       }
+
       break;
-    }
+
     case MLOG_UNDO_HDR_CREATE:
     case MLOG_UNDO_HDR_REUSE:
       // just only advance the pointer.
@@ -1395,7 +1644,7 @@ byte *LogParser::parse_or_apply_log_rec_body(
 
     case MLOG_REC_MIN_MARK:
     case MLOG_COMP_REC_MIN_MARK:
-      ut_ad(false);
+
       /* On a compressed page, MLOG_COMP_REC_MIN_MARK
       will be followed by MLOG_COMP_REC_DELETE
       or MLOG_ZIP_WRITE_HEADER(FIL_PAGE_PREV, FIL_nullptr)
@@ -1403,7 +1652,8 @@ byte *LogParser::parse_or_apply_log_rec_body(
       if (end_ptr < ptr + 2) {
         return nullptr;
       }
-      ptr = (ptr + 2);
+      ptr +=2;
+
       break;
 
     case MLOG_REC_DELETE:
@@ -1420,7 +1670,7 @@ byte *LogParser::parse_or_apply_log_rec_body(
 
     case MLOG_REC_DELETE_8027:
     case MLOG_COMP_REC_DELETE_8027:
-      ut_a(false);
+
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
@@ -1674,7 +1924,7 @@ ulint LogParser::parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
   return new_ptr - ptr;
 }
 
-uint LogParser::parse_single_rec(byte *ptr, byte *end_ptr) {
+ulint LogParser::parse_single_rec(byte *ptr, byte *end_ptr) {
   /* Try to parse a log record, fetching its type, space id,
   page no, and a pointer to the body of the log record */
 
@@ -1683,14 +1933,14 @@ uint LogParser::parse_single_rec(byte *ptr, byte *end_ptr) {
   page_no_t page_no = 0;
   space_id_t space_id = 0;
 
-  uint parsed_bytes =
+  ulint parsed_bytes =
       parse_log_rec(&type, ptr, end_ptr, &space_id, &page_no, &body);
   return parsed_bytes;
 }
 
-uint LogParser::parse_multi_rec(byte *ptr, byte *end_ptr) {
+ulint LogParser::parse_multi_rec(byte *ptr, byte *end_ptr) {
   ut_a(end_ptr >= ptr);
-  uint parsed_bytes{0}, n_recs{0};
+  ulint parsed_bytes{0}, n_recs{0};
 
   for (;;) {
     mlog_id_t type = MLOG_BIGGEST_TYPE;
@@ -1701,8 +1951,10 @@ uint LogParser::parse_multi_rec(byte *ptr, byte *end_ptr) {
     ulint len =
         parse_log_rec(&type, ptr, end_ptr, &space_id, &page_no, &body);
     if (len == 0) {
+      ut_a(false);
       return 0;
     } else if ((*ptr & MLOG_SINGLE_REC_FLAG)) {
+      ut_a(false);
       // report_corrupt_log(ptr, type, space_id, page_no);
       return 0;
     }

@@ -160,16 +160,33 @@ class LogParser {
                      const dict_index_t *real_index, const ulint *offsets, uchar *pk);
 
   // parse the signle log rec.
-  uint parse_single_rec(byte *ptr, byte *end_ptr);
+  ulint parse_single_rec(byte *ptr, byte *end_ptr);
 
   ////parse the multi log rec. retunr parsed byte size.
-  uint parse_multi_rec(byte *ptr, byte *end_ptr);
+  ulint parse_multi_rec(byte *ptr, byte *end_ptr);
 
   // gets blocks by page no and space id
   inline buf_block_t *get_block(space_id_t, page_no_t);
 
   byte *advance_parseMetadataLog(table_id_t id, uint64_t version, byte *ptr,
                                  byte *end);
+
+  [[nodiscard]] byte *parse_tablespace_redo_rename(byte *ptr, const byte *end,
+                                                   const page_id_t &page_id,
+                                                   ulint parsed_bytes,
+                                                   bool parse_only);
+  [[nodiscard]] byte *parse_tablespace_redo_delete(byte *ptr, const byte *end,
+                                                   const page_id_t &page_id,
+                                                   ulint parsed_bytes,
+                                                   bool parse_only);
+  [[nodiscard]] byte *parse_tablespace_redo_create(byte *ptr, const byte *end,
+                                                   const page_id_t &page_id,
+                                                   ulint parsed_bytes,
+                                                   bool parse_only);
+  [[nodiscard]] byte *parse_tablespace_redo_extend(byte *ptr, const byte *end,
+                                                   const page_id_t &page_id,
+                                                   ulint parsed_bytes,
+                                                   bool parse_only);
 };
 
 }  // namespace Populate
