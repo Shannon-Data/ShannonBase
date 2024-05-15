@@ -507,10 +507,6 @@ byte *LogParser::parse_tablespace_redo_delete(byte *ptr, const byte *end,
     return nullptr;
   }
 
-  if (parse_only) {
-    return ptr;
-  }
-
   return ptr;
 }
 
@@ -527,12 +523,6 @@ byte *LogParser::parse_tablespace_redo_create(byte *ptr, const byte *end,
   if (end <= ptr + 6) {
     return nullptr;
   }
-
-#ifdef UNIV_HOTBACKUP
-  uint32_t flags = mach_read_from_4(ptr);
-#else
-  /* Skip the flags, not used here. */
-#endif /* UNIV_HOTBACKUP */
 
   ptr += 4;
 
@@ -567,10 +557,6 @@ byte *LogParser::parse_tablespace_redo_create(byte *ptr, const byte *end,
     return nullptr;
   }
 
-  if (parse_only) {
-    return ptr;
-  }
-
   return ptr;
 }
 
@@ -602,10 +588,6 @@ byte *LogParser::parse_tablespace_redo_extend(byte *ptr, const byte *end,
         << "MLOG_FILE_EXTEND: Incorrect value for size encountered."
         << "Redo log corruption found.";
     return nullptr;
-  }
-
-  if (parse_only) {
-    return ptr;
   }
 
   return ptr;
@@ -818,6 +800,10 @@ byte *LogParser::parse_cur_and_apply_insert_rec(
     }
   }
 
+  if (UNIV_UNLIKELY(mismatch_index >= UNIV_PAGE_SIZE)) {
+    return (const_cast<byte *>(ptr + (end_seg_len >> 1)));
+  }
+
   end_seg_len >>= 1;
 
   if (mismatch_index + end_seg_len < sizeof buf1) {
@@ -828,18 +814,6 @@ byte *LogParser::parse_cur_and_apply_insert_rec(
   }
 
   /* Build the inserted record to buf */
-
-  if (UNIV_UNLIKELY(mismatch_index >= UNIV_PAGE_SIZE)) {
-    ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_859)
-        << "is_short " << is_short << ", "
-        << "info_and_status_bits " << info_and_status_bits << ", offset "
-        << page_offset(cursor_rec) << ", rec_offset_size " << rec_offs_size(offsets)
-        << ","
-           " o_offset "
-        << origin_offset << ", mismatch index " << mismatch_index
-        << ", end_seg_len " << end_seg_len << " parsed len " << (ptr - ptr2);
-  }
-
   if (mismatch_index) {
     ut_memcpy(buf, rec_get_start(cursor_rec, offsets), mismatch_index);
   }
@@ -851,7 +825,6 @@ byte *LogParser::parse_cur_and_apply_insert_rec(
     rec_set_info_bits_old(buf + origin_offset, info_and_status_bits);
   }
 
-  page = page_align(cursor_rec);
   index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
   real_tb_index = find_index(index_id);
   if (real_tb_index) {
@@ -1130,7 +1103,7 @@ byte *LogParser::parse_page_header(mlog_id_t type, const byte *ptr,
 byte *LogParser::parse_or_apply_log_rec_body(
     mlog_id_t type, byte *ptr, byte *end_ptr, space_id_t space_id,
     page_no_t page_no, buf_block_t *block, mtr_t *mtr, lsn_t start_lsn) {
-  bool applying_redo = (block != nullptr);
+
   /*same as the recv_add_to_hash_table does. dont not add the the system opers
     mlogs when pop thread has been started. such as mlogs of `LOG_DUMMY` table.
   */
@@ -1203,46 +1176,10 @@ byte *LogParser::parse_or_apply_log_rec_body(
       break;
   }
 
-  page_t *page;
-  page_zip_des_t *page_zip;
+  page_t *page {nullptr};
+  page_zip_des_t *page_zip{nullptr};
   dict_index_t *index = nullptr;
-
-#ifdef UNIV_DEBUG
-  ulint page_type;
-#endif /* UNIV_DEBUG */
-
-#if defined(UNIV_HOTBACKUP) && defined(UNIV_DEBUG)
-  ib::trace_3() << "recv_parse_or_apply_log_rec_body: type "
-                << get_mlog_string(type) << " space_id " << space_id
-                << " page_nr " << page_no << " ptr "
-                << static_cast<const void *>(ptr) << " end_ptr "
-                << static_cast<const void *>(end_ptr) << " block "
-                << static_cast<const void *>(block) << " mtr "
-                << static_cast<const void *>(mtr);
-#endif /* UNIV_HOTBACKUP && UNIV_DEBUG */
-
-  if (applying_redo) {
-    /* Applying a page log record. */
-    ut_ad(mtr != nullptr);
-
-    page = block->frame;
-    page_zip = buf_block_get_page_zip(block);
-
-    ut_d(page_type = fil_page_get_type(page));
-#if defined(UNIV_HOTBACKUP) && defined(UNIV_DEBUG)
-    if (page_type == 0) {
-      meb_print_page_header(page);
-    }
-#endif /* UNIV_HOTBACKUP && UNIV_DEBUG */
-
-  } else {
-    /* Parsing a page log record. */
-    ut_ad(mtr == nullptr);
-    page = nullptr;
-    page_zip = nullptr;
-
-    ut_d(page_type = FIL_PAGE_TYPE_ALLOCATED);
-  }
+  page_type_t page_type{FIL_PAGE_TYPE_ALLOCATED};
 
   switch (type) {
 #ifdef UNIV_LOG_LSN_DEBUG
@@ -1251,6 +1188,12 @@ byte *LogParser::parse_or_apply_log_rec_body(
       break;
 #endif /* UNIV_LOG_LSN_DEBUG */
     case MLOG_4BYTES:
+      block = get_block(space_id, page_no);
+      if (block) { //page_no != 0;
+        page = block->frame;
+        page_zip = buf_block_get_page_zip(block);
+        page_type = fil_page_get_type(page);
+      }
 
       ut_ad(page == nullptr || end_ptr > ptr + 2);
 
@@ -1268,15 +1211,7 @@ byte *LogParser::parse_or_apply_log_rec_body(
         /* When applying log, we have complete records.
         They can be incomplete (ptr=nullptr) only during
         scanning (page==nullptr) */
-
         ut_ad(ptr != nullptr);
-
-        fil_space_t *space = fil_space_acquire(space_id);
-
-        ut_ad(space != nullptr);
-
-        fil_space_release(space);
-
         break;
       }
 
@@ -1373,7 +1308,6 @@ byte *LogParser::parse_or_apply_log_rec_body(
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
-
         buf_block_t *block = get_block(space_id, page_no);
         ptr = parse_cur_and_apply_insert_rec(false, ptr, end_ptr, block, index, mtr);
       }
@@ -1830,7 +1764,6 @@ byte *LogParser::parse_or_apply_log_rec_body(
 
     default:
       ptr = nullptr;
-      break;
   }
 
   if (index != nullptr) {
