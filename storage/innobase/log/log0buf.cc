@@ -938,8 +938,7 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
   /* We neither write with holes, nor overwrite any fragments of data. */
   ut_ad(log.write_lsn.load() <= start_lsn);
   ut_ad(log_buffer_ready_for_write_lsn(log) <= start_lsn);
-  const byte* pop_ptr = str;
-  size_t pop_size = str_len;
+
   /* That's only used in the assertion at the very end. */
   const sn_t end_sn = log_translate_lsn_to_sn(start_lsn) + sn_t{str_len};
 
@@ -1048,15 +1047,6 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
       /* Nothing more to copy - we have finished! */
       break;
     }
-  }
-
-  /* Pointer to next data byte to set within the log buffer. */
-  if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
-      ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-      !recv_recovery_is_on() &&
-      !ShannonBase::Populate::sys_population_buffer->isFull()){
-      auto inserted = ShannonBase::Populate::sys_population_buffer->writeBuff(pop_ptr, pop_size);
-      ut_a(inserted == pop_size);
   }
 
   ut_a(ptr >= log.buf);

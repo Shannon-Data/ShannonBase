@@ -52,6 +52,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0purge.h"
 #endif /* !UNIV_HOTBACKUP */
 
+#include "storage/rapid_engine/populate/populate.h"
+
 static_assert(static_cast<int>(MTR_MEMO_PAGE_S_FIX) ==
                   static_cast<int>(RW_S_LATCH),
               "");
@@ -415,7 +417,8 @@ class mtr_t::Command {
   @return number of bytes to write in finish_write() */
   ulint prepare_write();
 #endif /* !UNIV_HOTBACKUP */
-
+ /**cpy the mlog to pop buffer, without block header and tailer.*/
+  lsn_t cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len);
   /** true if it is a sync mini-transaction. */
   bool m_sync;
 
@@ -812,6 +815,129 @@ ulint mtr_t::Command::prepare_write() {
 
   return len;
 }
+
+lsn_t mtr_t::Command::cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len) {
+  ut_a(log.buf != nullptr);
+  ut_a(log.buf_size > 0);
+  ut_a(log.buf_size % OS_FILE_LOG_BLOCK_SIZE == 0);
+  byte* to_buf = (byte*)std::malloc(str_len);
+  if (!to_buf) return start_lsn;
+
+  size_t pos {0};
+  /* That's only used in the assertion at the very end. */
+  const sn_t end_sn = log_translate_lsn_to_sn(start_lsn) + sn_t{str_len};
+
+  /* A guard used to detect when we should wrap (to avoid overflowing
+  outside the log buffer). */
+  byte *buf_end = log.buf + log.buf_size;
+
+  /* Pointer to next data byte to set within the log buffer. */
+  byte *ptr = log.buf + (start_lsn % log.buf_size);
+
+  /* Lsn value for the next byte to copy. */
+  lsn_t lsn = start_lsn;
+
+  /* Copy log records to the reserved space in the log buffer.
+  Decrease number of bytes to copy (str_len) after some are
+  copied. Proceed until number of bytes to copy reaches zero. */
+  while (true) {
+    /* Calculate offset from the beginning of log block. */
+    const auto offset = lsn % OS_FILE_LOG_BLOCK_SIZE;
+
+    ut_a(offset >= LOG_BLOCK_HDR_SIZE);
+    ut_a(offset < OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE);
+
+    /* Calculate how many free data bytes are available
+    within current log block. */
+    const auto left = OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE - offset;
+
+    ut_a(left > 0);
+    ut_a(left < OS_FILE_LOG_BLOCK_SIZE);
+
+    size_t len, lsn_diff;
+
+    if (left > str_len) {
+      /* There are enough free bytes to finish copying
+      the remaining part, leaving at least single free
+      data byte in the log block. */
+
+      len = str_len;
+
+      lsn_diff = str_len;
+
+    } else {
+      /* We have more to copy than the current log block
+      has remaining data bytes, or exactly the same.
+
+      In both cases, next lsn value will belong to the
+      next log block. Copy data up to the end of the
+      current log block and start a next iteration if
+      there is more to copy. */
+
+      len = left;
+
+      lsn_diff = left + LOG_BLOCK_TRL_SIZE + LOG_BLOCK_HDR_SIZE;
+    }
+
+    ut_a(len > 0);
+    ut_a(ptr + len <= buf_end);
+
+    /* This is the critical memcpy operation, which copies data
+    from internal mtr's buffer to the shared log buffer. */
+    /* Pointer to next data byte to set within the log buffer. */
+    std::memcpy(to_buf + pos, ptr, len);
+    ut_a(len <= str_len);
+
+    pos += len;
+    str_len -= len;
+    lsn += lsn_diff;
+    ptr += lsn_diff;
+
+    ut_a(log_is_data_lsn(lsn));
+
+    if (ptr >= buf_end) {
+      /* Wrap - next copy operation will write at the
+      beginning of the log buffer. */
+
+      ptr -= log.buf_size;
+    }
+
+    if (lsn_diff > left) {
+      /* We have crossed boundaries between consecutive log
+      blocks. Either we finish in next block, in which case
+      user will set the proper first_rec_group field after
+      this function is finished, or we finish even further,
+      in which case next block should have 0. In both cases,
+      we reset next block's value to 0 now, and in the first
+      case, user will simply overwrite it afterwards. */
+
+      ut_a((uintptr_t(ptr) % OS_FILE_LOG_BLOCK_SIZE) == LOG_BLOCK_HDR_SIZE);
+
+      ut_a((uintptr_t(ptr) & ~uintptr_t(LOG_BLOCK_HDR_SIZE)) %
+               OS_FILE_LOG_BLOCK_SIZE ==
+           0);
+
+      if (str_len == 0) {
+        /* We have finished at the boundary. */
+        break;
+      }
+    } else {
+      /* Nothing more to copy - we have finished! */
+      break;
+    }
+  }
+  ShannonBase::Populate::sys_population_buffer->writeBuff(to_buf, pos);
+  ut_a(!ShannonBase::Populate::sys_population_buffer->isFull());
+  std::free(to_buf);
+  to_buf = nullptr;
+
+  ut_a(ptr >= log.buf);
+  ut_a(ptr <= buf_end);
+  ut_a(buf_end == log.buf + log.buf_size);
+  ut_a(log_translate_lsn_to_sn(lsn) == end_sn);
+
+  return lsn;
+}
 #endif /* !UNIV_HOTBACKUP */
 
 /** Release the latches and blocks acquired by this mini-transaction */
@@ -866,6 +992,14 @@ void mtr_t::Command::execute() {
     add_dirty_blocks_to_flush_list(handle.start_lsn, handle.end_lsn);
 
     log_buffer_close(*log_sys, handle);
+
+    if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
+      ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+      !recv_recovery_is_on() &&
+      !ShannonBase::Populate::sys_population_buffer->isFull()){
+       //after each of block copied to log.buf without holes, the cpy to pop.
+       cpy_to_pop_buff(*log_sys, handle.start_lsn, len);
+    }
 
     m_impl->m_mtr->m_commit_lsn = handle.end_lsn;
 
