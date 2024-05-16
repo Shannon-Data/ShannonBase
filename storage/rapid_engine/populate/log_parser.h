@@ -58,7 +58,6 @@ class LogParser {
                                           byte *end_ptr, space_id_t space_id,
                                           page_no_t page_no, buf_block_t *block,
                                           mtr_t *mtr, lsn_t start_lsn);
-
   int parse_cur_rec_change_apply_low(
       const rec_t *rec, const dict_index_t *index,
       const dict_index_t *real_index,
@@ -82,7 +81,9 @@ class LogParser {
       bool is_short,       /*!< in: true if short inserts */
       const byte *ptr,     /*!< in: buffer */
       const byte *end_ptr, /*!< in: buffer end */
-      buf_block_t *block,  /*!< in: page or NULL */
+      buf_block_t *block,  /*!< in: block or NULL */
+      page_t* page,        /*!< in: page or NULL */
+      page_zip_des_t* page_zip, /*!< in: page_zip or NULL */
       dict_index_t *index, /*!< in: record descriptor */
       mtr_t *mtr);         /*!< in: mtr or NULL */
 
@@ -109,10 +110,12 @@ class LogParser {
 
   /** Parses a log record of copying a record list end to a new created page.
   @return end of log record or NULL */
-  byte *parse_page_copy_rec_list_to_created_page(
+  byte *parse_copy_rec_list_to_created_page(
       byte *ptr,           /*!< in: buffer */
       byte *end_ptr,       /*!< in: buffer end */
-      buf_block_t *block,  /*!< in: page or NULL */
+      buf_block_t *block,  /*!< in: block or NULL */
+      page_t* page,        /*!< in: page or NULL */
+      page_zip_des_t* page_zip, /*!< in: page or NULL */
       dict_index_t *index, /*!< in: record descriptor */
       mtr_t *mtr);         /*!< in: mtr or NULL */
 

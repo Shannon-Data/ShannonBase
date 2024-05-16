@@ -91,7 +91,7 @@ static void parse_log_func(log_t *log_ptr) {
     if (parsed_bytes) sys_population_buffer->remove(parsed_bytes);
     mutex_exit(&(log_sys->rapid_populator_mutex));
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }  // wile(pop_started)
 
   if (log_pop_thread_thd) {
