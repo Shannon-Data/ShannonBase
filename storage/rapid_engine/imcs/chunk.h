@@ -77,8 +77,7 @@ class Chunk : public MemoryObject {
     // pointer to the next or prev.
     Chunk *m_next_chunk{nullptr}, *m_prev_chunk{nullptr};
     // statistics data.
-    std::atomic<double> m_max{0}, m_min{0}, m_median{0}, m_middle{0}, m_avg{0},
-        m_sum{0};
+    std::atomic<double> m_max{0}, m_min{0}, m_median{0}, m_middle{0}, m_avg{0}, m_sum{0};
     std::atomic<uint64> m_rows{0}, m_delete_marked{0};
   };
 
@@ -96,29 +95,22 @@ class Chunk : public MemoryObject {
   // End of Rnd scan.
   uint rnd_end();
   // writes the data into this chunk. length unspecify means calc by chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context,
-                           const uchar *data, uint length = 0);
+  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *data, uint length = 0);
   // writes the data into this chunk at pos. length unspecify means calc by
   // chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *pos,
-                           const uchar *data, uint length = 0);
+  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *pos, const uchar *data, uint length = 0);
   // reads the data by from address .
   uchar *read_data_direct(ShannonBase::RapidContext *context, uchar *buffer);
   // reads the data by rowid.
-  uchar *read_data_direct(ShannonBase::RapidContext *context,
-                          const uchar *rowid, uchar *buffer);
+  uchar *read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid, uchar *buffer);
   // deletes the data by rowid.
-  uchar *delete_data_direct(ShannonBase::RapidContext *context,
-                            const uchar *rowid);
+  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *rowid);
   // deletes all.
   uchar *delete_all_direct();
   // updates the data. rowid is pos of where the data will be updated.
-  uchar *update_data_direct(ShannonBase::RapidContext *context,
-                            const uchar *rowid, const uchar *data,
-                            uint length = 0);
+  uchar *update_data_direct(ShannonBase::RapidContext *context, const uchar *rowid, const uchar *data, uint length = 0);
   // flush the data to disk. by now, we cannot impl this part.
-  uint flush_direct(RapidContext *context, const uchar *from = nullptr,
-                    const uchar *to = nullptr);
+  uint flush_direct(RapidContext *context, const uchar *from = nullptr, const uchar *to = nullptr);
   // the start loc of chunk. where the data wrtes from.
   inline uchar *get_base() const { return m_data_base; }
   // the end loc of chunk. is base + chunk_size
@@ -133,8 +125,7 @@ class Chunk : public MemoryObject {
   inline uint data_size() { return (m_data - m_data_base); }
 
   // how many rows are in this range of min and max?
-  ha_rows records_in_range(ShannonBase::RapidContext *context, double &min_key,
-                           double &max_key);
+  ha_rows records_in_range(ShannonBase::RapidContext *context, double &min_key, double &max_key);
   // get the phy address of offset.
   uchar *where(ShannonBase::RapidContext *context, uint offset);
   // set to the offset in physical address format, return the address.
@@ -143,8 +134,7 @@ class Chunk : public MemoryObject {
   // in context.
   uchar *GC(ShannonBase::RapidContext *context);
   // relocate the chunk to specific address[address should be in this chunk].
-  uchar *reshift(ShannonBase::RapidContext *context, const uchar *from,
-                 const uchar *to);
+  uchar *reshift(ShannonBase::RapidContext *context, const uchar *from, const uchar *to);
   // to set this chunk to a empty chunk.
   uchar *set_empty();
   uchar *set_full();

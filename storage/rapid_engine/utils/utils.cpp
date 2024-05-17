@@ -25,14 +25,8 @@
 */
 #include "storage/rapid_engine/utils/utils.h"
 
-#include <iostream>
-#include <iomanip>
-#include <sstream>
-
-#include "sql/field.h"                        //Field
 #include "sql/my_decimal.h"                   //my_decimal
 #include "sql/table.h"                        //TABLE
-
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
@@ -60,9 +54,9 @@ bool Util::is_support_type(enum_field_types type) {
   }
   return false;
 }
-double Util::get_value_mysql_type(enum_field_types &types,
-                                  Compress::Dictionary *&dictionary,
-                                  const uchar *key, uint key_len) {
+
+double Util::get_value_mysql_type(enum_field_types &types, Compress::Dictionary *&dictionary, const uchar *key,
+                                  uint key_len) {
   double val{0};
   if (!key || !key_len || !dictionary) return val;
 
@@ -84,8 +78,7 @@ double Util::get_value_mysql_type(enum_field_types &types,
     case MYSQL_TYPE_YEAR:
     case MYSQL_TYPE_TIMESTAMP:
     case MYSQL_TYPE_TIME2: {
-      Field_datetimef datetime(const_cast<uchar *>(key), nullptr, 0, 0,
-                               "temp_datetime", 6);
+      Field_datetimef datetime(const_cast<uchar *>(key), nullptr, 0, 0, "temp_datetime", 6);
       val = datetime.val_real();
     } break;
     case MYSQL_TYPE_STRING:
@@ -141,38 +134,37 @@ double Util::get_field_value(Field *&field, Compress::Dictionary *&dictionary) {
   return data_val;
 }
 
-double Util::get_field_value(enum_field_types type, const uchar* buf, uint len,
-                            Compress::Dictionary *dictionary, CHARSET_INFO* charset) {
+double Util::get_field_value(enum_field_types type, const uchar *buf, uint len, Compress::Dictionary *dictionary,
+                             CHARSET_INFO *charset) {
   ut_ad(buf && dictionary);
   double data_val{0};
   switch (type) {
     case MYSQL_TYPE_BLOB:
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VARCHAR: {
-      String str_str((const char*)buf, len, charset);
+      String str_str((const char *)buf, len, charset);
       data_val = dictionary->store(str_str);
     } break;
     case MYSQL_TYPE_SHORT:
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG:
-      data_val = *(int*)buf;
+      data_val = *(int *)buf;
       break;
     case MYSQL_TYPE_FLOAT:
-      data_val = *(float*) buf;
+      data_val = *(float *)buf;
       break;
     case MYSQL_TYPE_DOUBLE:
-      data_val = *(double*)buf;
+      data_val = *(double *)buf;
       break;
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL: {
       const int prec = 60;
       const int scale = 0;
       my_decimal dv;
-      auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW,
-                        buf, &dv, prec, scale);
+      auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, buf, &dv, prec, scale);
       if (!ret) {
-         my_decimal2double(0, &dv, &data_val);
+        my_decimal2double(0, &dv, &data_val);
       }
     } break;
     case MYSQL_TYPE_DATE:
@@ -189,9 +181,7 @@ double Util::get_field_value(enum_field_types type, const uchar* buf, uint len,
   return data_val;
 }
 
-double Util::store_field_value(TABLE *&table, Field *&field,
-                               Compress::Dictionary *&dictionary,
-                               double &value) {
+double Util::store_field_value(TABLE *&table, Field *&field, Compress::Dictionary *&dictionary, double &value) {
   ut_a(field && dictionary);
   my_bitmap_map *old_map = tmp_use_all_columns(table, table->write_set);
   switch (field->type()) {
@@ -200,8 +190,7 @@ double Util::store_field_value(TABLE *&table, Field *&field,
     case MYSQL_TYPE_VARCHAR: {  // if string, stores its stringid, and gets from
                                 // local dictionary.
       String str;
-      dictionary->get(value, str,
-                      *const_cast<CHARSET_INFO *>(field->charset()));
+      dictionary->get(value, str, *const_cast<CHARSET_INFO *>(field->charset()));
       field->store(str.c_ptr(), str.length(), &my_charset_bin);
     } break;
     case MYSQL_TYPE_INT24:
@@ -227,9 +216,8 @@ double Util::store_field_value(TABLE *&table, Field *&field,
   return value;
 }
 
-double Util::store_field_value(TABLE *&table, Field *&field,
-                               Compress::Dictionary *&dictionary,
-                               const uchar *key, uint key_len) {
+double Util::store_field_value(TABLE *&table, Field *&field, Compress::Dictionary *&dictionary, const uchar *key,
+                               uint key_len) {
   double val{0};
   if (!key || !key_len || !dictionary) return val;
   my_bitmap_map *old_map = tmp_use_all_columns(table, table->write_set);
@@ -253,8 +241,7 @@ double Util::store_field_value(TABLE *&table, Field *&field,
     case MYSQL_TYPE_YEAR:
     case MYSQL_TYPE_TIMESTAMP:
     case MYSQL_TYPE_TIME2: {
-      Field_datetimef datetime(const_cast<uchar *>(key), nullptr, 0, 0,
-                               "temp_datetime", 6);
+      Field_datetimef datetime(const_cast<uchar *>(key), nullptr, 0, 0, "temp_datetime", 6);
       val = datetime.val_real();
       field->store(val);
     } break;
@@ -276,8 +263,7 @@ double Util::store_field_value(TABLE *&table, Field *&field,
   if (old_map) tmp_restore_column_map(table->write_set, old_map);
   return 0;
 }
-int Util::get_range_value(enum_field_types type,
-                          Compress::Dictionary *&dictionary, key_range *min_key,
+int Util::get_range_value(enum_field_types type, Compress::Dictionary *&dictionary, key_range *min_key,
                           key_range *max_key, double &minkey, double &maxkey) {
   switch (type) {
     case MYSQL_TYPE_INT24:
@@ -310,13 +296,11 @@ int Util::get_range_value(enum_field_types type,
     case MYSQL_TYPE_TIME2: {
       minkey = maxkey = SHANNON_LOWEST_DOUBLE;
       if (min_key) {
-        Field_datetimef datetime_min(const_cast<uchar *>(min_key->key), nullptr,
-                                     0, 0, "start_datetime", 6);
+        Field_datetimef datetime_min(const_cast<uchar *>(min_key->key), nullptr, 0, 0, "start_datetime", 6);
         minkey = datetime_min.val_real();
       }
       if (max_key) {
-        Field_datetimef datetime_max(const_cast<uchar *>(max_key->key), nullptr,
-                                     0, 0, "start_datetime", 6);
+        Field_datetimef datetime_max(const_cast<uchar *>(max_key->key), nullptr, 0, 0, "start_datetime", 6);
         maxkey = datetime_max.val_real();
       }
     } break;
@@ -332,13 +316,13 @@ int Util::get_range_value(enum_field_types type,
   return 0;
 }
 
-int Util::mem2string (uchar* buff, uint length, std::string& result) {
-  const char* data = static_cast<const char*>((char*)buff);
+int Util::mem2string(uchar *buff, uint length, std::string &result) {
+  const char *data = static_cast<const char *>((char *)buff);
   std::ostringstream oss;
   oss << std::hex << std::setfill('0');
 
   for (size_t i = 0; i < length; ++i) {
-      oss << std::setw(2) << static_cast<unsigned>(static_cast<unsigned char>(data[i]));
+    oss << std::setw(2) << static_cast<unsigned>(static_cast<unsigned char>(data[i]));
   }
   result = oss.str();
   return 0;

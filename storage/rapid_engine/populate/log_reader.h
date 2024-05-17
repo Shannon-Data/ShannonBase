@@ -59,8 +59,7 @@ class RecordScanner {
    * @param block
    * @return
    */
-  bool scan(const unsigned char *block,
-            const uint32_t &offset = LOG_BLOCK_HDR_SIZE);
+  bool scan(const unsigned char *block, const uint32_t &offset = LOG_BLOCK_HDR_SIZE);
   uint64_t get_length() { return length; }
   // buffer for parsing.
   unsigned char *parse_buffer{nullptr};
@@ -74,8 +73,7 @@ class RecordScanner {
 class RecordHandler {
  public:
   RecordHandler() : m_continue(true) {}
-  int64_t handle_system_records(const mlog_id_t &type,
-                                const unsigned char *buffer, const lsn_t &lsn,
+  int64_t handle_system_records(const mlog_id_t &type, const unsigned char *buffer, const lsn_t &lsn,
                                 const unsigned char *end_ptr);
 
   void suspend_processing() { m_continue = false; }
@@ -85,9 +83,8 @@ class RecordHandler {
   bool is_continue_processing() { return m_continue; }
 
   template <typename mlog_id_t>
-  int64_t operator()(const mlog_id_t &type, const unsigned char *buffer,
-                     uint32_t space_id, uint32_t page_id, const lsn_t &lsn,
-                     const unsigned char *end_ptr) {
+  int64_t operator()(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
+                     const lsn_t &lsn, const unsigned char *end_ptr) {
     switch (type) {
       case MLOG_FILE_DELETE:
       case MLOG_FILE_CREATE:
@@ -141,16 +138,13 @@ class RecordHandler {
       case MLOG_UNDO_INSERT:
         return handle_add_undo_rec(type, buffer, space_id, page_id, end_ptr);
       case MLOG_UNDO_ERASE_END:
-        return handle_undo_erase_page_end(type, buffer, space_id, page_id,
-                                          end_ptr);
+        return handle_undo_erase_page_end(type, buffer, space_id, page_id, end_ptr);
       case MLOG_UNDO_INIT:
         return handle_undo_init(type, buffer, space_id, page_id, end_ptr);
       case MLOG_UNDO_HDR_REUSE:
-        return handle_mlog_undo_hdr_reuse(type, buffer, space_id, page_id,
-                                          end_ptr);
+        return handle_mlog_undo_hdr_reuse(type, buffer, space_id, page_id, end_ptr);
       case MLOG_UNDO_HDR_CREATE:
-        return handle_mlog_undo_hdr_create(type, buffer, space_id, page_id,
-                                           end_ptr);
+        return handle_mlog_undo_hdr_create(type, buffer, space_id, page_id, end_ptr);
       case MLOG_REC_MIN_MARK:
       case MLOG_COMP_REC_MIN_MARK:
         return handle_rec_min_mark(type, buffer, space_id, page_id, end_ptr);
@@ -160,241 +154,163 @@ class RecordHandler {
       case MLOG_IBUF_BITMAP_INIT:
         return handle_bitmap_init(type, buffer, space_id, page_id, end_ptr);
       case MLOG_INIT_FILE_PAGE2:
-        return handle_mlog_init_file_page2(type, buffer, space_id, page_id,
-                                           end_ptr);
+        return handle_mlog_init_file_page2(type, buffer, space_id, page_id, end_ptr);
       case MLOG_WRITE_STRING:
-        return handle_mlog_write_string(type, buffer, space_id, page_id,
-                                        end_ptr);
+        return handle_mlog_write_string(type, buffer, space_id, page_id, end_ptr);
       case MLOG_ZIP_WRITE_NODE_PTR:
-        return handle_zip_write_node_ptr(type, buffer, space_id, page_id,
-                                         end_ptr);
+        return handle_zip_write_node_ptr(type, buffer, space_id, page_id, end_ptr);
       case MLOG_ZIP_WRITE_BLOB_PTR:
-        return handle_zip_write_blob_ptr(type, buffer, space_id, page_id,
-                                         end_ptr);
+        return handle_zip_write_blob_ptr(type, buffer, space_id, page_id, end_ptr);
       case MLOG_ZIP_WRITE_HEADER:
-        return handle_zip_write_header(type, buffer, space_id, page_id,
-                                       end_ptr);
+        return handle_zip_write_header(type, buffer, space_id, page_id, end_ptr);
       case MLOG_ZIP_PAGE_COMPRESS:
-        return handle_zip_page_compress(type, buffer, space_id, page_id,
-                                        end_ptr);
+        return handle_zip_page_compress(type, buffer, space_id, page_id, end_ptr);
       case MLOG_ZIP_PAGE_COMPRESS_NO_DATA:
-        return handle_zip_page_compress_no_data(type, buffer, space_id, page_id,
-                                                end_ptr);
+        return handle_zip_page_compress_no_data(type, buffer, space_id, page_id, end_ptr);
       // case MLOG_FILE_WRITE_CRYPT_DATA:
       //     return handle_file_crypt_data(type, buffer, space_id, page_id,
       //     end_ptr);
       default:
-        ib::error() << "Unidentified redo log record type "
-                    << ib::hex(unsigned(type));
+        ib::error() << "Unidentified redo log record type " << ib::hex(unsigned(type));
         return -1;
     }
   }
 
  protected:
-  int64_t handle_mlog_file_name(const unsigned char *buffer, uint32_t space_id,
-                                uint32_t page_id, ulint len,
+  int64_t handle_mlog_file_name(const unsigned char *buffer, uint32_t space_id, uint32_t page_id, ulint len,
                                 const unsigned char *end_ptr) {
     // nothing to do ..
     return len;
   }
-  int64_t handle_mlog_file_delete(const unsigned char *buffer,
-                                  uint32_t space_id, uint32_t page_id,
-                                  ulint len, const unsigned char *end_ptr) {
+  int64_t handle_mlog_file_delete(const unsigned char *buffer, uint32_t space_id, uint32_t page_id, ulint len,
+                                  const unsigned char *end_ptr) {
     return len;
   }
-  int64_t handle_mlog_file_create2(const unsigned char *buffer,
-                                   uint32_t space_id, uint32_t page_id,
-                                   ulint len, const unsigned char *end_ptr) {
+  int64_t handle_mlog_file_create2(const unsigned char *buffer, uint32_t space_id, uint32_t page_id, ulint len,
+                                   const unsigned char *end_ptr) {
     return len;
   }
-  int64_t handle_mlog_file_rename2(const unsigned char *buffer,
-                                   uint32_t space_id, uint32_t page_id,
-                                   ulint len, const unsigned char *end_ptr);
-  int64_t handle_mlog_file_x(const mlog_id_t &type, const unsigned char *buffer,
-                             uint32_t space_id, uint32_t page_id,
+  int64_t handle_mlog_file_rename2(const unsigned char *buffer, uint32_t space_id, uint32_t page_id, ulint len,
+                                   const unsigned char *end_ptr);
+  int64_t handle_mlog_file_x(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
                              const unsigned char *end_ptr);
-  int64_t handle_mlog_index_load(const mlog_id_t &type,
-                                 const unsigned char *buffer, uint32_t space_id,
-                                 uint32_t page_id,
-                                 const unsigned char *end_ptr) {
+  int64_t handle_mlog_index_load(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                 uint32_t page_id, const unsigned char *end_ptr) {
     return 0;
   }
-  int64_t handle_mlog_truncate(const mlog_id_t &type,
-                               const unsigned char *buffer, uint32_t space_id,
-                               uint32_t page_id, const unsigned char *end_ptr) {
+  int64_t handle_mlog_truncate(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
+                               const unsigned char *end_ptr) {
     // truncate contains the truncated LSN
     return sizeof(lsn_t);
   }
-  int64_t handle_mlog_nbytes(const mlog_id_t &type, const unsigned char *buffer,
-                             uint32_t space_id, uint32_t page_id,
+  int64_t handle_mlog_nbytes(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
                              const unsigned char *end_ptr);
-  int64_t handle_mlog_1byte(const mlog_id_t &type, const unsigned char *buffer,
-                            uint32_t space_id, uint32_t page_id,
+  int64_t handle_mlog_1byte(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
                             ulint page_offset, const unsigned char *end_ptr);
-  int64_t handle_mlog_2bytes(const mlog_id_t &type, const unsigned char *buffer,
-                             uint32_t space_id, uint32_t page_id,
+  int64_t handle_mlog_2bytes(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
                              ulint page_offset, const unsigned char *end_ptr);
-  int64_t handle_mlog_4bytes(const mlog_id_t &type, const unsigned char *buffer,
-                             uint32_t space_id, uint32_t page_id,
+  int64_t handle_mlog_4bytes(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
                              ulint page_offset, const unsigned char *end_ptr);
-  int64_t handle_mlog_8bytes(const mlog_id_t &type, const unsigned char *buffer,
-                             uint32_t space_id, uint32_t page_id,
+  int64_t handle_mlog_8bytes(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
                              ulint page_offset, const unsigned char *end_ptr);
-  int64_t handle_mlog_init_file_page2(const mlog_id_t &type,
-                                      const unsigned char *buffer,
-                                      uint32_t space_id, uint32_t page_id,
-                                      const unsigned char *end_ptr) {
+  int64_t handle_mlog_init_file_page2(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                      uint32_t page_id, const unsigned char *end_ptr) {
     return 0;
   }
 
-  int64_t handle_mlog_write_string(const mlog_id_t &type,
-                                   const unsigned char *buffer,
-                                   uint32_t space_id, uint32_t page_id,
-                                   const unsigned char *end_ptr);
+  int64_t handle_mlog_write_string(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                   uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_mlog_undo_hdr_reuse(const mlog_id_t &type,
-                                     const unsigned char *buffer,
-                                     uint32_t space_id, uint32_t page_id,
-                                     const unsigned char *end_ptr);
+  int64_t handle_mlog_undo_hdr_reuse(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                     uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_mlog_undo_hdr_create(const mlog_id_t &type,
-                                      const unsigned char *buffer,
-                                      uint32_t space_id, uint32_t page_id,
-                                      const unsigned char *end_ptr);
+  int64_t handle_mlog_undo_hdr_create(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                      uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_index_info(const char *operation, const mlog_id_t &type,
-                            const unsigned char *buffer, uint32_t space_id,
-                            uint32_t page_id, const unsigned char *end_ptr);
+  int64_t handle_index_info(const char *operation, const mlog_id_t &type, const unsigned char *buffer,
+                            uint32_t space_id, uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_mlog_rec_insert(const mlog_id_t &type,
-                                 const unsigned char *buffer, uint32_t space_id,
-                                 uint32_t page_id,
-                                 const unsigned char *end_ptr);
+  int64_t handle_mlog_rec_insert(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                 uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_mlog_rec_insert_comp(const mlog_id_t &type,
-                                      const unsigned char *buffer,
-                                      uint32_t space_id, uint32_t page_id,
-                                      const unsigned char *end_ptr);
+  int64_t handle_mlog_rec_insert_comp(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                      uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_mlog_rec_delete_mark(const mlog_id_t &type,
-                                      const unsigned char *buffer,
-                                      uint32_t space_id, uint32_t page_id,
-                                      const unsigned char *end_ptr);
-  int64_t handle_mlog_rec_delete_mark_comp(const mlog_id_t &type,
-                                           const unsigned char *buffer,
-                                           uint32_t space_id, uint32_t page_id,
-                                           const unsigned char *end_ptr);
+  int64_t handle_mlog_rec_delete_mark(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                      uint32_t page_id, const unsigned char *end_ptr);
+  int64_t handle_mlog_rec_delete_mark_comp(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                           uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_secondary_index_delete(const mlog_id_t &type,
-                                        const unsigned char *buffer,
-                                        uint32_t space_id, uint32_t page_id,
-                                        const unsigned char *end_ptr);
+  int64_t handle_secondary_index_delete(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                        uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_rec_update_inplace(const mlog_id_t &type,
-                                    const unsigned char *buffer,
-                                    uint32_t space_id, uint32_t page_id,
-                                    const unsigned char *end_ptr);
-  int64_t handle_rec_update_inplace_comp(const mlog_id_t &type,
-                                         const unsigned char *buffer,
-                                         uint32_t space_id, uint32_t page_id,
-                                         const unsigned char *end_ptr);
+  int64_t handle_rec_update_inplace(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                    uint32_t page_id, const unsigned char *end_ptr);
+  int64_t handle_rec_update_inplace_comp(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                         uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_delete_record_list(const mlog_id_t &type,
-                                    const unsigned char *buffer,
-                                    uint32_t space_id, uint32_t page_id,
-                                    const unsigned char *end_ptr);
+  int64_t handle_delete_record_list(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                    uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_delete_record_list_comp(const mlog_id_t &type,
-                                         const unsigned char *buffer,
-                                         uint32_t space_id, uint32_t page_id,
-                                         const unsigned char *end_ptr);
+  int64_t handle_delete_record_list_comp(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                         uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_copy_rec_list_to_created_page(const mlog_id_t &type,
-                                               const unsigned char *buffer,
-                                               uint32_t space_id,
-                                               uint32_t page_id,
-                                               const unsigned char *end_ptr);
+  int64_t handle_copy_rec_list_to_created_page(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                               uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_copy_rec_list_to_created_page_comp(
-      const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-      uint32_t page_id, const unsigned char *end_ptr);
+  int64_t handle_copy_rec_list_to_created_page_comp(const mlog_id_t &type, const unsigned char *buffer,
+                                                    uint32_t space_id, uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_page_reorganize(const mlog_id_t &type,
-                                 const unsigned char *buffer, uint32_t space_id,
-                                 uint32_t page_id,
-                                 const unsigned char *end_ptr);
-  int64_t handle_page_create(const mlog_id_t &type, const unsigned char *buffer,
-                             uint32_t space_id, uint32_t page_id,
+  int64_t handle_page_reorganize(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                 uint32_t page_id, const unsigned char *end_ptr);
+  int64_t handle_page_create(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
                              const unsigned char *end_ptr) {
     const unsigned char *ptr = buffer;
     return (ptr - buffer);
   }
 
-  int64_t handle_add_undo_rec(const mlog_id_t &type,
-                              const unsigned char *buffer, uint32_t space_id,
-                              uint32_t page_id, const unsigned char *end_ptr);
+  int64_t handle_add_undo_rec(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
+                              const unsigned char *end_ptr);
 
-  int64_t handle_undo_erase_page_end(const mlog_id_t &type,
-                                     const unsigned char *buffer,
-                                     uint32_t space_id, uint32_t page_id,
-                                     const unsigned char *end_ptr) {
+  int64_t handle_undo_erase_page_end(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                     uint32_t page_id, const unsigned char *end_ptr) {
     const unsigned char *ptr = buffer;
     return (ptr - buffer);
   }
 
-  int64_t handle_undo_init(const mlog_id_t &type, const unsigned char *buffer,
-                           uint32_t space_id, uint32_t page_id,
+  int64_t handle_undo_init(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
                            const unsigned char *end_ptr);
 
-  int64_t handle_rec_min_mark(const mlog_id_t &type,
-                              const unsigned char *buffer, uint32_t space_id,
-                              uint32_t page_id, const unsigned char *end_ptr);
+  int64_t handle_rec_min_mark(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
+                              const unsigned char *end_ptr);
 
-  int64_t handle_mlog_rec_delete(const mlog_id_t &type,
-                                 const unsigned char *buffer, uint32_t space_id,
-                                 uint32_t page_id,
-                                 const unsigned char *end_ptr);
+  int64_t handle_mlog_rec_delete(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                 uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_bitmap_init(const mlog_id_t &type, const unsigned char *buffer,
-                             uint32_t space_id, uint32_t page_id,
+  int64_t handle_bitmap_init(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
                              const unsigned char *end_ptr);
 
-  int64_t handle_zip_write_node_ptr(const mlog_id_t &type,
-                                    const unsigned char *buffer,
-                                    uint32_t space_id, uint32_t page_id,
-                                    const unsigned char *end_ptr);
+  int64_t handle_zip_write_node_ptr(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                    uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_zip_write_blob_ptr(const mlog_id_t &type,
-                                    const unsigned char *buffer,
-                                    uint32_t space_id, uint32_t page_id,
-                                    const unsigned char *end_ptr);
+  int64_t handle_zip_write_blob_ptr(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                    uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_zip_write_header(const mlog_id_t &type,
-                                  const unsigned char *buffer,
-                                  uint32_t space_id, uint32_t page_id,
-                                  const unsigned char *end_ptr);
+  int64_t handle_zip_write_header(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                  uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_zip_page_compress(const mlog_id_t &type,
-                                   const unsigned char *buffer,
-                                   uint32_t space_id, uint32_t page_id,
-                                   const unsigned char *end_ptr);
+  int64_t handle_zip_page_compress(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                   uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_zip_page_compress_no_data(const mlog_id_t &type,
-                                           const unsigned char *buffer,
-                                           uint32_t space_id, uint32_t page_id,
-                                           const unsigned char *end_ptr);
+  int64_t handle_zip_page_compress_no_data(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                           uint32_t page_id, const unsigned char *end_ptr);
 
-  int64_t handle_file_crypt_data(const mlog_id_t &type,
-                                 const unsigned char *buffer, uint32_t space_id,
-                                 uint32_t page_id,
-                                 const unsigned char *end_ptr);
-  virtual int64_t handle_mlog_checkpoint(const unsigned char *buffer,
-                                         const unsigned char *end_ptr);
+  int64_t handle_file_crypt_data(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                 uint32_t page_id, const unsigned char *end_ptr);
+  virtual int64_t handle_mlog_checkpoint(const unsigned char *buffer, const unsigned char *end_ptr);
 
  private:
-  int64_t calculate_bytes_consumed_4bytes(const unsigned char *buffer,
-                                          ulint *val,
-                                          const unsigned char *end_ptr);
+  int64_t calculate_bytes_consumed_4bytes(const unsigned char *buffer, ulint *val, const unsigned char *end_ptr);
   bool m_continue;
 };
 
@@ -404,14 +320,12 @@ class MLogRecordHandler : public RecordHandler {
   lsn_t given_cp_lsn;
 
  public:
-  MLogRecordHandler(const lsn_t &checkpoint_lsn)
-      : mlog_checkpoint_found(false), given_cp_lsn(checkpoint_lsn) {}
+  MLogRecordHandler(const lsn_t &checkpoint_lsn) : mlog_checkpoint_found(false), given_cp_lsn(checkpoint_lsn) {}
 
   bool is_mlog_cp_found() { return mlog_checkpoint_found; }
 
   lsn_t checkpoint_lsn() { return given_cp_lsn; }
-  int64_t handle_mlog_checkpoint(const unsigned char *buffer,
-                                 const unsigned char *end_ptr) override;
+  int64_t handle_mlog_checkpoint(const unsigned char *buffer, const unsigned char *end_ptr) override;
 };
 
 template <typename RecordHandler>

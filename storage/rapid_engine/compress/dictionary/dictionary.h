@@ -47,8 +47,7 @@ class Dictionary {
   Dictionary() = default;
   virtual ~Dictionary() = default;
   virtual uint32 store(String &, Encoding_type type = Encoding_type::NONE);
-  virtual uint32 get(uint64 strid, String &val,
-                     CHARSET_INFO &charset = my_charset_bin);
+  virtual uint32 get(uint64 strid, String &val, CHARSET_INFO &charset = my_charset_bin);
   virtual void set_algo(Encoding_type type) { m_encoding_type = type; }
   virtual inline Encoding_type get_algo() const { return m_encoding_type; }
   virtual inline uint32 content_size() const { return m_content.size(); }

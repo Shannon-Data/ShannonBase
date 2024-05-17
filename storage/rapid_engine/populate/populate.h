@@ -40,17 +40,13 @@ class IB_thread;
 namespace ShannonBase {
 namespace Populate {
 
-#define log_rapid_pop_mutex_enter(log) \
-  mutex_enter(&((log).rapid_populator_mutex))
+#define log_rapid_pop_mutex_enter(log) mutex_enter(&((log).rapid_populator_mutex))
 
-#define log_rapid_pop_mutex_enter_nowait(log) \
-  mutex_enter_nowait(&((log).rapid_populator_mutex))
+#define log_rapid_pop_mutex_enter_nowait(log) mutex_enter_nowait(&((log).rapid_populator_mutex))
 
 #define log_rapid_pop_mutex_exit(log) mutex_exit(&((log).rapid_populator_mutex))
 
-#define log_rapid_pop_mutex_own(log)            \
-  (mutex_own(&((log).rapid_populator_mutex)) || \
-   !Populator::log_rapid_is_active())
+#define log_rapid_pop_mutex_own(log) (mutex_own(&((log).rapid_populator_mutex)) || !Populator::log_rapid_is_active())
 // pop change buffer size
 extern ulonglong sys_population_buffer_sz;
 // flag of pop change thread. true is running, set to false to stop

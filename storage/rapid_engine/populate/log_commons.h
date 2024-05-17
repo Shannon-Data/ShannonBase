@@ -43,8 +43,7 @@
 
 namespace ShannonBase {
 namespace Populate {
-constexpr int m_pop_buff_size =
-    ALIGN_WORD(SHANNON_MAX_POPULATION_BUFFER_SIZE, 512);
+constexpr int m_pop_buff_size = ALIGN_WORD(SHANNON_MAX_POPULATION_BUFFER_SIZE, 512);
 constexpr uint MAX_LOG_POP_SPIN_COUNT = 100000;
 
 /// jnk0le/Ring-Buffer
@@ -59,9 +58,8 @@ constexpr uint MAX_LOG_POP_SPIN_COUNT = 100000;
  * in between indexes and buffer \tparam index_t Type of array indexing type.
  * Serves also as placeholder for future implementations.
  */
-template <typename T, size_t buffer_size = m_pop_buff_size,
-          bool fake_tso = false, size_t cacheline_size = CACHE_LINE_SIZE,
-          typename index_t = size_t>
+template <typename T, size_t buffer_size = m_pop_buff_size, bool fake_tso = false,
+          size_t cacheline_size = CACHE_LINE_SIZE, typename index_t = size_t>
 class Ringbuffer {
  public:
   /*!
@@ -92,9 +90,7 @@ class Ringbuffer {
   /*!
    * \brief Clear buffer from consumer side
    */
-  void consumerClear(void) {
-    tail.store(head.load(std::memory_order_relaxed), std::memory_order_relaxed);
-  }
+  void consumerClear(void) { tail.store(head.load(std::memory_order_relaxed), std::memory_order_relaxed); }
 
   /*!
    * \brief Clear all buffer
@@ -120,18 +116,14 @@ class Ringbuffer {
    * \brief Check how many elements can be read from the buffer
    * \return Number of elements that can be read
    */
-  index_t readAvailable(void) const {
-    return head.load(index_acquire_barrier) -
-           tail.load(std::memory_order_relaxed);
-  }
+  index_t readAvailable(void) const { return head.load(index_acquire_barrier) - tail.load(std::memory_order_relaxed); }
 
   /*!
    * \brief Check how many elements can be written into the buffer
    * \return Number of free slots that can be be written
    */
   index_t writeAvailable(void) const {
-    return buffer_size - (head.load(std::memory_order_relaxed) -
-                          tail.load(index_acquire_barrier));
+    return buffer_size - (head.load(std::memory_order_relaxed) - tail.load(index_acquire_barrier));
   }
 
   /*!
@@ -301,10 +293,7 @@ class Ringbuffer {
    * \return Reference to requested element, undefined if index exceeds storage
    * count
    */
-  T &operator[](size_t index) {
-    return data_buff[(tail.load(std::memory_order_relaxed) + index) &
-                     buffer_mask];
-  }
+  T &operator[](size_t index) { return data_buff[(tail.load(std::memory_order_relaxed) + index) & buffer_mask]; }
 
   /*!
    * \brief Insert multiple elements into internal buffer without blocking
@@ -333,8 +322,7 @@ class Ringbuffer {
    * callback function executed after every loop iteration \return Number of
    * elements written into internal  buffer
    */
-  size_t writeBuff(const T *buff, size_t count, size_t count_to_callback,
-                   void (*execute_data_callback)(void));
+  size_t writeBuff(const T *buff, size_t count, size_t count_to_callback, void (*execute_data_callback)(void));
 
   /*!
    * \brief Load multiple elements from internal buffer without blocking
@@ -363,22 +351,16 @@ class Ringbuffer {
    * to callback function executed after every loop iteration \return Number of
    * elements that were read from internal buffer
    */
-  size_t readBuff(T *buff, size_t count, size_t count_to_callback,
-                  void (*execute_data_callback)(void));
+  size_t readBuff(T *buff, size_t count, size_t count_to_callback, void (*execute_data_callback)(void));
 
  private:
-  constexpr static index_t buffer_mask =
-      buffer_size - 1;  //!< bitwise mask for a given buffer size
+  constexpr static index_t buffer_mask = buffer_size - 1;  //!< bitwise mask for a given buffer size
   constexpr static std::memory_order index_acquire_barrier =
-      fake_tso
-          ? std::memory_order_relaxed
-          : std::memory_order_acquire;  // do not load from, or store to buffer
-                                        // before confirmed by the opposite side
+      fake_tso ? std::memory_order_relaxed : std::memory_order_acquire;  // do not load from, or store to buffer
+                                                                         // before confirmed by the opposite side
   constexpr static std::memory_order index_release_barrier =
-      fake_tso
-          ? std::memory_order_relaxed
-          : std::memory_order_release;  // do not update own side before all
-                                        // operations on data_buff committed
+      fake_tso ? std::memory_order_relaxed : std::memory_order_release;  // do not update own side before all
+                                                                         // operations on data_buff committed
 
   alignas(cacheline_size) std::atomic<index_t> head;  //!< head index
   alignas(cacheline_size) std::atomic<index_t> tail;  //!< tail index
@@ -388,28 +370,22 @@ class Ringbuffer {
 
   // let's assert that no UB will be compiled in
   static_assert((buffer_size != 0), "buffer cannot be of zero size");
-  static_assert((buffer_size & buffer_mask) == 0,
-                "buffer size is not a power of 2");
+  static_assert((buffer_size & buffer_mask) == 0, "buffer size is not a power of 2");
   static_assert(sizeof(index_t) <= sizeof(size_t),
                 "indexing type size is larger than size_t, operation is not "
                 "lock free and doesn't make sense");
 
-  static_assert(std::numeric_limits<index_t>::is_integer,
-                "indexing type is not integral type");
-  static_assert(!(std::numeric_limits<index_t>::is_signed),
-                "indexing type must not be signed");
+  static_assert(std::numeric_limits<index_t>::is_integer, "indexing type is not integral type");
+  static_assert(!(std::numeric_limits<index_t>::is_signed), "indexing type must not be signed");
   static_assert(buffer_mask <= ((std::numeric_limits<index_t>::max)() >> 1),
                 "buffer size is too large for a given indexing type (maximum "
                 "size for n-bit type is 2^(n-1))");
 
-  static_assert(std::is_trivial<T>::value,
-                "non trivial objects will currently break");
+  static_assert(std::is_trivial<T>::value, "non trivial objects will currently break");
 };
 
-template <typename T, size_t buffer_size, bool fake_tso, size_t cacheline_size,
-          typename index_t>
-size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::writeBuff(
-    const T *buff, size_t count) {
+template <typename T, size_t buffer_size, bool fake_tso, size_t cacheline_size, typename index_t>
+size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::writeBuff(const T *buff, size_t count) {
   index_t available = 0;
   index_t tmp_head = head.load(std::memory_order_relaxed);
   size_t to_write = count;
@@ -420,8 +396,7 @@ size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::writeBuff(
     to_write = available;
 
   // maybe divide it into 2 separate writes
-  for (size_t i = 0; i < to_write; i++)
-    data_buff[tmp_head++ & buffer_mask] = buff[i];
+  for (size_t i = 0; i < to_write; i++) data_buff[tmp_head++ & buffer_mask] = buff[i];
 
   std::atomic_signal_fence(std::memory_order_release);
   head.store(tmp_head, index_release_barrier);
@@ -429,18 +404,16 @@ size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::writeBuff(
   return to_write;
 }
 
-template <typename T, size_t buffer_size, bool fake_tso, size_t cacheline_size,
-          typename index_t>
-size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::writeBuff(
-    const T *buff, size_t count, size_t count_to_callback,
-    void (*execute_data_callback)()) {
+template <typename T, size_t buffer_size, bool fake_tso, size_t cacheline_size, typename index_t>
+size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::writeBuff(const T *buff, size_t count,
+                                                                                size_t count_to_callback,
+                                                                                void (*execute_data_callback)()) {
   size_t written = 0;
   index_t available = 0;
   index_t tmp_head = head.load(std::memory_order_relaxed);
   size_t to_write = count;
 
-  if (count_to_callback != 0 && count_to_callback < count)
-    to_write = count_to_callback;
+  if (count_to_callback != 0 && count_to_callback < count) to_write = count_to_callback;
 
   while (written < count) {
     available = buffer_size - (tmp_head - tail.load(index_acquire_barrier));
@@ -464,10 +437,8 @@ size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::writeBuff(
   return written;
 }
 
-template <typename T, size_t buffer_size, bool fake_tso, size_t cacheline_size,
-          typename index_t>
-size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::readBuff(
-    T *buff, size_t count) {
+template <typename T, size_t buffer_size, bool fake_tso, size_t cacheline_size, typename index_t>
+size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::readBuff(T *buff, size_t count) {
   index_t available = 0;
   index_t tmp_tail = tail.load(std::memory_order_relaxed);
   size_t to_read = count;
@@ -478,8 +449,7 @@ size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::readBuff(
     to_read = available;
 
   // maybe divide it into 2 separate reads
-  for (size_t i = 0; i < to_read; i++)
-    buff[i] = data_buff[tmp_tail++ & buffer_mask];
+  for (size_t i = 0; i < to_read; i++) buff[i] = data_buff[tmp_tail++ & buffer_mask];
 
   std::atomic_signal_fence(std::memory_order_release);
   tail.store(tmp_tail, index_release_barrier);
@@ -487,18 +457,16 @@ size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::readBuff(
   return to_read;
 }
 
-template <typename T, size_t buffer_size, bool fake_tso, size_t cacheline_size,
-          typename index_t>
-size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::readBuff(
-    T *buff, size_t count, size_t count_to_callback,
-    void (*execute_data_callback)()) {
+template <typename T, size_t buffer_size, bool fake_tso, size_t cacheline_size, typename index_t>
+size_t Ringbuffer<T, buffer_size, fake_tso, cacheline_size, index_t>::readBuff(T *buff, size_t count,
+                                                                               size_t count_to_callback,
+                                                                               void (*execute_data_callback)()) {
   size_t read = 0;
   index_t available = 0;
   index_t tmp_tail = tail.load(std::memory_order_relaxed);
   size_t to_read = count;
 
-  if (count_to_callback != 0 && count_to_callback < count)
-    to_read = count_to_callback;
+  if (count_to_callback != 0 && count_to_callback < count) to_read = count_to_callback;
 
   while (read < count) {
     available = head.load(index_acquire_barrier) - tmp_tail;

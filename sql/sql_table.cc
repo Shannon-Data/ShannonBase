@@ -203,6 +203,7 @@
 #include "storage/rapid_engine/include/rapid_stats.h" //meta_rpd_columns_infos
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/utils/utils.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 namespace dd {
 class View;
@@ -2739,9 +2740,9 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table) {
             sizeof (row_rpd_columns.column_name)-1);
     strncpy(row_rpd_columns.table_name, table.s->table_name.str,
             sizeof(row_rpd_columns.table_name)-1);
-    std::string key_name (table.s->db.str);
-    key_name += table.s->table_name.str;
-    key_name += field_ptr->field_name;
+    auto key_name = ShannonBase::Utils::Util::get_key_name(table.s->db.str,
+                                                           table.s->table_name.str,
+                                                           field_ptr->field_name);
     ShannonBase::Compress::Dictionary* dict =
       ShannonBase::Imcs::Imcs::get_instance()->get_cu(key_name)->get_header()->m_local_dict.get();
     if (dict)

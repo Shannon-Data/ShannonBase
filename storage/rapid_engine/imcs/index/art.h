@@ -47,8 +47,7 @@ class Art_index {
  public:
   static constexpr uint MAX_PREFIX_LEN = 10;
   using ART_Func =
-      std::function<int(void *data, const unsigned char *key, uint32 key_len,
-                        void *value, uint32 value_len)>;
+      std::function<int(void *data, const unsigned char *key, uint32 key_len, void *value, uint32 value_len)>;
   typedef struct {
     uint32 partial_len{0};
     uint8 type{NodeType::UNKNOWN};
@@ -93,20 +92,15 @@ class Art_index {
   Art_node *Alloc_node(NodeType type);
   void Destroy_node(Art_node *n);
 
-  using ART_Func2 =
-      std::function<int(Art_leaf *l, std::vector<Art_leaf *> &results)>;
+  using ART_Func2 = std::function<int(Art_leaf *l, std::vector<Art_leaf *> &results)>;
 
  private:
   // 0 sucess.
   Art_node **Find_child(Art_node *n, unsigned char c);
-  void Find_children(Art_node *n, unsigned char c,
-                     std::vector<Art_node *> &children);
-  int Check_prefix(const Art_node *n, const unsigned char *key, int key_len,
-                   int depth);
-  int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len,
-                   int depth);
-  int Leaf_partial_matches(const Art_leaf *n, const unsigned char *key,
-                           int key_len, int depth);
+  void Find_children(Art_node *n, unsigned char c, std::vector<Art_node *> &children);
+  int Check_prefix(const Art_node *n, const unsigned char *key, int key_len, int depth);
+  int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
+  int Leaf_partial_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
   inline uint64 art_size() { return m_tree->size; }
 
   Art_leaf *Minimum(const Art_node *n);
@@ -114,32 +108,26 @@ class Art_index {
   Art_leaf *Make_leaf(const unsigned char *key, int key_len, void *value);
   int Longest_common_prefix(Art_leaf *l1, Art_leaf *l2, int depth);
   void Copy_header(Art_node *dest, Art_node *src);
-  void Add_child256(Art_node256 *n, Art_node **ref, unsigned char c,
-                    void *child);
+  void Add_child256(Art_node256 *n, Art_node **ref, unsigned char c, void *child);
   void Add_child48(Art_node48 *n, Art_node **ref, unsigned char c, void *child);
   void Add_child16(Art_node16 *n, Art_node **ref, unsigned char c, void *child);
   void Add_child4(Art_node4 *n, Art_node **ref, unsigned char c, void *child);
   void Add_child(Art_node *n, Art_node **ref, unsigned char c, void *child);
-  int Prefix_mismatch(const Art_node *n, const unsigned char *key, int key_len,
-                      int depth);
-  void *Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *key,
-                         int key_len, void *value, int depth, int *old,
-                         int replace);
+  int Prefix_mismatch(const Art_node *n, const unsigned char *key, int key_len, int depth);
+  void *Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, void *value, int depth,
+                         int *old, int replace);
   void Remove_child256(Art_node256 *n, Art_node **ref, unsigned char c);
   void Remove_child48(Art_node48 *n, Art_node **ref, unsigned char c);
   void Remove_child16(Art_node16 *n, Art_node **ref, Art_node **l);
   void Remove_child4(Art_node4 *n, Art_node **ref, Art_node **l);
   void Remove_child(Art_node *n, Art_node **ref, unsigned char c, Art_node **l);
-  Art_leaf *Recursive_delete(Art_node *n, Art_node **ref,
-                             const unsigned char *key, int key_len, int depth);
+  Art_leaf *Recursive_delete(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, int depth);
   int Recursive_iter(Art_node *n, ART_Func &cb, void *data, int data_len);
   int Recursive_iter2(Art_node *n, ART_Func2 &cb);
   int Recursive_iter_ex(Art_node *n, const unsigned char *key, int key_len);
   int Cruise_fast(uint key_offset, unsigned char *key, int key_len);
-  int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix,
-                          int prefix_len);
-  int Leaf_prefix_matches2(const Art_leaf *n, const unsigned char *prefix,
-                           int prefix_len, uint offset);
+  int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
+  int Leaf_prefix_matches2(const Art_leaf *n, const unsigned char *prefix, int prefix_len, uint offset);
 
  private:
   Art_tree *m_tree{nullptr};
@@ -172,8 +160,7 @@ class Art_index {
   inline bool Art_initialized() { return m_inited; }
 
   void *ART_insert(const unsigned char *key, int key_len, void *value);
-  void *ART_insert_with_replace(const unsigned char *key, int key_len,
-                                void *value);
+  void *ART_insert_with_replace(const unsigned char *key, int key_len, void *value);
   void *ART_delete(const unsigned char *key, int key_len);
   void *ART_search(const unsigned char *key, int key_len);
   inline void ART_reset_cursor() { m_current_values.clear(); }
@@ -184,8 +171,7 @@ class Art_index {
   void *ART_iter_next();
   void *ART_iter(ART_Func2 &cb);
   void *ART_iter_first(uint key_offset, unsigned char *key, int key_len);
-  int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb,
-                      void *data, int data_len);
+  int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, void *data, int data_len);
 };
 
 }  // namespace Imcs

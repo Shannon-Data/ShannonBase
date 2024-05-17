@@ -96,19 +96,14 @@ bool RecordScanner::scan(const unsigned char *block, const uint32_t &offset) {
 }
 
 // The record handler.
-int64_t RecordHandler::handle_system_records(const mlog_id_t &type,
-                                             const unsigned char *buffer,
-                                             const lsn_t &lsn,
+int64_t RecordHandler::handle_system_records(const mlog_id_t &type, const unsigned char *buffer, const lsn_t &lsn,
                                              const unsigned char *end_ptr) {
   // to check the 'type'.
   return handle_mlog_checkpoint(buffer, end_ptr);
 }
 
-int64_t RecordHandler::handle_mlog_8bytes(const mlog_id_t &type,
-                                          const unsigned char *buffer,
-                                          uint32_t space_id, uint32_t page_id,
-                                          ulint page_offset,
-                                          const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_8bytes(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                          uint32_t page_id, ulint page_offset, const unsigned char *end_ptr) {
   // could take variable number of bytes ...
   const unsigned char *ptr = buffer;
   uint64_t dval [[maybe_unused]] = mach_u64_parse_compressed(&ptr, end_ptr);
@@ -117,53 +112,39 @@ int64_t RecordHandler::handle_mlog_8bytes(const mlog_id_t &type,
   return buffer_offset;
 }
 
-int64_t RecordHandler::handle_mlog_file_rename2(const unsigned char *buffer,
-                                                uint32_t space_id,
-                                                uint32_t page_id, ulint len,
-                                                const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_file_rename2(const unsigned char *buffer, uint32_t space_id, uint32_t page_id,
+                                                ulint len, const unsigned char *end_ptr) {
   ulint new_name_len = mach_read_from_2(buffer + len);
   return len + 2 + new_name_len;
 }
 
-int64_t RecordHandler::handle_mlog_2bytes(const mlog_id_t &type,
-                                          const unsigned char *buffer,
-                                          uint32_t space_id, uint32_t page_id,
-                                          ulint page_offset,
-                                          const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_2bytes(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                          uint32_t page_id, ulint page_offset, const unsigned char *end_ptr) {
   ulint val;
   return calculate_bytes_consumed_4bytes(buffer, &val, end_ptr);
 }
 
-int64_t RecordHandler::handle_mlog_4bytes(const mlog_id_t &type,
-                                          const unsigned char *buffer,
-                                          uint32_t space_id, uint32_t page_id,
-                                          ulint page_offset,
-                                          const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_4bytes(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                          uint32_t page_id, ulint page_offset, const unsigned char *end_ptr) {
   ulint val;
   return calculate_bytes_consumed_4bytes(buffer, &val, end_ptr);
 }
 
-int64_t RecordHandler::handle_mlog_1byte(const mlog_id_t &type,
-                                         const unsigned char *buffer,
-                                         uint32_t space_id, uint32_t page_id,
-                                         ulint page_offset,
-                                         const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_1byte(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                         uint32_t page_id, ulint page_offset, const unsigned char *end_ptr) {
   ulint val;
   return calculate_bytes_consumed_4bytes(buffer, &val, end_ptr);
 }
 
-int64_t RecordHandler::calculate_bytes_consumed_4bytes(
-    const unsigned char *buffer, ulint *val, const unsigned char *end_ptr) {
+int64_t RecordHandler::calculate_bytes_consumed_4bytes(const unsigned char *buffer, ulint *val,
+                                                       const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   (*val) = mach_parse_compressed(&ptr, end_ptr);
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_mlog_write_string(const mlog_id_t &type,
-                                                const unsigned char *buffer,
-                                                uint32_t space_id,
-                                                uint32_t page_id,
-                                                const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_write_string(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                                uint32_t page_id, const unsigned char *end_ptr) {
   // a string includes the page offset; i.e., to where the string should be
   // written in a page and the string's length.
   int64_t page_offset [[maybe_unused]] = mach_read_from_2(buffer);
@@ -172,48 +153,43 @@ int64_t RecordHandler::handle_mlog_write_string(const mlog_id_t &type,
   return (2 + 2 + len);
 }
 
-int64_t RecordHandler::handle_mlog_undo_hdr_reuse(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_undo_hdr_reuse(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                                  uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   trx_id_t trx_id [[maybe_unused]] = mach_u64_parse_compressed(&ptr, end_ptr);
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_mlog_undo_hdr_create(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_undo_hdr_create(const mlog_id_t &type, const unsigned char *buffer,
+                                                   uint32_t space_id, uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   trx_id_t trx_id [[maybe_unused]] = mach_u64_parse_compressed(&ptr, end_ptr);
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_mlog_rec_insert_comp(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_rec_insert_comp(const mlog_id_t &type, const unsigned char *buffer,
+                                                   uint32_t space_id, uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   // 1. first the index ...
-  ptr += handle_index_info("insert_comp", type, buffer, space_id, page_id,
-                           end_ptr);
+  ptr += handle_index_info("insert_comp", type, buffer, space_id, page_id, end_ptr);
   ptr += handle_mlog_rec_insert(type, ptr, space_id, page_id, end_ptr);
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_mlog_rec_delete_mark_comp(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_rec_delete_mark_comp(const mlog_id_t &type, const unsigned char *buffer,
+                                                        uint32_t space_id, uint32_t page_id,
+                                                        const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   // 1. first the index ...
-  ptr += handle_index_info("delete_comp", type, buffer, space_id, page_id,
-                           end_ptr);
+  ptr += handle_index_info("delete_comp", type, buffer, space_id, page_id, end_ptr);
   ptr += handle_mlog_rec_delete_mark(type, ptr, space_id, page_id, end_ptr);
 
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_secondary_index_delete(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_secondary_index_delete(const mlog_id_t &type, const unsigned char *buffer,
+                                                     uint32_t space_id, uint32_t page_id,
+                                                     const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   ulint val [[maybe_unused]] = mach_read_from_1(ptr);
   ptr++;
@@ -224,42 +200,37 @@ int64_t RecordHandler::handle_secondary_index_delete(
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_rec_update_inplace_comp(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_rec_update_inplace_comp(const mlog_id_t &type, const unsigned char *buffer,
+                                                      uint32_t space_id, uint32_t page_id,
+                                                      const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   // 1. first the index ...
-  ptr += handle_index_info("update_inplace_comp", type, buffer, space_id,
-                           page_id, end_ptr);
+  ptr += handle_index_info("update_inplace_comp", type, buffer, space_id, page_id, end_ptr);
   ptr += handle_rec_update_inplace(type, ptr, space_id, page_id, end_ptr);
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_delete_record_list(const mlog_id_t &type,
-                                                 const unsigned char *buffer,
-                                                 uint32_t space_id,
-                                                 uint32_t page_id,
-                                                 const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_delete_record_list(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                                 uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   ulint offset [[maybe_unused]] = mach_read_from_2(ptr);
   ptr += 2;
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_delete_record_list_comp(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_delete_record_list_comp(const mlog_id_t &type, const unsigned char *buffer,
+                                                      uint32_t space_id, uint32_t page_id,
+                                                      const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   // 1. first the index ...
-  ptr += handle_index_info("delete_record_list", type, buffer, space_id,
-                           page_id, end_ptr);
+  ptr += handle_index_info("delete_record_list", type, buffer, space_id, page_id, end_ptr);
   ptr += handle_delete_record_list(type, ptr, space_id, page_id, end_ptr);
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_copy_rec_list_to_created_page(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_copy_rec_list_to_created_page(const mlog_id_t &type, const unsigned char *buffer,
+                                                            uint32_t space_id, uint32_t page_id,
+                                                            const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   ulint log_data_len = mach_read_from_4(ptr);
   ptr += 4;
@@ -267,46 +238,37 @@ int64_t RecordHandler::handle_copy_rec_list_to_created_page(
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_copy_rec_list_to_created_page_comp(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_copy_rec_list_to_created_page_comp(const mlog_id_t &type, const unsigned char *buffer,
+                                                                 uint32_t space_id, uint32_t page_id,
+                                                                 const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   // 1. first the index ...
-  ptr += handle_index_info("copy_rec_list_to_created_page", type, buffer,
-                           space_id, page_id, end_ptr);
-  ptr += handle_copy_rec_list_to_created_page(type, ptr, space_id, page_id,
-                                              end_ptr);
+  ptr += handle_index_info("copy_rec_list_to_created_page", type, buffer, space_id, page_id, end_ptr);
+  ptr += handle_copy_rec_list_to_created_page(type, ptr, space_id, page_id, end_ptr);
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_mlog_file_x(const mlog_id_t &type,
-                                          const unsigned char *buffer,
-                                          uint32_t space_id, uint32_t page_id,
-                                          const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_file_x(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                          uint32_t page_id, const unsigned char *end_ptr) {
   uint64_t offset = 0;
   ulint len = mach_read_from_2(buffer);
   offset += 2;  // length 2 bytes ...
 
   switch (type) {
     case MLOG_FILE_DELETE:
-      return (2 +
-              handle_mlog_file_delete(buffer, space_id, page_id, len, end_ptr));
+      return (2 + handle_mlog_file_delete(buffer, space_id, page_id, len, end_ptr));
     case MLOG_FILE_CREATE:
-      return (2 + handle_mlog_file_create2(buffer, space_id, page_id, len,
-                                           end_ptr));
+      return (2 + handle_mlog_file_create2(buffer, space_id, page_id, len, end_ptr));
     case MLOG_FILE_RENAME:
-      return (2 + handle_mlog_file_rename2(buffer, space_id, page_id, len,
-                                           end_ptr));
+      return (2 + handle_mlog_file_rename2(buffer, space_id, page_id, len, end_ptr));
     default: {
       return 0;
     }
   }
 }
 
-int64_t RecordHandler::handle_mlog_nbytes(const mlog_id_t &type,
-                                          const unsigned char *buffer,
-                                          uint32_t space_id, uint32_t page_id,
-                                          const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_nbytes(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                          uint32_t page_id, const unsigned char *end_ptr) {
   // mlog_nbytes contain an offset and then the value ...
   // offset is 2 bytes -- this is the offset within the page ...
   ulint page_offset = mach_read_from_2(buffer);
@@ -314,31 +276,24 @@ int64_t RecordHandler::handle_mlog_nbytes(const mlog_id_t &type,
 
   switch (type) {
     case MLOG_1BYTE:
-      return (buffer_offset + handle_mlog_1byte(type, (buffer + buffer_offset),
-                                                space_id, page_id, page_offset,
-                                                end_ptr));
+      return (buffer_offset +
+              handle_mlog_1byte(type, (buffer + buffer_offset), space_id, page_id, page_offset, end_ptr));
     case MLOG_2BYTES:
-      return (buffer_offset + handle_mlog_2bytes(type, (buffer + buffer_offset),
-                                                 space_id, page_id, page_offset,
-                                                 end_ptr));
+      return (buffer_offset +
+              handle_mlog_2bytes(type, (buffer + buffer_offset), space_id, page_id, page_offset, end_ptr));
     case MLOG_4BYTES:
-      return (buffer_offset + handle_mlog_4bytes(type, (buffer + buffer_offset),
-                                                 space_id, page_id, page_offset,
-                                                 end_ptr));
+      return (buffer_offset +
+              handle_mlog_4bytes(type, (buffer + buffer_offset), space_id, page_id, page_offset, end_ptr));
     case MLOG_8BYTES:
-      return (buffer_offset + handle_mlog_8bytes(type, (buffer + buffer_offset),
-                                                 space_id, page_id, page_offset,
-                                                 end_ptr));
+      return (buffer_offset +
+              handle_mlog_8bytes(type, (buffer + buffer_offset), space_id, page_id, page_offset, end_ptr));
     default:
       return 0;
   }
 }
 
-int64_t RecordHandler::handle_index_info(const char *operation,
-                                         const mlog_id_t &type,
-                                         const unsigned char *buffer,
-                                         uint32_t space_id, uint32_t page_id,
-                                         const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_index_info(const char *operation, const mlog_id_t &type, const unsigned char *buffer,
+                                         uint32_t space_id, uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   // 1. first the index ...
 
@@ -361,11 +316,8 @@ int64_t RecordHandler::handle_index_info(const char *operation,
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_mlog_rec_insert(const mlog_id_t &type,
-                                              const unsigned char *buffer,
-                                              uint32_t space_id,
-                                              uint32_t page_id,
-                                              const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_rec_insert(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                              uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   // 1. first the index ...
   // no index stuff for non-compact records ....
@@ -383,17 +335,15 @@ int64_t RecordHandler::handle_mlog_rec_insert(const mlog_id_t &type,
     ptr++;
 
     ulint origin_offset [[maybe_unused]] = mach_parse_compressed(&ptr, end_ptr);
-    ulint mismatch_index [[maybe_unused]] =
-        mach_parse_compressed(&ptr, end_ptr);
+    ulint mismatch_index [[maybe_unused]] = mach_parse_compressed(&ptr, end_ptr);
   }
 
   ptr += (end_seg_len >> 1);
 
   return (ptr - buffer);
 }
-int64_t RecordHandler::handle_mlog_rec_delete_mark(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_rec_delete_mark(const mlog_id_t &type, const unsigned char *buffer,
+                                                   uint32_t space_id, uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
   // 2. now the record itself ...
@@ -419,11 +369,8 @@ int64_t RecordHandler::handle_mlog_rec_delete_mark(
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_rec_update_inplace(const mlog_id_t &type,
-                                                 const unsigned char *buffer,
-                                                 uint32_t space_id,
-                                                 uint32_t page_id,
-                                                 const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_rec_update_inplace(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                                 uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   ulint flags [[maybe_unused]] = mach_read_from_1(ptr);
   ptr++;
@@ -456,16 +403,12 @@ int64_t RecordHandler::handle_rec_update_inplace(const mlog_id_t &type,
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_page_reorganize(const mlog_id_t &type,
-                                              const unsigned char *buffer,
-                                              uint32_t space_id,
-                                              uint32_t page_id,
-                                              const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_page_reorganize(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                              uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
   if (type != MLOG_PAGE_REORGANIZE) {
-    ptr += handle_index_info("page_reorganize", type, buffer, space_id, page_id,
-                             end_ptr);
+    ptr += handle_index_info("page_reorganize", type, buffer, space_id, page_id, end_ptr);
   }
 
   if (type == MLOG_ZIP_PAGE_REORGANIZE) {
@@ -476,10 +419,8 @@ int64_t RecordHandler::handle_page_reorganize(const mlog_id_t &type,
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_add_undo_rec(const mlog_id_t &type,
-                                           const unsigned char *buffer,
-                                           uint32_t space_id, uint32_t page_id,
-                                           const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_add_undo_rec(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                           uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
   ulint len = mach_read_from_2(ptr);
@@ -489,55 +430,41 @@ int64_t RecordHandler::handle_add_undo_rec(const mlog_id_t &type,
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_undo_init(const mlog_id_t &type,
-                                        const unsigned char *buffer,
-                                        uint32_t space_id, uint32_t page_id,
-                                        const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_undo_init(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                        uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
   ulint undo_type [[maybe_unused]] = mach_parse_compressed(&ptr, end_ptr);
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_rec_min_mark(const mlog_id_t &type,
-                                           const unsigned char *buffer,
-                                           uint32_t space_id, uint32_t page_id,
-                                           const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_rec_min_mark(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                           uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
   ulint offset [[maybe_unused]] = mach_read_from_2(ptr);
   ptr += 2;
   return (ptr - buffer);
 }
-int64_t RecordHandler::handle_mlog_rec_delete(const mlog_id_t &type,
-                                              const unsigned char *buffer,
-                                              uint32_t space_id,
-                                              uint32_t page_id,
-                                              const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_rec_delete(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                              uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
-  if (type == MLOG_REC_DELETE)
-    ptr += handle_index_info("delete_rec", type, buffer, space_id, page_id,
-                             end_ptr);
+  if (type == MLOG_REC_DELETE) ptr += handle_index_info("delete_rec", type, buffer, space_id, page_id, end_ptr);
 
   ulint offset [[maybe_unused]] = mach_read_from_2(ptr);
   ptr += 2;
 
   return (ptr - buffer);
 }
-int64_t RecordHandler::handle_bitmap_init(const mlog_id_t &type,
-                                          const unsigned char *buffer,
-                                          uint32_t space_id, uint32_t page_id,
-                                          const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_bitmap_init(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                          uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_zip_write_node_ptr(const mlog_id_t &type,
-                                                 const unsigned char *buffer,
-                                                 uint32_t space_id,
-                                                 uint32_t page_id,
-                                                 const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_zip_write_node_ptr(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                                 uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
   ulint offset [[maybe_unused]] = mach_read_from_2(ptr);
@@ -550,11 +477,8 @@ int64_t RecordHandler::handle_zip_write_node_ptr(const mlog_id_t &type,
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_zip_write_blob_ptr(const mlog_id_t &type,
-                                                 const unsigned char *buffer,
-                                                 uint32_t space_id,
-                                                 uint32_t page_id,
-                                                 const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_zip_write_blob_ptr(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                                 uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
   ulint offset [[maybe_unused]] = mach_read_from_2(ptr);
@@ -567,11 +491,8 @@ int64_t RecordHandler::handle_zip_write_blob_ptr(const mlog_id_t &type,
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_zip_write_header(const mlog_id_t &type,
-                                               const unsigned char *buffer,
-                                               uint32_t space_id,
-                                               uint32_t page_id,
-                                               const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_zip_write_header(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                               uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
   ulint offset [[maybe_unused]] = (ulint)*ptr++;
@@ -581,11 +502,8 @@ int64_t RecordHandler::handle_zip_write_header(const mlog_id_t &type,
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_zip_page_compress(const mlog_id_t &type,
-                                                const unsigned char *buffer,
-                                                uint32_t space_id,
-                                                uint32_t page_id,
-                                                const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_zip_page_compress(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                                uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
 
   ulint size = mach_read_from_2(ptr);
@@ -598,22 +516,18 @@ int64_t RecordHandler::handle_zip_page_compress(const mlog_id_t &type,
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_zip_page_compress_no_data(
-    const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
-    uint32_t page_id, const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_zip_page_compress_no_data(const mlog_id_t &type, const unsigned char *buffer,
+                                                        uint32_t space_id, uint32_t page_id,
+                                                        const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
-  ptr += handle_index_info("zip_page_compress_no_data", type, buffer, space_id,
-                           page_id, end_ptr);
+  ptr += handle_index_info("zip_page_compress_no_data", type, buffer, space_id, page_id, end_ptr);
   ulint level [[maybe_unused]] = mach_read_from_1(ptr);
   ptr += 1;
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_file_crypt_data(const mlog_id_t &type,
-                                              const unsigned char *buffer,
-                                              uint32_t space_id,
-                                              uint32_t page_id,
-                                              const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_file_crypt_data(const mlog_id_t &type, const unsigned char *buffer, uint32_t space_id,
+                                              uint32_t page_id, const unsigned char *end_ptr) {
   const unsigned char *ptr = buffer;
   uint entry_size [[maybe_unused]] = 4 +  // size of space_id
                                      2 +  // size of offset
@@ -648,8 +562,7 @@ int64_t RecordHandler::handle_file_crypt_data(const mlog_id_t &type,
   return (ptr - buffer);
 }
 
-int64_t RecordHandler::handle_mlog_checkpoint(const unsigned char *buffer,
-                                              const unsigned char *end_ptr) {
+int64_t RecordHandler::handle_mlog_checkpoint(const unsigned char *buffer, const unsigned char *end_ptr) {
   // mlog checkpoint contains the checkpoint LSN which is 8 bytes ...
   lsn_t lsn [[maybe_unused]] = mach_read_from_8(buffer);
   return sizeof(lsn_t);
@@ -657,8 +570,7 @@ int64_t RecordHandler::handle_mlog_checkpoint(const unsigned char *buffer,
   return (SIZE_OF_MLOG_CHECKPOINT - 1);
 }
 
-int64_t MLogRecordHandler::handle_mlog_checkpoint(
-    const unsigned char *buffer, const unsigned char *end_ptr) {
+int64_t MLogRecordHandler::handle_mlog_checkpoint(const unsigned char *buffer, const unsigned char *end_ptr) {
   // mlog checkpoint contains the checkpoint LSN which is 8 bytes ...
   lsn_t lsn = mach_read_from_8(buffer);
 
@@ -681,8 +593,7 @@ int64_t MLogRecordHandler::handle_mlog_checkpoint(
 }
 
 template <typename RecordHandler>
-bool RecordParser<RecordHandler>::get_record_type(const unsigned char *buffer,
-                                                  mlog_id_t *type) {
+bool RecordParser<RecordHandler>::get_record_type(const unsigned char *buffer, mlog_id_t *type) {
   *type = mlog_id_t(buffer[record_offset] & ~MLOG_SINGLE_REC_FLAG);
   if (UNIV_UNLIKELY(*type > MLOG_BIGGEST_TYPE)) {
     // PRINT_ERR << "Found an invalid redo log record type at offset: " <<
@@ -697,8 +608,7 @@ bool RecordParser<RecordHandler>::get_record_type(const unsigned char *buffer,
 
 template <typename RecordHandler>
 lsn_t RecordParser<RecordHandler>::offset_to_lsn(const lsn_t &chunk_start_lsn) {
-  const lsn_t block_sz_wo_hdr_trl =
-      (OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_HDR_SIZE - LOG_BLOCK_TRL_SIZE);
+  const lsn_t block_sz_wo_hdr_trl = (OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_HDR_SIZE - LOG_BLOCK_TRL_SIZE);
   // how many blocks are there in the offset ?
   lsn_t blocks = record_offset / block_sz_wo_hdr_trl;
   lsn_t remainder = record_offset % block_sz_wo_hdr_trl;
@@ -728,15 +638,13 @@ lsn_t RecordParser<RecordHandler>::offset_to_lsn(const lsn_t &chunk_start_lsn) {
     }
   }
 
-  lsn_t lsn_at_offset = chunk_start_lsn + record_offset +
-                        blocks * (LOG_BLOCK_HDR_SIZE + LOG_BLOCK_TRL_SIZE) +
-                        adjustment;
+  lsn_t lsn_at_offset =
+      chunk_start_lsn + record_offset + blocks * (LOG_BLOCK_HDR_SIZE + LOG_BLOCK_TRL_SIZE) + adjustment;
   return lsn_at_offset;
 }
 
 template <typename RecordHandler>
-bool RecordParser<RecordHandler>::parse_record(const unsigned char *buffer,
-                                               const lsn_t &chunk_start_lsn) {
+bool RecordParser<RecordHandler>::parse_record(const unsigned char *buffer, const lsn_t &chunk_start_lsn) {
   // get the type of the record -- type is 1 byte
   mlog_id_t type;
   if (!get_record_type(buffer, &type)) return false;
@@ -760,13 +668,11 @@ bool RecordParser<RecordHandler>::parse_record(const unsigned char *buffer,
   // space id and page id is stored in 2 bytes, 2 bytes fields in some
   // compressed format ...
   byte *ptr = const_cast<byte *>(buffer + record_offset);
-  uint32_t space_id = mach_parse_compressed(const_cast<const byte **>(&ptr),
-                                            p_Scanner->end_ptr());
+  uint32_t space_id = mach_parse_compressed(const_cast<const byte **>(&ptr), p_Scanner->end_ptr());
 
   uint32_t page_id = 0;
   if (ptr != NULL) {
-    page_id = mach_parse_compressed(const_cast<const byte **>(&ptr),
-                                    p_Scanner->end_ptr());
+    page_id = mach_parse_compressed(const_cast<const byte **>(&ptr), p_Scanner->end_ptr());
   } else {
     // PRINT_ERR << "LSN: " << (record_offset) << ", unable to retrieve page id
     // for space id: " << space_id << std::endl;
@@ -775,9 +681,8 @@ bool RecordParser<RecordHandler>::parse_record(const unsigned char *buffer,
 
   record_offset += (ptr - (buffer + record_offset));
 
-  int64_t length =
-      (*p_Handler)(type, buffer + record_offset, space_id, page_id,
-                   offset_to_lsn(chunk_start_lsn), p_Scanner->end_ptr());
+  int64_t length = (*p_Handler)(type, buffer + record_offset, space_id, page_id, offset_to_lsn(chunk_start_lsn),
+                                p_Scanner->end_ptr());
   if (length < 0) {
     // PRINT_ERR << "Error parsing record " << get_mlog_string(type) <<
     // std::endl;
@@ -792,8 +697,7 @@ bool RecordParser<RecordHandler>::parse_record(const unsigned char *buffer,
 // returns false if a parse record failed
 template <typename RecordHandler>
 bool RecordParser<RecordHandler>::parse_records(const lsn_t &chunk_start_lsn) {
-  while ((record_offset < p_Scanner->get_length()) &&
-         p_Handler->is_continue_processing())
+  while ((record_offset < p_Scanner->get_length()) && p_Handler->is_continue_processing())
     if (!parse_record(p_Scanner->parse_buffer, chunk_start_lsn)) {
       return false;
     }
