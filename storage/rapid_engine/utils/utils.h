@@ -26,10 +26,14 @@
 #ifndef __SHANNONBASE_UTILS_H__
 #define __SHANNONBASE_UTILS_H__
 
+#include <iomanip>
+#include <iostream>
+#include <sstream>
 #include <string>
 
 #include "include/field_types.h"
 #include "include/my_inttypes.h"
+#include "sql/field.h"  //Field
 
 class TABLE;
 class Field;
@@ -43,26 +47,31 @@ class Dictionary;
 namespace Utils {
 class Util {
  public:
-  //to check whether this type is supported or not.
+  // to check whether this type is supported or not.
   static bool is_support_type(enum_field_types type);
 
-  //get the data value.
-  static double get_value_mysql_type(enum_field_types &,
-                                     Compress::Dictionary *&, const uchar *,
-                                     uint);
+  // get the data value.
+  static double get_value_mysql_type(enum_field_types &, Compress::Dictionary *&, const uchar *, uint);
   static double get_field_value(Field *&, Compress::Dictionary *&);
 
-  static double get_field_value(enum_field_types , const uchar*, uint,
-                                Compress::Dictionary *,
-                                CHARSET_INFO* charset);
+  static double get_field_value(enum_field_types, const uchar *, uint, Compress::Dictionary *, CHARSET_INFO *charset);
 
-  static double store_field_value(TABLE *&table, Field *&,
-                                  Compress::Dictionary *&, double &);
-  static double store_field_value(TABLE *&table, Field *&,
-                                  Compress::Dictionary *&, const uchar *, uint);
-  static int get_range_value(enum_field_types, Compress::Dictionary *&,
-                             key_range *, key_range *, double &, double &);
-  static int mem2string (uchar* buff, uint length, std::string& result);
+  static double store_field_value(TABLE *&table, Field *&, Compress::Dictionary *&, double &);
+  static double store_field_value(TABLE *&table, Field *&, Compress::Dictionary *&, const uchar *, uint);
+  static int get_range_value(enum_field_types, Compress::Dictionary *&, key_range *, key_range *, double &, double &);
+  static int mem2string(uchar *buff, uint length, std::string &result);
+
+  inline static std::string get_key_name(Field *field) {
+    std::ostringstream ostr;
+    ostr << field->table->s->db.str << ":" << *field->table_name << ":" << field->field_name;
+    return ostr.str();
+  }
+
+  inline static std::string get_key_name(const char *db_name, const char *table_name, const char *field_name) {
+    std::ostringstream ostr;
+    ostr << db_name << ":" << table_name << ":" << field_name;
+    return ostr.str();
+  }
 };
 
 }  // namespace Utils

@@ -56,14 +56,12 @@ class CuView {
   int open();
   int close();
   int read(ShannonBaseContext *context, uchar *buffer, size_t length = 0);
-  int read_index(ShannonBaseContext *context, uchar* value);
-  int read_index_fast(ShannonBaseContext *context, uchar *key, size_t key_len,
-                      uchar *value, ha_rkey_function find_flag);
+  int read_index(ShannonBaseContext *context, uchar *value);
+  int read_index_fast(ShannonBaseContext *context, uchar *key, size_t key_len, uchar *value,
+                      ha_rkey_function find_flag);
   int read_index_next(ShannonBaseContext *context, uchar *value);
-  int index_lookup(ShannonBaseContext *context, uchar *key, size_t key_len,
-                   uchar *value, ha_rkey_function find_flag);
-  int records_in_range(ShannonBaseContext *, unsigned int, key_range *,
-                       key_range *);
+  int index_lookup(ShannonBaseContext *context, uchar *key, size_t key_len, uchar *value, ha_rkey_function find_flag);
+  int records_in_range(ShannonBaseContext *, unsigned int, key_range *, key_range *);
   uchar *write(ShannonBaseContext *context, uchar *buffer, size_t length = 0);
   uchar *seek(size_t offset);
   inline Imcs::Cu *get_source() { return m_source_cu; }
@@ -90,9 +88,9 @@ class ImcsReader : public Reader {
  public:
   ImcsReader(TABLE *table);
   ImcsReader() = delete;
-  virtual ~ImcsReader() {}
+  virtual ~ImcsReader() { close(); }
 
-  //field index <----> std::unique_ptr<CuView>, for fast acess.
+  // field index <----> std::unique_ptr<CuView>, for fast acess.
   using TableCuViews = std::unordered_map<uint, std::unique_ptr<CuView>>;
   int open() override;
   int close() override;
@@ -101,16 +99,13 @@ class ImcsReader : public Reader {
   // sequential write, full table scan.
   int write(ShannonBaseContext *, uchar *, size_t = 0) override;
   // get the nums of rows in range.
-  int records_in_range(ShannonBaseContext *, unsigned int, key_range *,
-                       key_range *) override;
+  int records_in_range(ShannonBaseContext *, unsigned int, key_range *, key_range *) override;
   // read a row via index with a key.
-  int index_read(ShannonBaseContext *, uchar *, uchar *, uint,
-                 ha_rkey_function) override;
+  int index_read(ShannonBaseContext *, uchar *, uchar *, uint, ha_rkey_function) override;
   // read the rows without a key value, just like travel over index tree.
   int index_general(ShannonBaseContext *, uchar *, size_t = 0) override;
   int index_next(ShannonBaseContext *, uchar *, size_t = 0) override;
-  int index_next_same(ShannonBaseContext *, uchar *, uchar *, uint,
-                      ha_rkey_function) override;
+  int index_next_same(ShannonBaseContext *, uchar *, uchar *, uint, ha_rkey_function) override;
   uchar *tell(uint = 0) override;
   uchar *seek(size_t offset) override;
   bool is_open() const { return m_start_of_scan; }
@@ -124,7 +119,7 @@ class ImcsReader : public Reader {
   /** for fast acess the (field index) <---> (CuViews) pairs. and due to dont allow
    * "DDLs on a table with a secondary engine defined are not allowed", therefore,
    *  we can use an arrary to keep CuView.
-  */
+   */
   std::vector<std::unique_ptr<CuView>> m_cu_views;
   // source table.
   TABLE *m_source_table{nullptr};

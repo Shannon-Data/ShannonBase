@@ -65,8 +65,7 @@ static void parse_log_func(log_t *log_ptr) {
   // here we have a notifiyer, when checkpoint_lsn/flushed_lsn > rapid_lsn to
   // start pop
   LogParser parse_log;
-  while (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
-         sys_pop_started.load(std::memory_order_seq_cst)) {
+  while (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE && sys_pop_started.load(std::memory_order_seq_cst)) {
     auto stop_condition = [&](bool wait) {
       if (sys_population_buffer->readAvailable()) {
         return true;
@@ -75,8 +74,8 @@ static void parse_log_func(log_t *log_ptr) {
     };
 
     // waiting until the new data coming in.
-    os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT,
-                      std::chrono::microseconds{1000}, stop_condition);
+    os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT, std::chrono::microseconds{1000},
+                      stop_condition);
 
     sys_rapid_loop_count++;
 
@@ -101,15 +100,12 @@ static void parse_log_func(log_t *log_ptr) {
   sys_pop_started.store(false, std::memory_order_seq_cst);
 }
 
-bool Populator::log_pop_thread_is_active() {
-  return thread_is_active(srv_threads.m_change_pop);
-}
+bool Populator::log_pop_thread_is_active() { return thread_is_active(srv_threads.m_change_pop); }
 
 void Populator::start_change_populate_threads() {
   if (!Populator::log_pop_thread_is_active() && shannon_loaded_tables->size()) {
     os_event_reset(log_sys->rapid_events[0]);
-    srv_threads.m_change_pop =
-        os_thread_create(rapid_populate_thread_key, 0, parse_log_func, log_sys);
+    srv_threads.m_change_pop = os_thread_create(rapid_populate_thread_key, 0, parse_log_func, log_sys);
     ShannonBase::Populate::sys_pop_started = true;
     srv_threads.m_change_pop.start();
   }
@@ -128,8 +124,7 @@ void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */
   fprintf(file,
           "rapid log pop thread : %s \n"
           "rapid log pop thread loops: " ULINTPF "\n",
-          ShannonBase::Populate::sys_pop_started ? "running" : "stopped",
-          ShannonBase::Populate::sys_rapid_loop_count);
+          ShannonBase::Populate::sys_pop_started ? "running" : "stopped", ShannonBase::Populate::sys_rapid_loop_count);
 }
 
 }  // namespace Populate

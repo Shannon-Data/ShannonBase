@@ -49,11 +49,7 @@ std::string Timer::lap_formatted() {
 }
 
 // ctor
-Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr,
-                     const std::shared_ptr<CostEstimator> &cost_estimator)
- {
-  
-}
+Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr, const std::shared_ptr<CostEstimator> &cost_estimator) {}
 
 }  // namespace Optimizer
 }  // namespace ShannonBase
