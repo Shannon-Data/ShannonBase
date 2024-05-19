@@ -375,15 +375,13 @@ Item* ha_rapid::get_cond_item(Item* cond, Field* key_field) {
       } else if (item->type() == Item::FUNC_ITEM) {
         Item_func *item_func = (Item_func *)item;
         const Item_func::Functype func_type = item_func->functype();
-        ut_a(func_type != Item_func::TRIG_COND_FUNC ||
-            func_type != Item_func::DD_INTERNAL_FUNC);
+        ut_a(func_type != Item_func::TRIG_COND_FUNC || func_type != Item_func::DD_INTERNAL_FUNC);
 
         if (item_func->argument_count() > 0) {
         /* This is a function, apply condition recursively to arguments */
           Item **item_end =
               (item_func->arguments()) + item_func->argument_count();
-          for (Item **child = item_func->arguments(); child != item_end;
-              child++) {
+          for (Item **child = item_func->arguments(); child != item_end; child++) {
             auto arg = *child;
             if (uses_index_fields_only(arg, table, 0, false))
               return arg;
@@ -790,6 +788,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name,
     return ret;
   }
   shannon_loaded_tables->erase(db_name, table_name);
+  m_imcs_reader.reset(nullptr);
   return 0;
 }
 }  // namespace ShannonBase
@@ -1009,10 +1008,10 @@ static int ShannonRollback(handlerton *hton, /*!< in: handlerton */
 /** This function is used to prepare an X/Open XA distributed transaction.
  @return 0 or error number */
 static int ShannonXAPrepare(handlerton *hton, /*!< in: handlerton */
-                               THD *thd, /*!< in: handle to the MySQL thread of
+                            THD *thd, /*!< in: handle to the MySQL thread of
                                          the user whose XA transaction should
                                          be prepared */
-                               bool prepare_trx){ /*!< in: true - prepare
+                            bool prepare_trx){ /*!< in: true - prepare
                                                  transaction false - the current
                                                  SQL statement ended */
 

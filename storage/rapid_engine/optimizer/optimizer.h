@@ -41,8 +41,7 @@ class OptimizeContext;
 namespace Optimizer {
 class RuleMetrics {
  public:
-  explicit RuleMetrics(const std::string &rule_name,
-                       const std::chrono::nanoseconds duration)
+  explicit RuleMetrics(const std::string &rule_name, const std::chrono::nanoseconds duration)
       : m_rule_name{rule_name}, m_duration{duration} {}
 
  private:
@@ -65,8 +64,7 @@ class CardinalityEstimator;
 
 class Optimizer : public MemoryObject {
  public:
-  explicit Optimizer(std::shared_ptr<Query_expression> &,
-                     const std::shared_ptr<CostEstimator> &);
+  explicit Optimizer(std::shared_ptr<Query_expression> &, const std::shared_ptr<CostEstimator> &);
 };
 
 }  // namespace Optimizer

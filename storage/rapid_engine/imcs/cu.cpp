@@ -48,7 +48,7 @@ Cu::Cu(Field *field) {
   init_body_info(field);
 }
 
-Cu::~Cu() {}
+Cu::~Cu() { m_chunks.clear(); }
 
 bool Cu::init_header_info(const Field *field) {
   std::scoped_lock lk(m_header_mutex);
@@ -74,10 +74,9 @@ bool Cu::init_header_info(const Field *field) {
 
   std::string comment(field->comment.str);
   std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
-  const char *const patt_str =
-      "RAPID_COLUMN\\s*=\\s*ENCODING\\s*=\\s*(SORTED|VARLEN)";
-  std::regex column_encoding_patt(
-      patt_str, std::regex_constants::nosubs | std::regex_constants::icase);
+  const char *const patt_str = "RAPID_COLUMN\\s*=\\s*ENCODING\\s*=\\s*(SORTED|VARLEN)";
+  std::regex column_encoding_patt(patt_str, std::regex_constants::nosubs | std::regex_constants::icase);
+
   if (std::regex_search(comment.c_str(), column_encoding_patt)) {
     if (comment.find("SORTED") != std::string::npos)
       m_header->m_encoding_type = Compress::Encoding_type::SORTED;
@@ -86,8 +85,7 @@ bool Cu::init_header_info(const Field *field) {
   } else
     m_header->m_encoding_type = Compress::Encoding_type::NONE;
 
-  m_header->m_local_dict =
-      std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
+  m_header->m_local_dict = std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
   return false;
 }
 
@@ -109,10 +107,8 @@ bool Cu::update_statistics(double old_v, double new_v, OPER_TYPE type) {
   if (!m_header.get()) return false;
 
   // update the meta info.
-  if (m_header->m_cu_type == MYSQL_TYPE_BLOB ||
-      m_header->m_cu_type == MYSQL_TYPE_STRING ||
+  if (m_header->m_cu_type == MYSQL_TYPE_BLOB || m_header->m_cu_type == MYSQL_TYPE_STRING ||
       m_header->m_cu_type == MYSQL_TYPE_VARCHAR) {  // string type, otherwise,
-                                                    // update the meta info.
     return true;
   }
 
@@ -122,11 +118,11 @@ bool Cu::update_statistics(double old_v, double new_v, OPER_TYPE type) {
       m_header->m_sum = m_header->m_sum + new_v;
       m_header->m_avg = m_header->m_sum / m_header->m_rows;
 
-      if (is_less_than(m_header->m_max, new_v))
-        m_header->m_max.store(new_v, std::memory_order::memory_order_relaxed);
+      if (is_less_than(m_header->m_max, new_v)) m_header->m_max.store(new_v, std::memory_order::memory_order_relaxed);
       if (is_greater_than(m_header->m_min, new_v))
         m_header->m_min.store(new_v, std::memory_order::memory_order_relaxed);
     } break;
+
     case OPER_TYPE::OPER_UPDATE: {
       m_header->m_sum = m_header->m_sum - old_v + new_v;
       m_header->m_avg = m_header->m_sum / m_header->m_rows;
@@ -137,6 +133,7 @@ bool Cu::update_statistics(double old_v, double new_v, OPER_TYPE type) {
       if (is_greater_than_or_eq(m_header->m_min, value))
         m_header->m_min.store(value, std::memory_order::memory_order_relaxed);
     } break;
+
     case OPER_TYPE::OPER_DELETE: {
       m_header->m_rows.fetch_sub(1, std::memory_order_seq_cst);
       m_header->m_deleted_mark.fetch_sub(1, std::memory_order_seq_cst);
@@ -193,16 +190,21 @@ uint Cu::rnd_end() {
   return 0;
 }
 
-uchar *Cu::write_data_direct(ShannonBase::RapidContext *context,
-                             const uchar *pos, const uchar *data, uint length) {
+uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, const uchar *pos, const uchar *data, uint length) {
   return nullptr;
 }
 
-uchar *Cu::write_data_direct(ShannonBase::RapidContext *context,
-                             const uchar *data, uint length) {
+uchar *Cu::write_data_direct(ShannonBase::RapidContext *context, const uchar *data, uint length) {
   DBUG_TRACE;
-  ut_ad(m_header.get() && m_chunks.size());
+  ut_ad(m_header.get() && m_chunks.size() && data);
 
+  auto index_pos = m_index->lookup(reinterpret_cast<uchar *>(context->m_extra_info.m_key_buff.get()),
+                                   context->m_extra_info.m_key_len);
+  if (index_pos) {  // found, return now.
+    return 0;
+  }
+
+  // the last available chunk.
   Chunk *chunk_ptr = m_chunks[m_chunks.size() - 1].get();
   uchar *pos = chunk_ptr->write_data_direct(context, data, length);
   if (unlikely(!pos)) {
@@ -210,27 +212,30 @@ uchar *Cu::write_data_direct(ShannonBase::RapidContext *context,
     std::scoped_lock lk(m_header_mutex);
     Field *field = *(context->m_table->field + m_header->m_field_no);
     ut_ad(field);
+
     m_chunks.push_back(std::make_unique<Chunk>(field));
     chunk_ptr->get_header()->m_next_chunk = m_chunks[m_chunks.size() - 1].get();
     m_chunks[m_chunks.size() - 1].get()->get_header()->m_prev_chunk = chunk_ptr;
     chunk_ptr = m_chunks[m_chunks.size() - 1].get();
+
     pos = chunk_ptr->write_data_direct(context, data, length);
+    ut_a(pos);
   }
 
-  auto ret = m_index->insert((uchar *)context->m_extra_info.m_key_buff.get(),
-                             context->m_extra_info.m_key_len, pos);
-  if (unlikely(ret)) return nullptr;
+  if (unlikely(m_index->insert(reinterpret_cast<uchar *>(context->m_extra_info.m_key_buff.get()),
+                               context->m_extra_info.m_key_len, pos)))
+    return nullptr;
 
   double data_val{0};
   if (!m_header->m_nullable)
-    data_val = *(double *)(data + SHANNON_DATA_BYTE_OFFSET);
+    data_val = *reinterpret_cast<double *>(const_cast<uchar *>(data) + SHANNON_DATA_BYTE_OFFSET);
 
   // update the meta info.
   update_statistics(data_val, data_val, OPER_TYPE::OPER_INSERT);
   return pos;
 }
 
-uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, uchar *buffer) {
+uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, uchar *buff) {
   DBUG_TRACE;
   if (!m_chunks.size()) return nullptr;
 #ifdef SHANNON_GET_NTH_CHUNK
@@ -245,14 +250,16 @@ uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, uchar *buffer) {
   Chunk *chunk = m_chunks[m_current_chunk_id].get();
   if (unlikely(!chunk)) return nullptr;
 
-  auto ret = chunk->read_data_direct(context, buffer);
-  if (unlikely(!ret)) {  // to the end of this chunk, then start to read the
-                         // next chunk.
+  auto ret = chunk->read_data_direct(context, buff);
+  // to the end of this chunk, then start to read the next chunk.
+  if (unlikely(!ret)) {
     m_current_chunk_id.fetch_add(1, std::memory_order::memory_order_seq_cst);
     if (m_current_chunk_id >= m_chunks.size()) return nullptr;
+
     chunk = m_chunks[m_current_chunk_id].get();
     if (unlikely(!chunk)) return nullptr;
-    ret = chunk->read_data_direct(context, buffer);
+
+    ret = chunk->read_data_direct(context, buff);
   }
   return ret;
 #endif
@@ -265,43 +272,38 @@ uchar *Cu::seek(ShannonBase::RapidContext *context, size_t offset) {
   return m_chunks[chunk_id]->seek(context, offset_in_chunk);
 }
 
-uchar *Cu::lookup(ShannonBase::RapidContext *context, const uchar *pk,
-                  uint pk_len) {
+uchar *Cu::lookup(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len) {
   if (!m_index || !pk || !pk_len) return nullptr;
 
-  return reinterpret_cast<uchar *>(
-      m_index->lookup(const_cast<uchar *>(pk), pk_len));
+  return reinterpret_cast<uchar *>(m_index->lookup(const_cast<uchar *>(pk), pk_len));
 }
 
-uchar *Cu::read_data_direct(ShannonBase::RapidContext *context,
-                            const uchar *rowid, uchar *buffer) {
+uchar *Cu::read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid, uchar *buffer) {
   if (!m_chunks.size()) return nullptr;
-  // Chunk* chunk = m_chunks [m_chunks.size() - 1].get(); //to get the last
+  // Chunk* chunk = m_chunks [m_chunks.size() - 1].get();
   // chunk data. if (!chunk) return nullptr;
   ut_a(false);
   return nullptr;
 }
 
-uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context,
-                              const uchar *rowid) {
+uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context, const uchar *rowid) {
   ut_a(false);
   return nullptr;
 }
 
-uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context,
-                              const uchar *pk, uint pk_len) {
+uchar *Cu::delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len) {
   uchar *data_pos{nullptr};
   if (!pk && !pk_len) {  // delete all
     data_pos = delete_all_direct();
   } else {
-    data_pos = (uchar *)m_index->lookup(const_cast<uchar *>(pk), pk_len);
+    data_pos = reinterpret_cast<uchar *>(m_index->lookup(const_cast<uchar *>(pk), pk_len));
     if (!data_pos) return nullptr;
-    uint8 info = *(uint8 *)(data_pos + SHANNON_INFO_BYTE_OFFSET);
-    info |= DATA_DELETE_FLAG_MASK;
-    *(uint8 *)(data_pos + SHANNON_INFO_BYTE_OFFSET) = info;
 
-    auto data_val = *(double *)(data_pos + SHANNON_DATA_BYTE_OFFSET);
-    ut_a(data_val);
+    uint8 info = *reinterpret_cast<uint8 *>(data_pos + SHANNON_INFO_BYTE_OFFSET);
+    info |= DATA_DELETE_FLAG_MASK;
+    *reinterpret_cast<uint8 *>(data_pos + SHANNON_INFO_BYTE_OFFSET) = info;
+    *reinterpret_cast<uint64 *>(data_pos + SHANNON_TRX_ID_BYTE_OFFSET) = context->m_extra_info.m_trxid;
+    auto data_val = *reinterpret_cast<double *>(data_pos + SHANNON_DATA_BYTE_OFFSET);
     update_statistics(data_val, data_val, OPER_TYPE::OPER_DELETE);
   }
 
@@ -320,13 +322,13 @@ uchar *Cu::delete_all_direct() {
   return (uchar *)m_header.get();
 }
 
-uchar *Cu::update_data_direct(ShannonBase::RapidContext *context,
-                              const uchar *rowid, const uchar *data,
-                              uint length) {
-  const uchar *data_pos =
-      (rowid) ? rowid
-              : (uchar *)m_index->lookup(context->m_extra_info.m_key_buff.get(),
-                                         context->m_extra_info.m_key_len);
+uchar *Cu::update_data_direct(ShannonBase::RapidContext *context, const uchar *rowid, const uchar *data, uint length) {
+  const uchar *data_pos{nullptr};
+  if (rowid)
+    data_pos = rowid;
+  else
+    data_pos = (uchar *)m_index->lookup(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len);
+
   if (!data_pos) return nullptr;
   // in future, the old data will be added to version link.
   memcpy(const_cast<uchar *>(data_pos), data, length);
@@ -334,8 +336,7 @@ uchar *Cu::update_data_direct(ShannonBase::RapidContext *context,
   return const_cast<uchar *>(data_pos);
 }
 
-uint Cu::flush_direct(ShannonBase::RapidContext *context, const uchar *from,
-                      const uchar *to) {
+uint Cu::flush_direct(ShannonBase::RapidContext *context, const uchar *from, const uchar *to) {
   assert(from || to);
   return 0;
 }
@@ -352,18 +353,14 @@ uchar *Cu::GC(ShannonBase::RapidContext *context) {
     auto mv_size = m_chunks[index - 1]->free_size();
     // the next data size is larger than pre free space.
     if (m_chunks[index]->data_size() > mv_size) {
-      std::memcpy(m_chunks[index - 1]->get_data(), m_chunks[index]->get_base(),
-                  mv_size);
+      std::memcpy(m_chunks[index - 1]->get_data(), m_chunks[index]->get_base(), mv_size);
       m_chunks[index - 1]->set_full();
-      m_chunks[index]->reshift(context, m_chunks[index]->get_base(),
-                               m_chunks[index]->get_base() + mv_size);
+      m_chunks[index]->reshift(context, m_chunks[index]->get_base(), m_chunks[index]->get_base() + mv_size);
       index++;
     } else {
       mv_size = m_chunks[index]->data_size();
-      std::memcpy(m_chunks[index - 1]->get_data(), m_chunks[index]->get_base(),
-                  mv_size);
-      m_chunks[index]->reshift(context, m_chunks[index]->get_base(),
-                               m_chunks[index]->get_base() + mv_size);
+      std::memcpy(m_chunks[index - 1]->get_data(), m_chunks[index]->get_base(), mv_size);
+      m_chunks[index]->reshift(context, m_chunks[index]->get_base(), m_chunks[index]->get_base() + mv_size);
       if (m_chunks[index]->is_empty()) {
         m_chunks[index].reset(nullptr);
         m_chunks.erase(m_chunks.begin() + index - 1);

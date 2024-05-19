@@ -33,22 +33,11 @@ use any transaction impl to replace innobase's trx used here.
 */
 class Transaction {
  public:
-  enum class ISOLATION_LEVEL : uint8 {
-    READ_UNCOMMITTED,
-    READ_COMMITTED,
-    READ_REPEATABLE,
-    SERIALIZABLE
-  };
-  enum class STATUS : uint8 {
-    NOT_START,
-    ACTIVE,
-    PREPARED,
-    COMMITTED_IN_MEMORY
-  };
+  enum class ISOLATION_LEVEL : uint8 { READ_UNCOMMITTED, READ_COMMITTED, READ_REPEATABLE, SERIALIZABLE };
+  enum class STATUS : uint8 { NOT_START, ACTIVE, PREPARED, COMMITTED_IN_MEMORY };
   Transaction() = default;
   virtual ~Transaction() = default;
-  virtual int begin(
-      ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
+  virtual int begin(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
   virtual int commit();
   virtual int rollback();
 

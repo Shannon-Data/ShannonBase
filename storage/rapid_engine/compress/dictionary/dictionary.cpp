@@ -96,8 +96,7 @@ uint32 Dictionary::get(uint64 strid, String &val, CHARSET_INFO &charset) {
   {
     std::shared_lock lk(m_content_mtx);
     // if (m_id2content.find(strid) != m_id2content.end()) {
-    std::string decom_str(CompressFactory::get_instance(alg)->decompressString(
-        m_id2content[strid]));
+    std::string decom_str(CompressFactory::get_instance(alg)->decompressString(m_id2content[strid]));
     String strs(decom_str.c_str(), decom_str.length(), &charset);
     copy_if_not_alloced(&val, &strs, strs.length());
     //}
@@ -124,12 +123,10 @@ int Dictionary::lookup(uchar *&str) {
       break;
   }
 
-  std::string compressed_str(
-      CompressFactory::get_instance(alg)->compressString(origin_str));
+  std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
   {
     std::unique_lock lk(m_content_mtx);
-    if (m_content.find(compressed_str) ==
-        m_content.end()) {  // not found, return -1.
+    if (m_content.find(compressed_str) == m_content.end()) {  // not found, return -1.
       return -1;
     } else
       return m_content[compressed_str];
@@ -156,12 +153,10 @@ int Dictionary::lookup(String &str) {
       break;
   }
 
-  std::string compressed_str(
-      CompressFactory::get_instance(alg)->compressString(origin_str));
+  std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
   {
     std::unique_lock lk(m_content_mtx);
-    if (m_content.find(compressed_str) ==
-        m_content.end()) {  // not found, return -1.
+    if (m_content.find(compressed_str) == m_content.end()) {  // not found, return -1.
       return -1;
     } else
       return m_content[compressed_str];

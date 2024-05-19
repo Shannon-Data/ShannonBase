@@ -74,15 +74,13 @@ constexpr uint8 SHANNON_SUMPTR_BYTE_LEN = 4;
 constexpr uint8 SHANNON_DATA_BYTE_OFFSET = SHANNON_SUMPTR_BYTE_OFFSET + SHANNON_SUMPTR_BYTE_LEN;
 constexpr uint8 SHANNON_DATA_BYTE_LEN = 8;
 
-constexpr uint8 SHANNON_ROW_TOTAL_LEN_UNALIGN =
-    SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN +
-    SHANNON_SUMPTR_BYTE_LEN + SHANNON_DATA_BYTE_LEN;
+constexpr uint8 SHANNON_ROW_TOTAL_LEN_UNALIGN = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN +
+                                                SHANNON_ROWID_BYTE_LEN + SHANNON_SUMPTR_BYTE_LEN +
+                                                SHANNON_DATA_BYTE_LEN;
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
-constexpr uint8 SHANNON_ROW_TOTAL_LEN =
-    ALIGN_WORD(SHANNON_ROW_TOTAL_LEN_UNALIGN, 8);
+constexpr uint8 SHANNON_ROW_TOTAL_LEN = ALIGN_WORD(SHANNON_ROW_TOTAL_LEN_UNALIGN, 8);
 
-constexpr uint SHANNON_ROWS_IN_CHUNK =
-    SHANNON_CHUNK_SIZE / SHANNON_ROW_TOTAL_LEN;
+constexpr uint SHANNON_ROWS_IN_CHUNK = SHANNON_CHUNK_SIZE / SHANNON_ROW_TOTAL_LEN;
 
 constexpr uint SHANNON_BATCH_NUM = 8;
 // The lowest value, here, which means it's a invalid value. to describe its
@@ -91,35 +89,22 @@ constexpr double SHANNON_LOWEST_DOUBLE = std::numeric_limits<double>::lowest();
 constexpr double SHANNON_LOWEST_INT = std::numeric_limits<int>::lowest();
 
 constexpr double SHANNON_EPSILON = 1e-10;
-inline bool are_equal(double a, double b, double epsilon = SHANNON_EPSILON) {
-  return (std::fabs(a - b) < epsilon);
-}
+inline bool are_equal(double a, double b, double epsilon = SHANNON_EPSILON) { return (std::fabs(a - b) < epsilon); }
 
-inline bool is_less_than(double a, double b, double epsilon = SHANNON_EPSILON) {
-  return ((b - a) > epsilon);
-}
-inline bool is_less_than_or_eq(double a, double b,
-                               double epsilon = SHANNON_EPSILON) {
+inline bool is_less_than(double a, double b, double epsilon = SHANNON_EPSILON) { return ((b - a) > epsilon); }
+inline bool is_less_than_or_eq(double a, double b, double epsilon = SHANNON_EPSILON) {
   return (((b - a) > epsilon) || are_equal(a, b));
 }
 
-inline bool is_greater_than(double a, double b,
-                            double epsilon = SHANNON_EPSILON) {
-  return ((a - b) > epsilon);
-}
+inline bool is_greater_than(double a, double b, double epsilon = SHANNON_EPSILON) { return ((a - b) > epsilon); }
 
-inline bool is_greater_than_or_eq(double a, double b,
-                                  double epsilon = SHANNON_EPSILON) {
+inline bool is_greater_than_or_eq(double a, double b, double epsilon = SHANNON_EPSILON) {
   return (((a - b) > epsilon) || are_equal(a, b));
 }
 
-inline bool is_valid(double a) {
-  return are_equal(a, SHANNON_LOWEST_DOUBLE);
-}
+inline bool is_valid(double a) { return are_equal(a, SHANNON_LOWEST_DOUBLE); }
 
-inline bool is_valid(int a) {
-  return are_equal(a, SHANNON_LOWEST_INT);
-}
+inline bool is_valid(int a) { return are_equal(a, SHANNON_LOWEST_INT); }
 // This is use for Rapid cluster in future. in next, we will build up a AP clust
 // for ShannonBase.
 enum class RPD_NODE_ROLE {
@@ -129,11 +114,7 @@ enum class RPD_NODE_ROLE {
   NODE_SECONDARY_NODE
 };
 
-enum class OPER_TYPE :uint8 {
-   OPER_INSERT,
-   OPER_UPDATE,
-   OPER_DELETE
-};
+enum class OPER_TYPE : uint8 { OPER_INSERT, OPER_UPDATE, OPER_DELETE };
 
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CONST_H__

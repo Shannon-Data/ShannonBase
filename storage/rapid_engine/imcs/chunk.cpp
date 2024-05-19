@@ -61,11 +61,9 @@ Chunk::Chunk(Field *field) {
    * memory management. In IMCS, all modules use ut:: to manage memory
    * operations, it's an effiecient memory utils. it has been initialized in
    * ha_innodb.cc: ut_new_boot(); */
-  if (likely(rapid_allocated_mem_size + ShannonBase::SHANNON_CHUNK_SIZE <=
-             rapid_memory_size)) {
+  if (likely(rapid_allocated_mem_size + ShannonBase::SHANNON_CHUNK_SIZE <= rapid_memory_size)) {
     m_data_base = static_cast<uchar *>(ut::aligned_alloc(
-        ShannonBase::SHANNON_CHUNK_SIZE,
-        ALIGN_WORD(ShannonBase::SHANNON_CHUNK_SIZE, SHANNON_ROW_TOTAL_LEN)));
+        ShannonBase::SHANNON_CHUNK_SIZE, ALIGN_WORD(ShannonBase::SHANNON_CHUNK_SIZE, SHANNON_ROW_TOTAL_LEN)));
 
     if (unlikely(!m_data_base)) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
@@ -73,14 +71,12 @@ Chunk::Chunk(Field *field) {
     }
     m_data = m_data_base;
     m_data_cursor = m_data_base;
-    m_data_end =
-        m_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
+    m_data_end = m_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
     rapid_allocated_mem_size += ShannonBase::SHANNON_CHUNK_SIZE;
 
     init_header_info(field);
   } else {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-             "Rapid allocated memory exceeds over the maximum");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
     return;
   }
 }
@@ -151,8 +147,7 @@ bool Chunk::init_header_info(const Field *field) {
 bool Chunk::update_statistics(double old_v, double new_v, OPER_TYPE type) {
   std::scoped_lock lk(m_header_mutex);
   // string type do nothing. will build up the histogram in next.
-  if (m_header->m_chunk_type == MYSQL_TYPE_BLOB ||
-      m_header->m_chunk_type == MYSQL_TYPE_STRING ||
+  if (m_header->m_chunk_type == MYSQL_TYPE_BLOB || m_header->m_chunk_type == MYSQL_TYPE_STRING ||
       m_header->m_chunk_type == MYSQL_TYPE_VARCHAR)
     return true;
 
@@ -163,24 +158,21 @@ bool Chunk::update_statistics(double old_v, double new_v, OPER_TYPE type) {
       m_header->m_sum = m_header->m_sum + new_v;
       m_header->m_avg = m_header->m_sum / m_header->m_rows;
 
-      if (is_less_than(m_header->m_max, new_v))
-        m_header->m_max.store(new_v, std::memory_order::memory_order_relaxed);
+      if (is_less_than(m_header->m_max, new_v)) m_header->m_max.store(new_v, std::memory_order::memory_order_relaxed);
+
       if (is_greater_than(m_header->m_min, new_v))
         m_header->m_min.store(new_v, std::memory_order::memory_order_relaxed);
     } break;
-    case OPER_TYPE::OPER_UPDATE:
-      break;
-      {
-        m_header->m_sum = m_header->m_sum - old_v + new_v;
-        m_header->m_avg = m_header->m_sum / m_header->m_rows;
+    case OPER_TYPE::OPER_UPDATE: {
+      m_header->m_sum = m_header->m_sum - old_v + new_v;
+      m_header->m_avg = m_header->m_sum / m_header->m_rows;
 
-        double value = is_greater_than_or_eq(old_v, new_v) ? old_v : new_v;
-        if (is_less_than_or_eq(m_header->m_max, value))
-          m_header->m_max.store(value, std::memory_order::memory_order_relaxed);
-        if (is_greater_than_or_eq(m_header->m_min, value))
-          m_header->m_min.store(value, std::memory_order::memory_order_relaxed);
-      }
-      break;
+      double value = is_greater_than_or_eq(old_v, new_v) ? old_v : new_v;
+      if (is_less_than_or_eq(m_header->m_max, value))
+        m_header->m_max.store(value, std::memory_order::memory_order_relaxed);
+      if (is_greater_than_or_eq(m_header->m_min, value))
+        m_header->m_min.store(value, std::memory_order::memory_order_relaxed);
+    } break;
     case OPER_TYPE::OPER_DELETE: {
       m_header->m_rows.fetch_sub(1, std::memory_order_seq_cst);
       m_header->m_delete_marked.fetch_sub(1, std::memory_order_seq_cst);
@@ -214,51 +206,48 @@ bool Chunk::reset_statistics() {
 bool Chunk::deleted(const uchar *data) {
   ut_a(data);
 
-  uint8 info =
-      *((uint8 *)(m_data_cursor + SHANNON_INFO_BYTE_OFFSET));  // info byte
+  uint8 info = *((uint8 *)(m_data_cursor + SHANNON_INFO_BYTE_OFFSET));  // info byte
   return (info & DATA_DELETE_FLAG_MASK);
 }
 
 bool Chunk::is_null(const uchar *data) {
   ut_a(data);
 
-  uint8 info =
-      *((uint8 *)(m_data_cursor + SHANNON_INFO_BYTE_OFFSET));  // info byte
+  uint8 info = *((uint8 *)(m_data_cursor + SHANNON_INFO_BYTE_OFFSET));  // info byte
   return (info & DATA_NULL_FLAG_MASK);
 }
 
-uchar *Chunk::write_data_direct(ShannonBase::RapidContext *context,
-                                const uchar *pos, const uchar *data,
-                                uint length) {
+uchar *Chunk::write_data_direct(ShannonBase::RapidContext *context, const uchar *pos, const uchar *data, uint length) {
   DBUG_TRACE;
-  ut_ad(m_data_base || data || m_data);
+  ut_ad(m_data_base && data && m_data);
   ut_ad(length == SHANNON_ROW_TOTAL_LEN);
 
-  std::scoped_lock lk(m_data_mutex);
   if (unlikely(pos > m_data_end)) return nullptr;  // out of range.
 
-  return nullptr;
+  std::memcpy(m_data, data, length);
+  m_data.fetch_add(length);
+
+  auto val = *reinterpret_cast<double *>(m_data - length + SHANNON_DATA_BYTE_OFFSET);
+  update_statistics(val, val, OPER_TYPE::OPER_INSERT);
+  return (m_data - length);  // where the data write from.
 }
 
-uchar *Chunk::write_data_direct(ShannonBase::RapidContext *context,
-                                const uchar *data, uint length) {
+uchar *Chunk::write_data_direct(ShannonBase::RapidContext *context, const uchar *data, uint length) {
   DBUG_TRACE;
-  ut_ad(m_data_base || data || m_data);
+  ut_ad(m_data_base && data && m_data);
   ut_ad(length == SHANNON_ROW_TOTAL_LEN);
 
-  std::scoped_lock lk(m_data_mutex);
   if (unlikely(m_data + length > m_data_end)) return nullptr;
 
   std::memcpy(m_data, data, length);
-  m_data += length;
+  m_data.fetch_add(length);
 
-  auto val = *(double *)(m_data - length + SHANNON_DATA_BYTE_OFFSET);
+  auto val = *reinterpret_cast<double *>(m_data - length + SHANNON_DATA_BYTE_OFFSET);
   update_statistics(val, val, OPER_TYPE::OPER_INSERT);
   return (m_data - length);
 }
 
-uchar *Chunk::read_data_direct(ShannonBase::RapidContext *context,
-                               uchar *buffer) {
+uchar *Chunk::read_data_direct(ShannonBase::RapidContext *context, uchar *buffer) {
   DBUG_TRACE;
   ut_ad(context && buffer);
   // has to the end.
@@ -266,9 +255,7 @@ uchar *Chunk::read_data_direct(ShannonBase::RapidContext *context,
   if (diff >= 0) return nullptr;
 
   while (diff < 0) {  // find the first visiable an no-deleted data in chunk.
-    trx_id_t trxid =
-        *((trx_id_t *)(m_data_cursor +
-                       SHANNON_TRX_ID_BYTE_OFFSET));  // trxid bytes
+    trx_id_t trxid = *reinterpret_cast<trx_id_t *>(m_data_cursor + SHANNON_TRX_ID_BYTE_OFFSET);  // trxid bytes
     // visibility check at firt.
     table_name_t name{const_cast<char *>(context->m_current_db.c_str())};
     ReadView *read_view = trx_get_read_view(context->m_trx);
@@ -276,12 +263,12 @@ uchar *Chunk::read_data_direct(ShannonBase::RapidContext *context,
 
     if (!read_view->changes_visible(trxid, name) || deleted(m_data_cursor)) {
       // TODO: travel the change link to get the visibile version data.
-      m_data_cursor += SHANNON_ROW_TOTAL_LEN;  // to the next value.
+      m_data_cursor.fetch_add(SHANNON_ROW_TOTAL_LEN);  // to the next value.
       diff = m_data_cursor - m_data;
       if (diff > 0) return nullptr;  // no data here.
     } else {
       std::memcpy(buffer, m_data_cursor, SHANNON_ROW_TOTAL_LEN);
-      m_data_cursor += SHANNON_ROW_TOTAL_LEN;  // go to the next.
+      m_data_cursor.fetch_add(SHANNON_ROW_TOTAL_LEN);  // go to the next.
       return m_data_cursor;
     }
   }
@@ -289,8 +276,7 @@ uchar *Chunk::read_data_direct(ShannonBase::RapidContext *context,
   return nullptr;
 }
 
-ha_rows Chunk::records_in_range(ShannonBase::RapidContext *context,
-                                double &min_key, double &max_key) {
+ha_rows Chunk::records_in_range(ShannonBase::RapidContext *context, double &min_key, double &max_key) {
   /**
    * in future, we will use sampling to get the nums in range, not to scan all
    * data. it's a templ approach used here.*/
@@ -299,25 +285,21 @@ ha_rows Chunk::records_in_range(ShannonBase::RapidContext *context,
   double data_val{0};
 
   while (cur_pos < m_data.load(std::memory_order::memory_order_seq_cst)) {
-    trx_id_t trxid =
-        *((trx_id_t *)(cur_pos + SHANNON_TRX_ID_BYTE_OFFSET));  // trxid bytes
+    trx_id_t trxid = *((trx_id_t *)(cur_pos + SHANNON_TRX_ID_BYTE_OFFSET));  // trxid bytes
     // visibility check at firt.
     table_name_t name{const_cast<char *>(context->m_current_db.c_str())};
     ReadView *read_view = trx_get_read_view(context->m_trx);
     ut_ad(read_view);
-    if (deleted(cur_pos) ||
-        !read_view->changes_visible(trxid, name)) {  // invisible and deleted
+    if (deleted(cur_pos) || !read_view->changes_visible(trxid, name)) {  // invisible and deleted
       // TODO: travel the change link to get the visibile version data.
       cur_pos += SHANNON_ROW_TOTAL_LEN;  // to the next value.
       continue;
     }
 
     data_val = *(double *)(cur_pos + SHANNON_DATA_BYTE_OFFSET);
-    if ((is_valid(min_key) && !is_valid(max_key)) &&
-        is_greater_than(data_val, min_key)) {
+    if ((is_valid(min_key) && !is_valid(max_key)) && is_greater_than(data_val, min_key)) {
       count++;
-    } else if ((!is_valid(min_key) && is_valid(max_key)) &&
-               is_less_than(data_val, max_key)) {
+    } else if ((!is_valid(min_key) && is_valid(max_key)) && is_less_than(data_val, max_key)) {
       count++;
     } else
       count++;
@@ -329,28 +311,23 @@ ha_rows Chunk::records_in_range(ShannonBase::RapidContext *context,
 }
 
 uchar *Chunk::where(ShannonBase::RapidContext *context, uint offset) {
-  return (offset > SHANNON_ROWS_IN_CHUNK)
-             ? nullptr
-             : (m_data_base + offset * SHANNON_ROW_TOTAL_LEN);
+  return (offset > SHANNON_ROWS_IN_CHUNK) ? nullptr : (m_data_base + offset * SHANNON_ROW_TOTAL_LEN);
 }
 
 uchar *Chunk::seek(ShannonBase::RapidContext *context, uint offset) {
   auto current_pos = m_data_base + (offset * SHANNON_ROW_TOTAL_LEN);
-  m_data_cursor = (current_pos > m_data.load(std::memory_order_acq_rel))
-                      ? m_data.load(std::memory_order_acq_rel)
-                      : current_pos;
+  m_data_cursor =
+      (current_pos > m_data.load(std::memory_order_acq_rel)) ? m_data.load(std::memory_order_acq_rel) : current_pos;
   return m_data_cursor;
 }
 
-uchar *Chunk::read_data_direct(ShannonBase::RapidContext *context,
-                               const uchar *rowid, uchar *buffer) {
+uchar *Chunk::read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid, uchar *buffer) {
   assert(context && rowid && buffer);
   ut_a(false);
   return nullptr;
 }
 
-uchar *Chunk::delete_data_direct(ShannonBase::RapidContext *context,
-                                 const uchar *rowid) {
+uchar *Chunk::delete_data_direct(ShannonBase::RapidContext *context, const uchar *rowid) {
   if (rowid > m_data) return nullptr;  // out of range.
 
   std::scoped_lock lk(m_data_mutex);
@@ -373,8 +350,7 @@ uchar *Chunk::delete_all_direct() {
   return m_data_base;
 }
 
-uchar *Chunk::update_data_direct(ShannonBase::RapidContext *context,
-                                 const uchar *rowid, const uchar *data,
+uchar *Chunk::update_data_direct(ShannonBase::RapidContext *context, const uchar *rowid, const uchar *data,
                                  uint length) {
   ut_a(length == SHANNON_ROW_TOTAL_LEN);
   if (rowid > m_data_end) return nullptr;  // out of range.
@@ -388,8 +364,7 @@ uchar *Chunk::update_data_direct(ShannonBase::RapidContext *context,
   return const_cast<uchar *>(rowid);
 }
 
-uint Chunk::flush_direct(ShannonBase::RapidContext *context, const uchar *from,
-                         const uchar *to) {
+uint Chunk::flush_direct(ShannonBase::RapidContext *context, const uchar *from, const uchar *to) {
   bool flush_all [[maybe_unused]]{true};
   if (!from || !to) flush_all = false;
 
@@ -405,11 +380,9 @@ uchar *Chunk::GC(ShannonBase::RapidContext *context) {
   */
   uchar *new_data_base{nullptr};
 
-  if (likely(rapid_allocated_mem_size + ShannonBase::SHANNON_CHUNK_SIZE <=
-             rapid_memory_size)) {
+  if (likely(rapid_allocated_mem_size + ShannonBase::SHANNON_CHUNK_SIZE <= rapid_memory_size)) {
     auto new_data_base = static_cast<uchar *>(ut::aligned_alloc(
-        ShannonBase::SHANNON_CHUNK_SIZE,
-        ALIGN_WORD(ShannonBase::SHANNON_CHUNK_SIZE, SHANNON_ROW_TOTAL_LEN)));
+        ShannonBase::SHANNON_CHUNK_SIZE, ALIGN_WORD(ShannonBase::SHANNON_CHUNK_SIZE, SHANNON_ROW_TOTAL_LEN)));
 
     if (unlikely(!new_data_base)) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
@@ -424,12 +397,10 @@ uchar *Chunk::GC(ShannonBase::RapidContext *context) {
 
   while (from_ptr < m_data) {
     uint8 info = *(uint8 *)from_ptr;
-    trx_id_t trxid =
-        *((trx_id_t *)(from_ptr + SHANNON_TRX_ID_BYTE_OFFSET));  // trxid bytes
+    trx_id_t trxid = *((trx_id_t *)(from_ptr + SHANNON_TRX_ID_BYTE_OFFSET));  // trxid bytes
 
-    if ((trxid < gc_trxid) &&
-        (info & DATA_DELETE_FLAG_MASK)) {  // smaller trxid and del marked.
-      from_ptr += SHANNON_ROW_TOTAL_LEN;   // to the next.
+    if ((trxid < gc_trxid) && (info & DATA_DELETE_FLAG_MASK)) {  // smaller trxid and del marked.
+      from_ptr += SHANNON_ROW_TOTAL_LEN;                         // to the next.
     } else {
       std::memcpy(to_ptr, from_ptr, SHANNON_ROW_TOTAL_LEN);
       from_ptr += SHANNON_ROW_TOTAL_LEN;
@@ -444,15 +415,13 @@ uchar *Chunk::GC(ShannonBase::RapidContext *context) {
   // set to the new one.
   m_data_base = new_data_base;
   m_data_cursor = new_data_base;
-  m_data_end =
-      new_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
+  m_data_end = new_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
   m_data = to_ptr;
 
   return to_ptr;
 }
 
-uchar *Chunk::reshift(ShannonBase::RapidContext *context, const uchar *from,
-                      const uchar *to) {
+uchar *Chunk::reshift(ShannonBase::RapidContext *context, const uchar *from, const uchar *to) {
   ut_a(from && to);
   std::scoped_lock lk(m_data_mutex);
 
@@ -470,8 +439,7 @@ uchar *Chunk::set_empty() {
   std::scoped_lock lk(m_data_mutex);
   m_data = m_data_base;
   m_data_cursor = m_data_base;
-  m_data_end =
-      m_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
+  m_data_end = m_data_base + static_cast<ptrdiff_t>(ShannonBase::SHANNON_CHUNK_SIZE);
   return m_data_base;
 }
 uchar *Chunk::set_full() {
