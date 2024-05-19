@@ -396,7 +396,7 @@ int ImcsReader::read(ShannonBaseContext *context, uchar *buffer, size_t length) 
     uint8 info = *reinterpret_cast<uint8 *>(m_buff);
     if (info & DATA_DELETE_FLAG_MASK) continue;
 
-    my_bitmap_map *old_map = tmp_use_all_columns(m_source_table, m_source_table->write_set);
+    auto old_map = tmp_use_all_columns(m_source_table, m_source_table->write_set);
     if (unlikely(info & DATA_NULL_FLAG_MASK))
       field_ptr->set_null();
     else {
