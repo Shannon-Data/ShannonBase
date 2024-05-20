@@ -1963,7 +1963,7 @@ range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
 rapid-rapid-chunk-size-max 67108864
 rapid-rapid-memory-size-max 8589934592
-rapid-rapid-populate-buffer-size-max 8388608
+rapid-rapid-populate-buffer-size-max 67108864
 read-buffer-size 131072
 read-only FALSE
 read-rnd-buffer-size 262144

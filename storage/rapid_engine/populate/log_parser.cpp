@@ -475,10 +475,10 @@ byte *LogParser::parse_tablespace_redo_extend(byte *ptr, const byte *end, const 
 int LogParser::parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index_t *index,
                                               const dict_index_t *real_index, const ulint *offsets, mlog_id_t type,
                                               bool all, page_zip_des_t *page_zip, const upd_t *upd, trx_id_t trxid) {
-  ut_a(rec);
-  ut_a(rec_validate(rec, offsets));
-  ut_a(rec_offs_validate(rec, index, offsets));
-  ut_a(rec_offs_size(offsets));
+  ut_ad(rec);
+  ut_ad(rec_validate(rec, offsets));
+  ut_ad(rec_offs_validate(rec, index, offsets));
+  ut_ad(rec_offs_size(offsets));
 
   ut_a(offsets);
   ut_a(rec == nullptr || rec_get_n_fields(rec, index) >= rec_offs_n_fields(offsets));

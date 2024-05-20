@@ -17,7 +17,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
@@ -26,7 +26,7 @@
 
 #ifndef __SHANNON_RAPID_ARCH_INFO_H__
 #define __SHANNON_RAPID_ARCH_INFO_H__
-// cache L1 line size
+//cache L1 line size
 #define CACHE_LINE_SIZE 64
 
-#endif  //__SHANNON_RAPID_ARCH_INFO_H__
+#endif //__SHANNON_RAPID_ARCH_INFO_H__

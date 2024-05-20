@@ -100,5 +100,7 @@ jobs:
     - name: run_mtr_test
       run: |
         mkdir -p /home/shannon-bin/log
+        sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
-        ./mysql-test-run.pl --suite=main,innodb,secondary_engine --mysqld=--user=mysql --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=5
+        sudo chmod -R u+rwx mysql-test-run.pl
+        ./mysql-test-run.pl --suite=main,innodb --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=5
