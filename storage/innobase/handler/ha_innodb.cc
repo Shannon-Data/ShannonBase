@@ -8332,7 +8332,6 @@ static mysql_row_templ_t *build_template_field(
      * DB_TRX_ID, then return to mysql used by rapid engine. */
     templ->type = DATA_SYS;
     templ->rec_field_no = index->is_clustered() ? templ->col_no : ULINT_UNDEFINED;
-    ut_ad (templ->col_no == 1 || templ->col_no == 2);
   }
   return (templ);
 }
@@ -8681,7 +8680,9 @@ void ha_innobase::build_template(bool whole_row) {
   Field* db_trx_id_field = table->field[n_fields];
   if (db_trx_id_field) {
     assert(db_trx_id_field->type() == MYSQL_TYPE_DB_TRX_ID);
-    auto trx_id_pos = index->get_sys_col_pos(DATA_TRX_ID);
+    ulint trx_id_pos{DATA_TRX_ID};
+    if (index->get_sys_col_pos(DATA_TRX_ID) != ULINT_UNDEFINED)
+      trx_id_pos = index->get_sys_col_pos(DATA_TRX_ID);
     mysql_row_templ_t *templ [[maybe_unused]] = build_template_field(
       m_prebuilt, clust_index, index, table, db_trx_id_field, trx_id_pos, 0);
   }
