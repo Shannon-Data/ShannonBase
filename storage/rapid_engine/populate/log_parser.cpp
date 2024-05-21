@@ -484,7 +484,7 @@ int LogParser::parse_cur_rec_change_apply_low(const rec_t *rec, const dict_index
   ut_a(rec == nullptr || rec_get_n_fields(rec, index) >= rec_offs_n_fields(offsets));
 
   // only leave nodes.
-  if (rec_get_status(rec) != REC_STATUS_ORDINARY) return 0;
+  if (rec_get_status(rec) == REC_STATUS_NODE_PTR) return 0;
 #ifdef UNIV_DEBUG_VALGRIND
   {
     const void *rec_start = rec - rec_offs_extra_size(offsets);
@@ -703,7 +703,6 @@ byte *LogParser::parse_cur_and_apply_insert_rec(bool is_short,            /*!< i
   mem_heap_t *heap = nullptr;
   ulint offsets_[REC_OFFS_NORMAL_SIZE];
   ulint *offsets = offsets_;
-  uint64_t index_id{0};
   const dict_index_t *real_tb_index{nullptr};
   rec_offs_init(offsets_);
 
@@ -769,15 +768,20 @@ byte *LogParser::parse_cur_and_apply_insert_rec(bool is_short,            /*!< i
     return (nullptr);
   }
 
-  if (!block) {
+  /**real_b_index 0 means it's system dict table, otherwise, users.
+   * or the record status is NOT REC_STATUS_ORDINARY, means it can be leave nodes.
+   * || rec_get_status(cursor_rec) != REC_STATUS_ORDINARY
+   * dict_index_is_spatial(index) not support. */
+  real_tb_index = page ? find_index(mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID)) : nullptr;
+
+  if (!block || !real_tb_index || rec_get_status(cursor_rec) == REC_STATUS_NODE_PTR) {
     return (const_cast<byte *>(ptr + (end_seg_len >> 1)));
   }
 
   ut_ad(page_is_comp(page) == dict_table_is_comp(index->table));
   ut_ad(!buf_block_get_page_zip(block) || page_is_comp(page));
 
-  /* Read from the log the inserted index record end segment which
-  differs from the cursor record */
+  /* Read from the log the inserted index record end segment which  differs from the cursor record */
 
   if ((end_seg_len & 0x1UL) && mismatch_index == 0) {
     /* This is a record has nothing common to cursor record. */
@@ -819,9 +823,7 @@ byte *LogParser::parse_cur_and_apply_insert_rec(bool is_short,            /*!< i
 
   offsets = rec_get_offsets(buf + origin_offset, index, offsets, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
 
-  index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
-  real_tb_index = find_index(index_id);
-  if (real_tb_index) {
+  {
     std::string db_name, table_name;
     real_tb_index->table->get_table_name(db_name, table_name);
     // get field length from rapid
@@ -867,7 +869,8 @@ byte *LogParser::parse_and_apply_upd_rec_in_place(
 }
 byte *LogParser::parse_cur_update_in_place_and_apply(byte *ptr,                /*!< in: buffer */
                                                      byte *end_ptr,            /*!< in: buffer end */
-                                                     buf_block_t *block,       /*!< in/out: page or NULL */
+                                                     buf_block_t *block,       /*!< in: block or NULL */
+                                                     page_t *page,             /*!< in: page or NULL */
                                                      page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
                                                      dict_index_t *index) {    /*!< in: index corresponding to page */
   ulint flags;
@@ -879,9 +882,8 @@ byte *LogParser::parse_cur_update_in_place_and_apply(byte *ptr,                /
   ulint rec_offset;
   mem_heap_t *heap;
   ulint *offsets;
+  uint64_t index_id;
   const dict_index_t *tb_index;
-
-  auto page = block ? ((buf_frame_t *)block->frame) : nullptr;
 
   if (end_ptr < ptr + 1) {
     return (nullptr);
@@ -908,12 +910,13 @@ byte *LogParser::parse_cur_update_in_place_and_apply(byte *ptr,                /
   heap = mem_heap_create(256, UT_LOCATION_HERE);
 
   ptr = row_upd_index_parse(ptr, end_ptr, heap, &update);
-
-  tb_index = find_index(mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID));
-
-  if (!ptr || !page || !tb_index) {
+  if (!ptr || !page) {
     goto func_exit;
   }
+
+  index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
+  tb_index = find_index(index_id);
+  if (!tb_index) goto func_exit;
 
   ut_a(page_is_comp(page) == dict_table_is_comp(index->table));
   rec = page + rec_offset;
@@ -1305,7 +1308,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_update_in_place_and_apply(ptr, end_ptr, block, page_zip, index);
+        ptr = parse_cur_update_in_place_and_apply(ptr, end_ptr, block, page, page_zip, index);
       }
 
       break;
@@ -1318,7 +1321,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
       if (nullptr != (ptr = mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_UPDATE_IN_PLACE_8027, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_update_in_place_and_apply(ptr, end_ptr, block, page_zip, index);
+        ptr = parse_cur_update_in_place_and_apply(ptr, end_ptr, block, page, page_zip, index);
       }
 
       break;

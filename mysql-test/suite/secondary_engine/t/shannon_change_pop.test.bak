@@ -27,41 +27,41 @@ select * from tt;
 
 --echo #[conn_1] after insertion in conn2
 --connection connection_1
---sleep 3
+--sleep 5
 select * from tt;
 
 --echo #[conn_2]
 --connection connection_2
 update tt set gender ='a' where id >=1 and id <3;
---sleep 2
+--sleep 5
 select * from tt;
 
 --echo #[conn_1]
 --connection connection_1
---sleep 3
+--sleep 5
 select * from tt;
 
 --echo #[conn_2]
 --connection connection_2
 delete from tt where id >=1  and id < 3;
 insert into tt values (9,'n9', 9, 'f');
---sleep 2
+--sleep 5
 select * from tt;
 
 --echo #[conn_1]
 --connection connection_1
---sleep 3
+--sleep 5
 select * from tt;
 
 --echo #[conn_2]
 --connection connection_2
 delete from tt;
---sleep 2
+--sleep 5
 select * from tt;
 
 --echo #[conn_1]
 --connection connection_1
---sleep 3
+--sleep 5
 select * from tt;
 
 --echo #[conn_2]
@@ -72,7 +72,7 @@ insert into tt values(11, 'n11', 11, 'f');
 
 --echo #[conn_1]
 --connection connection_1
---sleep 3
+--sleep 5
 select * from tt;
 
 --echo #[conn_2]
@@ -81,7 +81,7 @@ commit;
 
 --echo #[conn_1]
 --connection connection_1
---sleep 3
+--sleep 5
 select * from tt;
 
 --echo #[conn_1]

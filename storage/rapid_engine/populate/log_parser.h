@@ -104,7 +104,8 @@ class LogParser {
   byte *parse_cur_update_in_place_and_apply(
       byte *ptr,                /*!< in: buffer */
       byte *end_ptr,            /*!< in: buffer end */
-      buf_block_t *block,       /*!< in/out: page or NULL */
+      buf_block_t *block,       /*!< in: block or NULL */
+      page_t* page,             /*!< in: page or NULL */
       page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
       dict_index_t *index);     /*!< in: index corresponding to page */
 

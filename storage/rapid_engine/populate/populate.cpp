@@ -98,6 +98,7 @@ static void parse_log_func(log_t *log_ptr) {
     log_pop_thread_thd = nullptr;
   }
   sys_pop_started.store(false, std::memory_order_seq_cst);
+  sys_population_buffer->clearUp();
 }
 
 bool Populator::log_pop_thread_is_active() { return thread_is_active(srv_threads.m_change_pop); }
