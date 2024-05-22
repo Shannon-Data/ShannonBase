@@ -598,7 +598,6 @@ int ImcsReader::write(ShannonBaseContext *context, uchar *buffer, size_t length)
      new data. or not. If no extra sapce left, allocate a new imcu. After a new
      imcu allocated, the meta info is stored into 'm_imcus'.*/
   for (uint idx = 0; idx < m_source_table->s->fields; idx++) {
-    std::memset(m_buff, 0x0, SHANNON_ROW_TOTAL_LEN);
     Field *field = *(m_source_table->field + idx);
     ut_a(field);
     // Skip columns marked as NOT SECONDARY.

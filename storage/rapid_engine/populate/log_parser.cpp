@@ -119,11 +119,19 @@ buf_block_t *LogParser::get_block(space_id_t space_id, page_no_t page_no) {
   if (found && buf_page_peek(page_id)) {
     mtr_t mtr_p;
     mtr_start(&mtr_p);
-    block =
-        buf_page_get_gen(page_id, page_size, RW_X_LATCH, nullptr, Page_fetch::POSSIBLY_FREED, UT_LOCATION_HERE, &mtr_p);
+    block = buf_page_get_gen(page_id, page_size, RW_SX_LATCH, nullptr, Page_fetch::POSSIBLY_FREED, UT_LOCATION_HERE,
+                             &mtr_p);
     mtr_commit(&mtr_p);
   }
   return block;
+}
+
+bool LogParser::is_data_rec(rec_t *rec) {
+  auto status = rec_get_status(rec);
+  if (status == REC_STATUS_ORDINARY || status == REC_STATUS_INFIMUM || status == REC_STATUS_SUPREMUM)
+    return true;
+  else
+    return false;
 }
 
 const dict_index_t *LogParser::find_index(uint64 idx_id) {
@@ -768,13 +776,10 @@ byte *LogParser::parse_cur_and_apply_insert_rec(bool is_short,            /*!< i
     return (nullptr);
   }
 
-  /**real_b_index 0 means it's system dict table, otherwise, users.
-   * or the record status is NOT REC_STATUS_ORDINARY, means it can be leave nodes.
-   * || rec_get_status(cursor_rec) != REC_STATUS_ORDINARY
-   * dict_index_is_spatial(index) not support. */
+  /**real_b_index 0 means it's system dict table, otherwise, users. or the record status is
+   * NOT REC_STATUS_ORDINARY, means it can be leave nodes. dict_index_is_spatial(index) not support. */
   real_tb_index = page ? find_index(mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID)) : nullptr;
-
-  if (!block || !real_tb_index || rec_get_status(cursor_rec) == REC_STATUS_NODE_PTR) {
+  if (!block || !real_tb_index || !is_data_rec(cursor_rec)) {
     return (const_cast<byte *>(ptr + (end_seg_len >> 1)));
   }
 

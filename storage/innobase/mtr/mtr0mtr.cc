@@ -985,6 +985,14 @@ void mtr_t::Command::execute() {
     ut_ad(write_log.m_left_to_write == 0);
     ut_ad(write_log.m_lsn == handle.end_lsn);
 
+    if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
+      ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+      !recv_recovery_is_on() && 
+      !ShannonBase::Populate::sys_population_buffer->isFull()) {
+       //after each of block copied to log.buf without holes, then cpy to pop.
+       cpy_to_pop_buff(*log_sys, handle.start_lsn, len);
+    }
+
     log_wait_for_space_in_log_recent_closed(*log_sys, handle.start_lsn);
 
     DEBUG_SYNC_C("mtr_redo_before_add_dirty_blocks");
@@ -992,14 +1000,6 @@ void mtr_t::Command::execute() {
     add_dirty_blocks_to_flush_list(handle.start_lsn, handle.end_lsn);
 
     log_buffer_close(*log_sys, handle);
-
-    if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
-      ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-      !recv_recovery_is_on() &&
-      !ShannonBase::Populate::sys_population_buffer->isFull()){
-       //after each of block copied to log.buf without holes, the cpy to pop.
-       cpy_to_pop_buff(*log_sys, handle.start_lsn, len);
-    }
 
     m_impl->m_mtr->m_commit_lsn = handle.end_lsn;
 
