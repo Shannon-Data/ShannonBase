@@ -59,8 +59,8 @@ uint32 Dictionary::store(String &str, Encoding_type type) {
 
   std::unique_lock lk(m_content_mtx);
   std::string orgin_str(str.c_ptr());
-  std::unique_ptr<Compress_algorithm> algr = std::move(CompressFactory::get_instance(alg));
-  std::string compressed_str(algr.get()->compressString(orgin_str));
+  Compress_algorithm *algr = CompressFactory::get_instance(alg);
+  std::string compressed_str(algr->compressString(orgin_str));
   {
     if (m_content.find(compressed_str) == m_content.end()) {  // insert new one.
       m_content_id.fetch_add(1, std::memory_order::memory_order_acq_rel);
