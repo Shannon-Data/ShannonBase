@@ -183,6 +183,13 @@ class ha_rapid : public handler {
 
   void position(const unsigned char *) override {}
 
+  int records(ha_rows *num_rows) override;
+
+  int records_from_index(ha_rows *num_rows, uint) override {
+    /* Force use of index until we implement sec index parallel scan. */
+    return ha_rapid::records(num_rows);
+  }
+
   unsigned long index_flags(unsigned int, unsigned int, bool) const override;
 
   Item *idx_cond_push(uint keyno, Item *idx_cond) override;
