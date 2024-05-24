@@ -104,11 +104,18 @@ class ImcsReader : public Reader {
   int index_read(ShannonBaseContext *, uchar *, uchar *, uint, ha_rkey_function) override;
   // read the rows without a key value, just like travel over index tree.
   int index_general(ShannonBaseContext *, uchar *, size_t = 0) override;
+  // index read next record.
   int index_next(ShannonBaseContext *, uchar *, size_t = 0) override;
+  // function of IPC.
   int index_next_same(ShannonBaseContext *, uchar *, uchar *, uint, ha_rkey_function) override;
+  // where it is.
   uchar *tell(uint = 0) override;
+  // to seek to a where.
   uchar *seek(size_t offset) override;
+  // is this reader opened or not.
   bool is_open() const { return m_start_of_scan; }
+  // gets the row num of this view.
+  uint64 records(ShannonBaseContext *);
 
  private:
   int cond_comp(ShannonBaseContext *, uchar *, uchar *, uint, ha_rkey_function);
