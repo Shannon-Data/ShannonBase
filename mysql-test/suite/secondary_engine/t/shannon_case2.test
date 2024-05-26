@@ -22,7 +22,6 @@ select count(*) from tt1;
 select count(score), gender from tt1 group by gender order by gender;
 select sum(score), gender from tt1 group by gender order by gender;
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
-explain select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 
-
+--sleep 5
 drop database sh_test2;

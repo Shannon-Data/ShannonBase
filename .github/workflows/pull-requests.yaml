@@ -103,4 +103,4 @@ jobs:
         sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
-        ./mysql-test-run.pl --suite=main,innodb,secondary_engine --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=5
+        ./mysql-test-run.pl --suite=main,innodb,secondary_engine --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=10

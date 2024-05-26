@@ -418,7 +418,7 @@ class mtr_t::Command {
   ulint prepare_write();
 #endif /* !UNIV_HOTBACKUP */
  /**cpy the mlog to pop buffer, without block header and tailer.*/
-  lsn_t cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len);
+  lsn_t cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len);
   /** true if it is a sync mini-transaction. */
   bool m_sync;
 
@@ -816,12 +816,12 @@ ulint mtr_t::Command::prepare_write() {
   return len;
 }
 
-lsn_t mtr_t::Command::cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len) {
+lsn_t mtr_t::Command::cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len) {
   ut_a(log.buf != nullptr);
   ut_a(log.buf_size > 0);
   ut_a(log.buf_size % OS_FILE_LOG_BLOCK_SIZE == 0);
-  byte* to_buf = (byte*)std::malloc(str_len);
-  if (!to_buf) return start_lsn;
+
+  ShannonBase::Populate::mtr_log_rec log_rec(str_len);
 
   size_t pos {0};
   /* That's only used in the assertion at the very end. */
@@ -885,7 +885,7 @@ lsn_t mtr_t::Command::cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len
     /* This is the critical memcpy operation, which copies data
     from internal mtr's buffer to the shared log buffer. */
     /* Pointer to next data byte to set within the log buffer. */
-    std::memcpy(to_buf + pos, ptr, len);
+    std::memcpy(log_rec.data.get() + pos, ptr, len);
     ut_a(len <= str_len);
 
     pos += len;
@@ -926,11 +926,8 @@ lsn_t mtr_t::Command::cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len
       break;
     }
   }
-  ShannonBase::Populate::sys_population_buffer->writeBuff(to_buf, pos);
-  ut_a(!ShannonBase::Populate::sys_population_buffer->isFull());
-  std::free(to_buf);
-  to_buf = nullptr;
 
+  ShannonBase::Populate::sys_pop_buff.emplace(start_lsn, std::move(log_rec));
   ut_a(ptr >= log.buf);
   ut_a(ptr <= buf_end);
   ut_a(buf_end == log.buf + log.buf_size);
@@ -987,10 +984,9 @@ void mtr_t::Command::execute() {
 
     if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
       ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-      !recv_recovery_is_on() && 
-      !ShannonBase::Populate::sys_population_buffer->isFull()) {
+      !recv_recovery_is_on()) {
        //after each of block copied to log.buf without holes, then cpy to pop.
-       cpy_to_pop_buff(*log_sys, handle.start_lsn, len);
+       cp_to_pop_buff(*log_sys, handle.start_lsn, len);
     }
 
     log_wait_for_space_in_log_recent_closed(*log_sys, handle.start_lsn);

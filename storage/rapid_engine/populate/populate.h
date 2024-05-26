@@ -31,6 +31,8 @@
 #ifndef __SHANNONBASE_POPULATE_H__
 #define __SHANNONBASE_POPULATE_H__
 #include <memory>
+#include <unordered_map>
+
 #include "my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/populate/log_commons.h"
@@ -47,12 +49,44 @@ namespace Populate {
 #define log_rapid_pop_mutex_exit(log) mutex_exit(&((log).rapid_populator_mutex))
 
 #define log_rapid_pop_mutex_own(log) (mutex_own(&((log).rapid_populator_mutex)) || !Populator::log_rapid_is_active())
+
+typedef struct mtr_log_rec_t {
+  std::unique_ptr<uchar[]> data;
+  size_t size;
+
+  mtr_log_rec_t(size_t s) : data(std::make_unique<uchar[]>(s)), size(s) {}
+
+  mtr_log_rec_t(mtr_log_rec_t &&other) noexcept : data(std::move(other.data)), size(other.size) { other.size = 0; }
+
+  mtr_log_rec_t &operator=(mtr_log_rec_t &&other) noexcept {
+    if (this != &other) {
+      data = std::move(other.data);
+      size = other.size;
+      other.size = 0;
+    }
+    return *this;
+  }
+
+  // Deleted copy constructor and copy assignment operator to prevent copying
+  mtr_log_rec_t(const mtr_log_rec_t &) = delete;
+  mtr_log_rec_t &operator=(const mtr_log_rec_t &) = delete;
+
+  ~mtr_log_rec_t() {}
+} mtr_log_rec;
+
 // pop change buffer size
 extern ulonglong sys_population_buffer_sz;
 // flag of pop change thread. true is running, set to false to stop
 extern std::atomic<bool> sys_pop_started;
-// a ring buffer to store redo log records, then parses these records.
-extern std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer;
+/** a buffer to store redo log records, then parses these records. if we
+use std::map, that will occure corruption at rb tree reblance. if we impl
+copy cotr or assingment cotr, it's still corruption, due to access
+empty address. Therefore, here, we use hash map to store it, and other reason:
+the RB tree will do re-blancing when the size of items exceed a threshold, that's
+performance issue. in future, we will use co-rountine to process every item by a
+co-routine to promot the performance.
+*/
+extern std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
 
 class Populator {
  public:
