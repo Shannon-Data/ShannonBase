@@ -119,5 +119,6 @@ alter table tt11 secondary_load;
 select * from tt11;
 drop table tt11;
 
+--sleep 5
 set use_secondary_engine=off;
 drop database test_query;

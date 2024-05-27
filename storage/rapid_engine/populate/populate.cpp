@@ -51,7 +51,8 @@ namespace Populate {
 std::atomic<bool> sys_pop_started{false};
 
 ulonglong sys_population_buffer_sz = m_pop_buff_size;
-std::unique_ptr<Ringbuffer<uchar>> sys_population_buffer{nullptr};
+
+std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
 
 static ulint sys_rapid_loop_count;
 
@@ -67,7 +68,7 @@ static void parse_log_func(log_t *log_ptr) {
   LogParser parse_log;
   while (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE && sys_pop_started.load(std::memory_order_seq_cst)) {
     auto stop_condition = [&](bool wait) {
-      if (sys_population_buffer->readAvailable()) {
+      if (sys_pop_buff.size()) {
         return true;
       }
       return false;
@@ -80,14 +81,15 @@ static void parse_log_func(log_t *log_ptr) {
     sys_rapid_loop_count++;
 
     mutex_enter(&(log_sys->rapid_populator_mutex));
-    auto size = sys_population_buffer->readAvailable();
-    byte *from_ptr = sys_population_buffer->peek();
+    auto size = sys_pop_buff.begin()->second.size;
+    byte *from_ptr = sys_pop_buff.begin()->second.data.get();
     mutex_exit(&(log_sys->rapid_populator_mutex));
 
-    auto parsed_bytes = parse_log.parse_redo(from_ptr, from_ptr + size);
+    parse_log.parse_redo(from_ptr, from_ptr + size);
 
     mutex_enter(&(log_sys->rapid_populator_mutex));
-    if (parsed_bytes) sys_population_buffer->remove(parsed_bytes);
+    auto first_it = sys_pop_buff.begin();
+    sys_pop_buff.erase(first_it);
     mutex_exit(&(log_sys->rapid_populator_mutex));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -98,7 +100,6 @@ static void parse_log_func(log_t *log_ptr) {
     log_pop_thread_thd = nullptr;
   }
   sys_pop_started.store(false, std::memory_order_seq_cst);
-  sys_population_buffer->clearUp();
 }
 
 bool Populator::log_pop_thread_is_active() { return thread_is_active(srv_threads.m_change_pop); }
@@ -117,7 +118,6 @@ void Populator::end_change_populate_threads() {
     os_event_reset(log_sys->rapid_events[0]);
     sys_pop_started.store(false, std::memory_order_seq_cst);
     sys_rapid_loop_count = 0;
-    sys_population_buffer->clearUp();
   }
 }
 

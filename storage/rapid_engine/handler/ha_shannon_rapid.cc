@@ -1188,7 +1188,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   auto ret = ShannonBase::imcs_instance->initialize();
   if (!ret) ShannonBase::shannon_rpd_inited = true;
 
-  ShannonBase::Populate::sys_population_buffer.reset(new ShannonBase::Populate::Ringbuffer<byte>());
+  //ShannonBase::Populate::sys_population_buffer.reset(new ShannonBase::Populate::Ringbuffer<byte>());
   return ret;
 }
 

@@ -1175,6 +1175,8 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
 
     page_zip = buf_block_get_page_zip(block);
     buf_block_unfix(block);
+  } else {
+    DBUG_PRINT("ib_log the bloc is nullptr", ("type:%s", get_mlog_string(type)));
   }
 
   switch (type) {
