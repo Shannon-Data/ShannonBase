@@ -74,6 +74,14 @@ savepoint. */
 @return old mode */
 #define mtr_set_log_mode(m, d) (m)->set_log_mode((d))
 
+/** Get the poping log mode of a mini-transaction.
+@return logging mode: MTR_LOG_NONE, ... */
+#define mtr_get_pop_mode(m) (m)->get_pop_mode()
+
+/** Change the poping log mode of a mini-transaction.
+@return old mode */
+#define mtr_set_pop_mode(m, d) (m)->set_pop_mode((d))
+
 /** Get the flush observer of a mini-transaction.
 @return flush observer object */
 #define mtr_get_flush_observer(m) (m)->get_flush_observer()
@@ -428,6 +436,15 @@ struct mtr_t {
   @param mode    logging mode
   @return       old mode */
   mtr_log_t set_log_mode(mtr_log_t mode);
+
+  /** Get the pop mode.
+  @return       pop mode */
+  [[nodiscard]] inline bool get_pop_mode() const;
+
+  /** Change the to pop buff mode.
+  @param mode    true, changes to pop buff.
+  @return       old mode */
+  bool set_pop_mode(bool mode);
 
   /** Read 1 - 4 bytes from a file page buffered in the buffer pool.
   @param ptr    pointer from where to read

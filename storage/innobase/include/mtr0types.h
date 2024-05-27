@@ -42,17 +42,20 @@ enum mtr_log_t {
   /** Default mode: log all operations modifying disk-based data */
   MTR_LOG_ALL = 0,
 
+  /** Log all operations and set modifying to pop buff */
+  MTR_LOG_ALL_WITH_POP = 1,
+
   /** Log no operations and dirty pages are not added to the flush list */
-  MTR_LOG_NONE = 1,
+  MTR_LOG_NONE = 2,
 
   /** Don't generate REDO log but add dirty pages to flush list */
-  MTR_LOG_NO_REDO = 2,
+  MTR_LOG_NO_REDO = 3,
 
   /** Inserts are logged in a shorter form */
-  MTR_LOG_SHORT_INSERTS = 3,
+  MTR_LOG_SHORT_INSERTS = 4,
 
   /** Last element */
-  MTR_LOG_MODE_MAX = 4
+  MTR_LOG_MODE_MAX = 5
 };
 
 /** @name Log item types
