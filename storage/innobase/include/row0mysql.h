@@ -641,6 +641,8 @@ struct row_prebuilt_t {
   row is visited. */
   bool m_stop_tuple_found;
 
+  /*can route to pop buffer.*/
+  bool m_to_pop_buff;
  private:
   /** Set to true iff we are inside read_range_first() or read_range_next() */
   bool m_is_reading_range;

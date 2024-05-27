@@ -75,6 +75,7 @@ select * from tt1;
 
 --echo #[conn_1]
 --connection connection_1
+--sleep 5
 set use_secondary_engine=off;
 drop database test_query;
 

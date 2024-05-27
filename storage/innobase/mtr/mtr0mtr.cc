@@ -418,7 +418,7 @@ class mtr_t::Command {
   ulint prepare_write();
 #endif /* !UNIV_HOTBACKUP */
  /**cpy the mlog to pop buffer, without block header and tailer.*/
-  lsn_t cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len);
+  lsn_t cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len);
   /** true if it is a sync mini-transaction. */
   bool m_sync;
 
@@ -439,30 +439,33 @@ false: ignore new mode
    NR - MTR_LOG_NO_REDO
    S  - MTR_LOG_SHORT_INSERTS */
 bool mtr_t::s_mode_update[MTR_LOG_MODE_MAX][MTR_LOG_MODE_MAX] = {
-    /*      |  A      N    NR     S  */
-    /* A */ {false, true, true, true},   /* A is default and we allow to switch
-                                            to all other modes. */
-    /* N */ {true, false, true, false},  /* For both A & NR, we can shortly
-                                             switch to N and return back*/
-    /* NR*/ {false, true, false, false}, /* Default is NR when global redo is
-                                            disabled. Allow to move to N */
-    /* S */ {true, false, false, false}  /* Only allow return back to A after
-                                            short switch from A to S */
+    /*      |  A    AP    N    NR     S  */
+    /* A */ {false, true, true, true, true},   /* A is default and we allow to switch
+                                                  to all other modes. */
+    /* AP */{true, false, true, true, true},    /**for all log with pop.*/
+    /* N */ {true, true, false, true, false},  /* For both A & NR, we can shortly
+                                                  switch to N and return back*/
+    /* NR*/ {false, false, true, false, false}, /* Default is NR when global redo is
+                                                  disabled. Allow to move to N */
+    /* S */ {true, true, false, false, false}  /* Only allow return back to A after
+                                                  short switch from A to S */
 };
 #ifdef UNIV_DEBUG
 /* Mode update validity matrix. The array is indexed as [old mode][new mode]. */
 bool mtr_t::s_mode_update_valid[MTR_LOG_MODE_MAX][MTR_LOG_MODE_MAX] = {
-    /*      | A      N    NR    S  */
-    /* A */ {true, true, true, true}, /* No assert case. */
+    /*      | A     AP   N    NR    S  */
+    /* A */ {true, true, true, true, true}, /* No assert case. */
 
-    /* N */ {true, true, true, true},
+    /* AP*/ {true, true, true, true, true},
 
-    /* NR*/ {true, true, true, true}, /* We generally never return back from
-                                         NR to A but need to allow for LOB
-                                         restarting B-tree mtr. */
+    /* N */ {true, true, true, true, true},
 
-    /* S */ {true, false, false, true} /* Short Insert state is set transiently
-                                          and we don't expect N or NR switch. */
+    /* NR*/ {true, true, true, true, true}, /* We generally never return back from
+                                             NR to A but need to allow for LOB
+                                             restarting B-tree mtr. */
+
+    /* S */ {true, true, false, false, true} /* Short Insert state is set transiently
+                                             and we don't expect N or NR switch. */
 };
 #endif /* UNIV_DEBUG */
 
@@ -770,6 +773,7 @@ ulint mtr_t::Command::prepare_write() {
       ut_ad(m_impl->m_log.size() == 0);
       return 0;
     case MTR_LOG_ALL:
+    case MTR_LOG_ALL_WITH_POP:
       break;
     default:
       ut_d(ut_error);
@@ -809,19 +813,20 @@ ulint mtr_t::Command::prepare_write() {
     ++len;
   }
 
-  ut_ad(m_impl->m_log_mode == MTR_LOG_ALL);
+  ut_ad(m_impl->m_log_mode == MTR_LOG_ALL ||
+        m_impl->m_log_mode == MTR_LOG_ALL_WITH_POP);
   ut_ad(m_impl->m_log.size() == len);
   ut_ad(len > 0);
 
   return len;
 }
 
-lsn_t mtr_t::Command::cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len) {
+lsn_t mtr_t::Command::cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len) {
   ut_a(log.buf != nullptr);
   ut_a(log.buf_size > 0);
   ut_a(log.buf_size % OS_FILE_LOG_BLOCK_SIZE == 0);
-  byte* to_buf = (byte*)std::malloc(str_len);
-  if (!to_buf) return start_lsn;
+
+  ShannonBase::Populate::mtr_log_rec log_rec(str_len);
 
   size_t pos {0};
   /* That's only used in the assertion at the very end. */
@@ -885,7 +890,7 @@ lsn_t mtr_t::Command::cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len
     /* This is the critical memcpy operation, which copies data
     from internal mtr's buffer to the shared log buffer. */
     /* Pointer to next data byte to set within the log buffer. */
-    std::memcpy(to_buf + pos, ptr, len);
+    std::memcpy(log_rec.data.get() + pos, ptr, len);
     ut_a(len <= str_len);
 
     pos += len;
@@ -926,11 +931,8 @@ lsn_t mtr_t::Command::cpy_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len
       break;
     }
   }
-  ShannonBase::Populate::sys_population_buffer->writeBuff(to_buf, pos);
-  ut_a(!ShannonBase::Populate::sys_population_buffer->isFull());
-  std::free(to_buf);
-  to_buf = nullptr;
 
+  ShannonBase::Populate::sys_pop_buff.emplace(start_lsn, std::move(log_rec));
   ut_a(ptr >= log.buf);
   ut_a(ptr <= buf_end);
   ut_a(buf_end == log.buf + log.buf_size);
@@ -985,6 +987,15 @@ void mtr_t::Command::execute() {
     ut_ad(write_log.m_left_to_write == 0);
     ut_ad(write_log.m_lsn == handle.end_lsn);
 
+    if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
+      ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+      !recv_recovery_is_on() &&
+      m_impl->m_log_mode == MTR_LOG_ALL_WITH_POP) {
+       //after each of block copied to log.buf without holes, then cpy to pop.
+       auto end_lsn = cp_to_pop_buff(*log_sys, handle.start_lsn, len);
+       ut_a(end_lsn == handle.end_lsn);
+    }
+
     log_wait_for_space_in_log_recent_closed(*log_sys, handle.start_lsn);
 
     DEBUG_SYNC_C("mtr_redo_before_add_dirty_blocks");
@@ -992,14 +1003,6 @@ void mtr_t::Command::execute() {
     add_dirty_blocks_to_flush_list(handle.start_lsn, handle.end_lsn);
 
     log_buffer_close(*log_sys, handle);
-
-    if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
-      ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-      !recv_recovery_is_on() &&
-      !ShannonBase::Populate::sys_population_buffer->isFull()){
-       //after each of block copied to log.buf without holes, the cpy to pop.
-       cpy_to_pop_buff(*log_sys, handle.start_lsn, len);
-    }
 
     m_impl->m_mtr->m_commit_lsn = handle.end_lsn;
 

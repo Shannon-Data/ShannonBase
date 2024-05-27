@@ -730,6 +730,7 @@ static void fsp_space_modify_check(space_id_t id, const mtr_t *mtr) {
 #endif /* UNIV_DEBUG */
       return;
     case MTR_LOG_ALL:
+    case MTR_LOG_ALL_WITH_POP:
       /* We must not write redo log for the shared temporary
       tablespace. */
       ut_ad(!fsp_is_system_temporary(id));

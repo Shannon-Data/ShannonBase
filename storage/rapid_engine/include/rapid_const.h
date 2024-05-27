@@ -28,6 +28,8 @@
 #include <cmath>
 
 #include "my_inttypes.h"
+#include "rapid_arch_inf.h"
+
 namespace ShannonBase {
 /** Handler name for InnoDB */
 static constexpr char handler_name[] = "Rapid";
@@ -66,10 +68,10 @@ constexpr uint8 SHANNON_TRX_ID_BYTE_OFFSET = SHANNON_INFO_BYTE_OFFSET + SHANNON_
 constexpr uint8 SHANNON_TRX_ID_BYTE_LEN = 8;
 
 constexpr uint8 SHANNON_ROW_ID_BYTE_OFFSET = SHANNON_TRX_ID_BYTE_OFFSET + SHANNON_TRX_ID_BYTE_LEN;
-constexpr uint8 SHANNON_ROWID_BYTE_LEN = 0;
+constexpr uint8 SHANNON_ROWID_BYTE_LEN = 8;
 
 constexpr uint8 SHANNON_SUMPTR_BYTE_OFFSET = SHANNON_ROW_ID_BYTE_OFFSET + SHANNON_ROWID_BYTE_LEN;
-constexpr uint8 SHANNON_SUMPTR_BYTE_LEN = 4;
+constexpr uint8 SHANNON_SUMPTR_BYTE_LEN = 8;
 
 constexpr uint8 SHANNON_DATA_BYTE_OFFSET = SHANNON_SUMPTR_BYTE_OFFSET + SHANNON_SUMPTR_BYTE_LEN;
 constexpr uint8 SHANNON_DATA_BYTE_LEN = 8;
@@ -78,7 +80,7 @@ constexpr uint8 SHANNON_ROW_TOTAL_LEN_UNALIGN = SHANNON_INFO_BYTE_LEN + SHANNON_
                                                 SHANNON_ROWID_BYTE_LEN + SHANNON_SUMPTR_BYTE_LEN +
                                                 SHANNON_DATA_BYTE_LEN;
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
-constexpr uint8 SHANNON_ROW_TOTAL_LEN = ALIGN_WORD(SHANNON_ROW_TOTAL_LEN_UNALIGN, 8);
+constexpr uint8 SHANNON_ROW_TOTAL_LEN = ALIGN_WORD(SHANNON_ROW_TOTAL_LEN_UNALIGN, CACHE_LINE_SIZE);
 
 constexpr uint SHANNON_ROWS_IN_CHUNK = SHANNON_CHUNK_SIZE / SHANNON_ROW_TOTAL_LEN;
 

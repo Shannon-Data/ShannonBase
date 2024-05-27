@@ -485,6 +485,21 @@ int ha_rapid::index_end() {
   return rapid_deinitialize();
 }
 
+int ha_rapid::records(ha_rows *num_rows) {
+  DBUG_TRACE;
+
+  ulint n_rows = 0; /* Record count in this view */
+
+  if (!m_start_of_scan)
+    rapid_initialize();
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  n_rows = m_imcs_reader->records(m_rpd_context.get());
+  *num_rows = n_rows;
+  rapid_deinitialize();
+  return 0;
+}
+
 /** Positions an index cursor to the index specified in the handle. Fetches the
  row if any.
  @return 0, HA_ERR_KEY_NOT_FOUND, or error number */
@@ -804,9 +819,8 @@ static bool ShannonPrepareSecondaryEngine(THD *thd, LEX *lex) {
   lex->set_secondary_engine_execution_context(context);
 
   // Disable use of constant tables and evaluation of subqueries during
-  // optimization.
-  lex->add_statement_options(OPTION_NO_CONST_TABLES |
-                             OPTION_NO_SUBQUERY_DURING_OPTIMIZATION);
+  // optimization. OPTION_NO_CONST_TABLES
+  lex->add_statement_options(OPTION_NO_SUBQUERY_DURING_OPTIMIZATION);
 
   return false;
 }
@@ -1174,7 +1188,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   auto ret = ShannonBase::imcs_instance->initialize();
   if (!ret) ShannonBase::shannon_rpd_inited = true;
 
-  ShannonBase::Populate::sys_population_buffer.reset(new ShannonBase::Populate::Ringbuffer<byte>());
+  //ShannonBase::Populate::sys_population_buffer.reset(new ShannonBase::Populate::Ringbuffer<byte>());
   return ret;
 }
 

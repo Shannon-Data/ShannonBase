@@ -94,8 +94,9 @@ class lz4_compress : public Compress_algorithm {
 
 class CompressFactory {
  public:
-  static std::unique_ptr<Compress_algorithm> get_instance(compress_algos algo);
-  using AlgorithmFactoryT = std::map<compress_algos, std::unique_ptr<Compress_algorithm>>;
+  static Compress_algorithm *get_instance(compress_algos algo);
+  // using AlgorithmFactoryT = std::map<compress_algos, std::unique_ptr<Compress_algorithm>>;
+  using AlgorithmFactoryT = std::vector<std::unique_ptr<Compress_algorithm>>;
 
  private:
   CompressFactory() = default;
@@ -104,6 +105,7 @@ class CompressFactory {
   CompressFactory(CompressFactory &) = delete;
   CompressFactory &operator=(const CompressFactory &) = delete;
   CompressFactory &operator=(const CompressFactory &&) = delete;
+  void make_elements();
 
  private:
   static std::once_flag m_alg_once;

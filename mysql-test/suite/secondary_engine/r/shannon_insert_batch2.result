@@ -1,0 +1,71 @@
+create database test_query;
+use test_query;
+set use_secondary_engine=forced;
+create database test_db;
+use test_db;
+create table test_tb(col1 int);
+drop database test_db;
+create database test_db;
+use test_db;
+create table test_tb(col1 int);
+drop database test_db;
+create database test_db;
+use test_db;
+create table test_tb(col1 int);
+drop database test_db;
+#connection_1 and cconnection_2
+#[conn_1]
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+#[conn_2]
+CREATE PROCEDURE insert_into_tt1()
+BEGIN
+DECLARE i INT DEFAULT 1;
+DECLARE random_name CHAR(10);
+DECLARE random_gender CHAR(1);
+WHILE i <= 1000 DO
+-- Generate random data
+SET random_name = LEFT(MD5(RAND()), 10); -- Random 10-character string
+SET random_gender = IF(RAND() < 0.5, 'M', 'F'); -- Random gender 'M' or 'F'
+        
+-- Insert data into tt1
+INSERT INTO tt1 (score, name, id, gender) 
+VALUES (i, random_name, i, random_gender);
+-- Increment the counter
+SET i = i + 1;
+END WHILE;
+END //
+CALL insert_into_tt1();
+#[conn_1] after insertion in conn2
+create database test_db;
+use test_db;
+create table test_tb(col1 int);
+drop database test_db;
+use test_query;
+select count(score) from tt1;
+count(score)
+1000
+#[conn_2]
+create database test_db;
+use test_db;
+create table test_tb(col1 int primary key) secondary_engine=rapid;
+alter table test_tb secondary_load;
+drop database test_db;
+use test_query;
+update tt1 set gender='M';
+select count(*) from tt1 where gender ='M';
+count(*)
+1000
+#[conn_1]
+select count(score) from tt1 where gender ='M';
+count(score)
+1000
+#[conn_2]
+delete from tt1;
+select * from tt1;
+score	name	id	gender
+#[conn_1]
+select * from tt1;
+score	name	id	gender
+#[conn_1]
+set use_secondary_engine=off;
+drop database test_query;

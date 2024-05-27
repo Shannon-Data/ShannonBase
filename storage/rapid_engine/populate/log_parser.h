@@ -172,6 +172,9 @@ class LogParser {
   // gets blocks by page no and space id
   inline buf_block_t *get_block(space_id_t, page_no_t);
 
+  //is a valid data record.
+  inline bool is_data_rec(rec_t* rec);
+
   byte *advance_parseMetadataLog(table_id_t id, uint64_t version, byte *ptr,
                                  byte *end);
 

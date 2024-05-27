@@ -350,8 +350,7 @@ ImcsReader::ImcsReader(TABLE *table) : m_source_table(table) {
     Field *field_ptr = *(m_source_table->field + idx);
     ut_a(field_ptr);
     // Skip columns marked as NOT SECONDARY.
-    if (!bitmap_is_set(m_source_table->read_set, field_ptr->field_index()) ||
-        field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
+    if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
       m_cu_views.push_back(nullptr);  // placeholder.
     else
       m_cu_views.push_back(std::make_unique<CuView>(table, field_ptr));
@@ -598,7 +597,6 @@ int ImcsReader::write(ShannonBaseContext *context, uchar *buffer, size_t length)
      new data. or not. If no extra sapce left, allocate a new imcu. After a new
      imcu allocated, the meta info is stored into 'm_imcus'.*/
   for (uint idx = 0; idx < m_source_table->s->fields; idx++) {
-    std::memset(m_buff, 0x0, SHANNON_ROW_TOTAL_LEN);
     Field *field = *(m_source_table->field + idx);
     ut_a(field);
     // Skip columns marked as NOT SECONDARY.
@@ -642,4 +640,27 @@ uchar *ImcsReader::tell(uint field_index) { return nullptr; }
 
 uchar *ImcsReader::seek(size_t offset) { return nullptr; }
 
+uint64 ImcsReader::records(ShannonBaseContext *context) {
+  DBUG_TRACE;
+  ut_a(context);
+  uint64 n_rows{0};
+  if (!m_start_of_scan) return 0;
+
+  auto idx = m_source_table->key_info->key_part->field->field_index();
+  Field *field_ptr = *(m_source_table->field + idx);
+  for (;;) {  // to scan table
+
+    // Skip columns marked as NOT SECONDARY.
+    if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    auto ret = m_cu_views[idx]->read(context, m_buff);
+    if (unlikely(ret)) break;
+    uint8 info = *reinterpret_cast<uint8 *>(m_buff);
+    if (info & DATA_DELETE_FLAG_MASK) continue;
+
+    n_rows++;
+  }
+
+  return n_rows;
+}
 }  // namespace ShannonBase
