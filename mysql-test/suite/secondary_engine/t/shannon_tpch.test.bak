@@ -206,4 +206,6 @@ HAVING SUM(PS_SUPPLYCOST * PS_AVAILQTY) > (SELECT
         AND N_NAME = 'GERMANY')
 ORDER BY VALUE DESC;
 
+#to wait pop thread to process all mlogs
+--sleep 10
 drop database tpch_1024;

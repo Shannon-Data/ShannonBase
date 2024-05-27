@@ -41,9 +41,4 @@ sum(score)	gender
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 sum(score)	gender
 44	m
-explain select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
-id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	tt1	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using temporary; Using filesort; Using secondary engine Rapid
-Warnings:
-Note	1003	/* select#1 */ select sum(`sh_test2`.`tt1`.`score`) AS `sum(score)`,`sh_test2`.`tt1`.`gender` AS `gender` from `sh_test2`.`tt1` group by `sh_test2`.`tt1`.`gender` having (sum(`sh_test2`.`tt1`.`score`) > 30) order by `sh_test2`.`tt1`.`gender`
 drop database sh_test2;
