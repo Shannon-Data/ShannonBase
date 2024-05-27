@@ -3007,6 +3007,8 @@ func_exit:
   /* We have to restore the cursor to its position */
 
   mtr_start(&mtr);
+  if (thr && thr->prebuilt && thr->prebuilt->m_to_pop_buff)
+    mtr.set_log_mode(MTR_LOG_ALL_WITH_POP);
 
   /* Disable REDO logging as lifetime of temp-tables is limited to
   server or connection lifetime and so REDO information is not needed

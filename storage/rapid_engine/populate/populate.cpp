@@ -68,24 +68,26 @@ static void parse_log_func(log_t *log_ptr) {
   LogParser parse_log;
   while (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE && sys_pop_started.load(std::memory_order_seq_cst)) {
     auto stop_condition = [&](bool wait) {
-      if (sys_pop_buff.size()) {
+      if (sys_pop_buff.size() || sys_pop_started.load() == false) {
         return true;
       }
       return false;
     };
 
     // waiting until the new data coming in.
-    os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT, std::chrono::microseconds{1000},
-                      stop_condition);
+    os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT, std::chrono::microseconds{500}, stop_condition);
 
     sys_rapid_loop_count++;
+
+    if (!sys_pop_started) break;
 
     mutex_enter(&(log_sys->rapid_populator_mutex));
     auto size = sys_pop_buff.begin()->second.size;
     byte *from_ptr = sys_pop_buff.begin()->second.data.get();
     mutex_exit(&(log_sys->rapid_populator_mutex));
 
-    parse_log.parse_redo(from_ptr, from_ptr + size);
+    auto parsed_bytes = parse_log.parse_redo(from_ptr, from_ptr + size);
+    ut_a(parsed_bytes == size);
 
     mutex_enter(&(log_sys->rapid_populator_mutex));
     auto first_it = sys_pop_buff.begin();

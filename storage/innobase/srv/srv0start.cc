@@ -2600,6 +2600,7 @@ bool srv_shutdown_waits_for_rollback_of_recovered_transactions() {
 static void srv_shutdown_pop_stop() {
   while (ShannonBase::Populate::Populator::log_pop_thread_is_active()) {
     ShannonBase::Populate::sys_pop_started.store(false);
+    os_event_set(log_sys->rapid_events[0]);
     std::this_thread::sleep_for(
         std::chrono::microseconds(SHUTDOWN_SLEEP_TIME_US));
   }

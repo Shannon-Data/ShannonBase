@@ -439,30 +439,33 @@ false: ignore new mode
    NR - MTR_LOG_NO_REDO
    S  - MTR_LOG_SHORT_INSERTS */
 bool mtr_t::s_mode_update[MTR_LOG_MODE_MAX][MTR_LOG_MODE_MAX] = {
-    /*      |  A      N    NR     S  */
-    /* A */ {false, true, true, true},   /* A is default and we allow to switch
-                                            to all other modes. */
-    /* N */ {true, false, true, false},  /* For both A & NR, we can shortly
-                                             switch to N and return back*/
-    /* NR*/ {false, true, false, false}, /* Default is NR when global redo is
-                                            disabled. Allow to move to N */
-    /* S */ {true, false, false, false}  /* Only allow return back to A after
-                                            short switch from A to S */
+    /*      |  A    AP    N    NR     S  */
+    /* A */ {false, true, true, true, true},   /* A is default and we allow to switch
+                                                  to all other modes. */
+    /* AP */{true, false, true, true, true},    /**for all log with pop.*/
+    /* N */ {true, true, false, true, false},  /* For both A & NR, we can shortly
+                                                  switch to N and return back*/
+    /* NR*/ {false, false, true, false, false}, /* Default is NR when global redo is
+                                                  disabled. Allow to move to N */
+    /* S */ {true, true, false, false, false}  /* Only allow return back to A after
+                                                  short switch from A to S */
 };
 #ifdef UNIV_DEBUG
 /* Mode update validity matrix. The array is indexed as [old mode][new mode]. */
 bool mtr_t::s_mode_update_valid[MTR_LOG_MODE_MAX][MTR_LOG_MODE_MAX] = {
-    /*      | A      N    NR    S  */
-    /* A */ {true, true, true, true}, /* No assert case. */
+    /*      | A     AP   N    NR    S  */
+    /* A */ {true, true, true, true, true}, /* No assert case. */
 
-    /* N */ {true, true, true, true},
+    /* AP*/ {true, true, true, true, true},
 
-    /* NR*/ {true, true, true, true}, /* We generally never return back from
-                                         NR to A but need to allow for LOB
-                                         restarting B-tree mtr. */
+    /* N */ {true, true, true, true, true},
 
-    /* S */ {true, false, false, true} /* Short Insert state is set transiently
-                                          and we don't expect N or NR switch. */
+    /* NR*/ {true, true, true, true, true}, /* We generally never return back from
+                                             NR to A but need to allow for LOB
+                                             restarting B-tree mtr. */
+
+    /* S */ {true, true, false, false, true} /* Short Insert state is set transiently
+                                             and we don't expect N or NR switch. */
 };
 #endif /* UNIV_DEBUG */
 
@@ -770,6 +773,7 @@ ulint mtr_t::Command::prepare_write() {
       ut_ad(m_impl->m_log.size() == 0);
       return 0;
     case MTR_LOG_ALL:
+    case MTR_LOG_ALL_WITH_POP:
       break;
     default:
       ut_d(ut_error);
@@ -809,7 +813,8 @@ ulint mtr_t::Command::prepare_write() {
     ++len;
   }
 
-  ut_ad(m_impl->m_log_mode == MTR_LOG_ALL);
+  ut_ad(m_impl->m_log_mode == MTR_LOG_ALL ||
+        m_impl->m_log_mode == MTR_LOG_ALL_WITH_POP);
   ut_ad(m_impl->m_log.size() == len);
   ut_ad(len > 0);
 
@@ -984,9 +989,11 @@ void mtr_t::Command::execute() {
 
     if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
       ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-      !recv_recovery_is_on()) {
+      !recv_recovery_is_on() &&
+      m_impl->m_log_mode == MTR_LOG_ALL_WITH_POP) {
        //after each of block copied to log.buf without holes, then cpy to pop.
-       cp_to_pop_buff(*log_sys, handle.start_lsn, len);
+       auto end_lsn = cp_to_pop_buff(*log_sys, handle.start_lsn, len);
+       ut_a(end_lsn == handle.end_lsn);
     }
 
     log_wait_for_space_in_log_recent_closed(*log_sys, handle.start_lsn);

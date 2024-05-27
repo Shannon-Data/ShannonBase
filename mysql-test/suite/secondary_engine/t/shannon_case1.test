@@ -11,7 +11,7 @@ set use_secondary_engine=forced;
 create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
 alter table tt secondary_load;
 insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
---sleep 3
+--sleep 10
 select * from tt where score >=1  and score < 3 order by id;
 select * from tt where score >=1  and id < 3 order by id;
 select * from tt where id >=1  and id < 3 order by id;
@@ -60,6 +60,7 @@ set use_secondary_engine=forced;
 create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
 alter table tt secondary_load;
 insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+--sleep 3
 select * from tt where score >=1  and score < 3 order by id;
 select * from tt where score >=1  and id < 3 order by id;
 select * from tt where id >=1  and id < 3 order by id;
@@ -67,6 +68,7 @@ select * from tt where id >=1  and id < 3 order by id;
 create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
 insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
 alter table tt1 secondary_load;
+--sleep 3
 select * from tt1 where score >=1  and id < 3 order by id;
 select * from tt1 where score >=1  and score < 3 order by id;
 select * from tt1 where id >=1  and id < 3 order by id;
@@ -92,6 +94,7 @@ insert into tt4 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, '
 alter table tt4 secondary_engine=rapid;
 alter table tt4 secondary_load;
 select * from tt4 order by id;
+--sleep 3
 select * from tt4 where score > 1.1 order by id;
 select * from tt4 where score =1.1 order by id;
 select * from tt4 where id =2 order by id;
@@ -108,6 +111,7 @@ set use_secondary_engine=forced;
 create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
 alter table tt secondary_load;
 insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+--sleep 3
 select * from tt where score >=1  and score < 3 order by id;
 select * from tt where score >=1  and id < 3 order by id;
 select * from tt where id >=1  and id < 3 order by id;
@@ -115,6 +119,7 @@ select * from tt where id >=1  and id < 3 order by id;
 create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
 insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
 alter table tt1 secondary_load;
+--sleep 3
 select * from tt1 where score >=1  and id < 3 order by id;
 select * from tt1 where score >=1  and score < 3 order by id;
 select * from tt1 where id >=1  and id < 3 order by id;
@@ -139,6 +144,7 @@ create table tt4 (score double primary key, name char(10), id int, gender char(1
 insert into tt4 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
 alter table tt4 secondary_engine=rapid;
 alter table tt4 secondary_load;
+--sleep 3
 select * from tt4 order by id;
 select * from tt4 where score > 1.1 order by id;
 select * from tt4 where score =1.1 order by id;
@@ -146,5 +152,5 @@ select * from tt4 where id =2 order by id;
 select * from tt4 where score > 1.1 and id > 1 order by id;
 select * from tt4 where score < 2.3 and id < 4 order by id;
 
---sleep 10
+--sleep 5
 drop database sh_test1;
