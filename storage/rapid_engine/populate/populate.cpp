@@ -43,7 +43,6 @@ mysql_pfs_key_t rapid_populate_thread_key;
 #endif /* UNIV_PFS_THREAD */
 
 namespace ShannonBase {
-extern ShannonLoadedTables *shannon_loaded_tables;
 namespace Populate {
 // should be pay more attention to syc relation between this thread
 // and log_buffer write. if we stop changes poping, should stop writing

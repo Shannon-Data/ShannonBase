@@ -1936,7 +1936,8 @@ static inline void innobase_srv_conc_force_exit_innodb(
 }
 
 /** if can be route to pop then set true, or not. */
-static inline void log_route_to_pop(THD* thd, row_prebuilt_t *prebuilt) {
+static inline void log_route_to_pop(THD* thd, row_prebuilt_t *prebuilt,
+                                    TABLE* table) {
   switch (thd_sql_command(thd)) {
     case SQLCOM_LOAD:
     case SQLCOM_REPLACE:
@@ -1944,8 +1945,11 @@ static inline void log_route_to_pop(THD* thd, row_prebuilt_t *prebuilt) {
     case SQLCOM_REPLACE_SELECT:
     case SQLCOM_INSERT:
     case SQLCOM_UPDATE:
-    case SQLCOM_DELETE:
-        prebuilt->m_to_pop_buff = true;
+    case SQLCOM_DELETE: {
+      prebuilt->m_to_pop_buff = (ShannonBase::shannon_loaded_tables)? (
+        ShannonBase::shannon_loaded_tables->get(std::string(table->s->db.str),
+              std::string(table->s->table_name.str)) ? true : false) : false;
+    }break;
     default:
       break;
   }
@@ -9123,7 +9127,7 @@ int ha_innobase::write_row(uchar *record) /*!< in: a row in MySQL format */
     goto report_error;
   }
 
-  log_route_to_pop(m_user_thd, m_prebuilt);
+  log_route_to_pop(m_user_thd, m_prebuilt, table);
 
   /* Execute insert graph that will result in actual insert. */
   error = row_insert_for_mysql((byte *)record, m_prebuilt);
@@ -9863,7 +9867,7 @@ int ha_innobase::update_row(const uchar *old_row, uchar *new_row) {
     goto func_exit;
   }
 
-  log_route_to_pop(m_user_thd, m_prebuilt);
+  log_route_to_pop(m_user_thd, m_prebuilt, table);
 
   error = row_update_for_mysql((byte *)old_row, m_prebuilt);
 
@@ -9983,7 +9987,7 @@ int ha_innobase::delete_row(
 
   error = innobase_srv_conc_enter_innodb(m_prebuilt);
 
-  log_route_to_pop(m_user_thd, m_prebuilt);
+  log_route_to_pop(m_user_thd, m_prebuilt, table);
 
   if (error == DB_SUCCESS) {
     error = row_update_for_mysql((byte *)record, m_prebuilt);
