@@ -50,8 +50,6 @@
 /*
   Callbacks implementation for RPD_TABLE_ID.
 */
-extern ShannonBase::ShannonLoadedTables *shannon_loaded_tables;
-
 THR_LOCK table_rpd_table_id::m_table_lock;
 
 Plugin_table table_rpd_table_id::m_table_def(

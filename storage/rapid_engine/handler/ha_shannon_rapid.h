@@ -75,7 +75,7 @@ class ShannonLoadedTables {
 
   void table_infos(uint, ulonglong&, std::string&, std::string&);
 };
-
+extern ShannonLoadedTables* shannon_loaded_tables;
 /**
  * The shannon rapid storage engine is used for testing MySQL server functionality
  * related to secondary storage engines.

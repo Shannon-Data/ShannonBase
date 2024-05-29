@@ -58,7 +58,6 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
-extern ShannonLoadedTables *shannon_loaded_tables;
 
 namespace Populate {
 uint LogParser::get_PK(const rec_t *rec, const dict_index_t *index, const dict_index_t *real_index,
