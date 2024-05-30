@@ -1,35 +1,15 @@
-name: ShannonBase Compile & MTR
+name: nightly
 
 on:
   push:
-    branches-ignore:
-      - main
-    paths-ignore:
-      - 'Docs/**'
-      - 'docs/**'
-      - 'website/**'
-      - '**.md'
-      - 'scripts/setup/**'
-      - '.devcontainer/**'
-      - '.github/ISSUE_TEMPLATE/**'
-  pull_request:
-    # branches-ignore:
-    #   - main
-        # wait for mergify to ignore
-    paths-ignore:
-      - 'Docs/**'
-      - 'docs/**'
-      - 'website/**'
-      - '**.md'
-      - '.github/ISSUE_TEMPLATE/**'
+    tags:
+      - "*v*"
+  schedule:
+    - cron: "0 18 * * *"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  group: nightly
   cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  PROTOC: protoc
 
 defaults:
   run:
