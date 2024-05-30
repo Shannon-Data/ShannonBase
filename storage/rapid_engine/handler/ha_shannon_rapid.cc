@@ -79,7 +79,6 @@
 #include "storage/rapid_engine/optimizer/rules/rule.h"  //Rule
 #include "storage/rapid_engine/populate/populate.h"
 
-/* clang-format off */
 namespace dd {
 class Table;
 }
@@ -97,11 +96,13 @@ void ShannonLoadedTables::add(const std::string &db, const std::string &table, S
     std::lock_guard<std::mutex> guard(m_mutex);
     m_tables.insert({std::make_pair(db, table), share});
 }
+
 ShannonBase::RapidShare *ShannonLoadedTables::get(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
   auto it = m_tables.find(std::make_pair(db, table));
   return it == m_tables.end() ? nullptr : it->second;
 }
+
 void ShannonLoadedTables::erase(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
   auto it = m_tables.find(std::make_pair(db, table));
