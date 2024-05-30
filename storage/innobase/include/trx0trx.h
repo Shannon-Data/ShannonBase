@@ -212,6 +212,17 @@ void trx_mark_sql_stat_end(trx_t *trx); /*!< in: trx handle */
  when this function is first called for a new started transaction. */
 ReadView *trx_assign_read_view(trx_t *trx); /*!< in: active transaction */
 
+/**create a same read view from another one*/
+ReadView *trx_clone_read_view(trx_t *trx, ReadView *readview);
+
+/** Clones the read view from another transaction. All the consistent reads
+within the receiver transaction will get the same read view as the donor
+transaction.
+@param[in]	trx	receiver transaction
+@param[in]	from_trx	donor transaction
+@return read view clone */
+ReadView *trx_clone_read_view(trx_t *trx, trx_t *from_trx);
+
 /** @return the transaction's read view or NULL if one not assigned. */
 static inline ReadView *trx_get_read_view(trx_t *trx);
 
@@ -735,6 +746,12 @@ struct trx_t {
               it can */
 
   trx_id_t id; /*!< transaction id */
+
+  trx_id_t preallocated_id; /*!< preallocated transaction id for a
+                            RO transaction whose read view was
+                            cloned. If this transaction is promoted
+                            to RW, it will become the transaction
+                            id. */
 
   trx_id_t no; /*!< transaction serialization number:
                max trx id shortly before the

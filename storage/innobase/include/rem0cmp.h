@@ -116,6 +116,11 @@ int cmp_dtuple_rec_with_gis_internal(const dtuple_t *dtuple, const rec_t *rec,
                                      const ulint *offsets,
                                      const dd::Spatial_reference_system *srs);
 
+int cmp_sec_dtuple_pri_rec_with_match(const dtuple_t *dtuple, const rec_t *rec,
+                                      const dict_index_t *index,
+                                      const dict_index_t *clust_index,
+                                      const ulint *offsets, ulint n_cmp);
+
 /** Compare a data tuple to a physical record.
 @param[in]      dtuple          data tuple
 @param[in]      rec             record
