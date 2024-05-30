@@ -62,6 +62,10 @@ class MVCC {
   @param own_mutex      true if caller owns trx_sys_t::mutex */
   void view_close(ReadView *&view, bool own_mutex);
 
+  /** Insert the view in the proper order into the view list.
+  @param	view	view to add */
+  void view_add(const ReadView *view);
+
   /**
   Release a view that is inactive but not closed. Caller must own
   the trx_sys_t::mutex.
@@ -104,6 +108,7 @@ class MVCC {
   Validates a read view list. */
   bool validate() const;
 
+  friend class ReadView;
   /**
   Find a free view from the active list, if none found then allocate
   a new view. This function will also attempt to move delete marked
