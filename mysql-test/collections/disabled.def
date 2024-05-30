@@ -134,3 +134,9 @@ innodb.partition_upgrade_5727_lin_lctn_0_debug : WL#123456 2024-01-05 shannonbas
 innodb.partition_upgrade_5727_lin_lctn_1_debug : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
 innodb.upgrade_compressed_recv : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
 innodb.upgrade_geometry_56 : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
+rpl.rpl_mix_or_row_secondary_engine_load : WL#123456 2024-05-30 shannonbase disable mysisam will be fixed
+rpl.rpl_partial_revokes_add_remove : WL#123456 2024-05-30 shannonbase disable mysisam will be fixed
+rpl.rpl_row_multi_update_of_same_row : WL#123456 2024-05-30 shannonbase disable mysisam will be fixed
+rpl.rpl_stmt_secondary_engine_load : WL#123456 2024-05-30 shannonbase disable mysisam will be fixed
+rpl_gtid.rpl_current_user : WL#123456 2024-05-30 shannonbase disable mysisam will be fixed
+rpl_nogtid.rpl_deadlock_innodb : WL#123456 2024-05-30 shannonbase disable mysisam will be fixed

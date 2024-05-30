@@ -79,7 +79,6 @@
 #include "storage/rapid_engine/optimizer/rules/rule.h"  //Rule
 #include "storage/rapid_engine/populate/populate.h"
 
-/* clang-format off */
 namespace dd {
 class Table;
 }
@@ -97,11 +96,13 @@ void ShannonLoadedTables::add(const std::string &db, const std::string &table, S
     std::lock_guard<std::mutex> guard(m_mutex);
     m_tables.insert({std::make_pair(db, table), share});
 }
+
 ShannonBase::RapidShare *ShannonLoadedTables::get(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
   auto it = m_tables.find(std::make_pair(db, table));
   return it == m_tables.end() ? nullptr : it->second;
 }
+
 void ShannonLoadedTables::erase(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
   auto it = m_tables.find(std::make_pair(db, table));
@@ -699,7 +700,8 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   context.m_current_db = table_arg.s->db.str;
   context.m_current_table = table_arg.s->table_name.str;
   context.m_table = const_cast<TABLE *>(&table_arg);
-  // check if primary key is missing. rapid engine must has at least one PK. 
+
+  // check if primary key is missing. rapid engine must has at least one PK.
   if (table_arg.s->is_missing_primary_key()) {
     my_error(ER_REQUIRES_PRIMARY_KEY, MYF(0));
     return HA_ERR_GENERIC;
@@ -707,10 +709,10 @@ int ha_rapid::load_table(const TABLE &table_arg) {
 
   context.m_extra_info.m_keynr = 0;
   auto key = (table_arg.key_info + 0);
-  for (uint keyid =0; keyid < key->user_defined_key_parts; keyid++) {
+  for (uint keyid = 0; keyid < key->user_defined_key_parts; keyid++) {
     if (key->key_part[keyid].field->is_flag_set(NOT_SECONDARY_FLAG)) {
-      my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0),
-               table_arg.s->db.str, table_arg.s->table_name.str);
+      my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0), table_arg.s->db.str,
+               table_arg.s->table_name.str);
       return HA_ERR_GENERIC;
     }
   }
@@ -718,8 +720,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   context.m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
   // Scan the primary table and read the records.
   if (table_arg.file->inited == NONE && table_arg.file->ha_rnd_init(true)) {
-    my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str,
-             table_arg.s->table_name.str);
+    my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
     return HA_ERR_GENERIC;
   }
   //Start to write to IMCS. Do scan the primary table.
@@ -734,8 +735,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     auto offset {0};
     memset(context.m_extra_info.m_key_buff.get(), 0x0, key->key_length);
     for (uint key_partid = 0; key_partid < key->user_defined_key_parts; key_partid++) {
-      memcpy(context.m_extra_info.m_key_buff.get() + offset,
-             key->key_part[key_partid].field->field_ptr(),
+      memcpy(context.m_extra_info.m_key_buff.get() + offset, key->key_part[key_partid].field->field_ptr(),
              key->key_part[key_partid].store_length);
       offset += key->key_part[key_partid].store_length;
     }
@@ -1211,12 +1211,12 @@ mysql_declare_plugin(shannon_rapid){
     PLUGIN_AUTHOR_SHANNON,
     "Shannon Rapid storage engine",
     PLUGIN_LICENSE_GPL,
-    Shannonbase_Rapid_Init,  /* Plugin Init */
-    nullptr,                 /* Plugin Check uninstall */
-    Shannonbase_Rapid_Deinit,/* Plugin Deinit */
+    Shannonbase_Rapid_Init,   /* Plugin Init */
+    nullptr,                  /* Plugin Check uninstall */
+    Shannonbase_Rapid_Deinit, /* Plugin Deinit */
     ShannonBase::SHANNON_RAPID_VERSION,
-    shannonbase_rapid_status_variables_export,/* status variables */
-    shannonbase_rapid_system_variables,       /* system variables */
+    shannonbase_rapid_status_variables_export, /* status variables */
+    shannonbase_rapid_system_variables,        /* system variables */
     nullptr,                                   /* reserved */
     0,                                         /* flags */
 } mysql_declare_plugin_end;

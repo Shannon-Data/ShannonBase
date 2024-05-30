@@ -1,35 +1,15 @@
-name: ShannonBase Compile & MTR
+name: nightly
 
 on:
   push:
-    branches-ignore:
-      - main
-    paths-ignore:
-      - 'Docs/**'
-      - 'docs/**'
-      - 'website/**'
-      - '**.md'
-      - 'scripts/setup/**'
-      - '.devcontainer/**'
-      - '.github/ISSUE_TEMPLATE/**'
-  pull_request:
-    # branches-ignore:
-    #   - main
-        # wait for mergify to ignore
-    paths-ignore:
-      - 'Docs/**'
-      - 'docs/**'
-      - 'website/**'
-      - '**.md'
-      - '.github/ISSUE_TEMPLATE/**'
+    tags:
+      - "*v*"
+  schedule:
+    - cron: "0 18 * * *"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  group: nightly
   cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  PROTOC: protoc
 
 defaults:
   run:
@@ -56,7 +36,6 @@ jobs:
         run: |
           git diff -U0 --no-color ${{ github.event.pull_request.base.sha }} HEAD storage/rapid_engine ml | /usr/share/clang/clang-format-14/clang-format-diff.py -p1 | tee /tmp/.clang-format-diff
           [ -s /tmp/.clang-format-diff ] && exit 1 || true 
-
   build:
     needs: lint
     runs-on: ubuntu-latest
@@ -80,7 +59,7 @@ jobs:
       run: |
         mkdir /home/ShannonBase  && cd /home/ShannonBase
         mkdir cmake_build && cd cmake_build
-        git config --global --add safe.directory /home/ShannonBase
+        git config --global --add safe.directory /home/ShannonBase/ShannonBase
         git fetch --tags -f
         cmake ../ \
         -DWITH_BOOST=/usr/local/boost/include \
@@ -109,7 +88,7 @@ jobs:
         sudo rm /home/ShannonBase/ -rf
     - name: run_mtr_test
       run: |
-        sudo mkdir -p /home/shannon-bin/log
+        mkdir -p /home/shannon-bin/log
         sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl

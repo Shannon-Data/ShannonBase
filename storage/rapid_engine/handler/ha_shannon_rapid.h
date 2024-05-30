@@ -34,7 +34,7 @@
 
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/reader/imcs_reader.h"
-/* clang-format off */
+
 class THD;
 struct TABLE;
 struct TABLE_SHARE;
@@ -45,10 +45,13 @@ class Table;
 }
 
 namespace ShannonBase {
-extern handlerton* shannon_rapid_hton_ptr;
+extern handlerton *shannon_rapid_hton_ptr;
 
 struct RapidShare {
-  RapidShare(const TABLE& table) { thr_lock_init(&m_lock); m_source_table = &table;}
+  RapidShare(const TABLE &table) {
+    thr_lock_init(&m_lock);
+    m_source_table = &table;
+  }
   ~RapidShare() { thr_lock_delete(&m_lock); }
 
   // Not copyable. The THR_LOCK object must stay where it is in memory
@@ -56,26 +59,27 @@ struct RapidShare {
   RapidShare(const RapidShare &) = delete;
   THR_LOCK m_lock;
   RapidShare &operator=(const RapidShare &) = delete;
-  //source table.
+  // source table.
   ulonglong m_tableid;
-  const char* m_db_name {nullptr};
-  const char* m_table_name {nullptr};
-  handler* file {nullptr};
-  const TABLE* m_source_table;
+  const char *m_db_name{nullptr};
+  const char *m_table_name{nullptr};
+  handler *file{nullptr};
+  const TABLE *m_source_table;
 };
 
 class ShannonLoadedTables {
-  std::map<std::pair<std::string, std::string>, ShannonBase::RapidShare*> m_tables;
+  std::map<std::pair<std::string, std::string>, ShannonBase::RapidShare *> m_tables;
   std::mutex m_mutex;
+
  public:
-  void add(const std::string &db, const std::string &table, ShannonBase::RapidShare* share);
+  void add(const std::string &db, const std::string &table, ShannonBase::RapidShare *share);
   ShannonBase::RapidShare *get(const std::string &db, const std::string &table);
   void erase(const std::string &db, const std::string &table);
   uint size() const { return m_tables.size(); }
 
-  void table_infos(uint, ulonglong&, std::string&, std::string&);
+  void table_infos(uint, ulonglong &, std::string &, std::string &);
 };
-
+extern ShannonLoadedTables *shannon_loaded_tables;
 /**
  * The shannon rapid storage engine is used for testing MySQL server functionality
  * related to secondary storage engines.
@@ -95,9 +99,7 @@ class ha_rapid : public handler {
   ha_rapid(handlerton *hton, TABLE_SHARE *table_share);
   virtual ~ha_rapid();
   const char *table_type() const override;
-  enum ha_key_alg get_default_index_algorithm() const override {
-    return HA_KEY_ALG_BTREE;
-  }
+  enum ha_key_alg get_default_index_algorithm() const override { return HA_KEY_ALG_BTREE; }
   /** Check if SE supports specific key algorithm. */
   bool is_index_algorithm_supported(enum ha_key_alg key_alg) const override {
     /* This method is never used for FULLTEXT or SPATIAL keys.
@@ -112,11 +114,11 @@ class ha_rapid : public handler {
 
   int compare_key_icp(const key_range *range);
   bool is_push_down() { return (pushed_idx_cond) ? true : false; }
+
  private:
   int create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) override;
 
-  int open(const char *name, int mode, unsigned int test_if_locked,
-           const dd::Table *table_def) override;
+  int open(const char *name, int mode, unsigned int test_if_locked, const dd::Table *table_def) override;
 
   int close() override;
 
@@ -130,12 +132,9 @@ class ha_rapid : public handler {
 
   int rnd_end() override;
 
-  int rnd_pos(unsigned char *, unsigned char *) override {
-    return HA_ERR_WRONG_COMMAND;
-  }
-  
-  int read_range_first(const key_range *start_key, const key_range *end_key,
-                       bool eq_range_arg, bool sorted) override;
+  int rnd_pos(unsigned char *, unsigned char *) override { return HA_ERR_WRONG_COMMAND; }
+
+  int read_range_first(const key_range *start_key, const key_range *end_key, bool eq_range_arg, bool sorted) override;
 
   int read_range_next() override;
 
@@ -145,8 +144,7 @@ class ha_rapid : public handler {
 
   int index_end() override;
 
-  int index_read(uchar *buf, const uchar *key, uint key_len,
-                 ha_rkey_function find_flag) override;
+  int index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) override;
 
   int index_read_last(uchar *buf, const uchar *key, uint key_len) override;
 
@@ -176,8 +174,7 @@ class ha_rapid : public handler {
                                 uint *bufsz, uint *flags,
                                 Cost_estimate *cost) override;
 #endif
-  ha_rows records_in_range(unsigned int index, key_range *min_key,
-                           key_range *max_key) override;
+  ha_rows records_in_range(unsigned int index, key_range *min_key, key_range *max_key) override;
 
   ha_rows estimate_rows_upper_bound() override;
 
@@ -194,39 +191,36 @@ class ha_rapid : public handler {
 
   Item *idx_cond_push(uint keyno, Item *idx_cond) override;
 
-  THR_LOCK_DATA **store_lock(THD *thd, THR_LOCK_DATA **to,
-                             thr_lock_type lock_type) override;
+  THR_LOCK_DATA **store_lock(THD *thd, THR_LOCK_DATA **to, thr_lock_type lock_type) override;
 
   Table_flags table_flags() const override;
-  
+
   int key_cmp(KEY_PART_INFO *key_part, const uchar *key, uint key_length);
 
   int load_table(const TABLE &table) override;
 
-  int unload_table(const char *db_name, const char *table_name,
-                   bool error_if_not_loaded) override;
+  int unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) override;
 
   int rapid_initialize();
   int rapid_deinitialize();
-  Item* get_cond_item(Item* cond, Field* key_field);
+  Item *get_cond_item(Item *cond, Field *key_field);
 
-  THD* m_rpd_thd{nullptr};
+  THD *m_rpd_thd{nullptr};
   THR_LOCK_DATA m_lock;
   /** this is set to 1 when we are starting a table scan but have
       not yet fetched any row, else false */
-  bool m_start_of_scan {false};
+  bool m_start_of_scan{false};
   /** information for MySQL table locking */
-  RapidShare *m_share {nullptr};
+  RapidShare *m_share{nullptr};
   std::unique_ptr<ShannonBase::RapidContext> m_rpd_context{nullptr};
-  //imscs rnd reader;
-  std::unique_ptr<ImcsReader> m_imcs_reader {nullptr};
-  //primary key of this secondary engine.
-  dict_index_t* m_primary_key {nullptr};
-  enum_field_types m_key_type {MYSQL_TYPE_INVALID};
+  // imscs rnd reader;
+  std::unique_ptr<ImcsReader> m_imcs_reader{nullptr};
+  // primary key of this secondary engine.
+  dict_index_t *m_primary_key{nullptr};
+  enum_field_types m_key_type{MYSQL_TYPE_INVALID};
 };
 
-[[nodiscard]] ICP_RESULT shannon_rapid_index_cond(
-    ha_rapid *h); /*!< in/out: pointer to ha_innobase */
+[[nodiscard]] ICP_RESULT shannon_rapid_index_cond(ha_rapid *h); /*!< in/out: pointer to ha_innobase */
 
 }  // namespace ShannonBase
 

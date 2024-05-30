@@ -2385,8 +2385,9 @@ dberr_t row_ins_clust_index_entry_low(uint32_t flags, ulint mode,
   ut_ad(thr != nullptr || !dup_chk_only);
 
   mtr.start();
-  if (thr && thr->prebuilt && thr->prebuilt->m_to_pop_buff)
-    mtr.set_log_mode(MTR_LOG_ALL_WITH_POP);
+  if (thr && thr->prebuilt && thr->prebuilt->m_to_pop_buff) {
+      mtr.set_log_mode(MTR_LOG_ALL_WITH_POP);
+  }
 
   if (index->table->is_temporary()) {
     /* Disable REDO logging as the lifetime of temp-tables is

@@ -232,7 +232,7 @@ uint Imcs::read_direct(ShannonBase::RapidContext *context, uchar *buffer) {
     uchar buff[SHANNON_ROW_TOTAL_LEN] = {0};
     if (!m_cus[key].get()->read_data_direct(context, buff)) return HA_ERR_END_OF_FILE;
 
-    uint8 info = *(uint8 *)buff;
+    uint8 info = *reinterpret_cast<uint8 *>(buff);
     my_bitmap_map *old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);
     if (info & DATA_NULL_FLAG_MASK)
       field_ptr->set_null();
@@ -240,7 +240,7 @@ uint Imcs::read_direct(ShannonBase::RapidContext *context, uchar *buffer) {
       field_ptr->set_notnull();
       uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
       data_offset += SHANNON_SUMPTR_BYTE_LEN;
-      double val = *(double *)(buff + data_offset);
+      double val = *reinterpret_cast<double *>(buff + data_offset);
       Compress::Dictionary *dict = m_cus[key]->local_dictionary();
       Utils::Util::store_field_value(context->m_table, field_ptr, dict, val);
     }

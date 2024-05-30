@@ -348,13 +348,6 @@ SET(SQL_GIS_SOURCES
   item_geofunc_relchecks.cc
   options_parser.cc
 )
-SET(SQL_VECTOR_SOURCES
-  vector/vector.cpp
-  vector/bitvector.cpp
-  vector/vector_comm.cpp
-  vector/bitvector.cpp
-  vector/halfutils.cpp
-)
 
 SET(SQL_SHARED_SOURCES
   auth/auth_acls.cc
@@ -1003,10 +996,6 @@ TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC
 TARGET_LINK_LIBRARIES(sql_ml _lightgbm)
 SET_TARGET_PROPERTIES(sql_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
-ADD_LIBRARY(sql_vector STATIC ${SQL_VECTOR_SOURCES})
-TARGET_LINK_LIBRARIES(sql_vector sql_dd sql_main)
-SET_TARGET_PROPERTIES(sql_vector PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
-
 #
 # On Windows platform we compile in the client-side Windows Native Authentication
 # plugin which is used by the client connection code included in the server.
@@ -1272,7 +1261,7 @@ ENDIF()
 SET_TARGET_PROPERTIES(mysqld PROPERTIES ENABLE_EXPORTS TRUE)
 TARGET_LINK_LIBRARIES(mysqld
   sql_main sql_gis binlog rpl rpl_source rpl_replica sql_dd mysys
-  minchassis binlogevents_static sql_ml sql_vector ext::icu)
+  minchassis binlogevents_static sql_ml ext::icu)
 
 # Add dependency on ldap library, to ensure it is not unloaded
 # when we shutdown the authentication plugin.

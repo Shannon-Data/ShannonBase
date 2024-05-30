@@ -1,35 +1,16 @@
-name: ShannonBase Compile & MTR
+#To run all mtrs every week.
+name: weekly
 
 on:
   push:
-    branches-ignore:
-      - main
-    paths-ignore:
-      - 'Docs/**'
-      - 'docs/**'
-      - 'website/**'
-      - '**.md'
-      - 'scripts/setup/**'
-      - '.devcontainer/**'
-      - '.github/ISSUE_TEMPLATE/**'
-  pull_request:
-    # branches-ignore:
-    #   - main
-        # wait for mergify to ignore
-    paths-ignore:
-      - 'Docs/**'
-      - 'docs/**'
-      - 'website/**'
-      - '**.md'
-      - '.github/ISSUE_TEMPLATE/**'
+    tags:
+      - "*v*"
+  schedule:
+    - cron: '0 1 * * 6'   # every week at saturday 1 AM
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  group: weekly
   cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  PROTOC: protoc
 
 defaults:
   run:
@@ -80,7 +61,7 @@ jobs:
       run: |
         mkdir /home/ShannonBase  && cd /home/ShannonBase
         mkdir cmake_build && cd cmake_build
-        git config --global --add safe.directory /home/ShannonBase
+        git config --global --add safe.directory /home/ShannonBase/ShannonBase
         git fetch --tags -f
         cmake ../ \
         -DWITH_BOOST=/usr/local/boost/include \
@@ -106,12 +87,12 @@ jobs:
         sudo make install
     - name: clean_up_shannonbase_build
       run: |
-        sudo rm /home/ShannonBase/ -rf
+        sudo rm /home/ShannonBase/ -rf && cd .. && sudo rm ./cmake_build -rf
     - name: run_mtr_test
       run: |
-        sudo mkdir -p /home/shannon-bin/log
+        mkdir -p /home/shannon-bin/log
         sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
-        ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid \
-        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=$(nproc)
+        ./mysql-test-run.pl --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
+        --nocheck-testcases --retry=0 --parallel=$(nproc)
