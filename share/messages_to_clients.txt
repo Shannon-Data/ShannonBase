@@ -10077,3 +10077,16 @@ ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG
 # same directory as this file for more
 # information.
 ################################################################################
+
+################################################################################
+# Error numbers starting at 7500: server-to-client messages
+################################################################################
+
+start-error-number 7500
+
+ER_PARALLEL_FAIL_INIT
+ eng "Failed to parallel execute. this SQL is not supported."
+ER_WARN_BAD_PARALLEL_NUM
+ eng "Incorrect number for degree of parallel."
+ER_PARALLEL_EXEC_ERROR
+ eng "Parallel execution error."

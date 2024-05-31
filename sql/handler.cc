@@ -18,7 +18,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /** @file sql/handler.cc
 
@@ -8074,6 +8076,68 @@ int handler::ha_delete_row(const uchar *buf) {
   if (unlikely((error = binlog_log_row(table, buf, nullptr, log_func))))
     return error;
   return 0;
+}
+
+int handler::ha_pq_init(uint keyno, uint dop) {
+  DBUG_EXECUTE_IF("ha_pq_init_fail", return HA_ERR_TABLE_DEF_CHANGED;);
+  int result;
+  DBUG_ENTER("handler::ha_pq_init");
+  assert(table_share->tmp_table != NO_TMP_TABLE || m_lock_type != F_UNLCK);
+  assert(inited == NONE || inited == INDEX || (inited == PQ_LEADER));
+  THD *cur_thd = table->in_use;
+  inited = (result = pq_leader_scan_init(keyno, cur_thd->pq_ctx, dop))
+               ? NONE
+               : PQ_LEADER;
+  end_range = NULL;
+  pq_ref = false;
+  pq_reverse_scan = false;
+  DBUG_RETURN(result);
+}
+
+int handler::ha_pq_end() {
+  DBUG_ENTER("handler::ha_pq_end");
+
+  if (pq_table_scan) {
+    inited = RND;
+    ha_rnd_end();
+  } else {
+    inited = INDEX;
+    ha_index_end();
+  }
+
+  THD *thd = current_thd;
+  DBUG_RETURN(pq_leader_scan_end(thd->pq_ctx));
+}
+
+int handler::ha_pq_signal_all() {
+  DBUG_ENTER("handler::ha_pq_signal_all");
+  int result;
+  THD *cur_thd = table->in_use;
+  result = pq_leader_signal_all(cur_thd->pq_ctx);
+  DBUG_RETURN(result);
+}
+
+int handler::ha_pq_next(uchar *buf, void *scan_ctx) {
+  int result;
+  DBUG_EXECUTE_IF("ha_pq_next_deadlock", return HA_ERR_LOCK_DEADLOCK;);
+  DBUG_ENTER("handler::ha_pq_next");
+  assert(table_share->tmp_table != NO_TMP_TABLE || m_lock_type != F_UNLCK);
+
+  // Set status for the need to update generated fields
+  m_update_generated_read_fields = table->has_gcol();
+
+  MYSQL_TABLE_IO_WAIT(PSI_TABLE_FETCH_ROW,
+                      pq_table_scan ? MAX_KEY : active_index, result,
+                      { result = pq_worker_scan_next(scan_ctx, buf); })
+  if (!result && m_update_generated_read_fields) {
+    result = update_generated_read_fields(
+        buf, table, pq_table_scan ? MAX_KEY : active_index);
+    m_update_generated_read_fields = false;
+  }
+
+  table->set_row_status_from_handler(result);
+
+  DBUG_RETURN(result);
 }
 
 /** @brief

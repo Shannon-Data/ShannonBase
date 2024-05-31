@@ -43,6 +43,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include <mysql/components/services/page_track_service.h>
 #include "ft_global.h"  // ft_hints
@@ -4807,6 +4808,13 @@ class handler {
   int ha_index_last(uchar *buf);
   int ha_index_next_same(uchar *buf, const uchar *key, uint keylen);
   int ha_reset();
+
+  //for parallel processing.
+  int ha_pq_init(uint keyno, uint dop = std::thread::hardware_concurrency());
+  int ha_pq_next(uchar *buf, void *scan_ctx);
+  int ha_pq_signal_all();
+  int ha_pq_end();
+
   /* this is necessary in many places, e.g. in HANDLER command */
   int ha_index_or_rnd_end() {
     return inited == INDEX ? ha_index_end() : inited == RND ? ha_rnd_end() : 0;

@@ -97,7 +97,7 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 #include "row0log.h"
 #include "row0sel.h"
 #include "sql/create_field.h"
-#include "sql/pq_range.h"
+#include "sql/sql_pq_range.h"
 #include "srv0mon.h"
 #include "trx0roll.h"
 #include "trx0trx.h"
