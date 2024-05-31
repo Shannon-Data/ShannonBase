@@ -2066,13 +2066,13 @@ const char *thd_innodb_tmpdir(THD *thd) {
   return (innodb_session->m_trx);
 }
 
-ulong thd_parallel_read_threads(THD *thd) {
-  return THDVAR(thd, parallel_read_threads);
-}
-
 ulong thd_ddl_buffer_size(THD *thd) { return THDVAR(thd, ddl_buffer_size); }
 
 size_t thd_ddl_threads(THD *thd) noexcept { return THDVAR(thd, ddl_threads); }
+
+ulong thd_parallel_read_threads(THD *thd) {
+  return THDVAR(thd, parallel_read_threads);
+}
 
 /** Check if statement is of type INSERT .... SELECT that involves
 use of intrinsic tables.

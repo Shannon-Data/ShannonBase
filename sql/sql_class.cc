@@ -724,6 +724,11 @@ THD::THD(bool enable_plugins)
   main_lex->reset();
   set_psi(nullptr);
   mdl_context.init(this);
+  init_sql_alloc(key_memory_thd_main_mem_root, &main_mem_root,
+                 global_system_variables.query_alloc_block_size);
+  pq_mem_root = nullptr, pq_mem_root = new MEM_ROOT();
+  init_sql_alloc(key_memory_pq_mem_root, pq_mem_root,
+                 global_system_variables.query_alloc_block_size);
   stmt_arena = this;
   thread_stack = nullptr;
   m_catalog.str = "std";
