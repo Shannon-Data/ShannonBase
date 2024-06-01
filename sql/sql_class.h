@@ -89,6 +89,7 @@
 #include "sql/current_thd.h"
 #include "sql/dd/string_type.h"      // dd::string_type
 #include "sql/discrete_interval.h"   // Discrete_interval
+#include "sql/iterators/row_iterator.h" //RowIterator
 #include "sql/locked_tables_list.h"  // enum_locked_tables_mode
 #include "sql/mdl.h"
 #include "sql/opt_costmodel.h"
@@ -108,6 +109,7 @@
 #include "sql/sql_error.h"
 #include "sql/sql_list.h"
 #include "sql/sql_plugin_ref.h"
+#include "sql/sql_pq_condition.h"       //PQ_ConditionStatus
 #include "sql/sys_vars_resource_mgr.h"  // Session_sysvar_resource_manager
 #include "sql/system_variables.h"       // system_variables
 #include "sql/transaction_info.h"       // Ha_trx_info
@@ -1061,6 +1063,44 @@ class THD : public MDL_context_owner,
 
   /* Is transaction commit still pending */
   bool tx_commit_pending;
+
+  /* for parallel processing */
+  /* parallel reader context */
+  void *pq_ctx {nullptr};
+  /* using for PQ worker threads */
+  THD *pq_leader {nullptr};
+  /* using for explain */
+  bool parallel_exec {false};
+  /* parallel query running threads in session*/
+  uint pq_threads_running {0};
+  /* degree of parallel */
+  uint pq_dop {0};
+  /* disable parallel execute */
+  bool no_pq {false};
+  /* disable parallel query for store procedure and trigger */
+  uint in_sp_trigger {0};
+  /* select .. fro share/update */
+  bool locking_clause {false};
+  /* indicates whether parallel query is supported */
+  enum PQ_ConditionStatus m_suite_for_pq { PQ_ConditionStatus::INIT };
+
+  /* indicates whether occurring error during execution */
+  bool pq_error{false};
+
+  /* save ParallelScanIterator or PQblockScanIterator here to call end() */
+  RowIterator *pq_iterator{NULL};
+
+  /* check first table. */
+  uint pq_check_fields{0};
+  uint pq_check_reclen{0};
+
+  /* save PQ worker THDs. */
+  std::vector<THD *> pq_workers;
+  /* protects THD::pq_workers. */
+  mysql_mutex_t pq_lock_worker;
+
+  /* for explain analyze. */
+  std::string pq_explain;
 
   /**
     The function checks whether the thread is processing queries from binlog,
@@ -2698,6 +2738,9 @@ class THD : public MDL_context_owner,
   bool slave_thread;
 
   uchar password;
+
+  /** This memory root is used for Parallel Query */
+  MEM_ROOT *pq_mem_root;
 
  private:
   /**

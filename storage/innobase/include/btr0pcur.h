@@ -428,7 +428,6 @@ struct btr_pcur_t {
     return (old_fetch_mode);
   }
 
- private:
   /** Moves the persistent cursor backward if it is on the first record
   of the page. Commits mtr. Note that to prevent a possible deadlock, the
   operation first stores the position of the cursor, commits mtr, acquires

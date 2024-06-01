@@ -2479,6 +2479,14 @@ static void row_sel_store_row_id_to_prebuilt(
   ut_memcpy(prebuilt->row_id, data, len);
 }
 
+void pq_row_sel_store_row_id_to_prebuilt(
+    row_prebuilt_t *prebuilt,  /*!< in/out: prebuilt */
+    const rec_t *index_rec,    /*!< in: record */
+    const dict_index_t *index, /*!< in: index of the record */
+    const ulint *offsets) {    /*!< in: rec_get_offsets(index_rec, index) */
+  row_sel_store_row_id_to_prebuilt(prebuilt, index_rec, index, offsets);
+}
+
 /** Stores a non-SQL-NULL field in the MySQL format. The counterpart of this
 function is row_mysql_store_col_in_innobase_format() in row0mysql.cc.
 @param[in,out] dest             buffer where to store; NOTE
@@ -3077,46 +3085,9 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
   return err;
 }
 
-/** Helper class to cache clust_rec and old_ver */
-class Row_sel_get_clust_rec_for_mysql {
-  const rec_t *cached_clust_rec;
-  rec_t *cached_old_vers;
-
- public:
-  /** Constructor */
-  Row_sel_get_clust_rec_for_mysql()
-      : cached_clust_rec(nullptr), cached_old_vers(nullptr) {}
-
-  /** Retrieve the clustered index record corresponding to a record in a
-  non-clustered index. Does the necessary locking.
-  @param[in]     prebuilt    prebuilt struct in the handle
-  @param[in]     sec_index   secondary index where rec resides
-  @param[in]     rec         record in a non-clustered index
-  @param[in]     thr         query thread
-  @param[out]    out_rec     clustered record or an old version of it,
-                             NULL if the old version did not exist in the
-                             read view, i.e., it was a fresh inserted version
-  @param[in,out] offsets     in: offsets returned by
-                                 rec_get_offsets(rec, sec_index);
-                             out: offsets returned by
-                                 rec_get_offsets(out_rec, clust_index)
-  @param[in,out] offset_heap memory heap from which the offsets are allocated
-  @param[out]    vrow        virtual column to fill
-  @param[in]     mtr         mtr used to get access to the non-clustered record;
-                             the same mtr is used to access the clustered index
-  @param[in]     lob_undo    the LOB undo information.
-  @return DB_SUCCESS, DB_SUCCESS_LOCKED_REC, or error code */
-  dberr_t operator()(row_prebuilt_t *prebuilt, dict_index_t *sec_index,
-                     const rec_t *rec, que_thr_t *thr, const rec_t **out_rec,
-                     ulint **offsets, mem_heap_t **offset_heap,
-                     const dtuple_t **vrow, mtr_t *mtr,
-                     lob::undo_vers_t *lob_undo);
-};
-
 /** Retrieve the clustered index record corresponding to a record in a
 non-clustered index. Does the necessary locking.
   @return DB_SUCCESS, DB_SUCCESS_LOCKED_REC, or error code */
-
 [[nodiscard]] dberr_t Row_sel_get_clust_rec_for_mysql::operator()(
     row_prebuilt_t *prebuilt, dict_index_t *sec_index, const rec_t *rec,
     que_thr_t *thr, const rec_t **out_rec, ulint **offsets,
@@ -3129,6 +3100,8 @@ non-clustered index. Does the necessary locking.
   rec_t *old_vers;
   dberr_t err;
   trx_t *trx;
+
+  srv_sec_rec_cluster_reads.fetch_add(1, std::memory_order_relaxed);
 
   *out_rec = nullptr;
   trx = thr_get_trx(thr);
@@ -3200,7 +3173,6 @@ non-clustered index. Does the necessary locking.
       dtuple_t *tuple =
           dict_index_build_data_tuple(sec_index, const_cast<rec_t *>(rec),
                                       dict_index_get_n_fields(sec_index), heap);
-      ;
       page_cur_t page_cursor;
 
       ulint low_match =
@@ -3746,7 +3718,7 @@ static ulint row_sel_try_search_shortcut_for_mysql(
 
 /** Check a pushed-down index condition.
  @return ICP_NO_MATCH, ICP_MATCH, or ICP_OUT_OF_RANGE */
-static ICP_RESULT row_search_idx_cond_check(
+ICP_RESULT row_search_idx_cond_check(
     byte *mysql_rec,          /*!< out: record
                               in MySQL format (invalid unless
                               prebuilt->idx_cond == true and

@@ -652,6 +652,12 @@ static ulint srv_log_writes_and_flush = 0;
 
 #endif /* !UNIV_HOTBACKUP */
 
+/** Number of times secondary index lookup triggered cluster lookup */
+std::atomic<ulint> srv_sec_rec_cluster_reads(0);
+
+/** Number of times prefix optimization avoided triggering cluster lookup */
+std::atomic<ulint> srv_sec_rec_cluster_reads_avoided(0);
+
 /* Interval in seconds at which various tasks are performed by the
 master thread when server is active. In order to balance the workload,
 we should try to keep intervals such that they are not multiple of
