@@ -53,6 +53,8 @@ class Filesort {
   THD *m_thd;
   /// The tables we are sorting.
   Mem_root_array<TABLE *> tables;
+  /// list of expressions to order the table by
+  ORDER *m_order;
   /// If true, do not free the filesort buffers (use if you expect to sort many
   /// times, like in an uncacheable subquery).
   const bool keep_buffers;
@@ -93,10 +95,10 @@ class Filesort {
   /// circumstances (see NewWeedoutAccessPathForTables()).
   void clear_addon_fields();
 
- private:
   /* Prepare ORDER BY list for sorting. */
   uint make_sortorder(ORDER *order, bool unwrap_rollup);
 
+ private:
   uint m_sort_order_length;
 };
 

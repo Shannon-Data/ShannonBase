@@ -4313,6 +4313,18 @@ bool LEX::locate_var_assignment(const Name_string &name) {
   return false;
 }
 
+void Query_block::fix_prepare_information_for_order(
+    THD *thd, SQL_I_List<ORDER> *list, Group_list_ptrs **list_ptrs) {
+  Group_list_ptrs *p = *list_ptrs;
+  if (p == nullptr) {
+    void *mem = thd->stmt_arena->alloc(sizeof(Group_list_ptrs));
+    *list_ptrs = p = new (mem) Group_list_ptrs(thd->stmt_arena->mem_root);
+  }
+  p->reserve(list->elements);
+  for (ORDER *order = list->first; order; order = order->next)
+    p->push_back(order);
+}
+
 /**
   Save properties for ORDER clauses so that they can be reconstructed
   for a new optimization of the query block.

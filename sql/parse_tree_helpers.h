@@ -105,11 +105,13 @@ class PT_item_list : public Parse_tree_node {
   typedef Parse_tree_node super;
 
  public:
+  PT_item_list() : value(*THR_MALLOC), m_has_assignment_list(false) {}
   explicit PT_item_list(const POS &pos) : super(pos), value(*THR_MALLOC) {}
   explicit PT_item_list(const POS &start_pos, const POS &end_pos)
       : super(start_pos, end_pos), value(*THR_MALLOC) {}
 
   mem_root_deque<Item *> value;
+  bool m_has_assignment_list;
 
   bool do_contextualize(Parse_context *pc) override {
     if (super::do_contextualize(pc)) return true;

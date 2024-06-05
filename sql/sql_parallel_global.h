@@ -1,9 +1,8 @@
-#ifndef MYSQL_PQ_SQL_GLOBAL_H
-#define MYSQL_PQ_SQL_GLOBAL_H
+#ifndef __SHANNONBASE_SQL_PARALLEL_SQL_GLOBAL_H__
+#define __SHANNONBASE_SQL_PARALLEL_SQL_GLOBAL_H__
 
 /* Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
    Copyright (c) 2022, Huawei Technologies Co., Ltd.
-   Copyright (c) 2023, GreatDB Software Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -23,7 +22,10 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+    */
 
 #include <iostream>
 #include <memory>
@@ -44,4 +46,4 @@ T atomic_sub(T &value, T n) {
   return __sync_fetch_and_sub(&value, n);
 }
 
-#endif  // MYSQL_PQ_SQL_GLOBAL_H
+#endif  // __SHANNONBASE_SQL_PARALLEL_SQL_GLOBAL_H__

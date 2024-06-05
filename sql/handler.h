@@ -71,6 +71,7 @@
 #include "sql/sql_const.h"       // SHOW_COMP_OPTION
 #include "sql/sql_list.h"        // SQL_I_List
 #include "sql/sql_plugin_ref.h"  // plugin_ref
+#include "sql/sql_pq_range.h"
 #include "string_with_len.h"     // STRING_WITH_LEN
 #include "thr_lock.h"            // thr_lock_type
 #include "typelib.h"
@@ -4592,7 +4593,7 @@ class handler {
   std::mt19937 m_random_number_engine;
   double m_sampling_percentage;
 
-  uint pq_range_type{0};
+  PQ_RANGE_TYPE pq_range_type{PQ_RANGE_TYPE::PQ_QUICK_SELECT_NONE};
   key_range pq_ref_key;
   bool pq_ref{false};
   bool pq_table_scan{false};

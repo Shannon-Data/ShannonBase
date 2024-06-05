@@ -1768,7 +1768,7 @@ int ha_innobase::pq_leader_scan_init(uint keyno, void *&pq_ctx,
   if (pq_ref) return pq_leader_ref_init(keyno, pq_ctx, n_threads);
 
   // range scan
-  if (pq_range_type == PQ_INDEX_RANGE_SCAN)
+  if (pq_range_type == PQ_RANGE_TYPE::PQ_INDEX_RANGE_SCAN)
     return pq_leader_range_select_scan_init(keyno, pq_ctx, n_threads);
 
   // table or index scan

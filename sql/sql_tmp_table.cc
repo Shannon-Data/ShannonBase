@@ -1,4 +1,5 @@
 /* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -508,6 +509,26 @@ Field *create_tmp_field(THD *thd, TABLE *table, Item *item, Item::Type type,
   return result;
 }
 
+void Temp_table_param::pq_copy(Temp_table_param *orig) {
+  end_write_records = orig->end_write_records;
+  // field_count = orig->field_count;
+  func_count = orig->func_count;
+  sum_func_count = orig->sum_func_count;
+  hidden_field_count = orig->hidden_field_count;
+  group_parts = orig->group_parts;
+  group_length = orig->group_length;
+  group_null_parts = orig->group_null_parts;
+  outer_sum_func_count = orig->outer_sum_func_count;
+  using_outer_summary_function = orig->using_outer_summary_function;
+  schema_table = orig->schema_table;
+  precomputed_group_by = orig->precomputed_group_by;
+  force_copy_fields = orig->force_copy_fields;
+  skip_create_table = orig->skip_create_table;
+  bit_fields_as_long = orig->bit_fields_as_long;
+  can_use_pk_for_unique = orig->can_use_pk_for_unique;
+  // m_window_short_circuit = orig->m_window_short_circuit;
+}
+
 /*
   Set up column usage bitmaps for a temporary table
 
@@ -882,7 +903,8 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
                         const mem_root_deque<Item *> &fields, ORDER *group,
                         bool distinct, bool save_sum_fields,
                         ulonglong select_options, ha_rows rows_limit,
-                        const char *table_alias) {
+                        const char *table_alias, bool force_disk_table,
+                        bool parallel_query) {
   DBUG_TRACE;
   if (!param->allow_group_via_temp_table)
     group = nullptr;  // Can't use group key
@@ -910,6 +932,13 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
   bool unique_constraint_via_hash_field =
       param->m_operation != Temp_table_param::TTP_UNION_OR_TABLE;
 
+  bool except_connect_by =
+      param->allow_connect_by_tmp_table & EXCEPT_CONNECT_BY_FUNC;
+
+  bool except_connect_by_value =
+      param->allow_connect_by_tmp_table & EXCEPT_CONNECT_BY_VALUE;
+
+  bool except_rand_item = param->allow_connect_by_tmp_table & EXCEPT_RAND_FUNC;
   /*
     When loose index scan is employed as access method, it already
     computes all groups and the result of all aggregate functions. We
@@ -1006,7 +1035,9 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
   //    use result fields), or
   //  - We are creating a window function's framebuffer table, where the result
   //    field is already set to the output field and must not be overwritten.
+
   const bool modify_items = not_all_columns && !param->m_window_frame_buffer;
+  // const bool modify_items = not_all_columns;
 
   /*
     total_uneven_bit_length is uneven bit length for visible fields
@@ -1057,6 +1088,29 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
           store_column = false;
       }
 
+      if (item->has_connect_by_func()) {
+        if (except_connect_by) {
+          store_column = false;
+        } else {
+          if (except_connect_by_value && item->has_connect_by_value()) {
+            store_column = false;
+          }
+        }
+      }
+
+      if (item->const_item()) {
+        if ((int)hidden_field_count <= 0) {
+          // mark this item and then we can identify it without sending a
+          // message to MQ.
+          item->skip_create_tmp_table = true;
+          continue;  // We don't have to store this
+        }
+        if (parallel_query) {
+          item->skip_create_tmp_table = true;
+          goto HIDDEN;
+        }
+      }
+
       if (hidden_field_count <= 0) {
         if (thd->lex->current_query_block()->is_implicitly_grouped() &&
             (item->used_tables() & ~(RAND_TABLE_BIT | INNER_TABLE_BIT)) == 0) {
@@ -1067,13 +1121,17 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
           continue;
         } else if (item->const_for_execution() &&
                    evaluate_during_optimization(
-                       item, thd->lex->current_query_block())) {
+                       item, thd->lex->current_query_block()) &&
+                   !parallel_query) {
           /*
              Constant for the duration of the query, so no need to store in
              temporary table.
           */
           continue;
         }
+      }
+      if (except_rand_item && (item->used_tables() & (RAND_TABLE_BIT))) {
+        store_column = false;
       }
     }
 
@@ -1086,10 +1144,16 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
         if (!arg->const_item()) {
           Field *new_field = create_tmp_field(
               thd, table, arg, arg->type(), param->items_to_copy,
-              &from_field[fieldnr], &default_field[fieldnr], /*group=*/false,
-              modify_items, false, false);
+              &from_field[fieldnr], &default_field[fieldnr],
+              /*group=*/false, modify_items, false, false);
           from_item[fieldnr] = arg;
           if (new_field == nullptr) return nullptr;  // Should be OOM
+          if (thd->parallel_exec) {
+            new_field->item_sum_ref = sum_item;
+            new_field->extra_length = sum_item->sum_func() == Item_sum::AVG_FUNC
+                                          ? sizeof(longlong)
+                                          : 0;
+          }
           new_field->set_field_index(fieldnr);
           reg_field[fieldnr++] = new_field;
           share->reclength += new_field->pack_length();
@@ -1154,7 +1218,6 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       }
 
       if (new_field == nullptr) {
-        assert(thd->is_fatal_error());
         return nullptr;  // Got OOM
       }
       /*
@@ -1163,8 +1226,18 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
         But only for the group-by table. So do not set result_field if this is
         a tmp table for UNION or derived table materialization.
       */
-      if (modify_items && type == Item::SUM_FUNC_ITEM)
+
+      if (modify_items && type == Item::SUM_FUNC_ITEM) {
+        new_field->item_sum_ref = ((Item_sum *)item);
         down_cast<Item_sum *>(item)->set_result_field(new_field);
+      }
+      if (item->type() == Item::FIELD_AVG_ITEM) {
+        Item_avg_field *item_avg_field =
+            static_cast<Item_avg_field *>(item->real_item());
+        Item_sum_avg *item_avg = item_avg_field->avg_item;
+        new_field->item_sum_ref = item_avg;
+      }
+
       share->reclength += new_field->pack_length();
       if (!new_field->is_flag_set(NOT_NULL_FLAG)) null_count++;
       if (new_field->type() == MYSQL_TYPE_BIT)
@@ -1208,6 +1281,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       }
     }
 
+  HIDDEN:
     hidden_field_count--;
     if (hidden_field_count == 0) {
       /*
@@ -1374,6 +1448,32 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       unique_constraint_via_hash_field = true;
     }
   }
+  if (except_connect_by) {
+    Field_longlong *connect_by_field = new (&share->mem_root)
+        Field_longlong(sizeof(ulonglong), false, "<connect_by_field>", true);
+    if (connect_by_field == nullptr) {
+      /* purecov: begin inspected */
+      assert(thd->is_fatal_error());
+      return nullptr;  // Got OOM
+                       /* purecov: end */
+    }
+    // Mark as NOT NULL
+    connect_by_field->set_flag(NOT_NULL_FLAG);
+    // Register set counter as a hidden field.
+    register_hidden_field(table, &default_field[0], &from_field[0],
+                          share->blob_field, connect_by_field);
+
+    // Repoint arrays
+    table->field--;
+    default_field--;
+    from_field--;
+    from_item--;
+    share->reclength += connect_by_field->pack_length();
+    share->fields = ++fieldnr;
+    param->hidden_field_count++;
+    share->field--;
+    table->connect_by_field = connect_by_field;
+  }
 
   if (unique_constraint_via_hash_field) {
     if (param->needs_set_counter()) {
@@ -1431,7 +1531,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
     table->hash_field = field;
   }
 
-  if (setup_tmp_table_handler(thd, table, select_options, false,
+  if (setup_tmp_table_handler(thd, table, select_options, force_disk_table,
                               param->schema_table))
     return nullptr; /* purecov: inspected */
 
@@ -1450,7 +1550,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
     else
       null_count++;
   }
-  const uint hidden_null_pack_length =
+  uint hidden_null_pack_length =
       (hidden_null_count + 7 + hidden_uneven_bit_length) / 8;
   share->null_bytes = (hidden_null_pack_length +
                        (null_count + total_uneven_bit_length + 7) / 8);
@@ -1517,7 +1617,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       /*
         Get the value from default_values.
       */
-      const ptrdiff_t diff = orig_field->table->default_values_offset();
+      ptrdiff_t diff = orig_field->table->default_values_offset();
       Field *f_in_record0 = orig_field->table->field[orig_field->field_index()];
       if (f_in_record0->is_real_null(diff))
         field->set_null();

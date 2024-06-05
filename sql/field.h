@@ -2,6 +2,7 @@
 #define FIELD_INCLUDED
 
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -101,6 +102,7 @@ class Field_year;
 class Field_sys_trx_id;
 class Item;
 class Item_field;
+class Item_sum;
 class Json_array;
 class Json_diff_vector;
 class Json_wrapper;
@@ -113,6 +115,7 @@ class Time_zone;
 class my_decimal;
 struct TYPELIB;
 struct timeval;
+struct Field_raw_data;
 
 /*
   Inside an in-memory data record, memory pointers to pieces of the
@@ -639,6 +642,7 @@ class Field {
     return (auto_flags & (GENERATED_FROM_EXPRESSION | DEFAULT_NOW)) == 0;
   }
 
+  uchar* get_ptr() const { return ptr; }
  protected:
   /// Holds the position to the field in record
   uchar *ptr;
@@ -689,6 +693,7 @@ class Field {
   /// Pointer to original table name, only non-NULL for a temporary table
   const char *orig_table_name{nullptr};
   const char **table_name, *field_name;
+  Item_sum *item_sum_ref{nullptr};  
   LEX_CSTRING comment;
   /* Field is part of the following keys */
   Key_map key_start;          /* Keys that starts with this field */
@@ -744,6 +749,7 @@ class Field {
   // Length of field. Never write to this member directly; instead, use
   // set_field_length().
   uint32 field_length;
+  uint32 extra_length{0};  
   virtual void set_field_length(uint32 length) { field_length = length; }
 
  private:
@@ -3528,7 +3534,7 @@ class Field_varstring : public Field_longstr {
   const uchar *data_ptr() const final { return ptr + length_bytes; }
   bool is_text_key_type() const final { return binary() ? false : true; }
   uint32 get_length_bytes() const override { return length_bytes; }
-
+  void set_length_bytes(uint32 lenght) { length_bytes = lenght; }
  private:
   /* Store number of bytes used to store length (1 or 2) */
   uint32 length_bytes;
@@ -4762,4 +4768,14 @@ const char *get_field_name_or_expression(THD *thd, const Field *field);
 */
 bool pre_validate_value_generator_expr(Item *expression, const char *name,
                                        Value_generator_source source);
+// build field raw data from Field
+extern uint32 pq_build_field_raw(Field *field, Field_raw_data *field_raw);
+
+extern void pq_build_mq_fields(Field *field, Field_raw_data *field_raw,
+                               bool *null_array, int &null_num,
+                               uint32 &total_bytes);
+
+extern void pq_build_mq_item(Item *item, Field_raw_data *field_raw,
+                             bool *null_array, int &null_num,
+                             uint32 &total_bytes);
 #endif /* FIELD_INCLUDED */

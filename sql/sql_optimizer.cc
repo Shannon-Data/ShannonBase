@@ -179,6 +179,9 @@ JOIN::JOIN(THD *thd_arg, Query_block *select)
       keyuse_array(thd->mem_root),
       order(select->order_list.first, ESC_ORDER_BY),
       group_list(select->group_list.first, ESC_GROUP_BY),
+      start_with_cond(reinterpret_cast<Item *>(1)),
+      connect_by_cond(reinterpret_cast<Item *>(1)),
+      after_connect_by_cond(reinterpret_cast<Item *>(1)),      
       m_windows(select->m_windows),
       /*
         Those four members are meaningless before JOIN::optimize(), so force a
@@ -221,6 +224,29 @@ bool JOIN::alloc_indirection_slices() {
       (*THR_MALLOC)
           ->ArrayAlloc<mem_root_deque<Item *>>(num_slices, *THR_MALLOC);
   if (tmp_fields == nullptr) return true;
+
+  return false;
+}
+
+bool JOIN::alloc_indirection_slices1() {
+  const uint card = REF_SLICE_WIN_1 + m_windows.elements * 2;
+
+  assert(ref_items1 == nullptr);
+
+  ref_items1 =
+      (Ref_item_array *)(*THR_MALLOC)->ArrayAlloc<Ref_item_array>(card);
+  if (ref_items1 == nullptr) return true;
+
+  tmp_fields1 =
+      (*THR_MALLOC)->ArrayAlloc<mem_root_deque<Item *>>(card, *THR_MALLOC);
+  if (tmp_fields1 == nullptr) return true;
+
+  for (uint i = 0; i < card; i++) {
+    ref_items1[i].reset();
+  }
+
+  ref_items = ref_items1;
+  tmp_fields = tmp_fields1;
 
   return false;
 }
@@ -298,6 +324,127 @@ bool JOIN::check_access_path_with_fts() const {
 
   return false;
 }
+
+bool JOIN::setup_tmp_table_info(JOIN *orig) {
+  if (alloc_indirection_slices()) return true;
+
+  // The base ref items from query block are assigned as JOIN's ref items
+  ref_items[REF_SLICE_ACTIVE] = query_block->base_ref_items;
+
+  // make aggregation temp table info and create temp table for group by/order
+  // by/sort
+  tmp_table_param.pq_copy(orig->saved_tmp_table_param);
+  saved_tmp_table_param = new (thd->mem_root) Temp_table_param();
+  if (!saved_tmp_table_param) {
+    return true;
+  }
+  saved_tmp_table_param->pq_copy(orig->saved_tmp_table_param);
+
+  // aggregation
+  if (restore_optimized_vars()) return true;
+
+  select_distinct = orig->select_distinct;
+
+  if (alloc_func_list()) {
+    return true;
+  }
+
+  return false;
+}
+
+bool JOIN::pq_copy_from(JOIN *orig) {
+  query_block->join = this;
+  where_cond = query_block->where_cond();
+  tables_list = query_block->leaf_tables;
+  having_for_explain = orig->having_for_explain;
+  tables = orig->tables;
+  explain_flags = orig->explain_flags;
+  set_plan_state(JOIN::PLAN_READY);
+  pq_tab_idx = orig->pq_tab_idx;
+  calc_found_rows = orig->calc_found_rows;
+  m_select_limit = orig->m_select_limit;
+  query_expression()->select_limit_cnt =
+      orig->query_expression()->select_limit_cnt;
+  query_expression()->offset_limit_cnt = 0;
+  pq_stable_sort = orig->pq_stable_sort;
+  saved_optimized_vars = orig->saved_optimized_vars;
+  connect_by_cond = orig->connect_by_cond;
+
+  return false;
+}
+
+bool JOIN::restore_optimized_vars() {
+  // restore the make_tmp_tables_info's parameter through
+  // saved_optimized_variables
+  grouped = saved_optimized_vars.pq_grouped;
+  group_optimized_away = saved_optimized_vars.pq_group_optimized_away;
+  implicit_grouping = saved_optimized_vars.pq_implicit_grouping;
+  need_tmp_before_win = saved_optimized_vars.pq_need_tmp_before_win;
+  simple_group = saved_optimized_vars.pq_simple_group;
+  simple_order = saved_optimized_vars.pq_simple_order;
+  streaming_aggregation = saved_optimized_vars.pq_streaming_aggregation;
+  m_ordered_index_usage = static_cast<ORDERED_INDEX_USAGE>(
+      saved_optimized_vars.pq_m_ordered_index_usage);
+  skip_sort_order = saved_optimized_vars.pq_skip_sort_order;
+
+  // no need for template_join
+  if (need_tmp_pq || need_tmp_pq_leader) {
+    ORDER *optimized_order = NULL;
+    group_list.clean();
+
+    optimized_order = restore_optimized_group_order(
+        query_block->group_list, saved_optimized_vars.optimized_group_flags);
+    if (optimized_order) {
+      group_list = ORDER_with_src(optimized_order, ESC_GROUP_BY);
+    }
+
+    order.clean();
+    optimized_order = restore_optimized_group_order(
+        query_block->order_list, saved_optimized_vars.optimized_order_flags);
+
+    if (optimized_order) {
+      order = ORDER_with_src(optimized_order, ESC_ORDER_BY);
+    }
+
+    if (!group_list.empty()) {
+      uint old_group_parts = tmp_table_param.group_parts;
+      calc_group_buffer(this, group_list.order);
+      send_group_parts = tmp_table_param.group_parts; /* Save org parts */
+      if (send_group_parts != old_group_parts)  // error: leader and worker have
+                                                // different group fields
+        return true;
+    }
+
+    /** Traverse expressions and inject cast nodes to compatible data types (in
+     * general for time related item), if needed */
+    {
+      for (Item *item : *fields) {
+        item->walk(&Item::cast_incompatible_args, enum_walk::POSTFIX, nullptr);
+      }
+    }
+  }
+  return false;
+}
+
+void JOIN::save_optimized_vars() {
+  // saved optimized variables
+  saved_optimized_vars.pq_grouped = grouped;
+  saved_optimized_vars.pq_group_optimized_away = group_optimized_away;
+  saved_optimized_vars.pq_implicit_grouping = implicit_grouping;
+  saved_optimized_vars.pq_need_tmp_before_win = need_tmp_before_win;
+  saved_optimized_vars.pq_simple_group = simple_group;
+  saved_optimized_vars.pq_simple_order = simple_order;
+  saved_optimized_vars.pq_streaming_aggregation = streaming_aggregation;
+  saved_optimized_vars.pq_skip_sort_order = skip_sort_order;
+  saved_optimized_vars.pq_m_ordered_index_usage = m_ordered_index_usage;
+
+  // record the mapping: JOIN::group_list -> query_block->group_list
+  record_optimized_group_order(query_block->saved_group_list_ptrs, group_list,
+                               saved_optimized_vars.optimized_group_flags);
+  record_optimized_group_order(query_block->saved_order_list_ptrs, order,
+                               saved_optimized_vars.optimized_order_flags);
+}
+
 
 /**
   Optimizes one query block into a query execution plan (QEP.)
@@ -1316,6 +1463,43 @@ bool JOIN::alloc_qep(uint n) {
   return false;
 }
 
+bool JOIN::alloc_qep1(uint n) {
+  static_assert(MAX_TABLES <= INT_MAX8, "plan_idx needs to be wide enough.");
+  assert(tables == n);
+
+  qep_tab1 = new (thd->pq_mem_root) QEP_TAB[n + 1];
+  if (!qep_tab1) return true; /* purecov: inspected */
+
+  for (uint i = 0; i < n; i++) qep_tab1[i].pos = i;
+
+  for (uint i = 0; i < n; i++) {
+    qep_tab1[i].set_qs(qep_tab0[i].get_qs());
+    qep_tab1[i].set_join(this);
+    qep_tab1[i].match_tab = qep_tab0[i].match_tab;
+    qep_tab1[i].check_weed_out_table = qep_tab0[i].check_weed_out_table;
+    qep_tab1[i].flush_weedout_table = qep_tab0[i].flush_weedout_table;
+    qep_tab1[i].op_type = qep_tab0[i].op_type;
+    qep_tab1[i].table_ref = qep_tab0[i].table_ref;
+    qep_tab1[i].using_dynamic_range = qep_tab0[i].using_dynamic_range;
+    qep_tab0[i].set_old_type(qep_tab0[i].type());
+    qep_tab0[i].set_old_ref(&qep_tab0[i].ref());
+    // qep_tab0[i].set_old_quick_optim();
+  }
+
+  for (uint i = 0; i < primary_tables; i++) {
+    qep_tab1[i].pq_copy(thd, &qep_tab0[i]);
+    TABLE *tb = qep_tab0[i].table();
+    qep_tab1[i].set_table(tb);
+
+    if (qep_tab0[i].range_scan()) {
+      qep_tab1[i].set_range_scan(qep_tab0[i].range_scan());
+    }
+  }
+  qep_tab = qep_tab1;
+
+  return false;
+}
+
 void QEP_TAB::init(JOIN_TAB *jt) {
   jt->share_qs(this);
   set_table(table());  // to update table()->reginfo.qep_tab
@@ -1648,7 +1832,7 @@ void JOIN::test_skip_sort() {
   ASSERT_BEST_REF_IN_JOIN_ORDER(this);
   JOIN_TAB *const tab = best_ref[const_tables];
 
-  assert(m_ordered_index_usage == ORDERED_INDEX_VOID);
+  assert(m_ordered_index_usage == ORDERED_INDEX_USAGE::ORDERED_INDEX_VOID);
 
   if (!group_list.empty())  // GROUP BY honoured first
                             // (DISTINCT was rewritten to GROUP BY if skippable)
@@ -1682,7 +1866,7 @@ void JOIN::test_skip_sort() {
         if (test_if_skip_sort_order(tab, group_list, limit, false,
                                     &tab->table()->keys_in_use_for_group_by,
                                     &dummy)) {
-          m_ordered_index_usage = ORDERED_INDEX_GROUP_BY;
+          m_ordered_index_usage = ORDERED_INDEX_USAGE::ORDERED_INDEX_GROUP_BY;
         }
       }
 
@@ -1693,7 +1877,7 @@ void JOIN::test_skip_sort() {
         table.  In order to avoid this, force use of temporary table.
         TODO: Explain the allow_group_via_temp_table part of the test below.
        */
-      if ((m_ordered_index_usage != ORDERED_INDEX_GROUP_BY) &&
+      if ((m_ordered_index_usage != ORDERED_INDEX_USAGE::ORDERED_INDEX_GROUP_BY) &&
           (tmp_table_param.allow_group_via_temp_table ||
            (tab->emb_sj_nest &&
             tab->position()->sj_strategy == SJ_OPT_LOOSE_SCAN))) {
@@ -1710,7 +1894,7 @@ void JOIN::test_skip_sort() {
     if ((skip_sort_order = test_if_skip_sort_order(
              tab, order, m_select_limit, false,
              &tab->table()->keys_in_use_for_order_by, &dummy))) {
-      m_ordered_index_usage = ORDERED_INDEX_ORDER_BY;
+      m_ordered_index_usage = ORDERED_INDEX_USAGE::ORDERED_INDEX_ORDER_BY;
     }
   }
 }
@@ -10849,7 +11033,8 @@ bool JOIN::fts_index_access(JOIN_TAB *tab) {
     This optimization does not work with filesort nor GROUP BY
   */
   if (grouped ||
-      (!order.empty() && m_ordered_index_usage != ORDERED_INDEX_ORDER_BY))
+      (!order.empty() && m_ordered_index_usage !=
+        ORDERED_INDEX_USAGE::ORDERED_INDEX_ORDER_BY))
     return false;
 
   /*

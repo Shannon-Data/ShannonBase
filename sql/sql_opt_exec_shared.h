@@ -1,4 +1,5 @@
 /* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -18,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /**
   @file sql/sql_opt_exec_shared.h
@@ -172,6 +175,8 @@ struct Index_lookup {
     }
     return false;
   }
+
+  bool pq_copy(JOIN *join, Index_lookup *ref, QEP_TAB *qep_tab);
 };
 
 struct CACHE_FIELD;
@@ -273,7 +278,9 @@ class QEP_shared {
     m_idx = i;
   }
   TABLE *table() const { return m_table; }
+  TABLE *old_table() const { return m_old_table; }
   void set_table(TABLE *t) { m_table = t; }
+  void set_old_table(TABLE *t) { m_old_table = t; }
   POSITION *position() const { return m_position; }
   void set_position(POSITION *p) { m_position = p; }
   Semijoin_mat_exec *sj_mat_exec() const { return m_sj_mat_exec; }
@@ -289,10 +296,15 @@ class QEP_shared {
   plan_idx last_inner() { return m_last_inner; }
   plan_idx first_upper() { return m_first_upper; }
   Index_lookup &ref() { return m_ref; }
+  void set_ref(Index_lookup *ref) { m_ref = *ref; }
+  Index_lookup &old_ref() { return *m_old_ref; }
+  void set_old_ref(Index_lookup *ref) { m_old_ref = ref; }
   uint index() const { return m_index; }
   void set_index(uint i) { m_index = i; }
-  enum join_type type() const { return m_type; }
+  enum join_type type() const { return m_type; }  
   void set_type(enum join_type t) { m_type = t; }
+  enum join_type old_type() const { return m_old_type; }
+  void set_old_type(enum join_type t) { m_old_type = t; }
   Item *condition() const { return m_condition; }
   void set_condition(Item *c) { m_condition = c; }
   bool condition_is_pushed_to_sort() const {
@@ -354,6 +366,9 @@ class QEP_shared {
 
   bool skip_records_in_range() const { return m_skip_records_in_range; }
 
+  // the origin index type of the first rewritten qep_tab in leader
+  Index_lookup *m_old_ref;
+
  private:
   JOIN *m_join;
 
@@ -367,6 +382,9 @@ class QEP_shared {
 
   /// Corresponding table. Might be an internal temporary one.
   TABLE *m_table;
+
+  // parallel query old_table
+  TABLE *m_old_table;
 
   /// Points into best_positions array. Includes cost info.
   POSITION *m_position;
@@ -409,6 +427,7 @@ class QEP_shared {
 
   /// Type of chosen access method (scan, etc).
   enum join_type m_type;
+  enum join_type m_old_type;
 
   /**
     Table condition, ie condition to be evaluated for a row from this table.
@@ -484,6 +503,7 @@ class QEP_shared_owner {
     assert(!m_qs);
     m_qs = q;
   }
+  QEP_shared *get_qs() { return m_qs; }
 
   // Getters/setters forwarding to QEP_shared:
 
@@ -501,6 +521,8 @@ class QEP_shared_owner {
   }
 
   TABLE *table() const { return m_qs->table(); }
+  TABLE *old_table() const { return m_qs->old_table(); }
+  void set_old_type(enum join_type t) { m_qs->set_old_type(t); }  
   POSITION *position() const { return m_qs->position(); }
   void set_position(POSITION *p) { return m_qs->set_position(p); }
   Semijoin_mat_exec *sj_mat_exec() const { return m_qs->sj_mat_exec(); }
@@ -518,10 +540,14 @@ class QEP_shared_owner {
   void set_last_sj_inner(plan_idx i) { return m_qs->set_last_sj_inner(i); }
   void set_first_upper(plan_idx i) { return m_qs->set_first_upper(i); }
   Index_lookup &ref() const { return m_qs->ref(); }
+  void set_ref(Index_lookup *ref) { m_qs->set_ref(ref); }
+  Index_lookup &old_ref() const { return m_qs->old_ref(); }
+  void set_old_ref(Index_lookup *ref) { m_qs->set_old_ref(ref); }
   uint index() const { return m_qs->index(); }
   void set_index(uint i) { return m_qs->set_index(i); }
   enum join_type type() const { return m_qs->type(); }
   void set_type(enum join_type t) { return m_qs->set_type(t); }
+  enum join_type old_type() const { return m_qs->old_type(); }  
   Item *condition() const { return m_qs->condition(); }
   void set_condition(Item *to) { return m_qs->set_condition(to); }
   bool condition_is_pushed_to_sort() const {
@@ -628,12 +654,16 @@ enum {
      table
   */
   REF_SLICE_TMP2,
+  /*
+   * Use to store PQ worker query result
+   */
+  REF_SLICE_PQ_TMP,  
   /**
      The slice with pointers to columns of table(s), ie., the actual Items.
      Only used for queries involving temporary tables or the likes; for simple
      queries, they always live in REF_SLICE_ACTIVE, so we don't need a copy
      here. See REF_SLICE_ACTIVE for more discussion.
-  */
+  */ 
   REF_SLICE_SAVED_BASE,
   /**
      The slice with pointers to columns of 1st tmp table of windowing

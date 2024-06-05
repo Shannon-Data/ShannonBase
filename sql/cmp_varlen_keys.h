@@ -1,4 +1,5 @@
 /* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -18,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #ifndef CMP_VARLEN_KEYS_INCLUDED
 #define CMP_VARLEN_KEYS_INCLUDED
@@ -44,7 +47,7 @@
  */
 inline bool cmp_varlen_keys(
     Bounds_checked_array<st_sort_field> sort_field_array, bool use_hash,
-    const uchar *s1, const uchar *s2) {
+    const uchar *s1, const uchar *s2, int *pq_cmp_value = nullptr) {
   const uchar *kp1 = s1 + Sort_param::size_of_varlength_field;
   const uchar *kp2 = s2 + Sort_param::size_of_varlength_field;
   int res;
@@ -53,7 +56,11 @@ inline bool cmp_varlen_keys(
     if (sort_field.maybe_null) {
       const int k1_nullbyte = *kp1++;
       const int k2_nullbyte = *kp2++;
-      if (k1_nullbyte != k2_nullbyte) return k1_nullbyte < k2_nullbyte;
+
+      if (k1_nullbyte != k2_nullbyte) {
+        if (pq_cmp_value) *pq_cmp_value = k1_nullbyte - k2_nullbyte;
+        return k1_nullbyte < k2_nullbyte;
+      }
       if (k1_nullbyte == 0 || k1_nullbyte == 0xff) {
         if (!sort_field.is_varlen) {
           kp1 += sort_field.length;
@@ -79,12 +86,19 @@ inline bool cmp_varlen_keys(
 
     res = memcmp(kp1, kp2, kp_len);
 
-    if (res) return res < 0;
+    if (res) {
+      if (pq_cmp_value) *pq_cmp_value = res;
+      return res < 0;
+    }
+
     if (kp1_len != kp2_len) {
-      if (sort_field.reverse)
+      if (sort_field.reverse) {
+        if (pq_cmp_value) *pq_cmp_value = kp2_len - kp1_len;
         return kp2_len < kp1_len;
-      else
+      } else {
+        if (pq_cmp_value) *pq_cmp_value = kp1_len - kp2_len;
         return kp1_len < kp2_len;
+      }
     }
 
     kp1 += kp1_len;
@@ -93,8 +107,11 @@ inline bool cmp_varlen_keys(
 
   if (use_hash) {
     // Compare hashes at the end of sort keys
-    return memcmp(kp1, kp2, 8) < 0;
+    int cmp_value = memcmp(kp1, kp2, 8);
+    if (pq_cmp_value) *pq_cmp_value = cmp_value;
+    return cmp_value < 0;
   } else {
+    if (pq_cmp_value) *pq_cmp_value = 1;
     return false;
   }
 }

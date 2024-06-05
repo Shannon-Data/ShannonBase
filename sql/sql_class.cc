@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.   
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -20,6 +21,8 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
 #include "sql/sql_class.h"
@@ -97,6 +100,7 @@
 #include "sql/sql_cmd.h"
 #include "sql/sql_handler.h"  // mysql_ha_cleanup
 #include "sql/sql_lex.h"
+#include "sql/sql_parallel.h"
 #include "sql/sql_parse.h"    // is_update_query
 #include "sql/sql_plugin.h"   // plugin_thdvar_init
 #include "sql/sql_prepare.h"  // Prepared_statement
@@ -729,6 +733,9 @@ THD::THD(bool enable_plugins)
   pq_mem_root = nullptr, pq_mem_root = new MEM_ROOT();
   init_sql_alloc(key_memory_pq_mem_root, pq_mem_root,
                  global_system_variables.query_alloc_block_size);
+  pq_mem_root->set_alloc_func(add_pq_memory);
+  pq_mem_root->set_free_func(sub_pq_memory);
+
   stmt_arena = this;
   thread_stack = nullptr;
   m_catalog.str = "std";

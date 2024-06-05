@@ -1001,6 +1001,69 @@ char *String::dup(MEM_ROOT *root) const {
   return strmake_root(root, m_ptr, m_length);
 }
 
+void String::ltrim() {
+  if (m_ptr) {
+    auto pos = m_ptr;
+    while (m_length > 0 && *pos && my_isspace(m_charset, *pos)) {
+      pos++;
+      m_length--;
+    }
+
+    if (pos != m_ptr) {
+      memmove(m_ptr, pos, m_length);
+      if (m_length < m_alloced_length)
+        m_ptr[m_length] = 0;
+      else
+        mem_realloc_exp(m_length);
+    }
+  }
+}
+
+void String::rtrim() {
+  if (m_ptr) {
+    while ((m_length > 0) && my_isspace(m_charset, *(m_ptr + m_length - 1))) {
+      m_length--;
+    }
+    if (m_length < m_alloced_length)
+      m_ptr[m_length] = 0;
+    else
+      mem_realloc_exp(m_length);
+  }
+}
+
+void String::rtrim_zero() {
+  bool proint_flag = false;
+  size_t length = m_length;
+  if (m_ptr) {
+    while (length > 0) {
+      if (my_toupper(m_charset, *(m_ptr + length - 1)) == '.') {
+        proint_flag = true;
+        break;
+      }
+      length--;
+    }
+    // trim right last 0, when after '.'
+    while ((m_length > 0) &&
+           (my_toupper(m_charset, *(m_ptr + m_length - 1)) == '0') &&
+           proint_flag) {
+      m_length--;
+    }
+    if (my_toupper(m_charset, *(m_ptr + m_length - 1)) == '.') {
+      m_length--;
+      // convert string '.' to '0'
+      if (m_length == 0) {
+        m_length = 1;
+        *m_ptr = '0';
+      }
+    }
+
+    if (m_length < m_alloced_length)
+      m_ptr[m_length] = 0;
+    else
+      mem_realloc_exp(m_length);
+  }
+}
+
 /**
   Convert string to printable ASCII string
 
