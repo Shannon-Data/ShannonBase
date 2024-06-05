@@ -2,6 +2,7 @@
 #define ITEM_JSON_FUNC_INCLUDED
 
 /* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -21,7 +22,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #include <assert.h>
 #include <sys/types.h>
@@ -343,6 +346,8 @@ class Item_func_json_schema_valid final : public Item_bool_func {
 
   void cleanup() override;
 
+  Item *pq_clone(THD *thd, Query_block *select) override;
+
  private:
   // Wrap the object in a unique_ptr so that the relevant rapidjson destructors
   // are called.
@@ -416,6 +421,7 @@ class Item_func_json_contains final : public Item_int_func {
   enum_const_item_cache can_cache_json_arg(Item *arg) override {
     return (arg == args[0] || arg == args[1]) ? CACHE_JSON_VALUE : CACHE_NONE;
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 /**
@@ -532,6 +538,7 @@ class Item_func_json_depth final : public Item_int_func {
   }
 
   longlong val_int() override;
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 /**
@@ -886,6 +893,7 @@ class Item_func_json_quote : public Item_str_func {
   }
 
   String *val_str(String *tmpspace) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**

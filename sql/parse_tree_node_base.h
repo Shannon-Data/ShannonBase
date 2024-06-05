@@ -254,7 +254,11 @@ class Parse_tree_node_tmpl {
                               const std::nothrow_t &) noexcept {}
 
  protected:
-  Parse_tree_node_tmpl() = delete;
+  Parse_tree_node_tmpl() {
+#ifndef NDEBUG
+    contextualized = false;
+#endif  // NDEBUG
+  }
 
   explicit Parse_tree_node_tmpl(const POS &pos) : m_pos(pos) {}
 

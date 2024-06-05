@@ -177,6 +177,7 @@ class PTI_function_call_nonkeyword_now final : public Item_func_now_local {
       : super(pos, dec_arg) {}
 
   bool do_itemize(Parse_context *pc, Item **res) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class PTI_function_call_nonkeyword_sysdate : public Parse_tree_item {
@@ -281,6 +282,7 @@ class PTI_text_literal_text_string : public PTI_text_literal {
       : super(pos, is_7bit_arg, literal_arg) {}
 
   bool do_itemize(Parse_context *pc, Item **res) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class PTI_text_literal_nchar_string : public PTI_text_literal {
@@ -292,6 +294,7 @@ class PTI_text_literal_nchar_string : public PTI_text_literal {
       : super(pos, is_7bit_arg, literal_arg) {}
 
   bool do_itemize(Parse_context *pc, Item **res) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class PTI_text_literal_underscore_charset : public PTI_text_literal {
@@ -314,6 +317,7 @@ class PTI_text_literal_underscore_charset : public PTI_text_literal {
     set_cs_specified(true);
     return false;
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class PTI_text_literal_concat : public PTI_text_literal {
@@ -366,6 +370,7 @@ class PTI_literal_underscore_charset_hex_num : public Item_string {
     set_cs_specified(true);
     return check_well_formed_result(&str_value, true, true) == nullptr;
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class PTI_literal_underscore_charset_bin_num : public Item_string {
@@ -404,6 +409,7 @@ class PTI_user_variable final : public Item_func_get_user_var {
   PTI_user_variable(const POS &pos, const LEX_STRING &var) : super(pos, var) {}
 
   bool do_itemize(Parse_context *pc, Item **res) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -441,6 +447,7 @@ class PTI_count_sym : public Item_sum_count {
       : super(pos, (Item *)nullptr, w) {}
 
   bool do_itemize(Parse_context *pc, Item **res) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class PTI_in_sum_expr : public Parse_tree_item {

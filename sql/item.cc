@@ -2182,43 +2182,13 @@ void Item_name_const::print(const THD *thd, String *str,
   str->append(')');
 }
 
-/*
- need a special class to adjust printing : references to aggregate functions
- must not be printed as refs because the aggregate functions that are added to
- the front of select list are not printed as well.
-*/
-class Item_aggregate_ref : public Item_ref {
- public:
-  Item_aggregate_ref(Name_resolution_context *context_arg, Item **item,
-                     const char *db_name_arg, const char *table_name_arg,
-                     const char *field_name_arg, Query_block *depended_from_arg)
-      : Item_ref(context_arg, item, db_name_arg, table_name_arg,
-                 field_name_arg) {
-    depended_from = depended_from_arg;
-  }
-
-  void print(const THD *thd, String *str,
-             enum_query_type query_type) const override {
-    ref_item()->print(thd, str, query_type);
-  }
-  Ref_Type ref_type() const override { return AGGREGATE_REF; }
-
-  /**
-    Walker processor used by Query_block::transform_grouped_to_derived to
-    replace an aggregate's reference to one in the new derived table's (hidden)
-    select list.
-
-    @param  arg  An info object of type Item::Aggregate_ref_update
-    @returns false
-  */
-  bool update_aggr_refs(uchar *arg) override {
-    auto *info = pointer_cast<Item::Aggregate_ref_update *>(arg);
-    if (ref_item() != info->m_target) return false;
-    m_ref_item = info->m_owner->add_hidden_item(info->m_target);
-    link_referenced_item();
-    return false;
-  }
-};
+bool Item_aggregate_ref::update_aggr_refs(uchar *arg) {
+  auto *info = pointer_cast<Item::Aggregate_ref_update *>(arg);
+  if (ref_item() != info->m_target) return false;
+  m_ref_item = info->m_owner->add_hidden_item(info->m_target);
+  link_referenced_item();
+  return false;
+}
 
 /**
   1. Move SUM items out from item tree and replace with reference.
@@ -11055,3 +11025,5 @@ bool AllItemsAreEqual(const Item *const *a, const Item *const *b, int num_items,
   }
   return true;
 }
+
+#include "sql/sql_pq_clone_item.inc"

@@ -249,7 +249,7 @@ bool JOIN::create_intermediate_table(
   if (!group_list.empty() && simple_group) {
     DBUG_PRINT("info", ("Sorting for group"));
 
-    if (m_ordered_index_usage != ORDERED_INDEX_GROUP_BY &&
+    if (m_ordered_index_usage != ORDERED_INDEX_USAGE::ORDERED_INDEX_GROUP_BY &&
         add_sorting_to_table(const_tables, &group_list,
                              /*sort_before_group=*/true))
       goto err;
@@ -280,8 +280,8 @@ bool JOIN::create_intermediate_table(
         simple_order && rollup_state == RollupState::NONE && !m_windows_sort) {
       DBUG_PRINT("info", ("Sorting for order"));
 
-      if (m_ordered_index_usage != ORDERED_INDEX_ORDER_BY &&
-          add_sorting_to_table(const_tables, &order,
+      if (m_ordered_index_usage != ORDERED_INDEX_USAGE::ORDERED_INDEX_ORDER_BY
+          && add_sorting_to_table(const_tables, &order,
                                /*sort_before_group=*/false))
         goto err;
       order.clean();
@@ -357,8 +357,9 @@ void JOIN::optimize_distinct() {
   /* Optimize "select distinct b from t1 order by key_part_1 limit #" */
   if (!order.empty() && skip_sort_order) {
     /* Should already have been optimized away */
-    assert(m_ordered_index_usage == ORDERED_INDEX_ORDER_BY);
-    if (m_ordered_index_usage == ORDERED_INDEX_ORDER_BY) {
+    assert(m_ordered_index_usage == 
+           ORDERED_INDEX_USAGE::ORDERED_INDEX_ORDER_BY);
+    if (m_ordered_index_usage == ORDERED_INDEX_USAGE::ORDERED_INDEX_ORDER_BY) {
       order.clean();
     }
   }
@@ -3687,7 +3688,8 @@ bool QEP_TAB::use_order() const {
     if ORDER or GROUP BY use ordered index.
   */
   if ((uint)idx() == join()->const_tables &&
-      join()->m_ordered_index_usage != JOIN::ORDERED_INDEX_VOID)
+      join()->m_ordered_index_usage !=
+       JOIN::ORDERED_INDEX_USAGE::ORDERED_INDEX_VOID)
     return true;
 
   /*
