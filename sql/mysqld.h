@@ -185,6 +185,9 @@ extern Rpl_acf_configuration_handler *rpl_acf_configuration_handler;
 extern Source_IO_monitor *rpl_source_io_monitor;
 extern int32_t opt_regexp_time_limit;
 extern int32_t opt_regexp_stack_limit;
+extern uint parallel_threads_running;
+extern uint parallel_threads_refused;
+extern uint parallel_memory_refused;
 #ifdef _WIN32
 extern bool opt_no_monitor;
 #endif  // _WIN32

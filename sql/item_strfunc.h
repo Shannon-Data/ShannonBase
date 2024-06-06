@@ -786,6 +786,7 @@ class Item_func_make_set final : public Item_str_func {
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
   Item *pq_clone(THD *thd, Query_block *select) override; 
+  Item* get_item() { return item; } 
 };
 
 class Item_func_format final : public Item_str_ascii_func {

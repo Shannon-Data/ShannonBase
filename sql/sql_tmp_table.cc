@@ -509,6 +509,37 @@ Field *create_tmp_field(THD *thd, TABLE *table, Item *item, Item::Type type,
   return result;
 }
 
+/**
+  Create field for information schema table.
+
+  @param table		Temporary table
+  @param item		Item to create a field for
+
+  @retval
+    0			on error
+  @retval
+    new_created field
+*/
+Field *create_tmp_field_for_schema(Item *item, TABLE *table, MEM_ROOT *root) {
+  MEM_ROOT *pq_check_root = root ? root : *THR_MALLOC;
+  if (item->data_type() == MYSQL_TYPE_VARCHAR) {
+    Field *field;
+    if (item->max_length > MAX_FIELD_VARCHARLENGTH)
+      field = new (pq_check_root)
+          Field_blob(item->max_length, item->is_nullable(),
+                     item->item_name.ptr(), item->collation.collation, false);
+    else {
+      field = new (pq_check_root) Field_varstring(
+          item->max_length, item->is_nullable(), item->item_name.ptr(),
+          table->s, item->collation.collation);
+      table->s->db_create_options |= HA_OPTION_PACK_RECORD;
+    }
+    if (field) field->init(table);
+    return field;
+  }
+  return item->tmp_table_field_from_field_type(table, false, root);
+}
+
 void Temp_table_param::pq_copy(Temp_table_param *orig) {
   end_write_records = orig->end_write_records;
   // field_count = orig->field_count;

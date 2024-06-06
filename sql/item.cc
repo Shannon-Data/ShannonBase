@@ -6467,19 +6467,21 @@ bool Item::eq_by_collation(Item *item, bool binary_cmp,
   @param table		Table for which the field is created
 */
 
-Field *Item::make_string_field(TABLE *table) const {
+Field *Item::make_string_field(TABLE *table, MEM_ROOT *root) const {
   Field *field;
+  MEM_ROOT *pq_check_root = root ? root : *THR_MALLOC;
+
   assert(collation.collation);
   if (data_type() == MYSQL_TYPE_JSON)
     field =
-        new (*THR_MALLOC) Field_json(max_length, m_nullable, item_name.ptr());
+        new (pq_check_root) Field_json(max_length, m_nullable, item_name.ptr());
   else if (data_type() == MYSQL_TYPE_GEOMETRY) {
-    field = new (*THR_MALLOC)
+    field = new (pq_check_root)
         Field_geom(max_length, m_nullable, item_name.ptr(),
                    Field::GEOM_GEOMETRY, std::optional<gis::srid_t>());
   } else if (max_length / collation.collation->mbmaxlen >
              CONVERT_IF_BIGGER_TO_BLOB)
-    field = new (*THR_MALLOC) Field_blob(
+    field = new (pq_check_root) Field_blob(
         max_length, m_nullable, item_name.ptr(), collation.collation, true);
   /* Item_type_holder holds the exact type, do not change it */
   else if (max_length > 0 &&
@@ -6502,70 +6504,67 @@ Field *Item::make_string_field(TABLE *table) const {
   @return Created field
   @retval NULL  error
 */
-
-Field *Item::tmp_table_field_from_field_type(TABLE *table,
-                                             bool fixed_length) const {
-  /*
-    The field functions defines a field to be not null if null_ptr is not 0
-  */
+Field *Item::tmp_table_field_from_field_type(TABLE *table, bool fixed_length,
+                                             MEM_ROOT *root) const {
+  /*The field functions defines a field to be not null if null_ptr is not 0*/
   Field *field;
+  MEM_ROOT *pq_check_root = root ? root : *THR_MALLOC;
 
   switch (data_type()) {
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL:
-      field = Field_new_decimal::create_from_item(this);
+      field = Field_new_decimal::create_from_item(this, root);
       break;
     case MYSQL_TYPE_TINY:
-      field = new (*THR_MALLOC)
+      field = new (pq_check_root)
           Field_tiny(max_length, m_nullable, item_name.ptr(), unsigned_flag);
       break;
     case MYSQL_TYPE_SHORT:
-      field = new (*THR_MALLOC)
+      field = new (pq_check_root)
           Field_short(max_length, m_nullable, item_name.ptr(), unsigned_flag);
       break;
     case MYSQL_TYPE_LONG:
-      field = new (*THR_MALLOC)
+      field = new (pq_check_root)
           Field_long(max_length, m_nullable, item_name.ptr(), unsigned_flag);
       break;
     case MYSQL_TYPE_LONGLONG:
-      field = new (*THR_MALLOC) Field_longlong(max_length, m_nullable,
-                                               item_name.ptr(), unsigned_flag);
+      field = new (pq_check_root) Field_longlong(
+          max_length, m_nullable, item_name.ptr(), unsigned_flag);
       break;
     case MYSQL_TYPE_FLOAT:
-      field = new (*THR_MALLOC) Field_float(
+      field = new (pq_check_root) Field_float(
           max_length, m_nullable, item_name.ptr(), decimals, unsigned_flag);
       break;
     case MYSQL_TYPE_DOUBLE:
-      field = new (*THR_MALLOC) Field_double(
+      field = new (pq_check_root) Field_double(
           max_length, m_nullable, item_name.ptr(), decimals, unsigned_flag);
       break;
     case MYSQL_TYPE_INT24:
-      field = new (*THR_MALLOC)
+      field = new (pq_check_root)
           Field_medium(max_length, m_nullable, item_name.ptr(), unsigned_flag);
       break;
     case MYSQL_TYPE_DATE:
     case MYSQL_TYPE_NEWDATE:
-      field = new (*THR_MALLOC) Field_newdate(m_nullable, item_name.ptr());
+      field = new (pq_check_root) Field_newdate(m_nullable, item_name.ptr());
       break;
     case MYSQL_TYPE_TIME:
-      field =
-          new (*THR_MALLOC) Field_timef(m_nullable, item_name.ptr(), decimals);
+      field = new (pq_check_root)
+          Field_timef(m_nullable, item_name.ptr(), decimals);
       break;
     case MYSQL_TYPE_TIMESTAMP:
-      field = new (*THR_MALLOC)
+      field = new (pq_check_root)
           Field_timestampf(m_nullable, item_name.ptr(), decimals);
       break;
     case MYSQL_TYPE_DATETIME:
-      field = new (*THR_MALLOC)
+      field = new (pq_check_root)
           Field_datetimef(m_nullable, item_name.ptr(), decimals);
       break;
     case MYSQL_TYPE_YEAR:
       assert(max_length == 4);  // Field_year is only for length 4.
-      assert(decimal_precision() == 4);
-      field = new (*THR_MALLOC) Field_year(m_nullable, item_name.ptr());
+      field = new (pq_check_root) Field_year(m_nullable, item_name.ptr());
       break;
     case MYSQL_TYPE_BIT:
-      field = new (*THR_MALLOC)
+      field = new (pq_check_root)
           Field_bit_as_char(max_length, m_nullable, item_name.ptr());
       break;
     case MYSQL_TYPE_INVALID:
@@ -6578,7 +6577,7 @@ Field *Item::tmp_table_field_from_field_type(TABLE *table,
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_NULL:
       if (fixed_length && max_length <= CONVERT_IF_BIGGER_TO_BLOB) {
-        field = new (*THR_MALLOC) Field_string(
+        field = new (pq_check_root) Field_string(
             max_length, m_nullable, item_name.ptr(), collation.collation);
         break;
       }
@@ -6588,26 +6587,28 @@ Field *Item::tmp_table_field_from_field_type(TABLE *table,
     case MYSQL_TYPE_SET:
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_VARCHAR:
-      return make_string_field(table);
+      field = make_string_field(table, root);
+      // if (field) field->set_pseudo(is_pseudo);
+      return field;
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_BLOB:
       if (this->type() == Item::TYPE_HOLDER)
-        field = new (*THR_MALLOC) Field_blob(
+        field = new (pq_check_root) Field_blob(
             max_length, m_nullable, item_name.ptr(), collation.collation, true);
       else
-        field = new (*THR_MALLOC)
+        field = new (pq_check_root)
             Field_blob(max_length, m_nullable, item_name.ptr(),
                        collation.collation, false);
       break;  // Blob handled outside of case
     case MYSQL_TYPE_GEOMETRY:
-      field = new (*THR_MALLOC) Field_geom(
+      field = new (pq_check_root) Field_geom(
           max_length, m_nullable, item_name.ptr(), get_geometry_type(), {});
       break;
     case MYSQL_TYPE_JSON:
-      field =
-          new (*THR_MALLOC) Field_json(max_length, m_nullable, item_name.ptr());
+      field = new (pq_check_root)
+          Field_json(max_length, m_nullable, item_name.ptr());
   }
   if (field) field->init(table);
   return field;
@@ -11024,6 +11025,10 @@ bool AllItemsAreEqual(const Item *const *a, const Item *const *b, int num_items,
     }
   }
   return true;
+}
+
+void set_has_notsupported_func_true(void) {
+  current_thd->lex->has_notsupported_func = true;
 }
 
 #include "sql/sql_pq_clone_item.inc"

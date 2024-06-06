@@ -1,4 +1,5 @@
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -18,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /**
   @defgroup GROUP_PARSER Parser
@@ -1773,6 +1776,8 @@ class Query_block : public Query_term {
   bool right_joins() const { return m_right_joins; }
   void set_right_joins() { m_right_joins = true; }
 
+  bool has_foj() const { return m_has_foj; }
+  void set_has_foj(bool val) { m_has_foj = val; }
   /// Lookup for Query_block type
   enum_explain_type type() const;
 
@@ -2218,6 +2223,12 @@ class Query_block : public Query_term {
   /// How many expressions are part of the order by but not select list.
   int hidden_order_field_count{0};
 
+  /**
+    Intrusive linked list of all query blocks within the same
+    Windows function maybe be optimized, so we save this value to determine
+    whether support parallel query. */
+  uint saved_windows_elements{0};
+
  private:
   friend class Query_expression;
   friend class Condition_context;
@@ -2393,6 +2404,7 @@ class Query_block : public Query_term {
   bool has_sj_nests{false};
   bool has_aj_nests{false};   ///< @see has_sj_nests; counts antijoin nests.
   bool m_right_joins{false};  ///< True if query block has right joins
+  bool m_has_foj{false};      ///< True if query block has full outer joins
 
   /// Allow merge of immediate unnamed derived tables
   bool allow_merge_derived{true};
@@ -4065,8 +4077,11 @@ struct LEX : public Query_tables_list {
   bool sp_lex_in_use; /* Keep track on lex usage in SPs for error handling */
   bool all_privileges;
   bool contains_plaintext_password;
+  bool in_execute_ps{false};
   enum_keep_diagnostics keep_diagnostics;
   uint32 next_binlog_file_nr;
+  bool has_sp{false};  // Item_func_sp, create function with no nosame option.
+  bool has_notsupported_func{false};  // true: not support pq,false: support pq
 
  private:
   bool m_broken;  ///< see mark_broken()

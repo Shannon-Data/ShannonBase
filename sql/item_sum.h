@@ -2207,7 +2207,8 @@ class Item_func_group_concat final : public Item_sum {
   enum Sumfunctype sum_func() const override { return GROUP_CONCAT_FUNC; }
   const char *func_name() const override { return "group_concat"; }
   Item_result result_type() const override { return STRING_RESULT; }
-  Field *make_string_field(TABLE *table_arg) const override;
+  Field *make_string_field(TABLE *table_arg,
+                           MEM_ROOT *root = nullptr) const override;
   void clear() override;
   bool add() override;
   void reset_field() override { assert(0); }   // not used

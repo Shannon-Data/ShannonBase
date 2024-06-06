@@ -188,6 +188,7 @@ bool Query_block::prepare(THD *thd, mem_root_deque<Item *> *insert_field_list) {
   if (is_table_value_constructor) return prepare_values(thd);
 
   Query_expression *const unit = master_query_expression();
+  if (has_windows()) saved_windows_elements = m_windows.elements;
 
   if (!m_table_nest.empty()) propagate_nullability(&m_table_nest, false);
 
