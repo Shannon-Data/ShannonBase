@@ -2757,9 +2757,11 @@ Field_new_decimal::Field_new_decimal(uint32 len_arg, bool is_nullable_arg,
   bin_size = my_decimal_get_binary_size(precision, dec);
 }
 
-Field *Field_new_decimal::create_from_item(const Item *item) {
+Field *Field_new_decimal::create_from_item(const Item *item, MEM_ROOT *root) {
+  MEM_ROOT *pq_check_root = root ? root : *THR_MALLOC;
+
   uint8 dec = item->decimals;
-  const uint8 intg = item->decimal_precision() - dec;
+  uint8 intg = item->decimal_precision() - dec;
   uint32 len = item->max_char_length();
 
   assert(item->result_type() == DECIMAL_RESULT);
@@ -2793,7 +2795,7 @@ Field *Field_new_decimal::create_from_item(const Item *item) {
       /* Corrected value fits. */
       len = required_length;
   }
-  return new (*THR_MALLOC)
+  return new (pq_check_root)
       Field_new_decimal(len, item->is_nullable(), item->item_name.ptr(), dec,
                         item->unsigned_flag);
 }

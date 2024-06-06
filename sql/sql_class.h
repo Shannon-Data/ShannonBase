@@ -20,7 +20,7 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
+
    Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #ifndef SQL_CLASS_INCLUDED
@@ -2111,6 +2111,7 @@ class THD : public MDL_context_owner,
   Attachable_trx *m_attachable_trx;
 
  public:
+  Attachable_trx *get_attachable_trx() { return m_attachable_trx; }
   Transaction_ctx *get_transaction() { return m_transaction.get(); }
 
   const Transaction_ctx *get_transaction() const { return m_transaction.get(); }

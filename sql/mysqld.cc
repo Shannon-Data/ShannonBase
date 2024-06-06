@@ -810,6 +810,7 @@ MySQL clients support the protocol:
 #include "sql/options_mysqld.h"                  // OPT_THREAD_CACHE_SIZE
 #include "sql/partitioning/partition_handler.h"  // partitioning_init
 #include "sql/persisted_variable.h"              // Persisted_variables_cache
+#include "sql/sql_parallel.h"
 #include "sql/plugin_table.h"
 #include "sql/protocol.h"
 #include "sql/psi_memory_key.h"  // key_memory_MYSQL_RELAY_LOG_index
@@ -9720,6 +9721,14 @@ static int show_telemetry_traces_support(THD * /*unused*/, SHOW_VAR *var,
   return 0;
 }
 
+static int show_pq_memory(THD *, SHOW_VAR *var, char *buff) {
+  var->type = SHOW_INT;
+  var->value = buff;
+  unsigned int *value = reinterpret_cast<unsigned int *>(buff);
+  *value = get_pq_memory_total();
+  return 0;
+}
+
 SHOW_VAR status_vars[] = {
     {"Aborted_clients", (char *)&aborted_threads, SHOW_LONG, SHOW_SCOPE_GLOBAL},
     {"Aborted_connects", (char *)&show_aborted_connects, SHOW_FUNC,
@@ -10082,6 +10091,13 @@ SHOW_VAR status_vars[] = {
      SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"Tls_sni_server_name", (char *)&show_ssl_get_tls_sni_servername, SHOW_FUNC,
      SHOW_SCOPE_SESSION},
+    {"PQ_threads_refused", (char *)&parallel_threads_refused, SHOW_INT,
+     SHOW_SCOPE_GLOBAL},
+    {"PQ_memory_refused", (char *)&parallel_memory_refused, SHOW_INT,
+     SHOW_SCOPE_GLOBAL},
+    {"PQ_threads_running", (char *)&parallel_threads_running, SHOW_INT,
+     SHOW_SCOPE_GLOBAL},
+    {"PQ_memory_used", (char *)&show_pq_memory, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_ALL}};
 
 void add_terminator(vector<my_option> *options) {

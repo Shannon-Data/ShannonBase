@@ -26,6 +26,7 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.   */
 
+#include "my_alloc.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/sql_base.h"
 #include "sql/sql_lex.h"
@@ -178,7 +179,7 @@ extern void add_to_list(SQL_I_List<ORDER> &list, ORDER *order);
 
 extern ulonglong parallel_memory_limit;
 extern ulong parallel_max_threads;
-extern uint pq_memory_used[16];
+extern uint pq_memory_used[PQ_MEMORY_USED_BUCKET];
 extern uint pq_memory_total_used;
 extern uint parallel_threads_running;
 

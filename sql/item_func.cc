@@ -8036,6 +8036,7 @@ bool Item_func_sp::do_itemize(Parse_context *pc, Item **res) {
 
   context = lex->current_context();
   lex->safe_to_cache_query = false;
+  lex->has_sp = true;
 
   if (m_name->m_db.str == nullptr) {
     if (thd->lex->copy_db_to(&m_name->m_db.str, &m_name->m_db.length)) {

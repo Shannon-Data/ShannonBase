@@ -155,8 +155,8 @@ bool Query_result_mq::send_result_set_metadata(
 
   mq_fields_data = new (thd->pq_mem_root) Field_raw_data[send_fields_size]{};
   mq_fields_null_array = new (thd->pq_mem_root) bool[2 * field_size];
-  mq_fields_null_flag = new (
-      thd->pq_mem_root) char[field_size / MQ_FIELDS_DATA_HEADER_LENGTH + 2];
+  mq_fields_null_flag = 
+    new (thd->pq_mem_root) char[field_size / MQ_FIELDS_DATA_HEADER_LENGTH + 2];
 
   if (!mq_fields_data || !mq_fields_null_array || !mq_fields_null_flag) {
     return true;
@@ -192,20 +192,8 @@ bool Query_result_mq::send_data(
       continue;
     }
 
-// c2: check Item_copy. In the original execution plan, const_item will be
-// transformed into Item_copy in tmp_table (or ORDERED_GROUP_BY)
-#if 0
-    if (item->type() == Item::COPY_STR_ITEM) {
-      Item *orig_item = down_cast<Item_copy *>(item)->get_item();
-      assert(orig_item && !orig_item->skip_create_tmp_table);
-      if (orig_item->const_item() ||
-          orig_item->basic_const_item()) {
-        pq_build_mq_item(orig_item, &mq_fields_data[fields_idx],
-            mq_fields_null_array,null_num, total_copy_bytes);
-        continue;
-      }
-    }
-#endif
+    // c2: check Item_copy. In the original execution plan, const_item will be
+    // transformed into Item_copy in tmp_table (or ORDERED_GROUP_BY)
 
     // c3: check item_result_field and item_field
     result_field = item->get_result_field();

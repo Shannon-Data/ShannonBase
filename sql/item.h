@@ -1239,7 +1239,8 @@ class Item : public Parse_tree_node {
   */
   virtual void notify_removal() {}
   virtual void make_field(Send_field *field);
-  virtual Field *make_string_field(TABLE *table) const;
+  virtual Field *make_string_field(TABLE *table,
+                                   MEM_ROOT *root = nullptr) const;
   virtual bool fix_fields(THD *, Item **);
   /**
     Fix after tables have been moved from one query_block level to the parent
@@ -3092,7 +3093,9 @@ class Item : public Parse_tree_node {
   // used in row subselects to get value of elements
   virtual void bring_value() {}
 
-  Field *tmp_table_field_from_field_type(TABLE *table, bool fixed_length) const;
+  Field *tmp_table_field_from_field_type(TABLE *table, bool fixed_length,
+                                         MEM_ROOT *root = nullptr) const;  
+
   virtual Item_field *field_for_view_update() { return nullptr; }
   /**
     Informs an item that it is wrapped in a truth test, in case it wants to
@@ -5870,15 +5873,14 @@ class Item_ref : public Item_ident {
   };
 
   PQ_copy_type copy_type;
+
+  /// Indirect pointer to the referenced item.
+  Item **m_ref_item{nullptr};
  private:
   /// True if referenced item has been unlinked, used during item tree removal
   bool m_unlinked{false};
 
   Field *result_field{nullptr}; /* Save result here */
-
- protected:
-  /// Indirect pointer to the referenced item.
-  Item **m_ref_item{nullptr};
 
  public:
   Item_ref(Name_resolution_context *context_arg, const char *db_name_arg,
@@ -5911,8 +5913,8 @@ class Item_ref : public Item_ident {
   /* Constructor need to process subselect with temporary tables (see Item) */
   Item_ref(THD *thd, Item_ref *item)
       : Item_ident(thd, item),
-        result_field(item->result_field),
-        m_ref_item(item->m_ref_item) {}
+      m_ref_item(item->m_ref_item),
+      result_field(item->result_field) {}
 
   /// @returns the item referenced by this object
   Item *ref_item() const { return *m_ref_item; }
@@ -6097,7 +6099,8 @@ class Item_ref : public Item_ident {
     return ref_item()->check_column_in_group_by(arg);
   }
   bool collect_item_field_or_ref_processor(uchar *arg) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;  
+
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**

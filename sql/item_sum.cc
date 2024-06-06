@@ -1,4 +1,5 @@
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -18,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /**
   @file
@@ -4314,8 +4317,10 @@ void Item_func_group_concat::cleanup() {
   row_count = 0;
 }
 
-Field *Item_func_group_concat::make_string_field(TABLE *table_arg) const {
+Field *Item_func_group_concat::make_string_field(TABLE *table_arg,
+                                                 MEM_ROOT *root) const {
   Field *field;
+  MEM_ROOT *pq_check_root = root ? root : *THR_MALLOC;
   assert(collation.collation);
   /*
     Use mbminlen to determine maximum number of characters.
@@ -4335,11 +4340,11 @@ Field *Item_func_group_concat::make_string_field(TABLE *table_arg) const {
       UINT_MAX32);
 
   if (max_characters > CONVERT_IF_BIGGER_TO_BLOB)
-    field = new (*THR_MALLOC)
+    field = new (pq_check_root)
         Field_blob(field_length, is_nullable(), item_name.ptr(),
                    collation.collation, true);
   else
-    field = new (*THR_MALLOC)
+    field = new (pq_check_root)
         Field_varstring(field_length, is_nullable(), item_name.ptr(),
                         table_arg->s, collation.collation);
 
