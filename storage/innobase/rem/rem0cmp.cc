@@ -649,9 +649,15 @@ int cmp_dtuple_rec_with_match_low(const dtuple_t *dtuple, const rec_t *rec,
     ut_ad(!rec_offs_nth_default(index, offsets, i));
 
     ulint rec_f_len;
+    const byte *rec_b_ptr = nullptr;
+    if (index->has_instant_cols()) {
+      rec_b_ptr = rec_get_nth_field_instant(rec, offsets, i, index, &rec_f_len);
+    } else {
+      /* So does the field with default value */
+      ut_ad(!rec_offs_nth_default(index, offsets, i));
 
-    const auto rec_b_ptr =
-        rec_get_nth_field(index, rec, offsets, i, &rec_f_len);
+      rec_b_ptr = rec_get_nth_field(index, rec, offsets, i, &rec_f_len);
+    }
 
     ut_ad(!dfield_is_ext(dtuple_field));
 

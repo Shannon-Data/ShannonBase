@@ -411,7 +411,7 @@ class Query_arena {
   void reset_item_list() { m_item_list = nullptr; }
   void set_item_list(Item *item) { m_item_list = item; }
   void add_item(Item *item);
-  void free_items();
+  void free_items(bool parallel_exec = false);
   void set_state(enum_state state_arg) { state = state_arg; }
   enum_state get_state() const { return state; }
   bool is_stmt_prepare() const { return state == STMT_INITIALIZED; }
@@ -2715,6 +2715,7 @@ class THD : public MDL_context_owner,
     KILL_CONNECTION = ER_SERVER_SHUTDOWN,
     KILL_QUERY = ER_QUERY_INTERRUPTED,
     KILL_TIMEOUT = ER_QUERY_TIMEOUT,
+    KILL_PQ_QUERY = ER_PARALLEL_EXEC_ERROR,
     KILLED_NO_VALUE /* means neither of the states */
   };
   std::atomic<killed_state> killed;
@@ -4725,6 +4726,7 @@ class THD : public MDL_context_owner,
   bool is_connection_admin();
   void set_connection_admin(bool connection_admin_flag);
 
+  bool is_worker();
   bool pq_copy_from(THD *thd);
   bool pq_merge_status(THD *thd);
   bool pq_status_reset();
@@ -4900,5 +4902,7 @@ inline void THD::set_connection_admin(bool connection_admin_flag) {
 inline bool is_xa_tran_detached_on_prepare(const THD *thd) {
   return thd->variables.xa_detach_on_prepare;
 }
+
+inline bool THD::is_worker() { return pq_leader != nullptr; }
 
 #endif /* SQL_CLASS_INCLUDED */

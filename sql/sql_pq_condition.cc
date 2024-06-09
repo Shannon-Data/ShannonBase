@@ -740,6 +740,7 @@ bool choose_parallel_scan_table(JOIN *join) {
       tab->get_qs()->first_sj_inner() >= 0) {
     return false;
   }
+
   tab->do_parallel_scan = true;
   return true;
 }
@@ -748,6 +749,8 @@ void set_pq_dop(THD *thd) {
   if (!thd->no_pq && thd->variables.force_parallel_execute &&
       thd->pq_dop == 0) {
     thd->pq_dop = thd->variables.parallel_default_dop;
+    if (thd->pq_dop > std::thread::hardware_concurrency())
+      thd->pq_dop = std::thread::hardware_concurrency();
   }
 }
 
@@ -767,9 +770,10 @@ void set_pq_condition_status(THD *thd) {
 }
 
 bool suite_for_parallel_query(THD *thd) {
-  if (thd->in_sp_trigger != 0 ||    // store procedure or trigger
-      thd->get_attachable_trx() ||  // attachable transaction
-      thd->tx_isolation ==ISO_SERIALIZABLE) {  // seri without snapshot read
+  if (thd->in_sp_trigger != 0 ||  // store procedure or trigger
+      thd->get_attachable_trx() ||    // attachable transaction
+                                  // serializable without snapshot read
+      thd->tx_isolation == ISO_SERIALIZABLE ) {
     return false;
   }
 

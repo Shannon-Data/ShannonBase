@@ -1000,6 +1000,12 @@ void row_prebuilt_free(row_prebuilt_t *prebuilt, bool dict_locked) {
   }
 
   prebuilt->m_lob_undo.destroy();
+  prebuilt->ctx = nullptr;
+
+  if (prebuilt->pq_heap) {
+    mem_heap_free(prebuilt->pq_heap);
+    prebuilt->pq_heap = nullptr;
+  }
 
   mem_heap_free(prebuilt->heap);
 }

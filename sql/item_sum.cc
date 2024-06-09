@@ -2233,6 +2233,20 @@ void Item_sum_count::cleanup() {
 bool Item_sum_avg::resolve_type(THD *thd) {
   if (Item_sum_sum::resolve_type(thd)) return true;
 
+  if (pq_avg_type == ParallelAvgType::PQ_WORKER ||
+      pq_avg_type == ParallelAvgType::PQ_LEADER) {
+    prec_increment = 0;
+    if (hybrid_type == DECIMAL_RESULT) {
+      f_precision = args[0]->decimal_precision() + DECIMAL_LONGLONG_DIGITS;
+      decimals = args[0]->decimals;
+      max_length = my_decimal_precision_to_length_no_truncation(
+          f_precision, decimals, unsigned_flag);
+      f_scale = args[0]->decimals;
+      dec_bin_size = my_decimal_get_binary_size(f_precision, f_scale);
+    }
+    return false;
+  }
+
   set_nullable(true);
   null_value = true;
   prec_increment = thd->variables.div_precincrement;
@@ -2258,8 +2272,10 @@ bool Item_sum_avg::resolve_type(THD *thd) {
 
 Item *Item_sum_avg::copy_or_same(THD *thd) {
   DBUG_TRACE;
-  Item *result =
+  auto *result =
       m_is_window_function ? this : new (thd->mem_root) Item_sum_avg(thd, this);
+  if (!result) return result;
+  result->pq_avg_type = pq_avg_type;
   return result;
 }
 
@@ -2392,6 +2408,9 @@ my_decimal *Item_sum_avg::val_decimal(my_decimal *val) {
       my_decimal *result = val_decimal_from_real(val);
       return result;
     }
+
+    if (pq_avg_type == ParallelAvgType::PQ_WORKER)
+      return (dec_buffs + curr_dec_buff);
 
     sum_dec = dec_buffs + curr_dec_buff;
     int2my_decimal(E_DEC_FATAL_ERROR, m_count, false, &cnt);
@@ -3673,6 +3692,7 @@ Item_avg_field::Item_avg_field(Item_result res_type, Item_sum_avg *item) {
   field = item->get_result_field();
   set_nullable(true);
   hybrid_type = res_type;
+  pq_avg_type = item->pq_avg_type;
   set_data_type(hybrid_type == DECIMAL_RESULT ? MYSQL_TYPE_NEWDECIMAL
                                               : MYSQL_TYPE_DOUBLE);
   prec_increment = item->prec_increment;
@@ -3694,6 +3714,8 @@ double Item_avg_field::val_real() {
   res = (field->field_ptr() + sizeof(double));
   count = sint8korr(res);
 
+  if (pq_avg_type == ParallelAvgType::PQ_WORKER) return nr;
+
   if ((null_value = !count)) return 0.0;
   return nr / (double)count;
 }
@@ -3705,6 +3727,12 @@ my_decimal *Item_avg_field::val_decimal(my_decimal *dec_buf) {
   if ((null_value = !count)) return nullptr;
 
   my_decimal dec_count, dec_field;
+  if (pq_avg_type == ParallelAvgType::PQ_WORKER) {
+    binary2my_decimal(E_DEC_FATAL_ERROR, field->get_ptr(), dec_buf, f_precision,
+                      f_scale);
+    return dec_buf;
+  }
+
   binary2my_decimal(E_DEC_FATAL_ERROR, field->field_ptr(), &dec_field,
                     f_precision, f_scale);
   int2my_decimal(E_DEC_FATAL_ERROR, count, false, &dec_count);

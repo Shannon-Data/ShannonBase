@@ -31,6 +31,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
  *******************************************************/
 
 #include "que0que.h"
+#include "row0sel.h"
+#include "row0mysql.h"
 
 /** Gets the plan node for the nth table in a join.
  @return plan node */

@@ -33,6 +33,7 @@ Created 2019-04-20 by Darshan M N. */
 #define row0pread_histogram_h
 
 #include <random>
+#include "handler.h"
 #include "row0pread.h"
 #include "ut0counter.h"
 

@@ -1143,6 +1143,8 @@ static PSI_mutex_key key_LOCK_partial_revokes;
 static PSI_mutex_key key_LOCK_authentication_policy;
 static PSI_mutex_key key_LOCK_global_conn_mem_limit;
 #endif /* HAVE_PSI_INTERFACE */
+static PSI_mutex_key key_LOCK_pq_threads_running;
+static PSI_cond_key key_COND_pq_threads_running;
 
 /**
   Statement instrumentation key for replication.
@@ -2847,6 +2849,8 @@ static void clean_up_mutexes() {
   mysql_mutex_destroy(&LOCK_partial_revokes);
   mysql_mutex_destroy(&LOCK_authentication_policy);
   mysql_mutex_destroy(&LOCK_global_conn_mem_limit);
+  mysql_mutex_destroy(&LOCK_pq_threads_running);
+  mysql_cond_destroy(&COND_pq_threads_running);
 }
 
 /****************************************************************************
@@ -5424,6 +5428,9 @@ static int init_thread_environment() {
                    MY_MUTEX_INIT_FAST);
   mysql_mutex_init(key_LOCK_global_conn_mem_limit, &LOCK_global_conn_mem_limit,
                    MY_MUTEX_INIT_FAST);
+  mysql_mutex_init(key_LOCK_pq_threads_running, &LOCK_pq_threads_running,
+                   MY_MUTEX_INIT_FAST);
+  mysql_cond_init(key_COND_pq_threads_running, &COND_pq_threads_running);
   return 0;
 }
 
@@ -11986,7 +11993,8 @@ static PSI_mutex_info all_server_mutexes[]=
   { &key_LOCK_delegate_connection_mutex, "LOCK_delegate_connection_mutex", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME},
   { &key_LOCK_group_replication_connection_mutex, "LOCK_group_replication_connection_mutex", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME},
 { &key_LOCK_authentication_policy, "LOCK_authentication_policy", PSI_FLAG_SINGLETON, 0, "A lock to ensure execution of CREATE USER or ALTER USER sql and SET @@global.authentication_policy variable are serialized"},
-  { &key_LOCK_global_conn_mem_limit, "LOCK_global_conn_mem_limit", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME}
+  { &key_LOCK_global_conn_mem_limit, "LOCK_global_conn_mem_limit", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME},
+  { &key_LOCK_pq_threads_running, "LOCK_pq_threads_running", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME}
 };
 /* clang-format on */
 
@@ -12101,7 +12109,8 @@ static PSI_cond_info all_server_conds[]=
   { &key_cond_slave_worker_hash, "Relay_log_info::replica_worker_hash_cond", 0, 0, PSI_DOCUMENT_ME},
   { &key_monitor_info_run_cond, "Source_IO_monitor::run_cond", 0, 0, PSI_DOCUMENT_ME},
   { &key_COND_delegate_connection_cond_var, "THD::COND_delegate_connection_cond_var", 0, 0, PSI_DOCUMENT_ME},
-  { &key_COND_group_replication_connection_cond_var, "THD::COND_group_replication_connection_cond_var", 0, 0, PSI_DOCUMENT_ME}
+  { &key_COND_group_replication_connection_cond_var, "THD::COND_group_replication_connection_cond_var", 0, 0, PSI_DOCUMENT_ME},
+  { &key_COND_pq_threads_running, "COND_pq_threads_running", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME}
 };
 /* clang-format on */
 
@@ -12111,6 +12120,7 @@ PSI_thread_key key_thread_one_connection;
 PSI_thread_key key_thread_compress_gtid_table;
 PSI_thread_key key_thread_parser_service;
 PSI_thread_key key_thread_handle_con_admin_sockets;
+PSI_thread_key key_thread_parallel_query;
 
 /* clang-format off */
 static PSI_thread_info all_server_threads[]=
@@ -12130,6 +12140,7 @@ PSI_FLAG_USER | PSI_FLAG_NO_SEQNUM, 0, PSI_DOCUMENT_ME},
   { &key_thread_compress_gtid_table, "compress_gtid_table", "gtid_zip", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME},
   { &key_thread_parser_service, "parser_service", "parser_srv", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME},
   { &key_thread_handle_con_admin_sockets, "admin_interface", "con_admin", PSI_FLAG_USER, 0, PSI_DOCUMENT_ME},
+  { &key_thread_parallel_query, "parallel_query","parallel_query",PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME},
 };
 /* clang-format on */
 

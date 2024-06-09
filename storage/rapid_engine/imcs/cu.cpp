@@ -95,10 +95,7 @@ bool Cu::init_body_info(const Field *field) {
 
   std::string comment(field->comment.str);
   std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
-  if ((comment.find("INDEXED") != std::string::npos))
-    m_index = std::make_unique<Index>(Index::IndexType::ART);
-  else
-    m_index = std::make_unique<Index>(Index::IndexType::ART);
+  m_index = std::make_unique<Index>(Index::IndexType::ART);
   return false;
 }
 

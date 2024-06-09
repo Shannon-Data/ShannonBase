@@ -4811,15 +4811,13 @@ class handler {
   int ha_reset();
 
   //for parallel processing.
-  int ha_pq_init(uint keyno, uint dop = std::thread::hardware_concurrency());
+  int ha_pq_init(uint keyno, uint& dop);
   int ha_pq_next(uchar *buf, void *scan_ctx);
   int ha_pq_signal_all();
   int ha_pq_end();
 
   /* this is necessary in many places, e.g. in HANDLER command */
-  int ha_index_or_rnd_end() {
-    return inited == INDEX ? ha_index_end() : inited == RND ? ha_rnd_end() : 0;
-  }
+  int ha_index_or_rnd_end();
   /**
     The cached_table_flags is set at ha_open and ha_external_lock
   */

@@ -1015,6 +1015,18 @@ bool Sql_cmd_dml::execute_inner(THD *thd) {
   // Perform secondary engine optimizations, if needed.
   if (optimize_secondary_engine(thd)) return true;
 
+  if (thd->m_suite_for_pq == PQ_ConditionStatus::ENABLED) {
+    PQ_exec_status status = make_pq_leader_plan(thd);
+    if (status == PQ_exec_status::ABORT_EXEC) {
+      return true;
+    }
+
+    assert(status == PQ_exec_status::SEQ_EXEC ||
+           status == PQ_exec_status::PARL_EXEC);
+
+    DEBUG_SYNC(thd, "after_pq_leader_plan");
+  }
+
   // We know by now that execution will complete (successful or with error)
   lex->set_exec_completed();
   if (lex->is_explain()) {
@@ -1949,11 +1961,25 @@ void JOIN::destroy() {
   tmp_table_param.cleanup();
 
   /* Cleanup items referencing temporary table columns */
-  if (tmp_fields != nullptr) {
-    cleanup_item_list(tmp_fields[REF_SLICE_TMP1]);
-    cleanup_item_list(tmp_fields[REF_SLICE_TMP2]);
+  if (tmp_fields1 != nullptr) {
+    cleanup_item_list(tmp_fields1[REF_SLICE_TMP1]);
+    cleanup_item_list(tmp_fields1[REF_SLICE_TMP2]);
+    cleanup_item_list(tmp_fields1[REF_SLICE_PQ_TMP]);
     for (uint widx = 0; widx < m_windows.elements; widx++) {
-      cleanup_item_list(tmp_fields[REF_SLICE_WIN_1 + widx]);
+      cleanup_item_list(tmp_fields1[REF_SLICE_WIN_1 + widx]);
+      cleanup_item_list(tmp_fields1[REF_SLICE_WIN_1 + widx +
+                                    m_windows.elements]);  // frame buffer
+    }
+  }
+
+  if (tmp_fields0 != nullptr) {
+    cleanup_item_list(tmp_fields0[REF_SLICE_TMP1]);
+    cleanup_item_list(tmp_fields0[REF_SLICE_TMP2]);
+    cleanup_item_list(tmp_fields0[REF_SLICE_PQ_TMP]);
+    for (uint widx = 0; widx < m_windows.elements; widx++) {
+      cleanup_item_list(tmp_fields0[REF_SLICE_WIN_1 + widx]);
+      cleanup_item_list(tmp_fields0[REF_SLICE_WIN_1 + widx +
+                                    m_windows.elements]);  // frame buffer
     }
   }
 
@@ -2991,6 +3017,13 @@ void QEP_TAB::push_index_cond(const JOIN_TAB *join_tab, uint keyno,
       !has_guarded_conds() && type() != JT_CONST && type() != JT_SYSTEM &&
       !(keyno == tbl->s->primary_key &&
         tbl->file->primary_key_is_clustered())) {
+
+    if (do_parallel_scan) {
+      has_pq_cond = true;
+      pq_cond = condition()->pq_clone(join_->thd, join_->query_block);
+      if (pq_cond == nullptr) return;
+    }
+
     DBUG_EXECUTE("where", print_where(join_->thd, condition(), "full cond",
                                       QT_ORDINARY););
     Item *idx_cond =
@@ -3107,18 +3140,17 @@ bool JOIN::setup_semijoin_materialized_table(JOIN_TAB *tab, uint tableno,
          inner_pos->sj_strategy == SJ_OPT_MATERIALIZE_SCAN);
 
   /*
-    Set up the table to write to, do as
-    Query_result_union::create_result_table does
+  Set up the table to write, do as Query_result_union::create_result_table does
   */
   sjm_exec->table_param = Temp_table_param();
   count_field_types(query_block, &sjm_exec->table_param,
                     emb_sj_nest->nested_join->sj_inner_exprs, false, true);
   sjm_exec->table_param.bit_fields_as_long = true;
 
-  char buffer[NAME_LEN];
+  char buffer[NAME_LEN] = {0};
   const size_t len = snprintf(buffer, sizeof(buffer) - 1, "<subquery%u>",
                               emb_sj_nest->nested_join->query_block_id);
-  char *name = (char *)thd->mem_root->Alloc(len + 1);
+  char *name = (char *) thd->mem_root->Alloc(len + 1);
   if (name == nullptr) return true; /* purecov: inspected */
 
   memcpy(name, buffer, len);
@@ -4554,8 +4586,7 @@ bool JOIN::make_leader_tables_info() {
   /*
    * create sum() base on tmp table's sum_field which is sum of worker send.
    */
-  if (pq_build_sum_funcs(
-          thd, query_block, ref_items[REF_SLICE_PQ_TMP],
+  if (pq_build_sum_funcs(thd, query_block, ref_items[REF_SLICE_PQ_TMP],
           tmp_fields[REF_SLICE_PQ_TMP],
           CountVisibleFields(tmp_fields[REF_SLICE_PQ_TMP]),
           (nesting_map)1 << (unsigned int)query_block->nest_level)) {
@@ -4614,6 +4645,14 @@ bool JOIN::make_leader_tables_info() {
 
     if (exec_tmp_table->s->is_distinct) optimize_distinct();
 
+    /* If there is no sorting or grouping, 'use_order' index result should not
+     have been requested. Exception: LooseScan strategy for semijoin requires
+      sorted access even if final result is not to be sorted. */
+    assert(
+        thd->parallel_exec ||
+        !(m_ordered_index_usage == ORDERED_INDEX_VOID && !plan_is_const() &&
+          qep_tab[const_tables].position()->sj_strategy != SJ_OPT_LOOSE_SCAN &&
+          qep_tab[const_tables].use_order()));
     /*
       Allocate a slice of ref items that describe the items to be copied
       from the first temporary table.
@@ -5159,7 +5198,8 @@ bool JOIN::make_tmp_tables_info() {
     set_ref_item_slice(REF_SLICE_TMP1);
     qep_tab[curr_tmp_table].ref_item_slice = REF_SLICE_TMP1;
     setup_tmptable_write_func(&qep_tab[curr_tmp_table], &trace_this_outer);
-
+    last_slice_before_pq = REF_SLICE_TMP1;
+ 
     /*
       If having is not handled here, it will be checked before the row is sent
       to the client.
@@ -5302,6 +5342,9 @@ bool JOIN::make_tmp_tables_info() {
       set_ref_item_slice(REF_SLICE_TMP2);
       qep_tab[curr_tmp_table].ref_item_slice = REF_SLICE_TMP2;
       setup_tmptable_write_func(&qep_tab[curr_tmp_table], &trace_this_tbl);
+
+      // last_slice_before_windowing = REF_SLICE_TMP2;
+      last_slice_before_pq = REF_SLICE_TMP2;
     }
     if (qep_tab[curr_tmp_table].table()->s->is_distinct)
       select_distinct = false; /* Each row is unique */
@@ -5619,6 +5662,10 @@ void JOIN::refresh_base_slice() {
 }
 
 void JOIN::unplug_join_tabs() {
+  // clone JOIN info from pq_tmp_tables_info, best_bef = NULL
+  if (tables != 0 && !(best_ref && !join_tab)) {
+    return;
+  }
   ASSERT_BEST_REF_IN_JOIN_ORDER(this);
 
   map2table = nullptr;

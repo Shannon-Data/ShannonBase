@@ -423,15 +423,6 @@ bool Gather_operator::init() {
       keyno = m_table->s->primary_key;
   }
 
-  /*
-    QUICK_SELECT_I *quick = m_tab->quick();
-    if (quick && type == JT_RANGE) {
-      m_table->file->pq_range_type = quick->quick_select_type();
-      if (quick->reset()) return true;
-      if (quick->reverse_sorted()) m_table->file->pq_reverse_scan = true;
-    }
-  */
-
   if (m_tab->range_scan() && type == JT_RANGE) {
     m_table->file->pq_range_type = m_tab->range_scan()->quick_select_type();
     AccessPath *range = m_tab->range_scan();
@@ -450,7 +441,7 @@ bool Gather_operator::init() {
    * number
    */
   uint dop_orig = m_dop;
-  error = m_table->file->ha_pq_init(m_dop, keyno);
+  error = m_table->file->ha_pq_init(keyno, m_dop);
   m_pq_ctx = thd->pq_ctx;
   if (error) {
     m_table->file->print_error(error, MYF(0));

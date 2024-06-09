@@ -61,21 +61,7 @@ typedef struct mq_records_batch_struct {
 } mq_records_batch_st;
 
 class Exchange_sort : public Exchange {
- public:
-  Sort_param *m_sort_param; /** sort param */
-  uchar *row_id[2]{NULL};   /** row_id (or PK) used for stable output */
-  handler *m_file;          /** innodb handler */
-  uchar *keys[2]{NULL};     /** compared-keys of two nodes in heap*/
-
- private:
-  mq_record_st **m_min_records;         /** array of minimum records */
-  mq_records_batch_st *m_record_groups; /** array of minimum recors of each worker's group */
-  binary_heap *m_heap;                  /** binary heap used for merge sort */
-  Filesort *m_sort;                     /** sort structure */
-  bool m_init_heap;                     /** indicates whether init the heap */
-  uchar *m_tmp_key;                     /** tmp key for comparing */
-
- public:
+  public:
   Exchange_sort()
       : Exchange(),
         m_sort_param(nullptr),
@@ -86,6 +72,7 @@ class Exchange_sort : public Exchange {
         m_sort(nullptr),
         m_init_heap(false),
         m_tmp_key(nullptr) {}
+  
   Exchange_sort(THD *thd, TABLE *table, Filesort *sort, handler *file, uint32 workers, uint ref_len,
                 bool stab_output = false)
       : Exchange(thd, table, workers, ref_len, stab_output),
@@ -99,7 +86,6 @@ class Exchange_sort : public Exchange {
         m_tmp_key(nullptr) {}
 
   virtual ~Exchange_sort() override {}
-
  public:
   /** init members */
   bool init() override;
@@ -109,7 +95,7 @@ class Exchange_sort : public Exchange {
   void cleanup() override;
 
   /** get the k-th record in m_min_records */
-  mq_record_st *get_record(int k) {
+  inline mq_record_st *get_record(int k) {
     assert(0 <= k && k < lanuch_workers());
     mq_record_st *record = m_min_records[k];
     return record;
@@ -135,6 +121,10 @@ class Exchange_sort : public Exchange {
 
   EXCHANGE_TYPE get_exchange_type() override { return EXCHANGE_SORT; }
 
+  Sort_param *m_sort_param; /** sort param */
+  uchar *row_id[2]{NULL};   /** row_id (or PK) used for stable output */
+  handler *m_file;          /** innodb handler */
+  uchar *keys[2]{NULL};     /** compared-keys of two nodes in heap*/
  private:
   /** alloc space for sort */
   bool alloc();
@@ -152,6 +142,13 @@ class Exchange_sort : public Exchange {
   void load_group_records(int id);
   /** store message from table->record as a mq_record */
   bool store_mq_record(mq_record_st *rec, uchar *data, uint32 msg_len);
+
+  mq_record_st **m_min_records;         /** array of minimum records */
+  mq_records_batch_st *m_record_groups; /** array of minimum recors of each worker's group */
+  binary_heap *m_heap;                  /** binary heap used for merge sort */
+  Filesort *m_sort;                     /** sort structure */
+  bool m_init_heap;                     /** indicates whether init the heap */
+  uchar *m_tmp_key;                     /** tmp key for comparing */
 };
 
 /** compare two nodes in heap */

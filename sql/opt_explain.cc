@@ -471,6 +471,7 @@ class Explain_join : public Explain_table_base {
   bool end_simple_sort_context(Explain_sort_clause clause,
                                enum_parsing_context ctx);
   bool explain_qep_tab(size_t tab_num);
+  bool explain_pq_gather(QEP_TAB *tab);
 
  protected:
   bool shallow_explain() override;
@@ -1219,6 +1220,12 @@ bool Explain_join::explain_modify_flags() {
       break;
     default:;
   };
+
+  if (query_thd->parallel_exec &&
+      (const_cast<THD *>(query_thd))->is_worker() == false) {
+    fmt->entry()->mod_type = MT_GATHER;
+  }
+
   return false;
 }
 
@@ -1413,6 +1420,10 @@ bool Explain_join::explain_qep_tab(size_t tabnum) {
   Semijoin_mat_exec *const sjm = tab->sj_mat_exec();
   const enum_parsing_context c = sjm ? CTX_MATERIALIZATION : CTX_QEP_TAB;
 
+  if (tab->gather) {
+    need_tmp_table = need_order = false;
+  }
+
   if (fmt->begin_context(c) || prepare_columns()) return true;
 
   fmt->entry()->query_block_id = table->pos_in_table_list->query_block_id();
@@ -1438,6 +1449,9 @@ bool Explain_join::explain_qep_tab(size_t tabnum) {
 
   if (fmt->end_context(c)) return true;
 
+  // explain parallel query execute plan
+  if (tab->gather) explain_pq_gather(tab);
+
   if (first_non_const) {
     if (end_simple_sort_context(ESC_GROUP_BY, CTX_SIMPLE_GROUP_BY)) return true;
     if (end_simple_sort_context(ESC_DISTINCT, CTX_SIMPLE_DISTINCT)) return true;
@@ -1449,6 +1463,46 @@ bool Explain_join::explain_qep_tab(size_t tabnum) {
 
   return false;
 }
+
+bool Explain_join::explain_pq_gather(QEP_TAB *tab) {
+  assert(tab->gather);
+
+  JOIN *gather_join = tab->gather->m_template_join;
+  Query_block *query_block = gather_join->query_block;
+  const Explain_format_flags *flags = &gather_join->explain_flags;
+  const bool need_tmp_table = flags->any(ESP_USING_TMPTABLE);
+  const bool need_order = flags->any(ESP_USING_FILESORT);
+  const bool distinct = flags->get(ESC_DISTINCT, ESP_EXISTS);
+  query_block->join->best_read = this->join->best_read;
+  bool ret = true;
+
+  gather_join->thd->lock_query_plan();
+  bool explain_other = explain_thd != query_thd;
+  Explain_join *ej = new (gather_join->thd->pq_mem_root)
+      Explain_join(explain_thd, explain_other ? gather_join->thd : explain_thd,
+                   query_block, need_tmp_table, need_order, distinct);
+  if (ej == nullptr) {
+    goto END;
+  }
+
+  if (!explain_other) {
+    ej->query_thd = gather_join->thd;
+  }
+
+  if (ej->fmt->begin_context(CTX_GATHER, nullptr)) {
+    goto END;
+  }
+
+  ret = ej->shallow_explain() || ej->explain_subqueries();
+  if (!ret) {
+    ret = ej->fmt->end_context(CTX_GATHER);
+  }
+
+END:
+  gather_join->thd->unlock_query_plan();
+  return ret;
+}
+
 
 /**
   Generates either usual table name or <derived#N>, and passes it to
@@ -2132,7 +2186,13 @@ static bool ExplainIterator(THD *ethd, const THD *query_thd,
   }
 
   {
-    std::string explain = PrintQueryPlan(ethd, query_thd, unit);
+    std::string explain;
+    if (ethd->parallel_exec && ethd->lex->is_explain_analyze) {
+      explain = ethd->pq_explain;
+    } else {
+      explain = PrintQueryPlan(ethd, query_thd, unit);
+    }
+
     if (explain.empty()) {
       my_error(ER_INTERNAL_ERROR, MYF(0), "Failed to print query plan");
       return true;
