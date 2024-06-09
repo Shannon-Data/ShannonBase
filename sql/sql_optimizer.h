@@ -354,8 +354,7 @@ class JOIN {
 
   Item_sum **sum_funcs{nullptr};
   /**
-     Describes a temporary table.
-     Each tmp table has its own tmp_table_param.
+     Describes a temporary table. Each tmp table has its own tmp_table_param.
      The one here is transiently used as a model by create_intermediate_table(),
      to build the tmp table's own tmp_table_param.
   */
@@ -480,13 +479,6 @@ class JOIN {
 
   // used for worker's make_tmp_tables_info
   PQ_optimized_var saved_optimized_vars;  
-  /**
-   * join with connect by start with
-   *
-   */
-  Item *start_with_cond;
-  Item *connect_by_cond;
-  Item *after_connect_by_cond;
 
   /**
     Any window definitions
@@ -595,6 +587,9 @@ class JOIN {
     has been overwritten by another slice (1-3).
   */
   uint current_ref_item_slice;
+
+  // used for Parallel Query
+  uint last_slice_before_pq;
 
   /**
     Used only if this query block is recursive. Contains count of

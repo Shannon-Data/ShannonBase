@@ -510,6 +510,7 @@ extern PSI_thread_key key_thread_compress_gtid_table;
 extern PSI_thread_key key_thread_parser_service;
 extern PSI_thread_key key_thread_handle_con_admin_sockets;
 extern PSI_cond_key key_monitor_info_run_cond;
+extern PSI_thread_key key_thread_parallel_query;
 
 extern PSI_file_key key_file_binlog;
 extern PSI_file_key key_file_binlog_index;

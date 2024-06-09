@@ -1241,6 +1241,20 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
                                             std::move(job.children[0]));
         break;
       }
+      case AccessPath::PARALLEL_SCAN: {
+        const auto &param = path->parallel_scan();
+        iterator = NewIterator<ParallelScanIterator>(
+            thd, mem_root, param.tab, param.table, nullptr, join, param.gather,
+            param.stable_sort, param.ref_length);
+        break;
+      }
+      case AccessPath::PQBLOCK_SCAN: {
+        const auto &param = path->pq_block_scan();
+        iterator = NewIterator<PQblockScanIterator>(
+            thd, mem_root, param.table, param.table->record[0],
+            &join->examined_rows, param.gather, param.need_rowid);
+        break;
+      }
     }
 
     if (iterator == nullptr) {

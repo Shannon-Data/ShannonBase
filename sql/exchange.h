@@ -37,7 +37,7 @@ class Exchange {
   };
 
   Exchange()
-      : mqueue_handles(nullptr),
+      : m_queue_handles(nullptr),
         m_thd(nullptr),
         m_table(nullptr),
         m_nqueues(0),
@@ -46,7 +46,7 @@ class Exchange {
         m_stab_output(false) {}
 
   Exchange(THD *thd, TABLE *table, uint32 workers, uint ref_length, bool stab_output = false)
-      : mqueue_handles(nullptr),
+      : m_queue_handles(nullptr),
         m_thd(thd),
         m_table(table),
         m_nqueues(workers),
@@ -65,13 +65,12 @@ class Exchange {
   inline THD *get_thd() { return m_thd ? m_thd : current_thd; }
 
   inline MQueue_handle *get_mq_handle(uint32 i) {
-    assert(mqueue_handles);
-    assert(i < m_nqueues);
-    return mqueue_handles[i];
+    assert(m_queue_handles && (i < m_nqueues));
+    return m_queue_handles[i];
   }
 
   inline void mqueue_mmove(int mq_next_readers, int number_workers) {
-    memmove(&mqueue_handles[mq_next_readers], &mqueue_handles[mq_next_readers + 1],
+    memmove(&m_queue_handles[mq_next_readers], &m_queue_handles[mq_next_readers + 1],
             sizeof(MQueue_handle *) * (number_workers - mq_next_readers));
   }
 
@@ -84,7 +83,7 @@ class Exchange {
   inline bool is_stable() { return m_stab_output; }
 
  public:
-  MQueue_handle **mqueue_handles;
+  MQueue_handle **m_queue_handles;
   THD *m_thd;
   TABLE *m_table;
 

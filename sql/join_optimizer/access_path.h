@@ -71,7 +71,7 @@ struct ORDER;
 struct POSITION;
 struct RelationalExpression;
 struct TABLE;
-
+class Gather_operator;
 /**
   A specification that two specific relational expressions
   (e.g., two tables, or a table and a join between two other tables)
@@ -266,6 +266,8 @@ struct AccessPath {
     // Access paths that modify tables.
     DELETE_ROWS,
     UPDATE_ROWS,
+    PARALLEL_SCAN,
+    PQBLOCK_SCAN
   } type;
 
   /// A general enum to describe the safety of a given operation.
@@ -849,6 +851,23 @@ struct AccessPath {
     return u.update_rows;
   }
 
+  auto &parallel_scan() {
+    assert(type == PARALLEL_SCAN);
+    return u.parallel_scan;
+  }
+  const auto &parallel_scan() const {
+    assert(type == PARALLEL_SCAN);
+    return u.parallel_scan;
+  }
+  auto &pq_block_scan() {
+    assert(type == PQBLOCK_SCAN);
+    return u.pq_block_scan;
+  }
+  const auto &pq_block_scan() const {
+    assert(type == PQBLOCK_SCAN);
+    return u.pq_block_scan;
+  }
+
   double num_output_rows() const { return m_num_output_rows; }
 
   void set_num_output_rows(double val) { m_num_output_rows = val; }
@@ -1239,6 +1258,18 @@ struct AccessPath {
       table_map tables_to_update;
       table_map immediate_tables;
     } update_rows;
+    struct {
+      QEP_TAB *tab;
+      TABLE *table;
+      Gather_operator *gather;
+      bool stable_sort; /** determine whether using stable sort */
+      uint ref_length;
+    } parallel_scan;
+    struct {
+      TABLE *table;
+      Gather_operator *gather;
+      bool need_rowid;
+    } pq_block_scan;
   } u;
 };
 static_assert(std::is_trivially_destructible<AccessPath>::value,
@@ -1874,6 +1905,35 @@ AccessPath *NewDeleteRowsAccessPath(THD *thd, AccessPath *child,
 AccessPath *NewUpdateRowsAccessPath(THD *thd, AccessPath *child,
                                     table_map delete_tables,
                                     table_map immediate_tables);
+
+/**
+  Modifies "path" and the paths below it so that they provide row IDs for
+  all tables. */
+inline AccessPath *NewParallelScanAccessPath(THD *thd, QEP_TAB *tab,
+                                             TABLE *table,
+                                             Gather_operator *gather,
+                                             bool stable_sort,
+                                             uint ref_length) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::PARALLEL_SCAN;
+  path->parallel_scan().tab = tab;
+  path->parallel_scan().table = table;
+  path->parallel_scan().gather = gather;
+  path->parallel_scan().stable_sort = stable_sort;
+  path->parallel_scan().ref_length = ref_length;
+  return path;
+}
+
+inline AccessPath *NewPQBlockScanAccessPath(THD *thd, TABLE *table,
+                                            Gather_operator *gather,
+                                            bool need_rowid) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::PQBLOCK_SCAN;
+  path->pq_block_scan().table = table;
+  path->pq_block_scan().gather = gather;
+  path->pq_block_scan().need_rowid = need_rowid;
+  return path;
+}
 
 /**
   Modifies "path" and the paths below it so that they provide row IDs for

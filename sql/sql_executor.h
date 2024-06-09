@@ -279,7 +279,12 @@ class QEP_TAB : public QEP_shared_owner {
         ref_item_slice(REF_SLICE_SAVED_BASE),
         m_keyread_optim(false),
         m_reversed_access(false),
-        lateral_derived_tables_depend_on_me(0) {}
+        lateral_derived_tables_depend_on_me(0),
+        do_parallel_scan(false),
+        has_pq_cond(false),
+        pos(0),
+        gather(nullptr),
+        pq_cond(nullptr) {}
 
   /// Initializes the object from a JOIN_TAB
   void init(JOIN_TAB *jt);
@@ -479,11 +484,12 @@ class QEP_TAB : public QEP_shared_owner {
 
   Mem_root_array<const AccessPath *> *invalidators = nullptr;
 
-  Gather_operator *gather;
-  bool do_parallel_scan;
+  //for parallel query processing.
+  bool do_parallel_scan {false};
   bool has_pq_cond{false};
-  Item *pq_cond;
-  uint pos;  // position in qep_tab array
+  uint pos {0};  // position in qep_tab array
+  Gather_operator *gather {nullptr};
+  Item *pq_cond {nullptr};
 
   QEP_TAB(const QEP_TAB &);             // not defined
   QEP_TAB &operator=(const QEP_TAB &);  // not defined
@@ -591,7 +597,8 @@ bool ExtractConditions(Item *condition,
 AccessPath *create_table_access_path(THD *thd, TABLE *table,
                                      AccessPath *range_scan,
                                      Table_ref *table_ref, POSITION *position,
-                                     bool count_examined_rows);
+                                     bool count_examined_rows,
+                                     bool *pq_replace_path = nullptr);
 
 /**
   Creates an iterator for the given table, then calls Init() on the resulting

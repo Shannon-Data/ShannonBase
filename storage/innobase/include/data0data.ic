@@ -539,6 +539,16 @@ static inline dtuple_t *dtuple_copy(
   return (new_tuple);
 }
 
+static inline dtuple_t *pq_dtuple_copy(
+    const dtuple_t *tuple, /*!< in: tuple to copy from */
+    mem_heap_t *heap)      /*!< in: memory heap
+                           where the tuple is created */
+{
+  dtuple_t *new_tuple = dtuple_copy(tuple, heap);
+  dtuple_set_n_fields_cmp(new_tuple, tuple->n_fields_cmp);
+  return (new_tuple);
+}
+
 /** The following function returns the sum of data lengths of a tuple. The space
  occupied by the field structs or the tuple struct is not counted. Neither
  is possible space in externally stored parts of the field.

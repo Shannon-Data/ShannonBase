@@ -667,13 +667,18 @@ Filesort::Filesort(THD *thd, Mem_root_array<TABLE *> tables_arg,
                    bool unwrap_rollup)
     : m_thd(thd),
       tables(std::move(tables_arg)),
+      m_order(order),
       keep_buffers(keep_buffers_arg),
       limit(limit_arg),
       sortorder(nullptr),
       using_pq(false),
       m_remove_duplicates(remove_duplicates),
       m_force_sort_rowids(force_sort_rowids),
-      m_sort_order_length(make_sortorder(order, unwrap_rollup)) {}
+      m_sort_order_length(0) {
+      if (order) {
+        m_sort_order_length = make_sortorder(order, unwrap_rollup);
+      }
+}
 
 uint Filesort::make_sortorder(ORDER *order, bool unwrap_rollup) {
   uint count;

@@ -168,20 +168,25 @@ JOIN::JOIN(THD *thd_arg, Query_block *select)
       // Inner tables may always be considered to be constant:
       const_table_map(INNER_TABLE_BIT),
       found_const_table_map(INNER_TABLE_BIT),
-      // Needed in case optimizer short-cuts, set properly in
-      // make_tmp_tables_info()
+      // in case optimizer short-cuts, set properly in make_tmp_tables_info()
       fields(&select->fields),
+      origin_tmp_table_param(thd_arg->mem_root),
       tmp_table_param(thd_arg->mem_root),
+      saved_tmp_table_param(nullptr),
       lock(thd->lock),
       // @todo Can this be substituted with select->is_implicitly_grouped()?
       implicit_grouping(select->is_implicitly_grouped()),
       select_distinct(select->is_distinct()),
-      keyuse_array(thd->mem_root),
+      need_tmp_pq(false),
+      need_tmp_pq_leader(false),
+      need_tmp_before_win(false),
+      keyuse_array(thd_arg->mem_root),
       order(select->order_list.first, ESC_ORDER_BY),
       group_list(select->group_list.first, ESC_GROUP_BY),
-      start_with_cond(reinterpret_cast<Item *>(1)),
-      connect_by_cond(reinterpret_cast<Item *>(1)),
-      after_connect_by_cond(reinterpret_cast<Item *>(1)),      
+      pq_tab_idx(-1),
+      pq_rebuilt_group(false),
+      pq_stable_sort(false),
+      pq_last_sort_idx(-1),
       m_windows(select->m_windows),
       /*
         Those four members are meaningless before JOIN::optimize(), so force a
@@ -192,15 +197,16 @@ JOIN::JOIN(THD *thd_arg, Query_block *select)
       having_for_explain(reinterpret_cast<Item *>(1)),
       tables_list(reinterpret_cast<Table_ref *>(1)),
       current_ref_item_slice(REF_SLICE_SAVED_BASE),
+      last_slice_before_pq(REF_SLICE_SAVED_BASE),
       with_json_agg(select->json_agg_func_used()) {
-  rollup_state = RollupState::NONE;
-  if (select->order_list.first) explain_flags.set(ESC_ORDER_BY, ESP_EXISTS);
-  if (select->group_list.first) explain_flags.set(ESC_GROUP_BY, ESP_EXISTS);
-  if (select->is_distinct()) explain_flags.set(ESC_DISTINCT, ESP_EXISTS);
-  if (m_windows.elements > 0) explain_flags.set(ESC_WINDOWING, ESP_EXISTS);
-  // Calculate the number of groups
-  for (ORDER *group = group_list.order; group; group = group->next)
-    send_group_parts++;
+        rollup_state = RollupState::NONE;
+        if (select->order_list.first) explain_flags.set(ESC_ORDER_BY, ESP_EXISTS);
+        if (select->group_list.first) explain_flags.set(ESC_GROUP_BY, ESP_EXISTS);
+        if (select->is_distinct()) explain_flags.set(ESC_DISTINCT, ESP_EXISTS);
+        if (m_windows.elements > 0) explain_flags.set(ESC_WINDOWING, ESP_EXISTS);
+        // Calculate the number of groups
+        for (ORDER *group = group_list.order; group; group = group->next)
+          send_group_parts++;
 }
 
 bool JOIN::alloc_ref_item_slice(THD *thd_arg, int sliceno) {
@@ -368,7 +374,6 @@ bool JOIN::pq_copy_from(JOIN *orig) {
   query_expression()->offset_limit_cnt = 0;
   pq_stable_sort = orig->pq_stable_sort;
   saved_optimized_vars = orig->saved_optimized_vars;
-  connect_by_cond = orig->connect_by_cond;
 
   return false;
 }
@@ -1163,6 +1168,18 @@ bool JOIN::optimize(bool finalize_access_paths) {
     if (finalize_table_conditions(thd)) return true;
   }
 
+  if (thd->m_suite_for_pq == PQ_ConditionStatus::ENABLED) {
+    // save temp table param for later PQ scan
+    saved_tmp_table_param = new (thd->mem_root) Temp_table_param();
+    if (!saved_tmp_table_param) return true;
+
+    saved_tmp_table_param->pq_copy(&tmp_table_param);
+
+    // saved optimized variables to saved_optimized_vars.
+    save_optimized_vars();
+    saved_optimized_vars.pq_no_jbuf_after = no_jbuf_after;
+  }
+
   if (make_join_readinfo(this, no_jbuf_after))
     return true; /* purecov: inspected */
 
@@ -1456,10 +1473,15 @@ bool JOIN::alloc_qep(uint n) {
 
   ASSERT_BEST_REF_IN_JOIN_ORDER(this);
 
-  qep_tab = new (thd->mem_root)
-      QEP_TAB[n + 1];        // The last one holds only the final op_type.
-  if (!qep_tab) return true; /* purecov: inspected */
-  for (uint i = 0; i < n; ++i) qep_tab[i].init(best_ref[i]);
+  qep_tab0 = new (thd->mem_root)
+      QEP_TAB[n + 1];         // The last one holds only the final op_type.
+  if (!qep_tab0) return true; /* purecov: inspected */
+
+  for (uint i = 0; i < n; ++i) {
+    qep_tab0[i].init(best_ref[i]);
+    qep_tab0[i].pos = i;
+  }
+  qep_tab = qep_tab0;
   return false;
 }
 
@@ -6360,9 +6382,20 @@ static ha_rows get_quick_record_count(THD *thd, JOIN_TAB *tab, ha_rows limit,
     keys_to_use.merge(tab->skip_scan_keys);
     MEM_ROOT temp_mem_root(key_memory_test_quick_select_exec,
                            thd->variables.range_alloc_block_size);
+
+    table_map const_tables, read_tables;
+    if (tab->join()) {
+      const_tables = tab->join()->found_const_table_map;
+      read_tables = tab->join()->is_executed()
+                        ? (tab->prefix_tables() & ~tab->added_tables())
+                        : const_tables;
+    } else {
+      const_tables = read_tables = 0;
+    }
+
     const int error = test_quick_select(
-        thd, thd->mem_root, &temp_mem_root, keys_to_use, 0,
-        0,  // empty table_map
+        thd, thd->mem_root, &temp_mem_root, keys_to_use, const_tables,
+        read_tables,
         limit,
         false,  // don't force quick range
         ORDER_NOT_RELEVANT, tab->table(), tab->skip_records_in_range(),

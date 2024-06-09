@@ -1196,6 +1196,11 @@ class Item_avg_field : public Item_sum_num_field {
   enum Type type() const override { return FIELD_AVG_ITEM; }
   double val_real() override;
   my_decimal *val_decimal(my_decimal *) override;
+  size_t pq_extra_len(bool) override {
+    return ((pq_avg_type == ParallelAvgType::PQ_WORKER ||
+            pq_avg_type == ParallelAvgType::PQ_LEADER) ? sizeof(longlong) : 0);
+  }
+
   String *val_str(String *) override;
   bool resolve_type(THD *) override { return false; }
   const char *func_name() const override {

@@ -134,7 +134,8 @@ class context;
 }
 
 // Table modification type
-enum enum_mod_type { MT_NONE, MT_INSERT, MT_UPDATE, MT_DELETE, MT_REPLACE };
+enum enum_mod_type { MT_NONE, MT_INSERT, MT_UPDATE, MT_DELETE, MT_REPLACE,
+                     MT_GATHER};
 
 /**
   Helper class for table property buffering

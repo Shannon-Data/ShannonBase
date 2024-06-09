@@ -29,54 +29,42 @@
 #include "table.h"
 
 /**
- * alloc space for mqueue_handles
+ * alloc space for m_queue_handles
  *
  * @return false for success, and otherwise true.
  */
+#define TEST_AND_RET(cond) do { if (cond) goto err;} while (0)
+
 bool Exchange::init() {
   uint i = 0;
-  MQueue **mqueues = nullptr;
+  MQueue **queues = nullptr;
   /** note that: all workers share one receiver. */
   m_receiver = new (m_thd->pq_mem_root) MQ_event(m_thd);
-  if (m_receiver == nullptr) {
-    goto err;
-  }
+  TEST_AND_RET(!m_receiver);
 
-  mqueue_handles = new (m_thd->pq_mem_root) MQueue_handle *[m_nqueues] { nullptr };
-  if (mqueue_handles == nullptr) {
-    goto err;
-  }
+  m_queue_handles = new (m_thd->pq_mem_root) MQueue_handle *[m_nqueues] { nullptr };
+  TEST_AND_RET(!m_queue_handles);
 
-  mqueues = new (m_thd->pq_mem_root) MQueue *[m_nqueues] { nullptr };
-  if (mqueues == nullptr) {
-    goto err;
-  }
+  queues = new (m_thd->pq_mem_root) MQueue *[m_nqueues] { nullptr };
+  TEST_AND_RET(!queues);
+
 
   for (i = 0; i < m_nqueues; i++) {
     char *ring_buffer = new (m_thd->pq_mem_root) char[RING_SIZE];
-    if (ring_buffer == nullptr) {
-      goto err;
-    }
+    TEST_AND_RET(!ring_buffer);
 
     MQ_event *sender = new (m_thd->pq_mem_root) MQ_event();
-    if (sender == nullptr) {
-      goto err;
-    }
+    TEST_AND_RET(!sender);
 
-    mqueues[i] = new (m_thd->pq_mem_root) MQueue(sender, m_receiver, ring_buffer, RING_SIZE);
-    if (mqueues[i] == nullptr || DBUG_EVALUATE_IF("pq_mq_error1", true, false)) {
-      goto err;
-    }
+    queues[i] = new (m_thd->pq_mem_root) MQueue(sender, m_receiver, ring_buffer, RING_SIZE);
+    TEST_AND_RET(!queues[i] || DBUG_EVALUATE_IF("pq_mq_error1", true, false));
   }
 
   for (i = 0; i < m_nqueues; i++) {
-    mqueue_handles[i] = new (m_thd->pq_mem_root) MQueue_handle(mqueues[i], MQ_BUFFER_SIZE);
-    if (mqueue_handles[i] == nullptr || mqueue_handles[i]->init_mqueue_handle(m_thd) ||
-        DBUG_EVALUATE_IF("pq_mq_error2", true, false)) {
-      goto err;
-    }
+    m_queue_handles[i] = new (m_thd->pq_mem_root) MQueue_handle(queues[i], MQ_BUFFER_SIZE);
+    TEST_AND_RET(!m_queue_handles[i] || m_queue_handles[i]->init_mqueue_handle(m_thd) ||
+                  DBUG_EVALUATE_IF("pq_mq_error2", true, false));
   }
-
   return false;
 
 err:
@@ -86,10 +74,10 @@ err:
 
 void Exchange::cleanup() {
   destroy(m_receiver);
-  if (mqueue_handles) {
+  if (m_queue_handles) {
     for (uint i = 0; i < m_nqueues; i++) {
-      if (mqueue_handles[i]) {
-        mqueue_handles[i]->cleanup();
+      if (m_queue_handles[i]) {
+        m_queue_handles[i]->cleanup();
       }
     }
   }
