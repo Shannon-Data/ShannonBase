@@ -624,7 +624,8 @@ bool table_base_ctx::format_body(Opt_trace_context *json,
                                  Opt_trace_object *obj) {
   StringBuffer<64> buff;
 
-  if (mod_type != MT_NONE) obj->add(mod_type_name[mod_type], true);
+  if (mod_type != MT_NONE && mod_type != MT_GATHER)
+   obj->add(mod_type_name[mod_type], true);
 
   if (!col_id.is_empty() && !is_hidden_id) obj->add(K_SELECT_ID, col_id.value);
 
@@ -1305,6 +1306,9 @@ bool join_ctx::format_body(Opt_trace_context *json, Opt_trace_object *obj) {
       const Opt_trace_object insert_from(json, "insert_from");
       if (format_body_inner(json, obj)) return true; /* purecov: inspected */
     }
+  } else if (join_tabs.elements &&
+             (join_tabs.head()->get_mod_type() == MT_GATHER)) {
+    join_tabs.head()->format(json);
   } else if (format_body_inner(json, obj))
     return true; /* purecov: inspected */
   return format_query_expression(json);

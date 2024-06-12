@@ -66,6 +66,7 @@ enum enum_parsing_context {
   CTX_INSERT_VALUES,  ///< INSERT ... VALUES
   CTX_INSERT_UPDATE,  ///< INSERT ... ON DUPLICATE KEY UPDATE ...
   CTX_JOIN,
+  CTX_GATHER,
   CTX_QEP_TAB,
   CTX_MATERIALIZATION,
   CTX_DUPLICATES_WEEDOUT,
@@ -254,7 +255,11 @@ class Parse_tree_node_tmpl {
                               const std::nothrow_t &) noexcept {}
 
  protected:
-  Parse_tree_node_tmpl() = delete;
+  Parse_tree_node_tmpl() {
+#ifndef NDEBUG
+    contextualized = false;
+#endif  // NDEBUG
+  }
 
   explicit Parse_tree_node_tmpl(const POS &pos) : m_pos(pos) {}
 

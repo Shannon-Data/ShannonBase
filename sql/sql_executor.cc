@@ -249,10 +249,14 @@ bool JOIN::create_intermediate_table(
   if (!group_list.empty() && simple_group) {
     DBUG_PRINT("info", ("Sorting for group"));
 
-    if (m_ordered_index_usage != ORDERED_INDEX_GROUP_BY &&
-        add_sorting_to_table(const_tables, &group_list,
+    if (m_ordered_index_usage != ORDERED_INDEX_USAGE::ORDERED_INDEX_GROUP_BY) {
+        if (add_sorting_to_table(const_tables, &group_list,
                              /*sort_before_group=*/true))
       goto err;
+
+      pq_last_sort_idx = const_tables;
+      pq_rebuilt_group = true;
+    }
 
     if (alloc_group_fields(this, group_list.order)) goto err;
     if (make_sum_func_list(*fields, true)) goto err;
@@ -280,10 +284,13 @@ bool JOIN::create_intermediate_table(
         simple_order && rollup_state == RollupState::NONE && !m_windows_sort) {
       DBUG_PRINT("info", ("Sorting for order"));
 
-      if (m_ordered_index_usage != ORDERED_INDEX_ORDER_BY &&
-          add_sorting_to_table(const_tables, &order,
+      if (m_ordered_index_usage != ORDERED_INDEX_USAGE::ORDERED_INDEX_ORDER_BY){
+        if (add_sorting_to_table(const_tables, &order,
                                /*sort_before_group=*/false))
-        goto err;
+          goto err;
+
+        pq_last_sort_idx = const_tables;
+      }
       order.clean();
     }
   }
@@ -357,8 +364,9 @@ void JOIN::optimize_distinct() {
   /* Optimize "select distinct b from t1 order by key_part_1 limit #" */
   if (!order.empty() && skip_sort_order) {
     /* Should already have been optimized away */
-    assert(m_ordered_index_usage == ORDERED_INDEX_ORDER_BY);
-    if (m_ordered_index_usage == ORDERED_INDEX_ORDER_BY) {
+    assert(m_ordered_index_usage == 
+           ORDERED_INDEX_USAGE::ORDERED_INDEX_ORDER_BY);
+    if (m_ordered_index_usage == ORDERED_INDEX_USAGE::ORDERED_INDEX_ORDER_BY) {
       order.clean();
     }
   }
@@ -2983,38 +2991,46 @@ AccessPath *JOIN::create_root_access_path_for_join() {
     path->cost = 0.0;
     path->init_cost = 0.0;
   } else if (const_tables == primary_tables) {
-    // Only const tables, so add a fake single row to join in all
-    // the const tables (only inner-joined tables are promoted to
-    // const tables in the optimizer).
-    path = NewFakeSingleRowAccessPath(thd, /*count_examined_rows=*/true);
-    qep_tab_map conditions_depend_on_outer_tables = 0;
-    if (where_cond != nullptr) {
-      path = PossiblyAttachFilter(path, vector<Item *>{where_cond}, thd,
-                                  &conditions_depend_on_outer_tables);
-    }
+    if (need_tmp_pq_leader) {
+      assert(thd->parallel_exec && !thd->is_worker());
+      QEP_TAB *tab = &qep_tab[const_tables];
+      path = NewParallelScanAccessPath(thd, tab, tab->table(), tab->gather,
+                                       pq_stable_sort,
+                                       tab->old_table()->file->ref_length);
+    } else {
+      // Only const tables, so add a fake single row to join in all
+      // the const tables (only inner-joined tables are promoted to
+      // const tables in the optimizer).
+      path = NewFakeSingleRowAccessPath(thd, /*count_examined_rows=*/true);
+      qep_tab_map conditions_depend_on_outer_tables = 0;
+      if (where_cond != nullptr) {
+        path = PossiblyAttachFilter(path, vector<Item *>{where_cond}, thd,
+                                    &conditions_depend_on_outer_tables);
+      }
 
-    // Surprisingly enough, we can specify that the const tables are
-    // to be dumped immediately to a temporary table. If we don't do this,
-    // we risk that there are fields that are not copied correctly
-    // (tmp_table_param contains copy_funcs we'd otherwise miss).
-    if (const_tables > 0) {
-      QEP_TAB *qep_tab = &this->qep_tab[const_tables];
-      if (qep_tab->op_type == QEP_TAB::OT_MATERIALIZE) {
-        qep_tab->table()->alias = "<temporary>";
-        AccessPath *table_path = create_table_access_path(
-            thd, qep_tab->table(), qep_tab->range_scan(), qep_tab->table_ref,
-            qep_tab->position(),
-            /*count_examined_rows=*/false);
-        path = NewMaterializeAccessPath(
-            thd,
-            SingleMaterializeQueryBlock(
-                thd, path, query_block->select_number, this,
-                /*copy_items=*/true, qep_tab->tmp_table_param),
-            qep_tab->invalidators, qep_tab->table(), table_path,
-            /*cte=*/nullptr, query_expression(), qep_tab->ref_item_slice,
-            /*rematerialize=*/true, qep_tab->tmp_table_param->end_write_records,
-            /*reject_multiple_rows=*/false);
-        EstimateMaterializeCost(thd, path);
+      // Surprisingly enough, we can specify that the const tables are
+      // to be dumped immediately to a temporary table. If we don't do this,
+      // we risk that there are fields that are not copied correctly
+      // (tmp_table_param contains copy_funcs we'd otherwise miss).
+      if (const_tables > 0) {
+        QEP_TAB *qep_tab = &this->qep_tab[const_tables];
+        if (qep_tab->op_type == QEP_TAB::OT_MATERIALIZE) {
+          qep_tab->table()->alias = "<temporary>";
+          AccessPath *table_path = create_table_access_path(
+              thd, qep_tab->table(), qep_tab->range_scan(), qep_tab->table_ref,
+              qep_tab->position(),
+              /*count_examined_rows=*/false);
+          path = NewMaterializeAccessPath(
+              thd,
+              SingleMaterializeQueryBlock(
+                  thd, path, query_block->select_number, this,
+                  /*copy_items=*/true, qep_tab->tmp_table_param),
+              qep_tab->invalidators, qep_tab->table(), table_path,
+              /*cte=*/nullptr, query_expression(), qep_tab->ref_item_slice,
+              /*rematerialize=*/true, qep_tab->tmp_table_param->end_write_records,
+              /*reject_multiple_rows=*/false);
+          EstimateMaterializeCost(thd, path);
+        }
       }
     }
   } else {
@@ -3687,7 +3703,8 @@ bool QEP_TAB::use_order() const {
     if ORDER or GROUP BY use ordered index.
   */
   if ((uint)idx() == join()->const_tables &&
-      join()->m_ordered_index_usage != JOIN::ORDERED_INDEX_VOID)
+      join()->m_ordered_index_usage !=
+       JOIN::ORDERED_INDEX_USAGE::ORDERED_INDEX_VOID)
     return true;
 
   /*
@@ -3706,6 +3723,7 @@ AccessPath *QEP_TAB::access_path() {
   assert(!m_reversed_access || type() == JT_REF || type() == JT_INDEX_SCAN);
   Index_lookup *used_ref = nullptr;
   AccessPath *path = nullptr;
+  bool pq_replace_accesspath = false;
 
   switch (type()) {
     case JT_REF:
@@ -3746,6 +3764,7 @@ AccessPath *QEP_TAB::access_path() {
       path = NewIndexScanAccessPath(join()->thd, table(), index(), use_order(),
                                     m_reversed_access,
                                     /*count_examined_rows=*/true);
+      pq_replace_accesspath = true;
       break;
     case JT_ALL:
     case JT_RANGE:
@@ -3756,7 +3775,8 @@ AccessPath *QEP_TAB::access_path() {
       } else {
         path = create_table_access_path(join()->thd, table(), range_scan(),
                                         table_ref, position(),
-                                        /*count_examined_rows=*/true);
+                                        /*count_examined_rows=*/true,
+                                        &pq_replace_accesspath);
       }
       break;
     default:
@@ -3767,6 +3787,12 @@ AccessPath *QEP_TAB::access_path() {
   if (position() != nullptr) {
     SetCostOnTableAccessPath(*join()->thd->cost_model(), position(),
                              /*is_after_filter=*/false, path);
+  }
+
+  /** note that: for gather operator, we have no need to generate iterator */
+  if (current_thd->is_worker() && pq_replace_accesspath && do_parallel_scan) {
+    path = NewPQBlockScanAccessPath(current_thd, table(), gather,
+                                    join()->pq_stable_sort);
   }
 
   /*
@@ -4692,16 +4718,24 @@ bool MaterializeIsDoingDeduplication(TABLE *table) {
 AccessPath *create_table_access_path(THD *thd, TABLE *table,
                                      AccessPath *range_scan,
                                      Table_ref *table_ref, POSITION *position,
-                                     bool count_examined_rows) {
+                                     bool count_examined_rows,
+                                     bool *pq_replace_path) {
   AccessPath *path;
+  bool could_replace_path = false;
+
   if (range_scan != nullptr) {
     range_scan->count_examined_rows = count_examined_rows;
     path = range_scan;
+    could_replace_path = true;
   } else if (table_ref != nullptr && table_ref->is_recursive_reference()) {
     path = NewFollowTailAccessPath(thd, table, count_examined_rows);
   } else {
     path = NewTableScanAccessPath(thd, table, count_examined_rows);
+    could_replace_path = true;
   }
+
+  if (pq_replace_path) *pq_replace_path = could_replace_path;
+
   if (position != nullptr) {
     SetCostOnTableAccessPath(*thd->cost_model(), position,
                              /*is_after_filter=*/false, path);

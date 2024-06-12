@@ -2,6 +2,7 @@
 #define ITEM_INCLUDED
 
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1107,6 +1108,32 @@ class Item : public Parse_tree_node {
   */
   explicit Item(const POS &);
 
+  virtual Item *pq_clone(THD *thd, Query_block *select);
+
+  virtual bool pq_copy_from(THD *thd, Query_block *select, Item *item);
+
+  virtual size_t pq_extra_len(bool) { return 0; }
+
+  /**
+    During resolve/optimize phase, a item maybe subsituted by a new one, for
+    example convert_constant_item()/resolve_const_item(), this point to old item
+    for new item.
+  */
+  Item *origin_item{nullptr};
+
+  /**
+    During create_tmp_table, const_item can be skipped when hidden_field_count
+    <= 0; and thus, these skipped items will not create result_field in tmp
+    table. Here, we should mark it when sending data to MQ.
+  */
+  bool skip_create_tmp_table{false};
+
+  /**
+    During itemize (or new item()), some item are added to THD::m_item_list for
+    ease of releasing the space allocated at runtime.
+  */
+  bool pq_alloc_item{false};
+
 #ifdef EXTRA_DEBUG
   ~Item() override { item_name.set(0); }
 #else
@@ -1212,7 +1239,8 @@ class Item : public Parse_tree_node {
   */
   virtual void notify_removal() {}
   virtual void make_field(Send_field *field);
-  virtual Field *make_string_field(TABLE *table) const;
+  virtual Field *make_string_field(TABLE *table,
+                                   MEM_ROOT *root = nullptr) const;
   virtual bool fix_fields(THD *, Item **);
   /**
     Fix after tables have been moved from one query_block level to the parent
@@ -3065,7 +3093,9 @@ class Item : public Parse_tree_node {
   // used in row subselects to get value of elements
   virtual void bring_value() {}
 
-  Field *tmp_table_field_from_field_type(TABLE *table, bool fixed_length) const;
+  Field *tmp_table_field_from_field_type(TABLE *table, bool fixed_length,
+                                         MEM_ROOT *root = nullptr) const;  
+
   virtual Item_field *field_for_view_update() { return nullptr; }
   /**
     Informs an item that it is wrapped in a truth test, in case it wants to
@@ -3354,6 +3384,18 @@ class Item : public Parse_tree_node {
   /// Set the property: this item is a call to GROUPING
   void set_grouping_func() { m_accum_properties |= PROP_GROUPING_FUNC; }
 
+  void set_connect_by_func() { m_accum_properties |= PROP_CONNECT_BY_FUNC; }
+
+  bool has_connect_by_func() const {
+    return m_accum_properties & PROP_CONNECT_BY_FUNC;
+  }
+
+  void set_connect_by_value() { m_accum_properties |= PROP_CONNECT_BY_VALUE; }
+
+  bool has_connect_by_value() const {
+    return m_accum_properties & PROP_CONNECT_BY_VALUE;
+  }
+
   /// Whether this Item was created by the IN->EXISTS subquery transformation
   virtual bool created_by_in2exists() const { return false; }
 
@@ -3598,6 +3640,18 @@ class Item : public Parse_tree_node {
   static constexpr uint8 PROP_GROUPING_FUNC = 0x20;
   uint8 m_accum_properties;
 
+  /*
+    Set if the item or one or more of the underlying items is a connect by
+    function.
+  */
+  static constexpr uint8 PROP_CONNECT_BY_FUNC = 0x0080;
+
+  /**
+    Set if the item or one or more of the underlying items is a connect by
+    function. syc_connect_by_path,isleaf,iscycle
+  */
+  static constexpr uint32 PROP_CONNECT_BY_VALUE = 0x0400;
+
  public:
   /**
     Check if this expression can be used for partial update of a given
@@ -3707,6 +3761,7 @@ class Item_basic_constant : public Item {
   }
   bool basic_const_item() const override { return true; }
   void set_str_value(String *str) { str_value = *str; }
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 };
 
 /*****************************************************************************
@@ -3919,6 +3974,9 @@ class Item_name_const final : public Item {
     return false;
   }
 
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
+
  protected:
   type_conversion_status save_in_field_inner(Field *field,
                                              bool no_conversions) override {
@@ -4056,6 +4114,7 @@ class Item_ident : public Item {
           cached_table should be replaced by table_ref ASAP.
   */
   Table_ref *cached_table;
+  uint m_tableno{0};
   Query_block *depended_from;
 
   Item_ident(Name_resolution_context *context_arg, const char *db_name_arg,
@@ -4201,6 +4260,8 @@ class Item_ident : public Item {
                             bool any_privileges);
   bool is_strong_side_column_not_in_fd(uchar *arg) override;
   bool is_column_not_in_fd(uchar *arg) override;
+
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 };
 
 class Item_ident_for_show final : public Item {
@@ -4265,10 +4326,9 @@ class Item_field : public Item_ident {
   /// Source field
   Field *field;
 
- private:
   /// Result field
   Field *result_field{nullptr};
-
+ private:
   // save_in_field() and save_org_in_field() are often called repeatedly
   // with the same destination field (although the destination for the
   // two are distinct, thus two distinct caches). We detect this case by
@@ -4538,6 +4598,9 @@ class Item_field : public Item_ident {
   virtual bool is_asterisk() const { return false; }
   /// See \c m_protected_by_any_value
   bool protected_by_any_value() const { return m_protected_by_any_value; }
+
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 };
 
 /**
@@ -4643,6 +4706,7 @@ class Item_null : public Item_basic_constant {
 
   Item *safe_charset_converter(THD *thd, const CHARSET_INFO *tocs) override;
   bool check_partition_func_processor(uchar *) override { return false; }
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 /// Dynamic parameters used as placeholders ('?') inside prepared statements
@@ -5094,6 +5158,9 @@ class Item_int : public Item_num {
   bool eq(const Item *, bool) const override;
   bool check_partition_func_processor(uchar *) override { return false; }
   bool check_function_as_value_generator(uchar *) override { return false; }
+
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 };
 
 /**
@@ -5183,6 +5250,7 @@ class Item_uint : public Item_int {
              enum_query_type query_type) const override;
   Item_num *neg() override;
   uint decimal_precision() const override { return max_length; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /* decimal (fixed point) constant */
@@ -5230,6 +5298,7 @@ class Item_decimal : public Item_num {
   bool eq(const Item *, bool binary_cmp) const override;
   void set_decimal_value(const my_decimal *value_par);
   bool check_partition_func_processor(uchar *) override { return false; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_float : public Item_num {
@@ -5313,6 +5382,7 @@ class Item_float : public Item_num {
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
   bool eq(const Item *, bool binary_cmp) const override;
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class Item_func_pi : public Item_float {
@@ -5517,6 +5587,7 @@ class Item_string : public Item_basic_constant {
   }
 
   void mark_result_as_const() { str_value.mark_as_const(); }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 
  private:
   bool m_cs_specified;
@@ -5557,6 +5628,7 @@ class Item_static_string_func : public Item_string {
     func_arg->banned_function_name = func_name.ptr();
     return true;
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /* for show tables */
@@ -5662,6 +5734,7 @@ class Item_hex_string : public Item_basic_constant {
   bool check_partition_func_processor(uchar *) override { return false; }
   static LEX_CSTRING make_hex_str(const char *str, size_t str_length);
   uint decimal_precision() const override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 
  private:
   void hex_string_init(const char *str, uint str_length);
@@ -5679,6 +5752,8 @@ class Item_bin_string final : public Item_hex_string {
   }
 
   static LEX_CSTRING make_bin_str(const char *str, size_t str_length);
+
+  Item *pq_clone(THD *thd, Query_block *select) override;
 
  private:
   void bin_string_init(const char *str, size_t str_length);
@@ -5790,15 +5865,22 @@ class Item_ref : public Item_ident {
   // underlying field.
   bool pusheddown_depended_from{false};
 
+  enum class PQ_copy_type {
+    WITH_CONTEXT = 0,
+    WITHOUT_CONTEXT,
+    WITH_CONTEXT_REF,
+    WITH_REF_ONLY
+  };
+
+  PQ_copy_type copy_type;
+
+  /// Indirect pointer to the referenced item.
+  Item **m_ref_item{nullptr};
  private:
   /// True if referenced item has been unlinked, used during item tree removal
   bool m_unlinked{false};
 
   Field *result_field{nullptr}; /* Save result here */
-
- protected:
-  /// Indirect pointer to the referenced item.
-  Item **m_ref_item{nullptr};
 
  public:
   Item_ref(Name_resolution_context *context_arg, const char *db_name_arg,
@@ -5831,8 +5913,8 @@ class Item_ref : public Item_ident {
   /* Constructor need to process subselect with temporary tables (see Item) */
   Item_ref(THD *thd, Item_ref *item)
       : Item_ident(thd, item),
-        result_field(item->result_field),
-        m_ref_item(item->m_ref_item) {}
+      m_ref_item(item->m_ref_item),
+      result_field(item->result_field) {}
 
   /// @returns the item referenced by this object
   Item *ref_item() const { return *m_ref_item; }
@@ -6017,6 +6099,8 @@ class Item_ref : public Item_ident {
     return ref_item()->check_column_in_group_by(arg);
   }
   bool collect_item_field_or_ref_processor(uchar *arg) override;
+
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -6119,6 +6203,7 @@ class Item_view_ref final : public Item_ref {
   Item *replace_item_view_ref(uchar *arg) override;
   Item *replace_view_refs_with_clone(uchar *arg) override;
   Table_ref *get_first_inner_table() const { return first_inner_table; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 
  protected:
   type_conversion_status save_in_field_inner(Field *field,
@@ -6266,6 +6351,7 @@ class Item_int_with_ref : public Item_int {
   Item *clone_item() const override;
   Item *real_item() override { return ref; }
   const Item *real_item() const override { return ref; }
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 /*
@@ -6315,6 +6401,7 @@ class Item_datetime_with_ref final : public Item_temporal_with_ref {
     assert(0);
     return val_int();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /*
@@ -6340,6 +6427,7 @@ class Item_time_with_ref final : public Item_temporal_with_ref {
     assert(0);
     return val_int();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -6527,6 +6615,7 @@ class Item_default_value final : public Item_field {
 
   Item *transform(Item_transformer transformer, uchar *args) override;
   Item *argument() const { return arg; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 
  private:
   /// The argument for this function
@@ -6858,6 +6947,7 @@ class Item_cache : public Item_basic_constant {
   }
   Item *get_example() const { return example; }
   Item **get_example_ptr() { return &example; }
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;  
 };
 
 class Item_cache_int : public Item_cache {
@@ -6886,6 +6976,7 @@ class Item_cache_int : public Item_cache {
   bool get_time(MYSQL_TIME *ltime) override { return get_time_from_int(ltime); }
   Item_result result_type() const override { return INT_RESULT; }
   bool cache_value() override;
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 /**
@@ -6928,6 +7019,7 @@ class Item_cache_real final : public Item_cache {
   Item_result result_type() const override { return REAL_RESULT; }
   bool cache_value() override;
   void store_value(Item *expr, double value);
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_cache_decimal final : public Item_cache {
@@ -6950,6 +7042,7 @@ class Item_cache_decimal final : public Item_cache {
   Item_result result_type() const override { return DECIMAL_RESULT; }
   bool cache_value() override;
   void store_value(Item *expr, my_decimal *d);
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class Item_cache_str final : public Item_cache {
@@ -6984,6 +7077,7 @@ class Item_cache_str final : public Item_cache {
   const CHARSET_INFO *charset() const { return value->charset(); }
   bool cache_value() override;
   void store_value(Item *expr, String &s);
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class Item_cache_row final : public Item_cache {
@@ -7040,6 +7134,7 @@ class Item_cache_row final : public Item_cache {
   void bring_value() override;
   void cleanup() override { Item_cache::cleanup(); }
   bool cache_value() override;
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class Item_cache_datetime : public Item_cache {
@@ -7079,6 +7174,7 @@ class Item_cache_datetime : public Item_cache {
     Item_cache::clear();
     str_value_cached = false;
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 /// An item cache for values of type JSON.
@@ -7247,6 +7343,40 @@ class Item_json final : public Item_basic_constant {
   bool get_date(MYSQL_TIME *ltime, my_time_flags_t) override;
   bool get_time(MYSQL_TIME *ltime) override;
   Item *clone_item() const override;
+};
+
+/*
+ need a special class to adjust printing : references to aggregate functions
+ must not be printed as refs because the aggregate functions that are added to
+ the front of select list are not printed as well.
+*/
+class Item_aggregate_ref : public Item_ref {
+ public:
+  Item_aggregate_ref(Name_resolution_context *context_arg, Item **item,
+                     const char *db_name_arg, const char *table_name_arg,
+                     const char *field_name_arg, Query_block *depended_from_arg)
+      : Item_ref(context_arg, item, db_name_arg, table_name_arg,
+                 field_name_arg) {
+    depended_from = depended_from_arg;
+  }
+
+  void print(const THD *thd, String *str,
+             enum_query_type query_type) const override {
+    ref_item()->print(thd, str, query_type);
+  }
+  Ref_Type ref_type() const override { return AGGREGATE_REF; }
+
+  /**
+    Walker processor used by Query_block::transform_grouped_to_derived to
+    replace an aggregate's reference to one in the new derived table's (hidden)
+    select list.
+
+    @param  arg  An info object of type Item::Aggregate_ref_update
+    @returns false
+  */
+  bool update_aggr_refs(uchar *arg) override;
+
+  Item *pq_clone(class THD *thd, class Query_block *select) override;
 };
 
 extern Cached_item *new_Cached_item(THD *thd, Item *item);

@@ -392,6 +392,7 @@ SET(SQL_SHARED_SOURCES
   debug_sync.cc
   default_values.cc
   derror.cc
+  exchange.cc
   error_handler.cc
   field.cc
   field_conv.cc
@@ -569,6 +570,8 @@ SET(SQL_SHARED_SOURCES
   sql_error.cc
   sql_exception_handler.cc
   sql_executor.cc
+  sql_exchange_nosort.cc
+  sql_exchange_sort.cc
   sql_get_diagnostics.cc
   sql_gipk.cc
   sql_handler.cc
@@ -582,7 +585,9 @@ SET(SQL_SHARED_SOURCES
   sql_load.cc
   sql_locale.cc
   sql_manager.cc
+  sql_message_queue.cc
   sql_optimizer.cc
+  sql_parallel.cc
   sql_parse.cc
   sql_partition.cc
   sql_partition_admin.cc
@@ -592,6 +597,7 @@ SET(SQL_SHARED_SOURCES
   sql_prepare.cc
   sql_profile.cc
   sql_pq_condition.cc
+  sql_pq_clone.cc
   sql_query_rewrite.cc
   sql_reload.cc
   sql_rename.cc

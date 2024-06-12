@@ -185,6 +185,9 @@ extern Rpl_acf_configuration_handler *rpl_acf_configuration_handler;
 extern Source_IO_monitor *rpl_source_io_monitor;
 extern int32_t opt_regexp_time_limit;
 extern int32_t opt_regexp_stack_limit;
+extern uint parallel_threads_running;
+extern uint parallel_threads_refused;
+extern uint parallel_memory_refused;
 #ifdef _WIN32
 extern bool opt_no_monitor;
 #endif  // _WIN32
@@ -507,6 +510,7 @@ extern PSI_thread_key key_thread_compress_gtid_table;
 extern PSI_thread_key key_thread_parser_service;
 extern PSI_thread_key key_thread_handle_con_admin_sockets;
 extern PSI_cond_key key_monitor_info_run_cond;
+extern PSI_thread_key key_thread_parallel_query;
 
 extern PSI_file_key key_file_binlog;
 extern PSI_file_key key_file_binlog_index;

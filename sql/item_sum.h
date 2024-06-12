@@ -777,6 +777,12 @@ class Item_sum : public Item_func {
   /// Non-const version
   virtual Item_sum *unwrap_sum() { return this; }
 
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
+
+  virtual Item_sum *pq_rebuild_sum_func(THD *thd, Query_block *select,
+                                        Item *item);
+  virtual uint32 pq_extra_size() { return 0; }
+
  protected:
   /*
     Raise an error (ER_NOT_SUPPORTED_YET) with the detail that this
@@ -972,6 +978,7 @@ class Item_sum_num : public Item_sum {
     return get_time_from_numeric(ltime); /* Decimal or real */
   }
   void reset_field() override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;  
 };
 
 class Item_sum_int : public Item_sum_num {
@@ -1054,6 +1061,9 @@ class Item_sum_sum : public Item_sum_num {
   void update_field() override;
   const char *func_name() const override { return "sum"; }
   Item *copy_or_same(THD *thd) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  Item_sum *pq_rebuild_sum_func(THD *thd, Query_block *select,
+                                Item *item) override;  
 };
 
 class Item_sum_count : public Item_sum_int {
@@ -1066,8 +1076,9 @@ class Item_sum_count : public Item_sum_int {
   void cleanup() override;
 
  public:
-  Item_sum_count(const POS &pos, Item *item_par, PT_window *w)
-      : Item_sum_int(pos, item_par, w), count(0) {}
+  Item_sum_count(const POS &pos, Item *item_par, PT_window *w,
+                 bool fake = false)
+      : Item_sum_int(pos, item_par, w), count(0), is_fake(fake) {}
   Item_sum_count(Item_int *number) : Item_sum_int(number), count(0) {}
   /**
     Constructs an instance for COUNT(DISTINCT)
@@ -1104,6 +1115,11 @@ class Item_sum_count : public Item_sum_int {
   void update_field() override;
   const char *func_name() const override { return "count"; }
   Item *copy_or_same(THD *thd) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  Item_sum *pq_rebuild_sum_func(THD *thd, Query_block *select,
+                                Item *item) override;
+private:
+  bool is_fake{false};  // mark Item_sum_count                                
 };
 
 /* Item to get the value of a stored sum function */
@@ -1147,6 +1163,8 @@ class Item_sum_hybrid_field : public Item_result_field {
   }
 };
 
+enum class ParallelAvgType { PQ_LEADER, PQ_WORKER, PQ_REBUILD, PQ_INVALID };
+
 /**
   Common abstract class for:
     Item_avg_field
@@ -1171,10 +1189,18 @@ class Item_avg_field : public Item_sum_num_field {
  public:
   uint f_precision, f_scale, dec_bin_size;
   uint prec_increment;
+  Item_sum_avg *avg_item {nullptr};
+  ParallelAvgType pq_avg_type{ParallelAvgType::PQ_INVALID};
+
   Item_avg_field(Item_result res_type, Item_sum_avg *item);
   enum Type type() const override { return FIELD_AVG_ITEM; }
   double val_real() override;
   my_decimal *val_decimal(my_decimal *) override;
+  size_t pq_extra_len(bool) override {
+    return ((pq_avg_type == ParallelAvgType::PQ_WORKER ||
+            pq_avg_type == ParallelAvgType::PQ_LEADER) ? sizeof(longlong) : 0);
+  }
+
   String *val_str(String *) override;
   bool resolve_type(THD *) override { return false; }
   const char *func_name() const override {
@@ -1313,6 +1339,7 @@ class Item_sum_avg final : public Item_sum_sum {
   typedef Item_sum_sum super;
   my_decimal m_avg_dec;
   double m_avg;
+  ParallelAvgType pq_avg_type{ParallelAvgType::PQ_INVALID};
 
   Item_sum_avg(const POS &pos, Item *item_par, bool distinct, PT_window *w)
       : Item_sum_sum(pos, item_par, distinct, w) {}
@@ -1344,6 +1371,9 @@ class Item_sum_avg final : public Item_sum_sum {
     m_frame_null_count = 0;
     Item_sum_sum::cleanup();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  Item_sum *pq_rebuild_sum_func(THD *thd, Query_block *select,
+                                Item *item) override;  
 };
 
 class Item_sum_variance;
@@ -1686,7 +1716,7 @@ class Item_sum_hybrid : public Item_sum {
   Item *copy_or_same(THD *thd) override;
   bool check_wf_semantics1(THD *thd, Query_block *select,
                            Window_evaluation_requirements *r) override;
-
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
  private:
   /*
     These functions check if the value on the current row exceeds the maximum or
@@ -1710,6 +1740,9 @@ class Item_sum_min final : public Item_sum_hybrid {
       : Item_sum_hybrid(thd, item) {}
   enum Sumfunctype sum_func() const override { return MIN_FUNC; }
   const char *func_name() const override { return "min"; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  Item_sum *pq_rebuild_sum_func(THD *thd, Query_block *select,
+                                Item *item) override;
 
  private:
   Item_sum_min *clone_hybrid(THD *thd) const override;
@@ -1724,7 +1757,9 @@ class Item_sum_max final : public Item_sum_hybrid {
       : Item_sum_hybrid(thd, item) {}
   enum Sumfunctype sum_func() const override { return MAX_FUNC; }
   const char *func_name() const override { return "max"; }
-
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  Item_sum *pq_rebuild_sum_func(THD *thd, Query_block *select,
+                                Item *item) override;
  private:
   Item_sum_max *clone_hybrid(THD *thd) const override;
 };
@@ -1857,6 +1892,7 @@ class Item_sum_bit : public Item_sum {
   bool add() override;
   /// @returns true iff this is BIT_AND.
   inline bool is_and() const { return reset_bits != 0; }
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 
  private:
   /**
@@ -1900,7 +1936,10 @@ class Item_sum_or final : public Item_sum_bit {
 
   Item_sum_or(THD *thd, Item_sum_or *item) : Item_sum_bit(thd, item) {}
   const char *func_name() const override { return "bit_or"; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
   Item *copy_or_same(THD *thd) override;
+  Item_sum *pq_rebuild_sum_func(THD *thd, Query_block *select,
+                                Item *item) override;
 };
 
 class Item_sum_and final : public Item_sum_bit {
@@ -1911,6 +1950,9 @@ class Item_sum_and final : public Item_sum_bit {
   Item_sum_and(THD *thd, Item_sum_and *item) : Item_sum_bit(thd, item) {}
   const char *func_name() const override { return "bit_and"; }
   Item *copy_or_same(THD *thd) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  Item_sum *pq_rebuild_sum_func(THD *thd, Query_block *select,
+                                Item *item) override;
 };
 
 class Item_sum_xor final : public Item_sum_bit {
@@ -1923,6 +1965,9 @@ class Item_sum_xor final : public Item_sum_bit {
   Item_sum_xor(THD *thd, Item_sum_xor *item) : Item_sum_bit(thd, item) {}
   const char *func_name() const override { return "bit_xor"; }
   Item *copy_or_same(THD *thd) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  Item_sum *pq_rebuild_sum_func(THD *thd, Query_block *select,
+                                Item *item) override;
 };
 
 /*
@@ -2167,7 +2212,8 @@ class Item_func_group_concat final : public Item_sum {
   enum Sumfunctype sum_func() const override { return GROUP_CONCAT_FUNC; }
   const char *func_name() const override { return "group_concat"; }
   Item_result result_type() const override { return STRING_RESULT; }
-  Field *make_string_field(TABLE *table_arg) const override;
+  Field *make_string_field(TABLE *table_arg,
+                           MEM_ROOT *root = nullptr) const override;
   void clear() override;
   bool add() override;
   void reset_field() override { assert(0); }   // not used

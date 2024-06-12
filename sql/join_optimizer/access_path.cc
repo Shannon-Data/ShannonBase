@@ -1,4 +1,5 @@
 /* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -18,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #include "sql/join_optimizer/access_path.h"
 
@@ -1236,6 +1239,20 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         }
         iterator = CreateUpdateRowsIterator(thd, mem_root, join,
                                             std::move(job.children[0]));
+        break;
+      }
+      case AccessPath::PARALLEL_SCAN: {
+        const auto &param = path->parallel_scan();
+        iterator = NewIterator<ParallelScanIterator>(
+            thd, mem_root, param.tab, param.table, nullptr, join, param.gather,
+            param.stable_sort, param.ref_length);
+        break;
+      }
+      case AccessPath::PQBLOCK_SCAN: {
+        const auto &param = path->pq_block_scan();
+        iterator = NewIterator<PQblockScanIterator>(
+            thd, mem_root, param.table, param.table->record[0],
+            &join->examined_rows, param.gather, param.need_rowid);
         break;
       }
     }

@@ -1,4 +1,5 @@
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -18,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #ifndef SQL_CLASS_INCLUDED
 #define SQL_CLASS_INCLUDED
@@ -408,7 +411,7 @@ class Query_arena {
   void reset_item_list() { m_item_list = nullptr; }
   void set_item_list(Item *item) { m_item_list = item; }
   void add_item(Item *item);
-  void free_items();
+  void free_items(bool parallel_exec = false);
   void set_state(enum_state state_arg) { state = state_arg; }
   enum_state get_state() const { return state; }
   bool is_stmt_prepare() const { return state == STMT_INITIALIZED; }
@@ -2108,6 +2111,7 @@ class THD : public MDL_context_owner,
   Attachable_trx *m_attachable_trx;
 
  public:
+  Attachable_trx *get_attachable_trx() { return m_attachable_trx; }
   Transaction_ctx *get_transaction() { return m_transaction.get(); }
 
   const Transaction_ctx *get_transaction() const { return m_transaction.get(); }
@@ -2327,6 +2331,7 @@ class THD : public MDL_context_owner,
     stable throughout the next query, see update_previous_found_rows.
   */
   ulonglong current_found_rows;
+  ulonglong pq_current_found_rows;
 
   /*
     Indicate if the gtid_executed table is being operated implicitly
@@ -2710,6 +2715,7 @@ class THD : public MDL_context_owner,
     KILL_CONNECTION = ER_SERVER_SHUTDOWN,
     KILL_QUERY = ER_QUERY_INTERRUPTED,
     KILL_TIMEOUT = ER_QUERY_TIMEOUT,
+    KILL_PQ_QUERY = ER_PARALLEL_EXEC_ERROR,
     KILLED_NO_VALUE /* means neither of the states */
   };
   std::atomic<killed_state> killed;
@@ -3276,6 +3282,13 @@ class THD : public MDL_context_owner,
     To raise this flag, use my_error().
   */
   inline bool is_error() const { return get_stmt_da()->is_error(); }
+
+  inline bool is_pq_error() const {
+    return !pq_leader
+               ? pq_error
+               : (pq_error || (pq_leader->is_killed() || pq_leader->pq_error ||
+                               pq_leader->is_error()));
+  }
 
   /// Returns first Diagnostics Area for the current statement.
   Diagnostics_area *get_stmt_da() { return m_stmt_da; }
@@ -4110,6 +4123,8 @@ class THD : public MDL_context_owner,
                            uint code, const char *message_text);
   friend void my_message_sql(uint, const char *, myf);
 
+
+ public:
   /**
     Raise a generic SQL condition. Also calls
     mysql_event_tracking_general_notify() unless the condition is handled by a
@@ -4126,7 +4141,6 @@ class THD : public MDL_context_owner,
                                  Sql_condition::enum_severity_level level,
                                  const char *msg, bool fatal_error = false);
 
- public:
   void set_command(enum enum_server_command command);
 
   inline enum enum_server_command get_command() const { return m_command; }
@@ -4712,6 +4726,11 @@ class THD : public MDL_context_owner,
   bool is_connection_admin();
   void set_connection_admin(bool connection_admin_flag);
 
+  bool is_worker();
+  bool pq_copy_from(THD *thd);
+  bool pq_merge_status(THD *thd);
+  bool pq_status_reset();
+
  public:
   Transactional_ddl_context m_transactional_ddl{this};
 
@@ -4883,5 +4902,7 @@ inline void THD::set_connection_admin(bool connection_admin_flag) {
 inline bool is_xa_tran_detached_on_prepare(const THD *thd) {
   return thd->variables.xa_detach_on_prepare;
 }
+
+inline bool THD::is_worker() { return pq_leader != nullptr; }
 
 #endif /* SQL_CLASS_INCLUDED */

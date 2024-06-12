@@ -2,6 +2,7 @@
 #define ITEM_TIMEFUNC_INCLUDED
 
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -21,7 +22,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /* Function items used by mysql */
 
@@ -70,6 +73,7 @@ class Item_func_period_add final : public Item_int_func {
   const char *func_name() const override { return "period_add"; }
   enum Functype functype() const override { return PERIODADD_FUNC; }
   bool resolve_type(THD *thd) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class Item_func_period_diff final : public Item_int_func {
@@ -80,6 +84,7 @@ class Item_func_period_diff final : public Item_int_func {
   const char *func_name() const override { return "period_diff"; }
   enum Functype functype() const override { return PERIODDIFF_FUNC; }
   bool resolve_type(THD *thd) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class Item_func_to_days final : public Item_int_func {
@@ -95,6 +100,7 @@ class Item_func_to_days final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class Item_func_to_seconds final : public Item_int_func {
@@ -120,6 +126,7 @@ class Item_func_to_seconds final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_dayofmonth final : public Item_int_func {
@@ -134,6 +141,7 @@ class Item_func_dayofmonth final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -168,6 +176,7 @@ class Item_func_month final : public Item_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_monthname final : public Item_str_func {
@@ -183,6 +192,7 @@ class Item_func_monthname final : public Item_str_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_dayofyear final : public Item_int_func {
@@ -196,6 +206,7 @@ class Item_func_dayofyear final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_hour final : public Item_int_func {
@@ -209,6 +220,7 @@ class Item_func_hour final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_time_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_minute final : public Item_int_func {
@@ -222,6 +234,7 @@ class Item_func_minute final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_time_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_quarter final : public Item_int_func {
@@ -235,6 +248,7 @@ class Item_func_quarter final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_second final : public Item_int_func {
@@ -248,6 +262,7 @@ class Item_func_second final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_time_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_week final : public Item_int_func {
@@ -263,6 +278,7 @@ class Item_func_week final : public Item_int_func {
   const char *func_name() const override { return "week"; }
   enum Functype functype() const override { return WEEK_FUNC; }
   bool resolve_type(THD *thd) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_yearweek final : public Item_int_func {
@@ -277,6 +293,7 @@ class Item_func_yearweek final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_year final : public Item_int_func {
@@ -292,6 +309,7 @@ class Item_func_year final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_typecast_year final : public Item_int_func {
@@ -303,6 +321,7 @@ class Item_typecast_year final : public Item_int_func {
   const char *func_name() const override { return "cast_as_year"; }
   enum Functype functype() const override { return TYPECAST_FUNC; }
   bool resolve_type(THD *thd) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -341,6 +360,7 @@ class Item_func_weekday : public Item_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_date_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -366,6 +386,7 @@ class Item_func_dayname final : public Item_func_weekday {
   enum Item_result result_type() const override { return STRING_RESULT; }
   bool resolve_type(THD *thd) override;
   bool check_partition_func_processor(uchar *) override { return true; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /*
@@ -455,6 +476,7 @@ class Item_func_unix_timestamp final : public Item_timeval_func {
     return ((func_arg->source == VGS_GENERATED_COLUMN) ||
             (func_arg->source == VGS_CHECK_CONSTRAINT));
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_time_to_sec final : public Item_int_func {
@@ -469,6 +491,7 @@ class Item_func_time_to_sec final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_time_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -579,6 +602,7 @@ class Item_temporal_hybrid_func : public Item_str_func {
   }
   bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
   bool get_time(MYSQL_TIME *ltime) override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;  
 };
 
 /*
@@ -877,6 +901,7 @@ class Item_date_literal final : public Item_date_func {
   table_map not_null_tables() const override { return used_tables(); }
   void cleanup() override { assert(marker == MARKER_NONE); }
   bool eq(const Item *item, bool binary_cmp) const override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -884,6 +909,7 @@ class Item_date_literal final : public Item_date_func {
 */
 class Item_time_literal final : public Item_time_func {
   MYSQL_TIME_cache cached_time;
+  uint pq_dec_arg;
 
  public:
   /**
@@ -918,6 +944,7 @@ class Item_time_literal final : public Item_time_func {
   table_map not_null_tables() const override { return used_tables(); }
   void cleanup() override { assert(marker == MARKER_NONE); }
   bool eq(const Item *item, bool binary_cmp) const override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -962,6 +989,7 @@ class Item_datetime_literal final : public Item_datetime_func {
   table_map not_null_tables() const override { return used_tables(); }
   void cleanup() override { assert(marker == MARKER_NONE); }
   bool eq(const Item *item, bool binary_cmp) const override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -998,6 +1026,8 @@ class Item_func_at_time_zone final : public Item_datetime_func {
   bool get_date(MYSQL_TIME *res, my_time_flags_t) override;
 
   const char *specifier_string() const { return m_specifier_string; }
+
+  Item *pq_clone(THD *thd, Query_block *select) override;
 
  protected:
   bool check_type() const;
@@ -1067,6 +1097,7 @@ class Item_func_curtime_local final : public Item_func_curtime {
   Item_func_curtime_local(const POS &pos, uint8 dec_arg)
       : Item_func_curtime(pos, dec_arg) {}
   const char *func_name() const override { return "curtime"; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_curtime_utc final : public Item_func_curtime {
@@ -1077,6 +1108,7 @@ class Item_func_curtime_utc final : public Item_func_curtime {
   Item_func_curtime_utc(const POS &pos, uint8 dec_arg)
       : Item_func_curtime(pos, dec_arg) {}
   const char *func_name() const override { return "utc_time"; }
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 /**
@@ -1121,6 +1153,7 @@ class Item_func_curdate_local final : public Item_func_curdate {
  public:
   explicit Item_func_curdate_local(const POS &pos) : Item_func_curdate(pos) {}
   const char *func_name() const override { return "curdate"; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_curdate_utc final : public Item_func_curdate {
@@ -1130,6 +1163,7 @@ class Item_func_curdate_utc final : public Item_func_curdate {
  public:
   Item_func_curdate_utc(const POS &pos) : Item_func_curdate(pos) {}
   const char *func_name() const override { return "utc_date"; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -1235,6 +1269,7 @@ class Item_func_sysdate_local final : public Item_datetime_func {
   table_map get_initial_pseudo_tables() const override {
     return RAND_TABLE_BIT;
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_from_days final : public Item_date_func {
@@ -1251,6 +1286,7 @@ class Item_func_from_days final : public Item_date_func {
     if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_LONGLONG)) return true;
     return Item_date_func::resolve_type(thd);
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class Item_func_date_format final : public Item_str_func {
@@ -1269,6 +1305,8 @@ class Item_func_date_format final : public Item_str_func {
   bool resolve_type(THD *thd) override;
   uint format_length(const String *format);
   bool eq(const Item *item, bool binary_cmp) const override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;  
 };
 
 class Item_func_from_unixtime final : public Item_datetime_func {
@@ -1279,6 +1317,7 @@ class Item_func_from_unixtime final : public Item_datetime_func {
   enum Functype functype() const override { return FROM_UNIXTIME_FUNC; }
   bool resolve_type(THD *thd) override;
   bool get_date(MYSQL_TIME *res, my_time_flags_t fuzzy_date) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /*
@@ -1309,6 +1348,7 @@ class Item_func_convert_tz final : public Item_datetime_func {
   bool resolve_type(THD *) override;
   bool get_date(MYSQL_TIME *res, my_time_flags_t fuzzy_date) override;
   void cleanup() override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_sec_to_time final : public Item_time_func {
@@ -1325,6 +1365,7 @@ class Item_func_sec_to_time final : public Item_time_func {
   const char *func_name() const override { return "sec_to_time"; }
   enum Functype functype() const override { return SEC_TO_TIME_FUNC; }
   bool get_time(MYSQL_TIME *ltime) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 extern const char *interval_names[];
@@ -1358,6 +1399,7 @@ class Item_date_add_interval final : public Item_temporal_hybrid_func {
              enum_query_type query_type) const override;
   interval_type get_interval_type() const { return m_interval_type; }
   bool is_subtract() const { return m_subtract; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 
  protected:
   void add_json_info(Json_object *obj) override;
@@ -1424,6 +1466,8 @@ class Item_extract final : public Item_int_func {
     }
     return true;
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 };
 
 class Item_typecast_date final : public Item_date_func {
@@ -1449,6 +1493,8 @@ class Item_typecast_date final : public Item_date_func {
   bool is_explicit_cast() const { return m_explicit_cast; }
   bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzy_date) override;
   const char *cast_type() const { return "date"; }
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_typecast_time final : public Item_time_func {
@@ -1486,6 +1532,8 @@ class Item_typecast_time final : public Item_time_func {
     set_nullable(true);
     return false;
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 };
 
 class Item_typecast_datetime final : public Item_datetime_func {
@@ -1524,6 +1572,8 @@ class Item_typecast_datetime final : public Item_datetime_func {
     return false;
   }
   bool get_date(MYSQL_TIME *res, my_time_flags_t fuzzy_date) override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_makedate final : public Item_date_func {
@@ -1539,6 +1589,7 @@ class Item_func_makedate final : public Item_date_func {
     if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_LONGLONG)) return true;
     return Item_date_func::resolve_type(thd);
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /**
@@ -1573,6 +1624,7 @@ class Item_func_add_time final : public Item_temporal_hybrid_func {
   const char *func_name() const override { return "add_time"; }
   enum Functype functype() const override { return ADDTIME_FUNC; }
   int sign() const { return m_sign; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_timediff final : public Item_time_func {
@@ -1596,6 +1648,7 @@ class Item_func_timediff final : public Item_time_func {
     return false;
   }
   bool get_time(MYSQL_TIME *ltime) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_maketime final : public Item_time_func {
@@ -1614,6 +1667,7 @@ class Item_func_maketime final : public Item_time_func {
   const char *func_name() const override { return "maketime"; }
   enum Functype functype() const override { return MAKETIME_FUNC; }
   bool get_time(MYSQL_TIME *ltime) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_microsecond final : public Item_int_func {
@@ -1627,6 +1681,7 @@ class Item_func_microsecond final : public Item_int_func {
   bool check_valid_arguments_processor(uchar *) override {
     return !has_time_args();
   }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_timestamp_diff final : public Item_int_func {
@@ -1647,6 +1702,7 @@ class Item_func_timestamp_diff final : public Item_int_func {
   }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 enum date_time_format {
@@ -1675,6 +1731,7 @@ class Item_func_get_format final : public Item_str_ascii_func {
              enum_query_type query_type) const override;
 
   enum_mysql_timestamp_type timestamp_type() const { return type; }
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_str_to_date final : public Item_temporal_hybrid_func {
@@ -1689,6 +1746,8 @@ class Item_func_str_to_date final : public Item_temporal_hybrid_func {
       : Item_temporal_hybrid_func(pos, a, b) {}
   const char *func_name() const override { return "str_to_date"; }
   bool resolve_type(THD *) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
+  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 };
 
 class Item_func_last_day final : public Item_date_func {
@@ -1713,6 +1772,7 @@ class Item_func_internal_update_time final : public Item_datetime_func {
   const char *func_name() const override { return "internal_update_time"; }
   bool resolve_type(THD *thd) override;
   bool get_date(MYSQL_TIME *res, my_time_flags_t fuzzy_date) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 class Item_func_internal_check_time final : public Item_datetime_func {
@@ -1723,6 +1783,7 @@ class Item_func_internal_check_time final : public Item_datetime_func {
   const char *func_name() const override { return "internal_check_time"; }
   bool resolve_type(THD *thd) override;
   bool get_date(MYSQL_TIME *res, my_time_flags_t fuzzy_date) override;
+  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 /* Function prototypes */

@@ -1,4 +1,5 @@
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -18,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /**
   @defgroup GROUP_PARSER Parser
@@ -339,6 +342,7 @@ class Table_ident {
 
 using List_item = mem_root_deque<Item *>;
 using Group_list_ptrs = Mem_root_array<ORDER *>;
+using PQ_Group_list_ptrs = Mem_root_array<ORDER *>;
 
 /**
   Structure to hold parameters for CHANGE MASTER, START SLAVE, and STOP SLAVE.
@@ -748,14 +752,13 @@ class Query_expression {
   Mem_root_array<MaterializePathParameters::QueryBlock>
       m_query_blocks_to_materialize;
 
- private:
-  /**
+ public:
+   /**
     Convert the executor structures to a set of access paths, storing the result
     in m_root_access_path.
    */
   void create_access_paths(THD *thd);
 
- public:
   /**
     result of this query can't be cached, bit field, can be :
       UNCACHEABLE_DEPENDENT
@@ -1773,6 +1776,8 @@ class Query_block : public Query_term {
   bool right_joins() const { return m_right_joins; }
   void set_right_joins() { m_right_joins = true; }
 
+  bool has_foj() const { return m_has_foj; }
+  void set_has_foj(bool val) { m_has_foj = val; }
   /// Lookup for Query_block type
   enum_explain_type type() const;
 
@@ -1858,6 +1863,8 @@ class Query_block : public Query_term {
   MaterializePathParameters::QueryBlock setup_materialize_query_block(
       AccessPath *childPath, TABLE *dst_table);
 
+  Query_block *orig;
+
   // ************************************************
   // * Members (most of these should not be public) *
   // ************************************************
@@ -1925,6 +1932,13 @@ class Query_block : public Query_term {
   */
   SQL_I_List<ORDER> group_list{};
   Group_list_ptrs *group_list_ptrs{nullptr};
+
+  /*
+   * the backup of group_list/order_list before optimization, which is used
+   * to generate worker's group_list/order_list.
+   */
+  PQ_Group_list_ptrs *saved_group_list_ptrs{nullptr};
+  PQ_Group_list_ptrs *saved_order_list_ptrs{nullptr};
 
   // Used so that AggregateIterator knows which items to signal when the rollup
   // level changes. Obviously only used in the presence of rollup.
@@ -2188,6 +2202,33 @@ class Query_block : public Query_term {
 
   bool is_row_count_valid_for_semi_join();
 
+  /// Helper for fix_prepare_information()
+  void fix_prepare_information_for_order(THD *thd, SQL_I_List<ORDER> *list,
+                                         Group_list_ptrs **list_ptrs);
+
+  bool setup_group(THD *thd);
+
+  bool setup_order_final(THD *thd);
+
+  /**
+    Active options. Derived from base options, modifiers added during
+    resolving and values from session variable option_bits. Since the latter
+    may change, active options are refreshed per execution of a statement.
+  */
+  ulonglong m_active_options{0};
+
+  /// Number of GROUP BY expressions added to all_fields
+  int hidden_group_field_count{0};
+
+  /// How many expressions are part of the order by but not select list.
+  int hidden_order_field_count{0};
+
+  /**
+    Intrusive linked list of all query blocks within the same
+    Windows function maybe be optimized, so we save this value to determine
+    whether support parallel query. */
+  uint saved_windows_elements{0};
+
  private:
   friend class Query_expression;
   friend class Condition_context;
@@ -2234,8 +2275,6 @@ class Query_block : public Query_term {
   bool resolve_rollup(THD *thd);
 
   bool setup_wild(THD *thd);
-  bool setup_order_final(THD *thd);
-  bool setup_group(THD *thd);
   void fix_after_pullout(Query_block *parent_query_block,
                          Query_block *removed_query_block);
   bool remove_redundant_subquery_clauses(THD *thd,
@@ -2316,9 +2355,6 @@ class Query_block : public Query_term {
   */
   Mem_root_array<Item_exists_subselect *> *sj_candidates{nullptr};
 
-  /// How many expressions are part of the order by but not select list.
-  int hidden_order_field_count{0};
-
   /**
     Intrusive linked list of all query blocks within the same
     query expression.
@@ -2342,12 +2378,6 @@ class Query_block : public Query_term {
     should not be modified after resolving is done.
   */
   ulonglong m_base_options{0};
-  /**
-    Active options. Derived from base options, modifiers added during
-    resolving and values from session variable option_bits. Since the latter
-    may change, active options are refreshed per execution of a statement.
-  */
-  ulonglong m_active_options{0};
 
  public:
   Table_ref *resolve_nest{
@@ -2366,9 +2396,6 @@ class Query_block : public Query_term {
   /// Condition to be evaluated on grouped rows after grouping.
   Item *m_having_cond;
 
-  /// Number of GROUP BY expressions added to all_fields
-  int hidden_group_field_count;
-
   /**
     True if query block has semi-join nests merged into it. Notice that this
     is updated earlier than sj_nests, so check this if info is needed
@@ -2377,6 +2404,7 @@ class Query_block : public Query_term {
   bool has_sj_nests{false};
   bool has_aj_nests{false};   ///< @see has_sj_nests; counts antijoin nests.
   bool m_right_joins{false};  ///< True if query block has right joins
+  bool m_has_foj{false};      ///< True if query block has full outer joins
 
   /// Allow merge of immediate unnamed derived tables
   bool allow_merge_derived{true};
@@ -4049,8 +4077,11 @@ struct LEX : public Query_tables_list {
   bool sp_lex_in_use; /* Keep track on lex usage in SPs for error handling */
   bool all_privileges;
   bool contains_plaintext_password;
+  bool in_execute_ps{false};
   enum_keep_diagnostics keep_diagnostics;
   uint32 next_binlog_file_nr;
+  bool has_sp{false};  // Item_func_sp, create function with no nosame option.
+  bool has_notsupported_func{false};  // true: not support pq,false: support pq
 
  private:
   bool m_broken;  ///< see mark_broken()

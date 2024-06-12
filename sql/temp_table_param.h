@@ -131,7 +131,7 @@ class Temp_table_param {
   uint sum_func_count;
   uint hidden_field_count;
   uint group_parts, group_length, group_null_parts;
-  /**
+    /**
     Whether we allow running GROUP BY processing into a temporary table,
     i.e., keeping many different aggregations going at once without
     having ordered input. This is usually the case, but is currently not
@@ -142,6 +142,8 @@ class Temp_table_param {
     an index.
    */
   bool allow_group_via_temp_table{true};
+  longlong allow_connect_by_tmp_table{0};  
+
   /**
     Number of outer_sum_funcs i.e the number of set functions that are
     aggregated in a query block outer to this subquery.
@@ -257,6 +259,7 @@ class Temp_table_param {
         m_window(other.m_window) {}
 
   void cleanup() { copy_fields.clear(); }
+  void pq_copy(Temp_table_param *orig);  
 };
 
 #endif  // TEMP_TABLE_PARAM_INCLUDED

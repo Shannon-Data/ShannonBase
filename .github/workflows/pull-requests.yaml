@@ -41,10 +41,10 @@ jobs:
     # if: ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-testing') && github.event.pull_request.merged != true }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           clean: false
       # - name: Check License Header
@@ -60,15 +60,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
+    - name: free_disk_space
+      run: |
+        sudo rm -rf "/usr/local/share/boost" && sudo rm -rf "$AGENT_TOOLSDIRECTORY"
     - name: install_lib
       run: |
         sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev libudev-dev g++ libbison-dev flex clang-format lcov pkg-config \
         cmake zlib1g-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev -y
-    - name: install_gcc
-      run: |
-        sudo apt install  bison texinfo libgmp3-dev zlib1g-dev -y && sudo apt install gcc-10 g++-10 -y && \
-        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
+    #- name: install_gcc
+    #  run: |
+    #    sudo apt install  bison texinfo libgmp3-dev zlib1g-dev -y && sudo apt install gcc-10 g++-10 -y && \
+    #    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
     - name: install_boost
       run: |
         cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \

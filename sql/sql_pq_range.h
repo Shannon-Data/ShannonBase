@@ -1,5 +1,5 @@
-#ifndef PQ_RANGE_INCLUDED
-#define PQ_RANGE_INCLUDED
+#ifndef __SHANNONBASE_PQ_RANGE_INCLUDED_H__
+#define __SHANNONBASE_PQ_RANGE_INCLUDED_H__
 
 /* Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
    Copyright (c) 2022, Huawei Technologies Co., Ltd.
@@ -25,7 +25,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-enum PQ_RANGE_TYPE {
+enum class PQ_RANGE_TYPE {
   PQ_QUICK_SELECT_NONE,
   PQ_INDEX_RANGE_SCAN,   // INDEX_RANGE_SCAN
   PQ_INDEX_MERGE,        // INDEX_MERGE
@@ -33,4 +33,4 @@ enum PQ_RANGE_TYPE {
   PQ_ROWID_INTERSECTION  // ROWID_INTERSECTION
 };
 
-#endif /* PQ_RANGE_INCLUDED */
+#endif // __SHANNONBASE_PQ_RANGE_INCLUDED__

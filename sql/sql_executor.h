@@ -71,6 +71,7 @@ template <class T>
 class List;
 template <typename Element_type>
 class Mem_root_array;
+class Gather_operator;
 
 /*
   Array of pointers to tables whose rowids compose the temporary table
@@ -215,6 +216,10 @@ enum Copy_func_type : int {
   CFT_FIELDS,
 };
 
+#define EXCEPT_RAND_FUNC (1ULL << 1)
+#define EXCEPT_CONNECT_BY_FUNC (1ULL << 2)
+#define EXCEPT_CONNECT_BY_VALUE (1ULL << 3)
+
 bool copy_funcs(Temp_table_param *, const THD *thd,
                 Copy_func_type type = CFT_ALL);
 
@@ -274,7 +279,12 @@ class QEP_TAB : public QEP_shared_owner {
         ref_item_slice(REF_SLICE_SAVED_BASE),
         m_keyread_optim(false),
         m_reversed_access(false),
-        lateral_derived_tables_depend_on_me(0) {}
+        lateral_derived_tables_depend_on_me(0),
+        do_parallel_scan(false),
+        has_pq_cond(false),
+        pos(0),
+        gather(nullptr),
+        pq_cond(nullptr) {}
 
   /// Initializes the object from a JOIN_TAB
   void init(JOIN_TAB *jt);
@@ -297,6 +307,8 @@ class QEP_TAB : public QEP_shared_owner {
     if (t) t->reginfo.qep_tab = this;
   }
 
+  void set_old_table(TABLE *t) { m_qs->set_old_table(t); }
+
   /// @returns semijoin strategy for this table.
   uint get_sj_strategy() const;
 
@@ -317,6 +329,8 @@ class QEP_TAB : public QEP_shared_owner {
     sets next_query_block function of previous tab.
   */
   void init_join_cache(JOIN_TAB *join_tab);
+
+  bool pq_copy(THD *thd, QEP_TAB *qep_tab);
 
   /**
      @returns query block id for an inner table of materialized semi-join, and
@@ -351,6 +365,8 @@ class QEP_TAB : public QEP_shared_owner {
  public:
   /// Pointer to table reference
   Table_ref *table_ref;
+  LEX_CSTRING *table_name{nullptr};
+  LEX_CSTRING *db{nullptr};
 
   /* Variables for semi-join duplicate elimination */
   SJ_TMP_TABLE *flush_weedout_table;
@@ -468,6 +484,13 @@ class QEP_TAB : public QEP_shared_owner {
 
   Mem_root_array<const AccessPath *> *invalidators = nullptr;
 
+  //for parallel query processing.
+  bool do_parallel_scan {false};
+  bool has_pq_cond{false};
+  uint pos {0};  // position in qep_tab array
+  Gather_operator *gather {nullptr};
+  Item *pq_cond {nullptr};
+
   QEP_TAB(const QEP_TAB &);             // not defined
   QEP_TAB &operator=(const QEP_TAB &);  // not defined
 };
@@ -574,7 +597,8 @@ bool ExtractConditions(Item *condition,
 AccessPath *create_table_access_path(THD *thd, TABLE *table,
                                      AccessPath *range_scan,
                                      Table_ref *table_ref, POSITION *position,
-                                     bool count_examined_rows);
+                                     bool count_examined_rows,
+                                     bool *pq_replace_path = nullptr);
 
 /**
   Creates an iterator for the given table, then calls Init() on the resulting

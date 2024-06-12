@@ -400,6 +400,8 @@ The following options may be given as the first argument:
  --flush             Flush MyISAM tables to disk between SQL commands
  --flush-time=#      A dedicated thread is created to flush all tables at the
  given interval
+ --force-parallel-execute 
+ force parallel execute in session
  --ft-boolean-syntax=name 
  List of operators for MATCH ... AGAINST ( ... IN BOOLEAN
  MODE)
@@ -842,6 +844,17 @@ The following options may be given as the first argument:
  Maximum allowed cumulated size of stored optimizer traces
  --optimizer-trace-offset=# 
  Offset of first optimizer trace to show; see manual
+ --parallel-cost-threshold=# 
+ Cost threshold for parallel query.
+ --parallel-default-dop=# 
+ default degree of parallel query.
+ --parallel-max-threads=# 
+ max running threads of parallel query.
+ --parallel-memory-limit=# 
+ upper limit memory size that parallel query can use
+ --parallel-queue-timeout=# 
+ queue timeout for parallel query when resource is not
+ enough .the unit is microseconds
  --parser-max-mem-size=# 
  Maximum amount of memory available to the parser
  --partial-revokes   Access of database objects can be restricted, even if
@@ -1754,6 +1767,7 @@ explicit-defaults-for-timestamp TRUE
 external-locking FALSE
 flush FALSE
 flush-time 0
+force-parallel-execute FALSE
 ft-boolean-syntax + -><()~*:""&|
 ft-max-word-len 84
 ft-min-word-len 4
@@ -1881,6 +1895,11 @@ optimizer-trace-features greedy_search=on,range_optimizer=on,dynamic_range=on,re
 optimizer-trace-limit 1
 optimizer-trace-max-mem-size 1048576
 optimizer-trace-offset -1
+parallel-cost-threshold 1000
+parallel-default-dop 4
+parallel-max-threads 64
+parallel-memory-limit 104857600
+parallel-queue-timeout 0
 parser-max-mem-size 18446744073709551615
 partial-revokes ####
 password-history 0

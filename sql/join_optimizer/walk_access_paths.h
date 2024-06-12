@@ -99,6 +99,8 @@ void WalkAccessPaths(AccessPathPtr path, JoinPtr join,
     case AccessPath::ZERO_ROWS_AGGREGATED:
     case AccessPath::MATERIALIZED_TABLE_FUNCTION:
     case AccessPath::UNQUALIFIED_COUNT:
+    case AccessPath::PARALLEL_SCAN:
+    case AccessPath::PQBLOCK_SCAN:
       // No children.
       break;
     case AccessPath::NESTED_LOOP_JOIN:
@@ -337,6 +339,10 @@ void WalkTablesUnderAccessPath(AccessPath *root_path, Func &&func,
           case AccessPath::DELETE_ROWS:
           case AccessPath::UPDATE_ROWS:
             return false;
+          case AccessPath::PARALLEL_SCAN:
+            return func(path->parallel_scan().table);
+          case AccessPath::PQBLOCK_SCAN:
+            return func(path->pq_block_scan().table);
         }
         assert(false);
         return true;

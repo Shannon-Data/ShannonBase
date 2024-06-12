@@ -223,6 +223,13 @@ class RowIterator {
   virtual RowIterator *real_iterator() { return this; }
   virtual const RowIterator *real_iterator() const { return this; }
 
+  /**
+   * Ends the iterator
+   * @return 0: the normal iterator
+   * @return 1: the ParallelScanIterator
+   * @retrun -1: the PQblockScanIterator
+   */
+  virtual int End() { return 0; }
  protected:
   THD *thd() const { return m_thd; }
 
