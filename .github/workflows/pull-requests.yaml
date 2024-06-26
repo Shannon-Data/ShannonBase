@@ -61,9 +61,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - name: free_disk_space
-      run: |
-        sudo rm -rf "/usr/local/share/boost" && sudo rm -rf "$AGENT_TOOLSDIRECTORY"
     - name: install_lib
       run: |
         sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev libudev-dev g++ libbison-dev flex clang-format lcov pkg-config \
@@ -75,9 +72,10 @@ jobs:
     - name: install_boost
       run: |
         cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
-        tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && sudo ./b2 install
+        tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && sudo ./b2 install && \
+        sudo rm ../boost_1_77_0 -rf
       #sed -i '61s/^/#/' cmake_install.cmake to disable can not find openssl_executeable error. removes it when it fixed.
-    - name: build_shannon
+    - name: build_shannon_and_install
       run: |
         mkdir cmake_build && cd cmake_build
         git config --global --add safe.directory /__w/ShannonBase/ShannonBase
@@ -104,6 +102,9 @@ jobs:
         -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j5 && \
         sed -i '61s/^/#/' cmake_install.cmake && sed -i '62s/^/#/' cmake_install.cmake && sed -i '63s/^/#/' cmake_install.cmake && \
         sudo make install
+    - name: clean_up_shannonbase_build
+      run: |
+        sudo rm /__w/ShannonBase/ -rf
     - name: run_mtr_test
       run: |
         mkdir -p /home/shannon-bin/log
