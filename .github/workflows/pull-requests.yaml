@@ -36,6 +36,22 @@ defaults:
     shell: bash
 
 jobs:
+  check-runner-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Print disk space usage
+        run: |
+          echo "Root directory (/):"
+          df -h /
+          echo "Home directory (/home/runner):"
+          df -h /home/runner
+          echo "Work directory (/home/runner/work):"
+          df -h /home/runner/work
+          echo "Temp directory (/tmp):"
+          df -h /tmp
   lint:
     name: lint
     # if: ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-testing') && github.event.pull_request.merged != true }}
