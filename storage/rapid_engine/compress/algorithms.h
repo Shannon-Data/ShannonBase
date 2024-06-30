@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 
 namespace ShannonBase {
 namespace Compress {

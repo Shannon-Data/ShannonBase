@@ -1789,13 +1789,14 @@ bool Query_expression::ExecuteIteratorQuery(THD *thd) {
       else if (thd->killed)  // Aborted by user
       {
         thd->send_kill_message();
-        return true;
+        execute_error = true;
       }
-
+      if (execute_error) break;
       ++*send_records_ptr;
 
       if (query_result->send_data(thd, *fields)) {
-        return true;
+        execute_error = true;
+        break;
       }
       thd->get_stmt_da()->inc_current_row_for_condition();
     }

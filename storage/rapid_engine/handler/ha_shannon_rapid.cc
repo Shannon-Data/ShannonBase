@@ -701,21 +701,23 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   context.m_current_table = table_arg.s->table_name.str;
   context.m_table = const_cast<TABLE *>(&table_arg);
 
-  /** Any keys exist, set the key info. if any key exists, we also build keys on imcs table. otherwise, dont*/
-  if (table_arg.key_info) {
-    auto key = table_arg.key_info;  // first key we care about.
-    for (uint keyid = 0; keyid < key->user_defined_key_parts; keyid++) {
-      if (key->key_part[keyid].field->is_flag_set(NOT_SECONDARY_FLAG)) {
-        my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0), table_arg.s->db.str,
-                 table_arg.s->table_name.str);
-        return HA_ERR_GENERIC;
-      }
-    }
-
-    context.m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
-    context.m_extra_info.m_key_len = key->key_length;
+  // check if primary key is missing. rapid engine must has at least one PK.
+  if (table_arg.s->is_missing_primary_key()) {
+    my_error(ER_REQUIRES_PRIMARY_KEY, MYF(0));
+    return HA_ERR_GENERIC;
   }
 
+  context.m_extra_info.m_keynr = 0;
+  auto key = (table_arg.key_info + 0);
+  for (uint keyid = 0; keyid < key->user_defined_key_parts; keyid++) {
+    if (key->key_part[keyid].field->is_flag_set(NOT_SECONDARY_FLAG)) {
+      my_error(ER_RAPID_DA_PRIMARY_KEY_CAN_NOT_HAVE_NOT_SECONDARY_FLAG, MYF(0), table_arg.s->db.str,
+               table_arg.s->table_name.str);
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  context.m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
   // Scan the primary table and read the records.
   if (table_arg.file->inited == NONE && table_arg.file->ha_rnd_init(true)) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
@@ -732,11 +734,11 @@ int ha_rapid::load_table(const TABLE &table_arg) {
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
     auto offset {0};
-    for (uint key_partid = 0; key_partid < table_arg.key_info->user_defined_key_parts; key_partid++) {
-      memcpy(context.m_extra_info.m_key_buff.get() + offset,
-             table_arg.key_info->key_part[key_partid].field->field_ptr(),
-             table_arg.key_info->key_part[key_partid].store_length);
-      offset += table_arg.key_info->key_part[key_partid].store_length;
+    memset(context.m_extra_info.m_key_buff.get(), 0x0, key->key_length);
+    for (uint key_partid = 0; key_partid < key->user_defined_key_parts; key_partid++) {
+      memcpy(context.m_extra_info.m_key_buff.get() + offset, key->key_part[key_partid].field->field_ptr(),
+             key->key_part[key_partid].store_length);
+      offset += key->key_part[key_partid].store_length;
     }
     context.m_extra_info.m_key_len = offset;
 
