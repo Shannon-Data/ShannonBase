@@ -38,6 +38,7 @@ jobs:
           [ -s /tmp/.clang-format-diff ] && exit 1 || true 
 
   build:
+    needs: lint
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -53,12 +54,13 @@ jobs:
       run: |
         cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
         tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && sudo ./b2 install && \
-        sudo rm ../boost_1_77_0 -rf
+        sudo rm /tmp/boost_1_77_0 -rf && sudo rm /tmp/boost_1_77_0.tar.gz
       #sed -i '61s/^/#/' cmake_install.cmake to disable can not find openssl_executeable error. removes it when it fixed.
     - name: build_shannon_and_install
       run: |
+        mkdir /home/ShannonBase  && cd /home/ShannonBase
         mkdir cmake_build && cd cmake_build
-        git config --global --add safe.directory /__w/ShannonBase/ShannonBase
+        git config --global --add safe.directory /home/ShannonBase/ShannonBase
         git fetch --tags -f
         cmake ../ \
         -DWITH_BOOST=/usr/local/boost/include \
@@ -84,7 +86,7 @@ jobs:
         sudo make install
     - name: clean_up_shannonbase_build
       run: |
-        sudo rm /__w/ShannonBase/ -rf
+        sudo rm /home/ShannonBase/ -rf
     - name: run_mtr_test
       run: |
         mkdir -p /home/shannon-bin/log
@@ -92,4 +94,4 @@ jobs:
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
         ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,secondary_engine,rpl,rpl_gtid,rpl_nogtid \
-        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=10
+        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=$(nproc)

@@ -29,6 +29,7 @@
 #include <iostream>
 #include <sstream>
 
+#include "include/my_inttypes.h"
 #include "include/ut0dbg.h"
 
 #include "storage/rapid_engine/compress/algorithms.h"
