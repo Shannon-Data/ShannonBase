@@ -531,7 +531,7 @@ void warn_on_deprecated_user_defined_collation(
   2. We should not introduce new shift/reduce conflicts any more.
 */
 
-%expect 63
+%expect 64
 
 /*
    MAINTAINER:
@@ -1410,6 +1410,7 @@ void warn_on_deprecated_user_defined_collation(
 
 %token<lexer.keyword> PARSE_TREE_SYM     1205      /* MYSQL */
 
+%token<lexer.keyword> VECTOR_SYM 1215
 /*
   Precedence rules used to resolve the ambiguity when using keywords as idents
   in the case e.g.:
@@ -7170,6 +7171,10 @@ type:
           {
             $$= NEW_PTN PT_char_type(@$, Char_type::VARCHAR, $2, &my_charset_bin);
           }
+        | VECTOR_SYM opt_field_length
+          {
+            $$= NEW_PTN PT_vector_type(@$, $2);
+          }          
         | YEAR_SYM opt_field_length field_options
           {
             if ($2)
@@ -15793,6 +15798,7 @@ ident_keywords_unambiguous:
         | XML_SYM
         | YEAR_SYM
         | ZONE_SYM
+        | VECTOR_SYM
         ;
 
 /*

@@ -203,6 +203,11 @@
   ----------------------------------------------------------------------------
   Changes from version 80023:
   - No changes, this version number is not active yet.
+
+  90000:
+  ----------------------------------------------------------------------------
+  Changes:
+  - WL#16081: Native Vector Embeddings Support In MySQL And HeatWave  
  */
 namespace dd {
 

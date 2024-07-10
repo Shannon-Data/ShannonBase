@@ -1351,6 +1351,7 @@ static bool field_type_forces_var_part(enum_field_types type) {
       return true;
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_JSON:
@@ -1696,7 +1697,7 @@ static bool type_supports_default_value(enum_field_types mysql_type) {
       (mysql_type != MYSQL_TYPE_BLOB && mysql_type != MYSQL_TYPE_TINY_BLOB &&
        mysql_type != MYSQL_TYPE_MEDIUM_BLOB &&
        mysql_type != MYSQL_TYPE_LONG_BLOB && mysql_type != MYSQL_TYPE_JSON &&
-       mysql_type != MYSQL_TYPE_GEOMETRY);
+       mysql_type != MYSQL_TYPE_GEOMETRY && mysql_type != MYSQL_TYPE_VECTOR);
 
   return ret;
 }
@@ -8455,6 +8456,12 @@ static int create_ndb_column(THD *thd, NDBCOL &col, Field *field,
         col.setLength(no_of_bits);
       break;
     }
+    case MYSQL_TYPE_VECTOR:
+      push_warning_printf(
+          thd, Sql_condition::SL_WARNING, ER_UNSUPPORTED_EXTENSION,
+          "VECTOR type is not supported by NDB in this MySQL version");
+      return HA_ERR_UNSUPPORTED;
+
     case MYSQL_TYPE_NULL:
       goto mysql_type_unsupported;
     mysql_type_unsupported:
@@ -9892,6 +9899,7 @@ int ha_ndbcluster::create(const char *path [[maybe_unused]],
     switch (field->real_type()) {
       case MYSQL_TYPE_GEOMETRY:
       case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_VECTOR:
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_LONG_BLOB:
       case MYSQL_TYPE_JSON: {
@@ -10277,6 +10285,7 @@ int ha_ndbcluster::create_index_in_NDB(THD *thd, const char *name,
           key_store_length += HA_KEY_NULL_LENGTH;
         }
         if (field->type() == MYSQL_TYPE_BLOB ||
+            field->type() == MYSQL_TYPE_VECTOR ||
             field->real_type() == MYSQL_TYPE_VARCHAR ||
             field->type() == MYSQL_TYPE_GEOMETRY) {
           key_store_length += HA_KEY_BLOB_LENGTH;
