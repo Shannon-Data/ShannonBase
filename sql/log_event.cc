@@ -82,6 +82,7 @@
 #include "sql/system_variables.h"
 #include "sql/tc_log.h"
 #include "sql/xa/sql_cmd_xa.h"  // Sql_cmd_xa_*
+#include "sql/vector_conversion.h"
 #include "sql_const.h"
 #include "sql_string.h"
 #include "strmake.h"
@@ -1749,6 +1750,7 @@ static const char *print_json_diff(IO_CACHE *out, const uchar *data,
   @param[in] col_name          Column name
   @param[in] is_partial        True if this is a JSON column that will be
                                read in partial format, false otherwise.
+  @param[in] vector_dimensionality Dimensionality of vector column                               
 
   @retval 0 on error
   @retval number of bytes scanned from ptr for non-NULL fields, or
@@ -1758,7 +1760,8 @@ static const char *print_json_diff(IO_CACHE *out, const uchar *data,
 static size_t log_event_print_value(IO_CACHE *file, const uchar *ptr, uint type,
                                     uint meta, char *typestr,
                                     size_t typestr_length, char *col_name,
-                                    bool is_partial) {
+                                    bool is_partial,
+                                    unsigned int vector_dimensionality) {
   uint32 length = 0;
 
   if (type == MYSQL_TYPE_STRING) {
@@ -2004,6 +2007,25 @@ static size_t log_event_print_value(IO_CACHE *file, const uchar *ptr, uint type,
       my_b_write_bit(file, ptr, (meta & 0xFF) * 8);
       return meta & 0xFF;
 
+    case MYSQL_TYPE_VECTOR: {
+      snprintf(typestr, typestr_length, "VECTOR(%u)", vector_dimensionality);
+      if (ptr == nullptr) {
+        return my_b_printf(file, "NULL");
+      }
+      length = uint4korr(ptr);
+      ptr += 4;
+      uint dims = get_dimensions(length, sizeof(float));
+      my_b_printf(file, "[");
+      const uint tmp_length = 40;
+      char tmp[tmp_length];
+      for (uint i = 0; i < dims; i++) {
+        char delimiter = (i == dims - 1) ? ']' : ',';
+        snprintf(tmp, tmp_length, "%.5e", float4get(ptr + i * sizeof(float)));
+        my_b_printf(file, "%s%c", tmp, delimiter);
+      }
+      return length + 4;
+    }
+
     case MYSQL_TYPE_BLOB:
       switch (meta) {
         case 1:
@@ -2138,6 +2160,8 @@ size_t Rows_log_event::print_verbose_one_row(
 
   my_b_printf(file, "%s", prefix);
 
+  auto vector_dimensionality_it = td->get_vector_dimensionality_begin();
+
   for (size_t i = 0; i < td->size(); i++) {
     /*
       Note: need to read partial bit before reading cols_bitmap, since
@@ -2166,11 +2190,18 @@ size_t Rows_log_event::print_verbose_one_row(
         return 0;
       }
     }
+
+    unsigned int vector_dimensionality = 0;
+    if (td->type(i) == MYSQL_TYPE_VECTOR &&
+        vector_dimensionality_it != td->get_vector_dimensionality_end()) {
+      vector_dimensionality = *vector_dimensionality_it++;
+    }
+
     char col_name[256];
     sprintf(col_name, "@%lu", (unsigned long)i + 1);
     const size_t size = log_event_print_value(
         file, is_null ? nullptr : value, td->type(i), td->field_metadata(i),
-        typestr, sizeof(typestr), col_name, is_partial);
+        typestr, sizeof(typestr), col_name, is_partial, vector_dimensionality);
     if (!size) return 0;
 
     if (!is_null) value += size;
@@ -10825,9 +10856,17 @@ int Table_map_log_event::do_apply_event(Relay_log_info const *rli) {
       inside Relay_log_info::clear_tables_to_lock() by calling the
       table_def destructor explicitly.
     */
+    uint vector_column_count =
+        table_def::vector_column_count(m_coltype, m_colcnt);
+    std::vector<unsigned int> vector_dimensionality;
+    if (vector_column_count > 0) {
+      const Optional_metadata_fields fields(m_optional_metadata,
+                                            m_optional_metadata_len);
+      vector_dimensionality = fields.m_vector_dimensionality;
+    }   
     new (&table_list->m_tabledef)
         table_def(m_coltype, m_colcnt, m_field_metadata, m_field_metadata_size,
-                  m_null_bits, m_flags);
+                  m_null_bits, m_flags, vector_dimensionality);
 
     table_list->m_tabledef_valid = true;
     table_list->m_conv_table = nullptr;
@@ -11017,6 +11056,7 @@ static inline bool is_character_type(uint type) {
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
       return true;
     default:
       return false;
@@ -11059,7 +11099,7 @@ void Table_map_log_event::init_metadata_fields() {
   if (init_signedness_field() ||
       init_charset_field(&is_character_field, DEFAULT_CHARSET,
                          COLUMN_CHARSET) ||
-      init_geometry_type_field()) {
+      init_geometry_type_field() || init_vector_dimensionality_field()) {
     m_metadata_buf.length(0);
     return;
   }
@@ -11277,6 +11317,20 @@ bool Table_map_log_event::init_geometry_type_field() {
   return false;
 }
 
+bool Table_map_log_event::init_vector_dimensionality_field() {
+  StringBuffer<256> buf;
+  for (auto *field : *m_column_view) {
+    if (field->real_type() == MYSQL_TYPE_VECTOR) {
+      store_compressed_length(
+          buf, down_cast<Field_vector *>(field)->get_max_dimensions());
+    }
+  }
+
+  if (buf.length() > 0)
+    return write_tlv_field(m_metadata_buf, VECTOR_DIMENSIONALITY, buf);
+  return false;
+}
+
 bool Table_map_log_event::init_primary_key_field() {
   DBUG_EXECUTE_IF("simulate_init_primary_key_field_error", return true;);
 
@@ -11410,7 +11464,8 @@ void Table_map_log_event::print(FILE *,
  */
 static void get_type_name(uint type, unsigned char **meta_ptr,
                           const CHARSET_INFO *cs, char *typestr,
-                          uint typestr_length, unsigned int geometry_type) {
+                          uint typestr_length, unsigned int geometry_type,
+                          unsigned int vector_dimensionality) {
   switch (type) {
     case MYSQL_TYPE_LONG:
       snprintf(typestr, typestr_length, "%s", "INT");
@@ -11484,6 +11539,11 @@ static void get_type_name(uint type, unsigned char **meta_ptr,
       snprintf(typestr, typestr_length, "SET");
       (*meta_ptr) += 2;
       break;
+    case MYSQL_TYPE_VECTOR: {
+      snprintf(typestr, typestr_length, "VECTOR(%u)", vector_dimensionality);
+      (*meta_ptr)++;
+      break;
+    }      
     case MYSQL_TYPE_BLOB: {
       const bool is_text = (cs && cs->number != my_charset_bin.number);
       const char *names[5][2] = {{"INVALID_BLOB(%d)", "INVALID_TEXT(%d)"},
@@ -11650,6 +11710,7 @@ void Table_map_log_event::print_columns(
   uint geometry_type = 0;
   std::vector<bool>::const_iterator column_visibility_it =
       fields.m_column_visibility.begin();
+  auto vector_dimensionality_it = fields.m_vector_dimensionality.begin();
 
   my_b_printf(file, "# Columns(");
 
@@ -11685,11 +11746,17 @@ void Table_map_log_event::print_columns(
                           : 0;
     }
 
+    unsigned int vector_dimensionality = 0;
+    if (real_type == MYSQL_TYPE_VECTOR &&
+        vector_dimensionality_it != fields.m_vector_dimensionality.end()) {
+      vector_dimensionality = *vector_dimensionality_it++;
+    }
+
     // print column type
     const uint TYPE_NAME_LEN = 100;
     char type_name[TYPE_NAME_LEN];
     get_type_name(real_type, &field_metadata_ptr, cs, type_name, TYPE_NAME_LEN,
-                  geometry_type);
+                  geometry_type, vector_dimensionality);
 
     if (type_name[0] == '\0') {
       my_b_printf(file, "INVALID_TYPE(%d)", real_type);

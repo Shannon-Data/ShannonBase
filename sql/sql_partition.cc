@@ -510,6 +510,13 @@ static bool set_up_field_array(TABLE *table, bool is_sub_part) {
             performance reasons.
         */
 
+        if (field->real_type() == MYSQL_TYPE_VECTOR) {
+          /* vector column as partition key is not supported */
+          my_error(ER_FIELD_TYPE_NOT_ALLOWED_AS_PARTITION_FIELD, MYF(0),
+                   field->field_name);
+          result = true;
+        }
+
         if (field->is_flag_set(BLOB_FLAG)) {
           my_error(ER_BLOB_FIELD_IN_PART_FUNC_ERROR, MYF(0));
           result = true;
@@ -1949,6 +1956,13 @@ static int check_part_field(enum_field_types sql_type, const char *field_name,
     my_error(ER_BLOB_FIELD_IN_PART_FUNC_ERROR, MYF(0));
     return true;
   }
+  if (sql_type == MYSQL_TYPE_VECTOR) {
+    /* vector column as partition key is not supported */
+    /* LCOV_EXCL_START */
+    my_error(ER_FIELD_TYPE_NOT_ALLOWED_AS_PARTITION_FIELD, MYF(0), field_name);
+    return true;
+    /* LCOV_EXCL_STOP */
+  }  
   switch (sql_type) {
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT:
