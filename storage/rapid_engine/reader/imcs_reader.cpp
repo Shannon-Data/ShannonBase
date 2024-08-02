@@ -314,12 +314,11 @@ uchar *CuView::write(ShannonBaseContext *context, uchar *buffer, size_t length) 
     // To update the metainfo.
   }
 
-  if (rpd_context->m_extra_info.m_key_len) {
-    auto ret = m_source_cu->get_index()->insert(reinterpret_cast<uchar *>(rpd_context->m_extra_info.m_key_buff.get()),
-                                                rpd_context->m_extra_info.m_key_len, pos);
-    if (unlikely(ret)) return nullptr;
-  }
-  // update the meta info. numeric type update, otherwise return.[with trx vw meta inf]
+  auto ret = m_source_cu->get_index()->insert(reinterpret_cast<uchar *>(rpd_context->m_extra_info.m_key_buff.get()),
+                                              rpd_context->m_extra_info.m_key_len, pos);
+  if (unlikely(ret)) return nullptr;
+
+  // update the meta info. numeric type update, otherwise return.
   auto header = m_source_cu->get_header();
   if (header->m_cu_type == MYSQL_TYPE_BLOB || header->m_cu_type == MYSQL_TYPE_STRING ||
       header->m_cu_type == MYSQL_TYPE_VARCHAR) {
@@ -593,15 +592,17 @@ int ImcsReader::write(ShannonBaseContext *context, uchar *buffer, size_t length)
   ut_a(context && buffer);
   if (!m_start_of_scan) return HA_ERR_GENERIC;
 
-  int ret = 0;
   RapidContext *rpd_context = dynamic_cast<RapidContext *>(context);
   /** before insertion, should to check whether there's spare space to store the
      new data. or not. If no extra sapce left, allocate a new imcu. After a new
      imcu allocated, the meta info is stored into 'm_imcus'.*/
   for (uint idx = 0; idx < m_source_table->s->fields; idx++) {
     Field *field = *(m_source_table->field + idx);
-    ut_a(field && !(field)->is_flag_set(NOT_SECONDARY_FLAG));
-    ut_a(field->field_index() <= m_cu_views.size());
+    ut_a(field);
+    // Skip columns marked as NOT SECONDARY.
+    if ((field)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    if (field->field_index() > m_cu_views.size()) return HA_ERR_END_OF_FILE;
 
     // start writing the data, at first, assemble the data we want to write. the
     // layout of data pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr|
@@ -628,10 +629,11 @@ int ImcsReader::write(ShannonBaseContext *context, uchar *buffer, size_t length)
       // write data
       *reinterpret_cast<double *>(m_buff + SHANNON_DATA_BYTE_OFFSET) = data_val;
     }
-    ret = m_cu_views[idx]->write(context, m_buff, SHANNON_ROW_TOTAL_LEN) ? 0 : HA_ERR_GENERIC;
+    auto ret = m_cu_views[idx]->write(context, m_buff, SHANNON_ROW_TOTAL_LEN);
+    if (!ret) return 1;
   }
 
-  return ret;
+  return 0;
 }
 
 uchar *ImcsReader::tell(uint field_index) { return nullptr; }

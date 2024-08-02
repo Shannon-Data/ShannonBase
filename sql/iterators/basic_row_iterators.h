@@ -34,7 +34,6 @@
 
 #include "mem_root_deque.h"
 #include "my_base.h"
-#include "sql/filesort.h"
 #include "my_inttypes.h"
 #include "sql/iterators/row_iterator.h"
 #include "sql/mem_root_array.h"
@@ -45,11 +44,7 @@ class JOIN;
 class Sort_result;
 class THD;
 struct IO_CACHE;
-struct ORDER;
 struct TABLE;
-class Gather_operator;
-class MQ_record_gather;
-class QEP_TAB;
 
 /**
   Scan a table from beginning to end.
@@ -527,76 +522,6 @@ class TableValueConstructorIterator final : public RowIterator {
   /// be output, this contains Item_values_column objects. In this case, each
   /// call to Read() will replace its current reference with the next row.
   mem_root_deque<Item *> *const m_output_refs;
-};
-
-/**
- * Parallel scan iterator, which is used in parallel leader
- */
-class ParallelScanIterator final : public TableRowIterator {
- public:
-  ParallelScanIterator(THD *thd, QEP_TAB *tab, TABLE *table,
-                       ha_rows *examined_rows, JOIN *join,
-                       Gather_operator *gather, bool stab_output = false,
-                       uint ref_length = 0);
-
-  ~ParallelScanIterator() override;
-
-  bool Init() override;
-  int Read() override;
-  int End() override;
-  void UnlockRow() override {}
-  void SetNullRowFlag(bool) override {}
-  void StartPSIBatchMode() override {}
-  void EndPSIBatchModeIfStarted() override {}
-
- private:
-  uchar *const m_record;
-  ha_rows *const m_examined_rows;
-  uint m_dop;
-  JOIN *m_join;
-  Gather_operator *m_gather;
-  MQ_record_gather *m_record_gather;
-  ORDER *m_order; /** use for records merge sort */
-  QEP_TAB *m_tab;
-  bool m_stable_sort; /** determine whether using stable sort */
-  uint m_ref_length;
-
-  /** construct filesort on leader when needing stab_output or merge_sort */
-  bool pq_make_filesort(Filesort **sort);
-  /** init m_record_gather */
-  bool pq_init_record_gather();
-  /** launch worker threads to execute parallel query */
-  bool pq_launch_worker();
-  /** wait all workers finished */
-  void pq_wait_workers_finished();
-  /** outoput parallel query error code */
-  int pq_error_code();
-};
-
-class PQ_worker_manager;
-
-/**
- * block scan iterator, which is used is in parallel worker.
- * a whole talbe is cut into many blocks for parallel scan
- */
-class PQblockScanIterator final : public TableRowIterator {
- public:
-  PQblockScanIterator(THD *thd, TABLE *table, uchar *record,
-                      ha_rows *examined_rows, Gather_operator *gather,
-                      bool need_rowid = false);
-  ~PQblockScanIterator() override;
-
-  bool Init() override;
-  int Read() override;
-  int End() override;
-
- private:
-  uchar *const m_record;
-  ha_rows *const m_examined_rows;
-  void *m_pq_ctx;  // parallel query context
-  uint keyno;
-  Gather_operator *m_gather;
-  bool m_need_rowid;
 };
 
 /**

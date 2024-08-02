@@ -1,5 +1,4 @@
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -19,9 +18,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
  * @file include/my_alloc.h
@@ -39,7 +36,6 @@
 #include <new>
 #include <type_traits>
 #include <utility>
-#include <functional>
 
 #include "memory_debugging.h"
 #include "my_compiler.h"
@@ -51,10 +47,6 @@
 #if defined(MYSQL_SERVER)
 extern "C" void sql_alloc_error_handler();
 #endif
-
-
-using CallBackFunc = std::function<void (PSI_memory_key, size_t, uint)>;
-constexpr uint PQ_MEMORY_USED_BUCKET = 16;
 
 /**
  * The MEM_ROOT is a simple arena, where allocations are carved out of
@@ -367,8 +359,6 @@ struct MEM_ROOT {
     return false;
   }
 
-  void set_alloc_func(CallBackFunc func) { allocCBFunc = func; }
-  void set_free_func(CallBackFunc func) { freeCBFunc = func; }
   /// @}
 
  private:
@@ -426,10 +416,6 @@ struct MEM_ROOT {
   void (*m_error_handler)(void) = nullptr;
 
   PSI_memory_key m_psi_key = 0;
-
-  CallBackFunc allocCBFunc = nullptr;
-
-  CallBackFunc freeCBFunc = nullptr;
 };
 
 /**

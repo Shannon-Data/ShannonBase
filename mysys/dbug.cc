@@ -926,19 +926,6 @@ void _db_pop_() {
   }
 }
 
-void db_stack_copy(CODE_STATE *leader_cs) {
-  CODE_STATE *cs;
-  get_code_state_or_return;
-  assert(cs->stack == &init_settings);
-  cs->stack = leader_cs->stack;
-}
-
-void db_stack_reset() {
-  CODE_STATE *cs;
-  get_code_state_or_return;
-  cs->stack = &init_settings;
-}
-
 /*
  *  FUNCTION
  *

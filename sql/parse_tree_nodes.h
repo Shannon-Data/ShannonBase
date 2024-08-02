@@ -418,7 +418,6 @@ class PT_select_item_list : public PT_item_list {
   typedef PT_item_list super;
 
  public:
-  PT_select_item_list() : super() {}
   explicit PT_select_item_list(const POS &pos) : super(pos) {}
 
   bool do_contextualize(Parse_context *pc) override;

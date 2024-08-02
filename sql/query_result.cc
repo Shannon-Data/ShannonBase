@@ -1,5 +1,4 @@
 /* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -19,9 +18,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/query_result.h"
 
@@ -56,12 +53,9 @@
 #include "sql/sql_const.h"
 #include "sql/sql_error.h"
 #include "sql/sql_exchange.h"
-#include "sql/sql_message_queue.h"
 #include "sql/system_variables.h"
 #include "sql/visible_fields.h"
-#include "sql_optimizer.h"
 #include "sql_string.h"
-#include "sql_tmp_table.h"
 #include "strmake.h"
 #include "strxnmov.h"
 #include "template_utils.h"  // pointer_cast
@@ -122,215 +116,6 @@ bool Query_result_send::send_eof(THD *thd) {
   if (thd->is_error()) return true;
   ::my_eof(thd);
   is_result_set_started = false;
-  return false;
-}
-
-Query_result_mq::Query_result_mq(JOIN *join, MQueue_handle *msg_handler,
-                                 handler *file, bool stab_output)
-    : Query_result(),
-      m_table(nullptr),
-      m_param(nullptr),
-      send_fields(nullptr),
-      send_fields_size(0),
-      mq_fields_data(nullptr),
-      mq_fields_null_array(nullptr),
-      mq_fields_null_flag(nullptr) {
-  m_join = join;
-  m_handler = msg_handler;
-  m_file = file;
-  m_stable_output = stab_output;
-}
-
-#define MQ_FIELDS_DATA_HEADER_LENGTH 4
-
-bool Query_result_mq::send_result_set_metadata(
-    THD *thd, const mem_root_deque<Item *> &list MY_ATTRIBUTE((unused)),
-    uint flags MY_ATTRIBUTE((unused))) {
-  m_param = new (thd->pq_mem_root) Temp_table_param();
-  if (!m_param || m_join->make_pq_tables_info()) return true;
-
-  send_fields = &m_join->tmp_fields[REF_SLICE_PQ_TMP];
-  uint field_size = send_fields->size();
-  send_fields_size = field_size + MQ_FIELDS_DATA_HEADER_LENGTH;
-
-  mq_fields_data = new (thd->pq_mem_root) Field_raw_data[send_fields_size]{};
-  mq_fields_null_array = new (thd->pq_mem_root) bool[2 * field_size];
-  mq_fields_null_flag = 
-    new (thd->pq_mem_root) char[field_size / MQ_FIELDS_DATA_HEADER_LENGTH + 2];
-
-  if (!mq_fields_data || !mq_fields_null_array || !mq_fields_null_flag) {
-    return true;
-  }
-
-  return false;
-}
-
-bool Query_result_mq::send_data(
-    THD *thd, const mem_root_deque<Item *> &items MY_ATTRIBUTE((unused))) {
-  DBUG_ENTER("Query_result_mq::send_data");
-  int null_num = 0;
-  uint32 total_copy_bytes = 0;
-  int i, j;
-
-  // empty message
-  if (send_fields_size == MQ_FIELDS_DATA_HEADER_LENGTH) {
-    thd->inc_sent_row_count(1);
-    DBUG_RETURN(m_handler->send_exception_msg(EMPTY_MSG));
-  }
-
-  Field *result_field = nullptr;
-  int fields_idx = MQ_FIELDS_DATA_HEADER_LENGTH;
-  /* currently supporting ITEM_FIELD and ITEM_FUNC */
-  // for(Item *item = it++; item; item = it++, fields_idx++){
-  for (Item *item : *send_fields) {
-    assert(!item->skip_create_tmp_table);
-    // c0: skip null item
-    if (item->type() == Item::NULL_ITEM || item->type() == Item::STRING_ITEM) {
-      pq_build_mq_item(item, &mq_fields_data[fields_idx], mq_fields_null_array,
-                       null_num, total_copy_bytes);
-      fields_idx++;
-      continue;
-    }
-
-    // c2: check Item_copy. In the original execution plan, const_item will be
-    // transformed into Item_copy in tmp_table (or ORDERED_GROUP_BY)
-
-    // c3: check item_result_field and item_field
-    result_field = item->get_result_field();
-    if (!result_field) {
-      if (item->type() == Item::FIELD_ITEM &&
-          DBUG_EVALUATE_IF("pq_mq_error4", false, true)) {
-        result_field = down_cast<Item_field *>(item)->field;
-      } else {
-        // c4: other cases will be shielded in JOIN::check_first_rewritten_tab
-        sql_print_error("not supported field");
-        m_handler->send_exception_msg(ERROR_MSG);
-        DBUG_RETURN(true);
-      }
-    } else {
-      item->save_in_field(result_field, true);
-    }
-
-    assert(result_field);
-    pq_build_mq_fields(result_field, &mq_fields_data[fields_idx],
-                       mq_fields_null_array, null_num, total_copy_bytes);
-
-    fields_idx++;
-  }
-
-  assert((uint)null_num ==
-         2 * (send_fields_size - MQ_FIELDS_DATA_HEADER_LENGTH));
-  uint16 null_len = ((null_num % 8 == 0) ? null_num / 8 : null_num / 8 + 1) + 1;
-
-  memset(mq_fields_null_flag, 0, null_len);
-
-  /*
-   * Now, we use 2 bps/field as a header to send each Item, where the first bit
-   * indicates that the corresponding item is a CONST_ITEM or not, and the
-   * second bit indicates that the related result_field is NULL_FILED or not.
-   * These two bits have at most four status:
-   *   (0, 0)   =>  NOT_CONST_ITEM & NON_NULL_FIELD
-   *   (0, 1)   =>  NOT_CONST_ITEM & NULL_FIELD
-   *   (1, 0)   =>  CONST_ITEM & NON_NULL_FIELD
-   *   (1, 1)   =>  CONST_ITEM & NULL_FIELD (such as Item_null)
-   *
-   * Only for the first case (0, 0), we need send the field data to MQ.
-   *
-   * null_flag[j] = 0 indicates the corresponding field is NOT NULL (or it is
-   * not a const_item()). otherwise, null_flag[j] = 1.
-   */
-
-  for (i = 0; i < null_num; i++) {
-    if (mq_fields_null_array[i]) {
-      j = (i >> 3) + 1;
-      mq_fields_null_flag[j] += 1 << (7 - (i & 7));
-    }
-  }
-
-  mq_fields_data[3].m_ptr = (uchar *)mq_fields_null_flag;
-  mq_fields_data[3].m_len = null_len;
-  total_copy_bytes += null_len;
-
-  /* there are at most 4096 fields and thus null_len is less than 2 * 2^12/8 =
-   * 2^10. So, we can use 2 bytes to store it.
-   */
-  mq_fields_data[2].m_ptr = (uchar *)&null_len;
-  mq_fields_data[2].m_len = 2;
-  total_copy_bytes += 2;
-
-  if (m_stable_output) {
-    assert(m_file && m_file->ht->db_type == DB_TYPE_INNODB);
-    mq_fields_data[1].m_ptr = &m_file->ref[0];
-    mq_fields_data[1].m_len = m_file->ref_length;
-    mq_fields_data[1].m_var_len = 0;
-    mq_fields_data[1].m_need_send = m_file->ref_length ? true : false;
-    total_copy_bytes += m_file->ref_length;
-  } else {
-    mq_fields_data[1].m_need_send = false;
-  }
-
-  /* for total_copy_bytes, it is less than 2^16 * 2^16 = 2^32 and
-   * we can use 4 bytes to store it
-   */
-  mq_fields_data[0].m_ptr = (uchar *)&total_copy_bytes;
-  mq_fields_data[0].m_len = 4;
-
-  // send messages to mq
-  MQ_RESULT res;
-  for (i = 0; i < (int)send_fields_size; i++) {
-    /* for the case of NULL field, we need not send msg to MQ */
-    if (!mq_fields_data[i].m_need_send) continue;
-
-    res = m_handler->send(&mq_fields_data[i]);
-
-    // In some case, we should detach the MQ and thus the MQ_DETACHED status can
-    // also
-    //  be considered as an normal status.
-    if (res == MQ_DETACHED) DBUG_RETURN(false);
-
-    if (res != MQ_SUCCESS || DBUG_EVALUATE_IF("pq_mq_error5", true, false)) {
-      sql_print_error("send message to MQ error");
-      m_handler->send_exception_msg(ERROR_MSG);
-      DBUG_RETURN(true);
-    }
-  }
-
-  thd->inc_sent_row_count(1);
-  DBUG_RETURN(false);
-}
-
-void Query_result_mq::cleanup() {
-  if (m_param) {
-    m_param->cleanup();
-    destroy(m_param);
-    m_param = nullptr;
-  }
-
-  if (m_table) {
-    close_tmp_table(m_table);
-    free_tmp_table(m_table);
-    m_table = nullptr;
-  }
-
-  if (mq_fields_data) {
-    destroy(mq_fields_data);
-    mq_fields_data = nullptr;
-  }
-
-  if (mq_fields_null_array) {
-    destroy(mq_fields_null_array);
-    mq_fields_null_array = nullptr;
-  }
-
-  if (mq_fields_null_flag) {
-    destroy(mq_fields_null_flag);
-    mq_fields_null_flag = nullptr;
-  }
-}
-
-bool Query_result_mq::send_eof(THD *thd) {
-  if (thd->is_error()) return true;
-  ::my_eof(thd);
   return false;
 }
 

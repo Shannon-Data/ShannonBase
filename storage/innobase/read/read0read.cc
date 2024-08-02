@@ -804,10 +804,8 @@ void MVCC::view_close(ReadView *&view, bool own_mutex) {
 
     view->close();
 
-    if (!view->skip_view_list) {
-      UT_LIST_REMOVE(m_views, view);
-      UT_LIST_ADD_LAST(m_free, view);
-    }
+    UT_LIST_REMOVE(m_views, view);
+    UT_LIST_ADD_LAST(m_free, view);
 
     ut_ad(validate());
 
