@@ -2066,13 +2066,13 @@ const char *thd_innodb_tmpdir(THD *thd) {
   return (innodb_session->m_trx);
 }
 
-ulong thd_parallel_read_threads(THD *thd) {
-  return THDVAR(thd, parallel_read_threads);
-}
-
 ulong thd_ddl_buffer_size(THD *thd) { return THDVAR(thd, ddl_buffer_size); }
 
 size_t thd_ddl_threads(THD *thd) noexcept { return THDVAR(thd, ddl_threads); }
+
+ulong thd_parallel_read_threads(THD *thd) {
+  return THDVAR(thd, parallel_read_threads);
+}
 
 /** Check if statement is of type INSERT .... SELECT that involves
 use of intrinsic tables.
@@ -7992,6 +7992,7 @@ ulint get_innobase_type_from_mysql_type(ulint *unsigned_flag, const void *f) {
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_JSON:  // JSON fields are stored as BLOBs
       return (DATA_BLOB);
     case MYSQL_TYPE_NULL:
@@ -8129,6 +8130,7 @@ ulint get_innobase_type_from_mysql_dd_type(ulint *unsigned_flag,
     case dd::enum_column_types::MEDIUM_BLOB:
     case dd::enum_column_types::BLOB:
     case dd::enum_column_types::LONG_BLOB:
+    case dd::enum_column_types::VECTOR:
       *charset_no = field_charset->number;
       if (field_charset != &my_charset_bin) *binary_type = 0;
       return (DATA_BLOB);

@@ -150,6 +150,9 @@ class ReadView {
  public:
   ReadView();
   ~ReadView();
+
+  void Copy_readView(const ReadView &);
+
   /** Check whether transaction id is valid.
   @param[in]    id              transaction id to check
   @param[in]    name            table name */
@@ -230,6 +233,16 @@ class ReadView {
   @return true if there are no transaction ids in the snapshot */
   bool empty() const { return (m_ids.empty()); }
 
+  /**
+  Clones a read view object. The resulting read view has identical change
+  visibility as the donor read view
+  @param	result	pointer to resulting read view. If NULL, a view will be
+  allocated. If non-NULL, a view will overwrite a previously-existing
+  in-use or released view.
+  @param	from_trx	transation owning the donor read view. */
+
+  void clone(ReadView *&result, trx_t *from_trx) const;
+
 #ifdef UNIV_DEBUG
   /**
   @return the view low limit number */
@@ -272,6 +285,9 @@ class ReadView {
 
   friend class MVCC;
 
+ public:
+  bool skip_view_list{false};
+
  private:
   // Disable copying
   ReadView(const ReadView &);
@@ -307,6 +323,11 @@ class ReadView {
   variable INNODB_PURGE_VIEW_TRX_ID_AGE. */
   trx_id_t m_view_low_limit_no;
 #endif /* UNIV_DEBUG */
+
+  /** This is a view cloned by clone but not by
+  MVCC::clone_oldest_view. Used to make sure the cloned transaction does
+  not see its own changes. */
+  bool m_cloned;
 
   /** AC-NL-RO transaction view that has been "closed". */
   bool m_closed;

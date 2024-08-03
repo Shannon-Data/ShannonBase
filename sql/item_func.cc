@@ -143,7 +143,8 @@
 #include "sql/strfunc.h"        // find_type
 #include "sql/system_variables.h"
 #include "sql/thd_raii.h"
-#include "sql/val_int_compare.h"  // Integer_value
+#include "sql/val_int_compare.h"    // Integer_value
+#include "sql/vector_conversion.h"  // get_dimensions
 #include "sql_string.h"
 #include "string_with_len.h"
 #include "template_utils.h"
@@ -1560,11 +1561,33 @@ void Item_func_num1::fix_num_length_and_dec() {
   max_length = args[0]->max_length;
 }
 
+uint Item_func::num_vector_args() {
+  uint num_vectors = 0;
+  for (uint i = 0; i < arg_count; i++) {
+    /* VECTOR type fields should not participate as function arguments. */
+    if (args[i]->data_type() == MYSQL_TYPE_VECTOR) {
+      num_vectors++;
+    }
+  }
+  return num_vectors;
+}
+
+/*
+  Reject unsupported VECTOR type arguments.
+ */
+bool Item_func::reject_vector_args() {
+  if (num_vector_args() > 0) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+    return true;
+  }
+  return false;
+}
+
 /*
   Reject geometry arguments, should be called in resolve_type() for
   SQL functions/operators where geometries are not suitable as operands.
  */
-bool reject_geometry_args(uint arg_count, Item **args, Item_result_field *me) {
+bool Item_func::reject_geometry_args() {
   /*
     We want to make sure the operands are not GEOMETRY strings because
     it's meaningless for them to participate in arithmetic and/or numerical
@@ -1580,7 +1603,7 @@ bool reject_geometry_args(uint arg_count, Item **args, Item_result_field *me) {
   for (uint i = 0; i < arg_count; i++) {
     if (args[i]->result_type() != ROW_RESULT &&
         args[i]->data_type() == MYSQL_TYPE_GEOMETRY) {
-      my_error(ER_WRONG_ARGUMENTS, MYF(0), me->func_name());
+      my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
       return true;
     }
   }
@@ -1634,8 +1657,11 @@ bool Item_func_numhybrid::resolve_type(THD *thd) {
       if (args[1]->propagate_type(thd, Type_properties(*args[0]))) return true;
     }
   }
-  if (resolve_type_inner(thd)) return true;
-  return reject_geometry_args(arg_count, args, this);
+
+  if (resolve_type_inner(thd) || reject_geometry_args() ||
+      reject_vector_args()) return true;
+
+  return false;
 }
 
 bool Item_func_numhybrid::resolve_type_inner(THD *) {
@@ -1852,7 +1878,7 @@ void Item_typecast_signed::print(const THD *thd, String *str,
 }
 
 bool Item_typecast_signed::resolve_type(THD *thd) {
-  if (reject_geometry_args(arg_count, args, this)) return true;
+  if (reject_geometry_args() || reject_vector_args()) return true;
   return args[0]->propagate_type(thd, MYSQL_TYPE_LONGLONG, false, true);
 }
 
@@ -1910,7 +1936,7 @@ void Item_typecast_unsigned::print(const THD *thd, String *str,
 }
 
 bool Item_typecast_unsigned::resolve_type(THD *thd) {
-  if (reject_geometry_args(arg_count, args, this)) return true;
+  if (reject_geometry_args() || reject_vector_args()) return true;
   return args[0]->propagate_type(thd, MYSQL_TYPE_LONGLONG, false, true);
 }
 
@@ -2779,7 +2805,8 @@ bool Item_dec_func::resolve_type(THD *thd) {
   decimals = DECIMAL_NOT_SPECIFIED;
   max_length = float_length(decimals);
   set_nullable(true);
-  return reject_geometry_args(arg_count, args, this);
+  if (reject_geometry_args() || reject_vector_args()) return true;
+  return false;
 }
 
 /** Gateway to natural LOG function. */
@@ -2959,7 +2986,8 @@ bool Item_func_bit::resolve_type(THD *thd) {
     set_data_type_longlong();
     unsigned_flag = true;
   }
-  return reject_geometry_args(arg_count, args, this);
+  if (reject_vector_args()) return true;
+  return reject_geometry_args();
 }
 
 longlong Item_func_bit::val_int() {
@@ -3263,7 +3291,7 @@ bool Item_func_int_val::resolve_type_inner(THD *) {
   DBUG_PRINT("info", ("name %s", func_name()));
   assert(args[0]->data_type() != MYSQL_TYPE_INVALID);
 
-  if (reject_geometry_args(arg_count, args, this)) return true;
+  if (reject_geometry_args() || reject_vector_args()) return true;
 
   switch (args[0]->result_type()) {
     case STRING_RESULT:
@@ -3396,7 +3424,7 @@ bool Item_func_round::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_NEWDECIMAL)) return true;
   if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_LONGLONG)) return true;
 
-  if (reject_geometry_args(arg_count, args, this)) return true;
+  if (reject_geometry_args() || reject_vector_args()) return true;
 
   switch (args[0]->result_type()) {
     case INT_RESULT:
@@ -3625,7 +3653,8 @@ void Item_func_rand::seed_random(Item *arg) {
 bool Item_func_rand::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_DOUBLE)) return true;
   if (Item_real_func::resolve_type(thd)) return true;
-  return reject_geometry_args(arg_count, args, this);
+  if (reject_geometry_args() || reject_vector_args()) return true;
+  return false;
 }
 
 bool Item_func_rand::fix_fields(THD *thd, Item **ref) {
@@ -3694,7 +3723,8 @@ double Item_func_rand::val_real() {
 bool Item_func_sign::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DOUBLE)) return true;
   if (Item_int_func::resolve_type(thd)) return true;
-  return reject_geometry_args(arg_count, args, this);
+  if (reject_geometry_args() || reject_vector_args()) return true;
+  return false;
 }
 
 longlong Item_func_sign::val_int() {
@@ -3708,7 +3738,8 @@ bool Item_func_units::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DOUBLE)) return true;
   decimals = DECIMAL_NOT_SPECIFIED;
   max_length = float_length(decimals);
-  return reject_geometry_args(arg_count, args, this);
+  if (reject_geometry_args() || reject_vector_args()) return true;
+  return false;
 }
 
 double Item_func_units::val_real() {
@@ -3725,7 +3756,8 @@ bool Item_func_min_max::resolve_type(THD *thd) {
     return false;
 
   if (resolve_type_inner(thd)) return true;
-  return reject_geometry_args(arg_count, args, this);
+  if (reject_geometry_args() || reject_vector_args()) return true;
+  return false;
 }
 
 /*
@@ -4134,6 +4166,21 @@ longlong Item_func_length::val_int() {
   }
   null_value = false;
   return (longlong)res->length();
+}
+
+longlong Item_func_vector_dim::val_int() {
+  assert(fixed);
+  String *res = args[0]->val_str(&value);
+  null_value = false;
+  if (res == nullptr || res->ptr() == nullptr) {
+    return error_int(); /* purecov: inspected */
+  }
+  uint32 dimensions = get_dimensions(res->length(), Field_vector::precision);
+  if (dimensions == UINT32_MAX) {
+    my_error(ER_TO_VECTOR_CONVERSION, MYF(0), res->length(), res->ptr());
+    return error_int(); /* purecov: inspected */
+  }
+  return (longlong)dimensions;
 }
 
 longlong Item_func_char_length::val_int() {
@@ -6888,6 +6935,10 @@ bool Item_func_get_user_var::propagate_type(THD *,
     case MYSQL_TYPE_TIME2:
       set_data_type_string(15, type.m_collation);
       break;
+    case MYSQL_TYPE_VECTOR:
+      set_data_type_vector(
+          Field_vector::dimension_bytes(Field_vector::max_dimensions));
+      break;      
     default:
       assert(false);
   }
@@ -9786,6 +9837,12 @@ longlong Item_func_internal_dd_char_length::val_int() {
 
   // Check data types for getting info
   const enum_field_types field_type = dd_get_old_field_type(col_type);
+
+  if (field_type == MYSQL_TYPE_VECTOR) {
+    /* For vector types, we can return the field_length as is. */
+    return field_length;
+  }
+
   const bool blob_flag = is_blob(field_type);
   if (!blob_flag && field_type != MYSQL_TYPE_ENUM &&
       field_type != MYSQL_TYPE_SET &&

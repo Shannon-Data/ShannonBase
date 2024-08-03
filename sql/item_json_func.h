@@ -181,6 +181,7 @@ class Item_json_func : public Item_func {
   }
 
   bool resolve_type(THD *) override {
+    if (reject_vector_args()) return true;
     set_nullable(true);
     return false;
   }
@@ -319,6 +320,7 @@ class Item_func_json_valid final : public Item_int_func {
   longlong val_int() override;
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
     set_nullable(true);
     return false;
@@ -367,6 +369,7 @@ class Item_func_json_schema_validation_report final : public Item_json_func {
   bool val_json(Json_wrapper *wr) override;
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
     set_nullable(true);
     return false;
@@ -404,6 +407,7 @@ class Item_func_json_contains final : public Item_int_func {
   longlong val_int() override;
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
     if (param_type_is_default(thd, 1, 3)) return true;
     set_nullable(true);
@@ -441,6 +445,7 @@ class Item_func_json_contains_path final : public Item_int_func {
   longlong val_int() override;
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
     if (param_type_is_default(thd, 1, -1)) return true;
     set_nullable(true);
@@ -482,6 +487,7 @@ class Item_typecast_json final : public Item_json_func {
       : Item_json_func(thd, pos, a) {}
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (Item_json_func::resolve_type(thd)) return true;
     return args[0]->propagate_type(thd, MYSQL_TYPE_JSON, false, true);
   }
@@ -503,6 +509,7 @@ class Item_func_json_length final : public Item_int_func {
   Item_func_json_length(const POS &pos, Item *doc) : Item_int_func(pos, doc) {}
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
     if (param_type_is_default(thd, 1, 2)) return true;
     set_nullable(true);
@@ -526,6 +533,7 @@ class Item_func_json_depth final : public Item_int_func {
   const char *func_name() const override { return "json_depth"; }
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
     set_nullable(true);
     return false;
@@ -550,6 +558,7 @@ class Item_func_json_keys : public Item_json_func {
   const char *func_name() const override { return "json_keys"; }
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (Item_json_func::resolve_type(thd)) return true;
     if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
     if (param_type_is_default(thd, 1, 2)) return true;
@@ -575,6 +584,7 @@ class Item_func_json_extract final : public Item_json_func {
   const char *func_name() const override { return "json_extract"; }
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (Item_json_func::resolve_type(thd)) return true;
     if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
     if (param_type_is_default(thd, 1, -1)) return true;
@@ -873,6 +883,7 @@ class Item_func_json_quote : public Item_str_func {
   const char *func_name() const override { return "json_quote"; }
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, -1)) return true;
     set_nullable(true);
 
@@ -906,6 +917,7 @@ class Item_func_json_unquote : public Item_str_func {
   enum Functype functype() const override { return JSON_UNQUOTE_FUNC; }
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, -1)) return true;
     set_nullable(true);
     set_data_type_string(args[0]->max_char_length(), &my_charset_utf8mb4_bin);
@@ -925,6 +937,7 @@ class Item_func_json_pretty final : public Item_str_func {
   const char *func_name() const override { return "json_pretty"; }
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_JSON)) return true;
     set_data_type_string(MAX_BLOB_WIDTH, &my_charset_utf8mb4_bin);
     return false;
@@ -943,6 +956,7 @@ class Item_func_json_storage_size final : public Item_int_func {
   const char *func_name() const override { return "json_storage_size"; }
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_JSON)) return true;
     if (Item_int_func::resolve_type(thd)) return true;
     set_nullable(true);
@@ -962,6 +976,7 @@ class Item_func_json_storage_free final : public Item_int_func {
   const char *func_name() const override { return "json_storage_free"; }
 
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_JSON)) return true;
     return false;
   }
@@ -1064,6 +1079,7 @@ class Item_func_member_of : public Item_bool_func {
   const char *func_name() const override { return "member of"; }
   enum Functype functype() const override { return MEMBER_OF_FUNC; }
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (param_type_is_default(thd, 0, 2, MYSQL_TYPE_JSON)) return true;
     args[0]->mark_json_as_scalar();
     return false;

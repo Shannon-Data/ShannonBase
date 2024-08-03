@@ -758,6 +758,9 @@ struct dtuple_t {
     return (compare(rec, index, offsets, &matched_fields));
   }
 
+  int compare(const rec_t *rec, const dict_index_t *index,
+              const dict_index_t *index2, const ulint *offsets);
+
   /** Get number of externally stored fields.
   @retval number of externally stored fields. */
   inline size_t get_n_ext() const {

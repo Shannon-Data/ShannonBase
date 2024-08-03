@@ -88,9 +88,11 @@
 #include "sql/time_zone_common.h"
 #include "sql/transaction_info.h"
 #include "sql/tztime.h"  // Time_zone
+#include "sql/vector_conversion.h"  // get_dimensions
 #include "string_with_len.h"
 #include "template_utils.h"  // pointer_cast
 #include "typelib.h"
+
 namespace dd {
 class Spatial_reference_system;
 }  // namespace dd
@@ -123,8 +125,9 @@ uchar Field::dummy_null_buffer = ' ';
   and index of field in this array.
 */
 #define FIELDTYPE_TEAR_FROM (MYSQL_TYPE_BIT + 1)
-#define FIELDTYPE_TEAR_TO (243 - 1)
+#define FIELDTYPE_TEAR_TO (MYSQL_TYPE_INVALID - 1)
 #define FIELDTYPE_NUM (FIELDTYPE_TEAR_FROM + (255 - FIELDTYPE_TEAR_TO))
+static_assert(FIELDTYPE_NUM == 31, "FIELDTYPE_NUM expected as 31");
 
 namespace {
 /**
@@ -268,8 +271,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_NEWDECIMAL, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_NEWDECIMAL,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,         
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_DECIMAL, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -299,8 +306,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_TINY,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_LONGLONG, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_LONGLONG,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_TINY
          MYSQL_TYPE_TINY, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -330,8 +341,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_SHORT,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_LONGLONG, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_LONGLONG,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL      MYSQL_TYPE_JSON
          MYSQL_TYPE_SHORT, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -361,8 +376,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_LONG,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_LONGLONG, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_LONGLONG,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL      MYSQL_TYPE_JSON
          MYSQL_TYPE_LONG, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -392,8 +411,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_FLOAT,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_DOUBLE, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_DOUBLE,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_FLOAT, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -423,8 +446,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_DOUBLE,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_DOUBLE, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_DOUBLE,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_DOUBLE, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -454,8 +481,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_DATETIME, MYSQL_TYPE_YEAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_NEWDATE, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_BIT, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_BIT,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_VECTOR,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL      MYSQL_TYPE_JSON
          MYSQL_TYPE_BOOL, MYSQL_TYPE_JSON,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -485,8 +516,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_DATETIME, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_DATETIME, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -516,8 +551,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_LONGLONG,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_NEWDATE, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_LONGLONG, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_LONGLONG,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_LONGLONG, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -547,8 +586,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INT24,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_NEWDATE, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_LONGLONG, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_LONGLONG,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_INT24, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -578,8 +621,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_DATETIME, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_NEWDATE, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -609,8 +656,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_DATETIME, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_NEWDATE, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -640,8 +691,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_DATETIME, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_DATETIME, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -671,8 +726,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_YEAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_LONGLONG, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_LONGLONG,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_SHORT, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -702,8 +761,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_DATETIME, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_NEWDATE, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL      MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -733,8 +796,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -764,8 +831,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_LONGLONG,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_BIT, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_BIT,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL      MYSQL_TYPE_JSON
          MYSQL_TYPE_LONGLONG, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -778,6 +849,41 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_BLOB, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_STRING       MYSQL_TYPE_GEOMETRY
          MYSQL_TYPE_STRING, MYSQL_TYPE_VARCHAR},
+        /* MYSQL_TYPE_VECTOR -> */
+        {// MYSQL_TYPE_DECIMAL      MYSQL_TYPE_TINY
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_SHORT        MYSQL_TYPE_LONG
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_FLOAT        MYSQL_TYPE_DOUBLE
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_NULL         MYSQL_TYPE_TIMESTAMP
+         MYSQL_TYPE_VECTOR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_LONGLONG     MYSQL_TYPE_INT24
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_DATE         MYSQL_TYPE_TIME
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_DATETIME     MYSQL_TYPE_YEAR
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_VECTOR,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_SET          MYSQL_TYPE_TINY_BLOB
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_MEDIUM_BLOB  MYSQL_TYPE_LONG_BLOB
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BLOB         MYSQL_TYPE_VAR_STRING
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_STRING       MYSQL_TYPE_GEOMETRY
+         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID},         
         /* MYSQL_TYPE_INVALID -> */
         {// MYSQL_TYPE_DECIMAL      MYSQL_TYPE_TINY
          MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
@@ -795,8 +901,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_INVALID, MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -826,8 +936,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_SHORT,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_LONGLONG, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_LONGLONG,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_BOOL, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -857,8 +971,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_JSON,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -888,8 +1006,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_NEWDECIMAL,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_NEWDECIMAL, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_NEWDECIMAL,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_NEWDECIMAL, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -919,8 +1041,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -950,8 +1076,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -981,8 +1111,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_TINY_BLOB, MYSQL_TYPE_TINY_BLOB,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_TINY_BLOB, MYSQL_TYPE_TINY_BLOB,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_TINY_BLOB, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_TINY_BLOB, MYSQL_TYPE_LONG_BLOB,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -1012,8 +1146,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_MEDIUM_BLOB, MYSQL_TYPE_MEDIUM_BLOB,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_MEDIUM_BLOB, MYSQL_TYPE_MEDIUM_BLOB,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_MEDIUM_BLOB, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_MEDIUM_BLOB, MYSQL_TYPE_LONG_BLOB,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -1043,8 +1181,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_LONG_BLOB, MYSQL_TYPE_LONG_BLOB,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_LONG_BLOB, MYSQL_TYPE_LONG_BLOB,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_LONG_BLOB, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_LONG_BLOB, MYSQL_TYPE_LONG_BLOB,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -1074,8 +1216,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_BLOB, MYSQL_TYPE_BLOB,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_BLOB, MYSQL_TYPE_BLOB,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_BLOB, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_BLOB, MYSQL_TYPE_LONG_BLOB,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -1105,8 +1251,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -1136,8 +1286,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_STRING, MYSQL_TYPE_STRING,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_STRING, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_STRING, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_STRING, MYSQL_TYPE_STRING,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -1167,8 +1321,12 @@ static enum_field_types field_types_merge_rules[FIELDTYPE_NUM][FIELDTYPE_NUM] =
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
-         // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-         MYSQL_TYPE_VARCHAR, MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_BIT
+         MYSQL_TYPE_VARCHAR,
+         // MYSQL_TYPE_VECTOR
+         MYSQL_TYPE_INVALID,
+         // MYSQL_TYPE_INVALID
+         MYSQL_TYPE_INVALID,
          // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
          MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VARCHAR,
          // MYSQL_TYPE_NEWDECIMAL   MYSQL_TYPE_ENUM
@@ -1261,8 +1419,12 @@ static Item_result field_types_result_type[FIELDTYPE_NUM] = {
     STRING_RESULT, INT_RESULT,
     // MYSQL_TYPE_NEWDATE      MYSQL_TYPE_VARCHAR
     STRING_RESULT, STRING_RESULT,
-    // MYSQL_TYPE_BIT          MYSQL_TYPE_INVALID
-    INT_RESULT, INVALID_RESULT,
+    // MYSQL_TYPE_BIT
+    INT_RESULT,
+    // MYSQL_TYPE_VECTOR
+    STRING_RESULT,
+    // MYSQL_TYPE_INVALID
+    INVALID_RESULT,
     // Unused entries: <17>-<242>
     // MYSQL_TYPE_BOOL         MYSQL_TYPE_JSON
     INT_RESULT, STRING_RESULT,
@@ -7086,6 +7248,99 @@ type_conversion_status Field_blob::store(const char *from, size_t length,
   return store_internal(from, length, cs);
 }
 
+type_conversion_status Field_vector::store(double) {
+  my_error(ER_DATA_INCOMPATIBLE_WITH_VECTOR, MYF(0), "numeric", sizeof(double));
+  return TYPE_ERR_BAD_VALUE;
+}
+
+type_conversion_status Field_vector::store(longlong, bool) {
+  my_error(ER_DATA_INCOMPATIBLE_WITH_VECTOR, MYF(0), "numeric",
+           sizeof(longlong));
+  return TYPE_ERR_BAD_VALUE;
+}
+
+type_conversion_status Field_vector::store_decimal(const my_decimal *) {
+  my_error(ER_DATA_INCOMPATIBLE_WITH_VECTOR, MYF(0), "numeric",
+           sizeof(my_decimal));
+  return TYPE_ERR_BAD_VALUE;
+}
+
+type_conversion_status Field_vector::store(const char *from, size_t length,
+                                           const CHARSET_INFO *cs) {
+  uint32 dimensions = get_dimensions(length, Field_vector::precision);
+  if (dimensions == UINT32_MAX || cs != &my_charset_bin) {
+    my_error(ER_DATA_INCOMPATIBLE_WITH_VECTOR, MYF(0), "string", length);
+    return TYPE_ERR_BAD_VALUE;
+  }
+
+  if (dimensions > get_max_dimensions()) {
+    set_warning(Sql_condition::SL_WARNING, ER_DATA_TOO_LONG, 1);
+    return TYPE_WARN_TRUNCATED;
+  }
+
+  /* Check for NAN or INF value in the vector. */
+  for (uint32 i = 0; i < dimensions; i++) {
+    float to_store = 0;
+    memcpy(&to_store, from + sizeof(float) * i, sizeof(float));
+    if (std::isnan(to_store) || std::isinf(to_store)) {
+      my_error(ER_DATA_INCOMPATIBLE_WITH_VECTOR, MYF(0), "NAN or INF", length);
+      return TYPE_ERR_BAD_VALUE;
+    }
+  }
+
+#ifdef WORDS_BIGENDIAN
+  if (value.alloc(length)) {
+    reset();
+    return TYPE_ERR_OOM;
+  }
+  for (uint32 i = 0; i < dimensions; i++) {
+    float to_store = 0;
+    memcpy(&to_store, from + sizeof(float) * i, sizeof(float));
+    float4store(value.ptr() + i * sizeof(float), to_store);
+  }
+  from = value.ptr();
+#endif
+
+  return Field_blob::store(from, length, cs);
+}
+
+String *Field_vector::val_str(String *, String *val_ptr) const {
+  ASSERT_COLUMN_MARKED_FOR_READ;
+
+  const char *blob = pointer_cast<const char *>(get_blob_data());
+  if (blob == nullptr) {
+    val_ptr->set("", 0, charset());  // A bit safer than ->length(0)
+  } else {
+    uint32 length = get_length(ptr);
+#ifdef WORDS_BIGENDIAN
+    val_ptr->alloc(length);
+    uint32 dimensions = get_dimensions(length, Field_vector::precision);
+    float *to_store = (float *)(val_ptr->ptr());
+    for (uint32 i = 0; i < dimensions; i++) {
+      to_store[i] = float4get((const uchar *)(blob + i * sizeof(float)));
+    }
+    val_ptr->length(length);
+#else
+    val_ptr->set(blob, length, charset());
+#endif
+  }
+  return val_ptr;
+}
+
+uint Field_vector::is_equal(const Create_field *new_field) const {
+  if (new_field->sql_type != MYSQL_TYPE_VECTOR ||
+      new_field->max_display_width_in_codepoints() != field_length ||
+      new_field->charset != field_charset) {
+    return IS_EQUAL_NO;
+  }
+  return IS_EQUAL_YES;
+}
+
+void Field_vector::make_send_field(Send_field *field) const {
+  Field::make_send_field(field);
+  field->type = MYSQL_TYPE_VECTOR;
+}
+
 type_conversion_status Field_blob::store(double nr) {
   const CHARSET_INFO *cs = charset();
   value.set_real(nr, DECIMAL_NOT_SPECIFIED, cs);
@@ -9254,10 +9509,9 @@ size_t calc_pack_length(enum_field_types type, size_t length) {
       return 2 + portable_sizeof_char_ptr;
     case MYSQL_TYPE_MEDIUM_BLOB:
       return 3 + portable_sizeof_char_ptr;
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_LONG_BLOB:
-      return 4 + portable_sizeof_char_ptr;
     case MYSQL_TYPE_GEOMETRY:
-      return 4 + portable_sizeof_char_ptr;
     case MYSQL_TYPE_JSON:
       return 4 + portable_sizeof_char_ptr;
     case MYSQL_TYPE_SET:
@@ -9287,6 +9541,7 @@ size_t calc_pack_length(dd::enum_column_types type, size_t char_length,
     case dd::enum_column_types::MEDIUM_BLOB:
     case dd::enum_column_types::LONG_BLOB:
     case dd::enum_column_types::BLOB:
+    case dd::enum_column_types::VECTOR:
     case dd::enum_column_types::GEOMETRY:
     case dd::enum_column_types::VAR_STRING:
     case dd::enum_column_types::STRING:
@@ -9409,6 +9664,13 @@ Field *make_field(MEM_ROOT *mem_root, TABLE_SHARE *share, uchar *ptr,
       return new (mem_root) Field_varstring(
           ptr, field_length, HA_VARCHAR_PACKLENGTH(field_length), null_pos,
           null_bit, auto_flags, field_name, share, field_charset);
+    case MYSQL_TYPE_VECTOR: {
+      const uint pack_length =
+          calc_pack_length(field_type, field_length) - portable_sizeof_char_ptr;
+      return new (mem_root)
+          Field_vector(ptr, field_length, null_pos, null_bit, auto_flags,
+                       field_name, share, pack_length, field_charset);
+    }
     case MYSQL_TYPE_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_TINY_BLOB:

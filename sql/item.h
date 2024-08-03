@@ -995,6 +995,7 @@ class Item : public Parse_tree_node {
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_LONG_BLOB:
       case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_VECTOR:
       case MYSQL_TYPE_GEOMETRY:
       case MYSQL_TYPE_JSON:
       case MYSQL_TYPE_ENUM:
@@ -1066,6 +1067,7 @@ class Item : public Parse_tree_node {
       case MYSQL_TYPE_NULL:
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_VECTOR:
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_LONG_BLOB:
         return MYSQL_TYPE_VARCHAR;
@@ -1648,6 +1650,16 @@ class Item : public Parse_tree_node {
     collation.set_numeric();
     decimals = fsp;
     max_length = MAX_DATETIME_WIDTH + fsp + (fsp > 0 ? 1 : 0);
+  }
+
+  /**
+    Set the data type of the Item to be VECTOR.
+  */
+  void set_data_type_vector(uint32 max_l) {
+    set_data_type(MYSQL_TYPE_VECTOR);
+    collation.set(&my_charset_bin, DERIVATION_IMPLICIT);
+    decimals = DECIMAL_NOT_SPECIFIED;
+    max_length = max_l;
   }
 
   /**

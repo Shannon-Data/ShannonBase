@@ -63,7 +63,6 @@ static constexpr uint DD_VERSION_80017 = 80017;
 static constexpr uint DD_VERSION_80021 = 80021;
 static constexpr uint DD_VERSION_80022 = 80022;
 static constexpr uint DD_VERSION_80023 = 80023;
-
 /*
   Set of supported DD version labels. A supported DD version is a version
   from which we can upgrade. In the case of downgrade, this is not relevant,

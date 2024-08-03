@@ -4085,6 +4085,7 @@ bool prepare_pack_create_field(THD *thd, Create_field *sql_field,
       }
       [[fallthrough]];
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
@@ -5002,6 +5003,12 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
   // JSON columns cannot be used as keys.
   if (sql_field->sql_type == MYSQL_TYPE_JSON) {
     my_error(ER_JSON_USED_AS_KEY, MYF(0), column->get_field_name());
+    return true;
+  }
+
+  // VECTOR columns cannot be used as keys
+  if (sql_field->sql_type == MYSQL_TYPE_VECTOR) {
+    my_error(ER_NON_SCALAR_USED_AS_KEY, MYF(0), column->get_field_name());
     return true;
   }
 
@@ -7597,6 +7604,10 @@ bool Item_field::replace_field_processor(uchar *arg) {
   if (create_field) {
     field = new (targ->thd()->mem_root) Create_field_wrapper(create_field);
     switch (create_field->sql_type) {
+      case MYSQL_TYPE_VECTOR:
+        my_error(ER_INCORRECT_TYPE, MYF(0), create_field->field_name,
+                 "GENERATED COLUMN");
+        return true;      
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_LONG_BLOB:
@@ -8159,6 +8170,7 @@ bool mysql_prepare_create_table(
     switch (sql_field->sql_type) {
       case MYSQL_TYPE_GEOMETRY:
       case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_VECTOR:
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_LONG_BLOB:
@@ -18957,6 +18969,7 @@ bool mysql_checksum_table(THD *thd, Table_ref *tables,
               */
               switch (f->type()) {
                 case MYSQL_TYPE_BLOB:
+                case MYSQL_TYPE_VECTOR:
                 case MYSQL_TYPE_VARCHAR:
                 case MYSQL_TYPE_GEOMETRY:
                 case MYSQL_TYPE_JSON:

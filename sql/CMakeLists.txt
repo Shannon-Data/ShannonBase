@@ -584,6 +584,7 @@ SET(SQL_SHARED_SOURCES
   sql_plugin_var.cc
   sql_prepare.cc
   sql_profile.cc
+  sql_pq_condition.cc
   sql_query_rewrite.cc
   sql_reload.cc
   sql_rename.cc

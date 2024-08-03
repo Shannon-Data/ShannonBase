@@ -473,6 +473,8 @@ const char *ut_strerr(dberr_t num) {
       return ("Btree level limit exceeded");
     case DB_END_SAMPLE_READ:
       return ("Sample reader has been requested to stop sampling");
+    case DB_END_OF_RANGE:
+      return ("Reach end of Parallel Query Range");
     case DB_OUT_OF_RESOURCES:
       return ("System has run out of resources");
     case DB_FTS_TOO_MANY_NESTED_EXP:
