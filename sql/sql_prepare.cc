@@ -405,9 +405,7 @@ class Statement_backup {
 
     m_query_string = thd->query();
     thd->set_query(stmt->m_query_string);
-    if (thd->lex != nullptr) {
-      thd->lex->in_execute_ps = true;
-    }
+
     m_safe_to_display = thd->safe_to_display();
 
     /* Keep the current behaviour of displaying prepared statements always by
@@ -433,7 +431,6 @@ class Statement_backup {
 
     stmt->m_query_string = thd->query();
     thd->set_query(m_query_string);
-    thd->lex->in_execute_ps = false;
   }
 
   /**

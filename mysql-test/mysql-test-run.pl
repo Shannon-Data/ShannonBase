@@ -289,7 +289,6 @@ our $opt_keep_ndbfs                = 0;
 our $opt_mem                       = $ENV{'MTR_MEM'} ? 1 : 0;
 our $opt_only_big_test             = 0;
 our $opt_parallel                  = $ENV{MTR_PARALLEL};
-our $opt_pq                        = 0;
 our $opt_quiet                     = $ENV{'MTR_QUIET'} || 0;
 our $opt_repeat                    = 1;
 our $opt_report_times              = 0;
@@ -1653,7 +1652,6 @@ sub command_line_setup {
     'no-skip'                            => \$opt_no_skip,
     'only-big-test'                      => \$opt_only_big_test,
     'platform=s'                         => \$opt_platform,
-    'pq'                                 => \$opt_pq,
     'exclude-platform=s'                 => \$opt_platform_exclude,
     'skip-combinations'                  => \$opt_skip_combinations,
     'skip-im'                            => \&ignore_option,
@@ -2114,8 +2112,6 @@ sub command_line_setup {
 
   $ENV{'BIG_TEST'} = 1 if ($opt_big_test or $opt_only_big_test);
 
-  $ENV{'PQ_TEST'} = 1 if ($opt_pq);
-
   # Gcov flag
   if (($opt_gcov or $opt_gprof) and !$source_dist) {
     mtr_error("Coverage test needs the source - please use source dist");
@@ -2178,12 +2174,6 @@ sub command_line_setup {
       # Override: disable if running in the PB test environment
       $opt_ctest = 0;
     }
-  }
-
-  # Check parallel query
-  if ($opt_pq) {
-    push(@opt_extra_mysqld_opt, "--force_parallel_execute=1");
-    push(@opt_extra_mysqld_opt, "--parallel_cost_threshold=0");
   }
 
   # Check use of wait-all

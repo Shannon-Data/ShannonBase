@@ -1,5 +1,4 @@
 /* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -19,9 +18,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #ifndef SYSTEM_VARIABLES_INCLUDED
 #define SYSTEM_VARIABLES_INCLUDED
@@ -502,22 +499,6 @@ struct System_variables {
     @sa Sys_explain_format
    */
   Explain_format_type explain_format;
-
-  // add for parallel load data
-  bool gdb_parallel_load;
-  uint gdb_parallel_load_workers;
-  uint gdb_parallel_load_chunk_size;
-  bool gdb_parallel_load_executor;  // not displayed, need delete THD after use.
-                                    // inited to false by memset of THD()
-  bool force_parallel_execute;
-
-  ulong parallel_cost_threshold;
-
-  ulong parallel_default_dop;
-
-  ulong parallel_queue_timeout;
-
-  bool pq_copy_from(System_variables leader);  
 };
 
 /**
@@ -600,8 +581,6 @@ struct System_status_var {
   */
   double last_query_cost;
   ulonglong last_query_partial_plans;
-
-  bool pq_merge_status(System_status_var worker);
 };
 
 /*

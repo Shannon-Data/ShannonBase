@@ -2705,10 +2705,7 @@ THD *handler::ha_thd() const {
 void handler::unbind_psi() {
 #ifdef HAVE_PSI_TABLE_INTERFACE
   assert(m_lock_type == F_UNLCK);
-  /**If we were in force parallel query, we will make a copy of`thd->open_tables
-   * ` and do parallal query processing, and `inited` is initialized with
-   *  `PQ_LEADER` in `handler::ha_pq_init` */
-  assert(inited == NONE || inited ==  PQ_LEADER);
+  assert(inited == NONE);
   /*
     Notify the instrumentation that this table is not owned
     by this thread any more.
@@ -2720,7 +2717,7 @@ void handler::unbind_psi() {
 void handler::rebind_psi() {
 #ifdef HAVE_PSI_TABLE_INTERFACE
   assert(m_lock_type == F_UNLCK);
-  assert(inited == NONE || inited == PQ_LEADER);
+  assert(inited == NONE);
   /*
     Notify the instrumentation that this table is now owned
     by this thread.
@@ -2862,7 +2859,7 @@ int handler::ha_close(void) {
   // TODO: set table= NULL to mark the handler as closed?
   assert(m_psi == nullptr);
   assert(m_lock_type == F_UNLCK);
-  assert(inited == NONE || inited == PQ_LEADER);
+  assert(inited == NONE);
   if (m_unique) {
     // It's allocated on memroot and will be freed along with it
     m_unique->cleanup();
@@ -2887,7 +2884,7 @@ int handler::ha_index_init(uint idx, bool sorted) {
   int result;
   DBUG_TRACE;
   assert(table_share->tmp_table != NO_TMP_TABLE || m_lock_type != F_UNLCK);
-  assert(inited == NONE || inited == PQ_LEADER);
+  assert(inited == NONE);
   if (!(result = index_init(idx, sorted))) inited = INDEX;
   mrr_have_range = false;
   end_range = nullptr;
@@ -2931,7 +2928,7 @@ int handler::ha_rnd_init(bool scan) {
   int result;
   DBUG_TRACE;
   assert(table_share->tmp_table != NO_TMP_TABLE || m_lock_type != F_UNLCK);
-  assert(inited == NONE || inited == PQ_LEADER || (inited == RND && scan));
+  assert(inited == NONE || (inited == RND && scan));
   inited = (result = rnd_init(scan)) ? NONE : RND;
   end_range = nullptr;
   return result;
@@ -2954,8 +2951,6 @@ int handler::ha_rnd_end() {
   inited = NONE;
   end_range = nullptr;
   m_record_buffer = nullptr;
-  pq_range_type = PQ_RANGE_TYPE::PQ_QUICK_SELECT_NONE;
-
   return rnd_end();
 }
 
@@ -3050,7 +3045,7 @@ int handler::ha_sample_init(void *&scan_ctx, double sampling_percentage,
   DBUG_TRACE;
   assert(sampling_percentage >= 0.0);
   assert(sampling_percentage <= 100.0);
-  assert(inited == NONE || inited == PQ_LEADER);
+  assert(inited == NONE);
 
   // Initialise the random number generator.
   m_random_number_engine.seed(sampling_seed);
@@ -3303,7 +3298,7 @@ int handler::ha_index_read_idx_map(uchar *buf, uint index, const uchar *key,
   int result;
   DBUG_TRACE;
   assert(table_share->tmp_table != NO_TMP_TABLE || m_lock_type != F_UNLCK);
-  assert(inited == NONE || inited == PQ_LEADER);
+  assert(inited == NONE);
   assert(end_range == nullptr);
   assert(!pushed_idx_cond || buf == table->record[0]);
 
@@ -3318,7 +3313,7 @@ int handler::ha_index_read_idx_map(uchar *buf, uint index, const uchar *key,
     m_update_generated_read_fields = false;
   }
   table->set_row_status_from_handler(result);
-  assert(inited == NONE ||inited == PQ_LEADER);
+  assert(inited == NONE);
   return result;
 }
 
@@ -6575,13 +6570,6 @@ int DsMrr_impl::dsmrr_init(RANGE_SEQ_IF *seq_funcs, void *seq_init_param,
     return retval;
   }
 
-  if (thd->in_sp_trigger == 0 && thd->parallel_exec &&
-      table->file->pq_range_type != PQ_RANGE_TYPE::PQ_QUICK_SELECT_NONE) {
-    use_default_impl = true;
-    retval = h->handler::multi_range_read_init(seq_funcs, seq_init_param,
-                                               n_ranges, mode, buf);
-    return retval;
-  }
   /*
     This assert will hit if we have pushed an index condition to the
     primary key index and then "change our mind" and use a different
@@ -7951,7 +7939,7 @@ int handler::ha_external_lock(THD *thd, int lock_type) {
          ((lock_type != F_UNLCK && m_lock_type == F_UNLCK) ||
           lock_type == F_UNLCK));
   /* SQL HANDLER call locks/unlock while scanning (RND/INDEX). */
-  assert(inited == NONE || inited == PQ_LEADER || table->open_by_handler);
+  assert(inited == NONE || table->open_by_handler);
 
   ha_statistic_increment(&System_status_var::ha_external_lock_count);
 
@@ -7986,11 +7974,9 @@ int handler::ha_reset() {
   assert((uchar *)table->def_read_set.bitmap + table->s->column_bitmap_size ==
          (uchar *)table->def_write_set.bitmap);
   assert(bitmap_is_set_all(&table->s->all_set));
-  /**If we in parallel query, key_read will be set to corresponding value,
-   *  true in a copy of thd->open_tables. */
-  //assert(table->key_read == 0);
+  assert(table->key_read == 0);
   /* ensure that ha_index_end / ha_rnd_end has been called */
-  assert(inited == NONE || inited == PQ_LEADER);
+  assert(inited == NONE);
   /* Free cache used by filesort */
   free_io_cache(table);
   /* reset the bitmaps to point to defaults */
@@ -8092,12 +8078,12 @@ int handler::ha_delete_row(const uchar *buf) {
   return 0;
 }
 
-int handler::ha_pq_init(uint keyno, uint& dop) {
+int handler::ha_pq_init(uint keyno, uint dop) {
   DBUG_EXECUTE_IF("ha_pq_init_fail", return HA_ERR_TABLE_DEF_CHANGED;);
   int result;
   DBUG_ENTER("handler::ha_pq_init");
   assert(table_share->tmp_table != NO_TMP_TABLE || m_lock_type != F_UNLCK);
-  assert(inited == NONE || inited == INDEX || inited == PQ_LEADER);
+  assert(inited == NONE || inited == INDEX || (inited == PQ_LEADER));
   THD *cur_thd = table->in_use;
   inited = (result = pq_leader_scan_init(keyno, cur_thd->pq_ctx, dop))
                ? NONE
@@ -8121,25 +8107,6 @@ int handler::ha_pq_end() {
 
   THD *thd = current_thd;
   DBUG_RETURN(pq_leader_scan_end(thd->pq_ctx));
-}
-
-int handler::ha_index_or_rnd_end() {
-  switch (inited) {
-    case INDEX:
-      return ha_index_end();
-      break;
-    case RND:
-      return ha_rnd_end();
-      break;
-    case PQ_LEADER:
-      return ha_pq_end();
-      break;
-    case PQ_WORKER:
-      return pq_worker_scan_end(nullptr);
-      break;
-    default:
-      return 0;
-  }
 }
 
 int handler::ha_pq_signal_all() {

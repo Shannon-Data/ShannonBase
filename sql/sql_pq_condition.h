@@ -1,5 +1,5 @@
-#ifndef __SHANNONBASE_SQL_PQ_CONDITION_H__
-#define __SHANNONBASE_SQL_PQ_CONDITION_H__
+#ifndef SQL_PQ_CONDITION_H
+#define SQL_PQ_CONDITION_H
 
 /* Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
    Copyright (c) 2021, Huawei Technologies Co., Ltd.
@@ -34,4 +34,4 @@ void set_pq_condition_status(THD *thd);
 
 bool check_pq_conditions(THD *thd);
 
-#endif //__SHANNONBASE_SQL_PQ_CONDITION_H__
+#endif /* SQL_PQ_CONDITION_H */

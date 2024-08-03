@@ -1,5 +1,4 @@
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -19,9 +18,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #ifndef ITEM_PFS_FUNC_INCLUDED
 #define ITEM_PFS_FUNC_INCLUDED
@@ -81,8 +78,6 @@ class Item_func_pfs_format_bytes final : public Item_str_func {
   const char *func_name() const override { return "format_bytes"; }
   bool resolve_type(THD *) override;
   String *val_str(String *str) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;
-  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 };
 
 /** format_pico_time() */
@@ -98,7 +93,6 @@ class Item_func_pfs_format_pico_time final : public Item_str_func {
   const char *func_name() const override { return "format_pico_time"; }
   bool resolve_type(THD *) override;
   String *val_str(String *str) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;
 };
 
 #endif /* ITEM_PFS_FUNC_INCLUDED */

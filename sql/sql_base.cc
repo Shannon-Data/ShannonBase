@@ -1757,11 +1757,8 @@ static void release_or_close_table(THD *thd, TABLE *table) {
 void close_thread_table(THD *thd, TABLE **table_ptr) {
   TABLE *table = *table_ptr;
   DBUG_TRACE;
-  /**If we in parallel query, key_read will be set to corresponding value,
-   *  true in a copy of thd->open_tables. */
-  //assert(table->key_read == 0);
-  assert(!table->file || table->file->inited == handler::NONE ||
-          table->file->inited == handler::PQ_LEADER);
+  assert(table->key_read == 0);
+  assert(!table->file || table->file->inited == handler::NONE);
   mysql_mutex_assert_not_owner(&LOCK_open);
   /*
     The metadata lock must be released after giving back
@@ -2770,9 +2767,7 @@ static bool tdc_wait_for_old_version(THD *thd, const char *db,
   bool res = false;
 
   mysql_mutex_lock(&LOCK_open);
-  /*when current thread is PQ thread, no need to wait for flush tables. because
-   flush thread is waiting PQ leader thread finish.  */
-  if (!thd->is_worker() && (share = get_cached_table_share(db, table_name)) &&
+  if ((share = get_cached_table_share(db, table_name)) &&
       share->has_old_version()) {
     struct timespec abstime;
     set_timespec(&abstime, wait_timeout);
@@ -3332,7 +3327,7 @@ retry_share : {
 
 share_found:
   if (!(flags & MYSQL_OPEN_IGNORE_FLUSH)) {
-    if (!thd->is_worker() && share->has_old_version()) {
+    if (share->has_old_version()) {
       /*
         We already have an MDL lock. But we have encountered an old
         version of table in the table definition cache which is possible
@@ -8113,9 +8108,6 @@ Field *find_field_in_tables(THD *thd, Item_ident *item, Table_ref *first_table,
 
   for (cur_table = first_table; cur_table != last_table;
        cur_table = cur_table->next_name_resolution_table) {
-    if (thd->parallel_exec && item->m_tableno != cur_table->m_tableno) {
-      continue;
-    }
     Field *cur_field = find_field_in_table_ref(
         thd, cur_table, name, length, item->item_name.ptr(), db, table_name,
         ref, want_privilege, allow_rowid, &field_index, register_tree_change,

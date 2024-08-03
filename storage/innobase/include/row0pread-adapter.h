@@ -68,7 +68,7 @@ class Parallel_reader_adapter {
   @retval error. */
   [[nodiscard]] dberr_t add_scan(trx_t *trx,
                                  const Parallel_reader::Config &config,
-                                 Parallel_reader::F &&f, bool split= false);
+                                 Parallel_reader::F &&f);
 
   /** Run the parallel scan.
   @param[in]  thread_contexts   Context for each of the spawned threads

@@ -167,7 +167,6 @@ bool GroupIndexSkipScanIterator::Init() {
     ::index_first() within GroupIndexSkipScanIterator depends on it.
   */
   if (table()->file->inited) table()->file->ha_index_or_rnd_end();
-
   if (int result = table()->file->ha_index_init(index, true); result != 0) {
     table()->file->print_error(result, MYF(0));
     return true;

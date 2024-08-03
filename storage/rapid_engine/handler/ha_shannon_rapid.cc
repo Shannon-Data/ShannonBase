@@ -721,9 +721,9 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   // Scan the primary table and read the records.
   if (table_arg.file->inited == NONE && table_arg.file->ha_rnd_init(true)) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
+             table_arg.s->table_name.str);
     return HA_ERR_GENERIC;
   }
-
   //Start to write to IMCS. Do scan the primary table.
   m_rpd_thd->set_sent_row_count(0);
   int tmp {HA_ERR_GENERIC};

@@ -386,15 +386,13 @@ inline size_t Block::deallocate(Chunk chunk, size_t chunk_size) noexcept {
 
 inline void Block::destroy() noexcept {
   assert(!is_empty());
-  // PQ worker thread could quit early
-  if (Header::number_of_used_chunks() == 0) {
-    DBUG_PRINT("temptable_allocator",
-               ("destroying the block: (%s)", to_string().c_str()));
+  assert(Header::number_of_used_chunks() == 0);
+  DBUG_PRINT("temptable_allocator",
+             ("destroying the block: (%s)", to_string().c_str()));
 
-    deallocate_from(Header::memory_source_type(), Header::block_size(),
-                    Header::block_address());
-    Header::reset();
-  }
+  deallocate_from(Header::memory_source_type(), Header::block_size(),
+                  Header::block_address());
+  Header::reset();
 }
 
 inline bool Block::is_empty() const {

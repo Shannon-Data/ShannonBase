@@ -3027,9 +3027,6 @@ int mysql_execute_command(THD *thd, bool first_level) {
 
   thd->work_part_info = nullptr;
 
-  //set parallel query processing.
-  set_pq_condition_status(thd);
-
   if (thd->optimizer_switch_flag(OPTIMIZER_SWITCH_SUBQUERY_TO_DERIVED))
     lex->add_statement_options(OPTION_NO_CONST_TABLES);
 
