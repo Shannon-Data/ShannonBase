@@ -1253,6 +1253,31 @@ class Item_func_to_vector final : public Item_str_func {
   String *val_str(String *str) override;
 };
 
+class Item_func_to_vector final : public Item_str_func {
+  String buffer;
+
+ public:
+  Item_func_to_vector(const POS &pos, Item *a) : Item_str_func(pos, a) {}
+  bool resolve_type(THD *thd) override;
+  const char *func_name() const override { return "to_vector"; }
+  String *val_str(String *str) override;
+};
+
+class Item_func_from_vector final : public Item_str_func {
+  static const uint32 per_value_chars = 16;
+  static const uint32 max_output_bytes =
+      (Field_vector::max_dimensions * Item_func_from_vector::per_value_chars);
+  String buffer;
+
+ public:
+  Item_func_from_vector(const POS &pos, Item *a) : Item_str_func(pos, a) {
+    collation.set(&my_charset_utf8mb4_0900_bin);
+  }
+  bool resolve_type(THD *thd) override;
+  const char *func_name() const override { return "from_vector"; }
+  String *val_str(String *str) override;
+};
+
 class Item_func_uncompress final : public Item_str_func {
   String buffer;
 

@@ -928,6 +928,7 @@ uint ha_federated::convert_row_to_internal_format(uchar *record, MYSQL_ROW row,
       index variable to move us through the row at the
       same iterative step as the field
     */
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     ptrdiff_t old_ptr;
     old_ptr = (ptrdiff_t)(record - table->record[0]);
     (*field)->move_field_offset(old_ptr);
@@ -1475,6 +1476,7 @@ static FEDERATED_SHARE *get_share(const char *table_name, TABLE *table) {
       query.set_charset(system_charset_info);
       query.append(STRING_WITH_LEN("SELECT "));
       for (field = table->field; *field; field++) {
+        if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
         append_ident(&query, (*field)->field_name, strlen((*field)->field_name),
                      ident_quote_char);
         query.append(STRING_WITH_LEN(", "));
@@ -1665,6 +1667,7 @@ bool ha_federated::append_stmt_insert(String *query) {
     list and the fields list that match the current query id
   */
   for (field = table->field; *field; field++) {
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(table->write_set, (*field)->field_index())) {
       /* append the field name */
       append_ident(&insert_string, (*field)->field_name,
@@ -1752,6 +1755,7 @@ int ha_federated::write_row(uchar *) {
     list and the fields list that is part of the write set
   */
   for (field = table->field; *field; field++) {
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(table->write_set, (*field)->field_index())) {
       if ((*field)->is_null())
         values_string.append(STRING_WITH_LEN(" NULL "));
@@ -2033,6 +2037,7 @@ int ha_federated::update_row(const uchar *old_data, uchar *) {
   */
 
   for (Field **field = table->field; *field; field++) {
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(table->write_set, (*field)->field_index())) {
       const size_t field_name_length = strlen((*field)->field_name);
       append_ident(&update_string, (*field)->field_name, field_name_length,
@@ -2141,6 +2146,7 @@ int ha_federated::delete_row(const uchar *) {
   delete_string.append(STRING_WITH_LEN(" WHERE "));
 
   for (Field **field = table->field; *field; field++) {
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     Field *cur_field = *field;
     found++;
     if (bitmap_is_set(table->read_set, cur_field->field_index())) {
