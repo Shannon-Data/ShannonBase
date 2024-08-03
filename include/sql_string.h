@@ -606,12 +606,6 @@ class String {
     @return allocated string or NULL
   */
   char *dup(MEM_ROOT *root) const;
-
-  void ltrim();
-
-  void rtrim();
-
-  void rtrim_zero();  
 };
 
 /**

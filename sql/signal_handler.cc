@@ -170,9 +170,6 @@ void print_fatal_signal(int sig) {
       case THD::KILL_TIMEOUT:
         kreason = "KILL_TIMEOUT";
         break;
-      case THD::KILL_PQ_QUERY:
-        kreason = "KILL_PQ_QUERY";
-        break;
       case THD::KILLED_NO_VALUE:
         kreason = "KILLED_NO_VALUE";
         break;

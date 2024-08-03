@@ -1501,8 +1501,6 @@ struct TABLE {
   Field **gen_def_fields_ptr{nullptr};
   /// Field used by unique constraint
   Field *hash_field{nullptr};
-  /// Field used by connect by order
-  Field *connect_by_field{nullptr};  
   // ----------------------------------------------------------------------
   // The next few members are used if this (temporary) file is used solely for
   // the materialization/computation of an INTERSECT or EXCEPT set operation
@@ -2205,9 +2203,6 @@ struct TABLE {
   bool should_binlog_drop_if_temp_flag{false};
 
  public:
-  /** copy table property from orig table */
-  bool pq_copy(THD *thd, void *select, TABLE *orig);
-
   /**
     Does this table have any columns that can be updated using partial update
     in the current row?
@@ -3526,6 +3521,7 @@ class Table_ref {
     A table that takes part in a join operation must be assigned a unique
     table number.
   */
+  uint m_tableno{0};   ///< Table number within query block
   table_map m_map{0};  ///< Table map, derived from m_tableno
   /**
      If this table or join nest is the Y in "X [LEFT] JOIN Y ON C", this
@@ -3537,7 +3533,6 @@ class Table_ref {
   bool m_is_sj_or_aj_nest{false};
 
  public:
-   uint m_tableno{0};   ///< Table number within query block
   /*
     (Valid only for semi-join nests) Bitmap of tables that are within the
     semi-join (this is different from bitmap of all nest's children because
@@ -3609,6 +3604,7 @@ class Table_ref {
    */
   AccessPath *access_path_for_derived{nullptr};
 
+ private:
   /**
      This field is set to non-null for derived tables and views. It points
      to the Query_expression representing the derived table/view.
@@ -3616,7 +3612,7 @@ class Table_ref {
      @verbatim SELECT * FROM (SELECT a FROM t1) b @endverbatim
   */
   Query_expression *derived{nullptr}; /* Query_expression of derived table */
- private:
+
   /// If non-NULL, the CTE which this table is derived from.
   Common_table_expr *m_common_table_expr{nullptr};
   /**
@@ -3714,9 +3710,9 @@ class Table_ref {
   ulonglong view_suid{0};   ///< view is suid (true by default)
   ulonglong with_check{0};  ///< WITH CHECK OPTION
 
+ private:
   /// The view algorithm that is actually used, if this is a view.
   enum_view_algorithm effective_algorithm{VIEW_ALGORITHM_UNDEFINED};
- private:
   Lock_descriptor m_lock_descriptor;
 
  public:

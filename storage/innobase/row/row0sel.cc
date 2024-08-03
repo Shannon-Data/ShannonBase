@@ -5922,17 +5922,6 @@ normal_return:
   /*-------------------------------------------------------------*/
   que_thr_stop_for_mysql_no_error(thr, trx);
 
-  if (err == DB_SUCCESS && prebuilt->pq_index_read) {
-    if (prebuilt->pq_heap) mem_heap_free(prebuilt->pq_heap);
-    prebuilt->pq_heap = mem_heap_create(
-        sizeof(btr_pcur_t) + (srv_page_size / 16), UT_LOCATION_HERE);
-    prebuilt->pq_tuple = row_rec_to_index_entry_low(
-        rec, index,
-        rec_get_offsets(rec, index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE,
-                        &prebuilt->heap),
-        prebuilt->pq_heap);
-  }
-
   mtr_commit(&mtr);
 
   /* Rollback blocking transactions from hit list for high priority

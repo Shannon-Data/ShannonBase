@@ -290,6 +290,7 @@ class ReadView {
 
  private:
   // Disable copying
+  ReadView(const ReadView &);
   ReadView &operator=(const ReadView &);
 
  private:

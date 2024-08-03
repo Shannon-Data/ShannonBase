@@ -82,7 +82,7 @@ static const char *traditional_extra_tags[ET_total] = {
 };
 
 static const char *mod_type_name[] = {"NONE", "INSERT", "UPDATE", "DELETE",
-                                      "REPLACE", "SIMPLE"};
+                                      "REPLACE"};
 
 bool Explain_format_traditional::send_headers(Query_result *result) {
   return ((nil = new Item_null) == nullptr ||
