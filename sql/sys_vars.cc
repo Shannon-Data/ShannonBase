@@ -131,7 +131,6 @@
 #include "sql/sp_head.h"  // SP_PSI_STATEMENT_INFO_COUNT
 #include "sql/sql_lex.h"
 #include "sql/sql_locale.h"            // my_locale_by_number
-#include "sql/sql_parallel.h"
 #include "sql/sql_parse.h"             // killall_non_super_threads
 #include "sql/sql_show_processlist.h"  // pfs_processlist_enabled
 #include "sql/sql_tmp_table.h"         // internal_tmp_mem_storage_engine_names
@@ -1102,55 +1101,6 @@ static Sys_var_bool Sys_password_require_current(
     "password_require_current",
     "Current password is needed to be specified in order to change it",
     GLOBAL_VAR(password_require_current), CMD_LINE(OPT_ARG), DEFAULT(false));
-
-#ifndef NDEBUG
-extern bool dbug_pq_worker_stall;
-
-static Sys_var_bool Sys_Debug_pq_worker_stall(
-    "debug_pq_worker_stall",
-    "PQ worker stall while send date to message queue.",
-    HINT_UPDATEABLE GLOBAL_VAR(dbug_pq_worker_stall), CMD_LINE(OPT_ARG),
-    DEFAULT(false));
-#endif
-
-static Sys_var_bool Sys_sql_force_parallel_execute(
-    "force_parallel_execute", "force parallel execute in session",
-    HINT_UPDATEABLE SESSION_VAR(force_parallel_execute), CMD_LINE(OPT_ARG),
-    DEFAULT(0));
-
-static Sys_var_ulonglong Sys_parallel_memory_limit(
-    "parallel_memory_limit",
-    "upper limit memory size that parallel query can use",
-    GLOBAL_VAR(parallel_memory_limit), CMD_LINE(REQUIRED_ARG),
-    VALID_RANGE(0, ULONG_MAX), DEFAULT(100 * 1024 * 1024), BLOCK_SIZE(IO_SIZE),
-    NO_MUTEX_GUARD, NOT_IN_BINLOG, ON_CHECK(0), ON_UPDATE(NULL));
-
-static Sys_var_ulong Sys_parallel_max_threads(
-    "parallel_max_threads", "max running threads of parallel query.",
-    GLOBAL_VAR(parallel_max_threads), CMD_LINE(REQUIRED_ARG),
-    VALID_RANGE(0, ULONG_MAX), DEFAULT(64), BLOCK_SIZE(1), NO_MUTEX_GUARD,
-    NOT_IN_BINLOG, ON_CHECK(0), ON_UPDATE(NULL));
-
-static Sys_var_ulong Sys_parallel_cost_threshold(
-    "parallel_cost_threshold", "Cost threshold for parallel query.",
-    SESSION_VAR(parallel_cost_threshold), CMD_LINE(REQUIRED_ARG),
-    VALID_RANGE(0, ULONG_MAX), DEFAULT(1000), BLOCK_SIZE(1), NO_MUTEX_GUARD,
-    NOT_IN_BINLOG);
-
-static Sys_var_ulong Sys_parallel_default_dop(
-    "parallel_default_dop", "default degree of parallel query.",
-    SESSION_VAR(parallel_default_dop), CMD_LINE(REQUIRED_ARG),
-    VALID_RANGE(0, 1024), DEFAULT(4), BLOCK_SIZE(1), NO_MUTEX_GUARD,
-    NOT_IN_BINLOG);
-
-static Sys_var_ulong Sys_parallel_queue_timeout(
-    "parallel_queue_timeout",
-    "queue timeout for parallel query when resource is not enough ."
-    "the unit is microseconds",
-    SESSION_VAR(parallel_queue_timeout), CMD_LINE(REQUIRED_ARG),
-    VALID_RANGE(0, ULONG_MAX), DEFAULT(0), BLOCK_SIZE(1), NO_MUTEX_GUARD,
-    NOT_IN_BINLOG);
-
 /**
   Checks,
   if there exists at least a partial revoke on a database at the time

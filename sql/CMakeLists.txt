@@ -580,7 +580,6 @@ SET(SQL_SHARED_SOURCES
   sql_manager.cc
   sql_message_queue.cc
   sql_optimizer.cc
-  sql_parallel.cc
   sql_parse.cc
   sql_partition.cc
   sql_partition_admin.cc
@@ -589,8 +588,6 @@ SET(SQL_SHARED_SOURCES
   sql_plugin_var.cc
   sql_prepare.cc
   sql_profile.cc
-  sql_pq_condition.cc
-  sql_pq_clone.cc
   sql_query_rewrite.cc
   sql_reload.cc
   sql_rename.cc

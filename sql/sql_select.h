@@ -2,7 +2,6 @@
 #define SQL_SELECT_INCLUDED
 
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -300,18 +299,6 @@ class Key_use {
     This information is stored only in the first Key_use of the index.
   */
   double read_cost;
-
-  Key_use *pq_clone(THD *thd) {
-    Key_use *new_key_use = new (thd->pq_mem_root) Key_use(
-        nullptr, nullptr, used_tables, key, keypart, optimize, keypart_map,
-        ref_table_rows, null_rejecting, cond_guard, sj_pred_no);
-    if (new_key_use != nullptr) {
-      new_key_use->bound_keyparts = bound_keyparts;
-      new_key_use->fanout = fanout;
-      new_key_use->read_cost = read_cost;
-    }
-    return new_key_use;
-  }
 };
 
 /// @returns join type according to quick select type used

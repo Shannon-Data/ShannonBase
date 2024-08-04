@@ -1,6 +1,5 @@
 /*
    Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.   
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -100,7 +99,6 @@
 #include "sql/sql_cmd.h"
 #include "sql/sql_handler.h"  // mysql_ha_cleanup
 #include "sql/sql_lex.h"
-#include "sql/sql_parallel.h"
 #include "sql/sql_parse.h"    // is_update_query
 #include "sql/sql_plugin.h"   // plugin_thdvar_init
 #include "sql/sql_prepare.h"  // Prepared_statement
@@ -739,14 +737,6 @@ THD::THD(bool enable_plugins)
   main_lex->reset();
   set_psi(nullptr);
   mdl_context.init(this);
-  init_sql_alloc(key_memory_thd_main_mem_root, &main_mem_root,
-                 global_system_variables.query_alloc_block_size);
-  pq_mem_root = nullptr, pq_mem_root = new MEM_ROOT();
-  init_sql_alloc(key_memory_pq_mem_root, pq_mem_root,
-                 global_system_variables.query_alloc_block_size);
-  pq_mem_root->set_alloc_func(add_pq_memory);
-  pq_mem_root->set_free_func(sub_pq_memory);
-
   stmt_arena = this;
   thread_stack = nullptr;
   m_catalog.str = "std";
@@ -1508,11 +1498,6 @@ THD::~THD() {
 
   main_mem_root.Clear();
 
-  if (pq_mem_root) {
-    pq_mem_root->Clear();
-    delete pq_mem_root;
-  }
-
   if (m_token_array != nullptr) {
     my_free(m_token_array);
   }
@@ -1873,24 +1858,6 @@ void THD::cleanup_after_query() {
   if (rli_slave) rli_slave->cleanup_after_query();
   // Set the default "cute" mode for the execution environment:
   check_for_truncated_fields = CHECK_FIELD_IGNORE;
-
-  if (in_sp_trigger == 0) {
-    // cleanup for parallel query
-    if (pq_threads_running > 0) {
-      release_pq_running_threads(pq_threads_running);
-      pq_threads_running = 0;
-    }
-    if (pq_mem_root) pq_mem_root->Clear();
-    pq_dop = 0;
-    no_pq = false;
-    locking_clause = 0;
-    pq_error = false;
-    pq_workers.clear();
-    pq_explain.clear();
-
-    if (killed == THD::KILL_PQ_QUERY)
-      killed.store(THD::NOT_KILLED);  // restore killed for next query
-  }
 }
 
 /*

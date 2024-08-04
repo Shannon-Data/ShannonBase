@@ -5075,11 +5075,6 @@ string PrintAccessPath(const AccessPath &path, const JoinHypergraph &graph,
     case AccessPath::UPDATE_ROWS:
       str += "UPDATE_ROWS";
       break;
-    case AccessPath::PARALLEL_SCAN:
-      str += "PARALLEL_SCAN";
-      break;
-    case AccessPath::PQBLOCK_SCAN:
-      str += "PQBLOCK_SCAN";
   }
 
   str += StringPrintf(", cost=%.1f, init_cost=%.1f", path.cost, path.init_cost);

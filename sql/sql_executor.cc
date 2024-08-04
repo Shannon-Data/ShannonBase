@@ -2991,46 +2991,38 @@ AccessPath *JOIN::create_root_access_path_for_join() {
     path->cost = 0.0;
     path->init_cost = 0.0;
   } else if (const_tables == primary_tables) {
-    if (need_tmp_pq_leader) {
-      assert(thd->parallel_exec && !thd->is_worker());
-      QEP_TAB *tab = &qep_tab[const_tables];
-      path = NewParallelScanAccessPath(thd, tab, tab->table(), tab->gather,
-                                       pq_stable_sort,
-                                       tab->old_table()->file->ref_length);
-    } else {
-      // Only const tables, so add a fake single row to join in all
-      // the const tables (only inner-joined tables are promoted to
-      // const tables in the optimizer).
-      path = NewFakeSingleRowAccessPath(thd, /*count_examined_rows=*/true);
-      qep_tab_map conditions_depend_on_outer_tables = 0;
-      if (where_cond != nullptr) {
-        path = PossiblyAttachFilter(path, vector<Item *>{where_cond}, thd,
-                                    &conditions_depend_on_outer_tables);
-      }
+    // Only const tables, so add a fake single row to join in all
+    // the const tables (only inner-joined tables are promoted to
+    // const tables in the optimizer).
+    path = NewFakeSingleRowAccessPath(thd, /*count_examined_rows=*/true);
+    qep_tab_map conditions_depend_on_outer_tables = 0;
+    if (where_cond != nullptr) {
+      path = PossiblyAttachFilter(path, vector<Item *>{where_cond}, thd,
+                                  &conditions_depend_on_outer_tables);
+    }
 
-      // Surprisingly enough, we can specify that the const tables are
-      // to be dumped immediately to a temporary table. If we don't do this,
-      // we risk that there are fields that are not copied correctly
-      // (tmp_table_param contains copy_funcs we'd otherwise miss).
-      if (const_tables > 0) {
-        QEP_TAB *qep_tab = &this->qep_tab[const_tables];
-        if (qep_tab->op_type == QEP_TAB::OT_MATERIALIZE) {
-          qep_tab->table()->alias = "<temporary>";
-          AccessPath *table_path = create_table_access_path(
-              thd, qep_tab->table(), qep_tab->range_scan(), qep_tab->table_ref,
-              qep_tab->position(),
-              /*count_examined_rows=*/false);
-          path = NewMaterializeAccessPath(
-              thd,
-              SingleMaterializeQueryBlock(
-                  thd, path, query_block->select_number, this,
-                  /*copy_items=*/true, qep_tab->tmp_table_param),
-              qep_tab->invalidators, qep_tab->table(), table_path,
-              /*cte=*/nullptr, query_expression(), qep_tab->ref_item_slice,
-              /*rematerialize=*/true, qep_tab->tmp_table_param->end_write_records,
-              /*reject_multiple_rows=*/false);
-          EstimateMaterializeCost(thd, path);
-        }
+    // Surprisingly enough, we can specify that the const tables are
+    // to be dumped immediately to a temporary table. If we don't do this,
+    // we risk that there are fields that are not copied correctly
+    // (tmp_table_param contains copy_funcs we'd otherwise miss).
+    if (const_tables > 0) {
+      QEP_TAB *qep_tab = &this->qep_tab[const_tables];
+      if (qep_tab->op_type == QEP_TAB::OT_MATERIALIZE) {
+        qep_tab->table()->alias = "<temporary>";
+        AccessPath *table_path = create_table_access_path(
+            thd, qep_tab->table(), qep_tab->range_scan(), qep_tab->table_ref,
+            qep_tab->position(),
+            /*count_examined_rows=*/false);
+        path = NewMaterializeAccessPath(
+            thd,
+            SingleMaterializeQueryBlock(
+                thd, path, query_block->select_number, this,
+                /*copy_items=*/true, qep_tab->tmp_table_param),
+            qep_tab->invalidators, qep_tab->table(), table_path,
+            /*cte=*/nullptr, query_expression(), qep_tab->ref_item_slice,
+            /*rematerialize=*/true, qep_tab->tmp_table_param->end_write_records,
+            /*reject_multiple_rows=*/false);
+        EstimateMaterializeCost(thd, path);
       }
     }
   } else {
@@ -3787,12 +3779,6 @@ AccessPath *QEP_TAB::access_path() {
   if (position() != nullptr) {
     SetCostOnTableAccessPath(*join()->thd->cost_model(), position(),
                              /*is_after_filter=*/false, path);
-  }
-
-  /** note that: for gather operator, we have no need to generate iterator */
-  if (current_thd->is_worker() && pq_replace_accesspath && do_parallel_scan) {
-    path = NewPQBlockScanAccessPath(current_thd, table(), gather,
-                                    join()->pq_stable_sort);
   }
 
   /*

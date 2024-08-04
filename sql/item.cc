@@ -11076,5 +11076,3 @@ bool AllItemsAreEqual(const Item *const *a, const Item *const *b, int num_items,
 void set_has_notsupported_func_true(void) {
   current_thd->lex->has_notsupported_func = true;
 }
-
-#include "sql/sql_pq_clone_item.inc"
