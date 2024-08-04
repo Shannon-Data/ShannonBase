@@ -584,15 +584,6 @@ bool Query_block::prepare(THD *thd, mem_root_deque<Item *> *insert_field_list) {
   if (olap == ROLLUP_TYPE && resolve_rollup_wfs(thd))
     return true; /* purecov: inspected */
 
-  if (thd->m_suite_for_pq == PQ_ConditionStatus::ENABLED) {
-    if (group_list.elements > 0)
-      fix_prepare_information_for_order(thd, &group_list,
-                                        &saved_group_list_ptrs);
-    if (order_list.elements > 0)
-      fix_prepare_information_for_order(thd, &order_list,
-                                        &saved_order_list_ptrs);
-  }
-
   assert(!thd->is_error());
   return false;
 }

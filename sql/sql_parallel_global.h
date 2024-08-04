@@ -2,7 +2,6 @@
 #define __SHANNONBASE_SQL_PARALLEL_SQL_GLOBAL_H__
 
 /* Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
-   Copyright (c) 2022, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,

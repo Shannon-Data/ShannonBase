@@ -1652,66 +1652,6 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       children->push_back({path->update_rows().child});
       break;
     }
-    case AccessPath::PARALLEL_SCAN: {
-      description = string("Parallel scan on <temporary>") +
-                    path->parallel_scan().table->alias +
-                    path->parallel_scan().table->file->explain_extra();
-      Gather_operator *gather = path->parallel_scan().gather;
-      AccessPath *root_path =
-          gather->m_workers[0]->thd_worker->lex->unit->root_access_path();
-      children->push_back({root_path, "", gather->m_template_join});
-      break;
-    }
-    case AccessPath::PQBLOCK_SCAN: {
-      auto &param = path->pq_block_scan();
-      Gather_operator *gather = param.gather;
-      TABLE *table = param.table;
-      const KEY *key = &(table->key_info[gather->keyno]);
-      int tab_idx = gather->m_template_join->pq_tab_idx;
-      assert(tab_idx >= (int)gather->m_template_join->const_tables &&
-             gather->m_template_join->qep_tab[tab_idx].do_parallel_scan);
-      QEP_TAB *tab = &gather->m_template_join->qep_tab[tab_idx];
-
-      string str;
-      switch (tab->type()) {
-        case JT_ALL:
-          str = string("PQblock scan on ") + table->alias;
-          break;
-        case JT_RANGE:
-          str = string("PQblock range scan on ") + table->alias + " using " +
-                key->name;
-          if (table->file->pushed_idx_cond != nullptr) {
-            str += string(", with index condition: ") +
-                   ItemToString(table->file->pushed_idx_cond);
-          }
-          break;
-        case JT_REF:
-          str = string("PQblock lookup on ") + table->alias +
-                string(" using ") + key->name + " (" +
-                RefToString(tab->ref(), *key, /*include_nulls=*/false);
-          if (tab->m_reversed_access) {
-            str += string("; iterate backwards");
-          }
-          str += string(")");
-          if (table->file->pushed_idx_cond != nullptr) {
-            str += string(", with index condition: ") +
-                   ItemToString(table->file->pushed_idx_cond);
-          }
-          break;
-        case JT_INDEX_SCAN:
-          str =
-              string("PQblock scan on ") + table->alias + " using " + key->name;
-          if (tab->m_reversed_access) {
-            str += string(" (reverse)");
-          }
-          break;
-        default:
-          assert(0);
-          break;
-      }
-      description = str + table->file->explain_extra();
-      break;
-    }
   }
 
   // Append the various costs.

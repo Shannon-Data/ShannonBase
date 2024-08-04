@@ -2954,7 +2954,6 @@ int handler::ha_rnd_end() {
   inited = NONE;
   end_range = nullptr;
   m_record_buffer = nullptr;
-  pq_range_type = PQ_RANGE_TYPE::PQ_QUICK_SELECT_NONE;
 
   return rnd_end();
 }
@@ -6575,13 +6574,6 @@ int DsMrr_impl::dsmrr_init(RANGE_SEQ_IF *seq_funcs, void *seq_init_param,
     return retval;
   }
 
-  if (thd->in_sp_trigger == 0 && thd->parallel_exec &&
-      table->file->pq_range_type != PQ_RANGE_TYPE::PQ_QUICK_SELECT_NONE) {
-    use_default_impl = true;
-    retval = h->handler::multi_range_read_init(seq_funcs, seq_init_param,
-                                               n_ranges, mode, buf);
-    return retval;
-  }
   /*
     This assert will hit if we have pushed an index condition to the
     primary key index and then "change our mind" and use a different

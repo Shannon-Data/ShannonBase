@@ -1,5 +1,4 @@
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -112,7 +111,6 @@
 #include "sql/sql_error.h"
 #include "sql/sql_list.h"
 #include "sql/sql_plugin_ref.h"
-#include "sql/sql_pq_condition.h"       //PQ_ConditionStatus
 #include "sql/sys_vars_resource_mgr.h"  // Session_sysvar_resource_manager
 #include "sql/system_variables.h"       // system_variables
 #include "sql/transaction_info.h"       // Ha_trx_info
@@ -1084,8 +1082,6 @@ class THD : public MDL_context_owner,
   uint in_sp_trigger {0};
   /* select .. fro share/update */
   bool locking_clause {false};
-  /* indicates whether parallel query is supported */
-  enum PQ_ConditionStatus m_suite_for_pq { PQ_ConditionStatus::INIT };
 
   /* indicates whether occurring error during execution */
   bool pq_error{false};
@@ -4727,7 +4723,6 @@ class THD : public MDL_context_owner,
   void set_connection_admin(bool connection_admin_flag);
 
   bool is_worker();
-  bool pq_copy_from(THD *thd);
   bool pq_merge_status(THD *thd);
   bool pq_status_reset();
 

@@ -2,7 +2,6 @@
 #define ITEM_ROW_INCLUDED
 
 /* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -155,8 +154,6 @@ class Item_row : public Item {
   bool null_inside() override { return with_null; }
   void bring_value() override;
   bool check_function_as_value_generator(uchar *) override { return false; }
-  Item *pq_clone(THD *thd, Query_block *select) override;
-  bool pq_copy_from(THD *thd, Query_block *select, Item *item) override;
 };
 
 #endif /* ITEM_ROW_INCLUDED */

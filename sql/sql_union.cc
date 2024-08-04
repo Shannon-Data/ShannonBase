@@ -1769,58 +1769,29 @@ bool Query_expression::ExecuteIteratorQuery(THD *thd) {
       return true;
     }
 
-    uint read_records_num = 0;
-    MQueue_handle *handler = query_result->get_mq_handler();
-    if (handler) {
-      handler->set_datched_status(MQ_NOT_DETACHED);
-    }
-
     PFSBatchMode pfs_batch_mode(m_root_iterator.get());
-    bool execute_error = false;
 
     for (;;) {
       int error = m_root_iterator->Read();
       DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
 
       if (error > 0 || thd->is_error() || thd->is_pq_error())  // Fatal error
-        execute_error = true;
+        return true;
       else if (error < 0)
         break;
       else if (thd->killed)  // Aborted by user
       {
         thd->send_kill_message();
-        execute_error = true;
+        return true;
       }
-      if (execute_error) break;
+
       ++*send_records_ptr;
 
       if (query_result->send_data(thd, *fields)) {
-        execute_error = true;
-        break;
+        return true;
       }
       thd->get_stmt_da()->inc_current_row_for_condition();
     }
-
-    // if there is error, then for worker it should send an error msg to MQ and
-    // detach the MQ. Note that, only worker can detach the MQ.
-    if ((execute_error || !read_records_num ||
-         DBUG_EVALUATE_IF("pq_worker_error4", true, false)) &&
-        thd->is_worker()) {
-      MQ_DETACHED_STATUS status = MQ_NOT_DETACHED;
-      // there is an error during the execution
-      if (execute_error || DBUG_EVALUATE_IF("pq_worker_error4", true, false)) {
-        thd->pq_error = true;
-        if (handler != nullptr) {
-          handler->send_exception_msg(ERROR_MSG);
-        }
-        status = MQ_HAVE_DETACHED;
-      } else if (!read_records_num) {
-        status = MQ_TMP_DETACHED;
-      }
-      if (handler) handler->set_datched_status(status);
-    }
-
-    if (execute_error) return true;
 
     // NOTE: join_cleanup must be done before we send EOF, so that we get the
     // row counts right.

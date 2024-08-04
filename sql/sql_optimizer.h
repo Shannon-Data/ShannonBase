@@ -2,7 +2,6 @@
 #define SQL_OPTIMIZER_INCLUDED
 
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -51,7 +50,6 @@
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
 #include "sql/sql_opt_exec_shared.h"
-#include "sql/sql_parallel.h"
 #include "sql/sql_select.h"  // Key_use
 #include "sql/table.h"
 #include "sql/temp_table_param.h"
@@ -477,9 +475,6 @@ class JOIN {
 
   int pq_last_sort_idx{-1};
 
-  // used for worker's make_tmp_tables_info
-  PQ_optimized_var saved_optimized_vars;  
-
   /**
     Any window definitions
   */
@@ -844,25 +839,6 @@ class JOIN {
    */
   bool needs_finalize{false};
 
-  bool setup_tmp_table_info(JOIN *orig);
-
-  bool pq_copy_from(JOIN *orig);
-
-  bool alloc_indirection_slices1();
-
-  bool restore_optimized_vars();
-
-  void save_optimized_vars();
-
-  bool make_tmp_tables_info();
-
-  // make Paralle Query leader's qep tables info
-  bool make_leader_tables_info();
-  // make a tmp table in Query_result_mq for PQ
-  bool make_pq_tables_info();
-
-  bool alloc_qep1(uint n);
-
  private:
   bool optimized{false};  ///< flag to avoid double optimization in EXPLAIN
 
@@ -1042,6 +1018,7 @@ class JOIN {
                                          POSITION *sjm_pos);
 
   bool add_having_as_tmp_table_cond(uint curr_tmp_table);
+  bool make_tmp_tables_info();
   void set_plan_state(enum_plan_state plan_state_arg);
   bool compare_costs_of_subquery_strategies(Subquery_strategy *method);
   ORDER *remove_const(ORDER *first_order, Item *cond, bool change_list,

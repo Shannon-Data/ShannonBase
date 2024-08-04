@@ -1449,9 +1449,6 @@ bool Explain_join::explain_qep_tab(size_t tabnum) {
 
   if (fmt->end_context(c)) return true;
 
-  // explain parallel query execute plan
-  if (tab->gather) explain_pq_gather(tab);
-
   if (first_non_const) {
     if (end_simple_sort_context(ESC_GROUP_BY, CTX_SIMPLE_GROUP_BY)) return true;
     if (end_simple_sort_context(ESC_DISTINCT, CTX_SIMPLE_DISTINCT)) return true;
@@ -1463,46 +1460,6 @@ bool Explain_join::explain_qep_tab(size_t tabnum) {
 
   return false;
 }
-
-bool Explain_join::explain_pq_gather(QEP_TAB *tab) {
-  assert(tab->gather);
-
-  JOIN *gather_join = tab->gather->m_template_join;
-  Query_block *query_block = gather_join->query_block;
-  const Explain_format_flags *flags = &gather_join->explain_flags;
-  const bool need_tmp_table = flags->any(ESP_USING_TMPTABLE);
-  const bool need_order = flags->any(ESP_USING_FILESORT);
-  const bool distinct = flags->get(ESC_DISTINCT, ESP_EXISTS);
-  query_block->join->best_read = this->join->best_read;
-  bool ret = true;
-
-  gather_join->thd->lock_query_plan();
-  bool explain_other = explain_thd != query_thd;
-  Explain_join *ej = new (gather_join->thd->pq_mem_root)
-      Explain_join(explain_thd, explain_other ? gather_join->thd : explain_thd,
-                   query_block, need_tmp_table, need_order, distinct);
-  if (ej == nullptr) {
-    goto END;
-  }
-
-  if (!explain_other) {
-    ej->query_thd = gather_join->thd;
-  }
-
-  if (ej->fmt->begin_context(CTX_GATHER, nullptr)) {
-    goto END;
-  }
-
-  ret = ej->shallow_explain() || ej->explain_subqueries();
-  if (!ret) {
-    ret = ej->fmt->end_context(CTX_GATHER);
-  }
-
-END:
-  gather_join->thd->unlock_query_plan();
-  return ret;
-}
-
 
 /**
   Generates either usual table name or <derived#N>, and passes it to

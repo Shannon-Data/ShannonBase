@@ -2,7 +2,6 @@
 #define ITEM_GEOFUNC_INCLUDED
 
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -680,7 +679,6 @@ class Item_func_latfromgeohash : public Item_func_latlongfromgeohash {
                                      false) {}
 
   const char *func_name() const override { return "ST_LATFROMGEOHASH"; }
-  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 /**
@@ -694,7 +692,6 @@ class Item_func_longfromgeohash : public Item_func_latlongfromgeohash {
   }
 
   const char *func_name() const override { return "ST_LONGFROMGEOHASH"; }
-  Item *pq_clone(THD *thd, Query_block *select) override;  
 };
 
 class Item_func_centroid : public Item_geometry_func {
@@ -1024,7 +1021,6 @@ class Item_func_st_contains final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_contains"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
 };
 
 class Item_func_st_crosses final : public Item_func_spatial_relation {
@@ -1036,7 +1032,7 @@ class Item_func_st_crosses final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_crosses"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_st_disjoint final : public Item_func_spatial_relation {
@@ -1048,7 +1044,7 @@ class Item_func_st_disjoint final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_disjoint"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_st_equals final : public Item_func_spatial_relation {
@@ -1060,7 +1056,7 @@ class Item_func_st_equals final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_equals"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_st_intersects final : public Item_func_spatial_relation {
@@ -1072,7 +1068,7 @@ class Item_func_st_intersects final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_intersects"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_mbrcontains final : public Item_func_spatial_relation {
@@ -1084,7 +1080,7 @@ class Item_func_mbrcontains final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrcontains"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_mbrcoveredby final : public Item_func_spatial_relation {
@@ -1096,7 +1092,7 @@ class Item_func_mbrcoveredby final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrcoveredby"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_mbrcovers final : public Item_func_spatial_relation {
@@ -1108,7 +1104,7 @@ class Item_func_mbrcovers final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrcovers"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_mbrdisjoint final : public Item_func_spatial_relation {
@@ -1120,7 +1116,7 @@ class Item_func_mbrdisjoint final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrdisjoint"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_mbrequals final : public Item_func_spatial_relation {
@@ -1132,7 +1128,7 @@ class Item_func_mbrequals final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrequals"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_mbrintersects final : public Item_func_spatial_relation {
@@ -1144,7 +1140,7 @@ class Item_func_mbrintersects final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrintersects"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_mbroverlaps final : public Item_func_spatial_relation {
@@ -1156,7 +1152,7 @@ class Item_func_mbroverlaps final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbroverlaps"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_mbrtouches final : public Item_func_spatial_relation {
@@ -1168,7 +1164,7 @@ class Item_func_mbrtouches final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrtouches"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_mbrwithin final : public Item_func_spatial_relation {
@@ -1180,7 +1176,7 @@ class Item_func_mbrwithin final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrwithin"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_st_overlaps final : public Item_func_spatial_relation {
@@ -1192,7 +1188,7 @@ class Item_func_st_overlaps final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_overlaps"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_st_touches final : public Item_func_spatial_relation {
@@ -1204,7 +1200,7 @@ class Item_func_st_touches final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_touches"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 class Item_func_st_within final : public Item_func_spatial_relation {
@@ -1216,7 +1212,7 @@ class Item_func_st_within final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_within"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-  Item *pq_clone(THD *thd, Query_block *select) override;            
+              
 };
 
 /**
@@ -1643,7 +1639,7 @@ class Item_func_st_srid_mutator : public Item_geometry_func {
     if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_LONGLONG)) return true;
     return Item_geometry_func::resolve_type(thd);
   }
-  Item *pq_clone(THD *thd, Query_block *select) override;
+  
 };
 
 /// This class implements the one-parameter ST_SRID function which
