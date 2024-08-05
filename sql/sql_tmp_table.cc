@@ -1178,12 +1178,6 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
               /*group=*/false, modify_items, false, false);
           from_item[fieldnr] = arg;
           if (new_field == nullptr) return nullptr;  // Should be OOM
-          if (thd->parallel_exec) {
-            new_field->item_sum_ref = sum_item;
-            new_field->extra_length = sum_item->sum_func() == Item_sum::AVG_FUNC
-                                          ? sizeof(longlong)
-                                          : 0;
-          }
           new_field->set_field_index(fieldnr);
           reg_field[fieldnr++] = new_field;
           share->reclength += new_field->pack_length();

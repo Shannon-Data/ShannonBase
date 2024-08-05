@@ -156,8 +156,7 @@ class JOIN {
   JOIN_TAB *join_tab{nullptr};
   /// Array of QEP_TABs
   QEP_TAB *qep_tab{nullptr};
-  QEP_TAB *qep_tab0{nullptr};
-  QEP_TAB *qep_tab1{nullptr};
+
   /**
     Array of plan operators representing the current (partial) best
     plan. The array is allocated in JOIN::make_join_plan() and is valid only
@@ -407,12 +406,6 @@ class JOIN {
   */
   bool skip_sort_order{false};
 
-  // need a tmp table to store Parallel Query result
-  bool need_tmp_pq{false};
-
-  // need a tmp table for leader thread
-  bool need_tmp_pq_leader{false};
-
   /**
     If true we need a temporary table on the result set before any
     windowing steps, e.g. for DISTINCT or we have a query ORDER BY.
@@ -465,16 +458,6 @@ class JOIN {
       PSI_NOT_INSTRUMENTED};
   Prealloced_array<Item_rollup_sum_switcher *, 4> rollup_sums{
       PSI_NOT_INSTRUMENTED};
-
-  // for parallel query processing the split table
-  int pq_tab_idx{-1};
-
-  bool pq_rebuilt_group{false};
-
-  bool pq_stable_sort{false};
-
-  int pq_last_sort_idx{-1};
-
   /**
     Any window definitions
   */

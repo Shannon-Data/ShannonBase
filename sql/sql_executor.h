@@ -279,12 +279,7 @@ class QEP_TAB : public QEP_shared_owner {
         ref_item_slice(REF_SLICE_SAVED_BASE),
         m_keyread_optim(false),
         m_reversed_access(false),
-        lateral_derived_tables_depend_on_me(0),
-        do_parallel_scan(false),
-        has_pq_cond(false),
-        pos(0),
-        gather(nullptr),
-        pq_cond(nullptr) {}
+        lateral_derived_tables_depend_on_me(0) {}
 
   /// Initializes the object from a JOIN_TAB
   void init(JOIN_TAB *jt);
@@ -483,13 +478,6 @@ class QEP_TAB : public QEP_shared_owner {
   qep_tab_map lateral_derived_tables_depend_on_me;
 
   Mem_root_array<const AccessPath *> *invalidators = nullptr;
-
-  //for parallel query processing.
-  bool do_parallel_scan {false};
-  bool has_pq_cond{false};
-  uint pos {0};  // position in qep_tab array
-  Gather_operator *gather {nullptr};
-  Item *pq_cond {nullptr};
 
   QEP_TAB(const QEP_TAB &);             // not defined
   QEP_TAB &operator=(const QEP_TAB &);  // not defined

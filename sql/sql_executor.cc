@@ -253,9 +253,6 @@ bool JOIN::create_intermediate_table(
         if (add_sorting_to_table(const_tables, &group_list,
                              /*sort_before_group=*/true))
       goto err;
-
-      pq_last_sort_idx = const_tables;
-      pq_rebuilt_group = true;
     }
 
     if (alloc_group_fields(this, group_list.order)) goto err;
@@ -288,8 +285,6 @@ bool JOIN::create_intermediate_table(
         if (add_sorting_to_table(const_tables, &order,
                                /*sort_before_group=*/false))
           goto err;
-
-        pq_last_sort_idx = const_tables;
       }
       order.clean();
     }

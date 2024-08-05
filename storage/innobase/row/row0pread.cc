@@ -837,151 +837,6 @@ bool Parallel_reader::Ctx::move_to_next_node(PCursor *pcursor) {
   }
 }
 
-dberr_t Parallel_reader::Ctx::read_record(uchar *buf,
-                                          row_prebuilt_t *prebuilt) {
-  mtr_t mtr;
-  btr_pcur_t *pcur;
-
-  dberr_t err{DB_SUCCESS};
-  dberr_t err1{DB_SUCCESS};
-  int ret{0};
-  const rec_t *clust_rec = nullptr;
-  const rec_t *rec = nullptr;
-  const rec_t *result_rec = nullptr;
-  ulint *offsets = offsets_;
-  ulint *clust_offsets = clust_offsets_;
-
-  if (start_read) {
-    rec_offs_init(offsets_);
-    rec_offs_init(clust_offsets_);
-    start_read = false;
-  }
-
-  mtr.start();
-  mtr.set_log_mode(MTR_LOG_NO_REDO);
-
-  auto &from =
-      m_scan_ctx->m_config.m_pq_reverse_scan ? m_range.second : m_range.first;
-  pcur = from->m_pcur;
-
-  PCursor pcursor(pcur, &mtr, m_scan_ctx->m_config.m_read_level);
-  pcursor.restore_position();
-
-  const auto &end_tuple = m_scan_ctx->m_config.m_pq_reverse_scan
-                              ? m_range.first->m_tuple
-                              : m_range.second->m_tuple;
-  auto index = m_scan_ctx->m_config.m_index;
-  auto cur = pcur->get_page_cur();
-  dict_index_t *clust_index = index->table->first_index();
-
-  if (m_blob_heap == nullptr)
-    m_blob_heap = mem_heap_create(srv_page_size, UT_LOCATION_HERE);
-  if (m_heap == nullptr)
-    m_heap = mem_heap_create(srv_page_size / 4, UT_LOCATION_HERE);
-
-  if (!m_scan_ctx->m_config.m_pq_reverse_scan && page_cur_is_after_last(cur)) {
-    // pcur point to last record, move to next block
-    mem_heap_empty(m_heap);
-    offsets = offsets_;
-    rec_offs_init(offsets_);
-
-    err = pcursor.move_to_next_block(index);
-    if (err != DB_SUCCESS) {
-      ut_a(!mtr.is_active());
-      return err;
-    }
-    ut_ad(!page_cur_is_before_first(cur));
-  } else if (m_scan_ctx->m_config.m_pq_reverse_scan &&
-             page_cur_is_before_first(cur)) {
-    // pcur point to first record, move to prev block
-    mem_heap_empty(m_heap);
-    offsets = offsets_;
-    rec_offs_init(offsets_);
-
-    err = pcursor.move_to_prev_block(index);
-    if (err != DB_SUCCESS) {
-      ut_a(!mtr.is_active());
-      return err;
-    }
-    ut_ad(!page_cur_is_after_last(cur));
-  }
-
-  // 1. read record
-  rec = page_cur_get_rec(cur);
-  offsets = rec_get_offsets(rec, index, offsets, ULINT_UNDEFINED,
-                            UT_LOCATION_HERE, &m_heap);
-  clust_offsets = rec_get_offsets(rec, index, clust_offsets, ULINT_UNDEFINED,
-                                  UT_LOCATION_HERE, &m_heap);
-
-  // 2. find visible version record
-  err1 = m_scan_ctx->find_visible_record(buf, rec, clust_rec, offsets,
-                                         clust_offsets, m_heap, &mtr, prebuilt);
-
-  if (err1 == DB_END_OF_RANGE) {
-    err = DB_END_OF_RANGE;
-    goto func_exit;
-  }
-
-  if (err1 != DB_NOT_FOUND) {
-    // 3. check range boundary
-    m_block = page_cur_get_block(cur);
-    if (rec != nullptr && end_tuple != nullptr) {
-      if (!m_scan_ctx->m_config.m_index->is_clustered() &&
-          prebuilt->need_to_access_clustered)
-        ret = ((dtuple_t *)end_tuple)
-                  ->compare(clust_rec, index, clust_index, clust_offsets);
-      else
-        ret = end_tuple->compare(rec, index, offsets);
-
-      /* Note: The range creation doesn't use MVCC. Therefore it's possible
-      that the range boundary entry could have been deleted. */
-      if ((!m_scan_ctx->m_config.m_pq_reverse_scan && ret <= 0) ||
-          (m_scan_ctx->m_config.m_pq_reverse_scan && ret >= 0)) {
-        m_scan_ctx->m_reader->ctx_completed_inc();
-        err = DB_END_OF_RANGE;
-        goto func_exit;
-      }
-    }
-
-    // 4. convert record to mysql format
-    if (prebuilt->pq_requires_clust_rec) {
-      result_rec = clust_rec;
-      if (!row_sel_store_mysql_rec(buf, prebuilt, clust_rec, nullptr, true,
-                                   clust_index, prebuilt->index, clust_offsets,
-                                   false, nullptr, m_blob_heap))
-        err = DB_ERROR;
-    } else {
-      result_rec = rec;
-      if (!row_sel_store_mysql_rec(buf, prebuilt, rec, nullptr,
-                                   m_scan_ctx->m_config.m_index->is_clustered(),
-                                   index, prebuilt->index, offsets, false,
-                                   nullptr, m_blob_heap))
-        err = DB_ERROR;
-    }
-    if (prebuilt->clust_index_was_generated) {
-      pq_row_sel_store_row_id_to_prebuilt(
-          prebuilt, result_rec, result_rec == rec ? index : clust_index,
-          result_rec == rec ? offsets : clust_offsets);
-    }
-  } else {
-    err = DB_NOT_FOUND;
-    goto next_record;
-  }
-
-next_record:
-  if (!m_scan_ctx->m_config.m_pq_reverse_scan)
-    page_cur_move_to_next(cur);
-  else
-    page_cur_move_to_prev(cur);
-
-func_exit:
-  pcur->store_position(&mtr);
-  ut_a(mtr.is_active());
-  mtr.commit();
-
-  return err;
-}
-
 dberr_t Parallel_reader::Ctx::traverse() {
   /* Take index lock if the requested read level is on a non-leaf level as the
   index lock is required to access non-leaf page.  */
@@ -1176,8 +1031,6 @@ std::shared_ptr<Parallel_reader::Ctx> Parallel_reader::dequeue() {
   return (ctx);
 }
 
-void Parallel_reader::pq_set_reverse_scan() { m_pq_reverse_scan = true; }
-
 bool Parallel_reader::is_queue_empty() const {
   mutex_enter(&m_mutex);
   auto empty = m_ctxs.empty();
@@ -1306,15 +1159,6 @@ void Parallel_reader::worker(Parallel_reader::Thread_ctx *thread_ctx) {
 
 void Parallel_reader::ctx_completed_inc() {
   m_n_completed.fetch_add(1, std::memory_order_relaxed);
-}
-
-void Parallel_reader::pq_set_worker_done() {
-  work_done.store(true, std::memory_order_relaxed);
-}
-
-void Parallel_reader::pq_wakeup_workers() {
-  pq_set_worker_done();
-  os_event_set(m_event);
 }
 
 dberr_t Parallel_reader::dispatch_ctx(row_prebuilt_t *prebuilt) {

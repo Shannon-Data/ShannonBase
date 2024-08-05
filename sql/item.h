@@ -1123,12 +1123,6 @@ class Item : public Parse_tree_node {
   */
   bool skip_create_tmp_table{false};
 
-  /**
-    During itemize (or new item()), some item are added to THD::m_item_list for
-    ease of releasing the space allocated at runtime.
-  */
-  bool pq_alloc_item{false};
-
 #ifdef EXTRA_DEBUG
   ~Item() override { item_name.set(0); }
 #else

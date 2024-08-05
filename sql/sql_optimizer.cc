@@ -177,16 +177,10 @@ JOIN::JOIN(THD *thd_arg, Query_block *select)
       // @todo Can this be substituted with select->is_implicitly_grouped()?
       implicit_grouping(select->is_implicitly_grouped()),
       select_distinct(select->is_distinct()),
-      need_tmp_pq(false),
-      need_tmp_pq_leader(false),
       need_tmp_before_win(false),
       keyuse_array(thd_arg->mem_root),
       order(select->order_list.first, ESC_ORDER_BY),
       group_list(select->group_list.first, ESC_GROUP_BY),
-      pq_tab_idx(-1),
-      pq_rebuilt_group(false),
-      pq_stable_sort(false),
-      pq_last_sort_idx(-1),
       m_windows(select->m_windows),
       /*
         Those four members are meaningless before JOIN::optimize(), so force a
@@ -1318,15 +1312,10 @@ bool JOIN::alloc_qep(uint n) {
 
   ASSERT_BEST_REF_IN_JOIN_ORDER(this);
 
-  qep_tab0 = new (thd->mem_root)
-      QEP_TAB[n + 1];         // The last one holds only the final op_type.
-  if (!qep_tab0) return true; /* purecov: inspected */
-
-  for (uint i = 0; i < n; ++i) {
-    qep_tab0[i].init(best_ref[i]);
-    qep_tab0[i].pos = i;
-  }
-  qep_tab = qep_tab0;
+  qep_tab = new (thd->mem_root)
+      QEP_TAB[n + 1];        // The last one holds only the final op_type.
+  if (!qep_tab) return true; /* purecov: inspected */
+  for (uint i = 0; i < n; ++i) qep_tab[i].init(best_ref[i]);
   return false;
 }
 
