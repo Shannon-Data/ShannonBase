@@ -55,7 +55,6 @@
 #include "sql/sql_const.h"
 #include "sql/sql_error.h"
 #include "sql/sql_exchange.h"
-#include "sql/sql_message_queue.h"
 #include "sql/system_variables.h"
 #include "sql/visible_fields.h"
 #include "sql_optimizer.h"

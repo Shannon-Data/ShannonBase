@@ -362,14 +362,6 @@ class Parallel_reader {
 
   void ctx_completed_inc();
 
-  void pq_set_worker_done();
-
-  void pq_wakeup_workers();
-
-  void pq_set_reverse_scan();
-
-  bool pq_get_reverse_scan() { return m_pq_reverse_scan; }
-
   /** @return the configured max threads size. */
   [[nodiscard]] size_t max_threads() const { return m_max_threads; }
 
@@ -401,15 +393,6 @@ class Parallel_reader {
   Parallel_reader(const Parallel_reader &&) = delete;
   Parallel_reader &operator=(Parallel_reader &&) = delete;
   Parallel_reader &operator=(const Parallel_reader &) = delete;
-
-  /** obtain m_event **/
-  bool pq_have_event() { return m_event ? true : false; }
-
-  bool pq_need_change_dop() { return m_need_change_dop; }
-
-  ReadView *snapshot{};
-
-  uint key{0};
 
  private:
   /** Release unused threads back to the pool.

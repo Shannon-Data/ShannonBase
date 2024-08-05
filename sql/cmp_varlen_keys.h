@@ -46,7 +46,7 @@
  */
 inline bool cmp_varlen_keys(
     Bounds_checked_array<st_sort_field> sort_field_array, bool use_hash,
-    const uchar *s1, const uchar *s2, int *pq_cmp_value = nullptr) {
+    const uchar *s1, const uchar *s2) {
   const uchar *kp1 = s1 + Sort_param::size_of_varlength_field;
   const uchar *kp2 = s2 + Sort_param::size_of_varlength_field;
   int res;
@@ -56,10 +56,7 @@ inline bool cmp_varlen_keys(
       const int k1_nullbyte = *kp1++;
       const int k2_nullbyte = *kp2++;
 
-      if (k1_nullbyte != k2_nullbyte) {
-        if (pq_cmp_value) *pq_cmp_value = k1_nullbyte - k2_nullbyte;
-        return k1_nullbyte < k2_nullbyte;
-      }
+      if (k1_nullbyte != k2_nullbyte) return k1_nullbyte < k2_nullbyte;
       if (k1_nullbyte == 0 || k1_nullbyte == 0xff) {
         if (!sort_field.is_varlen) {
           kp1 += sort_field.length;
@@ -85,19 +82,12 @@ inline bool cmp_varlen_keys(
 
     res = memcmp(kp1, kp2, kp_len);
 
-    if (res) {
-      if (pq_cmp_value) *pq_cmp_value = res;
-      return res < 0;
-    }
-
+    if (res) return res < 0;
     if (kp1_len != kp2_len) {
-      if (sort_field.reverse) {
-        if (pq_cmp_value) *pq_cmp_value = kp2_len - kp1_len;
+      if (sort_field.reverse)
         return kp2_len < kp1_len;
-      } else {
-        if (pq_cmp_value) *pq_cmp_value = kp1_len - kp2_len;
+      else
         return kp1_len < kp2_len;
-      }
     }
 
     kp1 += kp1_len;
@@ -106,11 +96,8 @@ inline bool cmp_varlen_keys(
 
   if (use_hash) {
     // Compare hashes at the end of sort keys
-    int cmp_value = memcmp(kp1, kp2, 8);
-    if (pq_cmp_value) *pq_cmp_value = cmp_value;
-    return cmp_value < 0;
+    return memcmp(kp1, kp2, 8) < 0;
   } else {
-    if (pq_cmp_value) *pq_cmp_value = 1;
     return false;
   }
 }

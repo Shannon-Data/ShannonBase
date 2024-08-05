@@ -48,7 +48,6 @@
 #include "sql/field.h"
 #include "sql/item_timefunc.h"  // Item_func_now_local
 #include "sql/my_decimal.h"
-#include "sql/sql_message_queue.h"
 #include "sql/sql_class.h"  // THD
 #include "sql/sql_const.h"
 #include "sql/sql_error.h"
@@ -893,90 +892,4 @@ type_conversion_status field_conv_slow(Field *to, const Field *from) {
     return to->store_decimal(from->val_decimal(&buff));
   } else
     return to->store(from->val_int(), from->is_flag_set(UNSIGNED_FLAG));
-}
-
-/**
- * copy field->ptr to MQ
- * @field
- * @field_raw: the corresponding copy structure in MQ
- */
-uint32 pq_build_field_raw(Field *field, Field_raw_data *field_raw) {
-  // field must not be NULL value
-  assert(field && !field->is_null());
-
-  uint32 copy_bytes = 0;
-  auto field_type = field->type();
-  /*
-   * For the variable-length field, we should first extract its
-   * effective length and then only copy these effective content.
-   * Corresponding, we need to use one byte to store field->length_bytes, as
-   follows:
-   *  |one byte | m_var_len | field_len |
-                 \-------m_len-------/
-   */
-  if (field_type == MYSQL_TYPE_VARCHAR || field_type == MYSQL_TYPE_VAR_STRING) {
-    Field_varstring *from = static_cast<Field_varstring *>(field);
-    uint field_length =
-        (from->get_length_bytes() == 1) ? *from->get_ptr() :
-                                          uint2korr(from->get_ptr());
-    field_raw->m_ptr = from->get_ptr();
-    field_raw->m_var_len = from->get_length_bytes();
-    field_raw->m_len = from->get_length_bytes() + field_length;
-
-    // Note that: we use one more byte to store the
-    // Field_varstring::length_bytes
-    copy_bytes += 1 + field_raw->m_len;
-  } else {
-    /* * For the other fields, they are fixed-length fields whose field length
-    * is field->pack_length(); */    
-    field_raw->m_ptr = field->get_ptr();
-    field_raw->m_len = field->pack_length();
-    field_raw->m_var_len = 0;
-    copy_bytes += field_raw->m_len;
-  }
-
-  return copy_bytes;
-}
-
-/**
- * build fields' raw data sending to MQ, and fill the NULL value info of field
- * to the null_array.
- * @field:
- * @field_raw:
- * @null_array:
- * @null_num: number of maybe-NULL field
- * @total_bytes: number of total copied bytes
- */
-void pq_build_mq_fields(Field *field, Field_raw_data *mq_fields,
-                        bool *null_array, int &null_num, uint32 &total_bytes) {
-  /*
-   * for a clearly defined NOT NULL field, its m_null_ptr is nullptr and we
-   * should not mark it in null_array. For a maybe-NULL field, we first
-   * determine this field is NULL or not.
-   */
-  /* (1) first, mark it as a NOT_CONST_ITEM */
-  null_array[null_num++] = 0;
-
-  /* (2) then, determine whether the field is NULL */
-  null_array[null_num++] = field->is_null() ? 1 : 0;
-
-  // If this field is a not NULL-value, then we copy it to MQ
-  if (!null_array[null_num - 1]) {
-    /* the case of NOT_CONST_ITEM & NOT_NULL_FIELD (i.e., 00)*/
-    mq_fields->m_need_send = true;
-    total_bytes += pq_build_field_raw(field, mq_fields);
-  } else {
-    /* the case of NOT_CONST_ITEM & NULL_FIELD (i.e., 01)*/
-    mq_fields->m_need_send = false;
-  }
-}
-
-void pq_build_mq_item(Item *item MY_ATTRIBUTE((unused)),
-                      Field_raw_data *mq_fields, bool *null_array,
-                      int &null_num,
-                      uint32 &total_bytes MY_ATTRIBUTE((unused))) {
-  assert(item && (item->const_item() || item->basic_const_item()));
-  null_array[null_num++] = 1;
-  null_array[null_num++] = 0;
-  mq_fields->m_need_send = false;
 }

@@ -1749,11 +1749,6 @@ bool Query_expression::ExecuteIteratorQuery(THD *thd) {
 
   {
     auto join_cleanup = create_scope_guard([this, thd] {
-      /** for parallel scan, we should end the pq iterator */
-      if (thd->parallel_exec && thd->pq_iterator) {
-        thd->pq_iterator->End();
-      }
-
       for (Query_block *sl = first_query_block(); sl;
            sl = sl->next_query_block()) {
         JOIN *join = sl->join;
@@ -1775,7 +1770,7 @@ bool Query_expression::ExecuteIteratorQuery(THD *thd) {
       int error = m_root_iterator->Read();
       DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
 
-      if (error > 0 || thd->is_error() || thd->is_pq_error())  // Fatal error
+      if (error > 0 || thd->is_error())  // Fatal error
         return true;
       else if (error < 0)
         break;

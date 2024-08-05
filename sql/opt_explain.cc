@@ -471,7 +471,6 @@ class Explain_join : public Explain_table_base {
   bool end_simple_sort_context(Explain_sort_clause clause,
                                enum_parsing_context ctx);
   bool explain_qep_tab(size_t tab_num);
-  bool explain_pq_gather(QEP_TAB *tab);
 
  protected:
   bool shallow_explain() override;
@@ -1220,12 +1219,6 @@ bool Explain_join::explain_modify_flags() {
       break;
     default:;
   };
-
-  if (query_thd->parallel_exec &&
-      (const_cast<THD *>(query_thd))->is_worker() == false) {
-    fmt->entry()->mod_type = MT_GATHER;
-  }
-
   return false;
 }
 
@@ -1419,10 +1412,6 @@ bool Explain_join::explain_qep_tab(size_t tabnum) {
 
   Semijoin_mat_exec *const sjm = tab->sj_mat_exec();
   const enum_parsing_context c = sjm ? CTX_MATERIALIZATION : CTX_QEP_TAB;
-
-  if (tab->gather) {
-    need_tmp_table = need_order = false;
-  }
 
   if (fmt->begin_context(c) || prepare_columns()) return true;
 
@@ -2143,13 +2132,7 @@ static bool ExplainIterator(THD *ethd, const THD *query_thd,
   }
 
   {
-    std::string explain;
-    if (ethd->parallel_exec && ethd->lex->is_explain_analyze) {
-      explain = ethd->pq_explain;
-    } else {
-      explain = PrintQueryPlan(ethd, query_thd, unit);
-    }
-
+    std::string explain = PrintQueryPlan(ethd, query_thd, unit);
     if (explain.empty()) {
       my_error(ER_INTERNAL_ERROR, MYF(0), "Failed to print query plan");
       return true;

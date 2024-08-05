@@ -6690,12 +6690,9 @@ static int get_var_with_binlog(THD *thd, enum_sql_command sql_command,
   Binlog_user_var_event *user_var_event;
   user_var_entry *var_entry;
 
-  /* obtain user variables from leader thread */
-  THD *entry_thd = thd->is_worker() ? thd->pq_leader : thd;
-
   /* Protects thd->user_vars. */
   mysql_mutex_lock(&thd->LOCK_thd_data);
-  var_entry = get_variable(entry_thd, name, nullptr);
+  var_entry = get_variable(thd, name, nullptr);
   mysql_mutex_unlock(&thd->LOCK_thd_data);
 
   *out_entry = var_entry;

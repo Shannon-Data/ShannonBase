@@ -37,7 +37,6 @@
 #include "mysql/components/services/bits/psi_bits.h"
 #include "mysql/service_mysql_alloc.h"
 #include "mysql/strings/m_ctype.h"
-#include "sql/exchange.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/join_optimizer/bit_utils.h"
 #include "sql/key.h"

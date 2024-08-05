@@ -4041,7 +4041,7 @@ bool find_order_in_list(THD *thd, Ref_item_array ref_item_array,
          order_item_type == Item::FIELD_ITEM) ||
         order_item_type == Item::REF_ITEM) {
       from_field = find_field_in_tables(thd, (Item_ident *)order_item, tables,
-                                        nullptr, &view_ref, IGNORE_ERRORS, !thd->pq_leader,
+                                        nullptr, &view_ref, IGNORE_ERRORS, true,
                                         // view_ref is a local variable, so
                                         // don't record a change to roll back:
                                         false);
