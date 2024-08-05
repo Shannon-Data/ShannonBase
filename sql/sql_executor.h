@@ -325,8 +325,6 @@ class QEP_TAB : public QEP_shared_owner {
   */
   void init_join_cache(JOIN_TAB *join_tab);
 
-  bool pq_copy(THD *thd, QEP_TAB *qep_tab);
-
   /**
      @returns query block id for an inner table of materialized semi-join, and
               0 for all other tables.
@@ -585,8 +583,7 @@ bool ExtractConditions(Item *condition,
 AccessPath *create_table_access_path(THD *thd, TABLE *table,
                                      AccessPath *range_scan,
                                      Table_ref *table_ref, POSITION *position,
-                                     bool count_examined_rows,
-                                     bool *pq_replace_path = nullptr);
+                                     bool count_examined_rows);
 
 /**
   Creates an iterator for the given table, then calls Init() on the resulting

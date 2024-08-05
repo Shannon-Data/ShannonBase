@@ -259,7 +259,6 @@ class Temp_table_param {
         m_window(other.m_window) {}
 
   void cleanup() { copy_fields.clear(); }
-  void pq_copy(Temp_table_param *orig);  
 };
 
 #endif  // TEMP_TABLE_PARAM_INCLUDED

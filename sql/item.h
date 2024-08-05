@@ -1228,8 +1228,7 @@ class Item : public Parse_tree_node {
   */
   virtual void notify_removal() {}
   virtual void make_field(Send_field *field);
-  virtual Field *make_string_field(TABLE *table,
-                                   MEM_ROOT *root = nullptr) const;
+  virtual Field *make_string_field(TABLE *table) const;
   virtual bool fix_fields(THD *, Item **);
   /**
     Fix after tables have been moved from one query_block level to the parent

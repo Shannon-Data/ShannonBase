@@ -880,21 +880,6 @@ struct row_prebuilt_t {
                                         to reposition the cursors. */
   void try_unlock(bool has_latches_on_recs);
 
-  std::shared_ptr<Parallel_reader::Ctx> ctx{};
-
-  bool is_attach_ctx{false};
-
-  mem_heap_t *pq_heap{nullptr};
-
-  dtuple_t *pq_tuple{nullptr};
-
-  bool pq_index_read{false};
-
-  /** Number of externally stored columns. */
-  ulint pq_m_n_ext{ULINT_UNDEFINED};
-
-  bool pq_requires_clust_rec{false};
-
  private:
   /** A helper function for init_search_tuples_types() which prepares the shape
   of the tuple to match the index

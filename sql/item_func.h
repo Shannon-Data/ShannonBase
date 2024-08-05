@@ -1084,8 +1084,6 @@ class Item_typecast_decimal final : public Item_func {
   enum Functype functype() const override { return TYPECAST_FUNC; }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-  
-  int pq_precision; 
 };
 
 /**

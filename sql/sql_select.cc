@@ -4982,10 +4982,6 @@ void JOIN::refresh_base_slice() {
 }
 
 void JOIN::unplug_join_tabs() {
-  // clone JOIN info from pq_tmp_tables_info, best_bef = NULL
-  if (tables != 0 && !(best_ref && !join_tab)) {
-    return;
-  }
   ASSERT_BEST_REF_IN_JOIN_ORDER(this);
 
   map2table = nullptr;

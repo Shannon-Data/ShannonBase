@@ -579,7 +579,6 @@ struct POSITION {
 
   table_map get_suffix_lateral_deps() const { return m_suffix_lateral_deps; }
 
-  bool pq_copy(THD *thd, POSITION *orig);
  private:
   /**
      The lateral dependendencies of 'table' and all subsequent JOIN_TABs

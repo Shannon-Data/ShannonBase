@@ -908,7 +908,6 @@ class Item_date_literal final : public Item_date_func {
 */
 class Item_time_literal final : public Item_time_func {
   MYSQL_TIME_cache cached_time;
-  uint pq_dec_arg;
 
  public:
   /**
