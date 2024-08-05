@@ -1151,8 +1151,6 @@ class Item_sum_hybrid_field : public Item_result_field {
   }
 };
 
-enum class ParallelAvgType { PQ_LEADER, PQ_WORKER, PQ_REBUILD, PQ_INVALID };
-
 /**
   Common abstract class for:
     Item_avg_field
@@ -1178,7 +1176,6 @@ class Item_avg_field : public Item_sum_num_field {
   uint f_precision, f_scale, dec_bin_size;
   uint prec_increment;
   Item_sum_avg *avg_item {nullptr};
-  ParallelAvgType pq_avg_type{ParallelAvgType::PQ_INVALID};
 
   Item_avg_field(Item_result res_type, Item_sum_avg *item);
   enum Type type() const override { return FIELD_AVG_ITEM; }
@@ -1322,7 +1319,6 @@ class Item_sum_avg final : public Item_sum_sum {
   typedef Item_sum_sum super;
   my_decimal m_avg_dec;
   double m_avg;
-  ParallelAvgType pq_avg_type{ParallelAvgType::PQ_INVALID};
 
   Item_sum_avg(const POS &pos, Item *item_par, bool distinct, PT_window *w)
       : Item_sum_sum(pos, item_par, distinct, w) {}
@@ -2179,8 +2175,7 @@ class Item_func_group_concat final : public Item_sum {
   enum Sumfunctype sum_func() const override { return GROUP_CONCAT_FUNC; }
   const char *func_name() const override { return "group_concat"; }
   Item_result result_type() const override { return STRING_RESULT; }
-  Field *make_string_field(TABLE *table_arg,
-                           MEM_ROOT *root = nullptr) const override;
+  Field *make_string_field(TABLE *table_arg) const override;
   void clear() override;
   bool add() override;
   void reset_field() override { assert(0); }   // not used

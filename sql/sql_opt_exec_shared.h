@@ -174,8 +174,6 @@ struct Index_lookup {
     }
     return false;
   }
-
-  bool pq_copy(JOIN *join, Index_lookup *ref, QEP_TAB *qep_tab);
 };
 
 struct CACHE_FIELD;

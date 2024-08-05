@@ -2205,9 +2205,6 @@ struct TABLE {
   bool should_binlog_drop_if_temp_flag{false};
 
  public:
-  /** copy table property from orig table */
-  bool pq_copy(THD *thd, void *select, TABLE *orig);
-
   /**
     Does this table have any columns that can be updated using partial update
     in the current row?

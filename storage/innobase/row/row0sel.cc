@@ -2479,14 +2479,6 @@ static void row_sel_store_row_id_to_prebuilt(
   ut_memcpy(prebuilt->row_id, data, len);
 }
 
-void pq_row_sel_store_row_id_to_prebuilt(
-    row_prebuilt_t *prebuilt,  /*!< in/out: prebuilt */
-    const rec_t *index_rec,    /*!< in: record */
-    const dict_index_t *index, /*!< in: index of the record */
-    const ulint *offsets) {    /*!< in: rec_get_offsets(index_rec, index) */
-  row_sel_store_row_id_to_prebuilt(prebuilt, index_rec, index, offsets);
-}
-
 /** Stores a non-SQL-NULL field in the MySQL format. The counterpart of this
 function is row_mysql_store_col_in_innobase_format() in row0mysql.cc.
 @param[in,out] dest             buffer where to store; NOTE
@@ -5921,17 +5913,6 @@ lock_table_wait:
 normal_return:
   /*-------------------------------------------------------------*/
   que_thr_stop_for_mysql_no_error(thr, trx);
-
-  if (err == DB_SUCCESS && prebuilt->pq_index_read) {
-    if (prebuilt->pq_heap) mem_heap_free(prebuilt->pq_heap);
-    prebuilt->pq_heap = mem_heap_create(
-        sizeof(btr_pcur_t) + (srv_page_size / 16), UT_LOCATION_HERE);
-    prebuilt->pq_tuple = row_rec_to_index_entry_low(
-        rec, index,
-        rec_get_offsets(rec, index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE,
-                        &prebuilt->heap),
-        prebuilt->pq_heap);
-  }
 
   mtr_commit(&mtr);
 

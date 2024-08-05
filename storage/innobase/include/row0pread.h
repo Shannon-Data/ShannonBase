@@ -185,17 +185,8 @@ class Parallel_reader {
     /** Copy constructor.
     @param[in] config           Instance to copy from. */
     Config(const Config &config)
-        : m_scan_range(config.m_scan_range),
-          m_index(config.m_index),
-          m_is_compact(config.m_is_compact),
-          m_page_size(config.m_page_size),
-          m_read_level(config.m_read_level),
-          m_partition_id(config.m_partition_id),
-          m_range_errno(config.m_range_errno),
-          m_pcur(config.m_pcur),
-          m_pq_reverse_scan(config.m_pq_reverse_scan) {}
 
-    ~Config() {}
+        = default;
 
     /** Range to scan. */
     const Scan_range m_scan_range;
@@ -215,12 +206,6 @@ class Parallel_reader {
     /** Partition id if the index to be scanned belongs to a partitioned table,
     else std::numeric_limits<size_t>::max(). */
     size_t m_partition_id{std::numeric_limits<size_t>::max()};
-
-    uint m_range_errno{0};
-
-    btr_pcur_t *m_pcur{nullptr};
-
-    bool m_pq_reverse_scan{false};
   };
 
   /** Thread related context information. */
@@ -356,9 +341,6 @@ class Parallel_reader {
   @param[in] n_threads          Number of threads to use for the scan.
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t run(size_t n_threads);
-
-  /** dispatch a execution context to the prebuilt object */
-  dberr_t dispatch_ctx(row_prebuilt_t *prebuilt);
 
   void ctx_completed_inc();
 
@@ -500,14 +482,6 @@ class Parallel_reader {
 
   /** Context information related to each parallel reader thread. */
   std::vector<Thread_ctx *, ut::allocator<Thread_ctx *>> m_thread_ctxs;
-  /** state of worker currently doing parallel reads. */
-  std::atomic<bool> work_done{false};
-
-  bool m_pq_reverse_scan{false};
-
-  friend class Ctx;
-  friend class Scan_ctx;
-  friend class Parallel_reader_adapter;
 };
 
 /** Parallel reader context. */
@@ -651,12 +625,6 @@ class Parallel_reader::Scan_ctx {
   @return true if row is visible to the transaction. */
   [[nodiscard]] bool check_visibility(const rec_t *&rec, ulint *&offsets,
                                       mem_heap_t *&heap, mtr_t *mtr);
-
-  dberr_t find_visible_record(byte *buf, const rec_t *&rec,
-                              const rec_t *&clust_rec, ulint *&offsets,
-                              ulint *&clust_offsets, mem_heap_t *&heap,
-                              mtr_t *mtr, row_prebuilt_t *prebuilt = nullptr)
-      MY_ATTRIBUTE((warn_unused_result));
 
   /** Create an execution context for a range and add it to
   the Parallel_reader's run queue.

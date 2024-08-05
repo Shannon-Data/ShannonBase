@@ -1215,18 +1215,6 @@ struct AccessPath {
       table_map tables_to_update;
       table_map immediate_tables;
     } update_rows;
-    struct {
-      QEP_TAB *tab;
-      TABLE *table;
-      Gather_operator *gather;
-      bool stable_sort; /** determine whether using stable sort */
-      uint ref_length;
-    } parallel_scan;
-    struct {
-      TABLE *table;
-      Gather_operator *gather;
-      bool need_rowid;
-    } pq_block_scan;
   } u;
 };
 static_assert(std::is_trivially_destructible<AccessPath>::value,

@@ -3710,7 +3710,6 @@ AccessPath *QEP_TAB::access_path() {
   assert(!m_reversed_access || type() == JT_REF || type() == JT_INDEX_SCAN);
   Index_lookup *used_ref = nullptr;
   AccessPath *path = nullptr;
-  bool pq_replace_accesspath = false;
 
   switch (type()) {
     case JT_REF:
@@ -3751,7 +3750,6 @@ AccessPath *QEP_TAB::access_path() {
       path = NewIndexScanAccessPath(join()->thd, table(), index(), use_order(),
                                     m_reversed_access,
                                     /*count_examined_rows=*/true);
-      pq_replace_accesspath = true;
       break;
     case JT_ALL:
     case JT_RANGE:
@@ -3762,8 +3760,7 @@ AccessPath *QEP_TAB::access_path() {
       } else {
         path = create_table_access_path(join()->thd, table(), range_scan(),
                                         table_ref, position(),
-                                        /*count_examined_rows=*/true,
-                                        &pq_replace_accesspath);
+                                        /*count_examined_rows=*/true);
       }
       break;
     default:
@@ -4699,8 +4696,7 @@ bool MaterializeIsDoingDeduplication(TABLE *table) {
 AccessPath *create_table_access_path(THD *thd, TABLE *table,
                                      AccessPath *range_scan,
                                      Table_ref *table_ref, POSITION *position,
-                                     bool count_examined_rows,
-                                     bool *pq_replace_path) {
+                                     bool count_examined_rows) {
   AccessPath *path;
   bool could_replace_path = false;
 
@@ -4714,9 +4710,6 @@ AccessPath *create_table_access_path(THD *thd, TABLE *table,
     path = NewTableScanAccessPath(thd, table, count_examined_rows);
     could_replace_path = true;
   }
-
-  if (pq_replace_path) *pq_replace_path = could_replace_path;
-
   if (position != nullptr) {
     SetCostOnTableAccessPath(*thd->cost_model(), position,
                              /*is_after_filter=*/false, path);

@@ -1314,9 +1314,6 @@ double EstimateRowAccesses(const AccessPath *path, double num_evaluations,
 bool IsHashEquijoinCondition(const Item_eq_base *item, table_map left_side,
                              table_map right_side);
 
-extern Field *create_tmp_field_for_schema(Item *item, TABLE *table,
-                                          MEM_ROOT *root);
-
 extern void record_optimized_group_order(PQ_Group_list_ptrs *ptr,
                                          ORDER_with_src &new_list,
                                          std::vector<bool> &optimized_flags);
