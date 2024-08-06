@@ -2,7 +2,6 @@
 #define SQL_OPTIMIZER_INCLUDED
 
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -51,7 +50,6 @@
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
 #include "sql/sql_opt_exec_shared.h"
-#include "sql/sql_parallel.h"
 #include "sql/sql_select.h"  // Key_use
 #include "sql/table.h"
 #include "sql/temp_table_param.h"
@@ -158,8 +156,7 @@ class JOIN {
   JOIN_TAB *join_tab{nullptr};
   /// Array of QEP_TABs
   QEP_TAB *qep_tab{nullptr};
-  QEP_TAB *qep_tab0{nullptr};
-  QEP_TAB *qep_tab1{nullptr};
+
   /**
     Array of plan operators representing the current (partial) best
     plan. The array is allocated in JOIN::make_join_plan() and is valid only
@@ -409,12 +406,6 @@ class JOIN {
   */
   bool skip_sort_order{false};
 
-  // need a tmp table to store Parallel Query result
-  bool need_tmp_pq{false};
-
-  // need a tmp table for leader thread
-  bool need_tmp_pq_leader{false};
-
   /**
     If true we need a temporary table on the result set before any
     windowing steps, e.g. for DISTINCT or we have a query ORDER BY.
@@ -467,19 +458,6 @@ class JOIN {
       PSI_NOT_INSTRUMENTED};
   Prealloced_array<Item_rollup_sum_switcher *, 4> rollup_sums{
       PSI_NOT_INSTRUMENTED};
-
-  // for parallel query processing the split table
-  int pq_tab_idx{-1};
-
-  bool pq_rebuilt_group{false};
-
-  bool pq_stable_sort{false};
-
-  int pq_last_sort_idx{-1};
-
-  // used for worker's make_tmp_tables_info
-  PQ_optimized_var saved_optimized_vars;  
-
   /**
     Any window definitions
   */
@@ -844,25 +822,6 @@ class JOIN {
    */
   bool needs_finalize{false};
 
-  bool setup_tmp_table_info(JOIN *orig);
-
-  bool pq_copy_from(JOIN *orig);
-
-  bool alloc_indirection_slices1();
-
-  bool restore_optimized_vars();
-
-  void save_optimized_vars();
-
-  bool make_tmp_tables_info();
-
-  // make Paralle Query leader's qep tables info
-  bool make_leader_tables_info();
-  // make a tmp table in Query_result_mq for PQ
-  bool make_pq_tables_info();
-
-  bool alloc_qep1(uint n);
-
  private:
   bool optimized{false};  ///< flag to avoid double optimization in EXPLAIN
 
@@ -1042,6 +1001,7 @@ class JOIN {
                                          POSITION *sjm_pos);
 
   bool add_having_as_tmp_table_cond(uint curr_tmp_table);
+  bool make_tmp_tables_info();
   void set_plan_state(enum_plan_state plan_state_arg);
   bool compare_costs_of_subquery_strategies(Subquery_strategy *method);
   ORDER *remove_const(ORDER *first_order, Item *cond, bool change_list,
@@ -1353,9 +1313,6 @@ double EstimateRowAccesses(const AccessPath *path, double num_evaluations,
 */
 bool IsHashEquijoinCondition(const Item_eq_base *item, table_map left_side,
                              table_map right_side);
-
-extern Field *create_tmp_field_for_schema(Item *item, TABLE *table,
-                                          MEM_ROOT *root);
 
 extern void record_optimized_group_order(PQ_Group_list_ptrs *ptr,
                                          ORDER_with_src &new_list,

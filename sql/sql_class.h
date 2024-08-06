@@ -1,5 +1,4 @@
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -112,7 +111,6 @@
 #include "sql/sql_error.h"
 #include "sql/sql_list.h"
 #include "sql/sql_plugin_ref.h"
-#include "sql/sql_pq_condition.h"       //PQ_ConditionStatus
 #include "sql/sys_vars_resource_mgr.h"  // Session_sysvar_resource_manager
 #include "sql/system_variables.h"       // system_variables
 #include "sql/transaction_info.h"       // Ha_trx_info
@@ -1066,44 +1064,6 @@ class THD : public MDL_context_owner,
 
   /* Is transaction commit still pending */
   bool tx_commit_pending;
-
-  /* for parallel processing */
-  /* parallel reader context */
-  void *pq_ctx {nullptr};
-  /* using for PQ worker threads */
-  THD *pq_leader {nullptr};
-  /* using for explain */
-  bool parallel_exec {false};
-  /* parallel query running threads in session*/
-  uint pq_threads_running {0};
-  /* degree of parallel */
-  uint pq_dop {0};
-  /* disable parallel execute */
-  bool no_pq {false};
-  /* disable parallel query for store procedure and trigger */
-  uint in_sp_trigger {0};
-  /* select .. fro share/update */
-  bool locking_clause {false};
-  /* indicates whether parallel query is supported */
-  enum PQ_ConditionStatus m_suite_for_pq { PQ_ConditionStatus::INIT };
-
-  /* indicates whether occurring error during execution */
-  bool pq_error{false};
-
-  /* save ParallelScanIterator or PQblockScanIterator here to call end() */
-  RowIterator *pq_iterator{NULL};
-
-  /* check first table. */
-  uint pq_check_fields{0};
-  uint pq_check_reclen{0};
-
-  /* save PQ worker THDs. */
-  std::vector<THD *> pq_workers;
-  /* protects THD::pq_workers. */
-  mysql_mutex_t pq_lock_worker;
-
-  /* for explain analyze. */
-  std::string pq_explain;
 
   /**
     The function checks whether the thread is processing queries from binlog,
@@ -2331,7 +2291,6 @@ class THD : public MDL_context_owner,
     stable throughout the next query, see update_previous_found_rows.
   */
   ulonglong current_found_rows;
-  ulonglong pq_current_found_rows;
 
   /*
     Indicate if the gtid_executed table is being operated implicitly
@@ -2744,9 +2703,6 @@ class THD : public MDL_context_owner,
   bool slave_thread;
 
   uchar password;
-
-  /** This memory root is used for Parallel Query */
-  MEM_ROOT *pq_mem_root;
 
  private:
   /**
@@ -3282,13 +3238,6 @@ class THD : public MDL_context_owner,
     To raise this flag, use my_error().
   */
   inline bool is_error() const { return get_stmt_da()->is_error(); }
-
-  inline bool is_pq_error() const {
-    return !pq_leader
-               ? pq_error
-               : (pq_error || (pq_leader->is_killed() || pq_leader->pq_error ||
-                               pq_leader->is_error()));
-  }
 
   /// Returns first Diagnostics Area for the current statement.
   Diagnostics_area *get_stmt_da() { return m_stmt_da; }
@@ -4726,11 +4675,6 @@ class THD : public MDL_context_owner,
   bool is_connection_admin();
   void set_connection_admin(bool connection_admin_flag);
 
-  bool is_worker();
-  bool pq_copy_from(THD *thd);
-  bool pq_merge_status(THD *thd);
-  bool pq_status_reset();
-
  public:
   Transactional_ddl_context m_transactional_ddl{this};
 
@@ -4902,7 +4846,5 @@ inline void THD::set_connection_admin(bool connection_admin_flag) {
 inline bool is_xa_tran_detached_on_prepare(const THD *thd) {
   return thd->variables.xa_detach_on_prepare;
 }
-
-inline bool THD::is_worker() { return pq_leader != nullptr; }
 
 #endif /* SQL_CLASS_INCLUDED */

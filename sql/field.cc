@@ -2920,8 +2920,6 @@ Field_new_decimal::Field_new_decimal(uint32 len_arg, bool is_nullable_arg,
 }
 
 Field *Field_new_decimal::create_from_item(const Item *item, MEM_ROOT *root) {
-  MEM_ROOT *pq_check_root = root ? root : *THR_MALLOC;
-
   uint8 dec = item->decimals;
   uint8 intg = item->decimal_precision() - dec;
   uint32 len = item->max_char_length();
@@ -2957,7 +2955,7 @@ Field *Field_new_decimal::create_from_item(const Item *item, MEM_ROOT *root) {
       /* Corrected value fits. */
       len = required_length;
   }
-  return new (pq_check_root)
+  return new (*THR_MALLOC)
       Field_new_decimal(len, item->is_nullable(), item->item_name.ptr(), dec,
                         item->unsigned_flag);
 }

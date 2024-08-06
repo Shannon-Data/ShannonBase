@@ -2,7 +2,6 @@
 #define FIELD_INCLUDED
 
 /* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -4827,14 +4826,4 @@ const char *get_field_name_or_expression(THD *thd, const Field *field);
 */
 bool pre_validate_value_generator_expr(Item *expression, const char *name,
                                        Value_generator_source source);
-// build field raw data from Field
-extern uint32 pq_build_field_raw(Field *field, Field_raw_data *field_raw);
-
-extern void pq_build_mq_fields(Field *field, Field_raw_data *field_raw,
-                               bool *null_array, int &null_num,
-                               uint32 &total_bytes);
-
-extern void pq_build_mq_item(Item *item, Field_raw_data *field_raw,
-                             bool *null_array, int &null_num,
-                             uint32 &total_bytes);
 #endif /* FIELD_INCLUDED */

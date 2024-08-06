@@ -1,5 +1,4 @@
 /* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -175,8 +174,6 @@ struct Index_lookup {
     }
     return false;
   }
-
-  bool pq_copy(JOIN *join, Index_lookup *ref, QEP_TAB *qep_tab);
 };
 
 struct CACHE_FIELD;

@@ -71,7 +71,6 @@
 #include "sql/sql_const.h"       // SHOW_COMP_OPTION
 #include "sql/sql_list.h"        // SQL_I_List
 #include "sql/sql_plugin_ref.h"  // plugin_ref
-#include "sql/sql_pq_range.h"
 #include "string_with_len.h"     // STRING_WITH_LEN
 #include "thr_lock.h"            // thr_lock_type
 #include "typelib.h"
@@ -4548,7 +4547,7 @@ class handler {
   /** Length of ref (1-8 or the clustered key length) */
   uint ref_length;
   FT_INFO *ft_handler;
-  enum { NONE = 0, INDEX, RND, SAMPLING, PQ_LEADER, PQ_WORKER } inited;
+  enum { NONE = 0, INDEX, RND, SAMPLING } inited;
   bool implicit_emptied; /* Can be !=0 only if HEAP */
   const Item *pushed_cond;
 
@@ -4592,12 +4591,6 @@ class handler {
 
   std::mt19937 m_random_number_engine;
   double m_sampling_percentage;
-
-  PQ_RANGE_TYPE pq_range_type{PQ_RANGE_TYPE::PQ_QUICK_SELECT_NONE};
-  key_range pq_ref_key;
-  bool pq_ref{false};
-  bool pq_table_scan{false};
-  bool pq_reverse_scan{false};
 
  private:
   /** Internal state of the batch instrumentation. */
@@ -4810,12 +4803,6 @@ class handler {
   int ha_index_next_same(uchar *buf, const uchar *key, uint keylen);
   int ha_reset();
 
-  //for parallel processing.
-  int ha_pq_init(uint keyno, uint& dop);
-  int ha_pq_next(uchar *buf, void *scan_ctx);
-  int ha_pq_signal_all();
-  int ha_pq_end();
-
   /* this is necessary in many places, e.g. in HANDLER command */
   int ha_index_or_rnd_end();
   /**
@@ -4889,22 +4876,6 @@ class handler {
     return 0;
   }
 
-  virtual int pq_leader_signal_all(void *scan_ctx MY_ATTRIBUTE((unused))) {
-    return (0);
-  }
-
-  virtual int pq_leader_scan_init(uint keyno MY_ATTRIBUTE((unused)),
-                                  void *&scan_ctx MY_ATTRIBUTE((unused)),
-                                  uint &n_threads MY_ATTRIBUTE((unused))) {
-    return (0);
-  }
-
-  virtual int pq_worker_scan_init(uint keyno MY_ATTRIBUTE((unused)),
-                                  void *scan_ctx MY_ATTRIBUTE((unused))) {
-    return (0);
-  }
-
-
   /**
     This callback is called by each parallel load thread at the beginning of
     the parallel load for the adapter scan.
@@ -4976,21 +4947,6 @@ class handler {
     @param[in]      scan_ctx      A scan context created by parallel_scan_init.
   */
   virtual void parallel_scan_end(void *scan_ctx [[maybe_unused]]) { return; }
-
-  virtual int pq_worker_scan_next(void *scan_ctx MY_ATTRIBUTE((unused)),
-                                  uchar *buf MY_ATTRIBUTE((unused))) {
-    return (0);
-  }
-
-    virtual int pq_leader_scan_end(
-      void *parallel_scan_ctx MY_ATTRIBUTE((unused))) {
-    return (0);
-  }
-
-  virtual int pq_worker_scan_end(
-      void *parallel_scan_ctx MY_ATTRIBUTE((unused))) {
-    return (0);
-  }
 
   /**
     Submit a dd::Table object representing a core DD table having

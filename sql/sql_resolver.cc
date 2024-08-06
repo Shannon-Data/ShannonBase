@@ -584,15 +584,6 @@ bool Query_block::prepare(THD *thd, mem_root_deque<Item *> *insert_field_list) {
   if (olap == ROLLUP_TYPE && resolve_rollup_wfs(thd))
     return true; /* purecov: inspected */
 
-  if (thd->m_suite_for_pq == PQ_ConditionStatus::ENABLED) {
-    if (group_list.elements > 0)
-      fix_prepare_information_for_order(thd, &group_list,
-                                        &saved_group_list_ptrs);
-    if (order_list.elements > 0)
-      fix_prepare_information_for_order(thd, &order_list,
-                                        &saved_order_list_ptrs);
-  }
-
   assert(!thd->is_error());
   return false;
 }
@@ -4050,7 +4041,7 @@ bool find_order_in_list(THD *thd, Ref_item_array ref_item_array,
          order_item_type == Item::FIELD_ITEM) ||
         order_item_type == Item::REF_ITEM) {
       from_field = find_field_in_tables(thd, (Item_ident *)order_item, tables,
-                                        nullptr, &view_ref, IGNORE_ERRORS, !thd->pq_leader,
+                                        nullptr, &view_ref, IGNORE_ERRORS, true,
                                         // view_ref is a local variable, so
                                         // don't record a change to roll back:
                                         false);

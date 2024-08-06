@@ -1,5 +1,4 @@
 /* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -44,7 +43,6 @@
 #include "sql/mem_root_array.h"
 #include "sql/sql_array.h"
 #include "sql/sql_class.h"
-#include "sql/sql_pq_range.h"
 #include "sql/table.h"
 
 template <class T>
@@ -266,8 +264,6 @@ struct AccessPath {
     // Access paths that modify tables.
     DELETE_ROWS,
     UPDATE_ROWS,
-    PARALLEL_SCAN,
-    PQBLOCK_SCAN
   } type;
 
   /// A general enum to describe the safety of a given operation.
@@ -851,48 +847,9 @@ struct AccessPath {
     return u.update_rows;
   }
 
-  auto &parallel_scan() {
-    assert(type == PARALLEL_SCAN);
-    return u.parallel_scan;
-  }
-  const auto &parallel_scan() const {
-    assert(type == PARALLEL_SCAN);
-    return u.parallel_scan;
-  }
-  auto &pq_block_scan() {
-    assert(type == PQBLOCK_SCAN);
-    return u.pq_block_scan;
-  }
-  const auto &pq_block_scan() const {
-    assert(type == PQBLOCK_SCAN);
-    return u.pq_block_scan;
-  }
-
   double num_output_rows() const { return m_num_output_rows; }
 
   void set_num_output_rows(double val) { m_num_output_rows = val; }
-
-  inline PQ_RANGE_TYPE quick_select_type() {
-    auto pq_range_type = PQ_RANGE_TYPE::PQ_QUICK_SELECT_NONE;
-    switch (type) {
-      case AccessPath::INDEX_RANGE_SCAN:
-        pq_range_type = PQ_RANGE_TYPE::PQ_INDEX_RANGE_SCAN;
-        break;
-      case AccessPath::INDEX_MERGE:
-        pq_range_type = PQ_RANGE_TYPE::PQ_INDEX_MERGE;
-        break;
-      case AccessPath::ROWID_UNION:
-        pq_range_type = PQ_RANGE_TYPE::PQ_ROWID_UNION;
-        break;
-      case AccessPath::ROWID_INTERSECTION:
-        pq_range_type = PQ_RANGE_TYPE::PQ_ROWID_INTERSECTION;
-        break;
-      default:
-        break;
-    }
-
-    return pq_range_type;
-  }
 
  private:
   /// Expected number of output rows, -1.0 for unknown.
@@ -1258,18 +1215,6 @@ struct AccessPath {
       table_map tables_to_update;
       table_map immediate_tables;
     } update_rows;
-    struct {
-      QEP_TAB *tab;
-      TABLE *table;
-      Gather_operator *gather;
-      bool stable_sort; /** determine whether using stable sort */
-      uint ref_length;
-    } parallel_scan;
-    struct {
-      TABLE *table;
-      Gather_operator *gather;
-      bool need_rowid;
-    } pq_block_scan;
   } u;
 };
 static_assert(std::is_trivially_destructible<AccessPath>::value,
@@ -1750,154 +1695,6 @@ inline AccessPath *NewInvalidatorAccessPath(THD *thd, AccessPath *child,
   return path;
 }
 
-inline AccessPath *pq_range_clone_from(THD *thd, AccessPath *path,
-                                       TABLE *table) {
-  if (DBUG_EVALUATE_IF("pq_clone_error1", true, false)) {
-    return nullptr;
-  }
-  AccessPath *newpath = nullptr;
-  switch (path->type) {
-    case AccessPath::INDEX_RANGE_SCAN: {
-      auto &param = path->index_range_scan();
-      newpath = new (thd->mem_root) AccessPath;
-      newpath->type = AccessPath::INDEX_RANGE_SCAN;
-      newpath->cost = path->cost;
-      newpath->set_num_output_rows(path->num_output_rows());
-      newpath->index_range_scan().index = param.index;
-      newpath->index_range_scan().num_used_key_parts = param.num_used_key_parts;
-      newpath->index_range_scan().num_ranges = param.num_ranges;
-      newpath->index_range_scan().mrr_flags = param.mrr_flags;
-      newpath->index_range_scan().mrr_buf_size = param.mrr_buf_size;
-      newpath->index_range_scan().can_be_used_for_ror =
-          param.can_be_used_for_ror;
-      newpath->index_range_scan().need_rows_in_rowid_order =
-          param.need_rows_in_rowid_order;
-      newpath->index_range_scan().can_be_used_for_imerge =
-          param.can_be_used_for_imerge;
-      newpath->index_range_scan().reuse_handler = param.reuse_handler;
-      newpath->index_range_scan().geometry = param.geometry;
-      newpath->index_range_scan().reverse = param.reverse;
-      newpath->index_range_scan().using_extended_key_parts =
-          param.using_extended_key_parts;
-
-      newpath->index_range_scan().ranges = (QUICK_RANGE **)thd->mem_calloc(
-          sizeof(QUICK_RANGE *) * param.num_ranges);
-      for (unsigned ix = 0; ix < param.num_ranges; ix++) {
-        QUICK_RANGE *old_range = param.ranges[ix];
-        QUICK_RANGE *new_range = new (thd->mem_root) QUICK_RANGE(
-            thd->mem_root, old_range->min_key, old_range->min_length,
-            old_range->min_keypart_map, old_range->max_key,
-            old_range->max_length, old_range->max_keypart_map, old_range->flag,
-            old_range->rkey_func_flag);
-        newpath->index_range_scan().ranges[ix] = new_range;
-      }
-
-      MEM_ROOT *alloc = thd->mem_root;
-      KEY_PART *key_parts =
-          (KEY_PART *)alloc->Alloc(sizeof(KEY_PART) * param.num_used_key_parts);
-      if (!key_parts) {
-        return nullptr;
-      }
-
-      memcpy(key_parts, param.used_key_part,
-             sizeof(KEY_PART) * param.num_used_key_parts);
-
-      KEY_PART_INFO *key_part_info = table->key_info[param.index].key_part;
-      for (uint i = 0; i < param.num_used_key_parts; i++) {
-        key_parts[i].field = key_part_info[i].field;
-      }
-      newpath->index_range_scan().used_key_part = key_parts;
-      break;
-    }
-    case AccessPath::INDEX_MERGE: {
-      auto &param = path->index_merge();
-      newpath = new (thd->mem_root) AccessPath;
-      newpath->type = AccessPath::INDEX_MERGE;
-      newpath->cost = path->cost;
-
-      newpath->index_merge().table = table;
-      newpath->index_merge().forced_by_hint = param.forced_by_hint;
-      newpath->index_merge().allow_clustered_primary_key_scan =
-          param.allow_clustered_primary_key_scan;
-      Mem_root_array<AccessPath *> new_children_paths(thd->mem_root);
-      for (AccessPath *old_path : *param.children) {
-        AccessPath *new_path = pq_range_clone_from(thd, old_path, table);
-        // add code here
-
-        new_children_paths.push_back(new_path);
-      }
-
-      newpath->index_merge().children = new (thd->mem_root)
-          Mem_root_array<AccessPath *>(std::move(new_children_paths));
-
-      break;
-    }
-
-    case AccessPath::ROWID_UNION: {
-      auto &param = path->rowid_union();
-      newpath = new (thd->mem_root) AccessPath;
-      newpath->type = AccessPath::ROWID_UNION;
-      newpath->cost = path->cost;
-      newpath->rowid_union().table = table;
-      newpath->rowid_union().forced_by_hint = param.forced_by_hint;
-      Mem_root_array<AccessPath *> new_children_paths(thd->mem_root);
-      for (AccessPath *old_path : *param.children) {
-        AccessPath *new_path = pq_range_clone_from(thd, old_path, table);
-        new_children_paths.push_back(new_path);
-      }
-      newpath->rowid_union().children = new (thd->mem_root)
-          Mem_root_array<AccessPath *>(std::move(new_children_paths));
-
-      break;
-    }
-
-    case AccessPath::ROWID_INTERSECTION: {
-      auto &param = path->rowid_intersection();
-      newpath = new (thd->mem_root) AccessPath;
-      newpath->type = AccessPath::ROWID_INTERSECTION;
-      newpath->cost = path->cost;
-      newpath->rowid_intersection().table = table;
-      newpath->rowid_intersection().forced_by_hint = param.forced_by_hint;
-      newpath->rowid_intersection().retrieve_full_rows =
-          param.retrieve_full_rows;
-      newpath->rowid_intersection().need_rows_in_rowid_order =
-          param.need_rows_in_rowid_order;
-      newpath->rowid_intersection().reuse_handler = param.reuse_handler;
-      newpath->rowid_intersection().is_covering = param.is_covering;
-      Mem_root_array<AccessPath *> new_children_paths(thd->mem_root);
-      for (AccessPath *old_path : *param.children) {
-        AccessPath *new_path = pq_range_clone_from(thd, old_path, table);
-        new_children_paths.push_back(new_path);
-      }
-      newpath->rowid_intersection().children = new (thd->mem_root)
-          Mem_root_array<AccessPath *>(std::move(new_children_paths));
-
-      if (param.cpk_child != nullptr)
-        newpath->rowid_intersection().cpk_child =
-            pq_range_clone_from(thd, param.cpk_child, table);
-      else
-        newpath->rowid_intersection().cpk_child = nullptr;
-
-      break;
-    }
-
-    default:
-      assert(false);
-      break;
-  }
-
-  if (newpath) {
-    newpath->iterator = path->iterator;
-    newpath->init_cost = path->init_cost;
-    newpath->cost = path->cost;
-    newpath->cost_before_filter = path->cost_before_filter;
-    newpath->num_output_rows_before_filter =
-        path->num_output_rows_before_filter;
-  }
-
-  return newpath;
-}
-
 AccessPath *NewDeleteRowsAccessPath(THD *thd, AccessPath *child,
                                     table_map delete_tables,
                                     table_map immediate_tables);
@@ -1905,36 +1702,6 @@ AccessPath *NewDeleteRowsAccessPath(THD *thd, AccessPath *child,
 AccessPath *NewUpdateRowsAccessPath(THD *thd, AccessPath *child,
                                     table_map delete_tables,
                                     table_map immediate_tables);
-
-/**
-  Modifies "path" and the paths below it so that they provide row IDs for
-  all tables. */
-inline AccessPath *NewParallelScanAccessPath(THD *thd, QEP_TAB *tab,
-                                             TABLE *table,
-                                             Gather_operator *gather,
-                                             bool stable_sort,
-                                             uint ref_length) {
-  AccessPath *path = new (thd->mem_root) AccessPath;
-  path->type = AccessPath::PARALLEL_SCAN;
-  path->parallel_scan().tab = tab;
-  path->parallel_scan().table = table;
-  path->parallel_scan().gather = gather;
-  path->parallel_scan().stable_sort = stable_sort;
-  path->parallel_scan().ref_length = ref_length;
-  return path;
-}
-
-inline AccessPath *NewPQBlockScanAccessPath(THD *thd, TABLE *table,
-                                            Gather_operator *gather,
-                                            bool need_rowid) {
-  AccessPath *path = new (thd->mem_root) AccessPath;
-  path->type = AccessPath::PQBLOCK_SCAN;
-  path->pq_block_scan().table = table;
-  path->pq_block_scan().gather = gather;
-  path->pq_block_scan().need_rowid = need_rowid;
-  return path;
-}
-
 /**
   Modifies "path" and the paths below it so that they provide row IDs for
   all tables.

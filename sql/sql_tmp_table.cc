@@ -1,5 +1,4 @@
 /* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
-   Copyright (c) 2021, Huawei Technologies Co., Ltd.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -507,57 +506,6 @@ Field *create_tmp_field(THD *thd, TABLE *table, Item *item, Item::Type type,
       break;
   }
   return result;
-}
-
-/**
-  Create field for information schema table.
-
-  @param table		Temporary table
-  @param item		Item to create a field for
-
-  @retval
-    0			on error
-  @retval
-    new_created field
-*/
-Field *create_tmp_field_for_schema(Item *item, TABLE *table, MEM_ROOT *root) {
-  MEM_ROOT *pq_check_root = root ? root : *THR_MALLOC;
-  if (item->data_type() == MYSQL_TYPE_VARCHAR) {
-    Field *field;
-    if (item->max_length > MAX_FIELD_VARCHARLENGTH)
-      field = new (pq_check_root)
-          Field_blob(item->max_length, item->is_nullable(),
-                     item->item_name.ptr(), item->collation.collation, false);
-    else {
-      field = new (pq_check_root) Field_varstring(
-          item->max_length, item->is_nullable(), item->item_name.ptr(),
-          table->s, item->collation.collation);
-      table->s->db_create_options |= HA_OPTION_PACK_RECORD;
-    }
-    if (field) field->init(table);
-    return field;
-  }
-  return item->tmp_table_field_from_field_type(table, false, root);
-}
-
-void Temp_table_param::pq_copy(Temp_table_param *orig) {
-  end_write_records = orig->end_write_records;
-  // field_count = orig->field_count;
-  func_count = orig->func_count;
-  sum_func_count = orig->sum_func_count;
-  hidden_field_count = orig->hidden_field_count;
-  group_parts = orig->group_parts;
-  group_length = orig->group_length;
-  group_null_parts = orig->group_null_parts;
-  outer_sum_func_count = orig->outer_sum_func_count;
-  using_outer_summary_function = orig->using_outer_summary_function;
-  schema_table = orig->schema_table;
-  precomputed_group_by = orig->precomputed_group_by;
-  force_copy_fields = orig->force_copy_fields;
-  skip_create_table = orig->skip_create_table;
-  bit_fields_as_long = orig->bit_fields_as_long;
-  can_use_pk_for_unique = orig->can_use_pk_for_unique;
-  // m_window_short_circuit = orig->m_window_short_circuit;
 }
 
 /*
@@ -1179,12 +1127,6 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
               /*group=*/false, modify_items, false, false);
           from_item[fieldnr] = arg;
           if (new_field == nullptr) return nullptr;  // Should be OOM
-          if (thd->parallel_exec) {
-            new_field->item_sum_ref = sum_item;
-            new_field->extra_length = sum_item->sum_func() == Item_sum::AVG_FUNC
-                                          ? sizeof(longlong)
-                                          : 0;
-          }
           new_field->set_field_index(fieldnr);
           reg_field[fieldnr++] = new_field;
           share->reclength += new_field->pack_length();
