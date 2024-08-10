@@ -4698,17 +4698,14 @@ AccessPath *create_table_access_path(THD *thd, TABLE *table,
                                      Table_ref *table_ref, POSITION *position,
                                      bool count_examined_rows) {
   AccessPath *path;
-  bool could_replace_path = false;
 
   if (range_scan != nullptr) {
     range_scan->count_examined_rows = count_examined_rows;
     path = range_scan;
-    could_replace_path = true;
   } else if (table_ref != nullptr && table_ref->is_recursive_reference()) {
     path = NewFollowTailAccessPath(thd, table, count_examined_rows);
   } else {
     path = NewTableScanAccessPath(thd, table, count_examined_rows);
-    could_replace_path = true;
   }
   if (position != nullptr) {
     SetCostOnTableAccessPath(*thd->cost_model(), position,

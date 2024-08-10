@@ -201,7 +201,6 @@ class Item_func_sha : public Item_str_ascii_func {
   String *val_str_ascii(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "sha"; }
-  
 };
 
 class Item_func_sha2 : public Item_str_ascii_func {
@@ -211,7 +210,6 @@ class Item_func_sha2 : public Item_str_ascii_func {
   String *val_str_ascii(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "sha2"; }
-  
 };
 
 class Item_func_to_base64 final : public Item_str_ascii_func {
@@ -222,7 +220,6 @@ class Item_func_to_base64 final : public Item_str_ascii_func {
   String *val_str_ascii(String *) override;
   bool resolve_type(THD *) override;
   const char *func_name() const override { return "to_base64"; }
-  
 };
 
 class Item_func_statement_digest final : public Item_str_ascii_func {
@@ -281,7 +278,6 @@ class Item_func_from_base64 final : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "from_base64"; }
-  
 };
 
 class Item_func_aes_encrypt final : public Item_str_func {
@@ -305,7 +301,6 @@ class Item_func_aes_encrypt final : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
   const char *func_name() const override { return "aes_encrypt"; }
-  
 };
 
 class Item_func_aes_decrypt : public Item_str_func {
@@ -328,7 +323,6 @@ class Item_func_aes_decrypt : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "aes_decrypt"; }
-    
 };
 
 class Item_func_random_bytes : public Item_str_func {
@@ -348,7 +342,6 @@ class Item_func_random_bytes : public Item_str_func {
   table_map get_initial_pseudo_tables() const override {
     return RAND_TABLE_BIT;
   }
-    
 };
 
 class Item_func_concat : public Item_str_func {
@@ -363,7 +356,6 @@ class Item_func_concat : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "concat"; }
-    
 };
 
 class Item_func_concat_ws : public Item_str_func {
@@ -380,7 +372,6 @@ class Item_func_concat_ws : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "concat_ws"; }
-  
 };
 
 class Item_func_reverse : public Item_str_func {
@@ -393,7 +384,6 @@ class Item_func_reverse : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "reverse"; }
-  
 };
 
 class Item_func_replace : public Item_str_func {
@@ -407,7 +397,6 @@ class Item_func_replace : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "replace"; }
-    
 };
 
 class Item_func_insert : public Item_str_func {
@@ -422,7 +411,6 @@ class Item_func_insert : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "insert"; }
-  
 };
 
 class Item_str_conv : public Item_str_func {
@@ -441,7 +429,6 @@ class Item_func_lower : public Item_str_conv {
   Item_func_lower(const POS &pos, Item *item) : Item_str_conv(pos, item) {}
   const char *func_name() const override { return "lower"; }
   bool resolve_type(THD *) override;
-    
 };
 
 class Item_func_upper : public Item_str_conv {
@@ -449,7 +436,6 @@ class Item_func_upper : public Item_str_conv {
   Item_func_upper(const POS &pos, Item *item) : Item_str_conv(pos, item) {}
   const char *func_name() const override { return "upper"; }
   bool resolve_type(THD *) override;
-    
 };
 
 class Item_func_left : public Item_str_func {
@@ -460,7 +446,6 @@ class Item_func_left : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "left"; }
-    
 };
 
 class Item_func_right : public Item_str_func {
@@ -472,7 +457,6 @@ class Item_func_right : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "right"; }
-    
 };
 
 class Item_func_substr : public Item_str_func {
@@ -491,7 +475,6 @@ class Item_func_substr : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "substr"; }
-    
 };
 
 class Item_func_substr_index final : public Item_str_func {
@@ -503,7 +486,6 @@ class Item_func_substr_index final : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
   const char *func_name() const override { return "substring_index"; }
-    
 };
 
 class Item_func_trim : public Item_str_func {
@@ -585,21 +567,18 @@ class Item_func_trim : public Item_str_func {
   }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-      
 };
 
 class Item_func_ltrim final : public Item_func_trim {
  public:
   Item_func_ltrim(const POS &pos, Item *a)
       : Item_func_trim(pos, a, TRIM_LTRIM) {}
-      
 };
 
 class Item_func_rtrim final : public Item_func_trim {
  public:
   Item_func_rtrim(const POS &pos, Item *a)
       : Item_func_trim(pos, a, TRIM_RTRIM) {}
-      
 };
 
 class Item_func_sysconst : public Item_str_func {
@@ -648,7 +627,6 @@ class Item_func_database : public Item_func_sysconst {
   const Name_string fully_qualified_func_name() const override {
     return NAME_STRING("database()");
   }
-  
 };
 
 class Item_func_user : public Item_func_sysconst {
@@ -697,7 +675,6 @@ class Item_func_user : public Item_func_sysconst {
   }
 
   String *val_str(String *) override;
-  
 };
 
 class Item_func_current_user : public Item_func_user {
@@ -718,7 +695,6 @@ class Item_func_current_user : public Item_func_user {
   }
 
   String *val_str(String *) override;
-  
 };
 
 class Item_func_soundex : public Item_str_func {
@@ -730,7 +706,6 @@ class Item_func_soundex : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "soundex"; }
-  
 };
 
 class Item_func_elt final : public Item_str_func {
@@ -742,7 +717,6 @@ class Item_func_elt final : public Item_str_func {
   String *val_str(String *str) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "elt"; }
-  
 };
 
 class Item_func_make_set final : public Item_str_func {
@@ -802,7 +776,6 @@ class Item_func_format final : public Item_str_ascii_func {
   const char *func_name() const override { return "format"; }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-               
 };
 
 class Item_func_char final : public Item_str_func {
@@ -828,7 +801,6 @@ class Item_func_char final : public Item_str_func {
     obj->add_alias("charset",
                    create_dom_ptr<Json_string>(collation.collation->csname));
   }
-  
 };
 
 class Item_func_repeat final : public Item_str_func {
@@ -840,7 +812,6 @@ class Item_func_repeat final : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "repeat"; }
-  
 };
 
 class Item_func_space final : public Item_str_func {
@@ -849,7 +820,6 @@ class Item_func_space final : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
   const char *func_name() const override { return "space"; }
-  
 };
 
 class Item_func_rpad final : public Item_str_func {
@@ -861,7 +831,6 @@ class Item_func_rpad final : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
   const char *func_name() const override { return "rpad"; }
-  
 };
 
 class Item_func_lpad final : public Item_str_func {
@@ -873,7 +842,6 @@ class Item_func_lpad final : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
   const char *func_name() const override { return "lpad"; }
-  
 };
 
 class Item_func_uuid_to_bin final : public Item_str_func {
@@ -888,7 +856,6 @@ class Item_func_uuid_to_bin final : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
   const char *func_name() const override { return "uuid_to_bin"; }
-  
 };
 
 class Item_func_bin_to_uuid final : public Item_str_ascii_func {
@@ -903,7 +870,6 @@ class Item_func_bin_to_uuid final : public Item_str_ascii_func {
   String *val_str_ascii(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "bin_to_uuid"; }
-  
 };
 
 class Item_func_is_uuid final : public Item_bool_func {
@@ -930,7 +896,6 @@ class Item_func_conv final : public Item_str_func {
   const char *func_name() const override { return "conv"; }
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
-  
 };
 
 class Item_func_hex : public Item_str_ascii_func {
@@ -941,7 +906,6 @@ class Item_func_hex : public Item_str_ascii_func {
   const char *func_name() const override { return "hex"; }
   String *val_str_ascii(String *) override;
   bool resolve_type(THD *thd) override;
-  
 };
 
 class Item_func_unhex final : public Item_str_func {
@@ -955,7 +919,6 @@ class Item_func_unhex final : public Item_str_func {
   const char *func_name() const override { return "unhex"; }
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
-  
 };
 
 #ifndef NDEBUG
@@ -1080,8 +1043,6 @@ class Item_typecast_char final : public Item_charset_conversion {
   const char *func_name() const override { return "cast_as_char"; }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-        
-
 };
 
 class Item_load_file final : public Item_str_func {
@@ -1127,7 +1088,6 @@ class Item_func_export_set final : public Item_str_func {
   String *val_str(String *str) override;
   bool resolve_type(THD *) override;
   const char *func_name() const override { return "export_set"; }
-  
 };
 
 class Item_func_quote : public Item_str_func {
@@ -1138,7 +1098,6 @@ class Item_func_quote : public Item_str_func {
   const char *func_name() const override { return "quote"; }
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
-  
 };
 
 class Item_func_conv_charset final : public Item_charset_conversion {
@@ -1156,7 +1115,6 @@ class Item_func_conv_charset final : public Item_charset_conversion {
   const char *func_name() const override { return "convert"; }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-            
 };
 
 class Item_func_set_collation final : public Item_str_func {
@@ -1202,7 +1160,6 @@ class Item_func_charset final : public Item_str_func {
     set_nullable(false);
     return Item_str_func::resolve_type(thd);
   }
-  
 };
 
 class Item_func_collation : public Item_str_func {
@@ -1218,7 +1175,6 @@ class Item_func_collation : public Item_str_func {
     set_nullable(false);
     return false;
   }
-  
 };
 
 class Item_func_weight_string final : public Item_str_func {
@@ -1249,7 +1205,6 @@ class Item_func_weight_string final : public Item_str_func {
   bool resolve_type(THD *) override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-               
 };
 
 class Item_func_crc32 final : public Item_int_func {
@@ -1266,7 +1221,6 @@ class Item_func_crc32 final : public Item_int_func {
     return false;
   }
   longlong val_int() override;
-    
 };
 
 class Item_func_uncompressed_length final : public Item_int_func {
@@ -1283,7 +1237,6 @@ class Item_func_uncompressed_length final : public Item_int_func {
     return false;
   }
   longlong val_int() override;
-    
 };
 
 class Item_func_compress final : public Item_str_func {
@@ -1294,7 +1247,6 @@ class Item_func_compress final : public Item_str_func {
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "compress"; }
   String *val_str(String *str) override;
-    
 };
 
 class Item_func_to_vector final : public Item_str_func {
@@ -1336,7 +1288,6 @@ class Item_func_uncompress final : public Item_str_func {
   }
   const char *func_name() const override { return "uncompress"; }
   String *val_str(String *str) override;
-    
 };
 
 class Item_func_uuid final : public Item_str_func {
@@ -1361,7 +1312,6 @@ class Item_func_uuid final : public Item_str_func {
     return ((func_arg->source == VGS_GENERATED_COLUMN) ||
             (func_arg->source == VGS_CHECK_CONSTRAINT));
   }
-    
 };
 
 class Item_func_current_role final : public Item_func_sysconst {
@@ -1475,7 +1425,6 @@ class Item_func_get_dd_create_options final : public Item_str_func {
   const char *func_name() const override { return "get_dd_create_options"; }
 
   String *val_str(String *) override;
-    
 };
 
 class Item_func_get_dd_schema_options final : public Item_str_func {
@@ -1523,7 +1472,6 @@ class Item_func_internal_get_comment_or_error final : public Item_str_func {
   }
 
   String *val_str(String *) override;
-    
 };
 
 class Item_func_get_dd_tablespace_private_data final : public Item_str_func {

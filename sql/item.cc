@@ -6537,14 +6537,13 @@ Field *Item::make_string_field(TABLE *table) const {
   @return Created field
   @retval NULL  error
 */
-Field *Item::tmp_table_field_from_field_type(TABLE *table, bool fixed_length,
-                                             MEM_ROOT *root) const {
+Field *Item::tmp_table_field_from_field_type(TABLE *table, bool fixed_length) const {
   /*The field functions defines a field to be not null if null_ptr is not 0*/
   Field *field;
   switch (data_type()) {
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL:
-      field = Field_new_decimal::create_from_item(this, root);
+      field = Field_new_decimal::create_from_item(this);
       break;
     case MYSQL_TYPE_TINY:
       field = new (*THR_MALLOC)

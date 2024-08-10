@@ -2167,7 +2167,7 @@ class Field_new_decimal : public Field_num {
     return new (mem_root) Field_new_decimal(*this);
   }
   const uchar *unpack(uchar *to, const uchar *from, uint param_data) final;
-  static Field *create_from_item(const Item *item, MEM_ROOT *root = nullptr);
+  static Field *create_from_item(const Item *item);
   bool send_to_protocol(Protocol *protocol) const final;
   void set_keep_precision(bool arg) { m_keep_precision = arg; }
 };

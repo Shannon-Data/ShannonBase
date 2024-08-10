@@ -19,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /* sql_yacc.yy */
 
@@ -1411,6 +1413,7 @@ void warn_on_deprecated_user_defined_collation(
 %token<lexer.keyword> PARSE_TREE_SYM     1205      /* MYSQL */
 
 %token<lexer.keyword> VECTOR_SYM 1215
+%token<lexer.keyword> JAVASCRIPT_SYM 1216
 /*
   Precedence rules used to resolve the ambiguity when using keywords as idents
   in the case e.g.:
@@ -3966,6 +3969,10 @@ sp_chistic:
           { Lex->sp_chistics.comment= to_lex_cstring($2); }
         | LANGUAGE_SYM SQL_SYM
           { Lex->sp_chistics.language= {"SQL",3}; }
+        | LANGUAGE_SYM JAVASCRIPT_SYM
+          { Lex->sp_chistics.language= {"JAVASCRIPT",10};
+            Lex->sp_chistics.daccess= SP_NO_SQL;
+          }
         | LANGUAGE_SYM ident
           { Lex->sp_chistics.language= to_lex_cstring($2); }
         | NO_SYM SQL_SYM

@@ -2919,7 +2919,7 @@ Field_new_decimal::Field_new_decimal(uint32 len_arg, bool is_nullable_arg,
   bin_size = my_decimal_get_binary_size(precision, dec);
 }
 
-Field *Field_new_decimal::create_from_item(const Item *item, MEM_ROOT *root) {
+Field *Field_new_decimal::create_from_item(const Item *item) {
   uint8 dec = item->decimals;
   uint8 intg = item->decimal_precision() - dec;
   uint32 len = item->max_char_length();

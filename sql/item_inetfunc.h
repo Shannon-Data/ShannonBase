@@ -134,7 +134,6 @@ class Item_func_inet6_aton : public Item_func_inet_str_base {
     set_nullable(true);
     return false;
   }
-  
 
  protected:
   bool calc_value(String *arg, String *buffer) override;
@@ -162,7 +161,6 @@ class Item_func_inet6_ntoa : public Item_func_inet_str_base {
     set_nullable(true);
     return false;
   }
-  
 
  protected:
   bool calc_value(String *arg, String *buffer) override;

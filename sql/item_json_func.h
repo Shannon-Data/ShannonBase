@@ -544,7 +544,6 @@ class Item_func_json_depth final : public Item_int_func {
   }
 
   longlong val_int() override;
-    
 };
 
 /**
@@ -902,7 +901,6 @@ class Item_func_json_quote : public Item_str_func {
   }
 
   String *val_str(String *tmpspace) override;
-  
 };
 
 /**

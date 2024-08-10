@@ -19,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #include "sql/sp_head.h"
 
@@ -35,6 +37,7 @@
 #include <memory>
 #include <new>
 #include <utility>
+#include <sstream>
 
 #include "lex_string.h"
 #include "m_string.h"
@@ -1687,6 +1690,111 @@ void sp_name::init_qname(THD *thd) {
 ///////////////////////////////////////////////////////////////////////////
 // sp_head implementation.
 ///////////////////////////////////////////////////////////////////////////
+String sp_extra_compiler::to_javascript(String& source) {
+  String code_code(source);
+  String sub_return("return", source.charset());
+  String sub_RETURN("RETURN", source.charset());
+  String sub_replace("      ", source.charset()); //length should be same as 'return';
+  assert(sub_return.length() == sub_replace.length());
+
+  auto offset = code_code.strrstr(sub_return, code_code.length());
+  if (offset == -1) {
+    offset = code_code.strrstr(sub_RETURN, code_code.length());
+  }
+  if (offset == -1) return code_code;
+  
+  code_code.replace(offset, sub_return.length(), sub_replace);
+  return code_code;
+}
+
+sp_extra_compiler* 
+sp_head::get_instance(THD* thd, sp_compiler_type type, Field* fld) {
+  switch (type) {
+    case sp_compiler_type::LANG_JAVASCRIPT:
+      return new (thd->mem_root) sp_extra_compiler_java(fld);
+    break;
+    case sp_compiler_type::LANG_R:
+    case sp_compiler_type::LANG_NONE:
+    default:
+     return nullptr;
+  }
+
+  return nullptr;
+}
+
+sp_extra_compiler_java::~sp_extra_compiler_java() {
+}
+
+bool sp_extra_compiler_java::compile(const char* code, size_t code_len) {
+  bool ret{false};
+  jerry_init(JERRY_INIT_EMPTY);
+
+  assert(code && m_type == sp_compiler_type::LANG_JAVASCRIPT);
+  m_parsed_code = 
+  jerry_parse (reinterpret_cast<jerry_char_t*>(const_cast<char*>(code)),
+               code_len, nullptr);
+  if (jerry_value_is_error (m_parsed_code)) {
+    ret = true;
+  }
+
+  return ret;
+}
+
+bool sp_extra_compiler_java::execute() {
+  bool ret {false};
+  jerry_value_t ret_value = jerry_run (m_parsed_code);
+  jerry_value_t  value;
+  if (jerry_value_is_exception(ret_value)) {
+     value = jerry_exception_value (ret_value, false);
+     ret = true;
+  } else {
+    value = jerry_value_copy (ret_value);
+    jerry_value_is_null (value) ? m_return_fld->set_null() :
+                                  m_return_fld->set_notnull();
+    switch(m_return_fld->type()) {
+      case enum_field_types::MYSQL_TYPE_BIT:
+      break;
+      case enum_field_types::MYSQL_TYPE_BOOL:{
+        assert(jerry_value_is_boolean (value));
+        m_return_fld->store(jerry_value_is_true(value));
+      }
+      break;
+      case enum_field_types::MYSQL_TYPE_LONG:
+      case enum_field_types::MYSQL_TYPE_LONGLONG:
+      case enum_field_types::MYSQL_TYPE_DECIMAL:
+      case enum_field_types::MYSQL_TYPE_DOUBLE: {
+        assert (jerry_value_is_number (value) ||
+                jerry_value_is_boolean (value));
+        if (jerry_value_is_number (value))
+          m_return_fld->store(jerry_value_as_number(value));
+        else if (jerry_value_is_boolean (value))
+          m_return_fld->store(jerry_value_is_true(value));
+      } break;
+      case enum_field_types::MYSQL_TYPE_STRING:
+      case enum_field_types::MYSQL_TYPE_VAR_STRING:
+      case enum_field_types::MYSQL_TYPE_VARCHAR: {
+        jerry_size_t req_sz = jerry_string_size (value, JERRY_ENCODING_CESU8);
+        jerry_char_t* str_buf_p = new jerry_char_t[req_sz + 1];
+        jerry_string_to_buffer (value, JERRY_ENCODING_CESU8, str_buf_p, req_sz);
+        str_buf_p[req_sz] = '\0';
+        m_return_fld->store((const char*)str_buf_p,req_sz, m_return_fld->charset());
+        delete[] str_buf_p;
+      } break;
+      default:
+        assert(false);
+        break;
+    }
+  }
+  /* Returned value must be freed */
+  jerry_value_free (value);
+  jerry_value_free (ret_value);
+  jerry_value_free (m_parsed_code);
+  jerry_cleanup();
+  return ret;
+}
+
+void sp_extra_compiler_java::result() {
+}
 
 void sp_head::destroy(sp_head *sp) {
   if (!sp) return;
@@ -2410,6 +2518,79 @@ done:
   return err_status;
 }
 
+void sp_head::create_string(String& input, sp_variable* var,
+                            Item* val) {
+  input.append("var ");
+  input.append(var->name);
+  input.append(" = ");
+  switch (var->type) {
+    case enum_field_types::MYSQL_TYPE_LONG:
+    case enum_field_types::MYSQL_TYPE_LONGLONG:
+    case enum_field_types::MYSQL_TYPE_INT24:
+      input.append_longlong(val->val_int());
+      break;
+    case enum_field_types::MYSQL_TYPE_DECIMAL:
+    case enum_field_types::MYSQL_TYPE_NEWDECIMAL:{
+      std::ostringstream oss;
+      my_decimal dm;
+      double data_val;
+      val->val_decimal(&dm);
+      my_decimal2double(10, &dm, &data_val);
+      oss << data_val;
+      input.append(oss.str().c_str(), oss.str().length());
+    }break;
+    case enum_field_types::MYSQL_TYPE_DOUBLE:
+    case enum_field_types::MYSQL_TYPE_FLOAT:{
+      std::ostringstream oss;
+      oss << val->val_real();
+      input.append(oss.str().c_str(), oss.str().length());
+    } break;
+    case enum_field_types::MYSQL_TYPE_STRING:
+    case enum_field_types::MYSQL_TYPE_VARCHAR:
+    case enum_field_types::MYSQL_TYPE_VAR_STRING: {
+      String val_h;
+      String* val_s = val->val_str(&val_h);
+      input.append('\'');
+      input.append(val_s->c_ptr());
+      input.append('\'');
+    } break;
+    default:
+      assert(false);
+  }
+  input.append(";");
+  input.append('\n');
+}
+
+bool sp_head::execute_compiled_sp(THD* thd, Item **argp, uint argcount,
+                                  Field *return_value_fld) {
+  sp_extra_compiler* ext_compiler =
+    sp_head::get_instance(thd, sp_compiler_type::LANG_JAVASCRIPT,
+                          return_value_fld);
+  if (!ext_compiler) return true;
+
+  String code_str("", m_creation_ctx->get_client_cs());
+  for (auto index = 0u; index < argcount; index++) {
+    auto var = m_root_parsing_ctx->find_variable(index);
+    create_string(code_str, var, *(argp + index));
+  }
+  code_str.append(m_body_utf8.str, strlen(m_body_utf8.str));
+  String strstr = sp_extra_compiler::to_javascript(code_str);
+  strstr.ltrim();
+  strstr.rtrim();
+  if (ext_compiler->compile(strstr.c_ptr(), strstr.length())) {
+    my_error(ER_DEFINITION_CONTAINS_INVALID_STRING, MYF(0), "stored routine",
+             m_db.str, m_name.str, system_charset_info->csname, "parsed failed");
+    return true;
+  }
+
+  if (ext_compiler->execute()) {
+    my_error(ER_DEFINITION_CONTAINS_INVALID_STRING, MYF(0), "stored routine",
+             m_db.str, m_name.str, system_charset_info->csname, "execute failed");
+    return true;    
+  }
+  return false;
+}
+
 bool sp_head::execute_external_routine(THD *thd) {
   bool err_status = false;
 
@@ -2568,7 +2749,7 @@ err_with_cleanup:
 
 bool sp_head::init_external_routine(
     my_service<SERVICE_TYPE(external_program_execution)> &service) {
-  assert(!is_sql());
+  assert(!is_sql() || !is_javascript());
 
   if (!service.is_valid()) {
     my_error(ER_LANGUAGE_COMPONENT_NOT_AVAILABLE, MYF(0));
@@ -2745,7 +2926,10 @@ bool sp_head::execute_function(THD *thd, Item **argp, uint argcount,
   locker = MYSQL_START_SP(&psi_state, m_sp_share);
 #endif
   if (!err_status) {
-    err_status = is_sql() ? execute(thd, true) : execute_external_routine(thd);
+    if (is_sql())  err_status = execute(thd, true);
+    else if (is_javascript())
+      err_status = execute_compiled_sp(thd, argp, argcount, return_value_fld);
+    else err_status = execute_external_routine(thd);
   }
 #ifdef HAVE_PSI_SP_INTERFACE
   MYSQL_END_SP(locker);
@@ -2778,7 +2962,7 @@ bool sp_head::execute_function(THD *thd, Item **argp, uint argcount,
   if (!err_status) {
     /* We need result only in function but not in trigger */
 
-    if (!thd->sp_runtime_ctx->is_return_value_set()) {
+    if (!thd->sp_runtime_ctx->is_return_value_set() && is_sql()) {
       my_error(ER_SP_NORETURNEND, MYF(0), m_name.str);
       err_status = true;
     }

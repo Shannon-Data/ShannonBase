@@ -1,0 +1,100 @@
+CREATE DATABASE JAVASCRIPT_DB;
+USE JAVASCRIPT_DB;
+CREATE FUNCTION IS_EVEN (VAL INT) RETURNS INT
+LANGUAGE JAVASCRIPT AS $$
+function isEven(num) {
+return num % 2 == 0;
+}
+return isEven(VAL);
+$$|
+show create function IS_EVEN;
+Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
+IS_EVEN	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `IS_EVEN`(VAL INT) RETURNS int
+    NO SQL
+    LANGUAGE JAVASCRIPT
+AS $$
+function isEven(num) {
+return num % 2 == 0;
+}
+return isEven(VAL);
+$$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+select is_even(3);
+is_even(3)
+0
+select is_even(40);
+is_even(40)
+1
+CREATE FUNCTION gcd_js (a INT, b INT) RETURNS INT
+LANGUAGE JAVASCRIPT AS $$
+let [x, y] = [Math.abs(a), Math.abs(b)];
+while(y) [x, y] = [y, x % y];
+return x;
+$$|
+show create function gcd_js;
+Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
+gcd_js	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `gcd_js`(a INT, b INT) RETURNS int
+    NO SQL
+    LANGUAGE JAVASCRIPT
+AS $$
+let [x, y] = [Math.abs(a), Math.abs(b)];
+while(y) [x, y] = [y, x % y];
+return x;
+$$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+select gcd_js(10,20);
+gcd_js(10,20)
+10
+select gcd_js(536, 1676);
+gcd_js(536, 1676)
+4
+CREATE FUNCTION string_sim(
+s1 VARCHAR(255), s2 VARCHAR(255)) RETURNS INT
+LANGUAGE JAVASCRIPT AS $$
+const [ str1, str2, len1, len2 ] =
+s1.length < s2.length ?
+[ [...s2], [...s1], s2.length, s1.length ] :
+[ [...s1], [...s2], s1.length, s2.length ];
+var res = [...Array( len1 + 1 )].map( x =>
+[...Array(len2 + 1).keys()]
+);
+str1.forEach( (c,i) => {
+res[i+1][0] = i+1;
+str2.forEach( (d,j) => {
+res[i+1][j+1] = Math.min(
+res[i][j+1] + 1,
+res[i+1][j] + 1,
+res[i][j] + ((c == d) ? 0 : 1)
+)
+})
+})
+return res[len1][len2];
+$$|
+show create function string_sim;
+Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
+string_sim	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `string_sim`(
+s1 VARCHAR(255), s2 VARCHAR(255)) RETURNS int
+    NO SQL
+    LANGUAGE JAVASCRIPT
+AS $$
+const [ str1, str2, len1, len2 ] =
+s1.length < s2.length ?
+[ [...s2], [...s1], s2.length, s1.length ] :
+[ [...s1], [...s2], s1.length, s2.length ];
+var res = [...Array( len1 + 1 )].map( x =>
+[...Array(len2 + 1).keys()]
+);
+str1.forEach( (c,i) => {
+res[i+1][0] = i+1;
+str2.forEach( (d,j) => {
+res[i+1][j+1] = Math.min(
+res[i][j+1] + 1,
+res[i+1][j] + 1,
+res[i][j] + ((c == d) ? 0 : 1)
+)
+})
+})
+return res[len1][len2];
+$$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+select string_sim('this is a', 'this is another');
+string_sim('this is a', 'this is another')
+6
+DROP DATABASE JAVASCRIPT_DB;

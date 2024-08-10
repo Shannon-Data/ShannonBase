@@ -18,7 +18,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #ifndef _SP_HEAD_H_
 #define _SP_HEAD_H_
@@ -26,6 +28,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 #include <string>
+#include <utility>  // For std::forward
 #include <vector>
 
 #include "lex_string.h"
@@ -49,6 +52,7 @@
 #include "sql/system_variables.h"
 #include "sql/table.h"
 
+#include "extra/jerryscript/include/jerryscript.h"  //for jerryscript
 class Field;
 class Item;
 class Item_trigger_field;
@@ -70,6 +74,7 @@ class sp_instr;
 class sp_label;
 class sp_lex_branch_instr;
 class sp_pcontext;
+class sp_variable;
 
 /**
   Number of PSI_statement_info instruments
@@ -375,6 +380,43 @@ class sp_parser_data {
 
 struct SP_TABLE;
 
+enum class sp_compiler_type {
+  LANG_NONE,
+  LANG_JAVASCRIPT,
+  LANG_PYTHON,
+  LANG_R,
+  LANG_RUBY
+};
+
+class sp_extra_compiler {
+  public:
+    sp_extra_compiler(sp_compiler_type type, Field* fld) : m_type(type),
+      m_return_fld(fld) {}
+    virtual ~sp_extra_compiler() = default;
+    //compile the code.
+    virtual bool compile(const char* code, size_t code_len) = 0;
+    //execute the compiled code.
+    virtual bool execute() = 0;
+    //gets the result of execution.
+    virtual void result() = 0;
+    static String to_javascript(String& source);
+    sp_compiler_type m_type;
+    Field* m_return_fld;
+};
+
+class sp_extra_compiler_java : public sp_extra_compiler {
+  public:
+    sp_extra_compiler_java(Field* fld) :
+       sp_extra_compiler(sp_compiler_type::LANG_JAVASCRIPT, fld),
+       m_parsed_code{0}, m_ret_val{0}{}
+    virtual ~sp_extra_compiler_java();
+    bool compile(const char* code, size_t code_len) override;
+    bool execute() override;
+    void result() override;
+  private:
+    jerry_value_t m_parsed_code, m_ret_val;
+};
+
 /**
   sp_head represents one instance of a stored program. It might be of any type
   (stored procedure, function, trigger, event).
@@ -562,6 +604,15 @@ class sp_head {
   }
 
   /**
+    @returns true if this is an JAVASCRIPT routine, and
+             false if it is an external routine
+  */
+  bool is_javascript() const {
+    assert(m_chistics->language.length > 0);
+    return native_strcasecmp(m_chistics->language.str, "JAVASCRIPT") == 0;
+  }
+
+  /**
     Get the value of the SP cache version, as remembered
     when the routine was inserted into the cache.
   */
@@ -592,6 +643,7 @@ class sp_head {
 
   bool has_updated_trigger_fields(const MY_BITMAP *used_fields) const;
 
+  void create_string(String& input, sp_variable* var, Item* val);
   /**
     Execute trigger stored program.
 
@@ -867,6 +919,10 @@ class sp_head {
     return const_cast<sp_pcontext *>(m_root_parsing_ctx);
   }
 
+  void set_root_parsing_context(sp_pcontext * context) {
+    m_root_parsing_ctx = context;
+  }
+
   /**
     @return SP-persistent mem-root. Instructions and expressions are stored in
     its memory between executions.
@@ -975,6 +1031,8 @@ class sp_head {
   bool init_external_routine(
       my_service<SERVICE_TYPE(external_program_execution)> &service);
 
+  static sp_extra_compiler* get_instance(THD* thd, sp_compiler_type type,
+                                         Field* fld);
  private:
   /// Copy sp name from parser.
   void init_sp_name(THD *thd, sp_name *spname);
@@ -1005,6 +1063,9 @@ class sp_head {
   */
   bool execute_external_routine(THD *thd);
 
+  //execute native compiled none-sql sp.
+  bool execute_compiled_sp(THD* thd, Item **argp, uint argcount,
+                               Field *return_value_fld);
   /**
     Perform a forward flow analysis in the generated code.
     Mark reachable instructions, for the optimizer.

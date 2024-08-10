@@ -20,7 +20,8 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-*/
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #include "sql/sp.h"
 
@@ -110,7 +111,8 @@ static bool create_string(
     const char *name, size_t namelen, const char *params, size_t paramslen,
     const char *returns, size_t returnslen, const char *body, size_t bodylen,
     st_sp_chistics *chistics, const LEX_CSTRING &definer_user,
-    const LEX_CSTRING &definer_host, sql_mode_t sql_mode, bool if_not_exists);
+    const LEX_CSTRING &definer_host, sql_mode_t sql_mode, bool if_not_exists,
+    bool with_body = true);
 
 /**************************************************************************
   Fetch stored routines and events creation_ctx for upgrade.
@@ -156,6 +158,19 @@ bool load_collation(MEM_ROOT *mem_root, Field *field,
   return false;
 }
 
+/**
+    @returns true if this is an JAVASCRIPT routine, and
+             false if it is an external routine
+*/
+static enum_sp_language is_language_of(const char* lang) {
+  if (!lang) return enum_sp_language::SQL;
+ 
+  if (native_strcasecmp(lang, "SQL") == 0)
+    return enum_sp_language::SQL;
+  else if (native_strcasecmp(lang, "JAVASCRIPT") == 0)
+    return enum_sp_language::JAVASCRIPT;
+  else return enum_sp_language::SQL;
+}
 /**************************************************************************
   Stored_routine_creation_ctx implementation.
 **************************************************************************/
@@ -474,6 +489,18 @@ static sp_head *sp_compile(THD *thd, String *defstr, sql_mode_t sql_mode,
   return sp;
 }
 
+/**
+  The function parses input strings and returns SP structure.
+
+  @param[in]      thd               Thread handler
+  @param[in]      defstr            CREATE... string
+  @param[in]      sql_mode          SQL mode
+  @param[in]      creation_ctx      Creation context of stored routines
+
+  @retval         Pointer on sp_head struct   Success
+  @retval         NULL                        error
+*/
+
 class Bad_db_error_handler : public Internal_error_handler {
  public:
   Bad_db_error_handler() : m_error_caught(false) {}
@@ -496,7 +523,7 @@ class Bad_db_error_handler : public Internal_error_handler {
 
 enum_sp_return_code db_load_routine(
     THD *thd, enum_sp_type type, const char *sp_db, size_t sp_db_len,
-    const char *sp_name, size_t sp_name_len, sp_head **sphp,
+    const char *ssp_name, size_t ssp_name_len, sp_head **sphp,
     sql_mode_t sql_mode, const char *params, const char *returns,
     const char *body, st_sp_chistics *sp_chistics, const char *definer_user,
     const char *definer_host, longlong created, longlong modified,
@@ -513,17 +540,37 @@ enum_sp_return_code db_load_routine(
   newlex.thd = thd;
   newlex.set_current_query_block(nullptr);
 
-  String defstr;
+  String defstr, declare_str;
   defstr.set_charset(creation_ctx->get_client_cs());
+  declare_str.set_charset(creation_ctx->get_client_cs());
 
   const LEX_CSTRING user = {definer_user, strlen(definer_user)};
   const LEX_CSTRING host = {definer_host, strlen(definer_host)};
 
-  if (!create_string(thd, &defstr, type, nullptr, 0, sp_name, sp_name_len,
-                     params, strlen(params), returns, strlen(returns), body,
-                     strlen(body), sp_chistics, user, host, sql_mode, false)) {
-    ret = SP_INTERNAL_ERROR;
-    goto end;
+  switch (is_language_of(sp_chistics->language.str)) {
+    case enum_sp_language::SQL: {
+      if (!create_string(thd, &defstr, type, nullptr, 0, ssp_name, ssp_name_len,
+                        params, strlen(params), returns, strlen(returns), body,
+                        strlen(body), sp_chistics, user, host, sql_mode, false)) {
+        ret = SP_INTERNAL_ERROR;
+        goto end;
+      }
+    } break;
+    case enum_sp_language::JAVASCRIPT: {
+      /**Here, we just only need a declaration of a sp, the body we dont care. Because
+       * we need the params and its values,the return value field,etc, therefore, we
+       * remove the sp body. If it's with sp body, it will failed in sp_compile().*/
+      if (!create_string(thd, &declare_str, type, nullptr, 0, ssp_name, ssp_name_len,
+                        params, strlen(params), returns, strlen(returns), body,
+                        strlen(body), sp_chistics, user, host, sql_mode, false,
+                        false)) {
+        ret = SP_INTERNAL_ERROR;
+        goto end;
+      }
+    } break;
+    default: 
+      assert(false);
+    break;
   }
 
   thd->push_internal_handler(&db_not_exists_handler);
@@ -547,7 +594,19 @@ enum_sp_return_code db_load_routine(
   }
 
   {
-    *sphp = sp_compile(thd, &defstr, sql_mode, creation_ctx);
+    switch (is_language_of(sp_chistics->language.str)) {
+      case enum_sp_language::SQL:
+        *sphp = sp_compile(thd, &defstr, sql_mode, creation_ctx);
+        break;
+      case enum_sp_language::JAVASCRIPT: {
+        *sphp = sp_compile(thd, &declare_str, sql_mode, creation_ctx);
+        //reset the code body.
+        (*sphp)->code = {body, strlen(body)};
+        (*sphp)->m_body_utf8 = {body, strlen(body)};
+        (*sphp)->m_body = {body, strlen(body)};
+      }break;
+      default: assert(false);
+    }
     /*
       Force switching back to the saved current database (if changed),
       because it may be NULL. In this case, mysql_change_db() would
@@ -2132,7 +2191,8 @@ static bool create_string(
     const char *name, size_t namelen, const char *params, size_t paramslen,
     const char *returns, size_t returnslen, const char *body, size_t bodylen,
     st_sp_chistics *chistics, const LEX_CSTRING &definer_user,
-    const LEX_CSTRING &definer_host, sql_mode_t sql_mode, bool if_not_exists) {
+    const LEX_CSTRING &definer_host, sql_mode_t sql_mode, bool if_not_exists,
+    bool with_body) {
   const sql_mode_t old_sql_mode = thd->variables.sql_mode;
   const bool is_sql = chistics->language.length == 0 ||
                       native_strcasecmp(chistics->language.str, "SQL") == 0;
@@ -2209,7 +2269,8 @@ static bool create_string(
     buf->append("AS ");
     buf->append(dollar_quote, dollar_quote_len);
   }
-  buf->append(body, bodylen);
+  with_body? buf->append(body, bodylen) : buf->append(" ", strlen(" "));
+
   if (dollar_quote_len > 0) {
     buf->append(dollar_quote, dollar_quote_len);
   }
