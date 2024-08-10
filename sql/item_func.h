@@ -1023,7 +1023,6 @@ class Item_func_connection_id final : public Item_int_func {
     return ((func_arg->source == VGS_GENERATED_COLUMN) ||
             (func_arg->source == VGS_CHECK_CONSTRAINT));
   }
-  
 };
 
 class Item_typecast_signed final : public Item_int_func {
@@ -1037,7 +1036,6 @@ class Item_typecast_signed final : public Item_int_func {
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
   enum Functype functype() const override { return TYPECAST_FUNC; }
-    
 };
 
 class Item_typecast_unsigned final : public Item_int_func {
@@ -1051,7 +1049,6 @@ class Item_typecast_unsigned final : public Item_int_func {
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
   enum Functype functype() const override { return TYPECAST_FUNC; }
-    
 };
 
 class Item_typecast_decimal final : public Item_func {
@@ -1120,7 +1117,6 @@ class Item_typecast_real final : public Item_func {
   enum Functype functype() const override { return TYPECAST_FUNC; }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-               
 };
 
 class Item_func_additive_op : public Item_num_op {
@@ -1148,7 +1144,6 @@ class Item_func_plus final : public Item_func_additive_op {
   double real_op() override;
   my_decimal *decimal_op(my_decimal *) override;
   enum Functype functype() const override { return PLUS_FUNC; }
-  
 };
 
 class Item_func_minus final : public Item_func_additive_op {
@@ -1166,7 +1161,6 @@ class Item_func_minus final : public Item_func_additive_op {
   my_decimal *decimal_op(my_decimal *) override;
   bool resolve_type(THD *thd) override;
   enum Functype functype() const override { return MINUS_FUNC; }
-  
 };
 
 class Item_func_mul final : public Item_num_op {
@@ -1182,7 +1176,6 @@ class Item_func_mul final : public Item_num_op {
   bool check_partition_func_processor(uchar *) override { return false; }
   bool check_function_as_value_generator(uchar *) override { return false; }
   enum Functype functype() const override { return MUL_FUNC; }
-  
 };
 
 class Item_func_div_base : public Item_num_op {
@@ -1206,7 +1199,6 @@ class Item_func_div final : public Item_func_div_base {
   const char *func_name() const override { return "/"; }
   bool resolve_type(THD *thd) override;
   void result_precision() override;
-  
 };
 
 class Item_func_div_int final : public Item_func_div_base {
@@ -1223,7 +1215,6 @@ class Item_func_div_int final : public Item_func_div_base {
   void set_numeric_type() override;
   bool check_partition_func_processor(uchar *) override { return false; }
   bool check_function_as_value_generator(uchar *) override { return false; }
-    
 };
 
 class Item_func_mod final : public Item_num_op {
@@ -1240,7 +1231,6 @@ class Item_func_mod final : public Item_num_op {
   bool check_partition_func_processor(uchar *) override { return false; }
   bool check_function_as_value_generator(uchar *) override { return false; }
   enum Functype functype() const override { return MOD_FUNC; }
-  
 };
 
 class Item_func_neg final : public Item_func_num1 {
@@ -1257,7 +1247,6 @@ class Item_func_neg final : public Item_func_num1 {
   void fix_num_length_and_dec() override;
   bool check_partition_func_processor(uchar *) override { return false; }
   bool check_function_as_value_generator(uchar *) override { return false; }
-  
 };
 
 class Item_func_abs final : public Item_func_num1 {
@@ -1271,7 +1260,6 @@ class Item_func_abs final : public Item_func_num1 {
   bool check_partition_func_processor(uchar *) override { return false; }
   bool check_function_as_value_generator(uchar *) override { return false; }
   enum Functype functype() const override { return ABS_FUNC; }
-  
 };
 
 // A class to handle logarithmic and trigonometric functions
@@ -1291,7 +1279,6 @@ class Item_func_exp final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "exp"; }
   enum Functype functype() const override { return EXP_FUNC; }
-    
 };
 
 class Item_func_ln final : public Item_dec_func {
@@ -1300,7 +1287,6 @@ class Item_func_ln final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "ln"; }
   enum Functype functype() const override { return LN_FUNC; }
-  
 };
 
 class Item_func_log final : public Item_dec_func {
@@ -1310,7 +1296,6 @@ class Item_func_log final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "log"; }
   enum Functype functype() const override { return LOG_FUNC; }
-  
 };
 
 class Item_func_log2 final : public Item_dec_func {
@@ -1318,7 +1303,6 @@ class Item_func_log2 final : public Item_dec_func {
   Item_func_log2(const POS &pos, Item *a) : Item_dec_func(pos, a) {}
   double val_real() override;
   const char *func_name() const override { return "log2"; }
-  
 };
 
 class Item_func_log10 final : public Item_dec_func {
@@ -1327,7 +1311,6 @@ class Item_func_log10 final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "log10"; }
   enum Functype functype() const override { return LOG10_FUNC; }
-    
 };
 
 class Item_func_sqrt final : public Item_dec_func {
@@ -1336,7 +1319,6 @@ class Item_func_sqrt final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "sqrt"; }
   enum Functype functype() const override { return SQRT_FUNC; }
-    
 };
 
 class Item_func_pow final : public Item_dec_func {
@@ -1345,7 +1327,6 @@ class Item_func_pow final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "pow"; }
   enum Functype functype() const override { return POW_FUNC; }
-    
 };
 
 class Item_func_acos final : public Item_dec_func {
@@ -1354,7 +1335,6 @@ class Item_func_acos final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "acos"; }
   enum Functype functype() const override { return ACOS_FUNC; }
-    
 };
 
 class Item_func_asin final : public Item_dec_func {
@@ -1363,7 +1343,6 @@ class Item_func_asin final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "asin"; }
   enum Functype functype() const override { return ASIN_FUNC; }
-    
 };
 
 class Item_func_atan final : public Item_dec_func {
@@ -1373,7 +1352,6 @@ class Item_func_atan final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "atan"; }
   enum Functype functype() const override { return ATAN_FUNC; }
-    
 };
 
 class Item_func_cos final : public Item_dec_func {
@@ -1382,7 +1360,6 @@ class Item_func_cos final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "cos"; }
   enum Functype functype() const override { return COS_FUNC; }
-  
 };
 
 class Item_func_sin final : public Item_dec_func {
@@ -1391,7 +1368,6 @@ class Item_func_sin final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "sin"; }
   enum Functype functype() const override { return SIN_FUNC; }
-    
 };
 
 class Item_func_tan final : public Item_dec_func {
@@ -1400,7 +1376,6 @@ class Item_func_tan final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "tan"; }
   enum Functype functype() const override { return TAN_FUNC; }
-    
 };
 
 class Item_func_cot final : public Item_dec_func {
@@ -1409,7 +1384,6 @@ class Item_func_cot final : public Item_dec_func {
   double val_real() override;
   const char *func_name() const override { return "cot"; }
   enum Functype functype() const override { return COT_FUNC; }
-    
 };
 
 class Item_func_int_val : public Item_func_num1 {
@@ -1430,7 +1404,6 @@ class Item_func_ceiling final : public Item_func_int_val {
   bool check_partition_func_processor(uchar *) override { return false; }
   bool check_function_as_value_generator(uchar *) override { return false; }
   enum Functype functype() const override { return CEILING_FUNC; }
-    
 };
 
 class Item_func_floor final : public Item_func_int_val {
@@ -1444,7 +1417,6 @@ class Item_func_floor final : public Item_func_int_val {
   bool check_partition_func_processor(uchar *) override { return false; }
   bool check_function_as_value_generator(uchar *) override { return false; }
   enum Functype functype() const override { return FLOOR_FUNC; }
-    
 };
 
 /* This handles round and truncate */
@@ -1468,7 +1440,6 @@ class Item_func_round final : public Item_func_num1 {
   enum Functype functype() const override {
     return truncate ? TRUNCATE_FUNC : ROUND_FUNC;
   }
-    
 };
 
 class Item_func_rand final : public Item_real_func {
@@ -1506,7 +1477,6 @@ class Item_func_rand final : public Item_real_func {
     return ((func_arg->source == VGS_GENERATED_COLUMN) ||
             (func_arg->source == VGS_CHECK_CONSTRAINT));
   }
-  
 
  private:
   void seed_random(Item *val);
@@ -1632,7 +1602,6 @@ class Item_func_min final : public Item_func_min_max {
       : Item_func_min_max(pos, opt_list, true) {}
   const char *func_name() const override { return "least"; }
   enum Functype functype() const override { return LEAST_FUNC; }
-    
 };
 
 class Item_func_max final : public Item_func_min_max {
@@ -1641,7 +1610,6 @@ class Item_func_max final : public Item_func_min_max {
       : Item_func_min_max(pos, opt_list, false) {}
   const char *func_name() const override { return "greatest"; }
   enum Functype functype() const override { return GREATEST_FUNC; }
-    
 };
 
 /**
@@ -1745,7 +1713,6 @@ class Item_func_length : public Item_int_func {
     max_length = 10;
     return false;
   }
-    
 };
 
 class Item_func_vector_dim : public Item_int_func {
@@ -1779,7 +1746,6 @@ class Item_func_bit_length final : public Item_func_length {
     return Item_func_length::val_int() * 8;
   }
   const char *func_name() const override { return "bit_length"; }
-    
 };
 
 class Item_func_char_length final : public Item_int_func {
@@ -1825,7 +1791,7 @@ class Item_func_locate : public Item_int_func {
   longlong val_int() override;
   bool resolve_type(THD *thd) override;
   void print(const THD *thd, String *str,
-             enum_query_type query_type) const override; 
+             enum_query_type query_type) const override;
 };
 
 class Item_func_instr final : public Item_func_locate {
@@ -2376,7 +2342,6 @@ class Item_func_get_lock final : public Item_int_func {
     func_arg->banned_function_name = func_name();
     return true;
   }
-    
 };
 
 class Item_func_release_lock final : public Item_int_func {
@@ -2501,7 +2466,6 @@ class Item_func_can_access_table : public Item_int_func {
     set_nullable(true);
     return false;
   }
-    
 };
 
 class Item_func_can_access_user : public Item_int_func {
@@ -2605,7 +2569,6 @@ class Item_func_is_visible_dd_object : public Item_int_func {
     set_nullable(true);
     return false;
   }
-  
 };
 
 class Item_func_internal_table_rows : public Item_int_func {
@@ -2621,7 +2584,6 @@ class Item_func_internal_table_rows : public Item_int_func {
     null_on_null = false;
     return false;
   }
-  
 };
 
 class Item_func_internal_avg_row_length : public Item_int_func {
@@ -2637,7 +2599,6 @@ class Item_func_internal_avg_row_length : public Item_int_func {
     null_on_null = false;
     return false;
   }
-    
 };
 
 class Item_func_internal_data_length : public Item_int_func {
@@ -2653,7 +2614,6 @@ class Item_func_internal_data_length : public Item_int_func {
     null_on_null = false;
     return false;
   }
-    
 };
 
 class Item_func_internal_max_data_length : public Item_int_func {
@@ -2669,7 +2629,6 @@ class Item_func_internal_max_data_length : public Item_int_func {
     null_on_null = false;
     return false;
   }
-    
 };
 
 class Item_func_internal_index_length : public Item_int_func {
@@ -2685,7 +2644,6 @@ class Item_func_internal_index_length : public Item_int_func {
     null_on_null = false;
     return false;
   }
-    
 };
 
 class Item_func_internal_data_free : public Item_int_func {
@@ -2701,7 +2659,6 @@ class Item_func_internal_data_free : public Item_int_func {
     null_on_null = false;
     return false;
   }
-    
 };
 
 class Item_func_internal_auto_increment : public Item_int_func {
@@ -2717,7 +2674,6 @@ class Item_func_internal_auto_increment : public Item_int_func {
     null_on_null = false;
     return false;
   }
-    
 };
 
 class Item_func_internal_checksum : public Item_int_func {
@@ -2732,7 +2688,6 @@ class Item_func_internal_checksum : public Item_int_func {
     null_on_null = false;
     return false;
   }
-    
 };
 
 class Item_func_internal_keys_disabled : public Item_int_func {
@@ -3483,7 +3438,6 @@ class Item_func_get_system_var final : public Item_var_func {
   }
 
   void cleanup() override;
-  
 };
 
 class JOIN;
@@ -3960,7 +3914,6 @@ class Item_func_found_rows final : public Item_int_func {
     func_arg->banned_function_name = func_name();
     return true;
   }
-    
 };
 
 void uuid_short_init();
@@ -4000,7 +3953,6 @@ class Item_func_version final : public Item_static_string_func {
   explicit Item_func_version(const POS &pos);
 
   bool do_itemize(Parse_context *pc, Item **res) override;
-  
 };
 
 /**

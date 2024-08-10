@@ -1066,9 +1066,8 @@ class Item_sum_count : public Item_sum_int {
   void cleanup() override;
 
  public:
-  Item_sum_count(const POS &pos, Item *item_par, PT_window *w,
-                 bool fake = false)
-      : Item_sum_int(pos, item_par, w), count(0), is_fake(fake) {}
+  Item_sum_count(const POS &pos, Item *item_par, PT_window *w)
+      : Item_sum_int(pos, item_par, w), count(0) {}
   Item_sum_count(Item_int *number) : Item_sum_int(number), count(0) {}
   /**
     Constructs an instance for COUNT(DISTINCT)
@@ -1105,9 +1104,6 @@ class Item_sum_count : public Item_sum_int {
   void update_field() override;
   const char *func_name() const override { return "count"; }
   Item *copy_or_same(THD *thd) override;
-  
-private:
-  bool is_fake{false};  // mark Item_sum_count                                
 };
 
 /* Item to get the value of a stored sum function */
@@ -1715,7 +1711,6 @@ class Item_sum_min final : public Item_sum_hybrid {
       : Item_sum_hybrid(thd, item) {}
   enum Sumfunctype sum_func() const override { return MIN_FUNC; }
   const char *func_name() const override { return "min"; }
-  
  private:
   Item_sum_min *clone_hybrid(THD *thd) const override;
 };
@@ -1905,7 +1900,6 @@ class Item_sum_or final : public Item_sum_bit {
 
   Item_sum_or(THD *thd, Item_sum_or *item) : Item_sum_bit(thd, item) {}
   const char *func_name() const override { return "bit_or"; }
-  
   Item *copy_or_same(THD *thd) override;
 };
 
@@ -1917,7 +1911,6 @@ class Item_sum_and final : public Item_sum_bit {
   Item_sum_and(THD *thd, Item_sum_and *item) : Item_sum_bit(thd, item) {}
   const char *func_name() const override { return "bit_and"; }
   Item *copy_or_same(THD *thd) override;
-  
 };
 
 class Item_sum_xor final : public Item_sum_bit {
@@ -1930,7 +1923,6 @@ class Item_sum_xor final : public Item_sum_bit {
   Item_sum_xor(THD *thd, Item_sum_xor *item) : Item_sum_bit(thd, item) {}
   const char *func_name() const override { return "bit_xor"; }
   Item *copy_or_same(THD *thd) override;
-  
 };
 
 /*

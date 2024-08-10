@@ -691,7 +691,6 @@ DROP USER bug21464621;
 --echo # Test support for dollar quoting
 --echo
 
---error 1
 --exec $MYSQL test -e "CREATE FUNCTION f(i INTEGER) returns INTEGER LANGUAGE JAVASCRIPT AS \$mle\$ if (--i == 0) console.log('Hi!\nOops!'); return i; // Don't mess this up!\$mle\$;" 2>&1
 
 --error 1064

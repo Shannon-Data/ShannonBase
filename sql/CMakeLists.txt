@@ -951,7 +951,7 @@ ADD_DEPENDENCIES(sql_main GenSysSchema)
 TARGET_LINK_LIBRARIES(sql_main ${MYSQLD_STATIC_PLUGIN_LIBS}
   mysql_server_component_services mysys strings vio
   binlogevents_static ${LIBWRAP} ${LIBDL} ${SSL_LIBRARIES}
-  extra::rapidjson)
+  extra::rapidjson jerry-core jerry-ext jerry-port)
 
 # sql/immutable_string.h uses
 # google::protobuf::io::CodedOutputStream::WriteVarint64ToArray
@@ -996,6 +996,8 @@ TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC
 TARGET_LINK_LIBRARIES(sql_ml _lightgbm)
 SET_TARGET_PROPERTIES(sql_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
+INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/extra/jerryscript/include/)
+LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/extra/jerryscript/lib)
 #
 # On Windows platform we compile in the client-side Windows Native Authentication
 # plugin which is used by the client connection code included in the server.
