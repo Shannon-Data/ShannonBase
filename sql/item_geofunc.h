@@ -1032,7 +1032,6 @@ class Item_func_st_crosses final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_crosses"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_st_disjoint final : public Item_func_spatial_relation {
@@ -1044,7 +1043,6 @@ class Item_func_st_disjoint final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_disjoint"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_st_equals final : public Item_func_spatial_relation {
@@ -1056,7 +1054,6 @@ class Item_func_st_equals final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_equals"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_st_intersects final : public Item_func_spatial_relation {
@@ -1068,7 +1065,6 @@ class Item_func_st_intersects final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_intersects"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_mbrcontains final : public Item_func_spatial_relation {
@@ -1080,7 +1076,6 @@ class Item_func_mbrcontains final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrcontains"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_mbrcoveredby final : public Item_func_spatial_relation {
@@ -1092,7 +1087,6 @@ class Item_func_mbrcoveredby final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrcoveredby"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_mbrcovers final : public Item_func_spatial_relation {
@@ -1104,7 +1098,6 @@ class Item_func_mbrcovers final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrcovers"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_mbrdisjoint final : public Item_func_spatial_relation {
@@ -1116,7 +1109,6 @@ class Item_func_mbrdisjoint final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrdisjoint"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_mbrequals final : public Item_func_spatial_relation {
@@ -1128,7 +1120,6 @@ class Item_func_mbrequals final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrequals"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_mbrintersects final : public Item_func_spatial_relation {
@@ -1140,7 +1131,6 @@ class Item_func_mbrintersects final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrintersects"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_mbroverlaps final : public Item_func_spatial_relation {
@@ -1152,7 +1142,6 @@ class Item_func_mbroverlaps final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbroverlaps"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_mbrtouches final : public Item_func_spatial_relation {
@@ -1164,7 +1153,6 @@ class Item_func_mbrtouches final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrtouches"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_mbrwithin final : public Item_func_spatial_relation {
@@ -1176,7 +1164,6 @@ class Item_func_mbrwithin final : public Item_func_spatial_relation {
   const char *func_name() const override { return "mbrwithin"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_st_overlaps final : public Item_func_spatial_relation {
@@ -1188,7 +1175,6 @@ class Item_func_st_overlaps final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_overlaps"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_st_touches final : public Item_func_spatial_relation {
@@ -1200,7 +1186,6 @@ class Item_func_st_touches final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_touches"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 class Item_func_st_within final : public Item_func_spatial_relation {
@@ -1212,7 +1197,6 @@ class Item_func_st_within final : public Item_func_spatial_relation {
   const char *func_name() const override { return "st_within"; }
   bool eval(const dd::Spatial_reference_system *srs, const gis::Geometry *g1,
             const gis::Geometry *g2, bool *result, bool *null) override;
-              
 };
 
 /**

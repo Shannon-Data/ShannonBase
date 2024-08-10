@@ -18,7 +18,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #include "sql/sql_parse.h"
 
@@ -4389,7 +4391,7 @@ int mysql_execute_command(THD *thd, bool first_level) {
 
       assert(lex->sphead != nullptr);
 
-      if (!lex->sphead->is_sql()) {
+      if (!lex->sphead->is_sql() && !lex->sphead->is_javascript()) {
         if (srv_registry == nullptr) {
           my_error(ER_LANGUAGE_COMPONENT_NOT_AVAILABLE, MYF(0));
           goto error;

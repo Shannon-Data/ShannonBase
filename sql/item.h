@@ -3091,8 +3091,7 @@ class Item : public Parse_tree_node {
   // used in row subselects to get value of elements
   virtual void bring_value() {}
 
-  Field *tmp_table_field_from_field_type(TABLE *table, bool fixed_length,
-                                         MEM_ROOT *root = nullptr) const;  
+  Field *tmp_table_field_from_field_type(TABLE *table, bool fixed_length) const;
 
   virtual Item_field *field_for_view_update() { return nullptr; }
   /**
