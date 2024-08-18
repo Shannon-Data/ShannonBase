@@ -35,13 +35,20 @@
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 
+/**
+ * Dictionary used for a local dictionary algorithm, in massive data volumn, maybe, there
+ * are huge amount of text, which takes a lot of disk volumn to store these texts. Therefore,
+ * we want to use compressed string replace the original one to save disk volumn. But, it
+ * takes time to uncompress the compressed string, and send back to users. The tradeoff between
+ * performance and space.
+ */
 namespace ShannonBase {
 namespace Compress {
 
-uint32 Dictionary::store(String &str, Encoding_type type) {
+uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
   DBUG_TRACE;
   // returns dictionary id. //encoding alg pls ref to: heatwave document.
-  if (!str.c_ptr() || str.is_empty()) return 0;
+  if (!str || !len) return 0;
 
   compress_algos alg{compress_algos::NONE};
   switch (m_encoding_type) {
@@ -58,16 +65,19 @@ uint32 Dictionary::store(String &str, Encoding_type type) {
       break;
   }
 
-  std::unique_lock lk(m_content_mtx);
-  std::string orgin_str(str.c_ptr());
+  std::scoped_lock lk(m_content_mtx);
+  std::string orgin_str((char *)str, len);
   Compress_algorithm *algr = CompressFactory::get_instance(alg);
   std::string compressed_str(algr->compressString(orgin_str));
   {
     if (m_content.find(compressed_str) == m_content.end()) {  // insert new one.
       m_content_id.fetch_add(1, std::memory_order::memory_order_acq_rel);
       uint64 id = m_content_id.load(std::memory_order::memory_order_acq_rel);
+      // compressed string <---> str id. get a copy of string and store it in map.
       m_content.emplace(compressed_str, id);
-      m_id2content.emplace(id, compressed_str);
+      // id<---> orginal string
+      m_id2content.emplace(id, std::string((char *)str, len));
+
       ut_a((m_content.size() == m_id2content.size()));
       ut_a(m_content_id == m_content.size());
       return m_content_id;
@@ -78,8 +88,8 @@ uint32 Dictionary::store(String &str, Encoding_type type) {
   return 0;
 }
 
-uint32 Dictionary::get(uint64 strid, String &val, CHARSET_INFO &charset) {
-  compress_algos alg{compress_algos::NONE};
+uint32 Dictionary::get(uint64 strid, String &val) {
+  compress_algos alg [[maybe_unused]]{compress_algos::NONE};
   switch (m_encoding_type) {
     case Encoding_type::SORTED:
       alg = compress_algos::ZSTD;
@@ -95,15 +105,43 @@ uint32 Dictionary::get(uint64 strid, String &val, CHARSET_INFO &charset) {
   }
 
   {
-    std::shared_lock lk(m_content_mtx);
-    // if (m_id2content.find(strid) != m_id2content.end()) {
-    std::string decom_str(CompressFactory::get_instance(alg)->decompressString(m_id2content[strid]));
-    String strs(decom_str.c_str(), decom_str.length(), &charset);
-    copy_if_not_alloced(&val, &strs, strs.length());
-    //}
+    std::scoped_lock lk(m_content_mtx);
+    if (m_id2content.find(strid) != m_id2content.end()) {
+      String strs(m_id2content[strid].c_str(), m_id2content[strid].length(), val.charset());
+      copy_if_not_alloced(&val, &strs, strs.length());
+    } else
+      return 1;
   }
+
   return 0;
 }
+
+uchar *Dictionary::get(uint64 strid) {
+  compress_algos alg [[maybe_unused]]{compress_algos::NONE};
+  switch (m_encoding_type) {
+    case Encoding_type::SORTED:
+      alg = compress_algos::ZSTD;
+      break;
+    case Encoding_type::VARLEN:
+      alg = compress_algos::LZ4;
+      break;
+    case Encoding_type::NONE:
+      alg = compress_algos::NONE;
+      break;
+    default:
+      break;
+  }
+
+  {
+    std::scoped_lock lk(m_content_mtx);
+    if (m_id2content.find(strid) != m_id2content.end())
+      return (uchar *)(m_id2content[strid].c_str());
+    else
+      return nullptr;
+  }
+  return nullptr;
+}
+
 int Dictionary::lookup(uchar *&str) {
   DBUG_TRACE;
   // returns dictionary id. //encoding alg pls ref to: heatwave document.
@@ -126,7 +164,7 @@ int Dictionary::lookup(uchar *&str) {
 
   std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
   {
-    std::unique_lock lk(m_content_mtx);
+    std::scoped_lock lk(m_content_mtx);
     if (m_content.find(compressed_str) == m_content.end()) {  // not found, return -1.
       return -1;
     } else
@@ -156,7 +194,7 @@ int Dictionary::lookup(String &str) {
 
   std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
   {
-    std::unique_lock lk(m_content_mtx);
+    std::scoped_lock lk(m_content_mtx);
     if (m_content.find(compressed_str) == m_content.end()) {  // not found, return -1.
       return -1;
     } else

@@ -64,6 +64,7 @@ SET(SHANNON_RAPID_COMPRESS_SOURCES
   compress/dictionary/dictionary.cpp
 )
 SET(SHANNON_IMCS_SOURCES
+   imcs/data_table.cpp
    imcs/imcs.cpp
    imcs/imcu.cpp
    imcs/cu.cpp
@@ -71,8 +72,6 @@ SET(SHANNON_IMCS_SOURCES
    imcs/index/art.cpp
    imcs/index/index.cpp
    utils/utils.cpp
-)
-SET(SHANNON_ML_SOURCES
 )
 SET(SHANNON_POPULATE_SOURCES
    populate/log_parser.cpp
@@ -82,7 +81,6 @@ SET (SHANNON_TRX_SOURCES
     trx/transaction.cpp
 )
 SET (SHANNON_READER_SOURCES
-    reader/imcs_reader.cpp
     reader/parquet_reader.cpp
     reader/csv_reader.cpp
 )
@@ -99,7 +97,6 @@ set (SHANNON_OPTIMIZE
 SET(SHANNON_RAPID_SOURCES
     handler/ha_shannon_rapid.cc
     ${SHANNON_IMCS_SOURCES}
-    ${SHANNON_ML_SOURCES}
     ${SHANNON_TRX_SOURCES}
     ${SHANNON_ITERATOR_SOURCES}
     ${SHANNON_POPULATE_SOURCES}

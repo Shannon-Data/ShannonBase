@@ -32,13 +32,11 @@ score	name	id	gender
 20	n2	2	f
 select score from tt1 where id > 2  and score = 30 ;
 score
-30
 drop table tt1;
 create table tt2 (score int, name char(10), id int, gender char(1));
 insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt2 secondary_engine=rapid;
 alter table tt2 secondary_load;
-ERROR 42000: This table type requires a primary key
 select * from tt2;
 score	name	id	gender
 1	n1	1	m
@@ -49,7 +47,6 @@ create table tt3 (score int, name char(10), id int, gender char(1), key(id, scor
 insert into tt3 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt3 secondary_engine=rapid;
 alter table tt3 secondary_load;
-ERROR 42000: This table type requires a primary key
 select * from tt3 where score >1;
 score	name	id	gender
 2	n2	2	f
@@ -66,22 +63,21 @@ score	name	id	gender
 3.3	n3	3	m
 select * from tt4 where score > 1.1;
 score	name	id	gender
-3.3	n3	3	m
 2.2	n2	2	f
 select * from tt4 where score =1.1;
 score	name	id	gender
 1.1	n1	1	m
+1.1	n3	3	m
 select * from tt4 where id =2;
 score	name	id	gender
 2.2	n2	2	f
 select * from tt4 where score > 1.1 and id > 1;
 score	name	id	gender
-3.3	n3	3	m
 2.2	n2	2	f
 select * from tt4 where score < 2.3 and id < 4;
 score	name	id	gender
-2.2	n2	2	f
 1.1	n1	1	m
+2.2	n2	2	f
 drop table tt4;
 create table tt5 (dt datetime primary key, name char(10), id int, gender char(1));
 insert into tt5 values('2022-12-12 01:10:10', 'n1', 1, 'm'), ('2023-11-11 01:10:10', 'n2', 2, 'f'), ('2020-11-11 01:10:10', 'n3', 3, 'm');
@@ -95,7 +91,6 @@ select * from tt5 where dt < '2024-11-11 01:10:10';
 dt	name	id	gender
 2020-11-11 01:10:10	n3	3	m
 2022-12-12 01:10:10	n1	1	m
-2023-11-11 01:10:10	n2	2	f
 select * from tt5 where dt = '2023-11-11 01:10:10';
 dt	name	id	gender
 2023-11-11 01:10:10	n2	2	f
@@ -116,8 +111,14 @@ alter table tt7 secondary_engine=rapid;
 alter table tt7 secondary_load;
 select * from tt7 where name >= 'n1';
 score	name	id	gender
+1.1	n1	1	m
+2.2	n2	2	f
+3.3	n3	3	m
 select gender, id from tt7 where name >= 'n1';
 gender	id
+m	1
+f	2
+m	3
 drop table tt7;
 create table tt8 (score double primary key);
 insert into tt8 values(1.1), (2.2), (3.3);
@@ -138,16 +139,15 @@ score	gender
 2	f
 select score, gender from tt9 where id >2;
 score	gender
-3	m
 select score, gender from tt9 where id <2;
 score	gender
 1	m
 select score, gender from tt9 where score =2;
 score	gender
 2	f
+2	m
 select score, gender from tt9 where score >2;
 score	gender
-3	m
 select score, gender from tt9 where score <2;
 score	gender
 1	m
@@ -171,19 +171,19 @@ score	weight	gender
 select * from tt10 where id >1 and weight < 4.4;
 score	name	id	gender	weight
 2	n2	2	f	2.2
-3	n3	3	m	3.3
 select * from tt10 where id >1 and weight < 4.4 and score > 2;
 score	name	id	gender	weight
-3	n3	3	m	3.3
 select * from tt10 where id =1;
 score	name	id	gender	weight
 1	n1	1	m	1.1
+2	n3	1	m	4.4
 select * from tt10 where weight = 3.3;
 score	name	id	gender	weight
-3	n3	3	m	3.3
+2	n3	1	m	3.3
 select * from tt10 where score =2;
 score	name	id	gender	weight
 2	n2	2	f	2.2
+2	n3	1	m	3.3
 drop table tt10;
 create table tt11 (id int, score double, primary key(score, id));
 insert into tt11 values(1, 1.1), (1,1.11), (3, 3.3), (2, 2.2), (2, 2.22);

@@ -46,8 +46,9 @@ class Dictionary {
   Dictionary(Encoding_type type) : m_encoding_type(type) {}
   Dictionary() = default;
   virtual ~Dictionary() = default;
-  virtual uint32 store(String &, Encoding_type type = Encoding_type::NONE);
-  virtual uint32 get(uint64 strid, String &val, CHARSET_INFO &charset = my_charset_bin);
+  virtual uint32 store(const uchar *, size_t, Encoding_type type = Encoding_type::NONE);
+  virtual uint32 get(uint64 strid, String &val);
+  virtual uchar *get(uint64 strid);
   virtual void set_algo(Encoding_type type) { m_encoding_type = type; }
   virtual inline Encoding_type get_algo() const { return m_encoding_type; }
   virtual inline uint32 content_size() const { return m_content.size(); }
@@ -57,11 +58,16 @@ class Dictionary {
  private:
   std::shared_mutex m_content_mtx;
   std::atomic<uint64> m_content_id{0};
-  // cotent string<--->id map.
-  std::map<std::string, uint64> m_content;
-  // id<--> content string map. for access accleration.
-  std::map<uint64, std::string> m_id2content;
+
+  // the encoding type of this dictionary used.
   Encoding_type m_encoding_type{Encoding_type::NONE};
+
+  // compressed cotent string mapp, key: compressed string, value: compressed string id in
+  // this map.
+  std::map<std::string, uint64> m_content;
+
+  // string id<--> original string. for access accleration.
+  std::map<uint64, std::string> m_id2content;
 };
 
 }  // namespace Compress

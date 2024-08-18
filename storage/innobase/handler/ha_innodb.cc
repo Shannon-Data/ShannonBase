@@ -215,7 +215,7 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 #include <unistd.h>
 #endif /* HAVE_UNISTD_H */
 
-#include "../rapid_engine/handler/ha_shannon_rapid.h"
+#include "../rapid_engine/include/rapid_status.h"
 
 #ifndef UNIV_HOTBACKUP
 
@@ -6148,13 +6148,14 @@ static int innobase_close_connection(
   assert(hton == innodb_hton_ptr);
 
   //close the secondary engine.
+  #if 0
   if (ShannonBase::shannon_rapid_hton_ptr){
     handlerton *secondary_engine = ShannonBase::shannon_rapid_hton_ptr;
     secondary_engine != nullptr &&
           secondary_engine->close_connection != nullptr &&
           secondary_engine->close_connection(secondary_engine, thd);
   }
-
+  #endif
   trx_t *trx = thd_to_trx(thd);
   bool free_trx = false;
 

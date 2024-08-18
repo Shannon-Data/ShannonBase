@@ -35,6 +35,7 @@
 namespace ShannonBase {
 namespace Utils {
 
+std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
 bool Util::is_support_type(enum_field_types type) {
   switch (type) {
     case MYSQL_TYPE_BIT:
@@ -107,7 +108,7 @@ double Util::get_field_value(Field *&field, Compress::Dictionary *&dictionary) {
         String buf;
         buf.set_charset(field->charset());
         field->val_str(&buf);
-        data_val = dictionary->store(buf);
+        data_val = dictionary->store((uchar *)buf.c_ptr(), buf.length());
       } break;
       case MYSQL_TYPE_INT24:
       case MYSQL_TYPE_LONG:
@@ -142,8 +143,7 @@ double Util::get_field_value(enum_field_types type, const uchar *buf, uint len, 
     case MYSQL_TYPE_BLOB:
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VARCHAR: {
-      String str_str((const char *)buf, len, charset);
-      data_val = dictionary->store(str_str);
+      data_val = dictionary->store(buf, len);
     } break;
     case MYSQL_TYPE_SHORT:
     case MYSQL_TYPE_INT24:
@@ -175,7 +175,7 @@ double Util::get_field_value(enum_field_types type, const uchar *buf, uint len, 
       data_val = TIME_to_ulonglong_datetime(ltime);
     } break;
     default:
-      assert(false);
+      ut_a(false);
   }
 
   return data_val;
@@ -190,7 +190,7 @@ double Util::store_field_value(TABLE *&table, Field *&field, Compress::Dictionar
     case MYSQL_TYPE_VARCHAR: {  // if string, stores its stringid, and gets from
                                 // local dictionary.
       String str;
-      dictionary->get(value, str, *const_cast<CHARSET_INFO *>(field->charset()));
+      dictionary->get(value, str /*, *const_cast<CHARSET_INFO *>(field->charset())*/);
       field->store(str.c_ptr(), str.length(), &my_charset_bin);
     } break;
     case MYSQL_TYPE_INT24:
@@ -326,6 +326,23 @@ int Util::mem2string(uchar *buff, uint length, std::string &result) {
   }
   result = oss.str();
   return 0;
+}
+
+uchar *Util::pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, uchar *to, size_t to_length,
+                      const CHARSET_INFO *to_cs) {
+  size_t copy_length;
+  const char *well_formed_error_pos;
+  const char *cannot_convert_error_pos;
+  const char *from_end_pos;
+
+  copy_length = well_formed_copy_nchars(to_cs, (char *)to, to_length, &my_charset_bin, (char *)from, length, to_length,
+                                        &well_formed_error_pos, &cannot_convert_error_pos, &from_end_pos);
+
+  /* Append spaces if the string was shorter than the field. */
+  if (copy_length < to_length)
+    to_cs->cset->fill(to_cs, (char *)to + copy_length, to_length - copy_length, to_cs->pad_char);
+
+  return to;
 }
 
 }  // namespace Utils

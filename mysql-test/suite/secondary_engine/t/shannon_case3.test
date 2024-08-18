@@ -35,8 +35,8 @@ insert into tt1 values(10, 'n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1
                           as published by the Free Software Foundation.  how to use LogReader to read the red log file'),
                          (30, 'n3', 3, 'm');
 
---sleep 10
+
 select * from tt1 order by id;
 
---sleep 5
+
 drop database sh_test_case3;

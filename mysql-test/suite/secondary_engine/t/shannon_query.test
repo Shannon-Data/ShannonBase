@@ -30,7 +30,6 @@ drop table tt1;
 create table tt2 (score int, name char(10), id int, gender char(1));
 insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt2 secondary_engine=rapid;
---error 1173
 alter table tt2 secondary_load;
 select * from tt2;
 drop table tt2;
@@ -38,7 +37,6 @@ drop table tt2;
 create table tt3 (score int, name char(10), id int, gender char(1), key(id, score));
 insert into tt3 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt3 secondary_engine=rapid;
---error 1173
 alter table tt3 secondary_load;
 select * from tt3 where score >1;
 drop table tt3;

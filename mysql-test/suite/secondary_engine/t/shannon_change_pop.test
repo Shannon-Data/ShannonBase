@@ -7,90 +7,55 @@
 
 create database test_query;
 use test_query;
-create table tt (score int, name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
+create table tt (score int, name char(10), id int, gender char(1)) secondary_engine=rapid;
+
+--disable_warnings
 
 --echo #connection_1 and cconnection_2
 --connect(connection_1,localhost,root,,test_query)
 --connect(connection_2,localhost,root,,test_query)
 
---echo #[conn_1]
 --connection connection_1
-alter table tt secondary_load;
+--echo #[conn_1]
 set use_secondary_engine=forced;
-select * from tt order by id;
+alter table tt secondary_load;
+show variables  like '%use_secondary_engine%' ;
 
---echo #[conn_2]
+select * from tt order by id;
+explain select * from tt order by id;
+
 --connection connection_2
-insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
---sleep 10
-select * from tt order by id;
-
---echo #[conn_1] after insertion in conn2
---connection connection_1
---sleep 10
-select * from tt order by id;
-
---echo #[conn_2]
---connection connection_2
-update tt set gender ='a' where id >=1 and id <3;
---sleep 10
-select * from tt order by id;
-
---echo #[conn_1]
---connection connection_1
---sleep 10
-select * from tt order by id;
-
---echo #[conn_2]
---connection connection_2
-delete from tt where id >=1  and id < 3;
-insert into tt values (9,'n9', 9, 'f');
---sleep 10
-select * from tt order by id;
-
---echo #[conn_1]
---connection connection_1
---sleep 5
-select * from tt order by id;
-
---echo #[conn_2]
---connection connection_2
-delete from tt;
---sleep 5
-select * from tt order by id;
-
---echo #[conn_1]
---connection connection_1
---sleep 5
-select * from tt order by id;
-
---echo #[conn_2]
---connection connection_2
-begin;
-insert into tt values(10, 'n10', 10, 'm');
-insert into tt values(11, 'n11', 11, 'f');
-
---echo #[conn_1]
---connection connection_1
---sleep 5
-select * from tt order by id;
-
---echo #[conn_2]
---connection connection_2
-commit;
-
---echo #[conn_1]
---connection connection_1
---sleep 5
-select * from tt order by id;
-
---echo #[conn_1]
---connection connection_1
+--echo [conn2]
 set use_secondary_engine=off;
-alter table tt secondary_unload;
+show variables  like '%use_secondary_engine%' ;
+insert into tt values(1, 'n1', 1, 'a');
+--sleep 5
+select * from tt order by id;
+
+insert into tt values (2,'n2',2,'b'),(3,'n3',3,'c'),(4,'n4',4,'d');
+--sleep 5
+select * from tt order by id;
+explain select * from tt order by id;
+
+--connection connection_1
+--echo [conn1_after_insertion]
+--sleep 15
+select * from tt order by id;
+explain select * from tt order by id;
+
+--connection connection_2
+--echo [conn2]
+delete from tt where id =3;
+select * from tt order by id;
+
+--connection connection_1
+--echo [conn1]
+--sleep 10
+select * from tt order by id;
 
 --connection default
---sleep 5
+--enable_warnings
+
 drop table tt;
 drop database test_query;
 disconnect connection_1;

@@ -22,7 +22,7 @@
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -75,7 +75,7 @@ typedef struct mtr_log_rec_t {
 } mtr_log_rec;
 
 // pop change buffer size
-extern ulonglong sys_population_buffer_sz;
+extern ulonglong sys_pop_buffer_sz;
 // flag of pop change thread. true is running, set to false to stop
 extern std::atomic<bool> sys_pop_started;
 /** a buffer to store redo log records, then parses these records. if we
