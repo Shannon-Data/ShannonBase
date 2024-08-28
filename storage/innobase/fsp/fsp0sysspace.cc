@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -509,17 +510,15 @@ dberr_t SysTablespace::open_file(Datafile &file) {
 
 #ifndef UNIV_HOTBACKUP
 
-dberr_t SysTablespace::read_lsn_and_check_flags(lsn_t *flushed_lsn, lsn_t* rapid_lsn) {
+dberr_t SysTablespace::read_lsn_and_check_flags(lsn_t *flushed_lsn) {
   /* Only relevant for the system tablespace. */
   ut_ad(space_id() == TRX_SYS_SPACE);
 
   files_t::iterator it = m_files.begin();
 
   ut_a(it->m_exists);
-  ut_ad(it->m_handle.m_file != OS_FILE_CLOSED);
-
-  dberr_t err =
-      it->read_first_page(m_ignore_read_only ? false : srv_read_only_mode);
+  ut_ad(it->is_open());
+  dberr_t err = it->read_first_page();
 
   if (err != DB_SUCCESS) {
     return (err);
@@ -540,37 +539,25 @@ dberr_t SysTablespace::read_lsn_and_check_flags(lsn_t *flushed_lsn, lsn_t* rapid
   }
 
   /* Check the contents of the first page of the first datafile. */
-  for (int retry = 0; retry < 2; ++retry) {
-    err = it->validate_first_page(it->m_space_id, flushed_lsn, rapid_lsn, false);
-
-    if (err != DB_SUCCESS &&
-        (retry == 1 || it->open_or_create(srv_read_only_mode) != DB_SUCCESS ||
-         it->restore_from_doublewrite(0) != DB_SUCCESS)) {
+  err = it->validate_first_page(space_id(), flushed_lsn, false);
+  if (err != DB_SUCCESS) {
+    /* Perhaps the first page was torn? Recover it and validate again. */
+    if (it->open_or_create(srv_read_only_mode) != DB_SUCCESS ||
+        it->restore_from_doublewrite(0) != DB_SUCCESS) {
       it->close();
-
-      return (err);
+      return err;
+    }
+    err = it->validate_first_page(space_id(), flushed_lsn, false);
+    if (err != DB_SUCCESS) {
+      return err;
     }
   }
-
-  /* Make sure the tablespace space ID matches the
-  space ID on the first page of the first datafile. */
-  if (space_id() != it->m_space_id) {
-    ib::error(ER_IB_MSG_444)
-        << "The " << name() << " data file '" << it->name()
-        << "' has the wrong space ID. It should be " << space_id() << ", but "
-        << it->m_space_id << " was found";
-
-    it->close();
-
-    return (err);
-  }
+  ut_ad(!it->is_open());
 
   /* The flags of srv_sys_space do not have SDI Flag set.
   Update the flags of system tablespace to indicate the presence
   of SDI */
   set_flags(it->flags());
-
-  it->close();
 
   return (DB_SUCCESS);
 }
@@ -796,7 +783,7 @@ dberr_t SysTablespace::check_file_spec(bool create_new_db,
 
 dberr_t SysTablespace::open_or_create(bool is_temp, bool create_new_db,
                                       page_no_t *sum_new_sizes,
-                                      lsn_t *flush_lsn, lsn_t* rapid_lsn) {
+                                      lsn_t *flush_lsn) {
   dberr_t err = DB_SUCCESS;
   fil_space_t *space = nullptr;
 
@@ -840,7 +827,7 @@ dberr_t SysTablespace::open_or_create(bool is_temp, bool create_new_db,
       return (err);
     }
 
-#if !defined(NO_FALLOCATE) && defined(UNIV_LINUX)
+#ifdef UNIV_LINUX
     /* Note: This should really be per node and not per
     tablespace because a tablespace can contain multiple
     files (nodes). The implication is that all files of
@@ -860,20 +847,19 @@ dberr_t SysTablespace::open_or_create(bool is_temp, bool create_new_db,
     }
 #else
     it->m_atomic_write = false;
-#endif /* !NO_FALLOCATE && UNIV_LINUX*/
+#endif /* UNIV_LINUX */
   }
 
   if (flush_lsn != nullptr) {
     if (create_new_db) {
       /* There are no data files, so we assign the initial value
-      to flush_lsn instead of reading it from disk, and rapid_lsn so on. */
+      to flush_lsn instead of reading it from disk. */
       *flush_lsn = LOG_START_LSN + LOG_BLOCK_HDR_SIZE;
-      *rapid_lsn = LOG_START_LSN + LOG_BLOCK_HDR_SIZE;
     } else {
       /* Validate the header page in the first datafile in the
       system tablespace and read flush_lsn from the validated
-      header page, rapid_lsn so does. */
-      err = read_lsn_and_check_flags(flush_lsn, rapid_lsn);
+      header page. */
+      err = read_lsn_and_check_flags(flush_lsn);
       if (err != DB_SUCCESS) {
         return (err);
       }

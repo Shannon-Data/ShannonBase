@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,9 +41,9 @@
 #include <utility>
 
 #include "decimal.h"
+#include "field_types.h"
 #include "mf_wcomp.h"  // wild_one, wild_many
 #include "my_alloc.h"
-#include "my_bit.h"
 #include "my_bitmap.h"
 #include "my_dbug.h"
 #include "my_sqlcommand.h"
@@ -153,7 +154,7 @@ static Item_result agg_cmp_type(Item **items, uint nitems) {
   return type;
 }
 
-static void write_histogram_to_trace(THD *thd, Item_func *item,
+static void write_histogram_to_trace(THD *thd, const Item_func *item,
                                      const double selectivity) {
   Opt_trace_object obj(&thd->opt_trace, "histogram_selectivity");
   obj.add("condition", item).add("histogram_selectivity", selectivity);
@@ -229,22 +230,137 @@ static void my_coll_agg_error(DTCollation &c1, DTCollation &c2,
            c2.derivation_name(), fname);
 }
 
-static bool get_histogram_selectivity(THD *thd, const Field *field, Item **args,
-                                      size_t arg_count,
-                                      histograms::enum_operator op,
-                                      Item_func *item_func, const TABLE *table,
-                                      double *selectivity) {
+/// This is used to indicate that the selectivity of a predicate has
+/// not been determined.
+static constexpr double kUndefinedSelectivity{-1.0};
+
+/**
+  Try to find the selectivity of an Item_func (predicate) using a
+  histogram.
+  @param thd The current thread.
+  @param field The field for which we will look for a histogram.
+  @param op The comparison operator of item_func.
+  @param item_func The predicate.
+  @return The selectivity if a histogram was found and the arguments
+    of item_func allowed use of a histogram. Otherwise, kUndefinedSelectivity.
+*/
+static double get_histogram_selectivity(THD *thd, const Field &field,
+                                        histograms::enum_operator op,
+                                        const Item_func &item_func) {
   const histograms::Histogram *histogram =
-      table->find_histogram(field->field_index());
+      field.table->find_histogram(field.field_index());
   if (histogram != nullptr) {
-    if (!histogram->get_selectivity(args, arg_count, op, selectivity)) {
+    double selectivity;
+    if (!histogram->get_selectivity(item_func.arguments(),
+                                    item_func.argument_count(), op,
+                                    &selectivity)) {
       if (unlikely(thd->opt_trace.is_started()))
-        write_histogram_to_trace(thd, item_func, *selectivity);
-      return false;
+        write_histogram_to_trace(thd, &item_func, selectivity);
+      return selectivity;
     }
   }
 
-  return true;
+  return kUndefinedSelectivity;
+}
+
+/**
+   Estimate the selectivity of a predicate of type field=expression,
+   using an index containing 'field'. ('expression' is assumed to be
+   independent of the table that 'field' belongs to, meaning that this
+   function should not be called for e.g. "t1.f1=t1.f2+1").
+   @param field The field for which we estimate the selectivity.
+   @returns The selectivity estimate, or kUndefinedSelectivity if no
+   suitable index was found.
+*/
+static double IndexSelectivityOfUnknownValue(const Field &field) {
+  const ha_rows row_count{field.table->file->stats.records};
+  int contributing_keys{0};
+  double selectivity_product{-1.0};
+
+  if (row_count == 0) {
+    return kUndefinedSelectivity;
+  }
+
+  uint shortest_prefix{UINT_MAX};
+
+  // Loop over the keys containing 'field'.
+  for (uint key_no = field.part_of_key.get_first_set(); key_no != MY_BIT_NONE;
+       key_no = field.part_of_key.get_next_set(key_no)) {
+    const KEY &key{field.table->key_info[key_no]};
+
+    // Loop over the fields of 'key'.
+    for (uint part_no = 0; part_no < key.user_defined_key_parts; part_no++) {
+      if (!key.has_records_per_key(part_no)) {
+        break;
+      }
+
+      const Field &key_field{*key.key_part[part_no].field};
+
+      // Find (the square of) a selectivity estimate for a field that is part of
+      // an index, but not the first field of that index.
+      const auto subsequent_field_selectivity_squared = [&]() {
+        assert(part_no > 0);
+        /*
+          For a field that is the first part (zero-indexed) of a key we
+          can obtain the number of distinct values directly from the
+          records_per_key statistic, but if the field is the k'th > 0
+          part we have to make an estimate. Let d_k denote the number of
+          distinct values in the k-part prefix of the key. Given that we
+          only have information about d_k and d_(k-1) the number of
+          distinct values in the field can be anywhere between d_k and
+          d_k / d_(k-1), so we use the geometric mean of these two
+          values as our estimate.
+        */
+
+        // Case 1: key field 'part_no' and the preceding fields are
+        // uncorrelated.
+        const double uncorrelated_estimate{
+            double{key.records_per_key(part_no)} /
+            key.records_per_key(part_no - 1)};
+
+        // Case 2: The preceding fields are functionally dependent on
+        // key field 'part_no'.
+        const double correlated_estimate{
+            std::min(1.0, double{key.records_per_key(part_no)} / row_count)};
+
+        // Use the geometric mean of case 1 and 2.
+        return uncorrelated_estimate * correlated_estimate;
+      };
+
+      if (&field == &key_field) {
+        if (part_no == 0) {
+          // We need std::min() since records_per_key() and stats.records
+          // may be updated at different points in time.
+          return std::min(1.0, double{key.records_per_key(0)} / row_count);
+
+        } else if (part_no < shortest_prefix) {
+          shortest_prefix = part_no;
+          selectivity_product = subsequent_field_selectivity_squared();
+          contributing_keys = 1;
+          break;
+
+        } else if (part_no == shortest_prefix) {
+          // If 'field' is the n'th part of several indexes, we calculate the
+          // geometric mean of the estimate from each of them.
+          selectivity_product *= subsequent_field_selectivity_squared();
+          contributing_keys++;
+          break;
+        }
+      }
+    }
+  }
+
+  switch (contributing_keys) {
+    case 0:
+      return kUndefinedSelectivity;
+
+    case 1:
+      return std::sqrt(
+          selectivity_product);  // Minor optimization for the most common case.
+
+    default:
+      return std::pow(selectivity_product, 0.5 / contributing_keys);
+  }
 }
 
 /**
@@ -349,7 +465,7 @@ float Item_func_not::get_filtering_effect(THD *thd, table_map filter_for_table,
 */
 
 longlong Item_func_not::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   const bool value = args[0]->val_bool();
   null_value = args[0]->null_value;
   /*
@@ -381,7 +497,7 @@ void Item_func_not::print(const THD *thd, String *str,
 */
 
 longlong Item_func_not_all::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   const bool value = args[0]->val_bool();
 
   /*
@@ -433,7 +549,7 @@ void Item_func_not_all::print(const THD *thd, String *str,
 */
 
 longlong Item_func_nop_all::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   const longlong value = args[0]->val_int();
 
   /*
@@ -655,15 +771,9 @@ bool Item_bool_func2::resolve_type(THD *thd) {
     the GEOMETRY byte string rather than doing a geometric equality comparison.
   */
   const Functype func_type = functype();
-  uint nvector_args = num_vector_args();
-  if (func_type == EQ_FUNC && nvector_args != 0 && nvector_args != arg_count) {
-    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
-    return true;
-  }
-
   if ((func_type == LT_FUNC || func_type == LE_FUNC || func_type == GE_FUNC ||
        func_type == GT_FUNC || func_type == FT_FUNC) &&
-      (reject_geometry_args() || reject_vector_args()))
+      reject_geometry_args(arg_count, args, this))
     return true;
 
   // Make a special case of compare with fields to get nicer DATE comparisons
@@ -703,7 +813,7 @@ bool Item_func_like::resolve_type(THD *thd) {
     }
   }
 
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
 
   // LIKE is always carried out as a string operation
   args[0]->cmp_context = STRING_RESULT;
@@ -748,7 +858,9 @@ Item *Item_func_like::replace_scalar_subquery(uchar *) {
 }
 
 Item *Item_bool_func2::replace_scalar_subquery(uchar *) {
-  (void)set_cmp_func();
+  if (set_cmp_func()) {
+    return nullptr;
+  }
   return this;
 }
 
@@ -762,8 +874,10 @@ void Arg_comparator::cleanup() {
       comparators[i].cleanup();
     }
   }
-  destroy(json_scalar);
-  json_scalar = nullptr;
+  if (json_scalar != nullptr) {
+    ::destroy_at(json_scalar);
+    json_scalar = nullptr;
+  }
   value1.mem_free();
   value2.mem_free();
 }
@@ -1150,6 +1264,7 @@ bool Arg_comparator::set_cmp_func(Item_result_field *owner_arg, Item **left_arg,
                               (*right)->data_type() == MYSQL_TYPE_JSON))) {
     // Use the JSON comparator if at least one of the arguments is JSON.
     func = &Arg_comparator::compare_json;
+    m_compare_type = STRING_RESULT;
     // Convention: Immediate dynamic parameters are handled as scalars:
     (*left)->mark_json_as_scalar();
     (*right)->mark_json_as_scalar();
@@ -1278,22 +1393,22 @@ bool Arg_comparator::set_cmp_func(Item_result_field *owner_arg, Item **left_arg,
  */
 inline bool wrap_in_cast(Item **item, enum_field_types type) {
   THD *thd = current_thd;
-  Item *cast;
+  Item *cast = nullptr;
   switch (type) {
     case MYSQL_TYPE_DATETIME: {
-      if (!(cast = new Item_typecast_datetime(*item, false))) return true;
+      cast = new Item_typecast_datetime(*item, false);
       break;
     }
     case MYSQL_TYPE_DATE: {
-      if (!(cast = new Item_typecast_date(*item, false))) return true;
+      cast = new Item_typecast_date(*item, false);
       break;
     }
     case MYSQL_TYPE_TIME: {
-      if (!(cast = new Item_typecast_time(*item))) return true;
+      cast = new Item_typecast_time(*item);
       break;
     }
     case MYSQL_TYPE_DOUBLE: {
-      if (!(cast = new Item_typecast_real(*item))) return true;
+      cast = new Item_typecast_real(*item);
       break;
     }
     default: {
@@ -1301,8 +1416,9 @@ inline bool wrap_in_cast(Item **item, enum_field_types type) {
       return true;
     }
   }
+  if (cast == nullptr) return true;
 
-  cast->fix_fields(thd, item);
+  if (cast->fix_fields(thd, item)) return true;
   thd->change_item_tree(item, cast);
 
   return false;
@@ -2244,11 +2360,16 @@ void Item_in_optimizer::fix_after_pullout(Query_block *parent_query_block,
   not_null_tables_cache |= args[0]->not_null_tables();
 }
 
-void Item_in_optimizer::split_sum_func(THD *thd, Ref_item_array ref_item_array,
+bool Item_in_optimizer::split_sum_func(THD *thd, Ref_item_array ref_item_array,
                                        mem_root_deque<Item *> *fields) {
-  args[0]->split_sum_func2(thd, ref_item_array, fields, args, true);
+  if (args[0]->split_sum_func2(thd, ref_item_array, fields, args, true)) {
+    return true;
+  }
   Item **left = &down_cast<Item_in_subselect *>(args[0])->left_expr;
-  (*left)->split_sum_func2(thd, ref_item_array, fields, left, true);
+  if ((*left)->split_sum_func2(thd, ref_item_array, fields, left, true)) {
+    return true;
+  }
+  return false;
 }
 
 void Item_in_optimizer::print(const THD *thd, String *str,
@@ -2419,6 +2540,14 @@ longlong Item_in_optimizer::val_int() {
 void Item_in_optimizer::cleanup() {
   Item_bool_func::cleanup();
   result_for_null_param = UNKNOWN;
+  // Restore the changes done to the cached object during execution.
+  // E.g. constant expressions in "left_expr" might have been
+  // replaced with cached items (cache_const_expr_transformer())
+  // which live only for one execution and these cached items
+  // replace the original items in "cache" during execution.
+  if (cache != nullptr) {
+    cache->store(down_cast<Item_in_subselect *>(args[0])->left_expr);
+  }
 }
 
 bool Item_in_optimizer::is_null() {
@@ -2438,7 +2567,7 @@ void Item_in_optimizer::update_used_tables() {
 }
 
 longlong Item_func_eq::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   const int value = cmp.compare();
   return value == 0 ? 1 : 0;
 }
@@ -2447,18 +2576,13 @@ longlong Item_func_eq::val_int() {
 
 bool Item_func_equal::resolve_type(THD *thd) {
   if (Item_bool_func2::resolve_type(thd)) return true;
-  uint nvector_args = num_vector_args();
-  if (nvector_args != 0 && nvector_args != arg_count) {
-    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
-    return true;
-  }  
   set_nullable(false);
   null_value = false;
   return false;
 }
 
 longlong Item_func_equal::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   // Perform regular equality check first:
   const int value = cmp.compare();
   // If comparison is not NULL, we have a result:
@@ -2472,135 +2596,167 @@ float Item_func_ne::get_filtering_effect(THD *thd, table_map filter_for_table,
                                          table_map read_tables,
                                          const MY_BITMAP *fields_to_ignore,
                                          double rows_in_table) {
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
+  const Item_field *fld = contributes_to_filter(
+      thd, read_tables, filter_for_table, fields_to_ignore);
   if (!fld) return COND_FILTER_ALLPASS;
 
-  double selectivity;
-  if (!get_histogram_selectivity(thd, fld->field, args, arg_count,
-                                 histograms::enum_operator::NOT_EQUALS_TO, this,
-                                 fld->field->table, &selectivity))
-    return static_cast<float>(selectivity);
+  // Find selectivity from histogram or index.
+  const double selectivity = [&]() {
+    // The index calculation might be useful for the original optimizer too,
+    // but we are loth to change existing plans and therefore restrict
+    // it to Hypergraph.
+    const auto index_selectivity = [&]() {
+      const double reverse_selectivity =
+          IndexSelectivityOfUnknownValue(*fld->field);
 
-  return 1.0f - fld->get_cond_filter_default_probability(rows_in_table,
-                                                         COND_FILTER_EQUALITY);
+      if (reverse_selectivity == kUndefinedSelectivity) {
+        return kUndefinedSelectivity;
+      } else {
+        // Even if all rows have the same value for 'fld', we should avoid
+        // returning a selectivity estimate of zero, as that can give
+        // a distorted view of the cost of a plan if the estimate should
+        // be wrong (even by a small margin).
+        return std::max(1.0 - reverse_selectivity,
+                        Item_func_ne::kMinSelectivityForUnknownValue);
+      }
+    };
+
+    if (!thd->lex->using_hypergraph_optimizer()) {
+      return get_histogram_selectivity(
+          thd, *fld->field, histograms::enum_operator::NOT_EQUALS_TO, *this);
+
+    } else if (args[0]->const_item() || args[1]->const_item() ||
+               fld->field->key_start.is_clear_all()) {
+      // We prefer histograms over indexes if:
+      // 1) We are comparing a field to a constant, since histograms will
+      //    give the frequency of that constant value.
+      // 2) If no index starts with fld->field, as index estimates will then
+      //    be less accurate, since we do not know if that field is correlated
+      //    with the preceding fields of the index.
+      const double histogram_selectivity = get_histogram_selectivity(
+          thd, *fld->field, histograms::enum_operator::NOT_EQUALS_TO, *this);
+
+      return histogram_selectivity == kUndefinedSelectivity
+                 ? index_selectivity()
+                 : histogram_selectivity;
+    } else {
+      const double idx_sel = index_selectivity();
+
+      return idx_sel == kUndefinedSelectivity
+                 ? get_histogram_selectivity(
+                       thd, *fld->field,
+                       histograms::enum_operator::NOT_EQUALS_TO, *this)
+                 : idx_sel;
+    }
+  }();
+
+  return selectivity == kUndefinedSelectivity
+             ? 1.0 - fld->get_cond_filter_default_probability(
+                         rows_in_table, COND_FILTER_EQUALITY)
+             : selectivity;
 }
 
 longlong Item_func_ne::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   const int value = cmp.compare();
   return value != 0 && !null_value ? 1 : 0;
 }
 
-float Item_func_equal::get_filtering_effect(THD *, table_map filter_for_table,
+/**
+   Compute selectivity for field=expression and field<=>expression, where
+   'expression' is not Item_null.
+   @param thd The current thread.
+   @param equal The '=' or '<=>' term.
+   @param field The field we compare with 'expression'.
+   @param rows_in_table Number of rows in the table of 'field'.
+   @returns Selectivity estimate.
+ */
+static double GetEqualSelectivity(THD *thd, Item_eq_base *equal,
+                                  const Item_field &field,
+                                  double rows_in_table) {
+  assert(equal->argument_count() == 2);
+  assert(std::none_of(
+      equal->arguments(), equal->arguments() + equal->argument_count(),
+      [](const Item *item) { return item->type() == Item::NULL_ITEM; }));
+
+  const double selectivity = [&]() {
+    // The index calculation might be useful for the original optimizer too,
+    // but we are loth to change existing plans and therefore restrict
+    // it to Hypergraph.
+    if (!thd->lex->using_hypergraph_optimizer()) {
+      return get_histogram_selectivity(
+          thd, *field.field, histograms::enum_operator::EQUALS_TO, *equal);
+
+    } else if (equal->arguments()[0]->const_item() ||
+               equal->arguments()[1]->const_item() ||
+               field.field->key_start.is_clear_all()) {
+      // We prefer histograms over indexes if:
+      // 1) We are comparing a field to a constant, since histograms will
+      //    give the frequency of that constant value.
+      // 2) If no index starts with field.field, as index estimates will then
+      //    be less accurate, since we do not know if that field is correlated
+      //    with the preceding fields of the index.
+      const double histogram_selectivity = get_histogram_selectivity(
+          thd, *field.field, histograms::enum_operator::EQUALS_TO, *equal);
+
+      return histogram_selectivity == kUndefinedSelectivity
+                 ? IndexSelectivityOfUnknownValue(*field.field)
+                 : histogram_selectivity;
+
+    } else {
+      const double index_selectivity =
+          IndexSelectivityOfUnknownValue(*field.field);
+
+      return index_selectivity == kUndefinedSelectivity
+                 ? get_histogram_selectivity(
+                       thd, *field.field, histograms::enum_operator::EQUALS_TO,
+                       *equal)
+                 : index_selectivity;
+    }
+  }();
+
+  return selectivity == kUndefinedSelectivity
+             ? field.get_cond_filter_default_probability(rows_in_table,
+                                                         COND_FILTER_EQUALITY)
+             : selectivity;
+}
+
+float Item_func_equal::get_filtering_effect(THD *thd,
+                                            table_map filter_for_table,
                                             table_map read_tables,
                                             const MY_BITMAP *fields_to_ignore,
                                             double rows_in_table) {
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
+  const Item_field *fld = contributes_to_filter(
+      thd, read_tables, filter_for_table, fields_to_ignore);
   if (!fld) return COND_FILTER_ALLPASS;
 
-  // TODO(khatlen): Use histograms for field <=> const, like in Item_func_eq?
+  for (int i : {0, 1}) {
+    if (arguments()[i]->type() == NULL_ITEM) {
+      if (!fld->field->is_nullable()) {
+        return 0.0;
+      }
 
-  return fld->get_cond_filter_default_probability(rows_in_table,
-                                                  COND_FILTER_EQUALITY);
+      const Item_func *is_null =
+          new (thd->mem_root) Item_func_isnull(arguments()[(i + 1) % 2]);
+
+      const double histogram_selectivity = get_histogram_selectivity(
+          thd, *fld->field, histograms::enum_operator::IS_NULL, *is_null);
+
+      if (histogram_selectivity >= 0.0) {
+        return histogram_selectivity;
+      } else {
+        return fld->get_cond_filter_default_probability(rows_in_table,
+                                                        COND_FILTER_EQUALITY);
+      }
+    }
+  }
+
+  return GetEqualSelectivity(thd, this, *fld, rows_in_table);
 }
 
-float Item_func_ge::get_filtering_effect(THD *thd, table_map filter_for_table,
-                                         table_map read_tables,
-                                         const MY_BITMAP *fields_to_ignore,
-                                         double rows_in_table) {
-  // See Item_func_gt::get_filtering_effect().
-  if (is_function_of_type(args[0], Item_func::FT_FUNC) &&
-      args[1]->const_item()) {
-    return args[0]->get_filtering_effect(thd, filter_for_table, read_tables,
-                                         fields_to_ignore, rows_in_table);
-  }
-  if (is_function_of_type(args[1], Item_func::FT_FUNC) &&
-      args[0]->const_item()) {
-    return args[1]->get_filtering_effect(thd, filter_for_table, read_tables,
-                                         fields_to_ignore, rows_in_table);
-  }
-
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
-  if (!fld) return COND_FILTER_ALLPASS;
-
-  double selectivity;
-  if (!get_histogram_selectivity(
-          thd, fld->field, args, arg_count,
-          histograms::enum_operator::GREATER_THAN_OR_EQUAL, this,
-          fld->field->table, &selectivity))
-    return static_cast<float>(selectivity);
-
-  return fld->get_cond_filter_default_probability(rows_in_table,
-                                                  COND_FILTER_INEQUALITY);
-}
-
-float Item_func_lt::get_filtering_effect(THD *thd, table_map filter_for_table,
-                                         table_map read_tables,
-                                         const MY_BITMAP *fields_to_ignore,
-                                         double rows_in_table) {
-  // See Item_func_gt::get_filtering_effect().
-  if (is_function_of_type(args[0], Item_func::FT_FUNC) &&
-      args[1]->const_item()) {
-    return args[0]->get_filtering_effect(thd, filter_for_table, read_tables,
-                                         fields_to_ignore, rows_in_table);
-  }
-  if (is_function_of_type(args[1], Item_func::FT_FUNC) &&
-      args[0]->const_item()) {
-    return args[1]->get_filtering_effect(thd, filter_for_table, read_tables,
-                                         fields_to_ignore, rows_in_table);
-  }
-
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
-  if (!fld) return COND_FILTER_ALLPASS;
-
-  double selectivity;
-  if (!get_histogram_selectivity(thd, fld->field, args, arg_count,
-                                 histograms::enum_operator::LESS_THAN, this,
-                                 fld->field->table, &selectivity))
-    return static_cast<float>(selectivity);
-
-  return fld->get_cond_filter_default_probability(rows_in_table,
-                                                  COND_FILTER_INEQUALITY);
-}
-
-float Item_func_le::get_filtering_effect(THD *thd, table_map filter_for_table,
-                                         table_map read_tables,
-                                         const MY_BITMAP *fields_to_ignore,
-                                         double rows_in_table) {
-  // See Item_func_gt::get_filtering_effect().
-  if (is_function_of_type(args[0], Item_func::FT_FUNC) &&
-      args[1]->const_item()) {
-    return args[0]->get_filtering_effect(thd, filter_for_table, read_tables,
-                                         fields_to_ignore, rows_in_table);
-  }
-  if (is_function_of_type(args[1], Item_func::FT_FUNC) &&
-      args[0]->const_item()) {
-    return args[1]->get_filtering_effect(thd, filter_for_table, read_tables,
-                                         fields_to_ignore, rows_in_table);
-  }
-
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
-  if (!fld) return COND_FILTER_ALLPASS;
-
-  double selectivity;
-  if (!get_histogram_selectivity(thd, fld->field, args, arg_count,
-                                 histograms::enum_operator::LESS_THAN_OR_EQUAL,
-                                 this, fld->field->table, &selectivity))
-    return static_cast<float>(selectivity);
-
-  return fld->get_cond_filter_default_probability(rows_in_table,
-                                                  COND_FILTER_INEQUALITY);
-}
-
-float Item_func_gt::get_filtering_effect(THD *thd, table_map filter_for_table,
-                                         table_map read_tables,
-                                         const MY_BITMAP *fields_to_ignore,
-                                         double rows_in_table) {
+float Item_func_inequality::get_filtering_effect(
+    THD *thd, table_map filter_for_table, table_map read_tables,
+    const MY_BITMAP *fields_to_ignore, double rows_in_table) {
   // For comparing MATCH(...), generally reuse the same selectivity as for
   // MATCH(...), which is generally COND_FILTER_BETWEEN. This is wrong
   // in a number of cases (the equivalence only holds for MATCH(...) > 0
@@ -2621,34 +2777,53 @@ float Item_func_gt::get_filtering_effect(THD *thd, table_map filter_for_table,
                                          fields_to_ignore, rows_in_table);
   }
 
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
+  const Item_field *fld = contributes_to_filter(
+      thd, read_tables, filter_for_table, fields_to_ignore);
   if (!fld) return COND_FILTER_ALLPASS;
 
-  double selectivity;
-  if (!get_histogram_selectivity(thd, fld->field, args, arg_count,
-                                 histograms::enum_operator::GREATER_THAN, this,
-                                 fld->field->table, &selectivity))
-    return static_cast<float>(selectivity);
+  const histograms::enum_operator comp_op = [&]() {
+    switch (functype()) {
+      case GT_FUNC:
+        return histograms::enum_operator::GREATER_THAN;
 
-  return fld->get_cond_filter_default_probability(rows_in_table,
-                                                  COND_FILTER_INEQUALITY);
+      case LT_FUNC:
+        return histograms::enum_operator::LESS_THAN;
+
+      case GE_FUNC:
+        return histograms::enum_operator::GREATER_THAN_OR_EQUAL;
+
+      case LE_FUNC:
+        return histograms::enum_operator::LESS_THAN_OR_EQUAL;
+
+      default:
+        assert(false);
+        return histograms::enum_operator::GREATER_THAN;
+    };
+  }();
+
+  const double selectivity =
+      get_histogram_selectivity(thd, *fld->field, comp_op, *this);
+
+  return selectivity == kUndefinedSelectivity
+             ? fld->get_cond_filter_default_probability(rows_in_table,
+                                                        COND_FILTER_INEQUALITY)
+             : selectivity;
 }
 
 longlong Item_func_ge::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   const int value = cmp.compare();
   return value >= 0 ? 1 : 0;
 }
 
 longlong Item_func_gt::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   const int value = cmp.compare();
   return value > 0 ? 1 : 0;
 }
 
 longlong Item_func_le::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   const int value = cmp.compare();
   return value <= 0 && !null_value ? 1 : 0;
 }
@@ -2668,7 +2843,7 @@ float Item_func_reject_if::get_filtering_effect(
 }
 
 longlong Item_func_lt::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   const int value = cmp.compare();
   return value < 0 && !null_value ? 1 : 0;
 }
@@ -2825,7 +3000,7 @@ void Item_func_interval::print(const THD *thd, String *str,
 */
 
 longlong Item_func_interval::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   double value;
   my_decimal dec_buf, *dec = nullptr;
   uint i;
@@ -2963,7 +3138,7 @@ bool Item_func_between::resolve_type(THD *thd) {
     See comments for the code block doing similar checks in
     Item_bool_func2::resolve_type().
   */
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
 
   /*
     JSON values will be compared as strings, and not with the JSON
@@ -3068,23 +3243,25 @@ float Item_func_between::get_filtering_effect(THD *thd,
                                               table_map read_tables,
                                               const MY_BITMAP *fields_to_ignore,
                                               double rows_in_table) {
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
+  const Item_field *fld = contributes_to_filter(
+      thd, read_tables, filter_for_table, fields_to_ignore);
   if (!fld) return COND_FILTER_ALLPASS;
 
   const histograms::enum_operator op =
       (negated ? histograms::enum_operator::NOT_BETWEEN
                : histograms::enum_operator::BETWEEN);
 
-  double selectivity;
-  if (!get_histogram_selectivity(thd, fld->field, args, arg_count, op, this,
-                                 fld->field->table, &selectivity))
-    return static_cast<float>(selectivity);
+  const double selectivity =
+      get_histogram_selectivity(thd, *fld->field, op, *this);
 
-  const float filter = fld->get_cond_filter_default_probability(
-      rows_in_table, COND_FILTER_BETWEEN);
+  if (selectivity == kUndefinedSelectivity) {
+    const float filter = fld->get_cond_filter_default_probability(
+        rows_in_table, COND_FILTER_BETWEEN);
 
-  return negated ? 1.0f - filter : filter;
+    return negated ? 1.0f - filter : filter;
+  } else {
+    return selectivity;
+  }
 }
 
 /**
@@ -3291,37 +3468,43 @@ Field *Item_func_ifnull::tmp_table_field(TABLE *table) {
 }
 
 double Item_func_ifnull::real_op() {
-  assert(fixed == 1);
+  assert(fixed);
   double value = args[0]->val_real();
+  if (current_thd->is_error()) return error_real();
   if (!args[0]->null_value) {
     null_value = false;
     return value;
   }
   value = args[1]->val_real();
+  if (current_thd->is_error()) return error_real();
   if ((null_value = args[1]->null_value)) return 0.0;
   return value;
 }
 
 longlong Item_func_ifnull::int_op() {
-  assert(fixed == 1);
+  assert(fixed);
   longlong value = args[0]->val_int();
+  if (current_thd->is_error()) return error_int();
   if (!args[0]->null_value) {
     null_value = false;
     return value;
   }
   value = args[1]->val_int();
+  if (current_thd->is_error()) return error_int();
   if ((null_value = args[1]->null_value)) return 0;
   return value;
 }
 
 my_decimal *Item_func_ifnull::decimal_op(my_decimal *decimal_value) {
-  assert(fixed == 1);
+  assert(fixed);
   my_decimal *value = args[0]->val_decimal(decimal_value);
+  if (current_thd->is_error()) return error_decimal(decimal_value);
   if (!args[0]->null_value) {
     null_value = false;
     return value;
   }
   value = args[1]->val_decimal(decimal_value);
+  if (current_thd->is_error()) return error_decimal(decimal_value);
   if ((null_value = args[1]->null_value)) return nullptr;
   return value;
 }
@@ -3342,26 +3525,29 @@ bool Item_func_ifnull::val_json(Json_wrapper *result) {
 }
 
 bool Item_func_ifnull::date_op(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) {
-  assert(fixed == 1);
+  assert(fixed);
   if (!args[0]->get_date(ltime, fuzzydate)) return (null_value = false);
   return (null_value = args[1]->get_date(ltime, fuzzydate));
 }
 
 bool Item_func_ifnull::time_op(MYSQL_TIME *ltime) {
-  assert(fixed == 1);
+  assert(fixed);
   if (!args[0]->get_time(ltime)) return (null_value = false);
   return (null_value = args[1]->get_time(ltime));
 }
 
 String *Item_func_ifnull::str_op(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   String *res = args[0]->val_str(str);
+  if (current_thd->is_error()) return error_str();
   if (!args[0]->null_value) {
     null_value = false;
     res->set_charset(collation.collation);
     return res;
   }
   res = args[1]->val_str(str);
+  if (current_thd->is_error()) return error_str();
+
   if ((null_value = args[1]->null_value)) return nullptr;
   res->set_charset(collation.collation);
   return res;
@@ -3394,7 +3580,7 @@ String *Item_func_ifnull::str_op(String *str) {
 */
 
 bool Item_func_if::fix_fields(THD *thd, Item **ref) {
-  assert(fixed == 0);
+  assert(!fixed);
   args[0]->apply_is_true();
 
   if (Item_func::fix_fields(thd, ref)) return true;
@@ -3445,14 +3631,20 @@ bool Item_func_if::resolve_type_inner(THD *thd) {
 }
 
 TYPELIB *Item_func_if::get_typelib() const {
+  if (data_type() != MYSQL_TYPE_ENUM && data_type() != MYSQL_TYPE_SET) {
+    return nullptr;
+  }
   assert((args[1]->data_type() == MYSQL_TYPE_NULL) ^
          (args[2]->data_type() == MYSQL_TYPE_NULL));
-  return args[1]->data_type() != MYSQL_TYPE_NULL ? args[1]->get_typelib()
-                                                 : args[2]->get_typelib();
+  TYPELIB *typelib = args[1]->data_type() != MYSQL_TYPE_NULL
+                         ? args[1]->get_typelib()
+                         : args[2]->get_typelib();
+  assert(typelib != nullptr);
+  return typelib;
 }
 
 double Item_func_if::val_real() {
-  assert(fixed == 1);
+  assert(fixed);
   Item *arg = args[0]->val_bool() ? args[1] : args[2];
   if (current_thd->is_error()) return error_real();
   const double value = arg->val_real();
@@ -3461,7 +3653,7 @@ double Item_func_if::val_real() {
 }
 
 longlong Item_func_if::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   Item *arg = args[0]->val_bool() ? args[1] : args[2];
   if (current_thd->is_error()) return error_int();
   const longlong value = arg->val_int();
@@ -3470,7 +3662,7 @@ longlong Item_func_if::val_int() {
 }
 
 String *Item_func_if::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
 
   switch (data_type()) {
     case MYSQL_TYPE_DATETIME:
@@ -3496,7 +3688,7 @@ String *Item_func_if::val_str(String *str) {
 }
 
 my_decimal *Item_func_if::val_decimal(my_decimal *decimal_value) {
-  assert(fixed == 1);
+  assert(fixed);
   Item *arg = args[0]->val_bool() ? args[1] : args[2];
   if (current_thd->is_error()) return error_decimal(decimal_value);
   my_decimal *value = arg->val_decimal(decimal_value);
@@ -3505,7 +3697,7 @@ my_decimal *Item_func_if::val_decimal(my_decimal *decimal_value) {
 }
 
 bool Item_func_if::val_json(Json_wrapper *wr) {
-  assert(fixed == 1);
+  assert(fixed);
   Item *arg = args[0]->val_bool() ? args[1] : args[2];
   if (current_thd->is_error()) return error_json();
   bool has_value;
@@ -3516,7 +3708,7 @@ bool Item_func_if::val_json(Json_wrapper *wr) {
 }
 
 bool Item_func_if::get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) {
-  assert(fixed == 1);
+  assert(fixed);
   Item *arg = args[0]->val_bool() ? args[1] : args[2];
   if (arg->get_date(ltime, fuzzydate)) return error_date();
   null_value = arg->null_value;
@@ -3524,7 +3716,7 @@ bool Item_func_if::get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) {
 }
 
 bool Item_func_if::get_time(MYSQL_TIME *ltime) {
-  assert(fixed == 1);
+  assert(fixed);
   Item *arg = args[0]->val_bool() ? args[1] : args[2];
   if (arg->get_time(ltime)) return error_time();
   null_value = arg->null_value;
@@ -3560,6 +3752,10 @@ bool Item_func_nullif::resolve_type_inner(THD *thd) {
     cached_result_type = STRING_RESULT;
   }
   return false;
+}
+
+TYPELIB *Item_func_nullif::get_typelib() const {
+  return args[0]->get_typelib();
 }
 
 /**
@@ -3700,7 +3896,7 @@ Item *Item_func_case::find_item(String *) {
 }
 
 String *Item_func_case::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   switch (data_type()) {
     case MYSQL_TYPE_DATETIME:
     case MYSQL_TYPE_TIMESTAMP:
@@ -3729,7 +3925,7 @@ String *Item_func_case::val_str(String *str) {
 }
 
 longlong Item_func_case::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   StringBuffer<MAX_FIELD_WIDTH> dummy_str(default_charset());
   Item *item = find_item(&dummy_str);
 
@@ -3748,7 +3944,7 @@ longlong Item_func_case::val_int() {
 }
 
 double Item_func_case::val_real() {
-  assert(fixed == 1);
+  assert(fixed);
   StringBuffer<MAX_FIELD_WIDTH> dummy_str(default_charset());
   Item *item = find_item(&dummy_str);
 
@@ -3767,7 +3963,7 @@ double Item_func_case::val_real() {
 }
 
 my_decimal *Item_func_case::val_decimal(my_decimal *decimal_value) {
-  assert(fixed == 1);
+  assert(fixed);
   StringBuffer<MAX_FIELD_WIDTH> dummy_str(default_charset());
   Item *item = find_item(&dummy_str);
 
@@ -3807,7 +4003,7 @@ bool Item_func_case::val_json(Json_wrapper *wr) {
 }
 
 bool Item_func_case::get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) {
-  assert(fixed == 1);
+  assert(fixed);
   char buff[MAX_FIELD_WIDTH];
   String dummy_str(buff, sizeof(buff), default_charset());
   Item *item = find_item(&dummy_str);
@@ -3821,7 +4017,7 @@ bool Item_func_case::get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) {
 }
 
 bool Item_func_case::get_time(MYSQL_TIME *ltime) {
-  assert(fixed == 1);
+  assert(fixed);
   char buff[MAX_FIELD_WIDTH];
   String dummy_str(buff, sizeof(buff), default_charset());
   Item *item = find_item(&dummy_str);
@@ -4042,6 +4238,9 @@ bool Item_func_case::resolve_type_inner(THD *thd) {
 }
 
 TYPELIB *Item_func_case::get_typelib() const {
+  if (data_type() != MYSQL_TYPE_ENUM && data_type() != MYSQL_TYPE_SET) {
+    return nullptr;
+  }
   TYPELIB *typelib = nullptr;
   for (uint i = 0; i < ncases; i += 2) {
     if (typelib == nullptr) {
@@ -4086,8 +4285,10 @@ void Item_func_case::print(const THD *thd, String *str,
 
 Item_func_case::~Item_func_case() {
   for (uint i = 0; i <= (uint)DECIMAL_RESULT; i++) {
-    destroy(cmp_items[i]);
-    cmp_items[i] = nullptr;
+    if (cmp_items[i] != nullptr) {
+      ::destroy_at(cmp_items[i]);
+      cmp_items[i] = nullptr;
+    }
   }
 }
 
@@ -4096,18 +4297,19 @@ Item_func_case::~Item_func_case() {
 */
 
 String *Item_func_coalesce::str_op(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
-    String *res;
-    if ((res = args[i]->val_str(str))) return res;
+    String *res = args[i]->val_str(str);
+    if (current_thd->is_error()) return error_str();
+    if (res != nullptr) return res;
   }
   null_value = true;
   return nullptr;
 }
 
 bool Item_func_coalesce::val_json(Json_wrapper *wr) {
-  assert(fixed == 1);
+  assert(fixed);
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
     bool has_value;
@@ -4121,10 +4323,11 @@ bool Item_func_coalesce::val_json(Json_wrapper *wr) {
 }
 
 longlong Item_func_coalesce::int_op() {
-  assert(fixed == 1);
+  assert(fixed);
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
     const longlong res = args[i]->val_int();
+    if (current_thd->is_error()) return error_int();
     if (!args[i]->null_value) return res;
   }
   null_value = true;
@@ -4132,10 +4335,11 @@ longlong Item_func_coalesce::int_op() {
 }
 
 double Item_func_coalesce::real_op() {
-  assert(fixed == 1);
+  assert(fixed);
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
     const double res = args[i]->val_real();
+    if (current_thd->is_error()) return 0.0E0;
     if (!args[i]->null_value) return res;
   }
   null_value = true;
@@ -4143,10 +4347,11 @@ double Item_func_coalesce::real_op() {
 }
 
 my_decimal *Item_func_coalesce::decimal_op(my_decimal *decimal_value) {
-  assert(fixed == 1);
+  assert(fixed);
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
     my_decimal *res = args[i]->val_decimal(decimal_value);
+    if (current_thd->is_error()) return error_decimal(decimal_value);
     if (!args[i]->null_value) return res;
   }
   null_value = true;
@@ -4154,7 +4359,7 @@ my_decimal *Item_func_coalesce::decimal_op(my_decimal *decimal_value) {
 }
 
 bool Item_func_coalesce::date_op(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) {
-  assert(fixed == 1);
+  assert(fixed);
   for (uint i = 0; i < arg_count; i++) {
     if (!args[i]->get_date(ltime, fuzzydate)) return (null_value = false);
   }
@@ -4162,7 +4367,7 @@ bool Item_func_coalesce::date_op(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) {
 }
 
 bool Item_func_coalesce::time_op(MYSQL_TIME *ltime) {
-  assert(fixed == 1);
+  assert(fixed);
   for (uint i = 0; i < arg_count; i++) {
     if (!args[i]->get_time(ltime)) return (null_value = false);
   }
@@ -4194,6 +4399,9 @@ bool Item_func_coalesce::resolve_type_inner(THD *thd) {
 }
 
 TYPELIB *Item_func_coalesce::get_typelib() const {
+  if (data_type() != MYSQL_TYPE_ENUM && data_type() != MYSQL_TYPE_SET) {
+    return nullptr;
+  }
   TYPELIB *typelib = nullptr;
   for (uint i = 0; i < arg_count; i++) {
     if (typelib == nullptr) {
@@ -4214,6 +4422,7 @@ bool in_vector::fill(Item **items, uint item_count) {
   m_used_size = 0;
   for (uint i = 0; i < item_count; i++) {
     set(m_used_size, items[i]);
+    if (current_thd->is_error()) return true;
     /*
       We don't put NULL values in array, to avoid erroneous matches in
       bisection.
@@ -4365,7 +4574,7 @@ void in_row::sort_array() {
 bool in_row::find_item(Item *item) {
   if (m_used_size == 0) return false;
   tmp->store_value(item);
-  if (item->is_null()) return false;
+  if (item->null_value) return false;
   return std::binary_search(base_pointers.begin(),
                             base_pointers.begin() + m_used_size, tmp.get(),
                             Cmp_row());
@@ -4435,6 +4644,7 @@ bool in_string::find_item(Item *item) {
   if (m_used_size == 0) return false;
   const String *str = eval_string_arg(collation, item, &tmp);
   if (str == nullptr) return false;
+  if (current_thd->is_error()) return false;
   return std::binary_search(base_pointers.begin(),
                             base_pointers.begin() + m_used_size, str,
                             Cmp_string(collation));
@@ -4640,7 +4850,7 @@ cmp_item_row::~cmp_item_row() {
   DBUG_PRINT("enter", ("this: %p", this));
   if (comparators) {
     for (uint i = 0; i < n; i++) {
-      if (comparators[i]) destroy(comparators[i]);
+      if (comparators[i] != nullptr) ::destroy_at(comparators[i]);
     }
   }
 }
@@ -4906,11 +5116,12 @@ float Item_func_in::get_filtering_effect(THD *thd, table_map filter_for_table,
           (negated ? histograms::enum_operator::NOT_IN_LIST
                    : histograms::enum_operator::IN_LIST);
 
-      double selectivity;
-      if (!get_histogram_selectivity(thd, item_field->field, args, arg_count,
-                                     op, this, item_field->field->table,
-                                     &selectivity))
-        return static_cast<float>(selectivity);
+      const double selectivity =
+          get_histogram_selectivity(thd, *item_field->field, op, *this);
+
+      if (selectivity != kUndefinedSelectivity) {
+        return selectivity;
+      }
     }
 
     Item_ident *fieldref = static_cast<Item_ident *>(args[0]);
@@ -5004,7 +5215,7 @@ bool Item_func_in::resolve_type(THD *thd) {
     if (!(*arg)->const_for_execution()) {
       m_values_are_const = false;
       // @todo - rewrite as has_subquery() ???
-      if ((*arg)->real_item()->type() == Item::SUBSELECT_ITEM)
+      if ((*arg)->real_item()->type() == Item::SUBQUERY_ITEM)
         dep_subq_in_list = true;
       break;
     } else {
@@ -5321,6 +5532,7 @@ longlong Item_func_in::val_int() {
   if (m_const_array != nullptr) {
     if (!m_populated) {
       have_null = m_const_array->fill(args + 1, arg_count - 1);
+      if (current_thd->is_error()) return error_int();
       m_populated = true;
     }
 
@@ -5372,11 +5584,13 @@ bool Item_func_in::populate_bisection(THD *) {
 
 void Item_func_in::cleanup_arrays() {
   m_populated = false;
-  destroy(m_const_array);
+  if (m_const_array != nullptr) ::destroy_at(m_const_array);
   m_const_array = nullptr;
   for (uint i = 0; i <= (uint)DECIMAL_RESULT + 1; i++) {
-    destroy(cmp_items[i]);
-    cmp_items[i] = nullptr;
+    if (cmp_items[i] != nullptr) {
+      ::destroy_at(cmp_items[i]);
+      cmp_items[i] = nullptr;
+    }
   }
 }
 
@@ -5477,7 +5691,7 @@ void Item_cond::copy_andor_arguments(THD *thd, Item_cond *item) {
 }
 
 bool Item_cond::fix_fields(THD *thd, Item **ref) {
-  assert(fixed == 0);
+  assert(!fixed);
   List_iterator<Item> li(list);
   Item *item;
   Query_block *select = thd->lex->current_query_block();
@@ -5823,26 +6037,26 @@ void Item_cond::traverse_cond(Cond_traverser traverser, void *arg,
 /**
   Move SUM items out from item tree and replace with reference.
 
-  The split is done to get an unique item for each SUM function
+  The split is done to get a unique item for each SUM function
   so that we can easily find and calculate them.
   (Calculation done by update_sum_func() and copy_sum_funcs() in
   sql_select.cc)
-
-  @param thd            Thread handler
-  @param ref_item_array Pointer to array of pointers to items
-  @param fields         All fields in select
 
   @note
     This function is run on all expression (SELECT list, WHERE, HAVING etc)
     that have or refer (HAVING) to a SUM expression.
 */
 
-void Item_cond::split_sum_func(THD *thd, Ref_item_array ref_item_array,
+bool Item_cond::split_sum_func(THD *thd, Ref_item_array ref_item_array,
                                mem_root_deque<Item *> *fields) {
   List_iterator<Item> li(list);
   Item *item;
-  while ((item = li++))
-    item->split_sum_func2(thd, ref_item_array, fields, li.ref(), true);
+  while ((item = li++)) {
+    if (item->split_sum_func2(thd, ref_item_array, fields, li.ref(), true)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void Item_cond::update_used_tables() {
@@ -5940,7 +6154,7 @@ float Item_cond_and::get_filtering_effect(THD *thd, table_map filter_for_table,
 */
 
 longlong Item_cond_and::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   List_iterator_fast<Item> li(list);
   Item *item;
   null_value = false;
@@ -5984,7 +6198,7 @@ float Item_cond_or::get_filtering_effect(THD *thd, table_map filter_for_table,
 }
 
 longlong Item_cond_or::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   List_iterator_fast<Item> li(list);
   Item *item;
   null_value = false;
@@ -6023,18 +6237,17 @@ float Item_func_isnull::get_filtering_effect(THD *thd,
     return cached_value ? COND_FILTER_ALLPASS : 0.0f;
   }
 
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
+  const Item_field *fld = contributes_to_filter(
+      thd, read_tables, filter_for_table, fields_to_ignore);
   if (!fld) return COND_FILTER_ALLPASS;
 
-  double selectivity;
-  if (!get_histogram_selectivity(thd, fld->field, args, arg_count,
-                                 histograms::enum_operator::IS_NULL, this,
-                                 fld->field->table, &selectivity))
-    return static_cast<float>(selectivity);
+  const double selectivity = get_histogram_selectivity(
+      thd, *fld->field, histograms::enum_operator::IS_NULL, *this);
 
-  return fld->get_cond_filter_default_probability(rows_in_table,
-                                                  COND_FILTER_EQUALITY);
+  return selectivity == kUndefinedSelectivity
+             ? fld->get_cond_filter_default_probability(rows_in_table,
+                                                        COND_FILTER_EQUALITY)
+             : selectivity;
 }
 
 bool Item_func_isnull::fix_fields(THD *thd, Item **ref) {
@@ -6150,7 +6363,7 @@ bool Item_func_isnull::resolve_type(THD *thd) {
 }
 
 longlong Item_func_isnull::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   if (cache_used) return cached_value;
   return args[0]->is_null() ? 1 : 0;
 }
@@ -6196,22 +6409,21 @@ void Item_is_not_null_test::update_used_tables() {
 float Item_func_isnotnull::get_filtering_effect(
     THD *thd, table_map filter_for_table, table_map read_tables,
     const MY_BITMAP *fields_to_ignore, double rows_in_table) {
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
+  const Item_field *fld = contributes_to_filter(
+      thd, read_tables, filter_for_table, fields_to_ignore);
   if (!fld) return COND_FILTER_ALLPASS;
 
-  double selectivity;
-  if (!get_histogram_selectivity(thd, fld->field, args, arg_count,
-                                 histograms::enum_operator::IS_NOT_NULL, this,
-                                 fld->field->table, &selectivity))
-    return static_cast<float>(selectivity);
+  const double selectivity = get_histogram_selectivity(
+      thd, *fld->field, histograms::enum_operator::IS_NOT_NULL, *this);
 
-  return 1.0f - fld->get_cond_filter_default_probability(rows_in_table,
-                                                         COND_FILTER_EQUALITY);
+  return selectivity == kUndefinedSelectivity
+             ? 1.0f - fld->get_cond_filter_default_probability(
+                          rows_in_table, COND_FILTER_EQUALITY)
+             : selectivity;
 }
 
 longlong Item_func_isnotnull::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   return args[0]->is_null() ? 0 : 1;
 }
 
@@ -6222,12 +6434,12 @@ void Item_func_isnotnull::print(const THD *thd, String *str,
   str->append(STRING_WITH_LEN(" is not null)"));
 }
 
-float Item_func_like::get_filtering_effect(THD *, table_map filter_for_table,
+float Item_func_like::get_filtering_effect(THD *thd, table_map filter_for_table,
                                            table_map read_tables,
                                            const MY_BITMAP *fields_to_ignore,
                                            double rows_in_table) {
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
+  const Item_field *fld = contributes_to_filter(
+      thd, read_tables, filter_for_table, fields_to_ignore);
   if (!fld) return COND_FILTER_ALLPASS;
 
   /*
@@ -6507,7 +6719,7 @@ float Item_func_xor::get_filtering_effect(THD *thd, table_map filter_for_table,
 */
 
 longlong Item_func_xor::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   int result = 0;
   null_value = false;
   for (uint i = 0; i < arg_count; i++) {
@@ -7016,8 +7228,10 @@ longlong Item_equal::val_int() {
 }
 
 Item_equal::~Item_equal() {
-  destroy(eval_item);
-  eval_item = nullptr;
+  if (eval_item != nullptr) {
+    ::destroy_at(eval_item);
+    eval_item = nullptr;
+  }
 }
 
 bool Item_equal::resolve_type(THD *thd) {
@@ -7361,18 +7575,17 @@ float Item_func_eq::get_filtering_effect(THD *thd, table_map filter_for_table,
                                          table_map read_tables,
                                          const MY_BITMAP *fields_to_ignore,
                                          double rows_in_table) {
-  const Item_field *fld =
-      contributes_to_filter(read_tables, filter_for_table, fields_to_ignore);
+  if (arguments()[0]->type() == NULL_ITEM ||
+      arguments()[1]->type() == NULL_ITEM) {
+    return 0.0;
+  }
+
+  const Item_field *fld = contributes_to_filter(
+      thd, read_tables, filter_for_table, fields_to_ignore);
+
   if (!fld) return COND_FILTER_ALLPASS;
 
-  double selectivity;
-  if (!get_histogram_selectivity(thd, fld->field, args, arg_count,
-                                 histograms::enum_operator::EQUALS_TO, this,
-                                 fld->field->table, &selectivity))
-    return static_cast<float>(selectivity);
-
-  return fld->get_cond_filter_default_probability(rows_in_table,
-                                                  COND_FILTER_EQUALITY);
+  return GetEqualSelectivity(thd, this, *fld, rows_in_table);
 }
 
 bool Item_func_any_value::aggregate_check_group(uchar *arg) {
@@ -7606,6 +7819,23 @@ static bool append_hash_for_string_value(Item *comparand,
   return false;
 }
 
+static bool append_hash_for_json_value(Item *comparand,
+                                       String *join_key_buffer) {
+  Json_wrapper value;
+  StringBuffer<STRING_BUFFER_USUAL_SIZE> buffer1, buffer2;
+  if (get_json_atom_wrapper(
+          &comparand, /*arg_idx=*/0, /*calling_function=*/"hash", &buffer1,
+          &buffer2, &value, /*scalar=*/nullptr, /*accept_string=*/true)) {
+    return true;
+  }
+
+  if (comparand->null_value) return true;
+
+  const uint64_t hash = value.make_hash_key(/*hash_val=*/0);
+  return join_key_buffer->append(pointer_cast<const char *>(&hash),
+                                 sizeof(hash));
+}
+
 // Append a decimal value to join_key_buffer, extracted from "comparand".
 //
 // The number of bytes written depends on the actual value. (Leading zero digits
@@ -7720,6 +7950,11 @@ static bool extract_value_for_hash_join(THD *thd,
 
   switch (comparator->get_compare_type()) {
     case STRING_RESULT: {
+      if (comparator->compare_as_json()) {
+        // JSON values can be large, so we don't store the full sort key.
+        assert(!join_condition.store_full_sort_key());
+        return append_hash_for_json_value(comparand, join_key_buffer);
+      }
       if (join_condition.store_full_sort_key()) {
         return append_string_value(
             comparand, comparator->cmp_collation.collation,

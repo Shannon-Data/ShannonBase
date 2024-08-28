@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -30,8 +31,6 @@
 #include <cstring>  // memcpy
 #include <mutex>
 
-#include <iostream>
-
 #include "lex_string.h"  // LEX_STRING
 #include "my_compiler.h"
 #include "my_dbug.h"                // DBUG_SET
@@ -39,6 +38,7 @@
 #include "my_sys.h"                 // strmake_root
 #include "mysql/strings/m_ctype.h"  // my_charset_...
 #include "mysql_version.h"          // MYSQL_VERSION_ID
+#include "sql/lex.h"
 #include "sql/lexer_yystype.h"
 #include "sql/sql_digest_stream.h"
 #include "sql/sql_lex_hash.h"
@@ -256,9 +256,9 @@ void Lex_input_stream::body_utf8_append_literal(THD *thd, const LEX_STRING *txt,
   m_cpp_utf8_processed_ptr = end_ptr;
 }
 
-void Lex_input_stream::add_digest_token(uint token, Lexer_yystype *yylval) {
+void Lex_input_stream::add_digest_token(uint token, Lexer_yystype *lval) {
   if (m_digest != nullptr) {
-    m_digest = digest_add_token(m_digest, token, yylval);
+    m_digest = digest_add_token(m_digest, token, lval);
   }
 }
 
@@ -1276,15 +1276,56 @@ SqlLexer::iterator::iterator(THD *session) : session_(session) {
   }
 }
 
+#if 0
+
+// for debugging.
+std::ostream &operator<<(std::ostream &oss, SqlLexer::iterator::Token tkn) {
+  for (size_t ndx{}; ndx < sizeof(symbols) / sizeof(symbols[0]); ++ndx) {
+    auto sym = symbols[ndx];
+
+    if (sym.tok == tkn.id) {
+      oss << "sym[" << std::string_view(sym.name, sym.length) << "]";
+      return oss;
+    }
+  }
+
+  if (tkn.id >= 32 && tkn.id < 127) {
+    oss << (char)tkn.id;
+  } else if (tkn.id == IDENT || tkn.id == IDENT_QUOTED) {
+    oss << std::quoted(tkn.text, '`');
+  } else if (tkn.id == TEXT_STRING) {
+    oss << std::quoted(tkn.text);
+  } else if (tkn.id == NUM) {
+    oss << tkn.text;
+  } else if (tkn.id == ABORT_SYM) {
+    oss << "<ABORT>";
+  } else if (tkn.id == END_OF_INPUT) {
+    oss << "<END>";
+  }
+
+  return oss;
+}
+#endif
+
 SqlLexer::iterator::Token SqlLexer::iterator::next_token() {
   const auto token_id = lex_one_token(&st, session_);
 
   return {get_token_text(token_id), token_id};
 }
 
+static bool is_final_token(const SqlLexer::iterator::Token &tkn) {
+  switch (tkn.id) {
+    case END_OF_INPUT:  // end-of-input
+    case ABORT_SYM:     // broken comment, string, hex-number, ...
+      return true;
+  }
+
+  return false;
+}
+
 SqlLexer::iterator SqlLexer::iterator::operator++(int) {
-  // the last token as END_OF_INPUT, +1 is past the "end()"
-  if (token_.id == END_OF_INPUT) {
+  // the last token is END_OF_INPUT, +1 is past the "end()"
+  if (is_final_token(token_)) {
     return {nullptr};
   }
 
@@ -1292,8 +1333,8 @@ SqlLexer::iterator SqlLexer::iterator::operator++(int) {
 }
 
 SqlLexer::iterator &SqlLexer::iterator::operator++() {
-  // the last token as END_OF_INPUT, +1 is past the "end()"
-  if (token_.id == END_OF_INPUT) {
+  // the last token is END_OF_INPUT, +1 is past the "end()"
+  if (is_final_token(token_)) {
     token_ = {};
   } else {
     token_ = next_token();
@@ -1317,6 +1358,8 @@ std::string_view SqlLexer::iterator::get_token_text(TokenId token_id) const {
     return {"\0", 1};
   } else if (token_id == 0) {  // YYEOF
     return {};
+  } else if (token_id == ABORT_SYM) {
+    return raw_token;
   } else if (token_id < 256) {  // 0-255 are plain ASCII characters
     return raw_token;
   } else if (token_id == IDENT) {

@@ -1,15 +1,16 @@
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,6 +24,7 @@
 #include "sql/event_data_objects.h"
 
 #include <string.h>
+#include <memory>
 
 #include "lex_string.h"
 #include "my_dbug.h"
@@ -70,6 +72,7 @@
 // calc_time_diff.
 #include "sql/tztime.h"  // my_tz_find, my_tz_OFFSET0
 #include "sql_string.h"
+#include "storage/perfschema/terminology_use_previous_enum.h"
 #include "string_with_len.h"
 
 class Item;
@@ -134,7 +137,7 @@ class Event_creation_ctx : public Stored_program_creation_ctx {
     return nullptr;
   }
 
-  void delete_backup_ctx() override { destroy(this); }
+  void delete_backup_ctx() override { ::destroy_at(this); }
 
  private:
   Event_creation_ctx(const CHARSET_INFO *client_cs,
@@ -936,9 +939,16 @@ int Event_timed::get_create_event(const THD *thd, String *buf) {
 
   if (m_status == Event_parse_data::ENABLED)
     buf->append(STRING_WITH_LEN("ENABLE"));
-  else if (m_status == Event_parse_data::SLAVESIDE_DISABLED)
-    buf->append(STRING_WITH_LEN("DISABLE ON SLAVE"));
-  else
+  else if (m_status == Event_parse_data::REPLICA_SIDE_DISABLED) {
+    if (thd->variables.terminology_use_previous !=
+            terminology_use_previous::enum_compatibility_version::NONE &&
+        thd->variables.terminology_use_previous <=
+            (ulong)terminology_use_previous::enum_compatibility_version::
+                BEFORE_8_2_0)
+      buf->append(STRING_WITH_LEN("DISABLE ON SLAVE"));
+    else
+      buf->append(STRING_WITH_LEN("DISABLE ON REPLICA"));
+  } else
     buf->append(STRING_WITH_LEN("DISABLE"));
 
   if (m_comment.length) {

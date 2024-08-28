@@ -23,6 +23,18 @@ INDEX i6(key6),
 INDEX i7(key7),
 INDEX i8(key8)
 );
+create procedure populate_t0()
+begin
+declare d int default 2;
+insert into t0 values (1,1,1,1,1,1,1,1023),(2,2,2,2,2,2,2,1022);
+while d<=POW(2,9) do
+insert into t0 select key1+d, key2+d, key3+d, key4+d, key5+d,
+key6+d, key7+d, key8-d from t0;
+set d = d*2;
+end while;
+end|
+call populate_t0();
+drop procedure populate_t0;
 analyze table t0;
 Table	Op	Msg_type	Msg_text
 test.t0	analyze	status	OK
@@ -600,27 +612,27 @@ max(a.key1 + b.key1 + a.key2 + b.key2 + a.key3 + b.key3 + a.key4 + b.key4 + a.ke
 update t0 set key1=1;
 explain select max(a.key1 + b.key1 + a.key2 + b.key2 + a.key3 + b.key3 + a.key4 + b.key4 + a.key5 + b.key5)
 from t0 as a force index(i1,i2), t0 as b force index (i1,i2)
-where (a.key1 = 1 or a.key2 = 1)
-and   (b.key1 = 1 or b.key2 = 1);
+where (a.key1 = 2 or a.key2 = 2)
+and   (b.key1 = 2 or b.key2 = 2);
 EXPLAIN
 -> Aggregate: max((((((((((a.key1 + b.key1) + a.key2) + b.key2) + a.key3) + b.key3) + a.key4) + b.key4) + a.key5) + b.key5))  (rows=1)
-    -> Inner hash join (no condition)  (rows=1.04e+6)
-        -> Filter: ((b.key1 = 1) or (b.key2 = 1))  (rows=1021)
-            -> Deduplicate rows sorted by row ID  (rows=1021)
-                -> Index range scan on b using i1 over (key1 = 1)  (rows=1021)
-                -> Index range scan on b using i2 over (key2 = 1)  (rows=1)
+    -> Inner hash join (no condition)  (rows=4)
+        -> Filter: ((b.key1 = 2) or (b.key2 = 2))  (rows=2)
+            -> Deduplicate rows sorted by row ID  (rows=2)
+                -> Index range scan on b using i1 over (key1 = 2)  (rows=1)
+                -> Index range scan on b using i2 over (key2 = 2)  (rows=1)
         -> Hash
-            -> Filter: ((a.key1 = 1) or (a.key2 = 1))  (rows=1021)
-                -> Deduplicate rows sorted by row ID  (rows=1021)
-                    -> Index range scan on a using i1 over (key1 = 1)  (rows=1021)
-                    -> Index range scan on a using i2 over (key2 = 1)  (rows=1)
+            -> Filter: ((a.key1 = 2) or (a.key2 = 2))  (rows=2)
+                -> Deduplicate rows sorted by row ID  (rows=2)
+                    -> Index range scan on a using i1 over (key1 = 2)  (rows=1)
+                    -> Index range scan on a using i2 over (key2 = 2)  (rows=1)
 
 select max(a.key1 + b.key1 + a.key2 + b.key2 + a.key3 + b.key3 + a.key4 + b.key4 + a.key5 + b.key5)
 from t0 as a force index(i1,i2), t0 as b force index (i1,i2)
-where (a.key1 = 1 or a.key2 = 1)
-and   (b.key1 = 1 or b.key2 = 1);
+where (a.key1 = 2 or a.key2 = 2)
+and   (b.key1 = 2 or b.key2 = 2);
 max(a.key1 + b.key1 + a.key2 + b.key2 + a.key3 + b.key3 + a.key4 + b.key4 + a.key5 + b.key5)
-8194
+NULL
 alter table t0 add filler1 char(200), add filler2 char(200), add filler3 char(200);
 update t0 set key2=1, key3=1, key4=1, key5=1,key6=1,key7=1 where key7 < 500;
 # The next query will not use index i7 in intersection if the OS doesn't
@@ -1290,8 +1302,8 @@ EXPLAIN
 drop table t0,t1;
 # 'Partially' covered fields test
 create table t2 (
-a char(10),
-b char(10),
+a char(10) collate utf8mb4_0900_bin,
+b char(10) collate utf8mb4_0900_bin,
 filler1 char(255),
 filler2 char(255),
 key(a(5)),
@@ -1304,11 +1316,11 @@ select count(a) from t2 where b='BBBBBBBB';
 count(a)
 4
 # BUG#1:
-expla_or_bin select count(a_or_b) from t2 where a_or_b='AAAAAAAA' a_or_bnd a_or_b='AAAAAAAA';
+explain select count(a_or_b) from t2 where a_or_b='AAAAAAAA' and a_or_b='AAAAAAAA';
 EXPLAIN
--> Aggrega_or_bte: count(t2.a_or_b)  (...)
-    -> Filter: ((t2.a_or_b = 'AAAAAAAA') a_or_bnd (t2.a_or_b = 'AAAAAAAA'))  (...)
-        -> Index lookup on t2 using a_or_b (a_or_b='AAAAAAAA')  (...)
+-> Aggregate: count(t2.a_or_b)
+    -> Filter: ((t2.a_or_b = 'AAAAAAAA') and (t2.a_or_b = 'AAAAAAAA'))
+        -> Index lookup on t2 using a_or_b (a_or_b='AAAAAAAA')
 
 select count(a) from t2 where a='AAAAAAAA' and b='AAAAAAAA';
 count(a)
@@ -1982,8 +1994,8 @@ primary key (pk1, pk2)
 # Column 9, rows, can change depending on innodb-page-size.
 explain select * from t1 where pk1 = 1 and pk2 < 80  and key1=0;
 EXPLAIN
--> Filter: ((t1.key1 = 0) and (t1.pk1 = 1) and (t1.pk2 < 80))  (rows=0.099)
-    -> Index range scan on t1 using PRIMARY over (pk1 = 1 AND pk2 < 80)  (rows=10)
+-> Filter: ((t1.key1 = 0) and (t1.pk1 = 1) and (t1.pk2 < 80))  (...)
+    -> Index range scan on t1 using PRIMARY over (pk1 = 1 AND pk2 < 80)  (...)
 
 # CPK scan + 1 ROR range scan is a special case
 select * from t1 where pk1 = 1 and pk2 < 80  and key1=0;

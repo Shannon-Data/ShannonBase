@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -399,8 +400,8 @@ class context : public Explain_context {
 /**
   Node class to wrap a subquery node tree
 
-  Implements CTX_WHERE, CTX_HAVING, CTX_ORDER_BY_SQ, CTX_GROUP_BY_SQ and
-  CTX_OPTIMIZED_AWAY_SUBQUERY context nodes.
+  Implements CTX_WHERE, CTX_HAVING,  CTX_QUALIFY, CTX_ORDER_BY_SQ,
+  CTX_GROUP_BY_SQ and CTX_OPTIMIZED_AWAY_SUBQUERY context nodes.
   This class hosts underlying join_ctx or uion_ctx.
 
   Is used for a subquery, a derived table.
@@ -624,8 +625,7 @@ bool table_base_ctx::format_body(Opt_trace_context *json,
                                  Opt_trace_object *obj) {
   StringBuffer<64> buff;
 
-  if (mod_type != MT_NONE && mod_type != MT_GATHER)
-   obj->add(mod_type_name[mod_type], true);
+  if (mod_type != MT_NONE) obj->add(mod_type_name[mod_type], true);
 
   if (!col_id.is_empty() && !is_hidden_id) obj->add(K_SELECT_ID, col_id.value);
 
@@ -1306,9 +1306,6 @@ bool join_ctx::format_body(Opt_trace_context *json, Opt_trace_object *obj) {
       const Opt_trace_object insert_from(json, "insert_from");
       if (format_body_inner(json, obj)) return true; /* purecov: inspected */
     }
-  } else if (join_tabs.elements &&
-             (join_tabs.head()->get_mod_type() == MT_GATHER)) {
-    join_tabs.head()->format(json);
   } else if (format_body_inner(json, obj))
     return true; /* purecov: inspected */
   return format_query_expression(json);
@@ -1673,6 +1670,7 @@ bool Explain_format_JSON::begin_context(enum_parsing_context ctx_arg,
              current_context->type == CTX_OPTIMIZED_AWAY_SUBQUERY ||
              current_context->type == CTX_WHERE ||
              current_context->type == CTX_HAVING ||
+             current_context->type == CTX_QUALIFY ||
              current_context->type == CTX_ORDER_BY_SQ ||
              current_context->type == CTX_GROUP_BY_SQ ||
              current_context->type == CTX_QUERY_SPEC);
@@ -1915,10 +1913,12 @@ bool Explain_format_JSON::begin_context(enum_parsing_context ctx_arg,
              // subqueries:
              current_context->type == CTX_SELECT_LIST ||
              current_context->type == CTX_UPDATE_VALUE ||
+             current_context->type == CTX_INSERT_VALUES ||
              current_context->type == CTX_DERIVED ||
              current_context->type == CTX_OPTIMIZED_AWAY_SUBQUERY ||
              current_context->type == CTX_WHERE ||
              current_context->type == CTX_HAVING ||
+             current_context->type == CTX_QUALIFY ||
              current_context->type == CTX_ORDER_BY_SQ ||
              current_context->type == CTX_GROUP_BY_SQ ||
              current_context->type == CTX_QUERY_SPEC);
@@ -2110,7 +2110,7 @@ std::string Explain_format_JSON::ExplainJsonToString(Json_object *json) {
   Json_wrapper wrapper(json, /*alias=*/true);
   StringBuffer<STRING_BUFFER_USUAL_SIZE> explain;
   if (wrapper.to_pretty_string(&explain, "ExplainJsonToString()",
-                               JsonDocumentDefaultDepthHandler)) {
+                               JsonDepthErrorHandler)) {
     return "";
   }
   return {explain.ptr(), explain.length()};

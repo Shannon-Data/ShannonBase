@@ -6,9 +6,10 @@
 --echo #
 
 --disable_query_log
+eval INSTALL PLUGIN mock SONAME '$MOCK_PLUGIN';
 --enable_query_log
 
-CREATE TABLE t1(id INT PRIMARY KEY, x INT NOT NULL) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1(id INT PRIMARY KEY, x INT NOT NULL) SECONDARY_ENGINE MOCK;
 INSERT INTO t1 VALUES
 (1, 1), (2, 1), (3, 1), (4, 1), (5, 1),
 (6, 1), (7, 1), (8, 1), (9, 2), (10, 2);
@@ -68,4 +69,5 @@ EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 3;
 DROP TABLE t1;
 
 --disable_query_log
+UNINSTALL PLUGIN mock;
 --enable_query_log

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -45,11 +46,84 @@
 #include "mysql/harness/logging/logging.h"
 #include "mysql/harness/stdx/expected.h"
 #include "mysqlrouter/classic_protocol.h"
+#include "mysqlrouter/classic_protocol_constants.h"
+#include "mysqlrouter/classic_protocol_session_track.h"
 #include "statement_reader.h"
 
 IMPORT_LOG_FUNCTIONS()
 
 namespace server_mock {
+
+template <class T>
+constexpr uint8_t type_byte() {
+  return classic_protocol::Codec<T>::type_byte();
+}
+
+template <class T>
+std::string encode_session_tracker(const T &tracker) {
+  auto shared_caps = classic_protocol::capabilities::session_track;
+
+  std::string track_field{};
+  std::string session_change{};
+
+  {
+    auto encode_res = classic_protocol::encode(
+        tracker, shared_caps, net::dynamic_buffer(track_field));
+    if (!encode_res) {
+      //
+      return {};
+    }
+  }
+
+  {
+    auto encode_res = classic_protocol::encode(
+        classic_protocol::session_track::Field{type_byte<T>(), track_field},
+        shared_caps, net::dynamic_buffer(session_change));
+    if (!encode_res) {
+      //
+      return {};
+    }
+  }
+
+  return session_change;
+}
+
+std::string encode_session_trackers(
+    const std::vector<session_tracker_field> &trackers) {
+  std::string session_changes{};
+  for (const auto &tracker : trackers) {
+    if (std::holds_alternative<
+            classic_protocol::session_track::TransactionCharacteristics>(
+            tracker)) {
+      session_changes += encode_session_tracker(
+          std::get<classic_protocol::session_track::TransactionCharacteristics>(
+              tracker));
+    } else if (std::holds_alternative<
+                   classic_protocol::session_track::TransactionState>(
+                   tracker)) {
+      session_changes += encode_session_tracker(
+          std::get<classic_protocol::session_track::TransactionState>(tracker));
+    } else if (std::holds_alternative<
+                   classic_protocol::session_track::SystemVariable>(tracker)) {
+      session_changes += encode_session_tracker(
+          std::get<classic_protocol::session_track::SystemVariable>(tracker));
+    } else if (std::holds_alternative<classic_protocol::session_track::Schema>(
+                   tracker)) {
+      session_changes += encode_session_tracker(
+          std::get<classic_protocol::session_track::Schema>(tracker));
+    } else if (std::holds_alternative<classic_protocol::session_track::Gtid>(
+                   tracker)) {
+      session_changes += encode_session_tracker(
+          std::get<classic_protocol::session_track::Gtid>(tracker));
+    } else if (std::holds_alternative<classic_protocol::session_track::State>(
+                   tracker)) {
+      session_changes += encode_session_tracker(
+          std::get<classic_protocol::session_track::State>(tracker));
+    }
+  }
+
+  return session_changes;
+}
 
 std::unique_ptr<StatementReaderBase>
 DuktapeStatementReaderFactory::operator()() {
@@ -506,6 +580,78 @@ struct DuktapeStatementReader::Pimpl {
     return value;
   }
 
+  std::vector<session_tracker_field> get_session_trackers(duk_idx_t idx) {
+    std::vector<session_tracker_field> trackers;
+
+    duk_get_prop_string(ctx, idx, "session_trackers");
+    if (duk_is_array(ctx, -1)) {
+      // iterate over the column meta
+      duk_enum(ctx, -1, DUK_ENUM_ARRAY_INDICES_ONLY);
+      while (duk_next(ctx, -1, 1)) {
+        // @-2 ndx
+        // @-1 tracker
+
+        auto type = get_object_string_value(-1, "type");
+        if (type == "system_variable") {
+          trackers.emplace_back(classic_protocol::session_track::SystemVariable(
+              get_object_string_value(-1, "name"),
+              get_object_string_value(-1, "value")));
+        } else if (type == "trx_characteristics") {
+          auto stmt = get_object_string_value(-1, "trx_stmt");
+
+          trackers.emplace_back(
+              classic_protocol::session_track::TransactionCharacteristics(
+                  stmt));
+        } else if (type == "trx_state") {
+          auto state = get_object_string_value(-1, "state");
+
+          if (state.size() != 8) {
+            throw std::runtime_error(
+                "session_tracket.state must be size==8, is " +
+                std::to_string(state.size()));
+          }
+
+          trackers.emplace_back(
+              classic_protocol::session_track::TransactionState(
+                  std::span<char, 8>(state)));
+        } else if (type == "schema") {
+          auto schema = get_object_string_value(-1, "schema");
+
+          trackers.emplace_back(
+              classic_protocol::session_track::Schema(schema));
+        } else if (type == "gtid") {
+          auto gtid = get_object_string_value(-1, "gtid");
+
+          trackers.emplace_back(classic_protocol::session_track::Gtid(0, gtid));
+        } else if (type == "state") {
+          auto state = get_object_string_value(-1, "state");
+
+          if (state.size() != 1) {
+            throw std::runtime_error(
+                "session_tracket.state must be size==1, is " +
+                std::to_string(state.size()));
+          }
+
+          trackers.emplace_back(
+              classic_protocol::session_track::State(state[0]));
+        } else {
+          throw std::runtime_error("unknown session_tracket.type = " + type);
+        }
+
+        duk_pop(ctx);  // tracker
+        duk_pop(ctx);  // ndx
+      }
+      duk_pop(ctx);  // enum
+    } else if (duk_is_undefined(ctx, -1)) {
+      // ok
+    } else {
+      throw std::runtime_error("expected .session_tracker to be an array");
+    }
+    duk_pop(ctx);
+
+    return trackers;
+  }
+
   OkResponse get_ok(duk_idx_t idx) {
     if (!duk_is_object(ctx, idx)) {
       throw std::runtime_error("expect an object");
@@ -514,7 +660,9 @@ struct DuktapeStatementReader::Pimpl {
     return {get_object_integer_value<uint32_t>(-1, "affected_rows", 0),
             get_object_integer_value<uint32_t>(-1, "last_insert_id", 0),
             get_object_integer_value<uint16_t>(-1, "status", 0),
-            get_object_integer_value<uint16_t>(-1, "warning_count", 0)};
+            get_object_integer_value<uint16_t>(-1, "warning_count", 0),
+            get_object_string_value(-1, "message", ""),
+            encode_session_trackers(get_session_trackers(-1))};
   }
 
   ErrorResponse get_error(duk_idx_t idx) {
@@ -603,6 +751,17 @@ struct DuktapeStatementReader::Pimpl {
     }
 
     duk_pop(ctx);  // "rows"
+
+    response.end_of_rows.affected_rows(
+        get_object_integer_value<uint32_t>(-1, "affected_rows", 0));
+    response.end_of_rows.last_insert_id(
+        get_object_integer_value<uint32_t>(-1, "last_insert_id", 0));
+    response.end_of_rows.status_flags(
+        get_object_integer_value<uint16_t>(-1, "status", 0));
+    response.end_of_rows.warning_count(
+        get_object_integer_value<uint16_t>(-1, "warning_count", 0));
+    response.end_of_rows.session_changes(
+        encode_session_trackers(get_session_trackers(-1)));
 
     return response;
   }
@@ -939,7 +1098,7 @@ DuktapeStatementReader::handshake(bool is_greeting) {
         duk_pop(ctx);  // retval
         duk_pop(ctx);  // handshake
 
-        return stdx::make_unexpected(ErrorResponse{
+        return stdx::unexpected(ErrorResponse{
             2013, "handshake-function must return an object, if set", "HY000"});
       }
     }
@@ -1012,14 +1171,14 @@ DuktapeStatementReader::handshake(bool is_greeting) {
   duk_pop(ctx);
 
   if (error) {
-    return stdx::make_unexpected(*error);
+    return stdx::unexpected(*error);
   }
   if (!server_greeting_res) {
     ec = server_greeting_res.error();
   }
 
   if (ec) {
-    return stdx::make_unexpected(ErrorResponse{2013, ec.message(), "HY000"});
+    return stdx::unexpected(ErrorResponse{2013, ec.message(), "HY000"});
   }
 
   return handshake_data{

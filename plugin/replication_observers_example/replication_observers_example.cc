@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -39,7 +40,7 @@
 #include "plugin/replication_observers_example/src/binlog/service/iterator/tests/pfs.h"
 #include "plugin/replication_observers_example/src/binlog/service/iterator/tests/status_vars.h"
 
-#include <include/mysql/components/services/ongoing_transaction_query_service.h>
+#include <mysql/components/services/ongoing_transaction_query_service.h>
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "sql/current_thd.h"
@@ -237,13 +238,14 @@ typedef enum enum_before_commit_test_cases {
 #ifndef NDEBUG
 static int before_commit_tests(Trans_param *param,
                                before_commit_test_cases test_case) {
-  rpl_sid fake_sid;
+  mysql::gtid::Tsid fake_tsid;
   rpl_sidno fake_sidno;
   rpl_gno fake_gno;
 
   Transaction_termination_ctx transaction_termination_ctx;
   memset(&transaction_termination_ctx, 0, sizeof(transaction_termination_ctx));
   transaction_termination_ctx.m_thread_id = param->thread_id;
+  [[maybe_unused]] std::size_t tsid_chars = 0;
 
   switch (test_case) {
     case NEGATIVE_CERTIFICATION:
@@ -254,9 +256,9 @@ static int before_commit_tests(Trans_param *param,
       break;
 
     case POSITIVE_CERTIFICATION_WITH_GTID:
-      fake_sid.parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                     binary_log::Uuid::TEXT_LENGTH);
-      fake_sidno = get_sidno_from_global_sid_map(fake_sid);
+      std::ignore =
+          fake_tsid.from_cstring("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+      fake_sidno = get_sidno_from_global_tsid_map(fake_tsid);
       fake_gno = get_last_executed_gno(fake_sidno);
       fake_gno++;
 
@@ -500,14 +502,15 @@ int validate_plugin_server_requirements(Trans_param *param) {
   /*
     Instantiate a Gtid_log_event without a THD parameter.
   */
-  rpl_sid fake_sid;
-  fake_sid.parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                 binary_log::Uuid::TEXT_LENGTH);
-  const rpl_sidno fake_sidno = get_sidno_from_global_sid_map(fake_sid);
+  mysql::gtid::Tsid fake_tsid;
+  std::ignore = fake_tsid.from_cstring("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+  const rpl_sidno fake_sidno = get_sidno_from_global_tsid_map(fake_tsid);
   const rpl_gno fake_gno = get_last_executed_gno(fake_sidno) + 1;
 
   const Gtid gtid = {fake_sidno, fake_gno};
-  const Gtid_specification gtid_spec = {ASSIGNED_GTID, gtid};
+  mysql::gtid::Tag_plain empty_tag;
+  empty_tag.clear();
+  Gtid_specification gtid_spec = {ASSIGNED_GTID, gtid, empty_tag};
   Gtid_log_event *gle =
       new Gtid_log_event(param->server_id, true, 0, 1, true, 0, 0, gtid_spec,
                          UNKNOWN_SERVER_VERSION, UNKNOWN_SERVER_VERSION);
@@ -524,7 +527,8 @@ int validate_plugin_server_requirements(Trans_param *param) {
   /*
     Instantiate a anonymous Gtid_log_event without a THD parameter.
   */
-  const Gtid_specification anonymous_gtid_spec = {ANONYMOUS_GTID, gtid};
+  const Gtid_specification anonymous_gtid_spec = {ANONYMOUS_GTID, gtid,
+                                                  empty_tag};
   gle = new Gtid_log_event(param->server_id, true, 0, 1, true, 0, 0,
                            anonymous_gtid_spec, UNKNOWN_SERVER_VERSION,
                            UNKNOWN_SERVER_VERSION);
@@ -682,10 +686,9 @@ int test_channel_service_interface() {
   assert(!error);
 
   // Get the last delivered gno (should be 0)
-  rpl_sid fake_sid;
-  fake_sid.parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                 binary_log::Uuid::TEXT_LENGTH);
-  const rpl_sidno fake_sidno = get_sidno_from_global_sid_map(fake_sid);
+  mysql::gtid::Tsid fake_tsid;
+  std::ignore = fake_tsid.from_cstring("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+  const rpl_sidno fake_sidno = get_sidno_from_global_tsid_map(fake_tsid);
   rpl_gno gno = channel_get_last_delivered_gno(interface_channel, fake_sidno);
   assert(gno == 0);
 
@@ -1041,7 +1044,7 @@ bool test_server_count_transactions() {
   bool error = service->get_ongoing_server_transactions(&ids, &size);
   assert(!error);
 
-  assert(size == 3);
+  assert(size == 4);
 
   my_free(ids);
 

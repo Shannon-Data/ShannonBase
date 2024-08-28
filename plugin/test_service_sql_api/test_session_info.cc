@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -615,7 +616,7 @@ static void test_sql(void *p) {
 
   /* Opening session 1 */
   WRITE_STR("Opening Session 1\n");
-  session_1 = srv_session_open(NULL, plugin_ctx);
+  session_1 = srv_session_open(nullptr, plugin_ctx);
   if (!session_1)
     LogPluginErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Opening Session 1 failed");
   else
@@ -623,7 +624,7 @@ static void test_sql(void *p) {
 
   /* Opening session 2 */
   WRITE_STR("Opening Session 2\n");
-  session_2 = srv_session_open(NULL, plugin_ctx);
+  session_2 = srv_session_open(nullptr, plugin_ctx);
   if (!session_2)
     LogPluginErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Opening Session 2 failed");
   else
@@ -989,7 +990,7 @@ static void test_sql(void *p) {
       srv_session_info_set_connection_type(session_2, VIO_TYPE_SHARED_MEMORY));
   WRITE_STR("\n");
 
-  session_3 = srv_session_open(NULL, plugin_ctx);
+  session_3 = srv_session_open(nullptr, plugin_ctx);
   if (!session_3)
     LogPluginErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Opening Session 3 failed");
   else {
