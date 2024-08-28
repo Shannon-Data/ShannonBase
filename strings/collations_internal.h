@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -81,7 +82,7 @@ class Collations final {
 
     @returns pointer to a collation object on success, nullptr if not found
   */
-  CHARSET_INFO *find_by_name(const mysql::collation::Name &, myf flags = 0,
+  CHARSET_INFO *find_by_name(const mysql::collation::Name &name, myf flags = 0,
                              MY_CHARSET_ERRMSG *errmsg = nullptr);
 
   /**
@@ -116,7 +117,8 @@ class Collations final {
 
     @returns pointer to a collation object on success, nullptr if not found
   */
-  CHARSET_INFO *find_primary(const mysql::collation::Name &, myf flags = 0,
+  CHARSET_INFO *find_primary(const mysql::collation::Name &cs_name,
+                             myf flags = 0,
                              MY_CHARSET_ERRMSG *errmsg = nullptr);
 
   /**
@@ -133,7 +135,7 @@ class Collations final {
 
     @returns pointer to a collation object on success, nullptr if not found
   */
-  CHARSET_INFO *find_default_binary(const mysql::collation::Name &,
+  CHARSET_INFO *find_default_binary(const mysql::collation::Name &cs_name,
                                     myf flags = 0,
                                     MY_CHARSET_ERRMSG *errmsg = nullptr);
 
@@ -153,7 +155,7 @@ class Collations final {
 
     @returns primary collation id
   */
-  unsigned get_primary_collation_id(const mysql::collation::Name &) const;
+  unsigned get_primary_collation_id(const mysql::collation::Name &name) const;
 
   /**
     Finds character set by its name and returns an id of its default binary
@@ -164,7 +166,7 @@ class Collations final {
     @returns default binary collation id
   */
   unsigned get_default_binary_collation_id(
-      const mysql::collation::Name &) const;
+      const mysql::collation::Name &name) const;
 
   /**
     If not done yet, force collation parsing/initialization under m_mutex lock
@@ -258,7 +260,8 @@ class Collations final {
     Maps normalized strings of all known character set names, collation names,
     and their aliases to CHARSET_INFO object pointers
 
-    @note @see old_conv and get_old_charset_by_name() for exclusions
+    @note see old_conv and get_old_charset_by_name() for exclusions
+    @see old_conv(), get_old_charset_by_name()
   */
   Hash<std::string> m_all_by_collation_name;
 

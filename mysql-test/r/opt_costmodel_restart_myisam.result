@@ -41,7 +41,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "35.02"
+      "query_cost": "34.97"
     },
     "table": {
       "table_name": "t1_myisam",
@@ -50,9 +50,9 @@ EXPLAIN
       "rows_produced_per_join": 100,
       "filtered": "100.00",
       "cost_info": {
-        "read_cost": "25.02",
+        "read_cost": "24.97",
         "eval_cost": "10.00",
-        "prefix_cost": "35.02",
+        "prefix_cost": "34.97",
         "data_read_per_join": "392K"
       },
       "used_columns": [
@@ -99,7 +99,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "240.14"
+      "query_cost": "239.75"
     },
     "table": {
       "table_name": "t1_myisam",
@@ -108,9 +108,9 @@ EXPLAIN
       "rows_produced_per_join": 100,
       "filtered": "100.00",
       "cost_info": {
-        "read_cost": "200.14",
+        "read_cost": "199.75",
         "eval_cost": "40.00",
-        "prefix_cost": "240.14",
+        "prefix_cost": "239.75",
         "data_read_per_join": "392K"
       },
       "used_columns": [
@@ -158,7 +158,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "35.02"
+      "query_cost": "34.97"
     },
     "table": {
       "table_name": "t1_myisam",
@@ -167,9 +167,9 @@ EXPLAIN
       "rows_produced_per_join": 100,
       "filtered": "100.00",
       "cost_info": {
-        "read_cost": "25.02",
+        "read_cost": "24.97",
         "eval_cost": "10.00",
-        "prefix_cost": "35.02",
+        "prefix_cost": "34.97",
         "data_read_per_join": "392K"
       },
       "used_columns": [

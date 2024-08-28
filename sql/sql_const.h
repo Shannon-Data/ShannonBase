@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,10 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
-*/
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
   @file
@@ -77,10 +75,7 @@ constexpr const int MAX_TIME_FULL_WIDTH{23};
 constexpr const int MAX_DATETIME_FULL_WIDTH{29};
 /** YYYY-MM-DD HH:MM:SS */
 constexpr const int MAX_DATETIME_WIDTH{19};
-/**TRANSACTION ID WIDTH, ulonglong, is should be same with sizeof(ib_id_t)
- * in row_sel_field_store_in_mysql_format_func, will memcpy trxid to dest.
-*/
-constexpr const int MAX_DB_TRX_ID_WIDTH{8};
+
 /**
   MAX_TABLES and xxx_TABLE_BIT are used in optimization of table factors and
   expressions, and in join plan generation.
@@ -228,7 +223,8 @@ constexpr const uint64_t OPTIMIZER_SWITCH_PREFER_ORDERING_INDEX{1ULL << 23};
 constexpr const uint64_t OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER{1ULL << 24};
 constexpr const uint64_t OPTIMIZER_SWITCH_DERIVED_CONDITION_PUSHDOWN{1ULL
                                                                      << 25};
-constexpr const uint64_t OPTIMIZER_SWITCH_LAST{1ULL << 26};
+constexpr const uint64_t OPTIMIZER_SWITCH_HASH_SET_OPERATIONS{1ULL << 26};
+constexpr const uint64_t OPTIMIZER_SWITCH_LAST{1ULL << 27};
 
 enum SHOW_COMP_OPTION { SHOW_OPTION_YES, SHOW_OPTION_NO, SHOW_OPTION_DISABLED };
 

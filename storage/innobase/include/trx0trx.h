@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -212,17 +213,6 @@ void trx_mark_sql_stat_end(trx_t *trx); /*!< in: trx handle */
  when this function is first called for a new started transaction. */
 ReadView *trx_assign_read_view(trx_t *trx); /*!< in: active transaction */
 
-/**create a same read view from another one*/
-ReadView *trx_clone_read_view(trx_t *trx, ReadView *readview);
-
-/** Clones the read view from another transaction. All the consistent reads
-within the receiver transaction will get the same read view as the donor
-transaction.
-@param[in]	trx	receiver transaction
-@param[in]	from_trx	donor transaction
-@return read view clone */
-ReadView *trx_clone_read_view(trx_t *trx, trx_t *from_trx);
-
 /** @return the transaction's read view or NULL if one not assigned. */
 static inline ReadView *trx_get_read_view(trx_t *trx);
 
@@ -247,7 +237,7 @@ void trx_print_low(FILE *f,
                    /*!< in: transaction */
                    ulint max_query_len,
                    /*!< in: max query length to print,
-                   or 0 to use the default max length */
+                   must be positive */
                    ulint n_rec_locks,
                    /*!< in: lock_number_of_rows_locked(&trx->lock) */
                    ulint n_trx_locks,
@@ -259,16 +249,14 @@ void trx_print_low(FILE *f,
 The caller must hold lock_sys exclusive global latch and trx_sys->mutex.
 @param[in]  f               output stream
 @param[in]  trx             transaction
-@param[in]  max_query_len   max query length to print, or 0 to use the default
-                            max length */
+@param[in]  max_query_len   max query length to print, must be positive */
 void trx_print_latched(FILE *f, const trx_t *trx, ulint max_query_len);
 
 /** Prints info about a transaction.
 Acquires and releases lock_sys exclusive global latch and trx_sys->mutex.
 @param[in]  f               output stream
 @param[in]  trx             transaction
-@param[in]  max_query_len   max query length to print, or 0 to use the default
-                            max length */
+@param[in]  max_query_len   max query length to print, must be positive */
 void trx_print(FILE *f, const trx_t *trx, ulint max_query_len);
 
 /** Determine if a transaction is a dictionary operation.
@@ -746,12 +734,6 @@ struct trx_t {
               it can */
 
   trx_id_t id; /*!< transaction id */
-
-  trx_id_t preallocated_id; /*!< preallocated transaction id for a
-                            RO transaction whose read view was
-                            cloned. If this transaction is promoted
-                            to RW, it will become the transaction
-                            id. */
 
   trx_id_t no; /*!< transaction serialization number:
                max trx id shortly before the
@@ -1629,6 +1611,10 @@ bool trx_is_prepared_in_tc(trx_t const *trx);
 @param[in,out] trx Transaction instance to finish prepare
 @return DB_SUCCESS or error number */
 dberr_t trx_set_prepared_in_tc_for_mysql(trx_t *trx);
+
+/** Human readable transaction state, for diagnostic purposes.
+@return pointer to static string, nullptr if state is not valid */
+inline const char *trx_state_string(trx_state_t state);
 
 #include "trx0trx.ic"
 #endif /* !UNIV_HOTBACKUP */

@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,9 +41,9 @@
 #include <string.h>
 #include <algorithm>
 #include <atomic>
+#include <bit>
 
 #include "my_base.h"  // key_part_map
-#include "my_bit.h"   // my_count_bits
 #include "my_bitmap.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
@@ -81,6 +82,7 @@
 
 using std::max;
 using std::min;
+using std::popcount;
 
 /**
   Number of rows in a reference table when refereed through a not unique key.
@@ -830,7 +832,7 @@ double Optimize_table_order::calculate_scan_cost(
       account here for range/index_merge access. Find out why this is so.
     */
     scan_and_filter_cost =
-        prefix_rowcount * (tab->range_scan()->cost +
+        prefix_rowcount * (tab->range_scan()->cost() +
                            cost_model->row_evaluate_cost(
                                tab->found_records - *rows_after_filtering));
   } else {
@@ -1115,8 +1117,8 @@ void Optimize_table_order::best_access_path(JOIN_TAB *tab,
              !table->covering_keys.is_clear_all() && best_ref &&          //(3)
              (!tab->range_scan() ||                                       //(3)
               (tab->range_scan()->type ==
-                   AccessPath::ROWID_INTERSECTION &&             //(3)
-               best_ref->read_cost < tab->range_scan()->cost)))  //(3)
+                   AccessPath::ROWID_INTERSECTION &&               //(3)
+               best_ref->read_cost < tab->range_scan()->cost())))  //(3)
   {
     if (tab->range_scan()) {
       trace_access_scan.add_alnum("access_type", "range");
@@ -1558,14 +1560,14 @@ static ulonglong get_bound_sj_equalities(const JOIN_TAB *tab,
       item = inner;
     else
       continue;
-    Item_field *const item_field = static_cast<Item_field *>(item);
-    Item_equal *item_equal = item_field->item_equal;
-    if (!item_equal) {
+    Item_field *const item_field = down_cast<Item_field *>(item);
+    Item_equal *item_equal = item_field->multi_equality();
+    if (item_equal == nullptr) {
       Table_ref *const nest = item_field->table_ref->outer_join_nest();
       item_equal = item_field->find_item_equal(nest ? nest->cond_equal
                                                     : tab->join()->cond_equal);
     }
-    if (item_equal) {
+    if (item_equal != nullptr) {
       /*
         If the multiple equality {[optional_constant,] col1, col2...} contains
         (1) a constant
@@ -1825,11 +1827,11 @@ bool Optimize_table_order::semijoin_loosescan_fill_driving_table_position(
 
   if (quick_uses_applicable_index && idx == join->const_tables) {
     Opt_trace_object trace_range(trace, "range_scan");
-    trace_range.add("cost", tab->range_scan()->cost);
+    trace_range.add("cost", tab->range_scan()->cost());
     // @TODO: this the right part restriction:
-    if (tab->range_scan()->cost < pos->read_cost) {
+    if (tab->range_scan()->cost() < pos->read_cost) {
       pos->loosescan_key = used_index(tab->range_scan());
-      pos->read_cost = tab->range_scan()->cost;
+      pos->read_cost = tab->range_scan()->cost();
       // this is ok because idx == join->const_tables
       pos->rows_fetched = tab->range_scan()->num_output_rows();
       pos->loosescan_parts = quick_max_keypart + 1;
@@ -2225,7 +2227,7 @@ static int semijoin_order_allows_materialization(const JOIN *join,
     Walk back and check if all immediately preceding tables are from
     this semi-join.
   */
-  const uint n_tables = my_count_bits(emb_sj_nest->sj_inner_tables);
+  const uint n_tables = popcount(emb_sj_nest->sj_inner_tables);
   for (uint i = 1; i < n_tables; i++) {
     if (join->positions[idx - i].table->emb_sj_nest != emb_sj_nest)
       return SJ_OPT_NONE;
@@ -2332,7 +2334,7 @@ bool Optimize_table_order::greedy_search(table_map remaining_tables) {
   DBUG_TRACE;
 
   /* Number of tables that we are optimizing */
-  const uint n_tables = my_count_bits(remaining_tables);
+  const uint n_tables = popcount(remaining_tables);
 
   /* Number of tables remaining to be optimized */
   uint size_remain = n_tables;
@@ -3380,7 +3382,7 @@ bool Optimize_table_order::fix_semijoin_strategies() {
     uint first = 0;
     if (pos->sj_strategy == SJ_OPT_MATERIALIZE_LOOKUP) {
       Table_ref *const sjm_nest = pos->table->emb_sj_nest;
-      const uint table_count = my_count_bits(sjm_nest->sj_inner_tables);
+      const uint table_count = popcount(sjm_nest->sj_inner_tables);
       /*
         This memcpy() copies a partial QEP produced by
         optimize_semijoin_nests_for_materialization() (source) into the final
@@ -3410,7 +3412,7 @@ bool Optimize_table_order::fix_semijoin_strategies() {
       const uint last_inner = pos->sjm_scan_last_inner;
       Table_ref *const sjm_nest =
           (join->best_positions + last_inner)->table->emb_sj_nest;
-      const uint table_count = my_count_bits(sjm_nest->sj_inner_tables);
+      const uint table_count = popcount(sjm_nest->sj_inner_tables);
       first = last_inner - table_count + 1;
       assert((join->best_positions + first)->table->emb_sj_nest == sjm_nest);
       memcpy(join->best_positions + first,  // stale semijoin strategy here too
@@ -3463,7 +3465,7 @@ bool Optimize_table_order::fix_semijoin_strategies() {
       POSITION *const first_pos = join->best_positions + first;
       first_pos->sj_strategy = SJ_OPT_LOOSE_SCAN;
       first_pos->n_sj_tables =
-          my_count_bits(first_pos->table->emb_sj_nest->sj_inner_tables);
+          popcount(first_pos->table->emb_sj_nest->sj_inner_tables);
     } else if (pos->sj_strategy == SJ_OPT_DUPS_WEEDOUT) {
       /*
         Duplicate Weedout starting at pos->first_dupsweedout_table, ending at
@@ -3831,7 +3833,7 @@ void Optimize_table_order::semijoin_mat_scan_access_paths(
 
   POSITION *const positions =
       got_final_plan ? join->best_positions : join->positions;
-  const uint inner_count = my_count_bits(sjm_nest->sj_inner_tables);
+  const uint inner_count = popcount(sjm_nest->sj_inner_tables);
 
   // Get the prefix cost.
   const uint first_inner = last_inner_tab + 1 - inner_count;
@@ -3905,7 +3907,7 @@ void Optimize_table_order::semijoin_mat_lookup_access_paths(uint last_inner,
                                                             double *newcost) {
   DBUG_TRACE;
 
-  const uint inner_count = my_count_bits(sjm_nest->sj_inner_tables);
+  const uint inner_count = popcount(sjm_nest->sj_inner_tables);
   double rowcount, cost;
 
   const uint first_inner = last_inner + 1 - inner_count;

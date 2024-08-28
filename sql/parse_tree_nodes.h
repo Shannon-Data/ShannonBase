@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,7 @@
 #include <assert.h>
 #include <sys/types.h>  // TODO: replace with cstdint
 
+#include <bit>
 #include <cctype>  // std::isspace
 #include <cstddef>
 #include <memory>
@@ -33,7 +35,6 @@
 #include "lex_string.h"
 #include "my_alloc.h"
 #include "my_base.h"
-#include "my_bit.h"  // is_single_bit
 
 #include "my_inttypes.h"  // TODO: replace with cstdint
 #include "my_sqlcommand.h"
@@ -68,6 +69,7 @@
 #include "sql/sql_tablespace.h"      // Tablespace_options
 #include "sql/sql_truncate.h"        // Sql_cmd_truncate_table
 #include "sql/table.h"               // Common_table_expr
+#include "sql/tablesample.h"
 #include "sql/window_lex.h"
 #include "string_with_len.h"
 #include "thr_lock.h"
@@ -418,7 +420,6 @@ class PT_select_item_list : public PT_item_list {
   typedef PT_item_list super;
 
  public:
-  PT_select_item_list() : super() {}
   explicit PT_select_item_list(const POS &pos) : super(pos) {}
 
   bool do_contextualize(Parse_context *pc) override;
@@ -474,17 +475,20 @@ class PT_table_factor_table_ident : public PT_table_reference {
   List<String> *opt_use_partition;
   const char *const opt_table_alias;
   List<Index_hint> *opt_key_definition;
+  PT_tablesample *opt_tablesample{nullptr};
 
  public:
   PT_table_factor_table_ident(const POS &pos, Table_ident *table_ident_arg,
                               List<String> *opt_use_partition_arg,
                               const LEX_CSTRING &opt_table_alias_arg,
-                              List<Index_hint> *opt_key_definition_arg)
+                              List<Index_hint> *opt_key_definition_arg,
+                              PT_tablesample *opt_tablesample_arg)
       : super(pos),
         table_ident(table_ident_arg),
         opt_use_partition(opt_use_partition_arg),
         opt_table_alias(opt_table_alias_arg.str),
-        opt_key_definition(opt_key_definition_arg) {}
+        opt_key_definition(opt_key_definition_arg),
+        opt_tablesample(opt_tablesample_arg) {}
 
  protected:
   bool do_contextualize(Parse_context *pc) override;
@@ -589,11 +593,12 @@ class PT_joined_table : public PT_table_reference {
         m_join_pos(join_pos_arg),
         m_type(type),
         m_right_pt_table(tab2_node_arg) {
-    static_assert(is_single_bit(JTT_INNER), "not a single bit");
-    static_assert(is_single_bit(JTT_STRAIGHT), "not a single bit");
-    static_assert(is_single_bit(JTT_NATURAL), "not a single bit");
-    static_assert(is_single_bit(JTT_LEFT), "not a single bit");
-    static_assert(is_single_bit(JTT_RIGHT), "not a single bit");
+    using std::has_single_bit;
+    static_assert(has_single_bit(unsigned{JTT_INNER}), "not a single bit");
+    static_assert(has_single_bit(unsigned{JTT_STRAIGHT}), "not a single bit");
+    static_assert(has_single_bit(unsigned{JTT_NATURAL}), "not a single bit");
+    static_assert(has_single_bit(unsigned{JTT_LEFT}), "not a single bit");
+    static_assert(has_single_bit(unsigned{JTT_RIGHT}), "not a single bit");
 
     assert(type == JTT_INNER || type == JTT_STRAIGHT_INNER ||
            type == JTT_NATURAL_INNER || type == JTT_NATURAL_LEFT ||
@@ -677,6 +682,25 @@ class PT_joined_table_using : public PT_joined_table {
 
  protected:
   void add_json_info(Json_object *obj) override;
+};
+
+/*
+  PT_tablesample - parse tree node
+
+  Information contained in TABLESAMPLE clause is here.
+*/
+class PT_tablesample : public Parse_tree_node {
+  typedef Parse_tree_node super;
+
+ public:
+  tablesample_type m_sampling_type;
+  Item *m_sample_percentage{nullptr};
+
+  PT_tablesample(const POS &pos, tablesample_type tablesample_type_arg,
+                 Item *sample_percentage)
+      : super(pos),
+        m_sampling_type(tablesample_type_arg),
+        m_sample_percentage(sample_percentage) {}
 };
 
 class PT_group : public Parse_tree_node {
@@ -1478,6 +1502,7 @@ class PT_query_specification : public PT_query_primary {
   PT_group *opt_group_clause;
   Item *opt_having_clause;
   PT_window_list *opt_window_clause;
+  Item *opt_qualify_clause;
 
  public:
   PT_query_specification(
@@ -1487,7 +1512,7 @@ class PT_query_specification : public PT_query_primary {
       const Mem_root_array_YY<PT_table_reference *> &from_clause_arg,
       Item *opt_where_clause_arg, PT_group *opt_group_clause_arg,
       Item *opt_having_clause_arg, PT_window_list *opt_window_clause_arg,
-      bool implicit_from_clause)
+      Item *opt_qualify_clause_arg, bool implicit_from_clause)
       : super(pos),
         opt_hints(opt_hints_arg),
         options(options_arg),
@@ -1498,7 +1523,8 @@ class PT_query_specification : public PT_query_primary {
         opt_where_clause(opt_where_clause_arg),
         opt_group_clause(opt_group_clause_arg),
         opt_having_clause(opt_having_clause_arg),
-        opt_window_clause(opt_window_clause_arg) {
+        opt_window_clause(opt_window_clause_arg),
+        opt_qualify_clause(opt_qualify_clause_arg) {
     assert(implicit_from_clause ? from_clause.empty() : true);
   }
 
@@ -1517,7 +1543,8 @@ class PT_query_specification : public PT_query_primary {
         opt_where_clause(opt_where_clause_arg),
         opt_group_clause(nullptr),
         opt_having_clause(nullptr),
-        opt_window_clause(nullptr) {}
+        opt_window_clause(nullptr),
+        opt_qualify_clause(nullptr) {}
 
   PT_query_specification(const POS &pos, const Query_options &options_arg,
                          PT_item_list *item_list_arg)
@@ -1531,7 +1558,8 @@ class PT_query_specification : public PT_query_primary {
         opt_where_clause(nullptr),
         opt_group_clause(nullptr),
         opt_having_clause(nullptr),
-        opt_window_clause(nullptr) {}
+        opt_window_clause(nullptr),
+        opt_qualify_clause(nullptr) {}
 
   bool do_contextualize(Parse_context *pc) override;
 
@@ -1539,7 +1567,8 @@ class PT_query_specification : public PT_query_primary {
   bool has_trailing_into_clause() const override {
     return (has_into_clause() && is_implicit_from_clause() &&
             opt_where_clause == nullptr && opt_group_clause == nullptr &&
-            opt_having_clause == nullptr && opt_window_clause == nullptr);
+            opt_having_clause == nullptr && opt_window_clause == nullptr &&
+            opt_qualify_clause == nullptr);
   }
 
   bool is_set_operation() const override { return false; }
@@ -3698,17 +3727,17 @@ class PT_show_keys final : public PT_show_table_base {
   Sql_cmd_show_keys m_sql_cmd;
 };
 
-/// Parse tree node for SHOW MASTER STATUS statement
+/// Parse tree node for SHOW BINARY LOG STATUS statement
 
-class PT_show_master_status final : public PT_show_base {
+class PT_show_binary_log_status final : public PT_show_base {
  public:
-  PT_show_master_status(const POS &pos)
-      : PT_show_base(pos, SQLCOM_SHOW_MASTER_STAT) {}
+  PT_show_binary_log_status(const POS &pos)
+      : PT_show_base(pos, SQLCOM_SHOW_BINLOG_STATUS) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
 
  private:
-  Sql_cmd_show_master_status m_sql_cmd;
+  Sql_cmd_show_binary_log_status m_sql_cmd;
 };
 
 /// Parse tree node for SHOW OPEN TABLES statement
@@ -3848,8 +3877,7 @@ class PT_show_relaylog_events final : public PT_show_base {
 
 class PT_show_replicas final : public PT_show_base {
  public:
-  PT_show_replicas(const POS &pos)
-      : PT_show_base(pos, SQLCOM_SHOW_SLAVE_HOSTS) {}
+  PT_show_replicas(const POS &pos) : PT_show_base(pos, SQLCOM_SHOW_REPLICAS) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
 
@@ -3862,7 +3890,7 @@ class PT_show_replicas final : public PT_show_base {
 class PT_show_replica_status final : public PT_show_base {
  public:
   PT_show_replica_status(const POS &pos, LEX_CSTRING opt_channel_name = {})
-      : PT_show_base(pos, SQLCOM_SHOW_SLAVE_STAT),
+      : PT_show_base(pos, SQLCOM_SHOW_REPLICA_STATUS),
         m_opt_channel_name(opt_channel_name) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
@@ -4744,11 +4772,18 @@ class PT_alter_table_secondary_load final
     : public PT_alter_table_standalone_action {
   using super = PT_alter_table_standalone_action;
 
+  const List<String> *opt_use_partition = nullptr;
+
  public:
-  explicit PT_alter_table_secondary_load(const POS &pos)
-      : super(pos, Alter_info::ALTER_SECONDARY_LOAD) {}
+  explicit PT_alter_table_secondary_load(
+      const POS &pos, const List<String> *opt_use_partition = nullptr)
+      : super(pos, Alter_info::ALTER_SECONDARY_LOAD),
+        opt_use_partition{opt_use_partition} {}
 
   Sql_cmd *make_cmd(Table_ddl_parse_context *pc) override {
+    if (opt_use_partition != nullptr)
+      pc->alter_info->partition_names = *opt_use_partition;
+
     return new (pc->mem_root) Sql_cmd_secondary_load_unload(pc->alter_info);
   }
 };
@@ -4757,11 +4792,18 @@ class PT_alter_table_secondary_unload final
     : public PT_alter_table_standalone_action {
   using super = PT_alter_table_standalone_action;
 
+  const List<String> *opt_use_partition = nullptr;
+
  public:
-  explicit PT_alter_table_secondary_unload(const POS &pos)
-      : super(pos, Alter_info::ALTER_SECONDARY_UNLOAD) {}
+  explicit PT_alter_table_secondary_unload(
+      const POS &pos, const List<String> *opt_use_partition = nullptr)
+      : super(pos, Alter_info::ALTER_SECONDARY_UNLOAD),
+        opt_use_partition{opt_use_partition} {}
 
   Sql_cmd *make_cmd(Table_ddl_parse_context *pc) override {
+    if (opt_use_partition != nullptr)
+      pc->alter_info->partition_names = *opt_use_partition;
+
     return new (pc->mem_root) Sql_cmd_secondary_load_unload(pc->alter_info);
   }
 };
@@ -4902,14 +4944,16 @@ class PT_analyze_table_stmt final : public PT_table_ddl_stmt_base {
                         bool no_write_to_binlog,
                         Mem_root_array<Table_ident *> *table_list,
                         Sql_cmd_analyze_table::Histogram_command command,
-                        int num_buckets, List<String> *columns, LEX_STRING data)
+                        int num_buckets, List<String> *columns, LEX_STRING data,
+                        bool auto_update)
       : PT_table_ddl_stmt_base(pos, mem_root),
         m_no_write_to_binlog(no_write_to_binlog),
         m_table_list(table_list),
         m_command(command),
         m_num_buckets(num_buckets),
         m_columns(columns),
-        m_data{data} {}
+        m_data{data},
+        m_auto_update(auto_update) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
 
@@ -4920,6 +4964,7 @@ class PT_analyze_table_stmt final : public PT_table_ddl_stmt_base {
   const int m_num_buckets;
   List<String> *m_columns;
   const LEX_STRING m_data;
+  const bool m_auto_update;
 };
 
 class PT_check_table_stmt final : public PT_table_ddl_stmt_base {
@@ -5418,13 +5463,15 @@ class PT_explain : public Parse_tree_root {
  public:
   PT_explain(const POS &pos, Explain_format_type format, bool is_analyze,
              bool is_explicit_format, Parse_tree_root *explainable_stmt,
-             std::optional<std::string_view> explain_into_variable_name)
+             std::optional<std::string_view> explain_into_variable_name,
+             LEX_CSTRING schema_name_for_explain)
       : Parse_tree_root(pos),
         m_format(format),
         m_analyze(is_analyze),
         m_explicit_format(is_explicit_format),
         m_explainable_stmt(explainable_stmt),
-        m_explain_into_variable_name(explain_into_variable_name) {}
+        m_explain_into_variable_name(explain_into_variable_name),
+        m_schema_name_for_explain(schema_name_for_explain) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
 
@@ -5434,28 +5481,33 @@ class PT_explain : public Parse_tree_root {
   const bool m_explicit_format;
   Parse_tree_root *const m_explainable_stmt;
   std::optional<std::string_view> m_explain_into_variable_name;
+  LEX_CSTRING m_schema_name_for_explain;
 };
 
 class PT_load_table final : public Parse_tree_root {
  public:
   PT_load_table(const POS &pos, enum_filetype filetype, thr_lock_type lock_type,
-                bool is_local_file, enum_source_type, const LEX_STRING filename,
-                ulong, bool, On_duplicate on_duplicate, Table_ident *table,
+                bool is_local_file, enum_source_type source_type,
+                const LEX_STRING filename, ulong file_count, bool in_key_order,
+                On_duplicate on_duplicate, Table_ident *table,
                 List<String> *opt_partitions, const CHARSET_INFO *opt_charset,
+                LEX_CSTRING compression_algorithm,
                 String *opt_xml_rows_identified_by,
                 const Field_separators &opt_field_separators,
                 const Line_separators &opt_line_separators,
                 ulong opt_ignore_lines, PT_item_list *opt_fields_or_vars,
                 PT_item_list *opt_set_fields, PT_item_list *opt_set_exprs,
-                List<String> *opt_set_expr_strings, bool)
+                List<String> *opt_set_expr_strings, ulong parallel,
+                ulonglong memory_size, bool is_bulk_operation)
       : Parse_tree_root(pos),
-        m_cmd(filetype, is_local_file, filename, on_duplicate, table,
-              opt_partitions, opt_charset, opt_xml_rows_identified_by,
+        m_cmd(filetype, is_local_file, source_type, filename, file_count,
+              in_key_order, on_duplicate, table, opt_partitions, opt_charset,
+              compression_algorithm, opt_xml_rows_identified_by,
               opt_field_separators, opt_line_separators, opt_ignore_lines,
               opt_fields_or_vars ? &opt_fields_or_vars->value : nullptr,
               opt_set_fields ? &opt_set_fields->value : nullptr,
               opt_set_exprs ? &opt_set_exprs->value : nullptr,
-              opt_set_expr_strings),
+              opt_set_expr_strings, parallel, memory_size, is_bulk_operation),
         m_lock_type(lock_type) {
     assert((opt_set_fields == nullptr) ^ (opt_set_exprs != nullptr));
     assert(opt_set_fields == nullptr ||

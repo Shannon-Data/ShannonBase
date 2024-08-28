@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -467,7 +468,7 @@ struct CHARSET_INFO {
 /*
   NOTE: You cannot use a CHARSET_INFO without it having been initialized first.
   In particular, they are not initialized when a unit test starts; do not use
-  these globals indiscriminately from there, and do not add more. Instead,
+  these globals indiscriminately from here, and do not add more. Instead,
   initialize them using my_collation_get_by_name().
 */
 
@@ -485,9 +486,6 @@ extern MYSQL_STRINGS_EXPORT CHARSET_INFO my_charset_utf8mb3_unicode_ci;
 extern MYSQL_STRINGS_EXPORT CHARSET_INFO my_charset_utf8mb3_bin;
 extern MYSQL_STRINGS_EXPORT CHARSET_INFO my_charset_utf8mb4_bin;
 extern MYSQL_STRINGS_EXPORT CHARSET_INFO my_charset_utf8mb4_general_ci;
-// TODO(tdidriks) check name rather than address:
-extern MYSQL_STRINGS_EXPORT CHARSET_INFO my_charset_gb18030_chinese_ci;
-extern MYSQL_STRINGS_EXPORT CHARSET_INFO my_charset_utf16le_general_ci;
 
 /**
   @note Deprecated function, please call cs->coll->wildcmp(cs...) instead.

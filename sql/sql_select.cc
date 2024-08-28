@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.*/
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
   @file sql/sql_select.cc
@@ -44,9 +43,10 @@
 #include <initializer_list>
 #include <memory>
 #include <string>
-
+#include <string_view>
 #include "field_types.h"
 #include "lex_string.h"
+#include "m_string.h"        // native_strncasecmp(), native_strcasecmp()
 #include "mem_root_deque.h"  // mem_root_deque
 #include "my_alloc.h"
 #include "my_bitmap.h"
@@ -56,12 +56,14 @@
 #include "my_pointer_arithmetic.h"
 #include "my_sqlcommand.h"
 #include "my_sys.h"
+#include "mysql/plugin.h"
 #include "mysql/strings/m_ctype.h"
 #include "mysql/udf_registration_types.h"
 #include "mysql_com.h"
 #include "mysqld_error.h"
 #include "scope_guard.h"
 #include "sql-common/json_dom.h"
+#include "sql-common/my_decimal.h"
 #include "sql/auth/auth_acls.h"
 #include "sql/auth/auth_common.h"  // *_ACL
 #include "sql/auth/sql_security_ctx.h"
@@ -86,8 +88,7 @@
 #include "sql/join_optimizer/replace_item.h"
 #include "sql/key.h"  // key_copy, key_cmp, key_cmp_if_same
 #include "sql/key_spec.h"
-#include "sql/lock.h"  // mysql_unlock_some_tables,
-#include "sql/my_decimal.h"
+#include "sql/lock.h"    // mysql_unlock_some_tables,
 #include "sql/mysqld.h"  // stage_init
 #include "sql/nested_join.h"
 #include "sql/opt_explain.h"
@@ -114,6 +115,7 @@
 #include "sql/sql_optimizer.h"  // JOIN
 #include "sql/sql_parse.h"      // bind_fields
 #include "sql/sql_planner.h"    // calculate_condition_filter
+#include "sql/sql_plugin.h"
 #include "sql/sql_resolver.h"
 #include "sql/sql_test.h"       // misc. debug printing utilities
 #include "sql/sql_timer.h"      // thd_timer_set
@@ -129,11 +131,13 @@
 
 using std::max;
 using std::min;
+using namespace std::literals;
 
-store_key *get_store_key(THD *thd, Item *val, table_map used_tables,
+static store_key *get_store_key(THD *thd, Item *val, table_map used_tables,
                                 table_map const_tables,
                                 const KEY_PART_INFO *key_part, uchar *key_buff,
                                 uint maybe_null);
+static bool retry_with_secondary_engine(THD *thd);
 
 using Global_tables_iterator =
     IntrusiveListIterator<Table_ref, &Table_ref::next_global>;
@@ -214,11 +218,15 @@ bool set_statement_timer(THD *thd) {
   thd->timer = thd_timer_set(thd, thd->timer_cache, max_execution_time);
   thd->timer_cache = nullptr;
 
-  if (thd->timer)
+  if (thd->timer) {
     thd->status_var.max_execution_time_set++;
-  else
+    global_aggregated_stats.get_shard(thd->thread_id())
+        .max_execution_time_set++;
+  } else {
     thd->status_var.max_execution_time_set_failed++;
-
+    global_aggregated_stats.get_shard(thd->thread_id())
+        .max_execution_time_set_failed++;
+  }
   return thd->timer;
 }
 
@@ -244,7 +252,7 @@ void reset_statement_timer(THD *thd) {
  * @return True if at least one of the read columns is not in the secondary
  * engine, false otherwise.
  */
-static bool reads_not_secondary_columns(const LEX *lex) {
+bool reads_not_secondary_columns(const LEX *lex) {
   // Check all read base tables.
   const Table_ref *tl = lex->query_tables;
   // For INSERT INTO SELECT statements, the table to insert into does not have
@@ -300,8 +308,7 @@ static bool equal_engines(const LEX_CSTRING &engine1,
 // Helper function that checks if the command is eligible for secondary engine
 // and if that's true returns the name of that eligible secondary storage
 // engine.
-static const MYSQL_LEX_CSTRING *get_eligible_secondary_engine_from(
-    const LEX *lex) {
+const MYSQL_LEX_CSTRING *get_eligible_secondary_engine_from(const LEX *lex) {
   // Don't use secondary storage engines for statements that call stored
   // routines.
   if (lex->uses_stored_routines()) return nullptr;
@@ -327,6 +334,9 @@ static const MYSQL_LEX_CSTRING *get_eligible_secondary_engine_from(
     // We're only interested in base tables.
     if (tl->is_placeholder()) continue;
 
+    // check if required pointers are valid before proceeding further
+    if (tl->table == nullptr || tl->table->s == nullptr) continue;
+
     assert(!tl->table->s->is_secondary_engine());
     // Give up, if the table is not in a secondary engine,
     if (!tl->table->s->has_secondary_engine()) return nullptr;
@@ -344,7 +354,7 @@ static const MYSQL_LEX_CSTRING *get_eligible_secondary_engine_from(
 }
 
 const handlerton *get_secondary_engine_handlerton(const LEX *lex) {
-  if (const handlerton *hton = SecondaryEngineHandlerton(lex->thd);
+  if (const handlerton *hton = lex->m_sql_cmd->secondary_engine();
       hton != nullptr) {
     return hton;
   }
@@ -358,82 +368,83 @@ const handlerton *get_secondary_engine_handlerton(const LEX *lex) {
   return nullptr;
 }
 
-static const char *get_secondary_engine_fail_reason(const LEX *lex) {
-  auto *hton = get_secondary_engine_handlerton(lex);
+std::string_view get_secondary_engine_fail_reason(const LEX *lex) {
+  const auto *hton = get_secondary_engine_handlerton(lex);
   if (hton != nullptr &&
       hton->get_secondary_engine_offload_or_exec_fail_reason != nullptr &&
-      lex->thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) {
+      lex->thd->is_secondary_engine_forced()) {
     return hton->get_secondary_engine_offload_or_exec_fail_reason(lex->thd);
   }
-  return nullptr;
+  return {};
 }
 
-void set_external_engine_fail_reason(const LEX *lex, const char *reason) {
-  if (lex->thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED &&
-      reason != nullptr) {
-    for (Table_ref *ref = lex->query_tables; ref != nullptr;
-         ref = ref->next_global) {
-      if (ref->is_external()) {
-        ref->table->get_primary_handler()->set_external_table_offload_error(
-            reason);
-        break;
-      }
-    }
+std::string_view find_secondary_engine_fail_reason(const LEX *lex) {
+  const auto *hton = get_secondary_engine_handlerton(lex);
+  if (hton != nullptr &&
+      hton->find_secondary_engine_offload_fail_reason != nullptr &&
+      lex->thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) {
+    return hton->find_secondary_engine_offload_fail_reason(lex->thd);
   }
-}
-
-static void external_engine_fail_reason(const LEX *lex) {
-  for (Table_ref *ref = lex->query_tables; ref != nullptr;
-       ref = ref->next_global) {
-    if (ref->is_external()) {
-      ref->table->get_primary_handler()->external_table_offload_error();
-      return;
-    }
+  if (hton == nullptr && get_eligible_secondary_engine_from(lex) != nullptr &&
+      get_eligible_secondary_engine_from(lex)->length > 0 &&
+      (native_strncasecmp(get_eligible_secondary_engine_from(lex)->str, "MOCK",
+                          4) == 0)) {
+    // We don't support secondary storage engine execution,
+    // if it is a MOCK secondary engine.
+    return "Queries cannot be offloaded to a MOCK secondary engine";
   }
+  // return a generic offload error if no specific reason is known
+  return "All plans were rejected by the secondary storage engine";
 }
 
 static bool set_secondary_engine_fail_reason(const LEX *lex,
-                                             const char *reason) {
-  auto *hton = get_secondary_engine_handlerton(lex);
+                                             std::string_view reason) {
+  const auto *hton = get_secondary_engine_handlerton(lex);
   if (hton != nullptr &&
       hton->set_secondary_engine_offload_fail_reason != nullptr &&
-      lex->thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) {
+      lex->thd->is_secondary_engine_forced()) {
     hton->set_secondary_engine_offload_fail_reason(lex->thd, reason);
     return true;
   }
   return false;
 }
 
-static void set_fail_reason_and_raise_error(const LEX *lex,
-                                            const char *reason) {
-  assert(reason != nullptr && strlen(reason) > 0);
+void set_fail_reason_and_raise_error(const LEX *lex, std::string_view reason) {
+  assert(!reason.empty());
   if (set_secondary_engine_fail_reason(lex, reason)) {
     my_error(ER_SECONDARY_ENGINE, MYF(0),
-             get_secondary_engine_fail_reason(lex));
+             (std::data(get_secondary_engine_fail_reason(lex))));
   } else {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), reason);
+    std::string err_msg{"Reason: "};
+    err_msg.append("\"");
+    err_msg.append(std::data(reason));
+    err_msg.append("\"");
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err_msg.c_str());
   }
 }
 
-static bool find_and_set_offload_fail_reason(const LEX *lex) {
+void find_and_set_offload_fail_reason(const LEX *lex) {
   // If we are unable to gather secondary-engine-specific error message,
   // check known unsupported features and raise a specific offload error.
-  std::string err_msg;
-  if (lex->uses_stored_routines()) {
+  std::string_view err_msg{};
+  if (lex->uses_stored_routines() ||
+      (lex->m_sql_cmd != nullptr && lex->m_sql_cmd->is_part_of_sp()) ||
+      lex->thd->sp_runtime_ctx != nullptr) {
     // We don't support secondary storage engine execution,
     // if the query has statements that call stored routines.
-    err_msg = "Stored routines are not supported in secondary engines";
+    err_msg =
+        "Queries part of stored functions or calling stored functions are not "
+        "supported in secondary engines";
   } else if (!has_secondary_engine_defined(lex)) {
     // We don't support secondary storage engine execution,
     // if at least one of the query tables have no secondary engine defined.
     err_msg =
         "No secondary engine defined for at least one of the query tables";
+  } else {
+    err_msg = find_secondary_engine_fail_reason(lex);
   }
-  if (err_msg.length() > 0) {
-    set_fail_reason_and_raise_error(lex, err_msg.c_str());
-    return true;
-  }
-  return false;
+  assert(!err_msg.empty());
+  set_fail_reason_and_raise_error(lex, err_msg);
 }
 
 bool validate_use_secondary_engine(const LEX *lex) {
@@ -445,50 +456,34 @@ bool validate_use_secondary_engine(const LEX *lex) {
   // Ensure that all read columns are in the secondary engine.
   if (sql_cmd->using_secondary_storage_engine()) {
     if (reads_not_secondary_columns(lex)) {
-      const char *err_msg =
-          "One or more read columns are marked as NOT SECONDARY";
+      std::string_view err_msg = find_secondary_engine_fail_reason(lex);
+      assert(!err_msg.empty());
       set_fail_reason_and_raise_error(lex, err_msg);
       return true;
     }
     return false;
   }
-  // A query must be executed in secondary engine if these conditions are met:
-  //
-  // (1) use_secondary_engine is FORCED.
-  // (and either)
-  // (2) Is a SELECT statement that accesses one or more base tables.
-  // (or)
-  // (3) Is an INSERT SELECT or CREATE TABLE AS SELECT statement that accesses
-  // two or more base tables.
-  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED &&  // 1
-      ((sql_cmd->sql_command_code() == SQLCOM_SELECT &&
-        lex->table_count >= 1) ||  // 2
-       ((sql_cmd->sql_command_code() == SQLCOM_INSERT_SELECT ||
-         sql_cmd->sql_command_code() == SQLCOM_CREATE_TABLE) &&
-        lex->table_count >= 2))) {  // 3
+
+  if (thd->secondary_engine_optimization() ==
+          Secondary_engine_optimization::SECONDARY &&
+      thd->is_secondary_engine_forced()) {
     // Gather secondary-engine-specific error message.
-    const char *offloadfail_reason = get_secondary_engine_fail_reason(lex);
-    if (offloadfail_reason != nullptr && strlen(offloadfail_reason) > 0) {
+    std::string_view offloadfail_reason = get_secondary_engine_fail_reason(lex);
+    if (!offloadfail_reason.empty()) {
       if (thd->is_error()) {
         thd->clear_error();
       }
-      my_error(ER_SECONDARY_ENGINE, MYF(0), offloadfail_reason);
+      my_error(ER_SECONDARY_ENGINE, MYF(0), std::data(offloadfail_reason));
       return true;
     }
     // If we haven't generated a specific error so far,
     // we try to generate one here.
-    if (!thd->is_error() && find_and_set_offload_fail_reason(lex)) {
+    if (!thd->is_error()) {
+      find_and_set_offload_fail_reason(lex);
       return true;
     }
-    // If no specifc error could be generated so far, we give out a generic one.
-    if (thd->is_error()) {
-      const char *err_msg =
-          "use_secondary_engine is FORCED but query could not be executed in "
-          "secondary engine";
-      set_fail_reason_and_raise_error(lex, err_msg);
-      return true;
-    } else return false;
   }
+
   return false;
 }
 
@@ -510,7 +505,6 @@ bool Sql_cmd_dml::prepare(THD *thd) {
 
   assert(!lex->unit->is_prepared() && !lex->unit->is_optimized() &&
          !lex->unit->is_executed());
-
   /*
     Constant folding could cause warnings during preparation. Make
     sure they are promoted to errors when strict mode is enabled.
@@ -552,8 +546,12 @@ bool Sql_cmd_dml::prepare(THD *thd) {
   if (sql_command_code() == SQLCOM_SELECT) DEBUG_SYNC(thd, "after_table_open");
 #endif
 
-  lex->using_hypergraph_optimizer =
-      thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER);
+  lex->set_using_hypergraph_optimizer(
+      thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER));
+
+  if (thd->lex->validate_use_in_old_optimizer()) {
+    return true;
+  }
 
   if (lex->set_var_list.elements && resolve_var_assignments(thd, lex))
     goto err; /* purecov: inspected */
@@ -570,6 +568,8 @@ bool Sql_cmd_dml::prepare(THD *thd) {
     }
     if (!is_regular()) {
       if (save_cmd_properties(thd)) goto err;
+    }
+    if (needs_explicit_preparation()) {
       lex->set_secondary_engine_execution_context(nullptr);
     }
     set_prepared();
@@ -602,9 +602,9 @@ bool Sql_cmd_select::accept(THD *thd, Select_lex_visitor *visitor) {
   return thd->lex->unit->accept(visitor);
 }
 
-const MYSQL_LEX_CSTRING *Sql_cmd_select::eligible_secondary_storage_engine()
-    const {
-  return get_eligible_secondary_engine();
+const MYSQL_LEX_CSTRING *Sql_cmd_select::eligible_secondary_storage_engine(
+    THD *thd) const {
+  return get_eligible_secondary_engine(thd);
 }
 
 /**
@@ -660,8 +660,12 @@ bool Sql_cmd_select::prepare_inner(THD *thd) {
   return false;
 }
 
-bool has_external_table(Table_ref *query_tables) {
-  for (Table_ref *ref = query_tables; ref != nullptr; ref = ref->next_global) {
+bool has_external_table(const LEX *lex) {
+  if (lex->m_sql_cmd == nullptr) {
+    return false;
+  }
+  for (Table_ref *ref = lex->query_tables; ref != nullptr;
+       ref = ref->next_global) {
     if (ref->is_external()) {
       return true;
     }
@@ -678,10 +682,6 @@ bool Sql_cmd_dml::execute(THD *thd) {
 
   bool statement_timer_armed = false;
   bool error_handler_active = false;
-
-  // flag to determine if execution was not offloaded to the secondary engine
-  // and ended up in the external engine in which case we throw an error.
-  bool external_table_not_offloaded = false;
 
   Ignore_error_handler ignore_handler;
   Strict_error_handler strict_handler;
@@ -728,8 +728,18 @@ bool Sql_cmd_dml::execute(THD *thd) {
     if (sql_command_code() == SQLCOM_SELECT)
       DEBUG_SYNC(thd, "after_table_open");
 #endif
+    // Use the hypergraph optimizer for the SELECT statement, if enabled.
+    const bool need_hypergraph_optimizer =
+        thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER);
+
+    if (need_hypergraph_optimizer != lex->using_hypergraph_optimizer() &&
+        ask_to_reprepare(thd)) {
+      goto err;
+    }
+    assert(need_hypergraph_optimizer == lex->using_hypergraph_optimizer());
+
     // Bind table and field information
-    if (restore_cmd_properties(thd)) return true;
+    if (restore_cmd_properties(thd)) goto err;
     if (check_privileges(thd)) goto err;
 
     if (m_lazy_result) {
@@ -738,28 +748,6 @@ bool Sql_cmd_dml::execute(THD *thd) {
       if (result->prepare(thd, *unit->get_unit_column_types(), unit)) goto err;
       m_lazy_result = false;
     }
-  }
-
-  if (lex->thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
-    if (has_external_table(lex->query_tables)) {
-      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-               "Query could not be offloaded to the secondary engine");
-      external_table_not_offloaded = true;
-      goto err;  // NOLINT
-    }
-  } else if ((thd->secondary_engine_optimization() ==
-                  Secondary_engine_optimization::PRIMARY_ONLY &&
-              lex->thd->variables.use_secondary_engine !=
-                  SECONDARY_ENGINE_FORCED) &&
-             has_external_table(lex->query_tables)) {
-    // throw the propagated error from the external engine in case there is an
-    // external table
-    external_engine_fail_reason(lex);
-
-    // reset error message
-    set_external_engine_fail_reason(lex, nullptr);
-    external_table_not_offloaded = true;
-    goto err;  // NOLINT
   }
 
   if (validate_use_secondary_engine(lex)) goto err;
@@ -794,8 +782,11 @@ bool Sql_cmd_dml::execute(THD *thd) {
   if (execute_inner(thd)) goto err;
 
   // Count the number of statements offloaded to a secondary storage engine.
-  if (using_secondary_storage_engine() && lex->unit->is_executed())
+  if (using_secondary_storage_engine() && lex->unit->is_executed()) {
     ++thd->status_var.secondary_engine_execution_count;
+    global_aggregated_stats.get_shard(thd->thread_id())
+        .secondary_engine_execution_count++;
+  }
 
   assert(!thd->is_error());
 
@@ -838,25 +829,6 @@ err:
   lex->cleanup(false);
   lex->clear_values_map();
   lex->set_secondary_engine_execution_context(nullptr);
-
-  // check if we already have a secondary-engine-specific error message
-  // populate otherwise
-  if (!external_table_not_offloaded) {
-    const char *offloadfail_reason = get_secondary_engine_fail_reason(lex);
-    if (offloadfail_reason == nullptr || strlen(offloadfail_reason) == 0) {
-      if (thd->is_error()) {
-        assert(thd->get_stmt_da() != nullptr);
-        // here we check if there is any table in an external engine to set the
-        // error there as well.
-        if (has_external_table(lex->query_tables)) {
-          set_external_engine_fail_reason(lex,
-                                          thd->get_stmt_da()->message_text());
-        }
-        set_secondary_engine_fail_reason(lex,
-                                         thd->get_stmt_da()->message_text());
-      }
-    }
-  }
 
   // Abort and cleanup the result set (if it has been prepared).
   if (result != nullptr) {
@@ -902,6 +874,33 @@ void accumulate_statement_cost(const LEX *lex) {
   lex->thd->m_current_query_cost = total_cost;
 }
 
+namespace {
+/**
+   Gets the secondary storage engine pre prepare hook function, if any. If no
+   hook is found, this function returns false. If hook function is found, it
+   returns the return value of the hook. Please refer to
+   secondary_engine_pre_prepare_hook_t definition for description of its return
+   value.
+ */
+bool SecondaryEngineCallPrePrepareHook(THD *thd,
+                                       const LEX_CSTRING &secondary_engine) {
+  handlerton *hton = nullptr;
+  plugin_ref ref = ha_resolve_by_name(thd, &secondary_engine, false);
+  if (ref != nullptr) {
+    hton = plugin_data<handlerton *>(ref);
+  }
+
+  if (hton != nullptr) {
+    secondary_engine_pre_prepare_hook_t secondary_engine_pre_prepare_hook =
+        hton->secondary_engine_pre_prepare_hook;
+    if (secondary_engine_pre_prepare_hook != nullptr) {
+      return secondary_engine_pre_prepare_hook(thd);
+    }
+  }
+  return false;
+}
+}  // namespace
+
 /**
   Checks if a query should be retried using a secondary storage engine.
 
@@ -922,7 +921,10 @@ static bool retry_with_secondary_engine(THD *thd) {
 
   // Don't retry if there is a property of the statement that prevents use of
   // secondary engines.
-  if (sql_cmd->eligible_secondary_storage_engine() == nullptr) {
+  const LEX_CSTRING *secondary_engine =
+      thd->lex->m_sql_cmd->eligible_secondary_storage_engine(thd);
+
+  if (secondary_engine == nullptr) {
     sql_cmd->disable_secondary_storage_engine();
     return false;
   }
@@ -939,33 +941,25 @@ static bool retry_with_secondary_engine(THD *thd) {
     return false;
   }
 
-  // Only attempt to use the secondary engine if the estimated cost of the query
-  // is higher than the specified cost threshold.
-  // We allow any query to be executed in the secondary_engine when it involves
-  // external tables.
-  if (!has_external_table(thd->lex->query_tables) &&
-      (thd->m_current_query_cost <=
-       thd->variables.secondary_engine_cost_threshold)) {
-    Opt_trace_context *const trace = &thd->opt_trace;
-    if (trace->is_started()) {
-      const Opt_trace_object wrapper(trace);
-      Opt_trace_object oto(trace, "secondary_engine_not_used");
-      oto.add_alnum("reason",
-                    "The estimated query cost does not exceed "
-                    "secondary_engine_cost_threshold.");
-      oto.add("cost", thd->m_current_query_cost);
-      oto.add("threshold", thd->variables.secondary_engine_cost_threshold);
-    }
-    return false;
+  // If the query cannot be executed in the PRIMARY engine, always attempt to
+  // execute it in the secondary engine whenever possible.
+  if (thd->lex->can_execute_only_in_secondary_engine()) {
+    return true;
   }
 
-  return true;
+  return SecondaryEngineCallPrePrepareHook(thd, *secondary_engine);
 }
 
 bool optimize_secondary_engine(THD *thd) {
   if (retry_with_secondary_engine(thd)) {
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-do-while)
+    DBUG_EXECUTE_IF("emulate_user_query_kill", {
+      thd->get_stmt_da()->set_error_status(thd, ER_QUERY_INTERRUPTED);
+      return true;
+    });
     thd->get_stmt_da()->reset_diagnostics_area();
     thd->get_stmt_da()->set_error_status(thd, ER_PREPARE_FOR_SECONDARY_ENGINE);
+
     return true;
   }
 
@@ -993,6 +987,38 @@ bool optimize_secondary_engine(THD *thd) {
          secondary_engine->optimize_secondary_engine(thd, thd->lex);
 }
 
+void notify_plugins_after_select(THD *thd, const Sql_cmd *cmd) {
+  /* Return if one of the 2 conditions is true:
+   * 1. when secondary engine statement context is not present, query cost is
+   * lower than the secondary than the engine threshold.
+   * 2. When secondary engine statement context is present, primary engine
+   * is the better execution engine for this query.
+   * This prevents calling plugin_foreach for short queries, reducing the
+   * overhead. */
+  if (((thd->secondary_engine_statement_context() == nullptr) &&
+       thd->m_current_query_cost <=
+           thd->variables.secondary_engine_cost_threshold) ||
+      ((thd->secondary_engine_statement_context() != nullptr) &&
+       thd->secondary_engine_statement_context()
+           ->is_primary_engine_optimal())) {
+    return;
+  }
+  auto executed_in = (cmd != nullptr && cmd->using_secondary_storage_engine())
+                         ? SelectExecutedIn::kSecondaryEngine
+                         : SelectExecutedIn::kPrimaryEngine;
+
+  plugin_foreach(
+      thd,
+      [](THD *t, plugin_ref plugin, void *arg) -> bool {
+        handlerton *hton = plugin_data<handlerton *>(plugin);
+        if (hton->notify_after_select != nullptr) {
+          hton->notify_after_select(t, *(static_cast<SelectExecutedIn *>(arg)));
+        }
+        return false;
+      },
+      MYSQL_STORAGE_ENGINE_PLUGIN, &executed_in);
+}
+
 /**
   Execute a DML statement.
   This is the default implementation for a DML statement and uses a
@@ -1018,9 +1044,21 @@ bool Sql_cmd_dml::execute_inner(THD *thd) {
   // We know by now that execution will complete (successful or with error)
   lex->set_exec_completed();
   if (lex->is_explain()) {
+    for (Table_ref *ref = lex->query_tables; ref != nullptr;
+         ref = ref->next_global) {
+      if (ref->table != nullptr && ref->table->file != nullptr) {
+        handlerton *hton = ref->table->file->ht;
+        if (hton->external_engine_explain_check != nullptr) {
+          if (hton->external_engine_explain_check(thd)) return true;
+        }
+      }
+    }
+
     if (explain_query(thd, thd, unit)) return true; /* purecov: inspected */
   } else {
     if (unit->execute(thd)) return true;
+
+    notify_plugins_after_select(thd, lex->m_sql_cmd);
   }
 
   return false;
@@ -1072,8 +1110,9 @@ static bool check_locking_clause_access(THD *thd, Global_tables_list tables) {
         If either of these privileges is present along with SELECT, access is
         granted.
       */
-      for (uint allowed_priv : {UPDATE_ACL, DELETE_ACL, LOCK_TABLES_ACL}) {
-        ulong priv = SELECT_ACL | allowed_priv;
+      for (Access_bitmask allowed_priv :
+           {UPDATE_ACL, DELETE_ACL, LOCK_TABLES_ACL}) {
+        Access_bitmask priv = SELECT_ACL | allowed_priv;
         if (!check_table_access(thd, priv, table_ref, false, 1, true)) {
           access_is_granted = true;
           // No need to check for other privileges for this table.
@@ -1175,7 +1214,7 @@ bool Sql_cmd_dml::check_all_table_privileges(THD *thd) {
     if (tr->is_internal())  // No privilege check required for internal tables
       continue;
     // Calculated wanted privilege based on how table/view is used:
-    ulong want_privilege = 0;
+    Access_bitmask want_privilege = 0;
     if (tr->is_inserted()) {
       want_privilege |= INSERT_ACL;
     }
@@ -1205,8 +1244,9 @@ bool Sql_cmd_dml::check_all_table_privileges(THD *thd) {
   return false;
 }
 
-const MYSQL_LEX_CSTRING *Sql_cmd_dml::get_eligible_secondary_engine() const {
-  return get_eligible_secondary_engine_from(lex);
+const MYSQL_LEX_CSTRING *Sql_cmd_dml::get_eligible_secondary_engine(
+    THD *thd) const {
+  return get_eligible_secondary_engine_from(thd->lex);
 }
 
 /*****************************************************************************
@@ -1308,13 +1348,11 @@ static bool sj_table_is_included(JOIN *join, JOIN_TAB *join_tab) {
   Table_ref *embedding = join_tab->table_ref->embedding;
   if (join_tab->type() == JT_EQ_REF) {
     table_map depends_on = 0;
-    uint idx;
 
     for (uint kp = 0; kp < join_tab->ref().key_parts; kp++)
       depends_on |= join_tab->ref().items[kp]->used_tables();
 
-    Table_map_iterator it(depends_on & ~PSEUDO_TABLE_BITS);
-    while ((idx = it.next_bit()) != Table_map_iterator::BITMAP_END) {
+    for (size_t idx : BitsSetIn(depends_on & ~PSEUDO_TABLE_BITS)) {
       JOIN_TAB *ref_tab = join->map2table[idx];
       if (embedding != ref_tab->table_ref->embedding) return true;
     }
@@ -1800,8 +1838,10 @@ void JOIN::reset() {
 
   if (!executed) return;
 
+  // clang-format off
   query_expression()->offset_limit_cnt = (ha_rows)(
       query_block->offset_limit ? query_block->offset_limit->val_uint() : 0ULL);
+  // clang-format on
 
   group_sent = false;
   recursive_iteration_count = 0;
@@ -1894,7 +1934,7 @@ void JOIN::destroy() {
       }
       qep_tab[i].cleanup();
     }
-  } else if (thd->lex->using_hypergraph_optimizer) {
+  } else if (thd->lex->using_hypergraph_optimizer()) {
     // Same, for hypergraph queries.
     for (Table_ref *tl = query_block->leaf_tables; tl; tl = tl->next_leaf) {
       TABLE *table = tl->table;
@@ -1922,10 +1962,10 @@ void JOIN::destroy() {
       }
       close_tmp_table(cleanup.table);
       free_tmp_table(cleanup.table);
-      ::destroy(cleanup.temp_table_param);
+      ::destroy_at(cleanup.temp_table_param);
     }
     for (Filesort *filesort : filesorts_to_cleanup) {
-      ::destroy(filesort);
+      if (filesort != nullptr) ::destroy_at(filesort);
     }
     temp_tables.clear();
     filesorts_to_cleanup.clear();
@@ -1949,40 +1989,19 @@ void JOIN::destroy() {
   tmp_table_param.cleanup();
 
   /* Cleanup items referencing temporary table columns */
-  if (tmp_fields1 != nullptr) {
-    cleanup_item_list(tmp_fields1[REF_SLICE_TMP1]);
-    cleanup_item_list(tmp_fields1[REF_SLICE_TMP2]);
-    cleanup_item_list(tmp_fields1[REF_SLICE_PQ_TMP]);
+  if (tmp_fields != nullptr) {
+    cleanup_item_list(tmp_fields[REF_SLICE_TMP1]);
+    cleanup_item_list(tmp_fields[REF_SLICE_TMP2]);
     for (uint widx = 0; widx < m_windows.elements; widx++) {
-      cleanup_item_list(tmp_fields1[REF_SLICE_WIN_1 + widx]);
-      cleanup_item_list(tmp_fields1[REF_SLICE_WIN_1 + widx +
-                                    m_windows.elements]);  // frame buffer
+      cleanup_item_list(tmp_fields[REF_SLICE_WIN_1 + widx]);
     }
   }
-
-  if (tmp_fields0 != nullptr) {
-    cleanup_item_list(tmp_fields0[REF_SLICE_TMP1]);
-    cleanup_item_list(tmp_fields0[REF_SLICE_TMP2]);
-    cleanup_item_list(tmp_fields0[REF_SLICE_PQ_TMP]);
-    for (uint widx = 0; widx < m_windows.elements; widx++) {
-      cleanup_item_list(tmp_fields0[REF_SLICE_WIN_1 + widx]);
-      cleanup_item_list(tmp_fields0[REF_SLICE_WIN_1 + widx +
-                                    m_windows.elements]);  // frame buffer
-    }
-  }
-
-  /*
-    If current optimization detected any const tables, expressions may have
-    been updated without used tables information from those const tables, so
-    make sure to restore used tables information as from resolving.
-  */
-  if (const_tables > 0) query_block->update_used_tables();
 
   destroy_sj_tmp_tables(this);
 
   List_iterator<Semijoin_mat_exec> sjm_list_it(sjm_exec_list);
   Semijoin_mat_exec *sjm;
-  while ((sjm = sjm_list_it++)) ::destroy(sjm);
+  while ((sjm = sjm_list_it++) != nullptr) ::destroy_at(sjm);
   sjm_exec_list.clear();
 
   keyuse_array.clear();
@@ -2140,7 +2159,7 @@ bool check_privileges_for_join(THD *thd, mem_root_deque<Table_ref *> *tables) {
   @returns false if success, true if error (insufficient privileges)
 */
 bool check_privileges_for_list(THD *thd, const mem_root_deque<Item *> &items,
-                               ulong privileges) {
+                               Access_bitmask privileges) {
   thd->want_privilege = privileges;
   for (Item *item : items) {
     if (item->walk(&Item::check_column_privileges, enum_walk::PREFIX,
@@ -2188,8 +2207,6 @@ void calc_used_field_length(TABLE *table, bool needs_rowid,
 
   uneven_bit_fields = null_fields = blobs = fields = rec_length = 0;
   for (f_ptr = table->field; (field = *f_ptr); f_ptr++) {
-    //skip ghost column
-    if (field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(read_set, field->field_index())) {
       fields++;
       rec_length += field->pack_length();
@@ -2600,7 +2617,7 @@ class store_key_json_item final : public store_key {
 
 }  // namespace
 
-store_key *get_store_key(THD *thd, Item *val, table_map used_tables,
+static store_key *get_store_key(THD *thd, Item *val, table_map used_tables,
                                 table_map const_tables,
                                 const KEY_PART_INFO *key_part, uchar *key_buff,
                                 uint maybe_null) {
@@ -2669,7 +2686,7 @@ enum store_key::store_key_result store_key_hash_item::copy_inner() {
     // Convert to and from little endian, since that is what gets
     // stored in the hash field we are lookup up against.
     ulonglong h = uint8korr(pointer_cast<char *>(hash));
-    h = unique_hash(to_field, &h);
+    h = calc_field_hash(to_field, &h);
     int8store(pointer_cast<char *>(hash), h);
   }
   return res;
@@ -2807,7 +2824,7 @@ bool and_conditions(Item **e1, Item *e2) {
     Index condition, or NULL if no condition could be inferred.
 */
 
-Item *make_cond_for_index(Item *cond, TABLE *table, uint keyno,
+static Item *make_cond_for_index(Item *cond, TABLE *table, uint keyno,
                                  bool other_tbls_ok) {
   assert(cond != nullptr);
 
@@ -2874,7 +2891,7 @@ Item *make_cond_for_index(Item *cond, TABLE *table, uint keyno,
   return cond;
 }
 
-Item *make_cond_remainder(Item *cond, bool exclude_index) {
+static Item *make_cond_remainder(Item *cond, bool exclude_index) {
   if (exclude_index && cond->marker == Item::MARKER_ICP_COND_USES_INDEX_ONLY)
     return nullptr; /* Already checked */
 
@@ -3005,7 +3022,6 @@ void QEP_TAB::push_index_cond(const JOIN_TAB *join_tab, uint keyno,
       !has_guarded_conds() && type() != JT_CONST && type() != JT_SYSTEM &&
       !(keyno == tbl->s->primary_key &&
         tbl->file->primary_key_is_clustered())) {
-
     DBUG_EXECUTE("where", print_where(join_->thd, condition(), "full cond",
                                       QT_ORDINARY););
     Item *idx_cond =
@@ -3122,17 +3138,18 @@ bool JOIN::setup_semijoin_materialized_table(JOIN_TAB *tab, uint tableno,
          inner_pos->sj_strategy == SJ_OPT_MATERIALIZE_SCAN);
 
   /*
-  Set up the table to write, do as Query_result_union::create_result_table does
+    Set up the table to write to, do as
+    Query_result_union::create_result_table does
   */
   sjm_exec->table_param = Temp_table_param();
   count_field_types(query_block, &sjm_exec->table_param,
                     emb_sj_nest->nested_join->sj_inner_exprs, false, true);
   sjm_exec->table_param.bit_fields_as_long = true;
 
-  char buffer[NAME_LEN] = {0};
+  char buffer[NAME_LEN];
   const size_t len = snprintf(buffer, sizeof(buffer) - 1, "<subquery%u>",
                               emb_sj_nest->nested_join->query_block_id);
-  char *name = (char *) thd->mem_root->Alloc(len + 1);
+  char *name = (char *)thd->mem_root->Alloc(len + 1);
   if (name == nullptr) return true; /* purecov: inspected */
 
   memcpy(name, buffer, len);
@@ -3432,6 +3449,14 @@ bool make_join_readinfo(JOIN *join, uint no_jbuf_after) {
 
     if (tab->position()->filter_effect <= COND_FILTER_STALE) {
       /*
+        Cost and rows produced needs to be updated to match the logic
+        in test_if_skip_sort_order().
+      */
+      bool need_cost_update =
+          join->primary_tables == 1 &&
+          tab->position()->filter_effect == COND_FILTER_STALE_NO_CONST &&
+          table->s->has_secondary_engine();
+      /*
         Give a proper value for EXPLAIN.
         For performance reasons, we do not recalculate the filter for
         non-EXPLAIN queries; thus, EXPLAIN CONNECTION may show 100%
@@ -3443,7 +3468,7 @@ bool make_join_readinfo(JOIN *join, uint no_jbuf_after) {
         applied.
       */
       tab->position()->filter_effect =
-          (join->thd->lex->is_explain() ||
+          (join->thd->lex->is_explain() || need_cost_update ||
            (join->m_select_limit != HA_POS_ERROR &&
             !Overlaps(join->thd->variables.option_bits, OPTION_BIG_SELECTS)))
               ? calculate_condition_filter(
@@ -3453,6 +3478,12 @@ bool make_join_readinfo(JOIN *join, uint no_jbuf_after) {
                     tab->position()->rows_fetched, false, false,
                     trace_refine_table)
               : COND_FILTER_ALLPASS;
+      /*
+        Update the cost/rows data accordingly for single table queries. Updating
+        Multi-table queries here can lead to inconsistencies.
+      */
+      if (need_cost_update)
+        tab->position()->set_prefix_join_cost(tab->idx(), join->cost_model());
     }
 
     assert(!table_ref->is_recursive_reference() || qep_tab->type() == JT_ALL);
@@ -3520,7 +3551,7 @@ void JOIN_TAB::cleanup() {
 
 void QEP_TAB::cleanup() {
   // Delete parts specific of QEP_TAB:
-  destroy(filesort);
+  if (filesort != nullptr) ::destroy_at(filesort);
   filesort = nullptr;
 
   TABLE *const t = table();
@@ -3543,7 +3574,7 @@ void QEP_TAB::cleanup() {
       close_tmp_table(t);
       free_tmp_table(t);
     }
-    destroy(tmp_table_param);
+    ::destroy_at(tmp_table_param);
     tmp_table_param = nullptr;
   }
   if (table_ref != nullptr && table_ref->uses_materialization()) {
@@ -3571,7 +3602,7 @@ void QEP_shared_owner::qs_cleanup() {
       table_ref->derived_key_list.clear();
     }
   }
-  destroy(range_scan());
+  if (range_scan() != nullptr) ::destroy_at(range_scan());
 }
 
 uint QEP_TAB::sjm_query_block_id() const {
@@ -3736,7 +3767,7 @@ void JOIN::cleanup() {
       if (!table) continue;
       cleanup_table(table);
     }
-  } else if (thd->lex->using_hypergraph_optimizer) {
+  } else if (thd->lex->using_hypergraph_optimizer()) {
     for (Table_ref *tl = query_block->leaf_tables; tl; tl = tl->next_leaf) {
       cleanup_table(tl->table);
     }
@@ -3744,22 +3775,6 @@ void JOIN::cleanup() {
       cleanup_table(cleanup.table);
     }
   }
-
-  if (rollup_state != RollupState::NONE) {
-    for (size_t i = 0; i < fields->size(); i++) {
-      Item *inner = unwrap_rollup_group(query_block->base_ref_items[i]);
-      if (inner->type() == Item::SUM_FUNC_ITEM) {
-        Item_sum *sum = down_cast<Item_sum *>(inner);
-        if (sum->is_rollup_sum_wrapper()) {
-          // unwrap sum switcher to restore original Item_sum
-          inner = down_cast<Item_rollup_sum_switcher *>(sum)->unwrap_sum();
-        }
-      }
-      query_block->base_ref_items[i] = inner;
-    }
-  }
-  /* Restore ref array to original state */
-  set_ref_item_slice(REF_SLICE_SAVED_BASE);
 }
 
 /**
@@ -4408,13 +4423,6 @@ bool JOIN::make_tmp_tables_info() {
 
   DBUG_TRACE;
 
-  // This is necessary to undo effects of any previous execute's call to
-  // CreateFramebufferTable->ReplaceMaterializedItems's calls of
-  // update_used_tables: loses PROP_WINDOW_FUNCTION needed here in next
-  // execution round
-  if (m_windows.elements > 0)
-    for (auto f : *fields) f->update_used_tables();
-
   /*
     In this function, we may change having_cond into a condition on a
     temporary sort/group table, so we have to assign having_for_explain now:
@@ -4518,8 +4526,7 @@ bool JOIN::make_tmp_tables_info() {
     set_ref_item_slice(REF_SLICE_TMP1);
     qep_tab[curr_tmp_table].ref_item_slice = REF_SLICE_TMP1;
     setup_tmptable_write_func(&qep_tab[curr_tmp_table], &trace_this_outer);
-    last_slice_before_pq = REF_SLICE_TMP1;
- 
+
     /*
       If having is not handled here, it will be checked before the row is sent
       to the client.
@@ -4662,9 +4669,6 @@ bool JOIN::make_tmp_tables_info() {
       set_ref_item_slice(REF_SLICE_TMP2);
       qep_tab[curr_tmp_table].ref_item_slice = REF_SLICE_TMP2;
       setup_tmptable_write_func(&qep_tab[curr_tmp_table], &trace_this_tbl);
-
-      // last_slice_before_windowing = REF_SLICE_TMP2;
-      last_slice_before_pq = REF_SLICE_TMP2;
     }
     if (qep_tab[curr_tmp_table].table()->s->is_distinct)
       select_distinct = false; /* Each row is unique */
@@ -4868,7 +4872,8 @@ bool JOIN::make_tmp_tables_info() {
 
         if (change_to_use_tmp_fields(curr_fields, thd, ref_items[widx],
                                      &tmp_fields[widx],
-                                     query_block->m_added_non_hidden_fields))
+                                     query_block->m_added_non_hidden_fields,
+                                     /*windowing*/ true))
           return true;
 
         curr_fields = &tmp_fields[widx];
@@ -5091,6 +5096,9 @@ bool JOIN::add_sorting_to_table(uint idx, ORDER_with_src *sort_order,
   @param [out]  saved_best_key_parts  NULL by default, otherwise preserve the
                                       value for further use in
                                       ReverseIndexRangeScanIterator
+  @param [out]    new_read_time       NULL by default, otherwise return the
+                                      cost of access using new_key if success
+                                      or undefined if the function fails
 
   @note
     This function takes into account table->quick_condition_rows statistic
@@ -5108,7 +5116,8 @@ bool test_if_cheaper_ordering(const JOIN_TAB *tab, ORDER_with_src *order,
                               ha_rows select_limit, int *new_key,
                               int *new_key_direction, ha_rows *new_select_limit,
                               uint *new_used_key_parts,
-                              uint *saved_best_key_parts) {
+                              uint *saved_best_key_parts,
+                              double *new_read_time) {
   DBUG_TRACE;
   /*
     Check whether there is an index compatible with the given order
@@ -5123,6 +5132,7 @@ bool test_if_cheaper_ordering(const JOIN_TAB *tab, ORDER_with_src *order,
   uint best_key_parts = 0;
   int best_key_direction = 0;
   ha_rows best_records = 0;
+  double best_read_time = 0;
   double read_time;
   int best_key = -1;
   bool is_best_covering = false;
@@ -5302,6 +5312,7 @@ bool test_if_cheaper_ordering(const JOIN_TAB *tab, ORDER_with_src *order,
             best_key = nr;
             best_key_parts = keyinfo->user_defined_key_parts;
             if (saved_best_key_parts) *saved_best_key_parts = used_key_parts;
+            best_read_time = index_scan_time;
             best_records = quick_records;
             is_best_covering = is_covering;
             best_key_direction = direction;
@@ -5318,6 +5329,7 @@ bool test_if_cheaper_ordering(const JOIN_TAB *tab, ORDER_with_src *order,
   *new_key_direction = best_key_direction;
   *new_select_limit = has_limit ? best_select_limit : table_records;
   if (new_used_key_parts != nullptr) *new_used_key_parts = best_key_parts;
+  if (new_read_time) *new_read_time = best_read_time;
 
   return true;
 }

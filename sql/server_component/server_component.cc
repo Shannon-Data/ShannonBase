@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -41,7 +42,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "mysql/components/services/mysql_query_attributes.h"
 #include "mysql/components/services/mysql_runtime_error_service.h"
 #include "mysql/components/services/mysql_rwlock_service.h"
+#include "mysql/components/services/mysql_signal_handler.h"
 #include "mysql/components/services/mysql_simple_error_log.h"
+#include "mysql/components/services/mysql_statement_service.h"
 #include "mysql/components/services/mysql_status_variable_reader.h"
 #include "mysql/components/services/mysql_system_variable.h"
 #include "mysql/components/services/table_access_service.h"
@@ -70,6 +73,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "mysql_audit_print_service_double_data_source_imp.h"
 #include "mysql_audit_print_service_longlong_data_source_imp.h"
 #include "mysql_backup_lock_imp.h"
+#include "mysql_bulk_data.h"
 #include "mysql_clone_protocol_imp.h"
 #include "mysql_command_consumer_imp.h"
 #include "mysql_command_services_imp.h"
@@ -81,7 +85,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "mysql_server_event_tracking_bridge_imp.h"
 #include "mysql_server_keyring_lockable_imp.h"
 #include "mysql_server_runnable_imp.h"
+#include "mysql_signal_handler_imp.h"
 #include "mysql_simple_error_log_imp.h"
+#include "mysql_statement_service_imp.h"
 #include "mysql_status_variable_reader_imp.h"
 #include "mysql_stored_program_imp.h"
 #include "mysql_string_service_imp.h"
@@ -136,6 +142,11 @@ mysql_persistent_dynamic_loader_imp::load,
 BEGIN_SERVICE_IMPLEMENTATION(mysql_server, dynamic_privilege_register)
 dynamic_privilege_services_impl::register_privilege,
     dynamic_privilege_services_impl::unregister_privilege
+    END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, dynamic_privilege_deprecation)
+dynamic_privilege_services_impl::add_deprecated,
+    dynamic_privilege_services_impl::remove_deprecated
     END_SERVICE_IMPLEMENTATION();
 
 BEGIN_SERVICE_IMPLEMENTATION(mysql_server, global_grants_check)
@@ -320,6 +331,17 @@ mysql_clone_start_statement, mysql_clone_finish_statement,
     mysql_clone_disconnect, mysql_clone_get_error, mysql_clone_get_command,
     mysql_clone_send_response,
     mysql_clone_send_error END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, bulk_data_convert)
+Bulk_data_convert::mysql_format, Bulk_data_convert::mysql_format_from_raw,
+    Bulk_data_convert::mysql_format_using_key, Bulk_data_convert::is_killed,
+    Bulk_data_convert::compare_keys,
+    Bulk_data_convert::get_row_metadata END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, bulk_data_load)
+Bulk_data_load::begin, Bulk_data_load::load, Bulk_data_load::end,
+    Bulk_data_load::is_table_supported, Bulk_data_load::get_se_memory_size,
+    END_SERVICE_IMPLEMENTATION();
 
 BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_thd_security_context)
 mysql_security_context_imp::get,
@@ -639,6 +661,12 @@ BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_debug_sync_service)
 mysql_debug_sync_service_imp::debug_sync END_SERVICE_IMPLEMENTATION();
 #endif
 
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server,
+                             mysql_stored_program_external_program_handle)
+mysql_stored_program_external_program_handle_imp::get,
+    mysql_stored_program_external_program_handle_imp::set,
+    END_SERVICE_IMPLEMENTATION();
+
 BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stored_program_metadata_query)
 mysql_stored_program_metadata_query_imp::get END_SERVICE_IMPLEMENTATION();
 
@@ -760,6 +788,67 @@ mysql_stored_program_return_value_float_imp::set, END_SERVICE_IMPLEMENTATION();
 BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_simple_error_log)
 mysql_simple_error_log_imp::emit END_SERVICE_IMPLEMENTATION();
 
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_factory)
+mysql_stmt_factory_imp::init, mysql_stmt_factory_imp::close,
+    END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_execute)
+mysql_stmt_execute_imp::execute, mysql_stmt_execute_imp::prepare,
+    mysql_stmt_execute_imp::reset, END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_execute_direct)
+mysql_stmt_execute_direct_imp::execute, END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_bind)
+mysql_stmt_bind_imp::bind_param, END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_result)
+
+mysql_stmt_result_imp::next_result, mysql_stmt_result_imp::fetch,
+    END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_diagnostics)
+mysql_stmt_diagnostics_imp::affected_rows,
+    mysql_stmt_diagnostics_imp::insert_id, mysql_stmt_diagnostics_imp::error_id,
+    mysql_stmt_diagnostics_imp::error, mysql_stmt_diagnostics_imp::sqlstate,
+    mysql_stmt_diagnostics_imp::num_warnings,
+    mysql_stmt_diagnostics_imp::get_warning,
+    mysql_stmt_diagnostics_imp::warning_level,
+    mysql_stmt_diagnostics_imp::warning_code,
+    mysql_stmt_diagnostics_imp::warning_message END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_attributes)
+mysql_stmt_attributes_imp::get, mysql_stmt_attributes_imp::set,
+    END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_metadata)
+mysql_stmt_metadata_imp::param_count, mysql_stmt_metadata_imp::param_metadata,
+    END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_resultset_metadata)
+mysql_stmt_resultset_metadata_imp::fetch_field,
+    mysql_stmt_resultset_metadata_imp::field_count,
+    mysql_stmt_resultset_metadata_imp::field_info, END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_get_string)
+mysql_stmt_get_string_imp::get, END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_get_time)
+mysql_stmt_get_time_imp::get, END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_get_double)
+mysql_stmt_get_double_imp::get, END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_get_unsigned_integer)
+mysql_stmt_get_unsigned_integer_imp::get, END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, mysql_stmt_get_integer)
+mysql_stmt_get_integer_imp::get, END_SERVICE_IMPLEMENTATION();
+
+BEGIN_SERVICE_IMPLEMENTATION(mysql_server, my_signal_handler)
+my_signal_handler_imp::add, my_signal_handler_imp::remove,
+    END_SERVICE_IMPLEMENTATION();
+
 BEGIN_COMPONENT_PROVIDES(mysql_server)
 PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(mysql_server, persistent_dynamic_loader),
@@ -813,6 +902,8 @@ PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(mysql_server, system_variable_source),
     PROVIDES_SERVICE(mysql_server, mysql_backup_lock),
     PROVIDES_SERVICE(mysql_server, clone_protocol),
+    PROVIDES_SERVICE(mysql_server, bulk_data_convert),
+    PROVIDES_SERVICE(mysql_server, bulk_data_load),
     PROVIDES_SERVICE(mysql_server, mysql_thd_security_context),
     PROVIDES_SERVICE(mysql_server, mysql_security_context_factory),
     PROVIDES_SERVICE(mysql_server,
@@ -884,8 +975,13 @@ PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(performance_schema, pfs_plugin_column_timestamp_v2),
     PROVIDES_SERVICE(performance_schema, pfs_plugin_column_year_v1),
     PROVIDES_SERVICE(performance_schema, psi_tls_channel_v1),
+    PROVIDES_SERVICE(performance_schema, mysql_server_telemetry_metrics_v1),
     PROVIDES_SERVICE(performance_schema, mysql_server_telemetry_traces_v1),
+    PROVIDES_SERVICE(performance_schema, psi_metric_v1),
     PROVIDES_SERVICE(performance_schema, pfs_plugin_column_text_v1),
+
+    PROVIDES_SERVICE(mysql_server, pfs_notification_v3),
+    PROVIDES_SERVICE(mysql_server, pfs_resource_group_v3),
 
     PROVIDES_SERVICE(mysql_server, mysql_query_attributes_iterator),
     PROVIDES_SERVICE(mysql_server, mysql_query_attribute_string),
@@ -941,6 +1037,8 @@ PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(mysql_server, mysql_command_field_metadata),
     PROVIDES_SERVICE(mysql_server, dynamic_loader_services_loaded_notification),
     PROVIDES_SERVICE(mysql_server, dynamic_loader_services_unload_notification),
+    PROVIDES_SERVICE(mysql_server,
+                     mysql_stored_program_external_program_handle),
     PROVIDES_SERVICE(mysql_server, mysql_stored_program_metadata_query),
     PROVIDES_SERVICE(mysql_server,
                      mysql_stored_program_argument_metadata_query),
@@ -973,11 +1071,26 @@ PROVIDES_SERVICE(mysql_server_path_filter, dynamic_loader_scheme_file),
     PROVIDES_SERVICE(mysql_server, mysql_stored_program_return_value_float),
     PROVIDES_SERVICE(mysql_server, thread_cleanup_register),
     PROVIDES_SERVICE(mysql_server, mysql_simple_error_log),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_factory),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_execute),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_execute_direct),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_attributes),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_bind),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_get_string),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_get_time),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_get_double),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_get_unsigned_integer),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_get_integer),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_diagnostics),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_metadata),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_resultset_metadata),
+    PROVIDES_SERVICE(mysql_server, mysql_stmt_result),
 #if !defined(NDEBUG)
     PROVIDES_SERVICE(mysql_server, mysql_debug_keyword_service),
     PROVIDES_SERVICE(mysql_server, mysql_debug_sync_service),
 #endif
-    END_COMPONENT_PROVIDES();
+    PROVIDES_SERVICE(mysql_server, dynamic_privilege_deprecation),
+    PROVIDES_SERVICE(mysql_server, my_signal_handler), END_COMPONENT_PROVIDES();
 
 static BEGIN_COMPONENT_REQUIRES(mysql_server) END_COMPONENT_REQUIRES();
 

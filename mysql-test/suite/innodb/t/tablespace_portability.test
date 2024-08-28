@@ -42,7 +42,6 @@ SHOW WARNINGS;
 --disable_query_log
 call mtr.add_suppression("\\[Warning\\] .* Converting backslash to forward slash in ADD DATAFILE");
 call mtr.add_suppression("\\[Warning\\] .* '.*' permission error, can't delete!");
-call mtr.add_suppression("\\[Warning\\] .* One can only use the --user switch if running as root");
 call mtr.add_suppression("\\[ERROR\\] .* The error means mysqld does not have the access rights to the directory.");
 call mtr.add_suppression("\\[ERROR\\] .* Cannot create file");
 call mtr.add_suppression("\\[ERROR\\] .* The directory for tablespace .* does not exist or is incorrect");
