@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -198,7 +199,7 @@ class StringLiteral {
   size_t size;
 };
 
-StringLiteral operator"" _sl(const char *ptr, size_t size) {
+StringLiteral operator""_sl(const char *ptr, size_t size) {
   return StringLiteral(ptr, size);
 }
 
@@ -574,6 +575,18 @@ class StringsUTF8mb4_900Test : public ::testing::Test {
                pointer_cast<const uchar *>(b), strlen(b)) == 0;
   }
 
+#if defined(__cpp_char8_t) && __cpp_char8_t
+  bool equals(const char *a, const char8_t *b) {
+    return equals(a, pointer_cast<const char *>(b));
+  }
+  bool equals(const char8_t *a, const char *b) {
+    return equals(pointer_cast<const char *>(a), b);
+  }
+  bool equals(const char8_t *a, const char8_t *b) {
+    return equals(pointer_cast<const char *>(a), pointer_cast<const char *>(b));
+  }
+#endif
+
  private:
   CHARSET_INFO *m_charset;
 };
@@ -663,6 +676,13 @@ static bool uca_wildcmp(const CHARSET_INFO *cs, const char *str,
   return !cs->coll->wildcmp(cs, str, str_end, pattern, pattern_end, '\\', '_',
                             '%');
 }
+
+#if defined(__cpp_char8_t) && __cpp_char8_t
+static bool uca_wildcmp(const CHARSET_INFO *cs, const char *str,
+                        const char8_t *pattern) {
+  return uca_wildcmp(cs, str, pointer_cast<const char *>(pattern));
+}
+#endif
 
 TEST(UCAWildCmpTest, UCA900WildCmp) {
   CHARSET_INFO *cs = get_charset_by_name("utf8mb4_0900_ai_ci", MYF(0));
@@ -765,6 +785,15 @@ static bool test_well_formed_copy_nchars(const CHARSET_INFO *to_cs,
 
   return well_formed;
 }
+
+#if defined(__cpp_char8_t) && __cpp_char8_t
+static bool test_well_formed_copy_nchars(const CHARSET_INFO *to_cs,
+                                         const CHARSET_INFO *from_cs,
+                                         const char8_t *input_str) {
+  return test_well_formed_copy_nchars(to_cs, from_cs,
+                                      pointer_cast<const char *>(input_str));
+}
+#endif
 
 TEST(WellFormedCopy, TooLongWellFormed) {
   EXPECT_TRUE(test_well_formed_copy_nchars(

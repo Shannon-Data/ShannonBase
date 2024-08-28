@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,7 +30,9 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <unordered_set>
+#include <vector>
 
 #include "field_types.h"
 #include "my_alloc.h"  // destroy
@@ -43,6 +46,7 @@
 #include "mysqld_error.h"
 #include "sql/derror.h"  // ER_THD
 #include "sql/enum_query_type.h"
+#include "sql/field.h"
 #include "sql/handler.h"
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
@@ -50,13 +54,13 @@
 #include "sql/item_sum.h"       // Item_sum
 #include "sql/item_timefunc.h"  // Item_date_add_interval
 #include "sql/join_optimizer/finalize_plan.h"
-#include "sql/join_optimizer/join_optimizer.h"
 #include "sql/join_optimizer/replace_item.h"
 #include "sql/key_spec.h"
 #include "sql/mem_root_array.h"
+#include "sql/mysqld_cs.h"
+#include "sql/parse_location.h"
 #include "sql/parse_tree_nodes.h"   // PT_*
 #include "sql/parse_tree_window.h"  // PT_window
-#include "sql/parser_yystype.h"
 #include "sql/sql_array.h"
 #include "sql/sql_class.h"
 #include "sql/sql_const.h"
@@ -68,10 +72,8 @@
 #include "sql/sql_resolver.h"   // find_order_in_list
 #include "sql/sql_show.h"
 #include "sql/sql_tmp_table.h"  // free_tmp_table
-#include "sql/system_variables.h"
 #include "sql/table.h"
 #include "sql/temp_table_param.h"  // Temp_table_param
-#include "sql/thd_raii.h"
 #include "sql/window_lex.h"
 #include "sql_string.h"
 #include "template_utils.h"
@@ -723,8 +725,9 @@ bool Window::resolve_window_ordering(THD *thd, Ref_item_array ref_item_array,
       expression.
     */
     if (oi->has_aggregation() && oi->type() != Item::SUM_FUNC_ITEM) {
-      oi->split_sum_func(thd, ref_item_array, fields);
-      if (thd->is_error()) return true;
+      if (oi->split_sum_func(thd, ref_item_array, fields)) {
+        return true;
+      }
     }
   }
 
@@ -1336,7 +1339,7 @@ void Window::cleanup() {
     (void)m_frame_buffer->file->ha_index_or_rnd_end();
     close_tmp_table(m_frame_buffer);
     free_tmp_table(m_frame_buffer);
-    ::destroy(m_frame_buffer_param);
+    ::destroy_at(m_frame_buffer_param);
   }
 
   m_frame_buffer_positions.clear();
@@ -1349,13 +1352,13 @@ void Window::cleanup() {
 void Window::destroy()  // called only at stmt destruction
 {
   for (Cached_item *ci : m_order_by_items) {
-    ::destroy(ci);
+    ::destroy_at(ci);
   }
   for (Cached_item *ci : m_partition_items) {
-    ::destroy(ci);
+    ::destroy_at(ci);
   }
-  destroy_array(m_comparators[0].data(), m_comparators[0].size());
-  destroy_array(m_comparators[1].data(), m_comparators[1].size());
+  std::destroy_n(m_comparators[0].data(), m_comparators[0].size());
+  std::destroy_n(m_comparators[1].data(), m_comparators[1].size());
 }
 
 void Window::reset_lead_lag() {
@@ -1524,19 +1527,26 @@ double Window::compute_cost(double cost, const List<Window> &windows) {
   return total_cost;
 }
 
-void Window::apply_temp_table(THD *thd, const Func_ptr_array &items_to_copy) {
-  for (Cached_item *&ci : m_partition_items) {
-    Item *item = FindReplacementOrReplaceMaterializedItems(
-        thd, ci->get_item()->real_item(), items_to_copy,
-        /*need_exact_match=*/true);
-    thd->change_item_tree(ci->get_item_ptr(), item);
+void Window::apply_temp_table(THD *thd, const Func_ptr_array &items_to_copy,
+                              bool first) {
+  // Window::setup_ordering_cached_items() adds Item_ref wrappers around the
+  // ordering and partitioning items. We need to see through them, so we unwrap
+  // them here. Since they get removed on the first call to apply_temp_table(),
+  // only unwrap on the first call.
+  const auto unwrap = [first](Item *item) {
+    return first ? down_cast<Item_ref *>(item)->ref_item() : item;
+  };
+
+  for (Mem_root_array<Cached_item *> *cached_items :
+       {&m_partition_items, &m_order_by_items}) {
+    for (Cached_item *&ci : *cached_items) {
+      Item *item = FindReplacementOrReplaceMaterializedItems(
+          thd, unwrap(ci->get_item()), items_to_copy,
+          /*need_exact_match=*/true);
+      thd->change_item_tree(ci->get_item_ptr(), item);
+    }
   }
-  for (Cached_item *&ci : m_order_by_items) {
-    Item *item = FindReplacementOrReplaceMaterializedItems(
-        thd, ci->get_item()->real_item(), items_to_copy,
-        /*need_exact_match=*/true);
-    thd->change_item_tree(ci->get_item_ptr(), item);
-  }
+
   // Item_rank looks directly into the ORDER *, so we need to update
   // that as well.
   if (m_order_by != nullptr) {
@@ -1547,13 +1557,13 @@ void Window::apply_temp_table(THD *thd, const Func_ptr_array &items_to_copy) {
     for (Arg_comparator &cmp : m_comparators[i]) {
       Item **left_ptr = cmp.get_left_ptr();
       Item *new_item = FindReplacementOrReplaceMaterializedItems(
-          thd, (*left_ptr)->real_item(), items_to_copy,
+          thd, unwrap(*left_ptr), items_to_copy,
           /*need_exact_match=*/true);
       thd->change_item_tree(left_ptr, new_item);
 
       Item_cache *cache = FindCacheInComparator(cmp);
       Item *new_cache_item = FindReplacementOrReplaceMaterializedItems(
-          thd, cache->get_example()->real_item(), items_to_copy,
+          thd, unwrap(cache->get_example()), items_to_copy,
           /*need_exact_match=*/true);
       thd->change_item_tree(cache->get_example_ptr(), new_cache_item);
     }

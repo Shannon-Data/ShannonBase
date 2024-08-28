@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -176,10 +177,15 @@ MDL_request *lock_request(THD *, const schema_map_t &, const T *) {
 template <>
 MDL_request *lock_request(THD *thd, const schema_map_t &schema_map,
                           const Abstract_table *object) {
+  // Since the object in this case comes from the m_map, any element in the map
+  // that was nullptr would be inconsistent. In such a situation,
+  // a crash might be more appropriate.
+  assert(object != nullptr);
+
   // Fetch the schema to get hold of the schema name.
   const schema_map_t::const_iterator schema_name =
       schema_map.find(object->schema_id());
-  if (schema_name == schema_map.end() || object == nullptr) return nullptr;
+  if (schema_name == schema_map.end()) return nullptr;
 
   MDL_request *request = new (thd->mem_root) MDL_request;
   if (request == nullptr) return nullptr;

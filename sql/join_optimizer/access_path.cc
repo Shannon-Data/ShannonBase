@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,26 +19,33 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/join_optimizer/access_path.h"
 
 #include <algorithm>
+#include <cmath>
+#include <memory>
 #include <vector>
 
+#include "mem_root_deque.h"
 #include "my_base.h"
+#include "my_dbug.h"
+#include "mysql/components/services/bits/psi_bits.h"
+#include "prealloced_array.h"
+#include "sql/field.h"
 #include "sql/filesort.h"
+#include "sql/handler.h"
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
-#include "sql/item_sum.h"
+#include "sql/item_subselect.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/bka_iterator.h"
 #include "sql/iterators/composite_iterators.h"
 #include "sql/iterators/delete_rows_iterator.h"
 #include "sql/iterators/hash_join_iterator.h"
 #include "sql/iterators/ref_row_iterators.h"
+#include "sql/iterators/row_iterator.h"
 #include "sql/iterators/sorting_iterator.h"
 #include "sql/iterators/timing_iterator.h"
 #include "sql/iterators/window_iterators.h"
@@ -48,6 +56,7 @@
 #include "sql/join_optimizer/relational_expression.h"
 #include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/mem_root_array.h"
+#include "sql/pack_rows.h"
 #include "sql/range_optimizer/geometry_index_range_scan.h"
 #include "sql/range_optimizer/group_index_skip_scan.h"
 #include "sql/range_optimizer/group_index_skip_scan_plan.h"
@@ -58,9 +67,18 @@
 #include "sql/range_optimizer/range_optimizer.h"
 #include "sql/range_optimizer/reverse_index_range_scan.h"
 #include "sql/range_optimizer/rowid_ordered_retrieval.h"
+#include "sql/sql_array.h"
+#include "sql/sql_const.h"
+#include "sql/sql_executor.h"
+#include "sql/sql_lex.h"
+#include "sql/sql_list.h"
+#include "sql/sql_opt_exec_shared.h"
 #include "sql/sql_optimizer.h"
 #include "sql/sql_update.h"
+#include "sql/system_variables.h"
 #include "sql/table.h"
+#include "sql/visible_fields.h"
+#include "template_utils.h"
 
 using pack_rows::TableCollection;
 using std::all_of;
@@ -97,7 +115,7 @@ AccessPath *NewSortAccessPath(THD *thd, AccessPath *child, Filesort *filesort,
       FindTablesToGetRowidFor(path);
     }
   }
-
+  path->has_group_skip_scan = child->has_group_skip_scan;
   return path;
 }
 
@@ -122,6 +140,38 @@ AccessPath *NewUpdateRowsAccessPath(THD *thd, AccessPath *child,
   path->update_rows().child = child;
   path->update_rows().tables_to_update = update_tables;
   path->update_rows().immediate_tables = immediate_tables;
+  return path;
+}
+
+static Mem_root_array<Item_values_column *> *GetTableValueConstructorOutputRefs(
+    MEM_ROOT *mem_root, const JOIN *join) {
+  // If the table value constructor has a single row, the values are contained
+  // directly in join->fields, and there are no Item_values_column output refs.
+  if (join->query_block->row_value_list->size() == 1) {
+    return nullptr;
+  }
+
+  auto columns = new (mem_root) Mem_root_array<Item_values_column *>(mem_root);
+  if (columns == nullptr) return nullptr;
+
+  for (Item *column : VisibleFields(*join->fields)) {
+    if (columns->push_back(down_cast<Item_values_column *>(column))) {
+      return nullptr;
+    }
+  }
+
+  return columns;
+}
+
+AccessPath *NewTableValueConstructorAccessPath(const THD *thd,
+                                               const JOIN *join) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::TABLE_VALUE_CONSTRUCTOR;
+  // The iterator keeps track of which row it is at in examined_rows,
+  // so we always need to give it the pointer.
+  path->count_examined_rows = true;
+  path->table_value_constructor().output_refs =
+      GetTableValueConstructorOutputRefs(thd->mem_root, join);
   return path;
 }
 
@@ -167,8 +217,12 @@ TABLE *GetBasicTable(const AccessPath *path) {
     // Basic access paths (those with no children, at least nominally).
     case AccessPath::TABLE_SCAN:
       return path->table_scan().table;
+    case AccessPath::SAMPLE_SCAN:
+      return path->sample_scan().table;
     case AccessPath::INDEX_SCAN:
       return path->index_scan().table;
+    case AccessPath::INDEX_DISTANCE_SCAN:
+      return path->index_distance_scan().table;
     case AccessPath::REF:
       return path->ref().table;
     case AccessPath::REF_OR_NULL:
@@ -286,6 +340,7 @@ bool ShouldEnableBatchMode(AccessPath *path) {
   switch (path->type) {
     case AccessPath::TABLE_SCAN:
     case AccessPath::INDEX_SCAN:
+    case AccessPath::INDEX_DISTANCE_SCAN:
     case AccessPath::REF:
     case AccessPath::REF_OR_NULL:
     case AccessPath::PUSHED_JOIN_REF:
@@ -491,6 +546,13 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
               thd, mem_root, param.table, param.idx, param.use_order,
               path->num_output_rows(), examined_rows);
         }
+        break;
+      }
+      case AccessPath::INDEX_DISTANCE_SCAN: {
+        const auto &param = path->index_distance_scan();
+        iterator = NewIterator<IndexDistanceScanIterator>(
+            thd, mem_root, param.table, param.idx, param.range,
+            path->num_output_rows(), examined_rows);
         break;
       }
       case AccessPath::REF: {
@@ -723,7 +785,7 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         Query_block *query_block = join->query_block;
         iterator = NewIterator<TableValueConstructorIterator>(
             thd, mem_root, examined_rows, *query_block->row_value_list,
-            query_block->join->fields);
+            path->table_value_constructor().output_refs);
         break;
       }
       case AccessPath::FAKE_SINGLE_ROW:
@@ -818,7 +880,7 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         }
         const Mem_root_array<Item *> *extra_conditions =
             GetExtraHashJoinConditions(
-                mem_root, thd->lex->using_hypergraph_optimizer, conditions,
+                mem_root, thd->lex->using_hypergraph_optimizer(), conditions,
                 join_predicate->expr->join_conditions);
         if (extra_conditions == nullptr) return nullptr;
         const bool probe_input_batch_mode =
@@ -872,10 +934,28 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         // path instead of being computed here? We do make the same checks in
         // the cost model, so perhaps it should set the flag as well.
         uint64_t *hash_table_generation =
-            (thd->lex->using_hypergraph_optimizer &&
+            (thd->lex->using_hypergraph_optimizer() &&
              path->parameter_tables == 0)
                 ? &join->hash_table_generation
                 : nullptr;
+
+        const auto first_row_cost = [](const AccessPath &p) {
+          return p.init_cost() + p.cost() / std::max(p.num_output_rows(), 1.0);
+        };
+
+        // If the probe (outer) input is empty, the join result will be empty,
+        // and we do not need to read the build input. For inner join and
+        // semijoin, the converse is also true. To benefit from this, we want to
+        // start with the input where the cost of reading the first row is
+        // lowest. (We only do this for Hypergraph, as the cost data for the
+        // traditional optimizer are incomplete, and since we are reluctant to
+        // change existing behavior.) Note that we always try the probe input
+        // first for left join and antijoin.
+        const HashJoinInput first_input =
+            (thd->lex->using_hypergraph_optimizer() &&
+             first_row_cost(*param.inner) > first_row_cost(*param.outer))
+                ? HashJoinInput::kProbe
+                : HashJoinInput::kBuild;
 
         iterator = NewIterator<HashJoinIterator>(
             thd, mem_root, std::move(job.children[1]),
@@ -885,7 +965,7 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
             param.store_rowids, param.tables_to_get_rowid_for,
             thd->variables.join_buff_size, std::move(conditions),
             param.allow_spill_to_disk, join_type, *extra_conditions,
-            probe_input_batch_mode, hash_table_generation);
+            first_input, probe_input_batch_mode, hash_table_generation);
         break;
       }
       case AccessPath::FILTER: {
@@ -939,7 +1019,7 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
             TableCollection(tables, /*store_rowids=*/false,
                             /*tables_to_get_rowid_for=*/0,
                             GetNullableEqRefTables(param.child)),
-            param.rollup);
+            param.olap == ROLLUP_TYPE);
         break;
       }
       case AccessPath::TEMPTABLE_AGGREGATE: {
@@ -1012,20 +1092,22 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
             path->materialize().table_path->type == AccessPath::CONST_TABLE ||
             path->materialize().table_path->type == AccessPath::INDEX_SCAN ||
             path->materialize().table_path->type ==
-                AccessPath::INDEX_RANGE_SCAN);
+                AccessPath::INDEX_RANGE_SCAN ||
+            path->materialize().table_path->type ==
+                AccessPath::DYNAMIC_INDEX_RANGE_SCAN);
 
         MaterializePathParameters *param = path->materialize().param;
         if (job.children.is_null()) {
-          job.AllocChildren(mem_root, param->query_blocks.size() + 1);
+          job.AllocChildren(mem_root, param->m_operands.size() + 1);
           todo.push_back(job);
           todo.push_back({path->materialize().table_path,
                           join,
                           eligible_for_batch_mode,
                           &job.children[0],
                           {}});
-          for (size_t i = 0; i < param->query_blocks.size(); ++i) {
-            const MaterializePathParameters::QueryBlock &from =
-                param->query_blocks[i];
+          for (size_t i = 0; i < param->m_operands.size(); ++i) {
+            const MaterializePathParameters::Operand &from =
+                param->m_operands[i];
             todo.push_back({from.subquery_path,
                             from.join,
                             /*eligible_for_batch_mode=*/true,
@@ -1036,12 +1118,11 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         }
         unique_ptr_destroy_only<RowIterator> table_iterator =
             std::move(job.children[0]);
-        Mem_root_array<materialize_iterator::QueryBlock> query_blocks(
-            thd->mem_root, param->query_blocks.size());
-        for (size_t i = 0; i < param->query_blocks.size(); ++i) {
-          const MaterializePathParameters::QueryBlock &from =
-              param->query_blocks[i];
-          materialize_iterator::QueryBlock &to = query_blocks[i];
+        Mem_root_array<materialize_iterator::Operand> operands(
+            thd->mem_root, param->m_operands.size());
+        for (size_t i = 0; i < param->m_operands.size(); ++i) {
+          const MaterializePathParameters::Operand &from = param->m_operands[i];
+          materialize_iterator::Operand &to = operands[i];
           to.subquery_iterator = std::move(job.children[i + 1]);
           to.select_number = from.select_number;
           to.join = from.join;
@@ -1053,6 +1134,7 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
           to.m_first_distinct = from.m_first_distinct;
           to.m_total_operands = from.m_total_operands;
           to.m_operand_idx = from.m_operand_idx;
+          to.m_estimated_output_rows = from.subquery_path->num_output_rows();
 
           if (to.is_recursive_reference) {
             // Find the recursive reference to ourselves; there should be
@@ -1070,11 +1152,11 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
             }
           }
         }
-        JOIN *subjoin = param->ref_slice == -1 ? nullptr : query_blocks[0].join;
+        JOIN *subjoin = param->ref_slice == -1 ? nullptr : operands[0].join;
 
         iterator = unique_ptr_destroy_only<RowIterator>(
             materialize_iterator::CreateIterator(
-                thd, std::move(query_blocks), param, std::move(table_iterator),
+                thd, std::move(operands), param, std::move(table_iterator),
                 subjoin));
 
         break;
@@ -1239,6 +1321,10 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
         iterator = CreateUpdateRowsIterator(thd, mem_root, join,
                                             std::move(job.children[0]));
         break;
+      }
+      case AccessPath::SAMPLE_SCAN: { /* LCOV_EXCL_LINE */
+        // SampleScan can be executed only in the secondary engine.
+        assert(false); /* LCOV_EXCL_LINE */
       }
     }
 
@@ -1425,7 +1511,7 @@ void ExpandSingleFilterAccessPath(THD *thd, AccessPath *path, const JOIN *join,
     // rows (purely for display purposes). Note that this mirrors the
     // calculation we are doing in CostingReceiver::ProposeNestedLoopJoin();
     // we don't have space in the AccessPath to store it there.
-    double filter_cost = right_path->cost;
+    double filter_cost = right_path->cost();
     double filter_rows = right_path->num_output_rows();
 
     List<Item> items;
@@ -1436,22 +1522,21 @@ void ExpandSingleFilterAccessPath(THD *thd, AccessPath *path, const JOIN *join,
       filter_cost +=
           EstimateFilterCost(thd, filter_rows, condition, join->query_block)
               .cost_if_not_materialized;
-      filter_rows *= EstimateSelectivity(thd, condition, *expr->companion_set,
-                                         /*trace=*/nullptr);
+      filter_rows *= EstimateSelectivity(thd, condition, *expr->companion_set);
     }
     for (Item *condition : expr->join_conditions) {
       items.push_back(condition);
       filter_cost +=
           EstimateFilterCost(thd, filter_rows, condition, join->query_block)
               .cost_if_not_materialized;
-      filter_rows *= EstimateSelectivity(thd, condition, *expr->companion_set,
-                                         /*trace=*/nullptr);
+      filter_rows *= EstimateSelectivity(thd, condition, *expr->companion_set);
     }
     assert(!items.is_empty());
 
     AccessPath *filter_path = new (thd->mem_root) AccessPath;
     filter_path->type = AccessPath::FILTER;
     filter_path->filter().child = right_path;
+    filter_path->has_group_skip_scan = right_path->has_group_skip_scan;
 
     // We don't bother trying to materialize subqueries in join conditions,
     // since they should be very rare.
@@ -1459,7 +1544,7 @@ void ExpandSingleFilterAccessPath(THD *thd, AccessPath *path, const JOIN *join,
 
     CopyBasicProperties(*right_path, filter_path);
     filter_path->filter().condition = CreateConjunction(&items);
-    filter_path->cost = filter_cost;
+    filter_path->set_cost(filter_cost);
     filter_path->set_num_output_rows(filter_rows);
 
     path->nested_loop_join().inner = filter_path;
@@ -1493,23 +1578,25 @@ void ExpandSingleFilterAccessPath(THD *thd, AccessPath *path, const JOIN *join,
   AccessPath *new_path = new (thd->mem_root) AccessPath(*path);
   new_path->filter_predicates.Clear();
   new_path->set_num_output_rows(path->num_output_rows_before_filter);
-  new_path->cost = path->cost_before_filter;
+  new_path->set_cost(path->cost_before_filter());
 
   // We don't really know how much of init_cost comes from the filter,
   // but we need to heed the invariant that cost >= init_cost
   // also for the new (non-filter) path we're creating, even if it's
   // just for display. Heuristically allocate as much as possible to
   // the filter.
-  double filter_only_cost = path->cost - path->cost_before_filter;
-  new_path->init_cost = std::max(new_path->init_cost - filter_only_cost, 0.0);
-  new_path->init_once_cost =
-      std::max(new_path->init_once_cost - filter_only_cost, 0.0);
-  assert(new_path->cost >= new_path->init_cost);
-  assert(new_path->init_cost >= new_path->init_once_cost);
+  double filter_only_cost = path->cost() - path->cost_before_filter();
+  new_path->set_init_cost(
+      std::max(new_path->init_cost() - filter_only_cost, 0.0));
+  new_path->set_init_once_cost(
+      std::max(new_path->init_once_cost() - filter_only_cost, 0.0));
+  assert(new_path->cost() >= new_path->init_cost());
+  assert(new_path->init_cost() >= new_path->init_once_cost());
 
   path->type = AccessPath::FILTER;
   path->filter().condition = condition;
   path->filter().child = new_path;
+  path->has_group_skip_scan = new_path->has_group_skip_scan;
   path->filter().materialize_subqueries = false;
 
   // Clear filter_predicates, but keep applied_sargable_join_predicates.

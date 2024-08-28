@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,9 +20,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #define MYSQL_SERVER 1
 #include "storage/myisam/ha_myisam.h"
@@ -30,11 +29,11 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <algorithm>
+#include <bit>
 #include <new>
 
 #include "lex_string.h"
 #include "m_string.h"
-#include "my_bit.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
 #include "my_io.h"
@@ -274,7 +273,6 @@ int table2myisam(TABLE *table_arg, MI_KEYDEF **keydef_out,
     keydef[i].keysegs = pos->user_defined_key_parts;
     for (j = 0; j < pos->user_defined_key_parts; j++) {
       Field *field = pos->key_part[j].field;
-      if (field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       type = field->key_type();
       keydef[i].seg[j].flag = pos->key_part[j].key_part_flag;
 
@@ -311,7 +309,6 @@ int table2myisam(TABLE *table_arg, MI_KEYDEF **keydef_out,
         keydef[i].seg[j].null_pos = 0;
       }
       if (field->type() == MYSQL_TYPE_BLOB ||
-          field->type() == MYSQL_TYPE_VECTOR ||
           field->type() == MYSQL_TYPE_GEOMETRY) {
         keydef[i].seg[j].flag |= HA_BLOB_PART;
         /* save number of bytes used to pack length */
@@ -337,7 +334,6 @@ int table2myisam(TABLE *table_arg, MI_KEYDEF **keydef_out,
     length = 0;
 
     for (field = table_arg->field; *field; field++) {
-      if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       if ((fieldpos = (*field)->offset(record)) >= recpos &&
           fieldpos <= minpos) {
         /* skip null fields */
@@ -761,7 +757,6 @@ int ha_myisam::open(const char *name, int mode, uint test_if_locked,
       goto err;
       /* purecov: end */
     }
-    recs = (recs == file->s->base.fields) ? recs : (recs -1);
     if (check_definition(keyinfo, recinfo, table->s->keys, recs,
                          file->s->keyinfo, file->s->rec, file->s->base.keys,
                          file->s->base.fields, true)) {
@@ -1986,7 +1981,7 @@ static int myisam_init(void *p) {
   else
     myisam_recover_options = HA_RECOVER_OFF;
 
-  myisam_block_size = (uint)1 << my_bit_log2(opt_myisam_block_size);
+  myisam_block_size = std::bit_floor(opt_myisam_block_size);
 
   myisam_hton = (handlerton *)p;
   myisam_hton->state = SHOW_OPTION_YES;

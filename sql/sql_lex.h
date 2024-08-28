@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
   @defgroup GROUP_PARSER Parser
@@ -34,6 +33,7 @@
 #include <sys/types.h>  // TODO: replace with cstdint
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -133,7 +133,7 @@ struct NESTED_JOIN;
 struct PSI_digest_locker;
 struct sql_digest_state;
 union Lexer_yystype;
-struct Lifted_fields_map;
+struct Lifted_expressions_map;
 
 const size_t INITIAL_LEX_PLUGIN_LIST_SIZE = 16;
 constexpr const int MAX_SELECT_NESTING{sizeof(nesting_map) * 8 - 1};
@@ -341,21 +341,21 @@ class Table_ident {
 
 using List_item = mem_root_deque<Item *>;
 using Group_list_ptrs = Mem_root_array<ORDER *>;
-using PQ_Group_list_ptrs = Mem_root_array<ORDER *>;
 
 /**
-  Structure to hold parameters for CHANGE MASTER, START SLAVE, and STOP SLAVE.
+  Structure to hold parameters for CHANGE REPLICATION SOURCE, START REPLICA, and
+  STOP REPLICA.
 
   Remark: this should not be confused with Master_info (and perhaps
   would better be renamed to st_lex_replication_info).  Some fields,
   e.g., delay, are saved in Relay_log_info, not in Master_info.
 */
-struct LEX_MASTER_INFO {
+struct LEX_SOURCE_INFO {
   /*
     The array of IGNORE_SERVER_IDS has a preallocation, and is not expected
     to grow to any significant size, so no instrumentation.
   */
-  LEX_MASTER_INFO() : repl_ignore_server_ids(PSI_NOT_INSTRUMENTED) {
+  LEX_SOURCE_INFO() : repl_ignore_server_ids(PSI_NOT_INSTRUMENTED) {
     initialize();
   }
   char *host, *user, *password, *log_file_name, *bind_addr, *network_namespace;
@@ -372,7 +372,7 @@ struct LEX_MASTER_INFO {
     UNTIL_SQL_AFTER_GTIDS
   } gtid_until_condition;
   bool until_after_gaps;
-  bool slave_until;
+  bool replica_until;
   bool for_channel;
 
   /*
@@ -407,7 +407,7 @@ struct LEX_MASTER_INFO {
   Prealloced_array<ulong, 2> repl_ignore_server_ids;
   /**
     Flag that is set to `true` whenever `PRIVILEGE_CHECKS_USER` is set to `NULL`
-    as a part of a `CHANGE MASTER TO` statement.
+    as a part of a `CHANGE REPLICATION SOURCE TO` statement.
    */
   bool privilege_checks_none;
   /**
@@ -453,11 +453,11 @@ struct LEX_MASTER_INFO {
 
  private:
   // Not copyable or assignable.
-  LEX_MASTER_INFO(const LEX_MASTER_INFO &);
-  LEX_MASTER_INFO &operator=(const LEX_MASTER_INFO &);
+  LEX_SOURCE_INFO(const LEX_SOURCE_INFO &);
+  LEX_SOURCE_INFO &operator=(const LEX_SOURCE_INFO &);
 };
 
-struct LEX_RESET_SLAVE {
+struct LEX_RESET_REPLICA {
   bool all;
 };
 
@@ -746,18 +746,19 @@ class Query_expression {
 
   /**
     If there is an unfinished materialization (see optimize()),
-    contains one element for each query block in this query expression.
+    contains one element for each operand (query block) in this query
+    expression.
    */
-  Mem_root_array<MaterializePathParameters::QueryBlock>
-      m_query_blocks_to_materialize;
+  Mem_root_array<MaterializePathParameters::Operand> m_operands;
 
- public:
-   /**
+ private:
+  /**
     Convert the executor structures to a set of access paths, storing the result
     in m_root_access_path.
    */
   void create_access_paths(THD *thd);
 
+ public:
   /**
     result of this query can't be cached, bit field, can be :
       UNCACHEABLE_DEPENDENT
@@ -894,14 +895,12 @@ class Query_expression {
   bool force_create_iterators(THD *thd);
 
   /// See optimize().
-  bool unfinished_materialization() const {
-    return !m_query_blocks_to_materialize.empty();
-  }
+  bool unfinished_materialization() const { return !m_operands.empty(); }
 
   /// See optimize().
-  Mem_root_array<MaterializePathParameters::QueryBlock>
+  Mem_root_array<MaterializePathParameters::Operand>
   release_query_blocks_to_materialize() {
-    return std::move(m_query_blocks_to_materialize);
+    return std::move(m_operands);
   }
 
   /// Set new query result object for this query expression
@@ -1180,6 +1179,7 @@ class Query_block : public Query_term {
   Query_block *query_block() const override {
     return const_cast<Query_block *>(this);
   }
+  void label_children() override {}
   void destroy_tree() override { m_parent = nullptr; }
 
   bool open_result_tables(THD *, int) override;
@@ -1192,6 +1192,9 @@ class Query_block : public Query_term {
   Item *having_cond() const { return m_having_cond; }
   Item **having_cond_ref() { return &m_having_cond; }
   void set_having_cond(Item *cond) { m_having_cond = cond; }
+  Item *qualify_cond() const { return m_qualify_cond; }
+  Item **qualify_cond_ref() { return &m_qualify_cond; }
+  void set_qualify_cond(Item *cond) { m_qualify_cond = cond; }
   void set_query_result(Query_result *result) { m_query_result = result; }
   Query_result *query_result() const { return m_query_result; }
   bool change_query_result(THD *thd, Query_result_interceptor *new_result,
@@ -1275,6 +1278,13 @@ class Query_block : public Query_term {
   */
   bool is_implicitly_grouped() const {
     return m_agg_func_used && group_list.elements == 0;
+  }
+
+  /**
+    @return true if this query block has GROUP BY modifier.
+  */
+  bool is_non_primitive_grouped() const {
+    return (olap != UNSPECIFIED_OLAP_TYPE);
   }
 
   /**
@@ -1381,8 +1391,8 @@ class Query_block : public Query_term {
   auto visible_fields() const { return VisibleFields(fields); }
 
   /// Check privileges for views that are merged into query block
-  bool check_view_privileges(THD *thd, ulong want_privilege_first,
-                             ulong want_privilege_next);
+  bool check_view_privileges(THD *thd, Access_bitmask want_privilege_first,
+                             Access_bitmask want_privilege_next);
   /// Check privileges for all columns referenced from query block
   bool check_column_privileges(THD *thd);
 
@@ -1693,6 +1703,16 @@ class Query_block : public Query_term {
   void print_having(const THD *thd, String *str, enum_query_type query_type);
 
   /**
+      Print list of items in QUALIFY clause.
+
+      @param      thd          Thread handle
+      @param[out] str          String of output
+      @param      query_type   Options to print out string output
+    */
+  void print_qualify(const THD *thd, String *str,
+                     enum_query_type query_type) const;
+
+  /**
     Print details of Windowing functions.
 
     @param      thd          Thread handler
@@ -1775,8 +1795,6 @@ class Query_block : public Query_term {
   bool right_joins() const { return m_right_joins; }
   void set_right_joins() { m_right_joins = true; }
 
-  bool has_foj() const { return m_has_foj; }
-  void set_has_foj(bool val) { m_has_foj = val; }
   /// Lookup for Query_block type
   enum_explain_type type() const;
 
@@ -1854,15 +1872,13 @@ class Query_block : public Query_term {
 
   /// Creates a clone for the given expression by re-parsing the
   /// expression. Used in condition pushdown to derived tables.
-  Item *clone_expression(THD *thd, Item *item);
+  Item *clone_expression(THD *thd, Item *item, Table_ref *derived_table);
   /// Returns an expression from the select list of the query block
   /// using the field's index in a derived table.
   Item *get_derived_expr(uint expr_index);
 
-  MaterializePathParameters::QueryBlock setup_materialize_query_block(
-      AccessPath *childPath, TABLE *dst_table);
-
-  Query_block *orig;
+  MaterializePathParameters::Operand setup_materialize_query_block(
+      AccessPath *child_path, TABLE *dst_table) const;
 
   // ************************************************
   // * Members (most of these should not be public) *
@@ -1923,21 +1939,29 @@ class Query_block : public Query_term {
   Group_list_ptrs *order_list_ptrs{nullptr};
 
   /**
-    GROUP BY clause.
-    This list may be mutated during optimization (by remove_const() in the old
-    optimizer or by RemoveRedundantOrderElements() in the hypergraph optimizer),
-    so for prepared statements, we keep a copy of the ORDER.next pointers in
-    group_list_ptrs, and re-establish the original list before each execution.
+    GROUP BY clause.  This list may be mutated during optimization (by
+    \c remove_const() in the old optimizer or by
+    RemoveRedundantOrderElements() in the hypergraph optimizer), so for prepared
+    statements, we keep a copy of the ORDER.next pointers in \c group_list_ptrs,
+    and re-establish the original list before each execution.  The list can also
+    be temporarily pruned and restored by \c Group_check (if transform done,
+    cf. \c Query_block::m_gl_size_orig).
   */
   SQL_I_List<ORDER> group_list{};
   Group_list_ptrs *group_list_ptrs{nullptr};
-
-  /*
-   * the backup of group_list/order_list before optimization, which is used
-   * to generate worker's group_list/order_list.
-   */
-  PQ_Group_list_ptrs *saved_group_list_ptrs{nullptr};
-  PQ_Group_list_ptrs *saved_order_list_ptrs{nullptr};
+  /**
+    For an explicitly grouped, correlated, scalar subquery which is transformed
+    to join with derived tables: the number of added non-column expressions.
+    Used for better functional dependency analysis since this is checked during
+    prepare *after* transformations. Transforms will append inner expressions
+    to the group by list, rendering the check too optimistic. To remedy this,
+    we temporarily remove the added compound (i.e. not simple column)
+    expressions when doing the full group by check. This is bit too
+    pessimistic: we can get occasionally false positives (full group by check
+    error). The underlying problem is that we do not perform full group by
+    checking before transformations.  See also \c Group_check's ctor and dtor.
+  */
+  decltype(SQL_I_List<ORDER>::elements) m_no_of_added_exprs{0};
 
   // Used so that AggregateIterator knows which items to signal when the rollup
   // level changes. Obviously only used in the presence of rollup.
@@ -2040,6 +2064,8 @@ class Query_block : public Query_term {
   enum_parsing_context parsing_place{CTX_NONE};
   /// Parse context: is inside a set function if this is positive
   uint in_sum_expr{0};
+  ///  Parse context: is inside a window function if this is positive
+  uint in_window_expr{0};
 
   /**
     Three fields used by semi-join transformations to know when semi-join is
@@ -2050,6 +2076,7 @@ class Query_block : public Query_term {
     RESOLVE_JOIN_NEST,
     RESOLVE_CONDITION,
     RESOLVE_HAVING,
+    RESOLVE_QUALIFY,
     RESOLVE_SELECT_LIST
   };
   Resolve_place resolve_place{
@@ -2061,9 +2088,10 @@ class Query_block : public Query_term {
   */
   uint select_n_where_fields{0};
   /**
-    number of items in select_list and HAVING clause used to get number
-    bigger then can be number of entries that will be added to all item
-    list during split_sum_func
+    Number of items in the select list, HAVING clause, QUALIFY clause and ORDER
+    BY clause. It is used to reserve space in the base_ref_items array so that
+    it is big enough to hold hidden items for any of the expressions or
+    sub-expressions in those clauses.
   */
   uint select_n_having_items{0};
   /// Number of arguments of and/or/xor in where/having/on
@@ -2113,7 +2141,10 @@ class Query_block : public Query_term {
   */
   int nest_level{0};
 
-  /// Indicates whether this query block contains the WITH ROLLUP clause
+  /**
+    Indicates whether this query block contains non-primitive grouping (such as
+    ROLLUP).
+  */
   olap_type olap{UNSPECIFIED_OLAP_TYPE};
 
   /// @see enum_condition_context
@@ -2201,33 +2232,6 @@ class Query_block : public Query_term {
 
   bool is_row_count_valid_for_semi_join();
 
-  /// Helper for fix_prepare_information()
-  void fix_prepare_information_for_order(THD *thd, SQL_I_List<ORDER> *list,
-                                         Group_list_ptrs **list_ptrs);
-
-  bool setup_group(THD *thd);
-
-  bool setup_order_final(THD *thd);
-
-  /**
-    Active options. Derived from base options, modifiers added during
-    resolving and values from session variable option_bits. Since the latter
-    may change, active options are refreshed per execution of a statement.
-  */
-  ulonglong m_active_options{0};
-
-  /// Number of GROUP BY expressions added to all_fields
-  int hidden_group_field_count{0};
-
-  /// How many expressions are part of the order by but not select list.
-  int hidden_order_field_count{0};
-
-  /**
-    Intrusive linked list of all query blocks within the same
-    Windows function maybe be optimized, so we save this value to determine
-    whether support parallel query. */
-  uint saved_windows_elements{0};
-
  private:
   friend class Query_expression;
   friend class Condition_context;
@@ -2245,7 +2249,7 @@ class Query_block : public Query_term {
   ///  Build semijoin condition for th query block
   bool build_sj_cond(THD *thd, NESTED_JOIN *nested_join,
                      Query_block *subq_query_block, table_map outer_tables_map,
-                     Item **sj_cond);
+                     Item **sj_cond, bool *simple_const);
   bool decorrelate_condition(Semijoin_decorrelation &sj_decor,
                              Table_ref *join_nest);
 
@@ -2261,23 +2265,38 @@ class Query_block : public Query_term {
                                      Item *lifted_where_cond);
   bool transform_table_subquery_to_join_with_derived(
       THD *thd, Item_exists_subselect *subq_pred);
+  bool setup_counts_over_partitions(
+      THD *thd, Table_ref *derived, Lifted_expressions_map *lifted_expressions,
+      mem_root_deque<Item *> &exprs_added_to_group_by, uint hidden_fields);
+  bool add_inner_fields_to_select_list(THD *thd,
+                                       Lifted_expressions_map *lifted_exprs,
+                                       Item *selected_field_or_ref,
+                                       const uint first_non_hidden);
+  bool add_inner_func_calls_to_select_list(
+      THD *thd, Lifted_expressions_map *lifted_exprs);
+  bool add_inner_exprs_to_group_by(
+      THD *thd, List_iterator<Item> &inner_exprs, Item *selected_item,
+      bool *selected_expr_added_to_group_by,
+      mem_root_deque<Item *> *exprs_added_to_group_by);
   bool decorrelate_derived_scalar_subquery_pre(
       THD *thd, Table_ref *derived, Item *lifted_where,
-      Lifted_fields_map *lifted_where_fields, bool *added_card_check);
+      Lifted_expressions_map *lifted_where_expressions, bool *added_card_check,
+      size_t *added_window_card_checks);
   bool decorrelate_derived_scalar_subquery_post(
-      THD *thd, Table_ref *derived, Lifted_fields_map *lifted_where_fields,
-      bool added_card_check);
+      THD *thd, Table_ref *derived, Lifted_expressions_map *lifted_exprs,
+      bool added_card_check, size_t added_window_card_checks);
   void replace_referenced_item(Item *const old_item, Item *const new_item);
   void remap_tables(THD *thd);
-  void mark_item_as_maybe_null_if_rollup_item(Item *item);
+  void mark_item_as_maybe_null_if_non_primitive_grouped(Item *item) const;
   Item *resolve_rollup_item(THD *thd, Item *item);
   bool resolve_rollup(THD *thd);
 
   bool setup_wild(THD *thd);
+  bool setup_order_final(THD *thd);
+  bool setup_group(THD *thd);
   void fix_after_pullout(Query_block *parent_query_block,
                          Query_block *removed_query_block);
-  bool remove_redundant_subquery_clauses(THD *thd,
-                                         int hidden_group_field_count);
+  bool remove_redundant_subquery_clauses(THD *thd);
   void repoint_contexts_of_join_nests(mem_root_deque<Table_ref *> join_list);
   bool empty_order_list(Query_block *sl);
   bool setup_join_cond(THD *thd, mem_root_deque<Table_ref *> *tables,
@@ -2354,6 +2373,9 @@ class Query_block : public Query_term {
   */
   Mem_root_array<Item_exists_subselect *> *sj_candidates{nullptr};
 
+  /// How many expressions are part of the order by but not select list.
+  int hidden_order_field_count{0};
+
   /**
     Intrusive linked list of all query blocks within the same
     query expression.
@@ -2377,10 +2399,37 @@ class Query_block : public Query_term {
     should not be modified after resolving is done.
   */
   ulonglong m_base_options{0};
+  /**
+    Active options. Derived from base options, modifiers added during
+    resolving and values from session variable option_bits. Since the latter
+    may change, active options are refreshed per execution of a statement.
+  */
+  ulonglong m_active_options{0};
+
+  /**
+    If the query block includes non-primitive grouping, then these modifiers are
+    represented as grouping sets. The variable 'm_num_grouping_sets' holds the
+    count of grouping sets.
+  */
+  int m_num_grouping_sets{0};
 
  public:
   Table_ref *resolve_nest{
       nullptr};  ///< Used when resolving outer join condition
+
+  /**
+    Initializes the grouping set if the query block includes GROUP BY
+    modifiers.
+  */
+  bool allocate_grouping_sets(THD *thd);
+
+  /**
+    Populates the grouping sets if the query block includes non-primitive
+    grouping.
+  */
+  bool populate_grouping_sets(THD *thd);
+  int get_number_of_grouping_sets() const { return m_num_grouping_sets; }
+
  private:
   /**
     Condition to be evaluated after all tables in a query block are joined.
@@ -2395,6 +2444,17 @@ class Query_block : public Query_term {
   /// Condition to be evaluated on grouped rows after grouping.
   Item *m_having_cond;
 
+  /// Condition to be evaluated after window functions.
+  Item *m_qualify_cond{nullptr};
+
+  /// Number of GROUP BY expressions added to all_fields
+  int hidden_group_field_count;
+
+  /// A backup of the items in base_ref_items at the end of preparation, so that
+  /// base_ref_items can be restored between executions of prepared statements.
+  /// Empty if it's a regular statement.
+  Ref_item_array m_saved_base_items;
+
   /**
     True if query block has semi-join nests merged into it. Notice that this
     is updated earlier than sj_nests, so check this if info is needed
@@ -2403,7 +2463,6 @@ class Query_block : public Query_term {
   bool has_sj_nests{false};
   bool has_aj_nests{false};   ///< @see has_sj_nests; counts antijoin nests.
   bool m_right_joins{false};  ///< True if query block has right joins
-  bool m_has_foj{false};      ///< True if query block has full outer joins
 
   /// Allow merge of immediate unnamed derived tables
   bool allow_merge_derived{true};
@@ -2484,14 +2543,14 @@ class Secondary_engine_execution_context {
   virtual ~Secondary_engine_execution_context() = default;
 };
 
-typedef struct struct_slave_connection {
+typedef struct struct_replica_connection {
   char *user;
   char *password;
   char *plugin_auth;
   char *plugin_dir;
 
   void reset();
-} LEX_SLAVE_CONNECTION;
+} LEX_REPLICA_CONNECTION;
 
 struct st_sp_chistics {
   LEX_CSTRING comment;
@@ -2893,8 +2952,10 @@ class Query_tables_list {
     @retval nonzero if the statement is a row injection
   */
   inline bool is_stmt_row_injection() const {
-    return binlog_stmt_flags &
-           (1U << (BINLOG_STMT_UNSAFE_COUNT + BINLOG_STMT_TYPE_ROW_INJECTION));
+    constexpr uint32_t shift =
+        static_cast<uint32_t>(BINLOG_STMT_UNSAFE_COUNT) +
+        static_cast<uint32_t>(BINLOG_STMT_TYPE_ROW_INJECTION);
+    return binlog_stmt_flags & (1U << shift);
   }
 
   /**
@@ -2903,10 +2964,11 @@ class Query_tables_list {
     the slave SQL thread.
   */
   inline void set_stmt_row_injection() {
+    constexpr uint32_t shift =
+        static_cast<uint32_t>(BINLOG_STMT_UNSAFE_COUNT) +
+        static_cast<uint32_t>(BINLOG_STMT_TYPE_ROW_INJECTION);
     DBUG_TRACE;
-    binlog_stmt_flags |=
-        (1U << (BINLOG_STMT_UNSAFE_COUNT + BINLOG_STMT_TYPE_ROW_INJECTION));
-    return;
+    binlog_stmt_flags |= (1U << shift);
   }
 
   enum enum_stmt_accessed_table {
@@ -3669,8 +3731,8 @@ class Lex_input_stream {
 class LEX_COLUMN {
  public:
   String column;
-  uint rights;
-  LEX_COLUMN(const String &x, const uint &y) : column(x), rights(y) {}
+  Access_bitmask rights;
+  LEX_COLUMN(const String &x, const Access_bitmask &y) : column(x), rights(y) {}
 };
 
 enum class role_enum;
@@ -3695,7 +3757,21 @@ class LEX_GRANT_AS {
   "execute_only_in_secondary_reasons" retains the explanations for queries that
   cannot be executed using the primary engine.
 */
-enum execute_only_in_secondary_reasons { SUPPORTED_IN_PRIMARY, CUBE };
+enum execute_only_in_secondary_reasons {
+  SUPPORTED_IN_PRIMARY,
+  CUBE,
+  TABLESAMPLE
+};
+
+/*
+  Some queries can be executed only in using the hypergraph optimizer. The enum
+  "execute_only_in_hypergraph_reasons" retains the explanations for the same.
+*/
+enum execute_only_in_hypergraph_reasons {
+  SUPPORTED_IN_BOTH_OPTIMIZERS,
+  QUALIFY_CLAUSE
+};
+
 /**
   The LEX object currently serves three different purposes:
 
@@ -3759,9 +3835,23 @@ struct LEX : public Query_tables_list {
   /* current Query_block in parsing */
   Query_block *m_current_query_block;
 
+  /*
+    Some queries can only be executed on a secondary engine, for example,
+    queries with non-primitive grouping like CUBE.
+  */
   bool m_can_execute_only_in_secondary_engine = false;
+
   execute_only_in_secondary_reasons m_execute_only_in_secondary_engine_reason{
       SUPPORTED_IN_PRIMARY};
+
+  /*
+    Some queries can only be executed in hypergraph optimizer, for example,
+    queries with QUALIFY clause.
+  */
+  bool m_can_execute_only_in_hypergraph_optimizer = false;
+  execute_only_in_hypergraph_reasons m_execute_only_in_hypergraph_reason =
+      SUPPORTED_IN_BOTH_OPTIMIZERS;
+
  public:
   inline Query_block *current_query_block() const {
     return m_current_query_block;
@@ -3781,17 +3871,30 @@ struct LEX : public Query_tables_list {
   /// @return true if this is an EXPLAIN statement
   bool is_explain() const { return explain_format != nullptr; }
   bool is_explain_analyze = false;
+
   /**
-    Whether the currently-running query should be (attempted) executed in
-    the hypergraph optimizer. This will not change after the query is
-    done parsing, so you can use it in any query phase to e.g. figure out
+    Whether the currently-running statement should be prepared and executed
+    with the hypergraph optimizer. This will not change after the statement is
+    prepared, so you can use it in any optimization phase to e.g. figure out
     whether to inhibit some transformation that the hypergraph optimizer
-    does not properly understand yet.
+    does not properly understand yet. If a different optimizer is requested,
+    the statement must be re-prepared with the proper optimizer settings.
    */
-  bool using_hypergraph_optimizer = false;
+  bool using_hypergraph_optimizer() const {
+    return m_using_hypergraph_optimizer;
+  }
+
+  void set_using_hypergraph_optimizer(bool use_hypergraph) {
+    m_using_hypergraph_optimizer = use_hypergraph;
+  }
+
+ private:
+  bool m_using_hypergraph_optimizer{false};
+
+ public:
   LEX_STRING name;
   char *help_arg;
-  char *to_log; /* For PURGE MASTER LOGS TO */
+  char *to_log; /* For PURGE BINARY LOGS TO */
   const char *x509_subject, *x509_issuer, *ssl_cipher;
   // Widcard from SHOW ... LIKE <wildcard> statements.
   String *wild;
@@ -3897,15 +4000,45 @@ struct LEX : public Query_tables_list {
            reason == SUPPORTED_IN_PRIMARY);
   }
 
-  const char *get_not_supported_in_primary_reason() {
+  execute_only_in_secondary_reasons get_not_supported_in_primary_reason()
+      const {
+    return m_execute_only_in_secondary_engine_reason;
+  }
+
+  const char *get_not_supported_in_primary_reason_str() {
     assert(can_execute_only_in_secondary_engine());
     switch (m_execute_only_in_secondary_engine_reason) {
       case CUBE:
         return "CUBE";
+      case TABLESAMPLE:
+        return "TABLESAMPLE";
       default:
         return "UNDEFINED";
     }
   }
+  bool can_execute_only_in_hypergraph_optimizer() const {
+    return m_can_execute_only_in_hypergraph_optimizer;
+  }
+  void set_execute_only_in_hypergraph_optimizer(
+      bool execute_in_hypergraph_optimizer_param,
+      execute_only_in_hypergraph_reasons reason) {
+    m_can_execute_only_in_hypergraph_optimizer =
+        execute_in_hypergraph_optimizer_param;
+    m_execute_only_in_hypergraph_reason = reason;
+  }
+
+  const char *get_only_supported_in_hypergraph_reason_str() const {
+    assert(can_execute_only_in_hypergraph_optimizer());
+    return (m_execute_only_in_hypergraph_reason == QUALIFY_CLAUSE)
+               ? "QUALIFY clause"
+               : "UNDEFINED";
+  }
+
+  execute_only_in_hypergraph_reasons get_only_supported_in_hypergraph_reason()
+      const {
+    return m_execute_only_in_hypergraph_reason;
+  }
+
  private:
   /*
     With Visual Studio, an std::map will always allocate two small objects
@@ -3936,11 +4069,11 @@ struct LEX : public Query_tables_list {
   HA_CHECK_OPT check_opt;  // check/repair options
   HA_CREATE_INFO *create_info;
   KEY_CREATE_INFO key_create_info;
-  LEX_MASTER_INFO mi;  // used by CHANGE MASTER
-  LEX_SLAVE_CONNECTION slave_connection;
+  LEX_SOURCE_INFO mi;  // used by CHANGE REPLICATION SOURCE
+  LEX_REPLICA_CONNECTION replica_connection;
   Server_options server_options;
   USER_RESOURCES mqh;
-  LEX_RESET_SLAVE reset_slave_info;
+  LEX_RESET_REPLICA reset_replica_info;
   ulong type;
   /**
     This field is used as a work field during resolving to validate
@@ -3955,9 +4088,14 @@ struct LEX : public Query_tables_list {
   */
   nesting_map allow_sum_func;
   /**
-    Windowing functions are not allowed in HAVING - in contrast to group
-    aggregates - then we need to be stricter than allow_sum_func.
-    One bit per query block, as allow_sum_func.
+    Windowing functions are not allowed in HAVING - in contrast to grouped
+    aggregate functions, since windowing in SQL logically follows after all
+    grouping operations. Nor are they allowed inside grouped aggregate
+    function arguments.  One bit per query block, as also \c allow_sum_func. For
+    ORDER BY and QUALIFY predicates, window functions \em are allowed unless
+    they are contained in arguments of a grouped aggregate function.  Nor are
+    references to outer window functions (via alias) allowed in subqueries, but
+    that is checked separately.
   */
   nesting_map m_deny_window_func;
 
@@ -3974,7 +4112,7 @@ struct LEX : public Query_tables_list {
     KILL, HA_READ, CREATE/ALTER EVENT etc. Set this to `false` to get
     syntax error back.
   */
-  bool expr_allows_subselect;
+  bool expr_allows_subquery{true};
   /**
     If currently re-parsing a CTE's definition, this is the offset in bytes
     of that definition in the original statement which had the WITH
@@ -4010,7 +4148,7 @@ struct LEX : public Query_tables_list {
    to all dynamic privileges.
   */
   bool grant_privilege;
-  uint slave_thd_opt, start_transaction_opt;
+  uint replica_thd_opt, start_transaction_opt;
   int select_number;  ///< Number of query block (by EXPLAIN)
   uint8 create_view_algorithm;
   uint8 create_view_check;
@@ -4076,11 +4214,8 @@ struct LEX : public Query_tables_list {
   bool sp_lex_in_use; /* Keep track on lex usage in SPs for error handling */
   bool all_privileges;
   bool contains_plaintext_password;
-  bool in_execute_ps{false};
   enum_keep_diagnostics keep_diagnostics;
   uint32 next_binlog_file_nr;
-  bool has_sp{false};  // Item_func_sp, create function with no nosame option.
-  bool has_notsupported_func{false};  // true: not support pq,false: support pq
 
  private:
   bool m_broken;  ///< see mark_broken()
@@ -4184,6 +4319,20 @@ struct LEX : public Query_tables_list {
            (sroutines != nullptr && !sroutines->empty());
   }
 
+  /// We have detected the presence of an alias of a window function with a
+  /// window on query block qb. Check if the reference is illegal at this point
+  /// during resolution.
+  /// @param qb  The query block of the window function
+  /// @return true if window function is referenced from another query block
+  /// than its window, or if window functions are disallowed at the current
+  /// point during prepare, cf. also documentation of \c m_deny_window_func.
+  bool deny_window_function(Query_block *qb) const {
+    return qb != current_query_block() ||
+           ((~allow_sum_func | m_deny_window_func) >>
+            current_query_block()->nest_level) &
+               0x1;
+  }
+
  public:
   st_sp_chistics sp_chistics;
 
@@ -4222,7 +4371,7 @@ struct LEX : public Query_tables_list {
   /// Set to true while resolving values in ON DUPLICATE KEY UPDATE clause
   bool in_update_value_clause;
 
-  class Explain_format *explain_format;
+  class Explain_format *explain_format{nullptr};
 
   // Maximum execution time for a statement.
   ulong max_execution_time;
@@ -4251,6 +4400,7 @@ struct LEX : public Query_tables_list {
     query_block = nullptr;
     all_query_blocks_list = nullptr;
     m_current_query_block = nullptr;
+    explain_format = nullptr;
     destroy_values_map();
   }
 
@@ -4457,17 +4607,11 @@ struct LEX : public Query_tables_list {
   void set_secondary_engine_execution_context(
       Secondary_engine_execution_context *context);
 
- private:
-  bool m_is_replication_deprecated_syntax_used{false};
-
- public:
-  bool is_replication_deprecated_syntax_used() {
-    return m_is_replication_deprecated_syntax_used;
-  }
-
-  void set_replication_deprecated_syntax_used() {
-    m_is_replication_deprecated_syntax_used = true;
-  }
+  /**
+    Validates if a query can run with the old optimizer.
+    @return True if the query cannot be run with old optimizer, false otherwise.
+  */
+  bool validate_use_in_old_optimizer();
 
  private:
   bool m_was_replication_command_executed{false};

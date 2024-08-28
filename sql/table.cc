@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,9 +20,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.*/
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/table.h"
 
@@ -68,8 +67,10 @@
 #include "mysql_version.h"  // MYSQL_VERSION_ID
 #include "mysqld_error.h"
 #include "nulls.h"
-#include "sql-common/json_dom.h"  // Json_wrapper
+#include "sql-common/json_diff.h"  // Json_diff_vector
+#include "sql-common/json_dom.h"   // Json_wrapper
 #include "sql-common/json_path.h"
+#include "sql-common/my_decimal.h"
 #include "sql/auth/auth_acls.h"
 #include "sql/auth/auth_common.h"  // acl_getroot
 #include "sql/auth/sql_security_ctx.h"
@@ -91,10 +92,8 @@
 #include "sql/item_cmpfunc.h"    // and_conds
 #include "sql/item_json_func.h"  // Item_func_array_cast
 #include "sql/join_optimizer/bit_utils.h"
-#include "sql/json_diff.h"  // Json_diff_vector
-#include "sql/key.h"        // find_ref_key
+#include "sql/key.h"  // find_ref_key
 #include "sql/log.h"
-#include "sql/my_decimal.h"
 #include "sql/mysqld.h"  // reg_ext key_file_frm ...
 #include "sql/nested_join.h"
 #include "sql/opt_trace.h"  // opt_trace_disable_if_no_security_...
@@ -110,6 +109,7 @@
 #include "sql/sql_error.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_opt_exec_shared.h"
+#include "sql/sql_optimizer.h"
 #include "sql/sql_parse.h"       // check_stack_overrun
 #include "sql/sql_partition.h"   // mysql_unpack_partition
 #include "sql/sql_plugin.h"      // plugin_unlock
@@ -549,8 +549,8 @@ void TABLE_SHARE::destroy() {
     delete ha_share;
     ha_share = nullptr;
   }
-  if (m_part_info) {
-    ::destroy(m_part_info);
+  if (m_part_info != nullptr) {
+    ::destroy_at(m_part_info);
     m_part_info = nullptr;
   }
   /* The mutex is initialized only for shares that are part of the TDC */
@@ -676,18 +676,7 @@ inline bool is_system_table_name(const char *name, size_t length) {
             my_tolower(ci, name[2]) == 'e' && my_tolower(ci, name[3]) == 'n' &&
             my_tolower(ci, name[4]) == 't'))));
 }
-bool is_system_object(const char* db_name, const char* table_name) {
-  size_t len = strlen(table_name);
-  return is_system_db(db_name) ||
-         is_system_table_name(table_name, len) ||
-         dd::get_dictionary()->is_system_table_name(db_name, table_name) ||
-         dd::get_dictionary()->is_dd_table_name(db_name, table_name) ||
-         strstr(table_name, "innodb_dynamic_metadata") ||
-         strstr(table_name, "innodb_table_stats") ||
-         strstr(table_name, "innodb_index_stats") ||
-         strstr(table_name, "innodb_ddl_log") ||
-         is_tmp_table(table_name) /**not temp table, #sqlxxxx*/;
-}
+
 /**
   Initialize key_part_flag from source field.
 */
@@ -765,22 +754,25 @@ void setup_key_part_field(TABLE_SHARE *share, handler *handler_file,
 
   const bool full_length_key_part =
       field->key_length() == key_part->length && !field->is_flag_set(BLOB_FLAG);
+  const bool is_spatial_key = Overlaps(keyinfo->flags, HA_SPATIAL);
   /*
     part_of_key contains all non-prefix keys, part_of_prefixkey
     contains prefix keys.
     Note that prefix keys in the extended PK key parts
     (part_of_key_not_extended is false) are not considered.
-    Full-text keys are not considered prefix keys.
+    Full-text and spatial keys are not considered prefix keys.
   */
   if (full_length_key_part || Overlaps(keyinfo->flags, HA_FULLTEXT)) {
     field->part_of_key.set_bit(key_n);
     if (part_of_key_not_extended)
       field->part_of_key_not_extended.set_bit(key_n);
-  } else if (part_of_key_not_extended) {
+  } else if (part_of_key_not_extended && !is_spatial_key) {
     field->part_of_prefixkey.set_bit(key_n);
   }
+  // R-tree indexes do not allow index scans and therefore cannot be
+  // marked as keys for index only access.
   if ((handler_file->index_flags(key_n, key_part_n, false) & HA_KEYREAD_ONLY) &&
-      field->type() != MYSQL_TYPE_GEOMETRY) {
+      !is_spatial_key) {
     // Set the key as 'keys_for_keyread' even if it is prefix key.
     share->keys_for_keyread.set_bit(key_n);
   }
@@ -2290,14 +2282,14 @@ static int open_binary_frm(THD *thd, TABLE_SHARE *share,
   bitmap_init(&share->all_set, bitmaps, share->fields);
   bitmap_set_all(&share->all_set);
 
-  destroy(handler_file);
+  ::destroy_at(handler_file);
   my_free(extra_segment_buff);
   return 0;
 
 err:
   my_free(disk_buff);
   my_free(extra_segment_buff);
-  destroy(handler_file);
+  if (handler_file != nullptr) ::destroy_at(handler_file);
 
   open_table_error(thd, share, error, my_errno());
   return error;
@@ -2621,14 +2613,14 @@ bool unpack_value_generator(THD *thd, TABLE *table,
                                   Query_arena::STMT_REGULAR_EXECUTION);
   thd->swap_query_arena(val_generator_arena, &save_arena);
   thd->stmt_arena = &val_generator_arena;
-  ulong save_old_privilege = thd->want_privilege;
+  Access_bitmask save_old_privilege = thd->want_privilege;
   thd->want_privilege = 0;
 
   const CHARSET_INFO *save_character_set_client =
       thd->variables.character_set_client;
   // Subquery is not allowed in generated expression
-  const bool save_allow_subselects = thd->lex->expr_allows_subselect;
-  thd->lex->expr_allows_subselect = false;
+  const bool save_allows_subquery = thd->lex->expr_allows_subquery;
+  thd->lex->expr_allows_subquery = false;
   // allow_sum_func is also 0, banning group aggregates and window functions.
   assert(thd->lex->allow_sum_func == 0);
 
@@ -2663,7 +2655,7 @@ bool unpack_value_generator(THD *thd, TABLE *table,
     thd->swap_query_arena(save_arena, &val_generator_arena);
     thd->variables.character_set_client = save_character_set_client;
     thd->want_privilege = save_old_privilege;
-    thd->lex->expr_allows_subselect = save_allow_subselects;
+    thd->lex->expr_allows_subquery = save_allows_subquery;
   };
 
   // Properties that need to be restored before leaving the scope if an
@@ -2688,7 +2680,7 @@ bool unpack_value_generator(THD *thd, TABLE *table,
   assert((*val_generator)->expr_item != nullptr &&
          (*val_generator)->expr_str.str == nullptr);
 
-  thd->lex->expr_allows_subselect = save_allow_subselects;
+  thd->lex->expr_allows_subquery = save_allows_subquery;
 
   // Set the stored_in_db attribute of the column it depends on (if any)
   if (field != nullptr) (*val_generator)->set_field_stored(field->stored_in_db);
@@ -2893,7 +2885,7 @@ bool create_key_part_field_with_prefix_length(TABLE *table, MEM_ROOT *root) {
   @retval 8    Table row format has changed in engine
 */
 
-int  open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
+int open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
                           uint db_stat, uint prgflag, uint ha_open_flags,
                           TABLE *outparam, bool is_create_table,
                           const dd::Table *table_def_param) {
@@ -2959,7 +2951,6 @@ int  open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
   if ((db_stat & HA_OPEN_KEYFILE) || (prgflag & DELAYED_OPEN)) records = 1;
   if (prgflag & (READ_ALL + EXTRA_RECORD)) records++;
 
-  //in find_record_length(), MAX_DB_TRX_ID_WIDTH is already added.
   record = root->ArrayAlloc<uchar>(share->rec_buff_length * records +
                                    share->null_bytes);
   if (record == nullptr) goto err; /* purecov: inspected */
@@ -2978,8 +2969,7 @@ int  open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
   outparam->null_flags_saved = record + (records * share->rec_buff_length);
   memset(outparam->null_flags_saved, '\0', share->null_bytes);
 
-  //Here we need an extra space to store 'ghost' column from table_share.
-  if (!(field_ptr = root->ArrayAlloc<Field *>(share->fields + 1 + 1)))
+  if (!(field_ptr = root->ArrayAlloc<Field *>(share->fields + 1)))
     goto err; /* purecov: inspected */
 
   outparam->field = field_ptr;
@@ -3001,9 +2991,8 @@ int  open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
                 (internal_tmp ? 2 * share->rec_buff_length : 0);
 
   /* Setup copy of fields from share, but use the right alias and record */
-  i = 0;
-  for (auto field = share->field; (*field); i++, field ++, field_ptr ++) {
-    Field *new_field = (*field)->clone(root);
+  for (i = 0; i < share->fields; i++, field_ptr++) {
+    Field *new_field = share->field[i]->clone(root);
     *field_ptr = new_field;
     if (new_field == nullptr) goto err;
     new_field->init(outparam);
@@ -3299,7 +3288,10 @@ int  open_table_from_share(THD *thd, TABLE_SHARE *share, const char *alias,
   }
 
   /* Increment the opened_tables counter, only when open flags set. */
-  if (db_stat) thd->status_var.opened_tables++;
+  if (db_stat) {
+    thd->status_var.opened_tables++;
+    global_aggregated_stats.get_shard(thd->thread_id()).opened_tables++;
+  }
 
   return 0;
 
@@ -3312,7 +3304,7 @@ err:
     outparam->histograms = nullptr;
   }
   if (!error_reported) open_table_error(thd, share, error, my_errno());
-  destroy(outparam->file);
+  ::destroy_at(outparam->file);
   if (outparam->part_info) free_items(outparam->part_info->item_list);
   if (outparam->vfield) {
     for (Field **vfield = outparam->vfield; *vfield; vfield++)
@@ -3354,7 +3346,7 @@ int closefrm(TABLE *table, bool free_share) {
       if ((*ptr)->gcol_info) free_items((*ptr)->gcol_info->item_list);
       if ((*ptr)->m_default_val_expr)
         free_items((*ptr)->m_default_val_expr->item_list);
-      destroy(*ptr);
+      ::destroy_at(*ptr);
     }
     table->field = nullptr;
   }
@@ -3363,7 +3355,7 @@ int closefrm(TABLE *table, bool free_share) {
       free_items(table_cc.value_generator()->item_list);
     }
   }
-  destroy(table->file);
+  if (table->file != nullptr) ::destroy_at(table->file);
   table->file = nullptr; /* For easier errorchecking */
   if (table->part_info) {
     /* Allocated through table->mem_root, freed below */
@@ -3474,7 +3466,7 @@ static void open_table_error(THD *thd, TABLE_SHARE *share, int error,
                  : (db_errno == EAGAIN) ? ER_SERVER_FILE_USED
                                         : ER_SERVER_CANT_OPEN_FILE,
              buff, db_errno, my_strerror(errbuf, sizeof(errbuf), db_errno));
-      destroy(file);
+      ::destroy_at(file);
       break;
     }
     default: /* Better wrong error than none */
@@ -5312,8 +5304,6 @@ Natural_join_column *Field_iterator_table_ref::get_or_create_column_ref(
   if (field_it == &table_field_it) {
     /* The field belongs to a stored table. */
     Field *tmp_field = table_field_it.field();
-    //make suure not ghost column. ???
-    assert(tmp_field->type() != MYSQL_TYPE_DB_TRX_ID);
     assert(table_ref == tmp_field->table->pos_in_table_list);
     Item_field *tmp_item = new Item_field(thd, &table_ref->query_block->context,
                                           table_ref, tmp_field);
@@ -7314,10 +7304,11 @@ void TABLE::column_bitmaps_set(MY_BITMAP *read_set_arg,
 }
 
 handler *TABLE::get_primary_handler() const {
-  if (s->is_primary_engine()) {
+  if (s != nullptr && s->is_primary_engine()) {
     return file;
   }
-  return file->ha_get_primary_handler();
+
+  return (file != nullptr) ? file->ha_get_primary_handler() : nullptr;
 }
 
 bool Table_ref::set_recursive_reference() {
@@ -7340,13 +7331,67 @@ uint Table_ref::get_hidden_field_count_for_derived() const {
 bool Table_ref::is_external() const {
   if (m_table_ref_type == TABLE_REF_BASE_TABLE && table != nullptr &&
       table->file != nullptr) {
+    if (is_placeholder()) return false;
     handler *primary_handler = table->get_primary_handler();
     return primary_handler != nullptr &&
            Overlaps(primary_handler->ht->flags,
                     HTON_SUPPORTS_EXTERNAL_SOURCE) &&
+           primary_handler->get_table_share() != nullptr &&
            primary_handler->get_table_share()->has_secondary_engine();
   }
   return false;
+}
+
+bool Table_ref::validate_tablesample_clause(THD *thd) {
+  if (is_view_or_derived()) {
+    my_error(ER_TABLESAMPLE_ONLY_ON_BASE_TABLES, MYF(0));
+    return true;
+  }
+
+  if (!sampling_percentage->fixed &&
+      sampling_percentage->fix_fields(thd, &sampling_percentage)) {
+    return true;
+  }
+
+  if (sampling_percentage->data_type() == MYSQL_TYPE_INVALID) {
+    if (sampling_percentage->propagate_type(
+            thd, Type_properties(MYSQL_TYPE_DOUBLE, true)))
+      return true;
+    sampling_percentage->pin_data_type();
+    return false;
+  }
+
+  if (sampling_percentage->result_type() != REAL_RESULT &&
+      sampling_percentage->result_type() != INT_RESULT &&
+      sampling_percentage->result_type() != DECIMAL_RESULT) {
+    my_error(ER_TABLESAMPLE_PERCENTAGE, MYF(0));
+    return true;
+  }
+
+  if (sampling_percentage->const_item() && update_sampling_percentage()) {
+    return true;
+  }
+  return thd->is_error();
+}
+
+bool Table_ref::update_sampling_percentage() {
+  assert(has_tablesample() && sampling_percentage->fixed);
+  if (sampling_percentage->null_value) {
+    my_error(ER_TABLESAMPLE_PERCENTAGE, MYF(0));
+    return true;
+  }
+
+  sampling_percentage_val = sampling_percentage->val_real();
+
+  if (sampling_percentage_val < 0 || sampling_percentage_val > 100) {
+    my_error(ER_TABLESAMPLE_PERCENTAGE, MYF(0));
+    return true;
+  }
+  return false;
+}
+
+double Table_ref::get_sampling_percentage() const {
+  return sampling_percentage_val;
 }
 
 void LEX_MFA::copy(LEX_MFA *m, MEM_ROOT *alloc) {
@@ -7476,7 +7521,9 @@ struct Partial_update_info {
   }
 
   ~Partial_update_info() {
-    for (auto v : m_logical_diff_vectors) destroy(v);
+    for (auto *v : m_logical_diff_vectors) {
+      if (v != nullptr) ::destroy_at(v);
+    }
   }
 
   /**
@@ -7598,18 +7645,16 @@ bool TABLE::setup_partial_update() {
       (thd->variables.binlog_row_value_options & PARTIAL_JSON_UPDATES) != 0 &&
       mysql_bin_log.is_open() &&
       (thd->variables.option_bits & OPTION_BIN_LOG) != 0 &&
-      log_bin_use_v1_row_events == 0 &&
       thd->is_current_stmt_binlog_format_row();
-  DBUG_PRINT(
-      "info",
-      ("TABLE::setup_partial_update(): logical_diffs=%d "
-       "because binlog_row_value_options=%d binlog.is_open=%d "
-       "sql_log_bin=%d use_v1_row_events=%d rbr=%d",
-       logical_diffs,
-       (thd->variables.binlog_row_value_options & PARTIAL_JSON_UPDATES) != 0,
-       mysql_bin_log.is_open(),
-       (thd->variables.option_bits & OPTION_BIN_LOG) != 0,
-       log_bin_use_v1_row_events, thd->is_current_stmt_binlog_format_row()));
+  DBUG_PRINT("info", ("TABLE::setup_partial_update(): logical_diffs=%d "
+                      "because binlog_row_value_options=%d binlog.is_open=%d "
+                      "sql_log_bin=%d rbr=%d",
+                      logical_diffs,
+                      (thd->variables.binlog_row_value_options &
+                       PARTIAL_JSON_UPDATES) != 0,
+                      mysql_bin_log.is_open(),
+                      (thd->variables.option_bits & OPTION_BIN_LOG) != 0,
+                      thd->is_current_stmt_binlog_format_row()));
   return setup_partial_update(logical_diffs);
 }
 
@@ -7624,7 +7669,7 @@ bool TABLE::has_columns_marked_for_partial_update() const {
 
 void TABLE::cleanup_partial_update() {
   DBUG_TRACE;
-  destroy(m_partial_update_info);
+  if (m_partial_update_info != nullptr) ::destroy_at(m_partial_update_info);
   m_partial_update_info = nullptr;
 }
 
@@ -7753,7 +7798,7 @@ void TABLE::add_logical_diff(const Field_json *field,
     value_str.set_ascii("<none>", 6);
   else {
     if (new_value->to_string(&value_str, false, "add_logical_diff",
-                             JsonDocumentDefaultDepthHandler))
+                             JsonDepthErrorHandler))
       value_str.length(0); /* purecov: inspected */
   }
   DBUG_PRINT("info", ("add_logical_diff(operation=%d, path=%.*s, value=%.*s)",
@@ -7809,8 +7854,11 @@ void TABLE::disable_logical_diffs_for_current_row(const Field *field) const {
 }
 
 const histograms::Histogram *TABLE::find_histogram(uint field_index) const {
-  if (histograms == nullptr) return nullptr;
-  return histograms->find_histogram(field_index);
+  const handler *primary = get_primary_handler();
+  if (primary == nullptr) return nullptr;
+  const TABLE *table = primary->get_table();
+  if (table == nullptr || table->histograms == nullptr) return nullptr;
+  return table->histograms->find_histogram(field_index);
 }
 
 //////////////////////////////////////////////////////////////////////////

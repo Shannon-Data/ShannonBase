@@ -1,15 +1,16 @@
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -35,7 +36,6 @@
 #include "my_base.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
-#include "my_default.h"  // free_defaults
 #include "my_getopt.h"
 #include "my_inttypes.h"
 #include "my_list.h"
@@ -91,6 +91,7 @@
 #include "sql/persisted_variable.h"  // Persisted_variables_cache
 #include "sql/protocol_classic.h"
 #include "sql/psi_memory_key.h"
+#include "sql/sd_notify.h"  // sysd::notify(..) calls
 #include "sql/set_var.h"
 #include "sql/sql_audit.h"        // mysql_audit_acquire_plugins
 #include "sql/sql_backup_lock.h"  // acquire_shared_backup_lock
@@ -397,8 +398,6 @@ static const char *plugin_declarations_sym = "_mysql_plugin_declarations_";
 static int min_plugin_interface_version =
     MYSQL_PLUGIN_INTERFACE_VERSION & ~0xFF;
 
-static void *innodb_callback_data;
-
 /* Note that 'int version' must be the first field of every plugin
    sub-structure (plugin->info).
 */
@@ -687,7 +686,14 @@ static st_plugin_dl *plugin_dl_add(const LEX_STRING *dl, int report,
   plugin_dl.ref_count = 1;
   /* Open new dll handle */
   mysql_mutex_assert_owner(&LOCK_plugin);
-  if (!(plugin_dl.handle = dlopen(dlpath, RTLD_NOW))) {
+  // We cannot use the RTLD_NODELETE trick for HAVE_ASAN | HAVE_LSAN here,
+  // since we still have plugins which depend on running static destructors
+  // at dlclose().
+  // If a test has valgrind/LSAN/ASAN leaks, then use the debug flag
+  // preserve_shared_objects_after_unload (see elsewhere in this file).
+  plugin_dl.handle = dlopen(dlpath, RTLD_NOW);
+
+  if (plugin_dl.handle == nullptr) {
     const char *errmsg;
     const int error_number = dlopen_errno;
     /*
@@ -1305,16 +1311,7 @@ static int plugin_initialize(st_plugin_int *plugin) {
       goto err;
     }
 
-    /* FIXME: Need better solution to transfer the callback function
-    array to memcached */
-    if (strcmp(plugin->name.str, "InnoDB") == 0) {
-      innodb_callback_data = ((handlerton *)plugin->data)->data;
-    }
   } else if (plugin->plugin->init) {
-    if (strcmp(plugin->name.str, "daemon_memcached") == 0) {
-      plugin->data = innodb_callback_data;
-    }
-
     if (plugin->plugin->init(plugin)) {
       LogErr(ERROR_LEVEL, ER_PLUGIN_INIT_FAILED, plugin->name.str);
       goto err;
@@ -2037,32 +2034,6 @@ error:
 }
 
 /*
-  Shutdown memcached plugin before binlog shuts down
-*/
-void memcached_shutdown() {
-  if (initialized) {
-    for (st_plugin_int **it = plugin_array->begin(); it != plugin_array->end();
-         ++it) {
-      st_plugin_int *plugin = *it;
-
-      if (plugin->state == PLUGIN_IS_READY &&
-          strcmp(plugin->name.str, "daemon_memcached") == 0) {
-        plugin_deinitialize(plugin, true);
-
-        mysql_mutex_lock(&LOCK_plugin_delete);
-        mysql_rwlock_wrlock(&LOCK_system_variables_hash);
-        mysql_mutex_lock(&LOCK_plugin);
-        plugin->state = PLUGIN_IS_DYING;
-        plugin_del(plugin);
-        mysql_mutex_unlock(&LOCK_plugin);
-        mysql_rwlock_unlock(&LOCK_system_variables_hash);
-        mysql_mutex_unlock(&LOCK_plugin_delete);
-      }
-    }
-  }
-}
-
-/*
   Deinitialize and unload all the loaded plugins.
   Note: During valgrind testing, the shared objects (.dll/.so)
         are not unloaded in order to keep the call stack
@@ -2082,7 +2053,10 @@ void plugin_shutdown() {
 
     reap_needed = true;
 
-    if (!opt_initialize) LogErr(INFORMATION_LEVEL, ER_PLUGINS_SHUTDOWN_START);
+    if (!opt_initialize) {
+      LogErr(INFORMATION_LEVEL, ER_PLUGINS_SHUTDOWN_START);
+      sysd::notify("STATUS=Shutdown of plugins in progress\n");
+    }
 
     /*
       We want to shut down plugins in a reasonable order, this will
@@ -2126,7 +2100,10 @@ void plugin_shutdown() {
         plugins[i]->state = PLUGIN_IS_DYING;
     }
 
-    if (!opt_initialize) LogErr(INFORMATION_LEVEL, ER_PLUGINS_SHUTDOWN_END);
+    if (!opt_initialize) {
+      LogErr(INFORMATION_LEVEL, ER_PLUGINS_SHUTDOWN_END);
+      sysd::notify("STATUS=Shutdown of plugins complete\n");
+    }
 
     mysql_mutex_unlock(&LOCK_plugin);
 
@@ -2261,8 +2238,9 @@ static bool mysql_install_plugin(THD *thd, LEX_CSTRING name,
                                  const LEX_STRING *dl) {
   TABLE *table;
   bool error = true;
-  int argc = orig_argc;
-  char **argv = orig_argv;
+  int argc;
+  char **argv;
+  char **argv_copy;
   st_plugin_int *tmp = nullptr;
   bool store_infoschema_metadata = false;
   dd::Schema_MDL_locker mdl_handler(thd);
@@ -2334,22 +2312,28 @@ static bool mysql_install_plugin(THD *thd, LEX_CSTRING name,
   mysql_mutex_lock(&LOCK_plugin);
 
   {
-    MEM_ROOT alloc{PSI_NOT_INSTRUMENTED, 512};
-    my_getopt_use_args_separator = true;
-    if (my_load_defaults(MYSQL_CONFIG_NAME, load_default_groups, &argc, &argv,
-                         &alloc, nullptr)) {
+    argc = argc_cached;
+    if (!(argv_copy =
+              (char **)my_memdup(PSI_NOT_INSTRUMENTED, argv_cached,
+                                 (argc + 1) * sizeof(char *), MYF(0)))) {
       mysql_mutex_unlock(&LOCK_plugin);
       mysql_rwlock_unlock(&LOCK_system_variables_hash);
-      report_error(REPORT_TO_USER, ER_PLUGIN_IS_NOT_LOADED, name.str);
+      report_error(REPORT_TO_USER, ER_OUTOFMEMORY,
+                   static_cast<int>((argc + 1) * sizeof(char *)));
       goto err;
     }
-    my_getopt_use_args_separator = false;
+    argv = argv_copy;
+
     /*
-     Append static variables present in mysqld-auto.cnf file for the
-     newly installed plugin to process those options which are specific
+     Append parse early and static variables present in mysqld-auto.cnf file
+     for the newly installed plugin to process those options which are specific
      to this plugin.
     */
-    if (pv && pv->append_read_only_variables(&argc, &argv, false, true)) {
+    bool arg_separator_added = false;
+    if (pv &&
+        (pv->append_parse_early_variables(&argc, &argv, arg_separator_added) ||
+         pv->append_read_only_variables(&argc, &argv, arg_separator_added,
+                                        true))) {
       mysql_mutex_unlock(&LOCK_plugin);
       mysql_rwlock_unlock(&LOCK_system_variables_hash);
       report_error(REPORT_TO_USER, ER_PLUGIN_IS_NOT_LOADED, name.str);
@@ -2475,6 +2459,7 @@ static bool mysql_install_plugin(THD *thd, LEX_CSTRING name,
   }
 
 err:
+  my_free(argv_copy);
   mysql_mutex_unlock(&LOCK_plugin_install);
   return end_transaction(thd, error);
 }
@@ -3097,6 +3082,7 @@ void plugin_thdvar_cleanup(THD *thd, bool enable_plugins) {
   DBUG_TRACE;
 
   if (enable_plugins) {
+    ha_reset_plugin_vars(thd);
     MUTEX_LOCK(plugin_lock, &LOCK_plugin);
     unlock_variables(&thd->variables);
     size_t idx;

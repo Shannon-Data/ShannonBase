@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.*/
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
   @file sql/sql_tmp_table.cc
@@ -34,6 +33,7 @@
 #include <stdio.h>
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <utility>
 #include <vector>
@@ -462,21 +462,18 @@ Field *create_tmp_field(THD *thd, TABLE *table, Item *item, Item::Type type,
 
       [[fallthrough]];
     case Item::COND_ITEM:
-    case Item::FIELD_AVG_ITEM:
-    case Item::FIELD_BIT_ITEM:
-    case Item::FIELD_STD_ITEM:
-    case Item::FIELD_VARIANCE_ITEM:
-    case Item::SUBSELECT_ITEM:
+    case Item::AGGR_FIELD_ITEM:
+    case Item::SUBQUERY_ITEM:
       /* The following can only happen with 'CREATE TABLE ... SELECT' */
-    case Item::PROC_ITEM:
     case Item::INT_ITEM:
     case Item::REAL_ITEM:
     case Item::DECIMAL_ITEM:
     case Item::STRING_ITEM:
     case Item::REF_ITEM:
     case Item::NULL_ITEM:
-    case Item::VARBIN_ITEM:
+    case Item::HEX_BIN_ITEM:
     case Item::PARAM_ITEM:
+    case Item::ROUTINE_FIELD_ITEM:
     case Item::SUM_FUNC_ITEM:
       if (type == Item::SUM_FUNC_ITEM && !is_wf) {
         Item_sum *item_sum = down_cast<Item_sum *>(item);
@@ -496,10 +493,17 @@ Field *create_tmp_field(THD *thd, TABLE *table, Item *item, Item::Type type,
         }
       }
       break;
-    case Item::TYPE_HOLDER:
-    case Item::VALUES_COLUMN_ITEM:
+    case Item::TYPE_HOLDER_ITEM:
       result = down_cast<Item_aggregate_type *>(item)->make_field_by_type(
           table, thd->is_strict_mode());
+      break;
+    case Item::VALUES_COLUMN_ITEM:
+      result = down_cast<Item_values_column *>(item)->make_field_by_type(
+          table, thd->is_strict_mode());
+      if (result == nullptr) return nullptr;
+      if (copy_func != nullptr && !make_copy_field) {
+        if (copy_func->emplace_back(item, result)) return nullptr;
+      }
       break;
     default:  // Doesn't have to be stored
       assert(false);
@@ -572,7 +576,7 @@ void Cache_temp_engine_properties::init(THD *thd) {
   HEAP_MAX_KEY_LENGTH = handler->max_key_length();
   HEAP_MAX_KEY_PART_LENGTH = handler->max_key_part_length(nullptr);
   HEAP_MAX_KEY_PARTS = handler->max_key_parts();
-  destroy(handler);
+  ::destroy_at(handler);
   plugin_unlock(nullptr, db_plugin);
   // Cache TempTable engine's
   db_plugin = ha_lock_engine(nullptr, temptable_hton);
@@ -581,7 +585,7 @@ void Cache_temp_engine_properties::init(THD *thd) {
   TEMPTABLE_MAX_KEY_LENGTH = handler->max_key_length();
   TEMPTABLE_MAX_KEY_PART_LENGTH = handler->max_key_part_length(nullptr);
   TEMPTABLE_MAX_KEY_PARTS = handler->max_key_parts();
-  destroy(handler);
+  ::destroy_at(handler);
   plugin_unlock(nullptr, db_plugin);
   // Cache INNODB engine's
   db_plugin = ha_lock_engine(nullptr, innodb_hton);
@@ -600,7 +604,7 @@ void Cache_temp_engine_properties::init(THD *thd) {
   */
   INNODB_MAX_KEY_PART_LENGTH = 3072;
   INNODB_MAX_KEY_PARTS = handler->max_key_parts();
-  destroy(handler);
+  ::destroy_at(handler);
   plugin_unlock(nullptr, db_plugin);
 }
 
@@ -882,8 +886,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
                         const mem_root_deque<Item *> &fields, ORDER *group,
                         bool distinct, bool save_sum_fields,
                         ulonglong select_options, ha_rows rows_limit,
-                        const char *table_alias, bool force_disk_table,
-                        bool parallel_query) {
+                        const char *table_alias) {
   DBUG_TRACE;
   if (!param->allow_group_via_temp_table)
     group = nullptr;  // Can't use group key
@@ -901,7 +904,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
   }
 
   /**
-    When true, enforces unique constraint (by adding a hidden hash_field and
+    When true, enforces unique constraint (by adding a hidden hash field and
     creating a key over this field) when:
     (1) unique key is too long, or
     (2) number of key parts in distinct key is too big, or
@@ -911,13 +914,6 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
   bool unique_constraint_via_hash_field =
       param->m_operation != Temp_table_param::TTP_UNION_OR_TABLE;
 
-  bool except_connect_by =
-      param->allow_connect_by_tmp_table & EXCEPT_CONNECT_BY_FUNC;
-
-  bool except_connect_by_value =
-      param->allow_connect_by_tmp_table & EXCEPT_CONNECT_BY_VALUE;
-
-  bool except_rand_item = param->allow_connect_by_tmp_table & EXCEPT_RAND_FUNC;
   /*
     When loose index scan is employed as access method, it already
     computes all groups and the result of all aggregate functions. We
@@ -1014,9 +1010,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
   //    use result fields), or
   //  - We are creating a window function's framebuffer table, where the result
   //    field is already set to the output field and must not be overwritten.
-
   const bool modify_items = not_all_columns && !param->m_window_frame_buffer;
-  // const bool modify_items = not_all_columns;
 
   /*
     total_uneven_bit_length is uneven bit length for visible fields
@@ -1039,7 +1033,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
     if (not_all_columns) {
       if (item->has_aggregation() && type != Item::SUM_FUNC_ITEM) {
         if (item->is_outer_reference()) item->update_used_tables();
-        if (type == Item::SUBSELECT_ITEM ||
+        if (type == Item::SUBQUERY_ITEM ||
             (item->used_tables() & ~OUTER_REF_TABLE_BIT)) {
           /*
             Mark that we have ignored an item that refers to a summary
@@ -1067,29 +1061,6 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
           store_column = false;
       }
 
-      if (item->has_connect_by_func()) {
-        if (except_connect_by) {
-          store_column = false;
-        } else {
-          if (except_connect_by_value && item->has_connect_by_value()) {
-            store_column = false;
-          }
-        }
-      }
-
-      if (item->const_item()) {
-        if ((int)hidden_field_count <= 0) {
-          // mark this item and then we can identify it without sending a
-          // message to MQ.
-          item->skip_create_tmp_table = true;
-          continue;  // We don't have to store this
-        }
-        if (parallel_query) {
-          item->skip_create_tmp_table = true;
-          goto HIDDEN;
-        }
-      }
-
       if (hidden_field_count <= 0) {
         if (thd->lex->current_query_block()->is_implicitly_grouped() &&
             (item->used_tables() & ~(RAND_TABLE_BIT | INNER_TABLE_BIT)) == 0) {
@@ -1100,17 +1071,13 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
           continue;
         } else if (item->const_for_execution() &&
                    evaluate_during_optimization(
-                       item, thd->lex->current_query_block()) &&
-                   !parallel_query) {
+                       item, thd->lex->current_query_block())) {
           /*
              Constant for the duration of the query, so no need to store in
              temporary table.
           */
           continue;
         }
-      }
-      if (except_rand_item && (item->used_tables() & (RAND_TABLE_BIT))) {
-        store_column = false;
       }
     }
 
@@ -1123,8 +1090,8 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
         if (!arg->const_item()) {
           Field *new_field = create_tmp_field(
               thd, table, arg, arg->type(), param->items_to_copy,
-              &from_field[fieldnr], &default_field[fieldnr],
-              /*group=*/false, modify_items, false, false);
+              &from_field[fieldnr], &default_field[fieldnr], /*group=*/false,
+              modify_items, false, false);
           from_item[fieldnr] = arg;
           if (new_field == nullptr) return nullptr;  // Should be OOM
           new_field->set_field_index(fieldnr);
@@ -1191,6 +1158,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       }
 
       if (new_field == nullptr) {
+        assert(thd->is_fatal_error());
         return nullptr;  // Got OOM
       }
       /*
@@ -1199,18 +1167,8 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
         But only for the group-by table. So do not set result_field if this is
         a tmp table for UNION or derived table materialization.
       */
-
-      if (modify_items && type == Item::SUM_FUNC_ITEM) {
-        new_field->item_sum_ref = ((Item_sum *)item);
+      if (modify_items && type == Item::SUM_FUNC_ITEM)
         down_cast<Item_sum *>(item)->set_result_field(new_field);
-      }
-      if (item->type() == Item::FIELD_AVG_ITEM) {
-        Item_avg_field *item_avg_field =
-            static_cast<Item_avg_field *>(item->real_item());
-        Item_sum_avg *item_avg = item_avg_field->avg_item;
-        new_field->item_sum_ref = item_avg;
-      }
-
       share->reclength += new_field->pack_length();
       if (!new_field->is_flag_set(NOT_NULL_FLAG)) null_count++;
       if (new_field->type() == MYSQL_TYPE_BIT)
@@ -1254,7 +1212,6 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       }
     }
 
-  HIDDEN:
     hidden_field_count--;
     if (hidden_field_count == 0) {
       /*
@@ -1421,32 +1378,6 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       unique_constraint_via_hash_field = true;
     }
   }
-  if (except_connect_by) {
-    Field_longlong *connect_by_field = new (&share->mem_root)
-        Field_longlong(sizeof(ulonglong), false, "<connect_by_field>", true);
-    if (connect_by_field == nullptr) {
-      /* purecov: begin inspected */
-      assert(thd->is_fatal_error());
-      return nullptr;  // Got OOM
-                       /* purecov: end */
-    }
-    // Mark as NOT NULL
-    connect_by_field->set_flag(NOT_NULL_FLAG);
-    // Register set counter as a hidden field.
-    register_hidden_field(table, &default_field[0], &from_field[0],
-                          share->blob_field, connect_by_field);
-
-    // Repoint arrays
-    table->field--;
-    default_field--;
-    from_field--;
-    from_item--;
-    share->reclength += connect_by_field->pack_length();
-    share->fields = ++fieldnr;
-    param->hidden_field_count++;
-    share->field--;
-    table->connect_by_field = connect_by_field;
-  }
 
   if (unique_constraint_via_hash_field) {
     if (param->needs_set_counter()) {
@@ -1473,9 +1404,11 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       share->fields = ++fieldnr;
       param->hidden_field_count++;
       share->field--;
-      table->set_set_counter(
-          set_counter, param->m_operation == Temp_table_param::TTP_EXCEPT);
-      table->set_distinct(param->m_last_operation_is_distinct);
+      table->set_set_op(set_counter,
+                        param->m_operation == Temp_table_param::TTP_EXCEPT,
+                        param->m_last_operation_is_distinct);
+      table->set_use_hash_map(
+          thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HASH_SET_OPERATIONS));
     }
 
     Field_longlong *field = new (&share->mem_root)
@@ -1504,7 +1437,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
     table->hash_field = field;
   }
 
-  if (setup_tmp_table_handler(thd, table, select_options, force_disk_table,
+  if (setup_tmp_table_handler(thd, table, select_options, false,
                               param->schema_table))
     return nullptr; /* purecov: inspected */
 
@@ -1523,7 +1456,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
     else
       null_count++;
   }
-  uint hidden_null_pack_length =
+  const uint hidden_null_pack_length =
       (hidden_null_count + 7 + hidden_uneven_bit_length) / 8;
   share->null_bytes = (hidden_null_pack_length +
                        (null_count + total_uneven_bit_length + 7) / 8);
@@ -1590,7 +1523,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       /*
         Get the value from default_values.
       */
-      ptrdiff_t diff = orig_field->table->default_values_offset();
+      const ptrdiff_t diff = orig_field->table->default_values_offset();
       Field *f_in_record0 = orig_field->table->field[orig_field->field_index()];
       if (f_in_record0->is_real_null(diff))
         field->set_null();
@@ -1682,7 +1615,14 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
     }
   }
 
-  // Create a key over hash_field to enforce unique constraint
+  // For set operations, we may use either a temporary table key strategy or a
+  // hashing strategy.  If a temporary table key strategy is used, it is set up
+  // here.  We create a key over a hash_field to enforce the unique constraint.
+  // If a hashing strategy is used, de-duplicating via a tmp table key is not
+  // used to start with, however it may be used as a fallback for secondary
+  // memory overflow during spill handling, thus most of the set-up is done
+  // here, but share->keys is set to 0 in instantiate_tmp_table until such time
+  //  as we would need the fallback.
   if (unique_constraint_via_hash_field) {
     KEY *hash_key;
     KEY_PART_INFO *hash_kpi;
@@ -2019,10 +1959,7 @@ TABLE *create_tmp_table_from_fields(THD *thd, List<Create_field> &field_list,
   table->init_tmp_table(thd, share, m_root, nullptr, alias, reg_field,
                         blob_field, is_virtual);
 
- /* Create all fields and calculate the total length of record.
-    we dont add the ghost column to temp table. and the field is only make by result
-    field, therefore it should not be ghonst field anytime.
- */
+  /* Create all fields and calculate the total length of record */
   List_iterator_fast<Create_field> it(field_list);
   uint idx = 0;
   while ((cdef = it++)) {
@@ -2095,7 +2032,9 @@ TABLE *create_tmp_table_from_fields(THD *thd, List<Create_field> &field_list,
 
   return table;
 error:
-  for (reg_field = table->field; *reg_field; ++reg_field) destroy(*reg_field);
+  for (reg_field = table->field; *reg_field != nullptr; ++reg_field) {
+    ::destroy_at(*reg_field);
+  }
   return nullptr;
 }
 
@@ -2232,7 +2171,7 @@ bool setup_tmp_table_handler(THD *thd, TABLE *table, ulonglong select_options,
   table->file->change_table_ptr(table, share);
 
   if (table->file->set_ha_share_ref(&share->ha_share)) {
-    destroy(table->file);
+    ::destroy_at(table->file);
     return true;
   }
 
@@ -2405,7 +2344,8 @@ static void trace_tmp_table(Opt_trace_context *trace, const TABLE *table) {
   trace_tmp.add("columns", s->fields)
       .add("row_length", s->reclength)
       .add("key_length", table->s->keys > 0 ? table->key_info->key_length : 0)
-      .add("unique_constraint", table->hash_field ? true : false)
+      .add("unique_constraint",
+           !table->is_union_or_table() || table->hash_field != nullptr)
       .add("makes_grouped_rows", table->group != nullptr)
       .add("cannot_insert_duplicates", s->is_distinct);
 
@@ -2430,7 +2370,6 @@ static void trace_tmp_table(Opt_trace_context *trace, const TABLE *table) {
   @param  thd             Thread handler
   @param  table           Table object that describes the table to be
                           instantiated
-
   Creates temporary table and opens it.
 
   @returns false if success, true if error
@@ -2442,6 +2381,7 @@ bool instantiate_tmp_table(THD *thd, TABLE *table) {
   table->in_use = thd;
 
   TABLE_SHARE *const share = table->s;
+  if (table->uses_hash_map()) share->keys = 0;
 
 #ifndef NDEBUG
   for (uint i = 0; i < share->fields; i++)
@@ -2533,7 +2473,7 @@ void close_tmp_table(TABLE *table) {
     table->set_deleted();
   }
 
-  destroy(table->file);
+  ::destroy_at(table->file);
   table->file = nullptr;
 
   if (--share->tmp_handler_count == 0 && share->db_plugin != nullptr) {
@@ -2579,7 +2519,7 @@ void free_tmp_table(TABLE *table) {
   if (share->decrement_ref_count() == 0)  // no more TABLE objects
   {
     MEM_ROOT own_root = std::move(share->mem_root);
-    destroy(table);
+    ::destroy_at(table);
     own_root.Clear();
   }
 }
@@ -2881,7 +2821,7 @@ bool create_ondisk_from_heap(THD *thd, TABLE *wtable, int error,
       Replace the guts of the old table with the new one, although keeping
       most members.
     */
-    destroy(table->file);
+    ::destroy_at(table->file);
     table->s = new_table.s;
     table->file = new_table.file;
     table->db_stat = new_table.db_stat;
@@ -2949,7 +2889,7 @@ err_after_open:
 err_after_create:
   new_table.file->ha_delete_table(new_table.s->table_name.str, nullptr);
 err_after_alloc:
-  destroy(new_table.file);
+  ::destroy_at(new_table.file);
 err_after_proc_info:
   thd_proc_info(thd, save_proc_info);
   // New share took control of old share mem_root; regain control:
