@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,10 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA 
-
-  Copyright (c) 2023, Shannon Data AI and/or its affiliates.
-*/
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/pack_rows.h"
 
@@ -161,7 +159,6 @@ static size_t CalculateColumnStorageSize(const Column &column) {
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_DB_TRX_ID:
       // Field_typed_array inherits from Field_blob, so we have to treat it as a
       // BLOB column. And is_array() the only way to detect if the field is a
       // typed array.
@@ -169,7 +166,6 @@ static size_t CalculateColumnStorageSize(const Column &column) {
       break;
     case MYSQL_TYPE_GEOMETRY:
     case MYSQL_TYPE_JSON:
-    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:

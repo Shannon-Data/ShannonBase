@@ -1,15 +1,16 @@
-/* Copyright (c) 2003, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2003, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
   @file
@@ -422,7 +421,7 @@ bool Item_func_geometry_from_text::is_allowed_wkb_type(
   not be the same as 'str' parameter.
  */
 String *Item_func_geometry_from_text::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   Geometry_buffer buffer;
   String arg_val;
   String *wkt = args[0]->val_str_ascii(&arg_val);
@@ -679,7 +678,7 @@ bool Item_func_geometry_from_wkb::is_allowed_wkb_type(
   not be the same as 'str' parameter.
  */
 String *Item_func_geometry_from_wkb::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   gis::srid_t srid = 0;
   bool reverse = false;
   bool srid_default_ordering = true;
@@ -1310,7 +1309,7 @@ bool Item_func_geomfromgeojson::get_positions(const Json_array *coordinates,
     */
     Json_wrapper coord((*coordinates)[i]);
     coord.set_alias();
-    const double coordinate = coord.coerce_real("");
+    const double coordinate = coord.coerce_real(JsonCoercionWarnHandler{""});
     if (i == 0) {
       // Longitude.
       if (coordinate <= m_min_longitude || coordinate > m_max_longitude) {
@@ -2364,7 +2363,7 @@ bool geometry_to_json(Json_wrapper *wr, String *swkb,
   Create a GeoJSON object, according to GeoJSON specification revision 1.0.
 */
 bool Item_func_as_geojson::val_json(Json_wrapper *wr) {
-  assert(fixed == true);
+  assert(fixed);
 
   if (arg_count > 1) {
     if (parse_maxdecimaldigits_argument()) return error_json();
@@ -2672,7 +2671,7 @@ bool Item_func_geohash::fill_and_check_fields() {
   important to supply an reasonable max geohash length argument.
 */
 String *Item_func_geohash::val_str_ascii(String *str) {
-  assert(fixed == true);
+  assert(fixed);
 
   if (fill_and_check_fields()) {
     if (null_value) {
@@ -3109,7 +3108,7 @@ double Item_func_latlongfromgeohash::round_latlongitude(double latlongitude,
   of the geohash.
 */
 double Item_func_latlongfromgeohash::val_real() {
-  assert(fixed == true);
+  assert(fixed);
 
   String buf;
   String *input_value = args[0]->val_str_ascii(&buf);
@@ -3139,7 +3138,7 @@ double Item_func_latlongfromgeohash::val_real() {
 }
 
 String *Item_func_as_wkt::val_str_ascii(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
 
   String swkb_tmp;
   String *swkb = args[0]->val_str(&swkb_tmp);
@@ -3258,7 +3257,7 @@ bool Item_func_as_wkt::resolve_type(THD *thd) {
 }
 
 String *Item_func_as_wkb::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
 
   String swkb_tmp;
   String *swkb = args[0]->val_str(&swkb_tmp);
@@ -3365,7 +3364,7 @@ String *Item_func_as_wkb::val_str(String *str) {
 }
 
 String *Item_func_geometry_type::val_str_ascii(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   String *swkb = args[0]->val_str(str);
   Geometry_buffer buffer;
   Geometry *geom = nullptr;
@@ -3430,7 +3429,7 @@ Field::geometry_type Item_func_make_envelope::get_geometry_type() const {
 }
 
 String *Item_func_make_envelope::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   String arg_val1, arg_val2;
   String *pt1 = args[0]->val_str(&arg_val1);
   String *pt2 = args[1]->val_str(&arg_val2);
@@ -3575,7 +3574,7 @@ Field::geometry_type Item_func_envelope::get_geometry_type() const {
 }
 
 String *Item_func_envelope::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   String arg_val;
   String *swkb = args[0]->val_str(&arg_val);
   Geometry_buffer buffer;
@@ -3612,7 +3611,7 @@ Field::geometry_type Item_func_centroid::get_geometry_type() const {
 }
 
 String *Item_func_centroid::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   String arg_val;
   String *swkb = args[0]->val_str(&arg_val);
   Geometry_buffer buffer;
@@ -4116,7 +4115,7 @@ String *Item_func_st_simplify::val_str(String *str) {
 */
 
 String *Item_func_spatial_decomp::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   String arg_val;
   String *swkb = args[0]->val_str(&arg_val);
   Geometry_buffer buffer;
@@ -4160,7 +4159,7 @@ err:
 }
 
 String *Item_func_spatial_decomp_n::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   String arg_val;
   String *swkb = args[0]->val_str(&arg_val);
   if (current_thd->is_error()) return error_str();
@@ -4221,7 +4220,7 @@ Field::geometry_type Item_func_point::get_geometry_type() const {
 }
 
 String *Item_func_point::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
 
   /*
     The coordinates of a point can't be another geometry, but other types
@@ -4306,7 +4305,7 @@ bool Item_func_pointfromgeohash::resolve_type(THD *thd) {
 }
 
 String *Item_func_pointfromgeohash::val_str(String *str) {
-  assert(fixed == true);
+  assert(fixed);
 
   String argument_value;
   String *geohash = args[0]->val_str_ascii(&argument_value);
@@ -4389,7 +4388,7 @@ const char *Item_func_spatial_collection::func_name() const {
 */
 
 String *Item_func_spatial_collection::val_str(String *str) {
-  assert(fixed == 1);
+  assert(fixed);
   String arg_value;
   uint i;
   gis::srid_t srid = 0;
@@ -4700,7 +4699,7 @@ String *Item_func_st_union::val_str(String *str) {
 }
 
 longlong Item_func_isempty::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   String tmp;
   String *swkb = args[0]->val_str(&tmp);
   Geometry_buffer buffer;
@@ -4764,7 +4763,7 @@ longlong Item_func_st_issimple::val_int() {
 }
 
 longlong Item_func_isclosed::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   String tmp;
   String *swkb = args[0]->val_str(&tmp);
   Geometry_buffer buffer;
@@ -4827,7 +4826,7 @@ longlong Item_func_isvalid::val_int() {
 */
 
 longlong Item_func_dimension::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   uint32 dim = 0;  // In case of error
   String *swkb = args[0]->val_str(&value);
   Geometry_buffer buffer;
@@ -4846,7 +4845,7 @@ longlong Item_func_dimension::val_int() {
 }
 
 longlong Item_func_numinteriorring::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   uint32 num = 0;  // In case of error
   String *swkb = args[0]->val_str(&value);
   Geometry_buffer buffer;
@@ -4865,7 +4864,7 @@ longlong Item_func_numinteriorring::val_int() {
 }
 
 longlong Item_func_numgeometries::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   uint32 num = 0;  // In case of errors
   String *swkb = args[0]->val_str(&value);
   Geometry_buffer buffer;
@@ -4884,7 +4883,7 @@ longlong Item_func_numgeometries::val_int() {
 }
 
 longlong Item_func_numpoints::val_int() {
-  assert(fixed == 1);
+  assert(fixed);
   uint32 num = 0;  // In case of errors
   String *swkb = args[0]->val_str(&value);
   Geometry_buffer buffer;
@@ -5458,7 +5457,7 @@ String *Item_func_st_srid_mutator::val_str(String *str) {
 }
 
 double Item_func_st_frechet_distance::val_real() {
-  assert(fixed == 1);
+  assert(fixed);
 
   String tmp_value1;
   String tmp_value2;
@@ -5522,7 +5521,7 @@ double Item_func_st_frechet_distance::val_real() {
 }
 
 double Item_func_st_hausdorff_distance::val_real() {
-  assert(fixed == 1);
+  assert(fixed);
 
   String tmp_value1;
   String tmp_value2;
@@ -5651,7 +5650,7 @@ String *Item_func_st_difference::val_str(String *str) {
 }
 
 double Item_func_distance::val_real() {
-  assert(fixed == 1);
+  assert(fixed);
 
   String tmp_value1;
   String tmp_value2;

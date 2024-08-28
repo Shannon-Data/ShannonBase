@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -447,7 +448,7 @@ bool String::append(const char *s, size_t arg_length) {
   }
 
   /*
-    For an ASCII compatinble string we can just append.
+    For an ASCII compatible string we can just append.
   */
   if (mem_realloc_exp(m_length + arg_length)) return true;
   memcpy(m_ptr + m_length, s, arg_length);
@@ -999,69 +1000,6 @@ void String::swap(String &s) noexcept {
 
 char *String::dup(MEM_ROOT *root) const {
   return strmake_root(root, m_ptr, m_length);
-}
-
-void String::ltrim() {
-  if (m_ptr) {
-    auto pos = m_ptr;
-    while (m_length > 0 && *pos && my_isspace(m_charset, *pos)) {
-      pos++;
-      m_length--;
-    }
-
-    if (pos != m_ptr) {
-      memmove(m_ptr, pos, m_length);
-      if (m_length < m_alloced_length)
-        m_ptr[m_length] = 0;
-      else
-        mem_realloc_exp(m_length);
-    }
-  }
-}
-
-void String::rtrim() {
-  if (m_ptr) {
-    while ((m_length > 0) && my_isspace(m_charset, *(m_ptr + m_length - 1))) {
-      m_length--;
-    }
-    if (m_length < m_alloced_length)
-      m_ptr[m_length] = 0;
-    else
-      mem_realloc_exp(m_length);
-  }
-}
-
-void String::rtrim_zero() {
-  bool proint_flag = false;
-  size_t length = m_length;
-  if (m_ptr) {
-    while (length > 0) {
-      if (my_toupper(m_charset, *(m_ptr + length - 1)) == '.') {
-        proint_flag = true;
-        break;
-      }
-      length--;
-    }
-    // trim right last 0, when after '.'
-    while ((m_length > 0) &&
-           (my_toupper(m_charset, *(m_ptr + m_length - 1)) == '0') &&
-           proint_flag) {
-      m_length--;
-    }
-    if (my_toupper(m_charset, *(m_ptr + m_length - 1)) == '.') {
-      m_length--;
-      // convert string '.' to '0'
-      if (m_length == 0) {
-        m_length = 1;
-        *m_ptr = '0';
-      }
-    }
-
-    if (m_length < m_alloced_length)
-      m_ptr[m_length] = 0;
-    else
-      mem_realloc_exp(m_length);
-  }
 }
 
 /**

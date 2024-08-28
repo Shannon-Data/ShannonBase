@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2018, 2021, Oracle and/or its affiliates.
+Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -34,6 +35,9 @@ Created 2018-01-27 by Sunny Bains. */
 
 #include <functional>
 #include <vector>
+
+#include "os0thread-create.h"
+#include "row0sel.h"
 
 // Forward declarations
 struct trx_t;
@@ -94,7 +98,6 @@ reference counting, this allows us to dispose of the Ctx instances
 without worrying about dangling pointers.
 
 NOTE: Secondary index scans are not supported currently. */
-class ReadView;
 class Parallel_reader {
  public:
   /** Maximum value for innodb-parallel-read-threads. */
@@ -289,7 +292,7 @@ class Parallel_reader {
   while checking for availability of threads
   @return number of threads available. */
   [[nodiscard]] static size_t available_threads(size_t n_required,
-                                                bool use_reserved = false);
+                                                bool use_reserved);
 
   /** Release the parallel read threads. */
   static void release_threads(size_t n_threads) {
@@ -304,8 +307,7 @@ class Parallel_reader {
   @param[in]      f           Callback function.
   (default is 0 which is leaf level)
   @return error. */
-  [[nodiscard]] dberr_t add_scan(trx_t *trx, const Config &config, F &&f,
-                                 bool split = false);
+  [[nodiscard]] dberr_t add_scan(trx_t *trx, const Config &config, F &&f);
 
   /** Wait for the join of threads spawned by the parallel reader. */
   void join() {
@@ -342,15 +344,8 @@ class Parallel_reader {
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t run(size_t n_threads);
 
-  void ctx_completed_inc();
-
   /** @return the configured max threads size. */
   [[nodiscard]] size_t max_threads() const { return m_max_threads; }
-
-  /** @return the queue size. */
-  size_t max_splits() const MY_ATTRIBUTE((warn_unused_result)) {
-    return m_ctxs.size();
-  }
 
   /** @return true if in error state. */
   [[nodiscard]] bool is_error_set() const {
@@ -407,11 +402,6 @@ class Parallel_reader {
     return m_n_completed.load(std::memory_order_relaxed) <
            m_ctx_id.load(std::memory_order_relaxed);
   }
-  /** @return true if tasks are over. */
-  bool is_ctx_over() const MY_ATTRIBUTE((warn_unused_result)) {
-    return !(m_n_completed.load(std::memory_order_relaxed) <
-             m_ctx_id.load(std::memory_order_relaxed));
-  }
 
  private:
   // clang-format off
@@ -427,10 +417,6 @@ class Parallel_reader {
 
   /** Maximum number of worker threads to use. */
   size_t m_max_threads{};
-
-  /** True: dop will change to m_ctxs.size() when m_ctxs.size() is less then
-   * exepected dop. */
-  bool m_need_change_dop{true};
 
   /** Number of worker threads that will be spawned. */
   size_t m_n_threads{0};
@@ -477,9 +463,6 @@ class Parallel_reader {
   /** If the caller wants to wait for the parallel_read to finish it's run */
   bool m_sync;
 
-  /** Covering transaction for slow query log. */
-  trx_t *m_trx_for_slow_log;
-
   /** Context information related to each parallel reader thread. */
   std::vector<Thread_ctx *, ut::allocator<Thread_ctx *>> m_thread_ctxs;
 };
@@ -497,7 +480,7 @@ class Parallel_reader::Scan_ctx {
            const Parallel_reader::Config &config, F &&f);
 
   /** Destructor. */
-  ~Scan_ctx();
+  ~Scan_ctx() = default;
 
  private:
   /** Boundary of the range to scan. */
@@ -668,7 +651,7 @@ class Parallel_reader::Scan_ctx {
   Config m_config;
 
   /** Covering transaction. */
-  trx_t *m_trx{};
+  const trx_t *m_trx{};
 
   /** Callback function. */
   F m_f;
@@ -701,10 +684,10 @@ class Parallel_reader::Ctx {
   @param[in]    scan_ctx        Scan context.
   @param[in]    range           Range that the thread has to read. */
   Ctx(size_t id, Scan_ctx *scan_ctx, const Scan_ctx::Range &range)
-      : m_id(id), m_range(range), m_scan_ctx(scan_ctx), reader(nullptr) {}
+      : m_id(id), m_range(range), m_scan_ctx(scan_ctx) {}
 
   /** Destructor. */
-  ~Ctx();
+  ~Ctx() = default;
 
  public:
   /** @return the context ID. */
@@ -804,23 +787,8 @@ class Parallel_reader::Ctx {
 
   ulint *m_offsets{};
 
-  dberr_t read_record(uchar *buf, row_prebuilt_t *prebuilt)
-      MY_ATTRIBUTE((warn_unused_result));
-
   /** Start of a new range to scan. */
   bool m_start{};
-
-  /** Current row curous */
-  btr_pcur_t *m_pcur{};
-
-  bool start_read{true};      // start to read range's records
-  mem_heap_t *m_blob_heap{};  // heap for containing mysql records
-  mem_heap_t *m_heap{};       // heap for containing innnodb rec
-
-  ulint offsets_[REC_OFFS_NORMAL_SIZE]{};
-  ulint clust_offsets_[REC_OFFS_NORMAL_SIZE]{};
-
-  Parallel_reader *reader;
 
   friend class Parallel_reader;
 };

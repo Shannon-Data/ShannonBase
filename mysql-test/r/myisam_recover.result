@@ -71,7 +71,7 @@ flush table t1;
 # check table is needed to mark the table as crashed.
 check table t1;
 Table	Op	Msg_type	Msg_text
-test.t1	check	warning	Size of datafile is: 78       Should be: 39
+test.t1	check	warning	Size of datafile is: 42       Should be: 21
 test.t1	check	error	Record-count is not ok; is 6   Should be: 3
 test.t1	check	warning	Found 6 key parts. Should be: 3
 test.t1	check	error	Corrupt
@@ -124,7 +124,7 @@ flush table t1;
 # Check table is needed to mark the table as crashed.
 check table t1;
 Table	Op	Msg_type	Msg_text
-test.t1	check	warning	Size of datafile is: 26       Should be: 13
+test.t1	check	warning	Size of datafile is: 14       Should be: 7
 test.t1	check	error	Record-count is not ok; is 2   Should be: 1
 test.t1	check	warning	Found 2 key parts. Should be: 1
 test.t1	check	error	Corrupt

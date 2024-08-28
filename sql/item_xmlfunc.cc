@@ -1,15 +1,16 @@
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -51,8 +52,7 @@
 
 /*
   TODO: future development directions:
-  1. add real constants for XPATH_NODESET_CMP and XPATH_NODESET
-     into enum Type in item.h.
+  1. add real constant for XPATH_NODESET_ITEM into enum Type in item.h.
   2. add nodeset_to_nodeset_comparator
   3. add lacking functions:
        - name()
@@ -158,7 +158,7 @@ class Item_nodeset_func : public Item_str_func {
    @param nodeset   the nodeset to be modified
   */
   virtual void val_nodeset(XPathFilter *nodeset) const = 0;
-  enum Type type() const override { return XPATH_NODESET; }
+  enum Type type() const override { return XPATH_NODESET_ITEM; }
   String *val_str(String *str) override {
     XPathFilter res;
     val_nodeset(&res);
@@ -184,7 +184,6 @@ class Item_nodeset_func : public Item_str_func {
   }
   enum Item_result result_type() const override { return STRING_RESULT; }
   bool resolve_type(THD *) override {
-    if (reject_vector_args()) return true;
     set_data_type_string(uint32{MAX_BLOB_WIDTH});
     // To avoid premature evaluation, mark all nodeset functions as non-const.
     used_tables_cache = RAND_TABLE_BIT;
@@ -366,7 +365,7 @@ class Item_xpath_cast_bool final : public Item_int_func {
   const char *func_name() const override { return "xpath_cast_bool"; }
   bool is_bool_func() const override { return true; }
   longlong val_int() override {
-    if (args[0]->type() == XPATH_NODESET) {
+    if (args[0]->type() == XPATH_NODESET_ITEM) {
       auto *nodeset_func = down_cast<const Item_nodeset_func *>(args[0]);
       XPathFilter flt;
       nodeset_func->val_nodeset(&flt);
@@ -420,7 +419,6 @@ class Item_func_xpath_position : public Item_int_func {
   explicit Item_func_xpath_position(Item *a) : Item_int_func(a) {}
   const char *func_name() const override { return "xpath_position"; }
   bool resolve_type(THD *) override {
-    if (reject_vector_args()) return true;
     set_data_type_string(10U);
     return false;
   }
@@ -438,7 +436,6 @@ class Item_func_xpath_count : public Item_int_func {
   explicit Item_func_xpath_count(Item *a) : Item_int_func(a) {}
   const char *func_name() const override { return "xpath_count"; }
   bool resolve_type(THD *) override {
-    if (reject_vector_args()) return true;
     set_data_type_string(10U);
     return false;
   }
@@ -492,7 +489,6 @@ class Item_nodeset_to_const_comparator final : public Item_bool_func {
   Item_nodeset_to_const_comparator(Item_nodeset_func *nodeset,
                                    Item_bool_func *cmpfunc, const ParsedXML *p)
       : Item_bool_func(nodeset, cmpfunc), pxml(p) {}
-  enum Type type() const override { return XPATH_NODESET_CMP; }
   const char *func_name() const override {
     return "xpath_nodeset_to_const_comparator";
   }
@@ -701,7 +697,7 @@ void Item_nodeset_func_elementbyindex::val_nodeset(XPathFilter *nodeset) const {
   otherwise returns the item itself.
 */
 static Item *nodeset2bool(Item *item) {
-  if (item->type() == Item::XPATH_NODESET)
+  if (item->type() == Item::XPATH_NODESET_ITEM)
     return new Item_xpath_cast_bool(item);
   return item;
 }
@@ -829,10 +825,11 @@ static Item_bool_func *eq_func_reverse(int oper, Item *a, Item *b) {
 */
 static Item *create_comparator(MY_XPATH *xpath, int oper, MY_XPATH_LEX *context,
                                Item *a, Item *b) {
-  if (a->type() != Item::XPATH_NODESET && b->type() != Item::XPATH_NODESET) {
+  if (a->type() != Item::XPATH_NODESET_ITEM &&
+      b->type() != Item::XPATH_NODESET_ITEM) {
     return eq_func(oper, a, b);  // two scalar arguments
-  } else if (a->type() == Item::XPATH_NODESET &&
-             b->type() == Item::XPATH_NODESET) {
+  } else if (a->type() == Item::XPATH_NODESET_ITEM &&
+             b->type() == Item::XPATH_NODESET_ITEM) {
     size_t len = xpath->query.end - context->beg;
     len = std::min(len, size_t(32));
     my_printf_error(ER_UNKNOWN_ERROR,
@@ -855,7 +852,7 @@ static Item *create_comparator(MY_XPATH *xpath, int oper, MY_XPATH_LEX *context,
     Item_nodeset_func *nodeset;
     Item *scalar;
     Item_bool_func *comp;
-    if (a->type() == Item::XPATH_NODESET) {
+    if (a->type() == Item::XPATH_NODESET_ITEM) {
       nodeset = down_cast<Item_nodeset_func *>(a);
       scalar = b;
       comp = eq_func(oper, fake, scalar);
@@ -880,7 +877,7 @@ static Item *create_comparator(MY_XPATH *xpath, int oper, MY_XPATH_LEX *context,
 static Item_nodeset_func *nametestfunc(MY_XPATH *xpath, int type, Item *arg,
                                        const char *beg, size_t len) {
   assert(arg != nullptr);
-  assert(arg->type() == Item::XPATH_NODESET);
+  assert(arg->type() == Item::XPATH_NODESET_ITEM);
   assert(beg != nullptr);
   assert(len > 0);
 
@@ -1078,12 +1075,12 @@ static Item *create_func_substr(MY_XPATH *, Item **args, uint nargs) {
 }
 
 static Item *create_func_count(MY_XPATH *, Item **args, uint) {
-  if (args[0]->type() != Item::XPATH_NODESET) return nullptr;
+  if (args[0]->type() != Item::XPATH_NODESET_ITEM) return nullptr;
   return new Item_func_xpath_count(args[0]);
 }
 
 static Item *create_func_sum(MY_XPATH *xpath, Item **args, uint) {
-  if (args[0]->type() != Item::XPATH_NODESET) return nullptr;
+  if (args[0]->type() != Item::XPATH_NODESET_ITEM) return nullptr;
   return new Item_func_xpath_sum(args[0], xpath->pxml);
 }
 
@@ -1715,10 +1712,10 @@ static int my_xpath_parse_UnionExpr(MY_XPATH *xpath) {
 
   while (my_xpath_parse_term(xpath, MY_XPATH_LEX_VLINE)) {
     Item *prev = xpath->item;
-    if (prev->type() != Item::XPATH_NODESET) return 0;
+    if (prev->type() != Item::XPATH_NODESET_ITEM) return 0;
 
     if (!my_xpath_parse_PathExpr(xpath) ||
-        xpath->item->type() != Item::XPATH_NODESET) {
+        xpath->item->type() != Item::XPATH_NODESET_ITEM) {
       xpath->error = 1;
       return 0;
     }
@@ -1750,7 +1747,7 @@ static int my_xpath_parse_FilterExpr_opt_slashes_RelativeLocationPath(
 
   if (!my_xpath_parse_term(xpath, MY_XPATH_LEX_SLASH)) return 1;
 
-  if (xpath->item->type() != Item::XPATH_NODESET) {
+  if (xpath->item->type() != Item::XPATH_NODESET_ITEM) {
     xpath->lasttok = xpath->prevtok;
     xpath->error = 1;
     return 0;
@@ -2284,7 +2281,6 @@ static int my_xpath_parse(MY_XPATH *xpath, const char *str,
 }
 
 bool Item_xml_str_func::resolve_type(THD *thd) {
-  if (reject_vector_args()) return true;
   if (param_type_is_default(thd, 0, -1)) return true;
 
   if (agg_arg_charsets_for_comparison(collation, args, arg_count)) return true;
@@ -2502,21 +2498,24 @@ String *Item_func_xml_extractvalue::val_str(String *str) {
 }
 
 String *Item_func_xml_update::val_str(String *str) {
-  String *res = nullptr, *rep = nullptr;
-
   null_value = false;
   if (!nodeset_func && parse_xpath(args[1])) {
     assert(is_nullable());
-    null_value = true;
-    return nullptr;
+    return error_str();
   }
 
-  if (!nodeset_func || !(res = args[0]->val_str(str)) ||
-      !(rep = args[2]->val_str(&tmp_value)) || !parse_xml(res, &pxml) ||
-      (nodeset_func->type() != XPATH_NODESET)) {
-    null_value = true;
-    return nullptr;
-  }
+  if (nodeset_func == nullptr) return error_str();
+
+  String *res = eval_string_arg(collation.collation, args[0], str);
+  if (res == nullptr) return error_str();
+
+  StringBuffer<STRING_BUFFER_USUAL_SIZE> rep_buf(nullptr, 0,
+                                                 collation.collation);
+  String *rep = eval_string_arg(collation.collation, args[2], &rep_buf);
+  if (rep == nullptr) return error_str();
+
+  if (!parse_xml(res, &pxml)) return error_str();
+  if (nodeset_func->type() != XPATH_NODESET_ITEM) return error_str();
 
   XPathFilter nodeset;
   down_cast<const Item_nodeset_func *>(nodeset_func)->val_nodeset(&nodeset);

@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,11 +23,12 @@
 
 #include <gtest/gtest.h>
 #include <sys/types.h>
+#include <memory>
 
 #include "my_inttypes.h"
 #include "mysql/strings/m_ctype.h"
+#include "sql-common/my_decimal.h"
 #include "sql/field.h"
-#include "sql/my_decimal.h"
 #include "sql/protocol.h"
 #include "sql/sql_class.h"
 #include "sql/sql_time.h"
@@ -298,7 +300,7 @@ TEST_F(FieldTest, FieldTimef) {
   EXPECT_FALSE(f->get_timestamp(&tv, &warnings));
   EXPECT_EQ(123400, tv.m_tv_usec);
 
-  destroy(field);
+  ::destroy_at(field);
 }
 
 TEST_F(FieldTest, FieldTimefCompare) {

@@ -1,18 +1,19 @@
 #!/usr/bin/perl
 # -*- cperl -*-
 
-# Copyright (c) 2004, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2004, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -39,6 +40,7 @@ use warnings;
 
 use lib "lib";
 use lib "../internal/cloud/mysql-test/lib";
+use lib "../internal/mysql-test/lib";
 
 use Cwd;
 use Cwd 'abs_path';
@@ -116,6 +118,7 @@ my $opt_platform_exclude;
 my $opt_ps_protocol;
 my $opt_report_features;
 my $opt_skip_core;
+my $opt_skip_suite;
 my $opt_skip_test_list;
 my $opt_sp_protocol;
 my $opt_start;
@@ -148,6 +151,7 @@ my $opt_max_test_fail      = env_or_val(MTR_MAX_TEST_FAIL => 10);
 my $opt_mysqlx_baseport    = $ENV{'MYSQLXPLUGIN_PORT'} || "auto";
 my $opt_port_base          = $ENV{'MTR_PORT_BASE'} || "auto";
 my $opt_port_exclude       = $ENV{'MTR_PORT_EXCLUDE'} || "none";
+my $opt_bind_local         = $ENV{'MTR_BIND_LOCAL'};
 my $opt_reorder            = 1;
 my $opt_retry              = 3;
 my $opt_retry_failure      = env_or_val(MTR_RETRY_FAILURE => 2);
@@ -158,6 +162,7 @@ my $opt_testcase_timeout   = $ENV{MTR_TESTCASE_TIMEOUT} || 15;         # minutes
 my $opt_valgrind_clients   = 0;
 my $opt_valgrind_mysqld    = 0;
 my $opt_valgrind_mysqltest = 0;
+my $opt_accept_fail        = 0;
 
 # Options used when connecting to an already running server
 my %opts_extern;
@@ -183,6 +188,7 @@ my $build_thread       = 0;
 my $daemonize_mysqld   = 0;
 my $debug_d            = "d";
 my $exe_ndbmtd_counter = 0;
+my $tmpdir_path_updated= 0;
 my $source_dist        = 0;
 my $shutdown_report    = 0;
 my $valgrind_reports   = 0;
@@ -289,7 +295,6 @@ our $opt_keep_ndbfs                = 0;
 our $opt_mem                       = $ENV{'MTR_MEM'} ? 1 : 0;
 our $opt_only_big_test             = 0;
 our $opt_parallel                  = $ENV{MTR_PARALLEL};
-our $opt_pq                        = 0;
 our $opt_quiet                     = $ENV{'MTR_QUIET'} || 0;
 our $opt_repeat                    = 1;
 our $opt_report_times              = 0;
@@ -326,7 +331,6 @@ our $default_vardir;
 our $excluded_string;
 our $exe_libtool;
 our $exe_mysql;
-our $exe_mysql_ssl_rsa_setup;
 our $exe_mysql_migrate_keyring;
 our $exe_mysql_keyring_encryption_test;
 our $exe_mysqladmin;
@@ -471,12 +475,25 @@ sub main {
     add_secondary_engine_suite();
   }
 
+  $external_language_support =
+    ($external_language_support and find_plugin("component_mle", "plugin_output_directory")) ? 1 : 0;
+
+  if ($external_language_support) {
+    # Append external language test suite to list of default suites if found.
+    add_external_language_suite();
+  }
+
   if ($opt_gcov) {
     gcov_prepare($basedir);
   }
 
   if ($opt_lock_order) {
     lock_order_prepare($bindir);
+  }
+
+  if ($opt_accept_fail and not $opt_force) {
+    $opt_force = 1;
+    mtr_report("accept-test-fail turned on: enabling --force");
   }
 
   # Collect test cases from a file and put them into '@opt_cases'.
@@ -529,8 +546,12 @@ sub main {
       # Scan all sub-directories for available test suites.
       # The variable $opt_suites is updated by get_all_suites()
       find(\&get_all_suites, "$glob_mysql_test_dir");
-      find({ wanted => \&get_all_suites, follow => 1 }, "$basedir/internal")
+      find({ wanted => \&get_all_suites, follow => 1 },
+	   "$basedir/internal/mysql-test")
         if (-d "$basedir/internal");
+      find({ wanted => \&get_all_suites, follow => 1 },
+           "$basedir/internal/cloud/mysql-test")
+        if (-d "$basedir/internal/cloud");
 
       if ($suite_set == 1) {
         # Run only with non-default suites
@@ -565,6 +586,19 @@ sub main {
     my $opt_do_suite_reg = init_pattern($opt_do_suite, "--do-suite");
     for my $suite (split(",", $opt_suites)) {
       if ($opt_do_suite_reg and not $suite =~ /$opt_do_suite_reg/) {
+        remove_suite_from_list($suite);
+      }
+    }
+
+    # Removing ',' at the end of $opt_suites if exists
+    $opt_suites =~ s/,$//;
+  }
+
+  # Skip suites which match the --skip-suite filter
+  if ($opt_skip_suite) {
+    my $opt_skip_suite_reg = init_pattern($opt_skip_suite, "--skip-suite");
+    for my $suite (split(",", $opt_suites)) {
+      if ($opt_skip_suite_reg and $suite =~ /$opt_skip_suite_reg/) {
         remove_suite_from_list($suite);
       }
     }
@@ -722,7 +756,7 @@ sub main {
   if ($secondary_engine_support) {
     secondary_engine_offload_count_report_init();
     # Create virtual environment
-    create_virtual_env($bindir);
+    find_ml_driver($bindir);
     reserve_secondary_ports();
   }
 
@@ -778,6 +812,7 @@ sub main {
       if ($opt_parallel > 1) {
         set_vardir("$opt_vardir/$child_num");
         $opt_tmpdir = "$opt_tmpdir/$child_num";
+        $tmpdir_path_updated = 1;
       }
 
       init_timers();
@@ -916,14 +951,9 @@ sub main {
   remove_redundant_thread_id_file_locations();
   clean_unique_id_dir();
 
-  # Cleanup the secondary engine environment
-  if ($secondary_engine_support) {
-    clean_virtual_env();
-  }
-
   print_total_times($opt_parallel) if $opt_report_times;
 
-  mtr_report_stats("Completed", $completed);
+  mtr_report_stats("Completed", $completed, $opt_accept_fail);
 
   remove_vardir_subs() if $opt_clean_vardir;
 
@@ -1653,12 +1683,12 @@ sub command_line_setup {
     'no-skip'                            => \$opt_no_skip,
     'only-big-test'                      => \$opt_only_big_test,
     'platform=s'                         => \$opt_platform,
-    'pq'                                 => \$opt_pq,
     'exclude-platform=s'                 => \$opt_platform_exclude,
     'skip-combinations'                  => \$opt_skip_combinations,
     'skip-im'                            => \&ignore_option,
     'skip-ndbcluster|skip-ndb'           => \$opt_skip_ndbcluster,
     'skip-rpl'                           => \&collect_option,
+    'skip-suite=s'                       => \$opt_skip_suite,
     'skip-sys-schema'                    => \$opt_skip_sys_schema,
     'skip-test=s'                        => \&collect_option,
     'start-from=s'                       => \&collect_option,
@@ -1670,6 +1700,7 @@ sub command_line_setup {
     'mysqlx-port=i'                   => \$opt_mysqlx_baseport,
     'port-base|mtr-port-base=i'       => \$opt_port_base,
     'port-exclude|mtr-port-exclude=s' => \$opt_port_exclude,
+    'bind-local!'                     => \$opt_bind_local,
 
     # Test case authoring
     'check-testcases!' => \$opt_check_testcases,
@@ -1758,6 +1789,7 @@ sub command_line_setup {
     'vardir=s'        => \$opt_vardir,
 
     # Misc
+    'accept-test-fail'      => \$opt_accept_fail,
     'charset-for-testdb=s'  => \$opt_charset_for_testdb,
     'colored-diff'          => \$opt_colored_diff,
     'comment=s'             => \$opt_comment,
@@ -1869,10 +1901,6 @@ sub command_line_setup {
   } else {
     # Run the mysqld to find out what features are available
     collect_mysqld_features();
-  }
-
-  if($external_language_support){
-    find_external_language_home($bindir);
   }
 
   # Look for language files and charsetsdir, use same share
@@ -2074,7 +2102,7 @@ sub command_line_setup {
     $opt_tmpdir = "$opt_vardir/tmp" unless $opt_tmpdir;
 
     my $res =
-      check_socket_path_length("$opt_tmpdir/mysqld.NN.sock", $opt_parallel);
+      check_socket_path_length("$opt_tmpdir/mysqld.NN.sock", $opt_parallel, $tmpdir_path_updated);
 
     if ($res) {
       mtr_report("Too long tmpdir path '$opt_tmpdir'",
@@ -2113,8 +2141,6 @@ sub command_line_setup {
   }
 
   $ENV{'BIG_TEST'} = 1 if ($opt_big_test or $opt_only_big_test);
-
-  $ENV{'PQ_TEST'} = 1 if ($opt_pq);
 
   # Gcov flag
   if (($opt_gcov or $opt_gprof) and !$source_dist) {
@@ -2180,12 +2206,6 @@ sub command_line_setup {
     }
   }
 
-  # Check parallel query
-  if ($opt_pq) {
-    push(@opt_extra_mysqld_opt, "--force_parallel_execute=1");
-    push(@opt_extra_mysqld_opt, "--parallel_cost_threshold=0");
-  }
-
   # Check use of wait-all
   if ($opt_wait_all && !$start_only) {
     mtr_error("--wait-all can only be used with --start options");
@@ -2224,7 +2244,7 @@ sub command_line_setup {
     mtr_report("Turning on valgrind for all executables");
     $opt_valgrind        = 1;
     $opt_valgrind_mysqld = 1;
-    # Enable this when mysqlpump and mysqlbinlog are fixed.
+    # Enable this when mysqlbinlog is fixed.
     # $opt_valgrind_clients = 1;
     $opt_valgrind_mysqltest        = 1;
     $opt_valgrind_secondary_engine = 1;
@@ -2344,7 +2364,56 @@ sub command_line_setup {
   check_fips_support();
 }
 
+# For OpenSSL 3 we need to parse this output:
+# openssl list -providers
+# Providers:
+#   base
+#     name: OpenSSL Base Provider
+#     version: 3.0.9
+#     status: active
+#   fips
+#     name: OpenSSL FIPS Provider
+#     version: 3.0.9
+#     status: active
 sub check_fips_support() {
+  # For OpenSSL 3, ask openssl about providers.
+  my $openssl_args;
+  mtr_init_args(\$openssl_args);
+  mtr_add_arg($openssl_args, "version");
+  my $openssl_cmd = join(" ", $exe_openssl, @$openssl_args);
+  my $openssl_result = `$openssl_cmd`;
+  if($openssl_result =~ /^OpenSSL 3./) {
+    mtr_init_args(\$openssl_args);
+    mtr_add_arg($openssl_args, "list");
+    mtr_add_arg($openssl_args, "-providers");
+    $openssl_cmd = join(" ", $exe_openssl, @$openssl_args);
+    $openssl_result = `$openssl_cmd`;
+    my $fips_active = 0;
+    my $fips_seen = 0;
+    foreach my $line (split('\n', $openssl_result)) {
+      # printf "line $line\n";
+      if ($line =~ "name:") {
+	if ($line =~ "FIPS") {
+	  $fips_seen = 1;
+	} else {
+	  $fips_seen = 0;
+	}
+      } elsif ($line =~ "status:") {
+	if ($fips_seen and $line =~ "active") {
+	  $fips_active = 1;
+	}
+      }
+    }
+    # printf "fips_active $fips_active\n";
+    if ($fips_active) {
+      $ENV{'OPENSSL3_FIPS_ACTIVE'} = 1;
+    } else {
+      $ENV{'OPENSSL3_FIPS_ACTIVE'} = 0;
+    }
+  } else {
+    $ENV{'OPENSSL3_FIPS_ACTIVE'} = 0;
+  }
+
   # Run $exe_mysqltest to see if FIPS mode is supported.
   my $args;
   mtr_init_args(\$args);
@@ -2705,8 +2774,6 @@ sub executable_setup () {
   # Look for the client binaries
   $exe_mysqladmin = mtr_exe_exists("$path_client_bindir/mysqladmin");
   $exe_mysql      = mtr_exe_exists("$path_client_bindir/mysql");
-  $exe_mysql_ssl_rsa_setup =
-    mtr_exe_exists("$path_client_bindir/mysql_ssl_rsa_setup");
   $exe_mysql_migrate_keyring =
     mtr_exe_exists("$path_client_bindir/mysql_migrate_keyring");
   $exe_mysql_keyring_encryption_test =
@@ -2726,13 +2793,19 @@ sub executable_setup () {
   if (!$exe_openssl) {
     if (IS_MAC) {
       # We use homebrew, rather than macOS SSL.
-      # TODO(tdidriks) add an option to mysqltest to see whether we are using
-      # openssl@1.1 or openssl@3
+      # Use the openssl symlink, which will point to something like
+      # ../Cellar/openssl@1.1/1.1.1t or ../Cellar/openssl@3/3.0.8
       my $machine_hw_name = `uname -m`;
       if ($machine_hw_name =~ "arm64") {
-	$exe_openssl = "/opt/homebrew/opt/" . "openssl\@1.1" . "/bin/openssl";
+	$exe_openssl =
+	  my_find_bin("/opt/homebrew/opt/",
+		      ["openssl/bin", "openssl\@1.1/bin"], "openssl",
+		      NOT_REQUIRED);
       } else {
-	$exe_openssl = "/usr/local/opt/" . "openssl\@1.1" . "/bin/openssl";
+	$exe_openssl =
+	  my_find_bin("/usr/local/opt/",
+		      ["openssl/bin", "openssl\@1.1/bin"], "openssl",
+		      NOT_REQUIRED);
       }
     } else {
       # We could use File::Which('openssl'),
@@ -2777,6 +2850,20 @@ sub executable_setup () {
     $exe_ndb_waiter =
       my_find_bin($bindir, [ "runtime_output_directory", "bin" ], "ndb_waiter");
 
+    # There are additional NDB test binaries which are only built when
+    # using WITH_NDB_TEST. Detect if those are available by looking for
+    # the `testNDBT` executable and in such case setup variables to
+    # indicate that they are available. Detecting this early makes it possible
+    # to quickly skip these tests without each individual test having to look
+    # for its binary.
+    my $test_ndbt =
+      my_find_bin($bindir,
+                  [ "runtime_output_directory", "bin" ],
+                   "testNDBT", NOT_REQUIRED);
+    if ($test_ndbt) {
+      mtr_verbose("Found NDBT binaries");
+      $ENV{'NDBT_BINARIES_AVAILABLE'} = 1;
+    }
   }
 
   if (defined $ENV{'MYSQL_TEST'}) {
@@ -2909,34 +2996,6 @@ sub mysqlxtest_arguments() {
   }
 
   mtr_add_arg($args, "--port=%d", $mysqlx_baseport);
-  return mtr_args2str($exe, @$args);
-}
-
-sub mysql_pump_arguments ($) {
-  my ($group_suffix) = @_;
-  my $exe = mtr_exe_exists("$path_client_bindir/mysqlpump");
-
-  my $args;
-  mtr_init_args(\$args);
-  if ($opt_valgrind_clients) {
-    valgrind_client_arguments($args, \$exe);
-  }
-
-  mtr_add_arg($args, "--defaults-file=%s",         $path_config_file);
-  mtr_add_arg($args, "--defaults-group-suffix=%s", $group_suffix);
-  client_debug_arg($args, "mysqlpump-$group_suffix");
-  return mtr_args2str($exe, @$args);
-}
-
-sub mysqlpump_arguments () {
-  my $exe = mtr_exe_exists("$path_client_bindir/mysqlpump");
-
-  my $args;
-  mtr_init_args(\$args);
-  if ($opt_valgrind_clients) {
-    valgrind_client_arguments($args, \$exe);
-  }
-
   return mtr_args2str($exe, @$args);
 }
 
@@ -3075,9 +3134,7 @@ sub get_all_suites {
   #     'engines/funcs' and 'engines/iuds'
   my $suite_name = $1
     if ($File::Find::name =~ /mysql\-test[\/\\]suite[\/\\](.*)[\/\\]t$/ or
-       $File::Find::name =~ /mysql\-test[\/\\]suite[\/\\]([^\/\\]*).*/     or
-       $File::Find::name =~ /plugin[\/\\](.*)[\/\\]tests[\/\\]mtr[\/\\]t$/ or
-       $File::Find::name =~ /components[\/\\](.*)[\/\\]tests[\/\\]mtr[\/\\]t$/);
+       $File::Find::name =~ /mysql\-test[\/\\]suite[\/\\]([^\/\\]*).*/);
   return if not defined $suite_name;
 
   # Skip extracting suite name if the path is already processed
@@ -3182,10 +3239,12 @@ sub environment_setup {
       ndb_move_data
       ndb_perror
       ndb_print_backup_file
+      ndb_redo_log_reader
       ndb_restore
       ndb_select_all
       ndb_select_count
       ndb_show_tables
+      ndb_sign_keys
       ndb_waiter
       ndbxfrm
       ndb_secretsfile_reader
@@ -3257,13 +3316,9 @@ sub environment_setup {
   $ENV{'MYSQL_DUMP'}          = mysqldump_arguments(".1");
   $ENV{'MYSQL_DUMP_SLAVE'}    = mysqldump_arguments(".2");
   $ENV{'MYSQL_IMPORT'}        = client_arguments("mysqlimport");
-  $ENV{'MYSQL_PUMP'}          = mysql_pump_arguments(".1");
-  $ENV{'MYSQLPUMP'}           = mysqlpump_arguments();
   $ENV{'MYSQL_SHOW'}          = client_arguments("mysqlshow");
   $ENV{'MYSQL_SLAP'}          = mysqlslap_arguments();
   $ENV{'MYSQL_SLAVE'}         = client_arguments("mysql", ".2");
-  $ENV{'MYSQL_SSL_RSA_SETUP'} = $exe_mysql_ssl_rsa_setup;
-  $ENV{'MYSQL_UPGRADE'}       = client_arguments("mysql_upgrade");
   $ENV{'MYSQLADMIN'}          = native_path($exe_mysqladmin);
   $ENV{'MYSQLXTEST'}          = mysqlxtest_arguments();
   $ENV{'MYSQL_MIGRATE_KEYRING'} = $exe_mysql_migrate_keyring;
@@ -3376,16 +3431,6 @@ sub environment_setup {
     mtr_exe_exists("$path_client_bindir/mysql_tzinfo_to_sql");
   $ENV{'MYSQL_TZINFO_TO_SQL'} = native_path($exe_mysql_tzinfo_to_sql);
 
-  # lz4_decompress
-  my $exe_lz4_decompress =
-    mtr_exe_maybe_exists("$path_client_bindir/lz4_decompress");
-  $ENV{'LZ4_DECOMPRESS'} = native_path($exe_lz4_decompress);
-
-  # zlib_decompress
-  my $exe_zlib_decompress =
-    mtr_exe_maybe_exists("$path_client_bindir/zlib_decompress");
-  $ENV{'ZLIB_DECOMPRESS'} = native_path($exe_zlib_decompress);
-
   # Create an environment variable to make it possible
   # to detect that the hypergraph optimizer is being used from test cases
   $ENV{'HYPERGRAPH_TEST'} = $opt_hypergraph;
@@ -3409,7 +3454,7 @@ sub environment_setup {
     ",print_suppressions=0"
     if $opt_sanitize;
 
-  $ENV{'ASAN_OPTIONS'} = "suppressions=${glob_mysql_test_dir}/asan.supp"
+  $ENV{'ASAN_OPTIONS'} = "suppressions=\"${glob_mysql_test_dir}/asan.supp\""
     . ",detect_stack_use_after_return=false"
     if $opt_sanitize;
 
@@ -3558,11 +3603,16 @@ sub setup_vardir() {
   mkpath("$opt_vardir/tmp");
   mkpath($opt_tmpdir) if ($opt_tmpdir ne "$opt_vardir/tmp");
 
+  if (defined $opt_debugger and $opt_debugger =~ /rr/) {
+    $ENV{'_RR_TRACE_DIR'} = $opt_vardir . "/rr_trace";
+    mtr_report("RR recording for server is enabled. For replay, execute: \"rr replay $opt_vardir\/rr_trace/mysqld-N\"");
+  }
+
   # On some operating systems, there is a limit to the length of a
   # UNIX domain socket's path far below PATH_MAX. Don't allow that
   # to happen.
   my $res =
-    check_socket_path_length("$opt_tmpdir/mysqld.NN.sock", $opt_parallel);
+    check_socket_path_length("$opt_tmpdir/mysqld.NN.sock", $opt_parallel, $tmpdir_path_updated);
   if ($res) {
     mtr_error("Socket path '$opt_tmpdir' too long, it would be ",
               "truncated and thus not possible to use for connection to ",
@@ -3758,7 +3808,7 @@ sub check_ndbcluster_support ($) {
   # Add MySQL Cluster test suites
   $DEFAULT_SUITES .= "," if $DEFAULT_SUITES;
   $DEFAULT_SUITES .= "ndb,ndb_binlog,rpl_ndb,ndb_rpl,ndbcluster,ndb_ddl,".
-                     "gcol_ndb,json_ndb,ndb_opt";
+                     "gcol_ndb,json_ndb,ndb_opt,ndb_tls";
   # Increase the suite timeout when running with default ndb suites
   $opt_suite_timeout *= 2;
   return;
@@ -4191,6 +4241,7 @@ sub default_mysqld {
                                     baseport      => 0,
                                     user          => $opt_user,
                                     password      => '',
+                                    bind_local    => $opt_bind_local
                                   });
 
   my $mysqld = $config->group('mysqld.1') or
@@ -4991,6 +5042,7 @@ sub run_testcase ($) {
                            tmpdir              => $opt_tmpdir,
                            user                => $opt_user,
                            vardir              => $opt_vardir,
+                           bind_local          => $opt_bind_local
                          });
 
       # Write the new my.cnf
@@ -6286,9 +6338,9 @@ sub mysqld_arguments ($$$) {
   my $mysqld     = shift;
   my $extra_opts = shift;
 
-  my @options = ("--no-defaults",   "--defaults-extra-file",
-                 "--defaults-file", "--login-path",
-                 "--print-defaults");
+  my @options = ("--no-defaults",    "--defaults-extra-file",
+                 "--defaults-file",  "--login-path",
+                 "--print-defaults", "--no-login-paths");
 
   arrange_option_files_options($args, $mysqld, $extra_opts, @options);
 
@@ -7274,8 +7326,14 @@ sub start_mysqltest ($) {
 
   mtr_add_arg($args, "--test-file=%s", $tinfo->{'path'});
 
-  # Number of lines of resut to include in failure report
-  mtr_add_arg($args, "--tail-lines=20");
+  my $tail_lines = 20;
+  if ($tinfo->{'full_result_diff'}) {
+    # Use 10000 as an approximation for infinite output (same as maximum for
+    # mysqltest --tail-lines).
+    $tail_lines = 10000;
+  }
+  # Number of lines of result to include in failure report
+  mtr_add_arg($args, "--tail-lines=${tail_lines}");
 
   if (defined $tinfo->{'result_file'}) {
     mtr_add_arg($args, "--result-file=%s", $tinfo->{'result_file'});
@@ -7524,6 +7582,10 @@ sub debugger_arguments {
     # Set exe to debuggername
     $$exe = $debugger;
 
+  } elsif ($debugger =~ /rr/) {
+    unshift(@$$args, "$$exe");
+    unshift(@$$args, "record");
+    $$exe = $debugger;
   } else {
     mtr_error("Unknown argument \"$debugger\" passed to --debugger");
   }
@@ -7914,6 +7976,11 @@ Options that specify ports
                         and is not "auto", it overrides build-thread.
   port-exclude=#-#      Specify the range of ports to exclude when searching
                         for available port ranges to use.
+  bind-local            Bind listening ports to localhost, i.e disallow
+                        "incoming network connections" which might cause
+                        firewall to display annoying popups.
+                        Can be set in environment variable MTR_BIND_LOCAL=1.
+                        To disable use --no-bind-local.
 
 Options for test case authoring
 
@@ -8031,6 +8098,9 @@ Options for valgrind
 
 Misc options
 
+  accept-test-fail      Do not print an error and do not give exit 1 if
+                        some tests failed, but test run was completed.
+                        This option also turns on --force.
   charset-for-testdb    CREATE DATABASE test CHARACTER SET <option value>.
   colored-diff          Colorize the diff part of the output.
   comment=STR           Write STR to the output.

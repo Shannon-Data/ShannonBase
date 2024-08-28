@@ -1,15 +1,16 @@
-/* Copyright (c) 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,6 +30,7 @@
 #include "plugin/group_replication/include/plugin_messages/group_service_message.h"
 #include "plugin/group_replication/include/plugin_messages/group_validation_message.h"
 #include "plugin/group_replication/include/plugin_messages/recovery_message.h"
+#include "plugin/group_replication/include/plugin_messages/recovery_metadata_message.h"
 #include "plugin/group_replication/include/plugin_messages/single_primary_message.h"
 #include "plugin/group_replication/include/plugin_messages/sync_before_execution_message.h"
 #include "plugin/group_replication/include/plugin_messages/transaction_message.h"
@@ -199,6 +201,12 @@ void Metrics_handler::add_message_sent(const Gcs_message &message) {
 
       case Plugin_gcs_message::CT_GROUP_VALIDATION_MESSAGE:
         message_sent_timestamp = Group_validation_message::get_sent_timestamp(
+            message.get_message_data().get_payload(),
+            message.get_message_data().get_payload_length());
+        break;
+
+      case Plugin_gcs_message::CT_RECOVERY_METADATA_MESSAGE:
+        message_sent_timestamp = Recovery_metadata_message::get_sent_timestamp(
             message.get_message_data().get_payload(),
             message.get_message_data().get_payload_length());
         break;

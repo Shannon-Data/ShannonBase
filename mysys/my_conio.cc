@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -55,7 +56,6 @@ extern CHARSET_INFO my_charset_utf16le_bin;
 
   @param file Input stream
 
-  @return
   @retval  0 if file is not Windows console
   @retval  1 if file is Windows console
 */
@@ -96,9 +96,10 @@ char *my_win_console_readline(const CHARSET_INFO *cs, char *mbbuf,
   SetConsoleMode(
       console, ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT | ENABLE_ECHO_INPUT);
 
-  if (!ReadConsoleW(console, u16buf, MAX_NUM_OF_CHARS_TO_READ, &nchars, NULL)) {
+  if (!ReadConsoleW(console, u16buf, MAX_NUM_OF_CHARS_TO_READ, &nchars,
+                    nullptr)) {
     SetConsoleMode(console, console_mode);
-    return NULL;
+    return nullptr;
   }
 
   *nread = nchars;
@@ -201,7 +202,7 @@ void my_win_console_write(const CHARSET_INFO *cs, const char *data,
                                      sizeof(u16buf) / sizeof(u16buf[0]));
   DWORD nwritten;
   WriteConsoleW(GetStdHandle(STD_OUTPUT_HANDLE), u16buf, (DWORD)nchars,
-                &nwritten, NULL);
+                &nwritten, nullptr);
 }
 
 /**
@@ -245,7 +246,7 @@ void my_win_console_vfprintf(const CHARSET_INFO *cs, const char *fmt,
   (Typically to utf8mb4).
   Translated parameters are allocated using my_once_alloc().
 
-  @param      tocs    Character set to convert parameters to.
+  @param      cs      Character set to convert parameters to.
   @param[out] argc    Write number of parameters here
   @param[out] argv    Write pointer to allocated parameters here.
 */

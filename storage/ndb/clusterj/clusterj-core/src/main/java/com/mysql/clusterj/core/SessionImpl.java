@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -107,9 +108,6 @@ public class SessionImpl implements SessionSPI, CacheManager, StoreManager {
 
     /** The underlying ClusterTransaction */
     protected ClusterTransaction clusterTransaction;
-
-    /** The transaction id to join */
-    protected String joinTransactionId = null;
 
     /** The properties for this session */
     protected Map properties;
@@ -616,7 +614,7 @@ public class SessionImpl implements SessionSPI, CacheManager, StoreManager {
         int count = 0;
         try {
             op = clusterTransaction.getTableScanOperationLockModeExclusiveScanFlagKeyInfo(storeTable);
-            count = deletePersistentAll(op, true);
+            count = deletePersistentAll(op, true, Long.MAX_VALUE);
         } catch (ClusterJException ex) {
             failAutoTransaction();
             // TODO add table name to the error message
@@ -630,9 +628,11 @@ public class SessionImpl implements SessionSPI, CacheManager, StoreManager {
     /** Delete all instances retrieved by the operation. The operation must have exclusive
      * access to the instances and have the ScanFlag.KEY_INFO flag set.
      * @param op the scan operation
+     * @param abort abort this transaction on error
+     * @param limit maximum number of instances to be deleted
      * @return the number of instances deleted
      */
-    public int deletePersistentAll(ScanOperation op, boolean abort) {
+    public int deletePersistentAll(ScanOperation op, boolean abort, long limit) {
         int cacheCount = 0;
         int count = 0;
         boolean done = false;
@@ -645,9 +645,11 @@ public class SessionImpl implements SessionSPI, CacheManager, StoreManager {
             int result = op.nextResult(fetch);
             switch (result) {
                 case RESULT_READY:
-                    op.deleteCurrentTuple();
-                    ++count;
-                    ++cacheCount;
+                    if(count < limit) {
+                      op.deleteCurrentTuple();
+                      ++count;
+                      ++cacheCount;
+                    }
                     fetch = false;
                     break;
                 case SCAN_FINISHED:
@@ -661,8 +663,9 @@ public class SessionImpl implements SessionSPI, CacheManager, StoreManager {
                     clusterTransaction.executeNoCommit(abort, true);
                     cacheCount = 0;
                     fetch = true;
+                    done = (count == limit);
                     break;
-                default: 
+                default:
                     throw new ClusterJException(
                             local.message("ERR_Next_Result_Illegal", result));
             }
@@ -879,7 +882,7 @@ public class SessionImpl implements SessionSPI, CacheManager, StoreManager {
      */
     protected void internalBegin() {
         try {
-            clusterTransaction = db.startTransaction(joinTransactionId);
+            clusterTransaction = db.startTransaction();
             clusterTransaction.setLockMode(lockmode);
             // if a transaction has already begun, tell the cluster transaction about the key
             if (partitionKey != null) {
@@ -1571,24 +1574,6 @@ public class SessionImpl implements SessionSPI, CacheManager, StoreManager {
     public <T> QueryDomainType<T> createQueryDomainType(DomainTypeHandler<T> domainTypeHandler) {
         QueryBuilderImpl builder = (QueryBuilderImpl)getQueryBuilder();
         return builder.createQueryDefinition(domainTypeHandler);
-    }
-
-    /** Return the coordinatedTransactionId of the current transaction.
-     * The transaction might not have been enlisted.
-     * @return the coordinatedTransactionId
-     */
-    public String getCoordinatedTransactionId() {
-        assertNotClosed();
-        return clusterTransaction.getCoordinatedTransactionId();
-    }
-
-    /** Set the coordinatedTransactionId for the next transaction. This
-     * will take effect as soon as the transaction is enlisted.
-     * @param coordinatedTransactionId the coordinatedTransactionId
-     */
-    public void setCoordinatedTransactionId(String coordinatedTransactionId) {
-        assertNotClosed();
-        clusterTransaction.setCoordinatedTransactionId(coordinatedTransactionId);
     }
 
     /** Set the lock mode for subsequent operations. The lock mode takes effect immediately

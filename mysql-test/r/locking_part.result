@@ -151,6 +151,7 @@ a	b	c	d	e
 03	07	343	9	03_07_343
 SELECT a,count(b) FROM t1 GROUP BY a ORDER BY a FOR SHARE SKIP LOCKED;
 a	count(b)
+01	5
 03	3
 04	2
 05	1
