@@ -29,6 +29,7 @@
 #ifndef __SHANNONBASE_CSV_READER_H__
 #define __SHANNONBASE_CSV_READER_H__
 #include <string>
+
 #include "include/my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/reader/reader.h"

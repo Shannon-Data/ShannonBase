@@ -74,6 +74,8 @@ Cu::Cu(const Field *field) {
   m_chunks.emplace_back(std::make_unique<Chunk>(const_cast<Field *>(field)));
 
   m_current_chunk.store(0);
+
+  m_name = field->field_name;
 }
 
 Cu::~Cu() { m_chunks.clear(); }
@@ -230,7 +232,7 @@ uchar *Cu::write_row_from_log(const Rapid_load_context *context, uchar *data, si
   auto chunk_ptr = m_chunks[m_chunks.size() - 1].get();
   ut_a(chunk_ptr);
 
-  data = (len == UNIV_SQL_NULL) ? nullptr : get_field_value(data, len, true);
+  // data = (len == UNIV_SQL_NULL) ? nullptr : get_field_value(data, len, true);
   if (!(written_to = chunk_ptr->write(data, len))) {  // current chunk is full.
     // then build a new one, and re-try to write the data.
     m_chunks.emplace_back(std::make_unique<Chunk>(m_header->m_source_fld));
@@ -301,9 +303,9 @@ uchar *Cu::update_row(const Rapid_load_context *context, row_id_t rowid, uchar *
 
   auto chunk_id = rowid / SHANNON_ROWS_IN_CHUNK;
   auto offset_in_chunk = rowid % SHANNON_ROWS_IN_CHUNK;
-  data = (len == UNIV_SQL_NULL) ? nullptr : get_field_value(data, len, false);
+  ut_a(chunk_id < m_chunks.size());
 
-  return nullptr;
+  return m_chunks[chunk_id]->update(offset_in_chunk, data, len);
 }
 
 }  // namespace Imcs

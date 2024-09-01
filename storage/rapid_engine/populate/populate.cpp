@@ -23,9 +23,6 @@
    transfer from row-based format to column-based format.
 
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
-
-   The fundmental code for imcs. The chunk is used to store the data which
-   transfer from row-based format to column-based format.
 */
 
 #include "storage/rapid_engine/populate/populate.h"
@@ -35,7 +32,6 @@
 #include "sql/sql_class.h"
 #include "storage/innobase/include/os0thread-create.h"
 
-//#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/populate/log_parser.h"
 

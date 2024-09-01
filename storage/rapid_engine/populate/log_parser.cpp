@@ -477,9 +477,9 @@ byte *LogParser::parse_tablespace_redo_extend(byte *ptr, const byte *end, const 
   return ptr;
 }
 
-std::string LogParser::parse_rec_get_fields(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
-                                            const dict_index_t *real_index, const ulint *offsets,
-                                            std::map<std::string, std::unique_ptr<uchar[]>> &field_values) {
+std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
+                                        const dict_index_t *real_index, const ulint *offsets,
+                                        std::map<std::string, std::unique_ptr<uchar[]>> &field_values) {
   ut_ad(rec);
   ut_ad(rec_validate(rec, offsets));
   ut_ad(rec_offs_validate(rec, index, offsets));
@@ -501,8 +501,7 @@ std::string LogParser::parse_rec_get_fields(Rapid_load_context *context, const r
      */
     auto field_name = real_index->get_field(idx)->name();
     if (!strncmp(field_name, SHANNON_DB_ROW_ID, SHANNON_DB_ROW_ID_LEN) ||
-        !strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN) ||
-        !strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN))
+        !strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN))
       continue;
 
     key_name = Utils::Util::get_key_name(context->m_schema_name, context->m_table_name, field_name);
@@ -536,8 +535,9 @@ std::string LogParser::parse_rec_get_fields(Rapid_load_context *context, const r
   return key_name;
 }
 
-row_id_t LogParser::find_matched_row(Rapid_load_context *context, std::string &key_name,
-                                     std::map<std::string, std::unique_ptr<uchar[]>> &field_values_to_find) {
+int LogParser::find_matched_rows(Rapid_load_context *context, std::string &key_name, bool with_sys_col,
+                                 std::map<std::string, std::unique_ptr<uchar[]>> &field_values_to_find,
+                                 std::set<std::string> &ignore_field, std::vector<row_id_t> &matched_rows) {
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
 
@@ -554,6 +554,12 @@ row_id_t LogParser::find_matched_row(Rapid_load_context *context, std::string &k
 
     for (auto &to_find : field_values_to_find) {
       auto cu_name = to_find.first;
+      // find the one field to ignore, then continue.
+      if (ignore_field.size() && ignore_field.find(cu_name) != ignore_field.end()) continue;
+
+      // test the sys field.
+      if (!with_sys_col && !strncmp(cu_name.c_str(), SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN)) continue;
+
       auto field_normal_len = imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->normalized_pack_length();
       uchar *pos = imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->base() + offset_in_chunk * field_normal_len;
       ut_a(pos <= imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->tell());
@@ -565,7 +571,7 @@ row_id_t LogParser::find_matched_row(Rapid_load_context *context, std::string &k
       }
     }
 
-    if (matched) return row_id;
+    if (matched) matched_rows.emplace_back(row_id);
   }
 
   return 0;
@@ -614,43 +620,29 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     case MLOG_REC_DELETE: {
       std::map<std::string, std::unique_ptr<uchar[]>> row_to_del;
       // step 1:to get all field data of deleting row.
-      auto key_name = parse_rec_get_fields(context, rec, index, real_index, offsets, row_to_del);
+      auto key_name = parse_rec_fields(context, rec, index, real_index, offsets, row_to_del);
 
       // step 2: go throug all the data to find the matched rows, and delete them.
-      row_id_t row_id = find_matched_row(context, key_name, row_to_del);
-      return imcs_instance->delete_row(context, row_id);
+      std::vector<row_id_t> row_ids;
+      std::set<std::string> empty;
+      if (find_matched_rows(context, key_name, false, row_to_del, empty, row_ids)) {
+        return HA_ERR_WRONG_IN_RECORD;
+      }
+      return imcs_instance->delete_row(context, row_ids[0]);
     } break;
     case MLOG_REC_INSERT: {
-      for (auto idx = 0u; idx < index->n_fields; idx++) {
-        /** IMPORTANT: should be notice that order of insertion by using 'insert xxx values(),().'
-         * in mlog_parse_index_v1, we can found that it does not bring the true type of that col
-         * into, just only use tow types: DATA_BINARY : DATA_FIXBINARY (`parse_index_fields(...)`)
-         * and `MLOG_LIST_END_COPY_CREATED` will move some recs to a new page, and this also gen
-         *  MLOG_REC_INSERT logs. And, here, we dont care about DB_ROW_ID, DB_ROLL_PTR, ONLY care
-         * about `DB_TRX_ID`.
-         */
-        auto idx_col = index->get_col(idx);
-        auto real_col = real_index->get_col(idx);
-        auto field_name = real_index->get_field(idx)->name();
-        if (!strncmp(field_name, SHANNON_DB_ROW_ID, SHANNON_DB_ROW_ID_LEN) ||
-            !strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN))
-          continue;
-        auto key_name = Utils::Util::get_key_name(context->m_schema_name, context->m_table_name, field_name);
+      std::map<std::string, std::unique_ptr<uchar[]>> rows_to_insert;
+      // step 1:to get all field data of inserting row.
+      auto key_name = parse_rec_fields(context, rec, index, real_index, offsets, rows_to_insert);
 
-        ulint len{0};
-        std::unique_ptr<uchar[]> field_data{nullptr};
-        byte *data = rec_get_nth_field(index, rec, offsets, idx, &len);
-        if (len != UNIV_SQL_NULL) {  // Not null
-          size_t alloc_size = real_index->get_col(idx)->len + 1;
-          field_data.reset(new uchar[alloc_size]);
-          memset(field_data.get(), 0x0, alloc_size);
-          store_field_in_mysql_format(index, idx_col, real_col, field_data.get(), data, len);
-        } else
-          field_data.reset(nullptr);
-
-        if (!imcs_instance->get_cu(key_name)->write_row_from_log(context, field_data.get(), len))
+      // step 2: insert all field data into CUs.
+      for (auto &insert_row : rows_to_insert) {
+        auto key_name = insert_row.first;
+        // if data is nullptr, means it's 'NULL'.
+        auto len =
+            (insert_row.second.get()) ? imcs_instance->get_cu(key_name)->normalized_pack_length() : UNIV_SQL_NULL;
+        if (!imcs_instance->get_cu(key_name)->write_row_from_log(context, insert_row.second.get(), len))
           ret = HA_ERR_WRONG_IN_RECORD;
-
         if (ret) return ret;
       }
     } break;
@@ -658,13 +650,11 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       ut_a(upd);
       context->m_extra_info.m_trxid = trxid;  // set to new trx id.
       std::map<std::string, std::unique_ptr<uchar[]>> row_fields;
-      // step 1:to get all field data of updating row.
-      auto key_name = parse_rec_get_fields(context, rec, index, real_index, offsets, row_fields);
+      // step 1:to get all field data of updating row[here, now, it's updated rows in innodb. but in rapid it's not].
+      auto key_name = parse_rec_fields(context, rec, index, real_index, offsets, row_fields);
 
-      // step 2: go throug all the data to find the matched rows, and delete them.
-      row_id_t row_id = find_matched_row(context, key_name, row_fields);
-
-      // step 3: to perform update operation.
+      // step 2: get all update fields data in mysql format.
+      std::set<std::string> ignore_field_names;
       for (auto i = 0u; i < upd_get_n_fields(upd); i++) {
         auto upd_field = upd_get_nth_field(upd, i);
         /* No need to update virtual columns for non-virtual index */
@@ -673,23 +663,21 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
         }
 
         uint32_t field_no = upd_field->field_no;
-        auto new_val = &(upd_field->new_val);
-        ut_ad(!dfield_is_ext(new_val) == !rec_offs_nth_extern(index, offsets, field_no));
-        /* Updating default value for instantly added columns must not be done
-           in-place. See also row_upd_changes_field_size_or_external() */
-        ut_ad(!rec_offs_nth_default(index, offsets, field_no));
-        ulint len{0};
-        rec_get_nth_field(index, rec, offsets, field_no, &len);
+        auto key_name = Utils::Util::get_key_name(context->m_schema_name, context->m_table_name,
+                                                  real_index->get_field(field_no)->name);
+        ignore_field_names.emplace(key_name);
+      }
+      ignore_field_names.emplace(Utils::Util::get_key_name(context->m_schema_name, context->m_table_name, "DB_TRX_ID"));
 
-        auto field_data = std::make_unique<uchar[]>(len);
-        ut_a(dfield_get_len(new_val) == len);
-        /**the reason of using real col, see above.*/
-        store_field_in_mysql_format(index, index->get_col(field_no), real_index->get_col(field_no), field_data.get(),
-                                    (const byte *)dfield_get_data(new_val), dfield_get_len(new_val));
+      // step 3: find all matched rows according to rec, which is an updated row, and to update all found rows.
+      std::vector<row_id_t> row_ids;
+      if (find_matched_rows(context, key_name, false, row_fields, ignore_field_names, row_ids)) {
+        return HA_ERR_WRONG_IN_RECORD;
+      }
 
-        auto field_key = Utils::Util::get_key_name(context->m_schema_name, context->m_table_name,
-                                                   real_index->get_field(field_no)->name);
-        ret = imcs_instance->update_row(context, row_id, field_key, field_data.get(), len);
+      // step 4: to update rows.
+      for (auto &rowid : row_ids) {
+        if (imcs_instance->update_row(context, rowid, row_fields)) return HA_ERR_WRONG_IN_RECORD;
       }
     } break;
     default:

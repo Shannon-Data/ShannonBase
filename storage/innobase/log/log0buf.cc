@@ -1049,22 +1049,6 @@ lsn_t log_buffer_write(log_t &log, const byte *str, size_t str_len,
     }
   }
 
-#if 0
-  auto type =  mlog_id_t(*start_addr & ~MLOG_SINGLE_REC_FLAG);
-  if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
-      ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-      !recv_recovery_is_on() &&( type == MLOG_REC_INSERT || type == MLOG_REC_CLUST_DELETE_MARK ||
-                                 type == MLOG_REC_UPDATE_IN_PLACE)) {
-      ShannonBase::Populate::mtr_log_rec_t log_rec;
-      log_rec.log_rec = std::make_unique<uchar[]>(data_len);
-      log_rec.sz = data_len;
-
-      std::memcpy(log_rec.log_rec.get(), start_addr, data_len);
-      log_rec.log_rec[0] |= MLOG_SINGLE_REC_FLAG;
-      ShannonBase::Populate::sys_pop_buff[start_lsn] = std::move(log_rec);
-  }
-#endif
-
   ut_a(ptr >= log.buf);
   ut_a(ptr <= buf_end);
   ut_a(buf_end == log.buf + log.buf_size);

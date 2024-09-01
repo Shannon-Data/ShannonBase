@@ -82,9 +82,9 @@ extern std::atomic<bool> sys_pop_started;
 use std::map, that will occure corruption at rb tree reblance. if we impl
 copy cotr or assingment cotr, it's still corruption, due to access
 empty address. Therefore, here, we use hash map to store it, and other reason:
-the RB tree will do re-blancing when the size of items exceed a threshold, that's
-performance issue. in future, we will use co-rountine to process every item by a
-co-routine to promot the performance.
+the RB tree will do re-blancing when the size of items exceed a threshold,
+that's performance issue. in future, we will use co-rountine to process every
+item by a co-routine to promot the performance.
 */
 extern std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
 

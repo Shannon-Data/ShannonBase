@@ -32,7 +32,6 @@
 
 #include "field_types.h"  //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"  //uintxxx
-
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
@@ -53,10 +52,12 @@ class Cu : public MemoryObject {
   using cu_fd_t = uint64;
   using Cu_header = struct alignas(CACHE_LINE_SIZE) Cu_header_t {
    public:
-    // physical row count. If you want to get logical rows, you should consider MVCC to decide
-    // that whether this phyical row is visiable or not to this transaction.
+    // physical row count. If you want to get logical rows, you should consider
+    // MVCC to decide that whether this phyical row is visiable or not to this
+    // transaction.
     std::atomic<row_id_t> m_prows{0};
-    // a copy of source field info, only use its meta info. do NOT use it directly.
+    // a copy of source field info, only use its meta info. do NOT use it
+    // directly.
     Field *m_source_fld{nullptr};
 
     // field type of this cu.
@@ -85,27 +86,29 @@ class Cu : public MemoryObject {
   Cu(Cu &&) = delete;
   Cu &operator=(Cu &&) = delete;
 
-  /** write the data to a cu. `data` the data will be written. returns the address
-  where the data wrote. the data append to tail of Cu. returns nullptr failed.*/
+  /** write the data to a cu. `data` the data will be written. returns the
+  address where the data wrote. the data append to tail of Cu. returns nullptr
+  failed.*/
   uchar *write_row(const Rapid_load_context *context, uchar *data, size_t len);
 
-  /** write the data to a cu. `data` the data will be written. returns the address
-   where the data wrote. the data append to tail of Cu. returns nullptr if failed.
-   otherwise, return addr of where the data written.*/
+  /** write the data to a cu. `data` the data will be written. returns the
+   address where the data wrote. the data append to tail of Cu. returns nullptr
+   if failed. otherwise, return addr of where the data written.*/
   uchar *write_row_from_log(const Rapid_load_context *context, uchar *data, size_t len);
 
   /** read the data from this Cu, traverse all chunks in cu to get the data from
   where m_r_ptr locates. */
   uchar *read_row(const Rapid_load_context *context, uchar *data, size_t len);
 
-  /** delete the data from this Cu, traverse all chunks in cu to delete the data from
-  where m_r_ptr locates. */
+  /** delete the data from this Cu, traverse all chunks in cu to delete the data
+  from where m_r_ptr locates. */
   uchar *delete_row(const Rapid_load_context *context, uchar *data, size_t len);
 
   // delete the row by rowid.
   uchar *delete_row(const Rapid_load_context *context, row_id_t rowid);
 
-  // delete the data from this cu. all the records equal to data will be removed.
+  // delete the data from this cu. all the records equal to data will be
+  // removed.
   uchar *delete_row_from_log(const Rapid_load_context *context, uchar *data, size_t len);
 
   // update the data located at rowid with new value-'data'.
@@ -132,7 +135,8 @@ class Cu : public MemoryObject {
     return m_chunks.size();
   }
 
-  // get how many rows in this cu. Here, we dont care about MVCC. just physical rows.
+  // get how many rows in this cu. Here, we dont care about MVCC. just physical
+  // rows.
   row_id_t prows();
 
   // returns the normalized length, the text type encoded with uint32.
@@ -160,6 +164,9 @@ class Cu : public MemoryObject {
 
   // reader pointer.
   std::atomic<uint32> m_current_chunk{0};
+
+  // name of this cu.
+  std::string m_name;
 
   // magic number for CU.
   const char *m_magic = "SHANNON_CU";
