@@ -299,10 +299,6 @@ uchar *Cu::update_row(const Rapid_load_context *context, row_id_t rowid, uchar *
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
   ut_a(rowid < m_header->m_prows.load());
 
-  auto chunk_id = rowid / SHANNON_ROWS_IN_CHUNK;
-  auto offset_in_chunk = rowid % SHANNON_ROWS_IN_CHUNK;
-  data = (len == UNIV_SQL_NULL) ? nullptr : get_field_value(data, len, false);
-
   return nullptr;
 }
 

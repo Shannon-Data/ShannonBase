@@ -39,7 +39,7 @@ jobs:
   lint:
     name: lint
     # if: ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-testing') && github.event.pull_request.merged != true }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,17 +59,18 @@ jobs:
 
   build:
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: install_lib
       run: |
         sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev libudev-dev g++ libbison-dev flex clang-format lcov pkg-config \
-        cmake zlib1g-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev -y
-    #- name: install_gcc
-    #  run: |
-    #    sudo apt install  bison texinfo libgmp3-dev zlib1g-dev -y && sudo apt install gcc-10 g++-10 -y && \
-    #    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
+        cmake zlib1g-dev libzstd-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev -y \
+        libtirpc-dev
+    - name: install_gcc_14
+      run: |
+        sudo apt install bison texinfo libgmp3-dev zlib1g-dev -y && sudo apt install gcc-14 g++-14 -y && \
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
     - name: install_boost
       run: |
         cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
@@ -78,36 +79,30 @@ jobs:
       #sed -i '61s/^/#/' cmake_install.cmake to disable can not find openssl_executeable error. removes it when it fixed.
     - name: build_shannon_and_install
       run: |
-        mkdir /home/ShannonBase  && cd /home/ShannonBase
+        cd ${{ github.workspace }}
         mkdir cmake_build && cd cmake_build
-        git config --global --add safe.directory /home/ShannonBase
+        git config --global --add safe.directory ${{ github.workspace }}
         git fetch --tags -f
         cmake ../ \
         -DWITH_BOOST=/usr/local/boost/include \
         -DCMAKE_BUILD_TYPE=Release  \
         -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
         -DMYSQL_DATADIR=/home/shannon-bin/ \
-        -DSYSCONFDIR=/home/shannon-bin/ \
+        -DSYSCONFDIR=. \
         -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
-        -DWITH_EMBEDDED_SERVER=OFF \
         -DWITH_MYISAM_STORAGE_ENGINE=1 \
         -DWITH_INNOBASE_STORAGE_ENGINE=1 \
-        -DWITH_PARTITION_STORAGE_ENGINE=1 \
         -DMYSQL_TCP_PORT=3306 \
         -DENABLED_LOCAL_INFILE=1 \
-        -DWITH_LIBEVENT=bundled \
-        -DEXTRA_CHARSETS=all \
         -DWITH_PROTOBUF=bundled \
-        -DWITH_SSL_PATH=/usr/include/openssl/ \
-        -DDEFAULT_SET=community \
         -DWITH_UNIT_TESTS=OFF \
         -DWITH_HYPERGRAPH_OPTIMIZER=ON \
-        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j5 && \
-        sed -i '61s/^/#/' cmake_install.cmake && sed -i '62s/^/#/' cmake_install.cmake && sed -i '63s/^/#/' cmake_install.cmake && \
+        -DWITH_LTO=OFF \
+        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)"  && make -j$(nproc) && \
         sudo make install
     - name: clean_up_shannonbase_build
       run: |
-        sudo rm /home/ShannonBase/ -rf
+        sudo rm ${{ github.workspace }} -rf
     - name: run_mtr_test
       run: |
         sudo mkdir -p /home/shannon-bin/log

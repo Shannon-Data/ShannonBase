@@ -82,10 +82,12 @@ Data Signing_Key::sign(const void *message, size_t length) {
  * Constructor.
  * Read the key from the file.
  */
+
+auto filecloser = [](FILE* file) { if (file) fclose(file); };
 Signing_Key::Signing_Key(const std::string &file_name)
     : m_private_key{EVP_PKEY_new()} {
-  std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(file_name.c_str(), "rb"),
-                                              &fclose);
+  std::unique_ptr<FILE, decltype(filecloser)> fp(fopen(file_name.c_str(), "rb"),
+                                                 filecloser);
   if (!fp) {
     log_error("Cannot open signing key file " + file_name + "\n");
     return;

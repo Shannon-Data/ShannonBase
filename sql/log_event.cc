@@ -950,10 +950,17 @@ Log_event::Log_event(Log_event_header *header, Log_event_footer *footer)
 #ifdef MYSQL_SERVER
   thd = nullptr;
 #endif
+#if defined(__GNUC__) && (__GNUC__ >= 14)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wuninitialized"
+#endif
   /*
      Mask out any irrelevant parts of the server_id
   */
   server_id = common_header->unmasked_server_id & opt_server_id_mask;
+#if defined(__GNUC__) && (__GNUC__ >= 14)
+#pragma GCC diagnostic pop
+#endif
 }
 
 /*

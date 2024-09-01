@@ -72,7 +72,7 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
   {
     if (m_content.find(compressed_str) == m_content.end()) {  // insert new one.
       m_content_id.fetch_add(1, std::memory_order::memory_order_acq_rel);
-      uint64 id = m_content_id.load(std::memory_order::memory_order_acq_rel);
+      uint64 id = m_content_id.load();
       // compressed string <---> str id. get a copy of string and store it in map.
       m_content.emplace(compressed_str, id);
       // id<---> orginal string

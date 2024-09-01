@@ -1,4 +1,4 @@
-prefix=/workshop/tools/jerryscript/install
+prefix=/home/lihao/workshop/tools/jerryscript/install
 libdir=${prefix}/lib
 includedir=${prefix}/include
 

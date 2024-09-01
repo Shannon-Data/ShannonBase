@@ -6,7 +6,7 @@ How to use jerryscript in ShannonBase:
 
 2) build the static libs, cp the built static libs files to here.
 2.1 `mkdir build && cd build`
-2.2 `cmake .. -DCMAKE_BUILD_TYPE=Release -DJERRY_CMDLINE=OFF -DBUILD_SHARED_LIBS=OFF -DJERRY_ERROR_MESSAGES=ON -DCMAKE_INSTALL_PREFIX=/path/to/install`
+2.2 `cmake .. -DCMAKE_BUILD_TYPE=Release -DJERRY_CMDLINE=OFF -DENABLE_LTO=OFF -DBUILD_SHARED_LIBS=OFF -DJERRY_ERROR_MESSAGES=ON -DCMAKE_INSTALL_PREFIX=/path/to/install`
 2.3 `make -j5`
 2.4 `make install`
 3) update the libs in this folder, to get the latest version of jerryscript.
