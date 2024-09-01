@@ -22,316 +22,194 @@
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/imcs/imcs.h"
 
-#include <mutex>
+#include <threads.h>
 #include <sstream>
 #include <string>
 
+#include "include/my_dbug.h"  //DBUG_EXECUTE_IF
 #include "sql/my_decimal.h"
 #include "storage/innobase/include/univ.i"    //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
 
-#include "storage/rapid_engine/imcs/cu.h"
-#include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
 namespace ShannonBase {
 namespace Imcs {
 
-unsigned long rapid_memory_size{SHANNON_MAX_MEMRORY_SIZE};
-unsigned long rapid_chunk_size{SHANNON_CHUNK_SIZE};
 Imcs *Imcs::m_instance{nullptr};
 std::once_flag Imcs::one;
 
-Imcs::Imcs() {}
-
-Imcs::~Imcs() {}
-
-uint Imcs::initialize() {
-  DBUG_TRACE;
+int Imcs::initialize() {
+  m_inited.store(1);
   return 0;
 }
 
-uint Imcs::deinitialize() {
-  DBUG_TRACE;
+int Imcs::deinitialize() {
+  m_inited.store(0);
+  return 0;
+}
+
+int Imcs::create_table_mem(const Rapid_load_context *context, const TABLE *source) {
+  ut_a(source);
+  std::ostringstream oss, oss2;
+  oss << source->s->db.str << ":" << source->s->table_name.str << ":";
+  // 1 is an extra ghost column, here, DB_TRX_ID.
+  for (auto index = 0u; index < source->s->fields + 1; index++) {
+    auto fld = *(source->field + index);
+    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    oss2 << oss.str() << fld->field_name;
+    m_cus.emplace(oss2.str(), std::make_unique<Cu>(fld));
+    oss2.str("");
+  }
   return 0;
 }
 
 Cu *Imcs::get_cu(std::string &key) {
-  DBUG_TRACE;
-  if (m_cus.find(key) != m_cus.end()) {
-    return m_cus[key].get();
-  }
-  return nullptr;
+  if (m_cus.find(key) == m_cus.end()) return nullptr;
+  return m_cus[key].get();
 }
 
-void Imcs::add_cu(std::string key, std::unique_ptr<Cu> &cu) {
-  DBUG_TRACE;
-  m_cus.insert({key, std::move(cu)});
-  return;
+Cu *Imcs::get_cu(const char *&key) {
+  std::string key_str(key);
+
+  if (m_cus.find(key_str) == m_cus.end()) return nullptr;
+  return m_cus[key_str].get();
 }
 
-ha_rows Imcs::get_rows(TABLE *source_table) {
-  ha_rows row_count{0};
-
-  for (uint index = 0; index < source_table->s->fields; index++) {
-    Field *field_ptr = *(source_table->field + index);
-    ut_ad(field_ptr);
-    if (!bitmap_is_set(source_table->read_set, field_ptr->field_index()) || field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
-      continue;
-
-    std::string key =
-        Utils::Util::get_key_name(source_table->s->db.str, source_table->s->table_name.str, field_ptr->field_name);
-    if (m_cus.find(key) == m_cus.end()) continue;  // not found this field.
-    row_count = m_cus[key].get()->get_header()->m_rows;
-    break;
-  }
-
-  return row_count;
-}
-
-uint Imcs::rnd_init(bool scan) {
-  DBUG_TRACE;
-  // ut::new_withkey<Compress::Dictionar>(UT_NEW_THIS_FILE_PSI_KEY);
-  for (auto &cu : m_cus) {
-    auto ret = cu.second.get()->rnd_init(scan);
-    if (ret) return ret;
-  }
-  m_inited = handler::RND;
-  return 0;
-}
-
-uint Imcs::rnd_end() {
-  DBUG_TRACE;
-  for (auto &cu : m_cus) {
-    auto ret = cu.second.get()->rnd_end();
-    if (ret) return ret;
-  }
-  m_inited = handler::NONE;
-  return 0;
-}
-
-uint Imcs::write_direct(ShannonBase::RapidContext *context, const char *key_str, const uchar *field_value,
-                        uint val_len) {
-  ut_a(context && key_str && field_value);
-
-  std::string key_name(key_str);
-  if (!key_name.length()) return HA_ERR_GENERIC;
-  // start writing the data, at first, assemble the data we want to write. the
-  // layout of data pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr|
-  // data]. And the string we dont store the string but using string id instead.
-  // offset[] = {0, 1, 9, 17, 21, 29}
-  // start to pack the data, then writes into memory.
-
-  std::unique_ptr<uchar[]> data(new uchar[SHANNON_ROW_TOTAL_LEN]);
-  uint8 info{0};
-  uint32 sum_ptr{0};
-  if (val_len == UNIV_SQL_NULL) info |= DATA_NULL_FLAG_MASK;
-
-  double rowid{0};
-  // byte info
-  *reinterpret_cast<uint8 *>(data.get() + SHANNON_INFO_BYTE_OFFSET) = info;
-  // trxid
-  *reinterpret_cast<uint64 *>(data.get() + SHANNON_TRX_ID_BYTE_OFFSET) = context->m_extra_info.m_trxid;
-  // write rowid
-  *reinterpret_cast<uint64 *>(data.get() + SHANNON_ROW_ID_BYTE_OFFSET) = rowid;
-  // sum_ptr
-  *reinterpret_cast<uint32 *>(data.get() + SHANNON_SUMPTR_BYTE_OFFSET) = sum_ptr;
-
-  double data_val =
-      (val_len == UNIV_SQL_NULL)
-          ? 0
-          : Utils::Util::get_field_value(m_cus[key_name]->get_header()->m_cu_type, field_value, val_len,
-                                         m_cus[key_name]->local_dictionary(),
-                                         const_cast<CHARSET_INFO *>(m_cus[key_name]->get_header()->m_charset));
-
-  *reinterpret_cast<double *>(data.get() + SHANNON_DATA_BYTE_OFFSET) = data_val;
-
-  if (!m_cus[key_name]->write_data_direct(context, data.get(), SHANNON_ROW_TOTAL_LEN)) return HA_ERR_GENERIC;
-
-  return 0;
-}
-
-uint Imcs::write_direct(ShannonBase::RapidContext *context, Field *field) {
-  DBUG_TRACE;
-  ut_ad(context && field);
-  /** before insertion, should to check whether there's spare space to store the
-     new data. or not. If no extra sapce left, allocate a new imcu. After a new
-     imcu allocated, the meta info is stored into 'm_imcus'.
-  */
-  // the last imcu key_name.
-  if (!Utils::Util::is_support_type(field->type())) {
-    std::ostringstream err;
-    err << field->field_name << " type not allowed";
-    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
+  auto m_thd = context->m_thd;
+  if (source->file->inited == handler::NONE && source->file->ha_rnd_init(true)) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), source->s->db.str, source->s->table_name.str);
     return HA_ERR_GENERIC;
   }
 
-  std::string key_name = Utils::Util::get_key_name(field);
-  if (!key_name.length()) {  // a new field. not found
-    auto [it, sucess] = m_cus.insert(std::pair{key_name, std::make_unique<Cu>(field)});
-    if (!sucess) return HA_ERR_GENERIC;
-  }
-  // start writing the data, at first, assemble the data we want to write. the
-  // layout of data pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr|
-  // data]. And the string we dont store the string but using string id instead.
-  // offset[] = {0, 1, 9, 17, 21, 29}
-  uint data_len = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
-  data_len += SHANNON_SUMPTR_BYTE_LEN + SHANNON_DATA_BYTE_LEN;
-  // start to pack the data, then writes into memory.
-  std::unique_ptr<uchar[]> data(new uchar[data_len]);
-  uint8 info{0};
-  uint32 sum_ptr{0};
-  if (field->is_real_null()) info |= DATA_NULL_FLAG_MASK;
+  int tmp{HA_ERR_GENERIC};
+  if (create_table_mem(context, source)) return HA_ERR_GENERIC;
 
-  double rowid{0};
-  // byte info
-  *reinterpret_cast<uint8 *>(data.get() + SHANNON_INFO_BYTE_OFFSET) = info;
-  // trxid
-  *reinterpret_cast<uint64 *>(data.get() + SHANNON_TRX_ID_BYTE_OFFSET) = context->m_extra_info.m_trxid;
-  // write rowid
-  *reinterpret_cast<uint64 *>(data.get() + SHANNON_ROW_ID_BYTE_OFFSET) = rowid;
-  // sum_ptr
-  *reinterpret_cast<uint32 *>(data.get() + SHANNON_SUMPTR_BYTE_OFFSET) = sum_ptr;
+  std::ostringstream key_part, key;
+  key_part << source->s->db.str << ":" << source->s->table_name.str << ":";
+  while ((tmp = source->file->ha_rnd_next(source->record[0])) != HA_ERR_END_OF_FILE) {
+    /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
+     without locks. Now, do full scan, but multi-thread scan will impl in future. */
+    key.str("");
+    if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
-  Compress::Dictionary *dict = m_cus[key_name]->local_dictionary();
-  double data_val = Utils::Util::get_field_value(field, dict);
-  *(double *)(data.get() + SHANNON_DATA_BYTE_OFFSET) = data_val;
+    DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
+      my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), source->s->db.str, source->s->table_name.str);
+      source->file->ha_rnd_end();
+      return HA_ERR_GENERIC;
+    });
 
-  if (!m_cus[key_name]->write_data_direct(context, data.get(), data_len)) return 1;
-  return 0;
-}
-
-uint Imcs::read_direct(ShannonBase::RapidContext *context, Field *field) {
-  ut_ad(context && field);
-  return 0;
-}
-
-uint Imcs::read_direct(ShannonBase::RapidContext *context, uchar *buffer) {
-  DBUG_TRACE;
-  ut_ad(context && buffer);
-  if (!m_cus.size()) return HA_ERR_END_OF_FILE;
-
-  for (uint index = 0; index < context->m_table->s->fields; index++) {
-    Field *field_ptr = *(context->m_table->field + index);
-    ut_ad(field_ptr);
-    if (!bitmap_is_set(context->m_table->read_set, field_ptr->field_index()) ||
-        field_ptr->is_flag_set(NOT_SECONDARY_FLAG))
-      continue;
-
-    std::string key = context->m_current_db + context->m_current_table;
-    key += field_ptr->field_name;
-
-    if (m_cus.find(key) == m_cus.end()) continue;  // not found this field.
-    uchar buff[SHANNON_ROW_TOTAL_LEN] = {0};
-    if (!m_cus[key].get()->read_data_direct(context, buff)) return HA_ERR_END_OF_FILE;
-
-    uint8 info = *reinterpret_cast<uint8 *>(buff);
-    my_bitmap_map *old_map = tmp_use_all_columns(context->m_table, context->m_table->write_set);
-    if (info & DATA_NULL_FLAG_MASK)
-      field_ptr->set_null();
-    else {
-      field_ptr->set_notnull();
-      uint8 data_offset = SHANNON_INFO_BYTE_LEN + SHANNON_TRX_ID_BYTE_LEN + SHANNON_ROWID_BYTE_LEN;
-      data_offset += SHANNON_SUMPTR_BYTE_LEN;
-      double val = *reinterpret_cast<double *>(buff + data_offset);
-      Compress::Dictionary *dict = m_cus[key]->local_dictionary();
-      Utils::Util::store_field_value(context->m_table, field_ptr, dict, val);
+    // the 1, is a ghost column DB_TRX_ID
+    for (auto index = 0u; index < source->s->fields + 1; index++) {
+      auto fld = *(source->field + index);
+      if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+      key << key_part.str() << fld->field_name;
+      if (!m_cus[key.str()].get()->write_row(context, fld->is_null() ? nullptr : fld->field_ptr(),
+                                             fld->is_null() ? UNIV_SQL_NULL : fld->pack_length())) {
+        my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), source->s->db.str, source->s->table_name.str);
+        source->file->ha_rnd_end();
+        return HA_ERR_GENERIC;
+      }
+      key.str("");
     }
 
-    if (old_map) tmp_restore_column_map(context->m_table->write_set, old_map);
+    m_thd->inc_sent_row_count(1);
+    if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
   }
+  // end of load the data from innodb to imcs.
+  source->file->ha_rnd_end();
   return 0;
 }
 
-uint read_batch_direct(ShannonBase::RapidContext *context, uchar *buffer) {
-  ut_ad(context && buffer);
-  return 0;
-}
-
-uint Imcs::delete_direct(ShannonBase::RapidContext *context, Field *field) {
-  if (!context || !field) return HA_ERR_GENERIC;
-
-  std::string key = context->m_current_db + context->m_current_table;
-  key += field->field_name;
-  m_cus.erase(key);
-  return 0;
-}
-
-uint Imcs::delete_direct(ShannonBase::RapidContext *context, const char *key_str, const uchar *pk_value, uint pk_len) {
-  ut_a(key_str);
-
-  std::string key_name(key_str);
-  if (!key_name.length()) return HA_ERR_GENERIC;
-
-  ut_a(pk_len != UNIV_SQL_NULL);
-  // start writing the data, at first, assemble the data we want to write. the
-  // layout of data pls ref to: issue #8.[info | trx id | rowid(pk)| smu_ptr|
-  // data]. And the string we dont store the string but using string id instead.
-  // offset[] = {0, 1, 9, 17, 21, 29}
-  // start to pack the data, then writes into memory.
-  if (m_cus[key_name].get() && !m_cus[key_name]->delete_data_direct(context, pk_value, pk_len)) return HA_ERR_GENERIC;
-
-  return 0;
-}
-
-uint Imcs::delete_all_direct(ShannonBase::RapidContext *context) {
-  // the key format: "db_name:table_name:field_name"
-  std::string key = context->m_current_db + ":" + context->m_current_table + ":";
+int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
+                       bool error_if_not_loaded) {
+  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
+   *  removed*/
+  std::ostringstream oss, oss2;
+  oss << db_name << ":" << table_name << ":";
   for (auto it = m_cus.begin(); it != m_cus.end();) {
-    if (it->first.compare(0, key.length(), key, 0, key.length()) == 0) {
+    if (it->first.substr(0, oss.str().length()) == oss.str()) {
       it = m_cus.erase(it);
-    } else
+    } else {
+      if (error_if_not_loaded) {
+        my_error(ER_NO_SUCH_TABLE, MYF(0), db_name, table_name);
+        return HA_ERR_GENERIC;
+      }
       ++it;
+    }
   }
 
   return 0;
 }
 
-uint Imcs::update_direct(ShannonBase::RapidContext *context, const char *key_str, const uchar *new_value,
-                         uint new_value_len, bool in_place_update) {
-  // Here we not use in place update,
+int Imcs::insert_row(const Rapid_load_context *context, row_id_t rowid, uchar *buf) {
+  ut_a(context && buf);
 
+  return 0;
+}
+
+int Imcs::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   ut_a(context);
-  ut_a(key_str);
-  ut_a(context->m_extra_info.m_key_buff.get() && context->m_extra_info.m_key_len);
-  bool is_null = (new_value_len == UNIV_SQL_NULL) ? true : false;
+  if (!m_cus.size()) return 0;
 
-  std::string key_name(key_str);
-  std::unique_ptr<uchar[]> data(new uchar[SHANNON_ROW_TOTAL_LEN]);
-  uint8 info{0};
-  uint32 sum_ptr{0};
-  if (is_null) info |= DATA_NULL_FLAG_MASK;
-
-  double rowid{0};
-  // byte info
-  *reinterpret_cast<uint8 *>(data.get() + SHANNON_INFO_BYTE_OFFSET) = info;
-  // trxid
-  *reinterpret_cast<uint64 *>(data.get() + SHANNON_TRX_ID_BYTE_OFFSET) = context->m_extra_info.m_trxid;
-  // write rowid
-  *reinterpret_cast<uint64 *>(data.get() + SHANNON_ROW_ID_BYTE_OFFSET) = rowid;
-  // sum_ptr
-  *reinterpret_cast<int32 *>(data.get() + SHANNON_SUMPTR_BYTE_OFFSET) = sum_ptr;
-
-  double data_val = Utils::Util::get_field_value(m_cus[key_name]->get_header()->m_cu_type, new_value, new_value_len,
-                                                 m_cus[key_name]->local_dictionary(),
-                                                 const_cast<CHARSET_INFO *>(m_cus[key_name]->get_header()->m_charset));
-  *reinterpret_cast<double *>(data.get() + SHANNON_DATA_BYTE_OFFSET) = data_val;
-
-  if (!in_place_update) {
-    delete_direct(context, key_str, context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len);
-    write_direct(context, key_str, new_value, new_value_len);
-  } else {
-    if (!m_cus[key_name]->update_data_direct(context, nullptr, data.get(), SHANNON_ROW_TOTAL_LEN))
-      return HA_ERR_GENERIC;
+  std::ostringstream oss, oss2;
+  oss << context->m_schema_name << ":" << context->m_table_name << ":";
+  for (auto it = m_cus.begin(); it != m_cus.end();) {
+    if (it->first.substr(0, oss.str().length()) == oss.str()) {
+      if (!it->second.get()->delete_row(context, rowid)) {
+        return HA_ERR_GENERIC;
+      }
+    }
+    ++it;
   }
+  return 0;
+}
 
+int Imcs::delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &rowids) {
+  ut_a(context);
+  std::ostringstream oss, oss2;
+  oss << context->m_schema_name << ":" << context->m_table_name << ":";
+
+  for (auto &rowid : rowids) {
+    for (auto it = m_cus.begin(); it != m_cus.end();) {
+      if (it->first.substr(0, oss.str().length()) == oss.str()) {
+        if (!it->second.get()->delete_row(context, rowid)) {
+          return HA_ERR_GENERIC;
+        }
+      }
+      ++it;
+    }
+  }
+  return 0;
+}
+
+int Imcs::update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
+                     const uchar *new_field_data, size_t len) {
+  ut_a(context);
+
+  ut_a(m_cus[field_key].get());
+  auto ret = m_cus[field_key].get()->update_row(context, rowid, const_cast<uchar *>(new_field_data), len);
+  if (!ret) return HA_ERR_GENERIC;
+  return 0;
+}
+
+int Imcs::update_row(const Rapid_load_context *context,
+                     std::vector<std::tuple<row_id_t, std::string, std::unique_ptr<uchar[]>>> &upds) {
+  ut_a(context);
+  for (auto &upd : upds) {
+    auto rowid [[maybe_unused]] = std::get<0>(upd);
+    auto field_key [[maybe_unused]] = std::get<1>(upd);
+    auto field_data [[maybe_unused]] = std::get<2>(upd).get();
+    // do update operation here.
+  }
   return 0;
 }
 

@@ -40,12 +40,12 @@
 #include "sql/field.h"
 #include "sql/plugin_table.h"
 #include "sql/table.h"
-#include "sql/sql_table.h" // meta_rpd_columns_infos
+#include "sql/sql_table.h" // rpd_columns_info
 
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
-#include "storage/rapid_engine/include/rapid_stats.h"
+#include "storage/rapid_engine/include/rapid_status.h"
 
 THR_LOCK table_rpd_preload_stats::m_table_lock;
 
@@ -102,7 +102,7 @@ void table_rpd_preload_stats::reset_position() {
 }
 
 ha_rows table_rpd_preload_stats::get_row_count() {
-  return ShannonBase::meta_rpd_columns_infos.size();
+  return ShannonBase::rpd_columns_info.size();
 }
 
 int table_rpd_preload_stats::rnd_next() {
@@ -132,21 +132,21 @@ int table_rpd_preload_stats::rnd_pos(const void *pos) {
 int table_rpd_preload_stats::make_row(uint index[[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::meta_rpd_columns_infos.size()) {
+  if (index >= ShannonBase::rpd_columns_info.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.avg_byte_width_inc_null = ShannonBase::meta_rpd_columns_infos[index].avg_byte_width_inc_null;
+    m_row.avg_byte_width_inc_null = ShannonBase::rpd_columns_info[index].avg_byte_width_inc_null;
 
     memset(m_row.table_schema, 0x0, NAME_LEN);
-    strncpy(m_row.table_schema, ShannonBase::meta_rpd_columns_infos[index].schema_name,
+    strncpy(m_row.table_schema, ShannonBase::rpd_columns_info[index].schema_name,
             sizeof(m_row.table_schema));
 
     memset(m_row.table_name, 0x0, NAME_LEN);
-    strncpy(m_row.table_name, ShannonBase::meta_rpd_columns_infos[index].table_name,
+    strncpy(m_row.table_name, ShannonBase::rpd_columns_info[index].table_name,
             sizeof(m_row.table_name));
 
     memset(m_row.column_name, 0x0, NAME_LEN);
-    strncpy(m_row.column_name, ShannonBase::meta_rpd_columns_infos[index].column_name,
+    strncpy(m_row.column_name, ShannonBase::rpd_columns_info[index].column_name,
             sizeof(m_row.column_name));
   }
   return 0;

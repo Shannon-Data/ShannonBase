@@ -1,6 +1,4 @@
-/*
-   Copyright (c) 2014, 2023, Oracle and/or its affiliates.
-
+/**
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
@@ -21,42 +19,61 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Shannon Data AI.
+   Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
+
+   The fundmental code for imcs.
 */
-#ifndef __SHANNONBASE_RPD_OBJECT_H__
-#define __SHANNONBASE_RPD_OBJECT_H__
-#include <cstring>
+#ifndef __SHANNONBASE_DATA_TABLE_H__
+#define __SHANNONBASE_DATA_TABLE_H__
 
-#include "include/my_alloc.h"     // MEM_ROOT
-#include "include/my_inttypes.h"  //uint8_t
-#include "storage/rapid_engine/include/rapid_const.h"
+#include <atomic>
+#include <vector>
 
+#include "storage/rapid_engine/include/rapid_object.h"
+
+class TABLE;
 namespace ShannonBase {
+namespace Imcs {
+class Imcs;
+class Cu;
+class DataTable : public MemoryObject {
+ public:
+  DataTable(TABLE *source_table);
+  virtual ~DataTable();
 
-extern MEM_ROOT rapid_mem_root;
-// the memor object for all rapid engine.
-class MemoryObject {};
+  // open a cursor on db_table to read/write.
+  int open();
 
-typedef struct alignas(CACHE_LINE_SIZE) BitArray {
-  BitArray(size_t rows) {
-    size = rows / 8 + 1;
-    data = new uint8_t[size];
-    std::memset(data, 0x0, size);
-  }
-  ~BitArray() {
-    if (data) {
-      delete[] data;
-      data = nullptr;
-      size = 0;
-    }
-  }
-  // data of BA, where to store the real bitmap.
-  uint8_t *data{nullptr};
-  // size of BA.
-  size_t size{0};
-} BitArray_t;
+  // close a cursor.
+  int close();
 
-using bit_array_t = BitArray_t;
+  // intitialize this data table object.
+  int init();
 
+  // to the next rows.
+  int next(uchar *buf);
+
+  // end of scan.
+  int end();
+
+  // get the data pos.
+  row_id_t find(uchar *buf);
+
+ private:
+  void scan_init();
+
+  std::atomic<bool> m_initialized{false};
+
+  // the data source, an IMCS.
+  TABLE *m_data_source{nullptr};
+
+  // all Cu ptr of all feilds.
+  std::vector<Cu *> m_field_cus;
+
+  // start from where.
+  std::atomic<row_id_t> m_rowid{0};
+};
+
+}  // namespace Imcs
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_RPD_OBJECT_H__
+#endif  //__SHANNONBASE_DATA_TABLE_H__

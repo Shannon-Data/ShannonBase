@@ -348,7 +348,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.10",
           "prefix_cost": "1.35",
-          "data_read_per_join": "616"
+          "data_read_per_join": "638"
         },
         "used_columns": [
           "a",

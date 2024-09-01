@@ -30,7 +30,7 @@
 #define __SHANNONBASE_READER_READER_H__
 #include <string>
 #include "include/my_inttypes.h"
-#include "storage/rapid_engine/include/rapid_context.h"
+#include "sql/sql_lex.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 class key_range;
 namespace ShannonBase {
@@ -41,13 +41,13 @@ class Reader : public MemoryObject {
   virtual ~Reader() = default;
   virtual int open() = 0;
   virtual int close() = 0;
-  virtual int read(ShannonBaseContext *, uchar *, size_t = 0) = 0;
-  virtual int records_in_range(ShannonBaseContext *, unsigned int, key_range *, key_range *) = 0;
-  virtual int write(ShannonBaseContext *, uchar *, size_t = 0) = 0;
-  virtual int index_read(ShannonBaseContext *, uchar *, uchar *, uint, ha_rkey_function) = 0;
-  virtual int index_general(ShannonBaseContext *, uchar *, size_t = 0) = 0;
-  virtual int index_next(ShannonBaseContext *, uchar *, size_t = 0) = 0;
-  virtual int index_next_same(ShannonBaseContext *, uchar *, uchar *, uint, ha_rkey_function) = 0;
+  virtual int read(Secondary_engine_execution_context *, uchar *, size_t = 0) = 0;
+  virtual int records_in_range(Secondary_engine_execution_context *, unsigned int, key_range *, key_range *) = 0;
+  virtual int write(Secondary_engine_execution_context *, uchar *, size_t = 0) = 0;
+  virtual int index_read(Secondary_engine_execution_context *, uchar *, uchar *, uint, ha_rkey_function) = 0;
+  virtual int index_general(Secondary_engine_execution_context *, uchar *, size_t = 0) = 0;
+  virtual int index_next(Secondary_engine_execution_context *, uchar *, size_t = 0) = 0;
+  virtual int index_next_same(Secondary_engine_execution_context *, uchar *, uchar *, uint, ha_rkey_function) = 0;
   virtual uchar *tell(uint = 0) = 0;
   virtual uchar *seek(size_t offset) = 0;
 };

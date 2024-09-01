@@ -1103,14 +1103,12 @@ The following options may be given as the first argument:
  optimization of a query, index range scan will not be
  considered for this query. A value of 0 means range
  optimizer does not have any cap on memory. 
- --rapid-rapid-chunk-size-max[=#] 
- Number of chunk memory size that used for rapid engine.
  --rapid-rapid-memory-size-max[=#] 
  Number of memory size that used for rapid engine, and it
  must not be oversize half of physical mem size.
- --rapid-rapid-populate-buffer-size-max[=#] 
- Number of populate buffer size that must not be 10%
- rapid_populate_buffer size.
+ --rapid-rapid-pop-buffer-size-max[=#] 
+ Number of memory used for populating the changes in
+ innodb to rapid engine..
  --read-buffer-size=# 
  Each thread that does a sequential scan allocates a
  buffer of this size for each table it scans. If you do
@@ -1961,9 +1959,8 @@ query-alloc-block-size 8192
 query-prealloc-size 8192
 range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
-rapid-rapid-chunk-size-max 67108864
 rapid-rapid-memory-size-max 8589934592
-rapid-rapid-populate-buffer-size-max 67108864
+rapid-rapid-pop-buffer-size-max 67108864
 read-buffer-size 131072
 read-only FALSE
 read-rnd-buffer-size 262144

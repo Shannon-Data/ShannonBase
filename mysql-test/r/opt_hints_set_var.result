@@ -775,7 +775,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "216"
+          "data_read_per_join": "234"
         },
         "used_columns": [
           "id",
@@ -829,7 +829,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "216"
+          "data_read_per_join": "234"
         },
         "used_columns": [
           "d",

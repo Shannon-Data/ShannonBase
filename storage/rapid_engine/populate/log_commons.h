@@ -22,7 +22,7 @@
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
 
-   Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.

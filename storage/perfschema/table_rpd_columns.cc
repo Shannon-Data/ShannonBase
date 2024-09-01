@@ -40,12 +40,12 @@
 #include "sql/field.h"
 #include "sql/plugin_table.h"
 #include "sql/table.h"
-#include "sql/sql_table.h" // meta_rpd_columns_infos
+#include "sql/sql_table.h" // rpd_columns_info
 
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
-#include "storage/rapid_engine/include/rapid_stats.h"
+#include "storage/rapid_engine/include/rapid_status.h"
 /*
   Callbacks implementation for RPD_COLUMNS.
 */
@@ -109,7 +109,7 @@ void table_rpd_columns::reset_position() {
 }
 
 ha_rows table_rpd_columns::get_row_count() {
-  return ShannonBase::meta_rpd_columns_infos.size();
+  return ShannonBase::rpd_columns_info.size();
 }
 
 int table_rpd_columns::rnd_next() {
@@ -139,16 +139,16 @@ int table_rpd_columns::rnd_pos(const void *pos) {
 int table_rpd_columns::make_row(uint index[[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::meta_rpd_columns_infos.size()) {
+  if (index >= ShannonBase::rpd_columns_info.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.colum_id = ShannonBase::meta_rpd_columns_infos[index].column_id;
-    m_row.table_id = ShannonBase::meta_rpd_columns_infos[index].table_id;
-    m_row.data_placement_index = ShannonBase::meta_rpd_columns_infos[index].data_placement_index;
-    m_row.dict_size_bytes = ShannonBase::meta_rpd_columns_infos[index].data_dict_bytes;
-    m_row.ndv = ShannonBase::meta_rpd_columns_infos[index].ndv;
+    m_row.colum_id = ShannonBase::rpd_columns_info[index].column_id;
+    m_row.table_id = ShannonBase::rpd_columns_info[index].table_id;
+    m_row.data_placement_index = ShannonBase::rpd_columns_info[index].data_placement_index;
+    m_row.dict_size_bytes = ShannonBase::rpd_columns_info[index].data_dict_bytes;
+    m_row.ndv = ShannonBase::rpd_columns_info[index].ndv;
     memset(m_row.encoding, 0x0, NAME_LEN);
-    strncpy(m_row.encoding, ShannonBase::meta_rpd_columns_infos[index].encoding,
+    strncpy(m_row.encoding, ShannonBase::rpd_columns_info[index].encoding,
             sizeof(m_row.encoding));
   }
   return 0;

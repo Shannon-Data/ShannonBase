@@ -25,11 +25,13 @@
 */
 #ifndef __SHANNONBASE_RPD_STATS_H__
 #define __SHANNONBASE_RPD_STATS_H__
+class handlerton;
 namespace ShannonBase {
-class ShannonLoadedTables;
+class LoadedTables;
+class RapidShare;
 // All the stats of loaded table of rapid.
-struct shannon_rpd_columns_info_t {
-  shannon_rpd_columns_info_t() {
+struct shannon_rpd_column_info_t {
+  shannon_rpd_column_info_t() {
     table_id = 0;
     column_id = 0;
     ndv = 0;
@@ -37,7 +39,7 @@ struct shannon_rpd_columns_info_t {
     data_dict_bytes = 0;
     avg_byte_width_inc_null = 0;
   }
-  // schema name
+  /**schema name*/
   char schema_name[NAME_LEN] = {0};
   /**table id of loaded table*/
   uint table_id{0};
@@ -59,12 +61,33 @@ struct shannon_rpd_columns_info_t {
   uint32 avg_byte_width_inc_null{0};
 };
 
-using rpd_columns_info = shannon_rpd_columns_info_t;
-using rpd_columns_container = std::vector<rpd_columns_info>;
+using rpd_column_info_t = shannon_rpd_column_info_t;
+using rpd_columns_container = std::vector<rpd_column_info_t>;
 
-/** Global shannon rpd column information map, keep loaded table. */
-extern rpd_columns_container meta_rpd_columns_infos;
-extern ShannonLoadedTables *shannon_loaded_tables;
+// Map from (db_name, table_name) to the RapidShare with table state.
+class LoadedTables {
+  std::map<std::pair<std::string, std::string>, RapidShare> m_tables;
+  std::mutex m_mutex;
 
+ public:
+  void add(const std::string &db, const std::string &table);
+
+  RapidShare *get(const std::string &db, const std::string &table);
+
+  void erase(const std::string &db, const std::string &table);
+
+  auto size() const { return m_tables.size(); }
+
+  void table_infos(uint index, ulonglong &tid, std::string &schema, std::string &table);
+};
+
+// all the loaded tables information.
+extern LoadedTables *shannon_loaded_tables;
+
+// all column infos of all loaded tables, which's used for performance_schema.rpd_column_xxx.
+extern rpd_columns_container rpd_columns_info;
+
+// the max memory size of rpd engine, initialized in xx_rapid.cc
+extern uint64 rpd_mem_sz_max;
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RPD_STATS_H__

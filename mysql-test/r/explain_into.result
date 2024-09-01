@@ -54,7 +54,7 @@ SELECT @v1, JSON_VALID(@v1);
             "read_cost": "0.45",
             "eval_cost": "0.10",
             "prefix_cost": "0.55",
-            "data_read_per_join": "16"
+            "data_read_per_join": "18"
           },
           "used_columns": [
             "i1",
@@ -75,7 +75,7 @@ SELECT @v1, JSON_VALID(@v1);
             "read_cost": "0.25",
             "eval_cost": "0.10",
             "prefix_cost": "1.10",
-            "data_read_per_join": "16"
+            "data_read_per_join": "18"
           },
           "used_columns": [
             "i3",

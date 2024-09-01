@@ -18,7 +18,8 @@ test.t1	analyze	status	OK
 # Uses the primary index to determine 10% filtering effect (one row).
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id = 1;
 EXPLAIN
--> Rows fetched before execution  (rows=1)
+-> Filter: (t1.id = 1)  (rows=1)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -26,7 +27,8 @@ Note	1003	Query is executed in secondary engine; the actual query plan may diver
 # rows 1 to 7).
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 1;
 EXPLAIN
--> Zero rows (no matching row in const table)  (rows=0)
+-> Filter: (t1.x = 1)  (rows=7)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -34,7 +36,8 @@ Note	1003	Query is executed in secondary engine; the actual query plan may diver
 # rows 8 and 9).
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 2;
 EXPLAIN
--> Zero rows (no matching row in const table)  (rows=0)
+-> Filter: (t1.x = 2)  (rows=2)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -42,7 +45,8 @@ Note	1003	Query is executed in secondary engine; the actual query plan may diver
 # row 10).
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 3;
 EXPLAIN
--> Zero rows (no matching row in const table)  (rows=0)
+-> Filter: (t1.x = 3)  (rows=1)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -86,110 +90,124 @@ Note	1003	Query is executed in secondary engine; the actual query plan may diver
 # No matching rows. Rounds up estimates to one matching row (10%).
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id = 100;
 EXPLAIN
--> Zero rows (no matching row in const table)  (rows=0)
+-> Filter: (t1.id = 100)  (rows=1)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 100;
 EXPLAIN
--> Zero rows (no matching row in const table)  (rows=0)
+-> Filter: (t1.x = 100)  (rows=1)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 # Matches two rows in the primary index (20%).
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id = 3 OR id = 7;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (id = 3) OR (id = 7), with index condition: ((t1.id = 3) or (t1.id = 7))  (rows=2)
+-> Filter: ((t1.id = 3) or (t1.id = 7))  (rows=2)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 # Matches three rows in the secondary index (30%).
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 2 OR x = 3;
 EXPLAIN
--> Zero rows (no matching row in const table)  (rows=0)
+-> Filter: ((t1.x = 2) or (t1.x = 3))  (rows=3)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 # Matches all rows in the secondary index (100%).
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 1 OR x = 2 OR x = 3;
 EXPLAIN
--> Zero rows (no matching row in const table)  (rows=0)
+-> Filter: ((t1.x = 1) or (t1.x = 2) or (t1.x = 3))  (rows=10)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 # Ranges in the primary index.
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id > 0;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (0 < id), with index condition: (t1.id > 0)  (rows=10)
+-> Filter: (t1.id > 0)  (rows=10)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id > 1;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (1 < id), with index condition: (t1.id > 1)  (rows=10)
+-> Filter: (t1.id > 1)  (rows=9)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id > 3;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (3 < id), with index condition: (t1.id > 3)  (rows=10)
+-> Filter: (t1.id > 3)  (rows=7)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id > 9;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (9 < id), with index condition: (t1.id > 9)  (rows=10)
+-> Filter: (t1.id > 9)  (rows=1)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id > 10;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (10 < id), with index condition: (t1.id > 10)  (rows=10)
+-> Filter: (t1.id > 10)  (rows=1)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id < 1;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (id < 1), with index condition: (t1.id < 1)  (rows=10)
+-> Filter: (t1.id < 1)  (rows=1)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id < 3;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (id < 3), with index condition: (t1.id < 3)  (rows=10)
+-> Filter: (t1.id < 3)  (rows=2)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id < 10;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (id < 10), with index condition: (t1.id < 10)  (rows=10)
+-> Filter: (t1.id < 10)  (rows=9)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE id BETWEEN 3 AND 7;
 EXPLAIN
--> Index range scan on t1 using PRIMARY over (3 <= id <= 7), with index condition: (t1.id between 3 and 7)  (rows=10)
+-> Filter: (t1.id between 3 and 7)  (rows=5)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 # Ranges in the secondary index.
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x < 1;
 EXPLAIN
--> Filter: (t1.x < 1)  (rows=10)
+-> Filter: (t1.x < 1)  (rows=1)
     -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x < 2;
 EXPLAIN
--> Filter: (t1.x < 2)  (rows=10)
+-> Filter: (t1.x < 2)  (rows=7)
     -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x < 3;
 EXPLAIN
--> Filter: (t1.x < 3)  (rows=10)
+-> Filter: (t1.x < 3)  (rows=9)
     -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
@@ -203,7 +221,8 @@ Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x BETWEEN 1 AND 2;
 EXPLAIN
--> Zero rows (no matching row in const table)  (rows=0)
+-> Filter: (t1.x between 1 and 2)  (rows=9)
+    -> Table scan on t1 in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -212,10 +231,11 @@ Note	1003	Query is executed in secondary engine; the actual query plan may diver
 # (No occurrence of "Range checked for each record" in the plan.)
 EXPLAIN FORMAT=TREE SELECT * FROM t1 a, t1 b WHERE a.id < b.id;
 EXPLAIN
--> Nested loop inner join  (rows=33.3)
-    -> Table scan on a in secondary engine Rapid  (rows=10)
-    -> Filter: (a.id < b.id)  (rows=3.33)
-        -> Index range scan on b (re-planned for each iteration)  (rows=10)
+-> Filter: (a.id < b.id)  (rows=33.3)
+    -> Inner hash join (no condition)  (rows=33.3)
+        -> Table scan on b in secondary engine Rapid  (rows=10)
+        -> Hash
+            -> Table scan on a in secondary engine Rapid  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -235,6 +255,8 @@ POINT(3,3), POINT(0,0))),
 g);
 EXPLAIN
 -> Filter: mbrcontains(<cache>(polygon(linestring(point(0,0),point(3,0),point(3,3),point(0,0)))),geom.g)  (rows=3)
-    -> Index range scan on geom using g over (g unprintable_geometry_value)  (rows=3)
+    -> Table scan on geom in secondary engine Rapid  (rows=3)
 
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 DROP TABLE geom;
