@@ -2347,7 +2347,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.10",
             "prefix_cost": "0.35",
-            "data_read_per_join": "16"
+            "data_read_per_join": "18"
           },
           "used_columns": [
             "ik",
@@ -2367,7 +2367,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.10",
             "prefix_cost": "0.70",
-            "data_read_per_join": "16"
+            "data_read_per_join": "18"
           },
           "used_columns": [
             "vc"
@@ -2387,7 +2387,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.10",
             "prefix_cost": "1.05",
-            "data_read_per_join": "16"
+            "data_read_per_join": "18"
           },
           "used_columns": [
             "vc"

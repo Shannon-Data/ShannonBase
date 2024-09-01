@@ -2672,7 +2672,7 @@ EXPLAIN
         "read_cost": "1.46",
         "eval_cost": "1.20",
         "prefix_cost": "2.66",
-        "data_read_per_join": "96"
+        "data_read_per_join": "120"
       },
       "used_columns": [
         "c1"

@@ -37,7 +37,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.40",
           "prefix_cost": "0.65",
-          "data_read_per_join": "64"
+          "data_read_per_join": "72"
         },
         "used_columns": [
           "i",
@@ -82,7 +82,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.40",
           "prefix_cost": "0.65",
-          "data_read_per_join": "64"
+          "data_read_per_join": "72"
         },
         "used_columns": [
           "i",
@@ -127,7 +127,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.40",
             "prefix_cost": "0.65",
-            "data_read_per_join": "64"
+            "data_read_per_join": "72"
           },
           "used_columns": [
             "i",
@@ -173,7 +173,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.40",
             "prefix_cost": "0.65",
-            "data_read_per_join": "64"
+            "data_read_per_join": "72"
           },
           "used_columns": [
             "i",
@@ -217,7 +217,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.40",
             "prefix_cost": "0.65",
-            "data_read_per_join": "64"
+            "data_read_per_join": "72"
           },
           "used_columns": [
             "i",
@@ -265,7 +265,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.40",
           "prefix_cost": "0.65",
-          "data_read_per_join": "64"
+          "data_read_per_join": "72"
         },
         "used_columns": [
           "i",
@@ -317,7 +317,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.40",
             "prefix_cost": "0.65",
-            "data_read_per_join": "64"
+            "data_read_per_join": "72"
           },
           "used_columns": [
             "i",
@@ -370,7 +370,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.40",
             "prefix_cost": "0.65",
-            "data_read_per_join": "64"
+            "data_read_per_join": "72"
           },
           "used_columns": [
             "i",
@@ -417,7 +417,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.40",
           "prefix_cost": "0.65",
-          "data_read_per_join": "64"
+          "data_read_per_join": "72"
         },
         "used_columns": [
           "i",
@@ -501,7 +501,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.40",
                 "prefix_cost": "0.65",
-                "data_read_per_join": "64"
+                "data_read_per_join": "72"
               },
               "used_columns": [
                 "i",
@@ -557,7 +557,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.40",
             "prefix_cost": "0.65",
-            "data_read_per_join": "64"
+            "data_read_per_join": "72"
           },
           "used_columns": [
             "i",
@@ -610,7 +610,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.40",
             "prefix_cost": "0.65",
-            "data_read_per_join": "64"
+            "data_read_per_join": "72"
           },
           "used_columns": [
             "i",
@@ -660,7 +660,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.20",
           "prefix_cost": "0.45",
-          "data_read_per_join": "32"
+          "data_read_per_join": "36"
         },
         "used_columns": [
           "i"
@@ -710,7 +710,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.60",
           "prefix_cost": "1.85",
-          "data_read_per_join": "256"
+          "data_read_per_join": "288"
         },
         "used_columns": [
           "k"
@@ -751,7 +751,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "1.60",
             "prefix_cost": "1.85",
-            "data_read_per_join": "256"
+            "data_read_per_join": "288"
           },
           "used_columns": [
             "i",
@@ -798,7 +798,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "1.60",
               "prefix_cost": "1.85",
-              "data_read_per_join": "256"
+              "data_read_per_join": "288"
             },
             "used_columns": [
               "i",
@@ -848,7 +848,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "1.60",
               "prefix_cost": "1.85",
-              "data_read_per_join": "256"
+              "data_read_per_join": "288"
             },
             "used_columns": [
               "j",
@@ -897,7 +897,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "1.60",
               "prefix_cost": "1.85",
-              "data_read_per_join": "256"
+              "data_read_per_join": "288"
             },
             "used_columns": [
               "j",
@@ -946,7 +946,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "1.60",
               "prefix_cost": "1.85",
-              "data_read_per_join": "256"
+              "data_read_per_join": "288"
             },
             "used_columns": [
               "j",
@@ -1002,7 +1002,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "1.60",
               "prefix_cost": "1.85",
-              "data_read_per_join": "256"
+              "data_read_per_join": "288"
             },
             "used_columns": [
               "j",
@@ -1074,7 +1074,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "user_id"
@@ -1119,7 +1119,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "user_id"
@@ -1158,7 +1158,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.50",
                   "prefix_cost": "0.75",
-                  "data_read_per_join": "80"
+                  "data_read_per_join": "90"
                 },
                 "used_columns": [
                   "id",
@@ -1178,7 +1178,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.50",
                   "prefix_cost": "4.50",
-                  "data_read_per_join": "80"
+                  "data_read_per_join": "90"
                 },
                 "used_columns": [
                   "user_id"
@@ -1234,7 +1234,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.50",
             "prefix_cost": "0.75",
-            "data_read_per_join": "80"
+            "data_read_per_join": "90"
           },
           "used_columns": [
             "id",
@@ -1287,7 +1287,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.50",
             "prefix_cost": "0.75",
-            "data_read_per_join": "80"
+            "data_read_per_join": "90"
           },
           "used_columns": [
             "id",
@@ -1351,7 +1351,7 @@ EXPLAIN
                     "read_cost": "0.25",
                     "eval_cost": "0.50",
                     "prefix_cost": "0.75",
-                    "data_read_per_join": "80"
+                    "data_read_per_join": "90"
                   },
                   "used_columns": [
                     "id",
@@ -1371,7 +1371,7 @@ EXPLAIN
                     "read_cost": "0.25",
                     "eval_cost": "0.50",
                     "prefix_cost": "4.50",
-                    "data_read_per_join": "80"
+                    "data_read_per_join": "90"
                   },
                   "used_columns": [
                     "user_id"
@@ -1430,7 +1430,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.50",
                 "prefix_cost": "0.75",
-                "data_read_per_join": "80"
+                "data_read_per_join": "90"
               },
               "used_columns": [
                 "id",
@@ -1450,7 +1450,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.50",
                 "prefix_cost": "4.50",
-                "data_read_per_join": "80"
+                "data_read_per_join": "90"
               },
               "used_columns": [
                 "user_id"
@@ -1518,7 +1518,7 @@ EXPLAIN
                     "read_cost": "0.25",
                     "eval_cost": "0.50",
                     "prefix_cost": "0.75",
-                    "data_read_per_join": "80"
+                    "data_read_per_join": "90"
                   },
                   "used_columns": [
                     "id",
@@ -1538,7 +1538,7 @@ EXPLAIN
                     "read_cost": "0.25",
                     "eval_cost": "0.50",
                     "prefix_cost": "4.50",
-                    "data_read_per_join": "80"
+                    "data_read_per_join": "90"
                   },
                   "used_columns": [
                     "user_id"
@@ -1601,7 +1601,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.50",
                   "prefix_cost": "0.75",
-                  "data_read_per_join": "80"
+                  "data_read_per_join": "90"
                 },
                 "used_columns": [
                   "id",
@@ -1621,7 +1621,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.50",
                   "prefix_cost": "4.50",
-                  "data_read_per_join": "80"
+                  "data_read_per_join": "90"
                 },
                 "used_columns": [
                   "user_id"
@@ -1694,7 +1694,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.70",
             "prefix_cost": "0.95",
-            "data_read_per_join": "112"
+            "data_read_per_join": "126"
           },
           "used_columns": [
             "id",
@@ -1747,7 +1747,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.70",
             "prefix_cost": "0.95",
-            "data_read_per_join": "112"
+            "data_read_per_join": "126"
           },
           "used_columns": [
             "id",
@@ -1791,7 +1791,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "0.70",
               "prefix_cost": "0.95",
-              "data_read_per_join": "112"
+              "data_read_per_join": "126"
             },
             "used_columns": [
               "id"
@@ -1810,7 +1810,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "0.70",
               "prefix_cost": "6.10",
-              "data_read_per_join": "112"
+              "data_read_per_join": "126"
             },
             "used_columns": [
               "user_id"
@@ -1859,7 +1859,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "id",
@@ -1879,7 +1879,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "6.10",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "user_id"
@@ -1939,7 +1939,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "0.70",
               "prefix_cost": "0.95",
-              "data_read_per_join": "112"
+              "data_read_per_join": "126"
             },
             "used_columns": [
               "id",
@@ -1996,7 +1996,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "0.70",
               "prefix_cost": "0.95",
-              "data_read_per_join": "112"
+              "data_read_per_join": "126"
             },
             "used_columns": [
               "id",
@@ -2030,7 +2030,7 @@ EXPLAIN
         "read_cost": "0.25",
         "eval_cost": "0.70",
         "prefix_cost": "0.95",
-        "data_read_per_join": "112"
+        "data_read_per_join": "126"
       },
       "used_columns": [
         "id"
@@ -2058,7 +2058,7 @@ EXPLAIN
         "read_cost": "0.25",
         "eval_cost": "0.70",
         "prefix_cost": "0.95",
-        "data_read_per_join": "112"
+        "data_read_per_join": "126"
       },
       "used_columns": [
         "id"
@@ -2086,7 +2086,7 @@ EXPLAIN
         "read_cost": "0.25",
         "eval_cost": "0.70",
         "prefix_cost": "0.95",
-        "data_read_per_join": "112"
+        "data_read_per_join": "126"
       },
       "used_columns": [
         "id"
@@ -2132,7 +2132,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -2179,7 +2179,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -2228,7 +2228,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -2284,7 +2284,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.70",
             "prefix_cost": "0.95",
-            "data_read_per_join": "112"
+            "data_read_per_join": "126"
           },
           "used_columns": [
             "id",
@@ -2374,7 +2374,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.70",
                   "prefix_cost": "0.95",
-                  "data_read_per_join": "112"
+                  "data_read_per_join": "126"
                 },
                 "used_columns": [
                   "d",
@@ -2455,7 +2455,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.70",
                   "prefix_cost": "0.95",
-                  "data_read_per_join": "112"
+                  "data_read_per_join": "126"
                 },
                 "used_columns": [
                   "d",
@@ -2521,7 +2521,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "i",
@@ -2572,7 +2572,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "id",
@@ -2592,7 +2592,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "6.10",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "user_id"
@@ -2646,7 +2646,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "id",
@@ -2666,7 +2666,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "6.10",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "user_id"
@@ -2720,7 +2720,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "id",
@@ -2740,7 +2740,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "6.10",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "user_id"
@@ -2791,7 +2791,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -2840,7 +2840,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "user_id"
@@ -2871,7 +2871,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.70",
             "prefix_cost": "0.95",
-            "data_read_per_join": "112"
+            "data_read_per_join": "126"
           },
           "used_columns": [
             "id",
@@ -2891,7 +2891,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.70",
             "prefix_cost": "6.10",
-            "data_read_per_join": "112"
+            "data_read_per_join": "126"
           },
           "used_columns": [
             "user_id",
@@ -2947,7 +2947,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "id",
@@ -2967,7 +2967,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "6.10",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "user_id",
@@ -3025,7 +3025,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "id",
@@ -3045,7 +3045,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "6.10",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "user_id",
@@ -3103,7 +3103,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "id"
@@ -3122,7 +3122,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "4.90",
                 "prefix_cost": "6.10",
-                "data_read_per_join": "784"
+                "data_read_per_join": "882"
               },
               "used_columns": [
                 "date"
@@ -3201,7 +3201,7 @@ EXPLAIN
                       "read_cost": "0.25",
                       "eval_cost": "0.70",
                       "prefix_cost": "0.95",
-                      "data_read_per_join": "112"
+                      "data_read_per_join": "126"
                     },
                     "used_columns": [
                       "id"
@@ -3220,7 +3220,7 @@ EXPLAIN
                       "read_cost": "0.25",
                       "eval_cost": "4.90",
                       "prefix_cost": "6.10",
-                      "data_read_per_join": "784"
+                      "data_read_per_join": "882"
                     },
                     "used_columns": [
                       "date"
@@ -3321,7 +3321,7 @@ EXPLAIN
                         "read_cost": "0.25",
                         "eval_cost": "0.70",
                         "prefix_cost": "0.95",
-                        "data_read_per_join": "112"
+                        "data_read_per_join": "126"
                       },
                       "used_columns": [
                         "id",
@@ -3341,7 +3341,7 @@ EXPLAIN
                         "read_cost": "0.25",
                         "eval_cost": "0.70",
                         "prefix_cost": "6.10",
-                        "data_read_per_join": "112"
+                        "data_read_per_join": "126"
                       },
                       "used_columns": [
                         "user_id",
@@ -3413,7 +3413,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -3501,7 +3501,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.70",
                   "prefix_cost": "0.95",
-                  "data_read_per_join": "112"
+                  "data_read_per_join": "126"
                 },
                 "used_columns": [
                   "id",
@@ -3577,7 +3577,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -3825,7 +3825,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.70",
                   "prefix_cost": "0.95",
-                  "data_read_per_join": "112"
+                  "data_read_per_join": "126"
                 },
                 "used_columns": [
                   "id",
@@ -4077,7 +4077,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.70",
                   "prefix_cost": "0.95",
-                  "data_read_per_join": "112"
+                  "data_read_per_join": "126"
                 },
                 "used_columns": [
                   "id",
@@ -4137,7 +4137,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -4223,7 +4223,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.70",
                   "prefix_cost": "0.95",
-                  "data_read_per_join": "112"
+                  "data_read_per_join": "126"
                 },
                 "used_columns": [
                   "id",
@@ -4277,7 +4277,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -4330,7 +4330,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -4415,7 +4415,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "112"
+                "data_read_per_join": "126"
               },
               "used_columns": [
                 "id",
@@ -4472,7 +4472,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -4525,7 +4525,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -4579,7 +4579,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -4618,7 +4618,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -4669,7 +4669,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -4738,7 +4738,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "d"
@@ -4801,7 +4801,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "d"
@@ -4863,7 +4863,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "d"
@@ -4914,7 +4914,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.20",
           "prefix_cost": "0.45",
-          "data_read_per_join": "32"
+          "data_read_per_join": "36"
         },
         "used_columns": [
           "d"
@@ -4958,7 +4958,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.20",
           "prefix_cost": "0.45",
-          "data_read_per_join": "32"
+          "data_read_per_join": "36"
         },
         "used_columns": [
           "d"
@@ -5015,7 +5015,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "d"
@@ -5065,7 +5065,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "d"
@@ -5115,7 +5115,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "d"
@@ -5167,7 +5167,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "d"
@@ -5218,7 +5218,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "d"
@@ -5269,7 +5269,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "d"
@@ -5324,7 +5324,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.00",
           "prefix_cost": "2.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "360"
         },
         "used_columns": [
           "d"
@@ -5374,7 +5374,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.00",
           "prefix_cost": "2.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "360"
         },
         "used_columns": [
           "d"
@@ -5424,7 +5424,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.00",
           "prefix_cost": "2.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "360"
         },
         "used_columns": [
           "d"
@@ -5476,7 +5476,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.00",
           "prefix_cost": "2.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "360"
         },
         "used_columns": [
           "d"
@@ -5527,7 +5527,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.00",
           "prefix_cost": "2.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "360"
         },
         "used_columns": [
           "d"
@@ -5578,7 +5578,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.00",
           "prefix_cost": "2.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "360"
         },
         "used_columns": [
           "d"
@@ -5635,7 +5635,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -5684,7 +5684,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -5733,7 +5733,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -5782,7 +5782,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -5835,7 +5835,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -5888,7 +5888,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "id"
@@ -5956,7 +5956,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -6030,7 +6030,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -6083,7 +6083,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id"
@@ -6141,7 +6141,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -6196,7 +6196,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "id",
@@ -6254,7 +6254,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.80",
           "prefix_cost": "1.05",
-          "data_read_per_join": "128"
+          "data_read_per_join": "144"
         },
         "used_columns": [
           "id",
@@ -6308,7 +6308,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.80",
           "prefix_cost": "1.05",
-          "data_read_per_join": "128"
+          "data_read_per_join": "144"
         },
         "used_columns": [
           "id",
@@ -6365,7 +6365,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.80",
           "prefix_cost": "1.05",
-          "data_read_per_join": "128"
+          "data_read_per_join": "144"
         },
         "used_columns": [
           "id",
@@ -6417,7 +6417,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -6477,7 +6477,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -6527,7 +6527,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id",
@@ -6577,7 +6577,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -6626,7 +6626,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -6675,7 +6675,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -6724,7 +6724,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -6773,7 +6773,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -6822,7 +6822,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -6871,7 +6871,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -6950,7 +6950,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.90",
                 "prefix_cost": "1.15",
-                "data_read_per_join": "144"
+                "data_read_per_join": "162"
               },
               "used_columns": [
                 "id"
@@ -7003,7 +7003,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7052,7 +7052,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7099,7 +7099,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7148,7 +7148,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7198,7 +7198,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id",
@@ -7248,7 +7248,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7297,7 +7297,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7346,7 +7346,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7395,7 +7395,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7444,7 +7444,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7493,7 +7493,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7542,7 +7542,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7591,7 +7591,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7640,7 +7640,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7688,7 +7688,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7737,7 +7737,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7787,7 +7787,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id",
@@ -7837,7 +7837,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7886,7 +7886,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7935,7 +7935,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -7984,7 +7984,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -8033,7 +8033,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -8082,7 +8082,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -8131,7 +8131,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -8180,7 +8180,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -8229,7 +8229,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -8277,7 +8277,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "792"
+          "data_read_per_join": "810"
         },
         "used_columns": [
           "id"
@@ -8326,7 +8326,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "792"
+          "data_read_per_join": "810"
         },
         "used_columns": [
           "id"
@@ -8376,7 +8376,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "792"
+          "data_read_per_join": "810"
         },
         "used_columns": [
           "id",
@@ -8426,7 +8426,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "792"
+          "data_read_per_join": "810"
         },
         "used_columns": [
           "id"
@@ -8475,7 +8475,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "792"
+          "data_read_per_join": "810"
         },
         "used_columns": [
           "id"
@@ -8524,7 +8524,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "792"
+          "data_read_per_join": "810"
         },
         "used_columns": [
           "id"
@@ -8573,7 +8573,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "792"
+          "data_read_per_join": "810"
         },
         "used_columns": [
           "id"
@@ -8622,7 +8622,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "792"
+          "data_read_per_join": "810"
         },
         "used_columns": [
           "id"
@@ -8676,7 +8676,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -8725,7 +8725,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -8774,7 +8774,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -8823,7 +8823,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -8872,7 +8872,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -8921,7 +8921,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -8970,7 +8970,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -9019,7 +9019,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -9068,7 +9068,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -9147,7 +9147,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "56"
+                "data_read_per_join": "70"
               },
               "used_columns": [
                 "id"
@@ -9200,7 +9200,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -9249,7 +9249,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "56"
+          "data_read_per_join": "70"
         },
         "used_columns": [
           "id"
@@ -9328,7 +9328,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.70",
                 "prefix_cost": "0.95",
-                "data_read_per_join": "56"
+                "data_read_per_join": "70"
               },
               "used_columns": [
                 "id"
@@ -9372,7 +9372,7 @@ EXPLAIN
             "first_value"
             "optimized_frame_evaluation": true
             "using_temporary_table": true,
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
           "eval_cost": "1.20",
           "frame_buffer": {
           "functions": [
@@ -9415,7 +9415,7 @@ EXPLAIN
             "first_value"
             "optimized_frame_evaluation": true
             "using_temporary_table": true,
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
           "eval_cost": "1.20",
           "filesort_key": [
           "frame_buffer": {
@@ -9496,7 +9496,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -9545,7 +9545,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -9594,7 +9594,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -9643,7 +9643,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -9692,7 +9692,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -9741,7 +9741,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -9790,7 +9790,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -9839,7 +9839,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -9888,7 +9888,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -9906,7 +9906,7 @@ EXPLAIN
             "first_value"
             "optimized_frame_evaluation": true
             "using_temporary_table": true,
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
           "eval_cost": "2.40",
           "filesort_key": [
           "frame_buffer": {
@@ -9989,7 +9989,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.40",
           "prefix_cost": "2.65",
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
         },
         "used_columns": [
           "t",
@@ -10040,7 +10040,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.40",
           "prefix_cost": "2.65",
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
         },
         "used_columns": [
           "t",
@@ -10091,7 +10091,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.40",
           "prefix_cost": "2.65",
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
         },
         "used_columns": [
           "t",
@@ -10142,7 +10142,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.40",
           "prefix_cost": "2.65",
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
         },
         "used_columns": [
           "t",
@@ -10193,7 +10193,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.40",
           "prefix_cost": "2.65",
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
         },
         "used_columns": [
           "t",
@@ -10244,7 +10244,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.40",
           "prefix_cost": "2.65",
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
         },
         "used_columns": [
           "t",
@@ -10295,7 +10295,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.40",
           "prefix_cost": "2.65",
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
         },
         "used_columns": [
           "t",
@@ -10346,7 +10346,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.40",
           "prefix_cost": "2.65",
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
         },
         "used_columns": [
           "t",
@@ -10397,7 +10397,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "2.40",
           "prefix_cost": "2.65",
-          "data_read_per_join": "384"
+          "data_read_per_join": "432"
         },
         "used_columns": [
           "t",
@@ -10431,7 +10431,7 @@ EXPLAIN
         "read_cost": "0.25",
         "eval_cost": "0.90",
         "prefix_cost": "1.15",
-        "data_read_per_join": "144"
+        "data_read_per_join": "162"
       },
       "used_columns": [
         "id",
@@ -10504,7 +10504,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.90",
             "prefix_cost": "1.15",
-            "data_read_per_join": "144"
+            "data_read_per_join": "162"
           },
           "used_columns": [
             "id"
@@ -10560,7 +10560,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.90",
             "prefix_cost": "1.15",
-            "data_read_per_join": "144"
+            "data_read_per_join": "162"
           },
           "used_columns": [
             "id"
@@ -10616,7 +10616,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.90",
             "prefix_cost": "1.15",
-            "data_read_per_join": "144"
+            "data_read_per_join": "162"
           },
           "used_columns": [
             "id"
@@ -10673,7 +10673,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "1.80",
             "prefix_cost": "2.05",
-            "data_read_per_join": "288"
+            "data_read_per_join": "324"
           },
           "used_columns": [
             "id",
@@ -10731,7 +10731,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "1.80",
             "prefix_cost": "2.05",
-            "data_read_per_join": "288"
+            "data_read_per_join": "324"
           },
           "used_columns": [
             "id",
@@ -10789,7 +10789,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "1.80",
             "prefix_cost": "2.05",
-            "data_read_per_join": "288"
+            "data_read_per_join": "324"
           },
           "used_columns": [
             "id",
@@ -10842,7 +10842,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "user_id"
@@ -10861,7 +10861,7 @@ EXPLAIN
               "optimized_frame_evaluation": true
               "sum",
               "using_temporary_table": true,
-            "data_read_per_join": "224"
+            "data_read_per_join": "252"
             "eval_cost": "1.40",
             "filesort_key": [
             "frame_buffer": {
@@ -10969,7 +10969,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "user_id"
@@ -11023,7 +11023,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -11078,7 +11078,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.80",
           "prefix_cost": "2.05",
-          "data_read_per_join": "288"
+          "data_read_per_join": "324"
         },
         "used_columns": [
           "id",
@@ -11131,7 +11131,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "user_id",
@@ -11187,7 +11187,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "d"
@@ -11239,7 +11239,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.80",
           "prefix_cost": "1.05",
-          "data_read_per_join": "192"
+          "data_read_per_join": "208"
         },
         "used_columns": [
           "j"
@@ -11288,7 +11288,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.80",
             "prefix_cost": "1.05",
-            "data_read_per_join": "192"
+            "data_read_per_join": "208"
           },
           "used_columns": [
             "i"
@@ -11385,7 +11385,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "0.80",
               "prefix_cost": "1.05",
-              "data_read_per_join": "192"
+              "data_read_per_join": "208"
             },
             "used_columns": [
               "i"
@@ -11420,7 +11420,7 @@ EXPLAIN
         "read_cost": "0.25",
         "eval_cost": "0.80",
         "prefix_cost": "1.05",
-        "data_read_per_join": "192"
+        "data_read_per_join": "208"
       },
       "used_columns": [
         "j",
@@ -11466,7 +11466,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.80",
             "prefix_cost": "1.05",
-            "data_read_per_join": "192"
+            "data_read_per_join": "208"
           },
           "used_columns": [
             "i"
@@ -11516,7 +11516,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "0.80",
               "prefix_cost": "1.05",
-              "data_read_per_join": "192"
+              "data_read_per_join": "208"
             },
             "used_columns": [
               "i"
@@ -11564,7 +11564,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.80",
             "prefix_cost": "1.05",
-            "data_read_per_join": "192"
+            "data_read_per_join": "208"
           },
           "used_columns": [
             "i"
@@ -11631,7 +11631,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.80",
             "prefix_cost": "1.05",
-            "data_read_per_join": "192"
+            "data_read_per_join": "208"
           },
           "used_columns": [
             "i"
@@ -11684,7 +11684,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.80",
           "prefix_cost": "1.05",
-          "data_read_per_join": "192"
+          "data_read_per_join": "208"
         },
         "used_columns": [
           "j",
@@ -11738,7 +11738,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.80",
           "prefix_cost": "1.05",
-          "data_read_per_join": "192"
+          "data_read_per_join": "208"
         },
         "used_columns": [
           "j",
@@ -11803,7 +11803,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.80",
           "prefix_cost": "1.05",
-          "data_read_per_join": "192"
+          "data_read_per_join": "208"
         },
         "used_columns": [
           "j",
@@ -11859,7 +11859,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.80",
           "prefix_cost": "1.05",
-          "data_read_per_join": "192"
+          "data_read_per_join": "208"
         },
         "used_columns": [
           "j",
@@ -11906,7 +11906,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.80",
                   "prefix_cost": "1.05",
-                  "data_read_per_join": "192"
+                  "data_read_per_join": "208"
                 },
                 "used_columns": [
                   "i"
@@ -11942,7 +11942,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.80",
                   "prefix_cost": "1.05",
-                  "data_read_per_join": "192"
+                  "data_read_per_join": "208"
                 },
                 "used_columns": [
                   "i"
@@ -12028,7 +12028,7 @@ EXPLAIN
                         "read_cost": "0.25",
                         "eval_cost": "0.80",
                         "prefix_cost": "1.05",
-                        "data_read_per_join": "192"
+                        "data_read_per_join": "208"
                       },
                       "used_columns": [
                         "j",
@@ -12072,7 +12072,7 @@ EXPLAIN
                         "read_cost": "0.25",
                         "eval_cost": "0.80",
                         "prefix_cost": "1.05",
-                        "data_read_per_join": "192"
+                        "data_read_per_join": "208"
                       },
                       "used_columns": [
                         "j",
@@ -12134,7 +12134,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "j"
@@ -12183,7 +12183,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "j"
@@ -12239,7 +12239,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.80",
           "prefix_cost": "1.05",
-          "data_read_per_join": "128"
+          "data_read_per_join": "144"
         },
         "used_columns": [
           "j"
@@ -12295,7 +12295,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.70",
           "prefix_cost": "0.95",
-          "data_read_per_join": "112"
+          "data_read_per_join": "126"
         },
         "used_columns": [
           "b"
@@ -12362,7 +12362,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -12445,7 +12445,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.20",
           "prefix_cost": "1.45",
-          "data_read_per_join": "192"
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "t"
@@ -12556,7 +12556,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "1.20",
                 "prefix_cost": "1.45",
-                "data_read_per_join": "192"
+                "data_read_per_join": "216"
               },
               "used_columns": [
                 "t"
@@ -12613,7 +12613,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -12662,7 +12662,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -12726,7 +12726,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -12790,7 +12790,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "144"
+          "data_read_per_join": "162"
         },
         "used_columns": [
           "id"
@@ -12848,7 +12848,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "id"
@@ -12901,7 +12901,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "id"
@@ -12953,7 +12953,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "id"
@@ -13010,7 +13010,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.00",
           "prefix_cost": "1.25",
-          "data_read_per_join": "160"
+          "data_read_per_join": "180"
         },
         "used_columns": [
           "id",
@@ -13036,7 +13036,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.10",
                 "prefix_cost": "0.35",
-                "data_read_per_join": "8"
+                "data_read_per_join": "10"
               },
               "used_columns": [
                 "c"
@@ -13096,7 +13096,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "1.00",
               "prefix_cost": "1.25",
-              "data_read_per_join": "160"
+              "data_read_per_join": "180"
             },
             "used_columns": [
               "id",
@@ -13199,7 +13199,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "1.00",
             "prefix_cost": "1.25",
-            "data_read_per_join": "160"
+            "data_read_per_join": "180"
           },
           "used_columns": [
             "i",
@@ -13287,7 +13287,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "192"
+          "data_read_per_join": "204"
         },
         "used_columns": [
           "s1",
@@ -13317,7 +13317,7 @@ EXPLAIN
         "read_cost": "0.25",
         "eval_cost": "0.60",
         "prefix_cost": "0.85",
-        "data_read_per_join": "192"
+        "data_read_per_join": "204"
       },
       "used_columns": [
         "s1"
@@ -13367,7 +13367,7 @@ EXPLAIN
           "read_cost": "0.75",
           "eval_cost": "0.10",
           "prefix_cost": "0.85",
-          "data_read_per_join": "32"
+          "data_read_per_join": "34"
         },
         "used_columns": [
           "s2"
@@ -13462,7 +13462,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.60",
                   "prefix_cost": "0.85",
-                  "data_read_per_join": "192"
+                  "data_read_per_join": "204"
                 },
                 "used_columns": [
                   "s1",
@@ -13555,7 +13555,7 @@ EXPLAIN
                     "read_cost": "0.25",
                     "eval_cost": "0.60",
                     "prefix_cost": "0.85",
-                    "data_read_per_join": "192"
+                    "data_read_per_join": "204"
                   },
                   "used_columns": [
                     "s1",
@@ -13609,7 +13609,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "192"
+          "data_read_per_join": "204"
         },
         "used_columns": [
           "s1",
@@ -13648,7 +13648,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "192"
+          "data_read_per_join": "204"
         },
         "used_columns": [
           "s1",
@@ -13715,7 +13715,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "1.80",
             "prefix_cost": "2.05",
-            "data_read_per_join": "288"
+            "data_read_per_join": "324"
           },
           "used_columns": [
             "a",
@@ -13771,7 +13771,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "1.80",
             "prefix_cost": "2.05",
-            "data_read_per_join": "288"
+            "data_read_per_join": "324"
           },
           "used_columns": [
             "a",
@@ -13862,7 +13862,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "1.80",
                   "prefix_cost": "2.05",
-                  "data_read_per_join": "288"
+                  "data_read_per_join": "324"
                 },
                 "used_columns": [
                   "a",
@@ -13951,7 +13951,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "1.80",
                 "prefix_cost": "2.05",
-                "data_read_per_join": "288"
+                "data_read_per_join": "324"
               },
               "used_columns": [
                 "a",
@@ -14037,7 +14037,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "1.80",
                 "prefix_cost": "2.05",
-                "data_read_per_join": "288"
+                "data_read_per_join": "324"
               },
               "used_columns": [
                 "a",
@@ -14110,7 +14110,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "1.80",
                 "prefix_cost": "2.05",
-                "data_read_per_join": "288"
+                "data_read_per_join": "324"
               },
               "used_columns": [
                 "a",
@@ -14182,7 +14182,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "1.80",
                 "prefix_cost": "2.05",
-                "data_read_per_join": "288"
+                "data_read_per_join": "324"
               },
               "used_columns": [
                 "b"
@@ -14260,7 +14260,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "1.80",
           "prefix_cost": "2.05",
-          "data_read_per_join": "288"
+          "data_read_per_join": "324"
         },
         "used_columns": [
           "a"
@@ -14285,7 +14285,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.10",
                 "prefix_cost": "0.35",
-                "data_read_per_join": "8"
+                "data_read_per_join": "10"
               },
               "used_columns": [
                 "d"
@@ -14311,7 +14311,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.10",
                 "prefix_cost": "0.35",
-                "data_read_per_join": "8"
+                "data_read_per_join": "10"
               },
               "used_columns": [
                 "d"
@@ -14337,7 +14337,7 @@ EXPLAIN
                 "read_cost": "0.25",
                 "eval_cost": "0.10",
                 "prefix_cost": "0.35",
-                "data_read_per_join": "8"
+                "data_read_per_join": "10"
               },
               "used_columns": [
                 "d"
@@ -14406,7 +14406,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "a",
@@ -14456,7 +14456,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "b"
@@ -14505,7 +14505,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "b"
@@ -14555,7 +14555,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "a",
@@ -14605,7 +14605,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "b"
@@ -14670,7 +14670,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.20",
           "prefix_cost": "0.45",
-          "data_read_per_join": "32"
+          "data_read_per_join": "36"
         },
         "used_columns": [
           "a",
@@ -14732,7 +14732,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.30",
           "prefix_cost": "0.55",
-          "data_read_per_join": "48"
+          "data_read_per_join": "54"
         },
         "used_columns": [
           "a",
@@ -14790,7 +14790,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.30",
           "prefix_cost": "0.55",
-          "data_read_per_join": "48"
+          "data_read_per_join": "54"
         },
         "used_columns": [
           "a",
@@ -14843,7 +14843,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.60",
           "prefix_cost": "0.85",
-          "data_read_per_join": "96"
+          "data_read_per_join": "108"
         },
         "used_columns": [
           "b"
@@ -14892,7 +14892,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.30",
           "prefix_cost": "0.55",
-          "data_read_per_join": "48"
+          "data_read_per_join": "54"
         },
         "used_columns": [
           "d"
@@ -14958,7 +14958,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "216"
+          "data_read_per_join": "234"
         },
         "used_columns": [
           "id",
@@ -15011,7 +15011,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.90",
           "prefix_cost": "1.15",
-          "data_read_per_join": "216"
+          "data_read_per_join": "234"
         },
         "used_columns": [
           "d",
@@ -15078,7 +15078,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "0.50",
           "prefix_cost": "0.75",
-          "data_read_per_join": "240"
+          "data_read_per_join": "250"
         },
         "used_columns": [
           "i",
@@ -15198,7 +15198,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.50",
             "prefix_cost": "0.75",
-            "data_read_per_join": "240"
+            "data_read_per_join": "250"
           },
           "used_columns": [
             "i",
@@ -15253,7 +15253,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "0.10",
               "prefix_cost": "0.35",
-              "data_read_per_join": "16"
+              "data_read_per_join": "18"
             },
             "used_columns": [
               "a"
@@ -15273,7 +15273,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "2.00",
               "prefix_cost": "2.60",
-              "data_read_per_join": "320"
+              "data_read_per_join": "360"
             },
             "used_columns": [
               "a"
@@ -15348,7 +15348,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.10",
                   "prefix_cost": "0.35",
-                  "data_read_per_join": "16"
+                  "data_read_per_join": "18"
                 },
                 "used_columns": [
                   "a"
@@ -15367,7 +15367,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.10",
                   "prefix_cost": "0.70",
-                  "data_read_per_join": "16"
+                  "data_read_per_join": "18"
                 },
                 "used_columns": [
                   "a",
@@ -15414,7 +15414,7 @@ EXPLAIN
         "read_cost": "0.25",
         "eval_cost": "4.00",
         "prefix_cost": "4.25",
-        "data_read_per_join": "320"
+        "data_read_per_join": "400"
       },
       "used_columns": [
         "i"
@@ -15447,7 +15447,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "4.00",
           "prefix_cost": "4.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "400"
         },
         "used_columns": [
           "i"
@@ -15479,7 +15479,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "4.00",
           "prefix_cost": "4.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "400"
         },
         "used_columns": [
           "i"
@@ -15516,7 +15516,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "4.00",
             "prefix_cost": "4.25",
-            "data_read_per_join": "320"
+            "data_read_per_join": "400"
           },
           "used_columns": [
             "i"
@@ -15555,7 +15555,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "4.00",
           "prefix_cost": "4.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "400"
         }
       }
     }
@@ -15584,7 +15584,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "4.00",
           "prefix_cost": "4.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "400"
         },
         "used_columns": [
           "i"
@@ -15625,7 +15625,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "4.00",
             "prefix_cost": "4.25",
-            "data_read_per_join": "320"
+            "data_read_per_join": "400"
           }
         }
       }
@@ -15666,7 +15666,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "4.00",
             "prefix_cost": "4.25",
-            "data_read_per_join": "320"
+            "data_read_per_join": "400"
           },
           "used_columns": [
             "i"
@@ -15708,7 +15708,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "4.00",
             "prefix_cost": "4.25",
-            "data_read_per_join": "320"
+            "data_read_per_join": "400"
           },
           "used_columns": [
             "i"
@@ -15754,7 +15754,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "4.00",
           "prefix_cost": "4.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "400"
         },
         "used_columns": [
           "i"
@@ -15802,7 +15802,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "4.00",
             "prefix_cost": "4.25",
-            "data_read_per_join": "320"
+            "data_read_per_join": "400"
           },
           "used_columns": [
             "i"
@@ -15855,7 +15855,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "4.00",
             "prefix_cost": "4.25",
-            "data_read_per_join": "320"
+            "data_read_per_join": "400"
           },
           "used_columns": [
             "i"
@@ -15907,7 +15907,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "4.00",
             "prefix_cost": "4.25",
-            "data_read_per_join": "320"
+            "data_read_per_join": "400"
           },
           "used_columns": [
             "i"
@@ -15967,7 +15967,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "4.00",
           "prefix_cost": "4.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "400"
         },
         "used_columns": [
           "i"
@@ -16027,7 +16027,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "4.00",
           "prefix_cost": "4.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "400"
         },
         "used_columns": [
           "i"
@@ -16090,7 +16090,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "4.00",
           "prefix_cost": "4.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "400"
         },
         "used_columns": [
           "i"
@@ -16156,7 +16156,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "4.00",
             "prefix_cost": "4.25",
-            "data_read_per_join": "320"
+            "data_read_per_join": "400"
           },
           "used_columns": [
             "i"
@@ -16223,7 +16223,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "4.00",
             "prefix_cost": "4.25",
-            "data_read_per_join": "320"
+            "data_read_per_join": "400"
           },
           "used_columns": [
             "i"
@@ -16297,7 +16297,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "4.00",
               "prefix_cost": "4.25",
-              "data_read_per_join": "320"
+              "data_read_per_join": "400"
             },
             "used_columns": [
               "i"
@@ -16372,7 +16372,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "4.00",
               "prefix_cost": "4.25",
-              "data_read_per_join": "320"
+              "data_read_per_join": "400"
             },
             "used_columns": [
               "i"
@@ -16404,7 +16404,7 @@ EXPLAIN
         "read_cost": "0.25",
         "eval_cost": "4.00",
         "prefix_cost": "4.25",
-        "data_read_per_join": "320"
+        "data_read_per_join": "400"
       },
       "used_columns": [
         "i"
@@ -16449,7 +16449,7 @@ EXPLAIN
           "read_cost": "0.25",
           "eval_cost": "4.00",
           "prefix_cost": "4.25",
-          "data_read_per_join": "320"
+          "data_read_per_join": "400"
         },
         "used_columns": [
           "i"

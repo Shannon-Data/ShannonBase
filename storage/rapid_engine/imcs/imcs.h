@@ -19,117 +19,107 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. IMCS - in memory column store.
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
 
 #ifndef __SHANNONBASE_IMCS_H__
 #define __SHANNONBASE_IMCS_H__
 
 #include <atomic>
-#include <map>
 #include <memory>
 #include <mutex>
+#include <tuple>
+#include <unordered_map>
 
 #include "my_inttypes.h"
 #include "sql/field.h"
 #include "sql/handler.h"
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"  //for local dictionary.
+
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 
 namespace ShannonBase {
-class RapidContext;
-extern std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
+class Rapid_load_context;
 namespace Imcs {
-// the memory size of allocation for imcs to store the loaded data.
-extern unsigned long rapid_memory_size;
-extern unsigned long rapid_chunk_size;
-class Cu;
-class Imcu;
+class DataTable;
+/** An IMCS is consist of CUs. Some chunks are made of a CU. Header and body is two parts of a CU.
+ *  Header has meta information about this CU, and the body has the read data. All chunks stored
+ *  consecutively in a CU.  key format of a  CU is listed as following: `db_name_str` + ":" +
+ *  `table_name_str` + ":" + `field_index`. */
 class Imcs : public MemoryObject {
  public:
-  /**
-   * key format: db_name_str + ":" + table_name_str + ":" + field_index
-   */
-  using Cu_map_t = std::unordered_map<std::string, std::unique_ptr<Cu>>;
-  using Imcu_map_t = std::multimap<std::string, std::unique_ptr<Imcu>>;
-  inline static Imcs *get_instance() {
+  // make ctor and dctor private.
+  Imcs() {}
+  virtual ~Imcs() {}
+
+  int initialize();
+  int deinitialize();
+  // gets initialized flag.
+  inline bool initialized() { return m_inited; }
+
+  inline static Imcs *instance() {
     std::call_once(one, [&] { m_instance = new Imcs(); });
     return m_instance;
   }
-  // initialize the imcs.
-  uint initialize();
-  // deinitialize the imcs.
-  uint deinitialize();
-  // gets initialized flag.
-  inline bool initialized() { return (m_inited == handler::NONE) ? false : true; }
-  // scan oper initialization.
-  uint rnd_init(bool scan);
-  // end of scanning
-  uint rnd_end();
-  // writes a row of a column in.
-  uint write_direct(ShannonBase::RapidContext *context, Field *field);
-  // writes a row of a column in.
-  uint write_direct(ShannonBase::RapidContext *context, const char *key_str, const uchar *field_value, uint val_len);
-  // reads the data by a rowid into a field.
-  uint read_direct(ShannonBase::RapidContext *context, Field *field);
-  // reads the data by a rowid into buffer.
-  uint read_direct(ShannonBase::RapidContext *context, uchar *buffer);
-  uint read_batch_direct(ShannonBase::RapidContext *context, uchar *buffer);
-  // deletes the data by a rowid
-  uint delete_direct(ShannonBase::RapidContext *context, Field *field);
-  // deletes the data by key. pk_value is key value of row you want to delete.
-  uint delete_direct(ShannonBase::RapidContext *context, const char *key_str, const uchar *pk_value, uint pk_len);
-  // deletes all the data.
-  uint delete_all_direct(ShannonBase::RapidContext *context);
-  uint update_direct(ShannonBase::RapidContext *context, const char *key_str, const uchar *new_value,
-                     uint new_value_len, bool in_place_update = false);
+
+  // get cu pointer by its key.
   Cu *get_cu(std::string &key);
-  void add_cu(std::string key, std::unique_ptr<Cu> &cu);
-  ha_rows get_rows(TABLE *source_table);
-  bool is_empty() { return m_cus.empty(); }
+  Cu *get_cu(const char *&key);
+
+  /**create all cus needed by source table, and ready to write the data into.*/
+  int create_table_mem(const Rapid_load_context *context, const TABLE *source);
+
+  /** load the current table rows data into imcs. the caller's responsible
+   for moving to next row */
+  int load_table(const Rapid_load_context *context, const TABLE *source);
+
+  // unload the table rows data from imcs.
+  int unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
+                   bool error_if_not_loaded);
+
+  // insert a row into IMCS, where located at 'rowid'.
+  int insert_row(const Rapid_load_context *context, row_id_t rowid, uchar *buf);
+
+  // delete a row in IMCS by using its rowid.
+  int delete_row(const Rapid_load_context *context, row_id_t rowid);
+
+  // delete a row in IMCS by using its rowid.
+  int delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &rowids);
+
+  // update a row in IMCS by using its rowid.
+  int update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key, const uchar *new_field_data,
+                 size_t len);
+
+  int update_row(const Rapid_load_context *context,
+                 std::vector<std::tuple<row_id_t, std::string, std::unique_ptr<uchar[]>>> &upds);
 
  private:
-  // make ctor and dctor private.
-  Imcs();
-  virtual ~Imcs();
-
   Imcs(Imcs &&) = delete;
   Imcs(Imcs &) = delete;
   Imcs &operator=(const Imcs &) = delete;
   Imcs &operator=(const Imcs &&) = delete;
 
-  /*if this field has been loaded into rapid, then return its key,
-  or return empty string*/
-  inline std::string get_key_name(Field *field) {
-    std::ostringstream ostr;
-    ostr << field->table->s->db.str << ":" << *field->table_name << ":" << field->field_index();
-    std::string key_name = ostr.str();
-    auto elem = m_cus.find(key_name);
-    if (elem == m_cus.end()) {  // a new field. not found. not  be loaded.
-      return "";
-    } else
-      return key_name;
-
-    return "";
-  }
-
- private:
   // imcs instance
   static Imcs *m_instance;
+
+  // initialization flag.
+  std::atomic<uint8> m_inited{0};
+
   // initialization flag, only once.
   static std::once_flag one;
-  // cus in this imcs. <db+table+col, cu*>
-  Cu_map_t m_cus;
-  // imcu in this imcs. <db name + table name, imcu*>
-  Imcu_map_t m_imcus;
-  // used to keep all allocated imcus. key string: db_name + table_name.
-  // initialization flag.
-  std::atomic<uint8> m_inited{handler::NONE};
-};
 
+  // the loaded cus. key format: db + ':' + table_name + ':' + field_name.
+  std::unordered_map<std::string, std::unique_ptr<Cu>> m_cus;
+
+  // the current version of imcs.
+  uint m_version{SHANNON_RPD_VERSION};
+
+  const char *m_magic = "SHANNON_MAGIC_IMCS";
+};
 }  // namespace Imcs
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_IMCS_H__

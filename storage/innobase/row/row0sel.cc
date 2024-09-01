@@ -2671,7 +2671,7 @@ void row_sel_field_store_in_mysql_format_func(
       switch (prtype & DATA_SYS_PRTYPE_MASK) {
          case DATA_TRX_ID:
              id = mach_read_from_6(data);
-             memcpy(dest, &id, sizeof(ib_id_t));
+             memcpy(dest, &id, DATA_TRX_ID_LEN);
              break;
          case DATA_ROW_ID:
          case DATA_ROLL_PTR:

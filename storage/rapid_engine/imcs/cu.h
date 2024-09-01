@@ -19,13 +19,14 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. Column Unit.
 */
 #ifndef __SHANNONBASE_CU_H__
 #define __SHANNONBASE_CU_H__
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -41,7 +42,7 @@
 class Field;
 namespace ShannonBase {
 class ShannonBaseContext;
-class RapidContext;
+class Rapid_load_context;
 
 namespace Imcs {
 class Index;
@@ -49,101 +50,119 @@ class Dictionary;
 class Chunk;
 class Cu : public MemoryObject {
  public:
-  /**A Snapshot Metadata Unit (SMU) contains metadata and transactional
-   * information for an associated IMCU.*/
-  class Snapshot_meta_unit {};
-
+  using cu_fd_t = uint64;
   using Cu_header = struct alignas(CACHE_LINE_SIZE) Cu_header_t {
    public:
+    // physical row count. If you want to get logical rows, you should consider MVCC to decide
+    // that whether this phyical row is visiable or not to this transaction.
+    std::atomic<row_id_t> m_prows{0};
+    // a copy of source field info, only use its meta info. do NOT use it directly.
+    Field *m_source_fld{nullptr};
+
+    // field type of this cu.
+    enum_field_types m_type{MYSQL_TYPE_NULL};
+
     // whether the is not null or not.
     bool m_nullable{false};
+
     // encoding type. pls ref to:
     // https://dev.mysql.com/doc/heatwave/en/mys-hw-varlen-encoding.html
     // https://dev.mysql.com/doc/heatwave/en/mys-hw-dictionary-encoding.html
     Compress::Encoding_type m_encoding_type{Compress::Encoding_type::NONE};
-    // the index of field.
-    uint16 m_field_no{0};
-    // field type of this cu.
-    enum_field_types m_cu_type{MYSQL_TYPE_TINY};
+
     // local dictionary.
     std::unique_ptr<Compress::Dictionary> m_local_dict;
+
+    // charset info of this  CU.
+    const CHARSET_INFO *m_charset;
+
     // statistics info.
     std::atomic<double> m_max{0}, m_min{0}, m_middle{0}, m_median{0}, m_avg{0}, m_sum{0};
-    std::atomic<uint64> m_rows{0}, m_deleted_mark{0};
-    const CHARSET_INFO *m_charset;
-    std::unique_ptr<Snapshot_meta_unit> m_smu;
   };
 
-  explicit Cu(Field *field);
+  explicit Cu(const Field *field);
   virtual ~Cu();
   Cu(Cu &&) = delete;
   Cu &operator=(Cu &&) = delete;
 
-  // initialization. these're for internal.
-  uint rnd_init(bool scan);
-  // End of Rnd scan
-  uint rnd_end();
-  // writes the data into this chunk. length unspecify means calc by chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *data, uint length = 0);
-  // writes the data into this chunk at pos. length unspecify means calc by
-  // chunk.
-  uchar *write_data_direct(ShannonBase::RapidContext *context, const uchar *pos, const uchar *data, uint length = 0);
-  // reads the data by from address.
-  uchar *read_data_direct(ShannonBase::RapidContext *context, uchar *buffer);
-  // reads the data by rowid to buffer.
-  uchar *read_data_direct(ShannonBase::RapidContext *context, const uchar *rowid, uchar *buffer);
-  // deletes the data by rowid
-  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *rowid);
-  // deletes the data by pk
-  uchar *delete_data_direct(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len);
-  // deletes all
-  uchar *delete_all_direct();
-  // updates the data with rowid with the new data.
-  uchar *update_data_direct(ShannonBase::RapidContext *context, const uchar *rowid, const uchar *data, uint length = 0);
-  // flush the data to disk. by now, we cannot impl this part.
-  uint flush_direct(ShannonBase::RapidContext *context, const uchar *from = nullptr, const uchar *to = nullptr);
-  // does a gc operation of this CU.
-  uchar *GC(ShannonBase::RapidContext *context);
-  inline Compress::Dictionary *local_dictionary() const { return m_header->m_local_dict.get(); }
-  // gets its header.
-  Cu_header *get_header() { return m_header.get(); }
-  // gets the base address of chunks.
-  uchar *get_base();
-  // adds a new chunk into this cu.
-  void add_chunk(std::unique_ptr<Chunk> &chunk);
-  // gets the chunk with chunk id.
-  inline Chunk *get_chunk(uint chunkid) { return (chunkid < m_chunks.size()) ? m_chunks[chunkid].get() : nullptr; }
-  // gets the first chunk in this cu.
-  inline Chunk *get_first_chunk() { return get_chunk(0); }
-  // gets the last chunk in this cu
-  inline Chunk *get_last_chunk() { return get_chunk(m_chunks.size() - 1); }
-  // gets the how many chunks in this cu.
-  inline size_t get_chunk_nums() { return m_chunks.size(); }
-  // seek to the real logical physical addr by offset.
-  inline uchar *seek(ShannonBase::RapidContext *context, size_t offset);
-  // get the address by a PK.
-  inline uchar *lookup(ShannonBase::RapidContext *context, const uchar *pk, uint pk_len);
-  // the its index of this cu.
-  inline Index *get_index() { return m_index.get(); }
+  /** write the data to a cu. `data` the data will be written. returns the address
+  where the data wrote. the data append to tail of Cu. returns nullptr failed.*/
+  uchar *write_row(const Rapid_load_context *context, uchar *data, size_t len);
+
+  /** write the data to a cu. `data` the data will be written. returns the address
+   where the data wrote. the data append to tail of Cu. returns nullptr if failed.
+   otherwise, return addr of where the data written.*/
+  uchar *write_row_from_log(const Rapid_load_context *context, uchar *data, size_t len);
+
+  /** read the data from this Cu, traverse all chunks in cu to get the data from
+  where m_r_ptr locates. */
+  uchar *read_row(const Rapid_load_context *context, uchar *data, size_t len);
+
+  /** delete the data from this Cu, traverse all chunks in cu to delete the data from
+  where m_r_ptr locates. */
+  uchar *delete_row(const Rapid_load_context *context, uchar *data, size_t len);
+
+  // delete the row by rowid.
+  uchar *delete_row(const Rapid_load_context *context, row_id_t rowid);
+
+  // delete the data from this cu. all the records equal to data will be removed.
+  uchar *delete_row_from_log(const Rapid_load_context *context, uchar *data, size_t len);
+
+  // update the data located at rowid with new value-'data'.
+  uchar *update_row(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
+
+  // gets the base address of CU.
+  uchar *base();
+
+  // gets to the last address of CU.
+  uchar *last();
+
+  // get the chunk header.
+  Cu_header *header() {
+    std::scoped_lock lk(m_header_mutex);
+    return m_header.get();
+  }
+
+  // get the pointer of chunk with its id.
+  Chunk *chunk(uint id);
+
+  // get how many chunks in this CU.
+  inline uint32 chunks() const {
+    assert((m_header->m_prows.load() / SHANNON_ROWS_IN_CHUNK + 1) == m_chunks.size());
+    return m_chunks.size();
+  }
+
+  // get how many rows in this cu. Here, we dont care about MVCC. just physical rows.
+  row_id_t prows();
+
+  // returns the normalized length, the text type encoded with uint32.
+  size_t normalized_pack_length();
+
+  // return the real pack length: field->pack_length.
+  size_t pack_length();
 
  private:
-  bool init_header_info(const Field *field);
-  bool init_body_info(const Field *field);
-  bool update_statistics(double old_v, double new_v, OPER_TYPE type);
-  bool reset_statistics();
+  // get the field value. if field is string/text then return its stringid.
+  // or, do nothing.
+  uchar *get_field_value(uchar *&data, size_t &len, bool need_pack = false);
+
+  // upda the header info, such as row count, sum, avg, etc.
+  void update_meta_info(OPER_TYPE type, uchar *data);
 
  private:
-  uint m_magic{SHANNON_MAGIC_CU};
   // proctect header.
   std::mutex m_header_mutex;
   // header info of this Cu.
   std::unique_ptr<Cu_header> m_header{nullptr};
+
   // chunks in this cu.
   std::vector<std::unique_ptr<Chunk>> m_chunks;
-  // current chunk read.
-  std::atomic<uint32> m_current_chunk_id{0};
-  // index of Cu
-  std::unique_ptr<Index> m_index{nullptr};
+
+  // reader pointer.
+  std::atomic<uint32> m_current_chunk{0};
+
+  // magic number for CU.
+  const char *m_magic = "SHANNON_CU";
 };
 
 }  // namespace Imcs

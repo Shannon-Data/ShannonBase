@@ -32,14 +32,16 @@
 #include "sql-common/json_dom.h"  //Json_wrapper.
 #include "sql/current_thd.h"
 #include "sql/derror.h"  //ER_TH
+#include "sql/field.h"   //Field
 #include "sql/handler.h"
 #include "sql/mysqld.h"
 #include "sql/sql_base.h"
+#include "sql/sql_class.h"  //THD
 #include "sql/table.h"
 
 #include "ml_utils.h"                                       //ml utils
 #include "storage/innobase/include/ut0dbg.h"                //for ut_a
-#include "storage/rapid_engine/handler/ha_shannon_rapid.h"  //shannon rapid
+#include "storage/rapid_engine/include/rapid_status.h"      //loaded table.
 
 #include "LightGBM/c_api.h"
 // clang-format off

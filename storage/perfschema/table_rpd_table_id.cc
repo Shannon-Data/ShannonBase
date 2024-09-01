@@ -40,12 +40,12 @@
 #include "sql/field.h"
 #include "sql/plugin_table.h"
 #include "sql/table.h"
-#include "sql/sql_table.h" // meta_rpd_columns_infos
+#include "sql/sql_table.h" // rpd_columns_info
 
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
-#include "storage/rapid_engine/include/rapid_stats.h"
+#include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 /*
   Callbacks implementation for RPD_TABLE_ID.

@@ -36,21 +36,22 @@ namespace ShannonBase {
 
 int ParquetReader::open() { return 0; }
 int ParquetReader::close() { return 0; }
-int ParquetReader::read(ShannonBaseContext *context, uchar *buffer, size_t length) { return 0; }
-int ParquetReader::records_in_range(ShannonBaseContext *context, unsigned int index, key_range *min, key_range *max) {
+int ParquetReader::read(Secondary_engine_execution_context *context, uchar *buffer, size_t length) { return 0; }
+int ParquetReader::records_in_range(Secondary_engine_execution_context *context, unsigned int index, key_range *min,
+                                    key_range *max) {
   return 0;
 }
-int ParquetReader::index_read(ShannonBaseContext *context, uchar *buff, uchar *key, uint key_len,
+int ParquetReader::index_read(Secondary_engine_execution_context *context, uchar *buff, uchar *key, uint key_len,
                               ha_rkey_function find_flag) {
   return 0;
 }
-int ParquetReader::index_next(ShannonBaseContext *context, uchar *buff, size_t length) { return 0; }
-int ParquetReader::index_next_same(ShannonBaseContext *context, uchar *buff, uchar *key, uint key_len,
+int ParquetReader::index_next(Secondary_engine_execution_context *context, uchar *buff, size_t length) { return 0; }
+int ParquetReader::index_next_same(Secondary_engine_execution_context *context, uchar *buff, uchar *key, uint key_len,
                                    ha_rkey_function find_flag) {
   return 0;
 }
-int ParquetReader::index_general(ShannonBaseContext *context, uchar *buff, size_t length) { return 0; }
-int ParquetReader::write(ShannonBaseContext *context, uchar *buffer, size_t length) { return 0; }
+int ParquetReader::index_general(Secondary_engine_execution_context *context, uchar *buff, size_t length) { return 0; }
+int ParquetReader::write(Secondary_engine_execution_context *context, uchar *buffer, size_t length) { return 0; }
 uchar *ParquetReader::tell(uint field_index) { return nullptr; }
 uchar *ParquetReader::seek(size_t offset) { return nullptr; }
 

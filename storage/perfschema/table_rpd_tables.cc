@@ -39,12 +39,12 @@
 #include "sql/field.h"
 #include "sql/plugin_table.h"
 #include "sql/table.h"
-#include "sql/sql_table.h" // meta_rpd_columns_infos
+#include "sql/sql_table.h" // rpd_columns_info
 
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
-#include "storage/rapid_engine/include/rapid_stats.h"
+#include "storage/rapid_engine/include/rapid_status.h"
 /*
   Callbacks implementation for RPD_TABLES.
 */
@@ -132,7 +132,7 @@ void table_rpd_tables::reset_position() {
 }
 
 ha_rows table_rpd_tables::get_row_count() {
-  return ShannonBase::meta_rpd_columns_infos.size();
+  return ShannonBase::rpd_columns_info.size();
 }
 
 int table_rpd_tables::rnd_next() {
@@ -162,10 +162,10 @@ int table_rpd_tables::rnd_pos(const void *pos) {
 int table_rpd_tables::make_row(uint index[[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::meta_rpd_columns_infos.size()) {
+  if (index >= ShannonBase::rpd_columns_info.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.id = ShannonBase::meta_rpd_columns_infos[index].table_id;
+    m_row.id = ShannonBase::rpd_columns_info[index].table_id;
     m_row.snapshot_scn = 0;
     m_row.persisted_scn = 0;
     m_row.pool_type = 0;

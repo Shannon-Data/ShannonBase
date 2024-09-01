@@ -21,7 +21,7 @@
 
    The fundmental code for imcs.
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/imcs/imcu.h"
 
@@ -33,9 +33,6 @@
 namespace ShannonBase {
 namespace Imcs {
 Imcu::Imcu(const TABLE &table_arg) {
-  m_version_num = SHANNON_MAGIC_IMCU;
-  m_magic_num = SHANNON_MAGIC_IMCU;
-
   m_headers.m_avg = 0;
   m_headers.m_fields = 0;
   m_headers.m_max_value = std::numeric_limits<double>::lowest();

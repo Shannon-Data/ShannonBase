@@ -22,7 +22,7 @@
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
 
-   Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs. The chunk is used to store the data which
    transfer from row-based format to column-based format.
@@ -40,6 +40,7 @@
 class Field;
 class TABLE;
 namespace ShannonBase {
+class Rapid_load_context;
 namespace Populate {
 /**
  * To parse the redo log file, it used to populate the changes from ionnodb
@@ -51,98 +52,91 @@ class LogParser {
 
  private:
   ulint parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
-                            space_id_t *space_id, page_no_t *page_no,
-                            byte **body);
+                      space_id_t *space_id, page_no_t *page_no,
+                      byte **body);
 
   byte *parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr,
-                                          byte *end_ptr, space_id_t space_id,
-                                          page_no_t page_no, buf_block_t *block,
-                                          mtr_t *mtr, lsn_t start_lsn);
-  int parse_cur_rec_change_apply_low(
-      const rec_t *rec, const dict_index_t *index,
-      const dict_index_t *real_index,
-      const ulint *offsets, mlog_id_t type, bool all,
-      page_zip_des_t *page_zip = nullptr,              /**used for upd*/
-      const upd_t *upd = nullptr, trx_id_t trxid = 0); /**upd vector for upd*/
+                                    byte *end_ptr, space_id_t space_id,
+                                    page_no_t page_no, buf_block_t *block,
+                                    mtr_t *mtr, lsn_t start_lsn);
+
+  int parse_cur_rec_change_apply_low(Rapid_load_context* context,
+                                    const rec_t *rec, const dict_index_t *index,
+                                    const dict_index_t *real_index,
+                                    const ulint *offsets, mlog_id_t type, bool all,
+                                    page_zip_des_t *page_zip = nullptr,              /**used for upd*/
+                                    const upd_t *upd = nullptr, trx_id_t trxid = 0); /**upd vector for upd*/
 
   // parses the update log and apply.
-  byte *parse_and_apply_upd_rec_in_place(
-      rec_t *rec,                /*!< in/out: record where replaced */
-      const dict_index_t *index, /*!< in: the index the record belongs to */
-      const dict_index_t *real_index, /*!< in: the real index the record belongs to */
-      const ulint *offsets,      /*!< in: array returned by rec_get_offsets() */
-      const upd_t *update,       /*!< in: update vector */
-      page_zip_des_t *page_zip,  /*!< in: compressed page with enough space
-                                           available, or NULL */
-      trx_id_t trx_id);          /*!< in: new trx id*/
+  byte *parse_and_apply_upd_rec_in_place(Rapid_load_context* context,
+                                        rec_t *rec,                /*!< in/out: record where replaced */
+                                        const dict_index_t *index, /*!< in: the index the record belongs to */
+                                        const dict_index_t *real_index, /*!< in: the real index the record belongs to */
+                                        const ulint *offsets,      /*!< in: array returned by rec_get_offsets() */
+                                        const upd_t *update,       /*!< in: update vector */
+                                        page_zip_des_t *page_zip,  /*!< in: compressed page with enough space
+                                                                            available, or NULL */
+                                        trx_id_t trx_id);          /*!< in: new trx id*/
 
   // parses the insert log and apply insertion to rapid.
-  byte *parse_cur_and_apply_insert_rec(
-      bool is_short,       /*!< in: true if short inserts */
-      const byte *ptr,     /*!< in: buffer */
-      const byte *end_ptr, /*!< in: buffer end */
-      buf_block_t *block,  /*!< in: block or NULL */
-      page_t* page,        /*!< in: page or NULL */
-      page_zip_des_t* page_zip, /*!< in: page_zip or NULL */
-      dict_index_t *index, /*!< in: record descriptor */
-      mtr_t *mtr);         /*!< in: mtr or NULL */
+  byte *parse_cur_and_apply_insert_rec(bool is_short,       /*!< in: true if short inserts */
+                                       const byte *ptr,     /*!< in: buffer */
+                                       const byte *end_ptr, /*!< in: buffer end */
+                                       buf_block_t *block,  /*!< in: block or NULL */
+                                       page_t* page,        /*!< in: page or NULL */
+                                       page_zip_des_t* page_zip, /*!< in: page_zip or NULL */
+                                       dict_index_t *index, /*!< in: record descriptor */
+                                       mtr_t *mtr);         /*!< in: mtr or NULL */
 
-  byte *parse_cur_and_apply_delete_rec(
-      byte *ptr,           /*!< in: buffer */
-      byte *end_ptr,       /*!< in: buffer end */
-      buf_block_t *block,  /*!< in: page or NULL */
-      dict_index_t *index, /*!< in: record descriptor */
-      mtr_t *mtr);         /*!< in: mtr or NULL */
+  byte *parse_cur_and_apply_delete_rec(byte *ptr,           /*!< in: buffer */
+                                       byte *end_ptr,       /*!< in: buffer end */
+                                       buf_block_t *block,  /*!< in: page or NULL */
+                                       dict_index_t *index, /*!< in: record descriptor */
+                                       mtr_t *mtr);         /*!< in: mtr or NULL */
 
-  byte *parse_cur_and_apply_delete_mark_rec(
-      byte *ptr,           /*!< in: buffer */
-      byte *end_ptr,       /*!< in: buffer end */
-      buf_block_t *block,  /*!< in: page or NULL */
-      dict_index_t *index, /*!< in: record descriptor */
-      mtr_t *mtr);         /*!< in: mtr or NULL */
+  byte *parse_cur_and_apply_delete_mark_rec(byte *ptr,           /*!< in: buffer */
+                                            byte *end_ptr,       /*!< in: buffer end */
+                                            buf_block_t *block,  /*!< in: page or NULL */
+                                            dict_index_t *index, /*!< in: record descriptor */
+                                            mtr_t *mtr);         /*!< in: mtr or NULL */
 
-  byte *parse_cur_update_in_place_and_apply(
-      byte *ptr,                /*!< in: buffer */
-      byte *end_ptr,            /*!< in: buffer end */
-      buf_block_t *block,       /*!< in: block or NULL */
-      page_t* page,             /*!< in: page or NULL */
-      page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
-      dict_index_t *index);     /*!< in: index corresponding to page */
+  byte *parse_cur_update_in_place_and_apply(byte *ptr,                /*!< in: buffer */
+                                            byte *end_ptr,            /*!< in: buffer end */
+                                            buf_block_t *block,       /*!< in: block or NULL */
+                                            page_t* page,             /*!< in: page or NULL */
+                                            page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
+                                            dict_index_t *index);     /*!< in: index corresponding to page */
 
   /** Parses a log record of copying a record list end to a new created page.
   @return end of log record or NULL */
-  byte *parse_copy_rec_list_to_created_page(
-      byte *ptr,           /*!< in: buffer */
-      byte *end_ptr,       /*!< in: buffer end */
-      buf_block_t *block,  /*!< in: block or NULL */
-      page_t* page,        /*!< in: page or NULL */
-      page_zip_des_t* page_zip, /*!< in: page or NULL */
-      dict_index_t *index, /*!< in: record descriptor */
-      mtr_t *mtr);         /*!< in: mtr or NULL */
+  byte *parse_copy_rec_list_to_created_page(byte *ptr,           /*!< in: buffer */
+                                            byte *end_ptr,       /*!< in: buffer end */
+                                            buf_block_t *block,  /*!< in: block or NULL */
+                                            page_t* page,        /*!< in: page or NULL */
+                                            page_zip_des_t* page_zip, /*!< in: page or NULL */
+                                            dict_index_t *index, /*!< in: record descriptor */
+                                            mtr_t *mtr);         /*!< in: mtr or NULL */
 
   /** Parses a redo log record of reorganizing a page.
   @return end of log record or NULL */
-  byte *parse_btr_page_reorganize(
-      byte *ptr,           /*!< in: buffer */
-      byte *end_ptr,       /*!< in: buffer end */
-      dict_index_t *index, /*!< in: record descriptor */
-      bool compressed,     /*!< in: true if compressed page */
-      buf_block_t *block,  /*!< in: page to be reorganized, or NULL */
-      mtr_t *mtr);         /*!< in: mtr or NULL */
+  byte *parse_btr_page_reorganize(byte *ptr,           /*!< in: buffer */
+                                  byte *end_ptr,       /*!< in: buffer end */
+                                  dict_index_t *index, /*!< in: record descriptor */
+                                  bool compressed,     /*!< in: true if compressed page */
+                                  buf_block_t *block,  /*!< in: page to be reorganized, or NULL */
+                                  mtr_t *mtr);         /*!< in: mtr or NULL */
 
   /** Parses the redo log record for delete marking or unmarking of a secondary
   index record.
   @return end of log record or NULL */
-  byte *parse_btr_cur_del_mark_set_sec_rec(
-      byte *ptr,     /*!< in: buffer */
-      byte *end_ptr, /*!< in: buffer end */
-      page_t *page,  /*!< in/out: page or NULL */
-      page_zip_des_t *page_zip);
+  byte *parse_btr_cur_del_mark_set_sec_rec(byte *ptr,     /*!< in: buffer */
+                                           byte *end_ptr, /*!< in: buffer end */
+                                           page_t *page,  /*!< in/out: page or NULL */
+                                           page_zip_des_t *page_zip);
 
-  byte *parse_trx_undo_add_undo_rec(
-      byte *ptr,   /*!< in: buffer */
-      byte *end_ptr, /*!< in: buffer end */
-      page_t *page);  /*!< in: page or NULL */
+  byte *parse_trx_undo_add_undo_rec(byte *ptr,   /*!< in: buffer */
+                                    byte *end_ptr, /*!< in: buffer end */
+                                    page_t *page);  /*!< in: page or NULL */
 
   byte *parse_page_header(mlog_id_t type, const byte *ptr, const byte *end_ptr,
                           page_t *page, mtr_t *mtr);
@@ -194,6 +188,21 @@ class LogParser {
                                                    const page_id_t &page_id,
                                                    ulint parsed_bytes,
                                                    bool parse_only);
+  /** parse a rec and get all feidls data in mysql format and save these values
+   * into a vector. return the last field key name, all field values store in 
+   * 'feild_values'*/
+  std::string parse_rec_get_fields(Rapid_load_context* context,
+                                   const rec_t *rec, const dict_index_t *index,
+                                   const dict_index_t *real_index,
+                                   const ulint *offsets,
+                                   std::map<std::string, std::unique_ptr<uchar[]>>& feild_values);
+
+  /**to find a row in imcs. a row divids into fields, and store int a map.
+   * return position of first matched row.
+   * key_name [in] main search column name in 'db:table_name:field_name' format.
+   * field_values_to_find [in], the all fields values of a row to find */
+  row_id_t find_matched_row(Rapid_load_context* context, std::string& key_name,
+                            std::map<std::string, std::unique_ptr<uchar[]>>& field_values_to_find);
 };
 
 }  // namespace Populate

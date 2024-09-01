@@ -95,7 +95,7 @@ EXPLAIN
               "read_cost": "0.25",
               "eval_cost": "0.20",
               "prefix_cost": "0.45",
-              "data_read_per_join": "16"
+              "data_read_per_join": "20"
             }
           }
         }
@@ -158,7 +158,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.20",
                   "prefix_cost": "0.45",
-                  "data_read_per_join": "16"
+                  "data_read_per_join": "20"
                 }
               }
             }
@@ -323,7 +323,7 @@ EXPLAIN
                           "read_cost": "0.25",
                           "eval_cost": "0.40",
                           "prefix_cost": "3.38",
-                          "data_read_per_join": "32"
+                          "data_read_per_join": "40"
                         }
                       }
                     }

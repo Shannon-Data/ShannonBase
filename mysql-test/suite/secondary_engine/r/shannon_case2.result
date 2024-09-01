@@ -36,9 +36,10 @@ count(score)	gender
 4	m
 select sum(score), gender from tt1 group by gender order by gender;
 sum(score)	gender
-26	f
+52	f
 44	m
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 sum(score)	gender
+52	f
 44	m
 drop database sh_test2;

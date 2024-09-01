@@ -35,6 +35,8 @@
 #include "include/my_inttypes.h"
 #include "sql/field.h"  //Field
 
+#include "storage/rapid_engine/include/rapid_object.h"  // bit_array_t
+
 class TABLE;
 class Field;
 class key_range;
@@ -61,6 +63,11 @@ class Util {
   static int get_range_value(enum_field_types, Compress::Dictionary *&, key_range *, key_range *, double &, double &);
   static int mem2string(uchar *buff, uint length, std::string &result);
 
+  // convert a string padding format(with padding). if the length is less then pack
+  // length, then padding the string with `space`(0x20) with dest charset.
+  static uchar *pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, uchar *to, size_t to_length,
+                         const CHARSET_INFO *to_cs);
+
   inline static std::string get_key_name(Field *field) {
     std::ostringstream ostr;
     ostr << field->table->s->db.str << ":" << *field->table_name << ":" << field->field_name;
@@ -71,6 +78,22 @@ class Util {
     std::ostringstream ostr;
     ostr << db_name << ":" << table_name << ":" << field_name;
     return ostr.str();
+  }
+
+  // check Nth is 1 or not.
+  inline static bool bit_array_get(bit_array_t *ba, size_t n) {
+    if (!ba) return false;
+
+    size_t byte_index = n / 8;
+    size_t bit_index = n % 8;
+    return (ba->data[byte_index] & (1 << bit_index)) != 0;
+  }
+
+  // set Nth is 1.
+  inline static void bit_array_set(bit_array_t *ba, size_t n) {
+    size_t byte_index = n / 8;
+    size_t bit_index = n % 8;
+    ba->data[byte_index] |= (1 << bit_index);
   }
 };
 
