@@ -49,21 +49,36 @@ namespace Imcs {
  */
 static unsigned long rapid_allocated_mem_size{0};
 Chunk::Chunk(const Field *field) {
-  auto pack_length = field->pack_length();
+  m_header = std::make_unique<Chunk_header>();
+  ut_a(m_header);
+  m_header->m_pack_length = field->pack_length();
+
+  auto normalized_pack_length = field->pack_length();
   switch (field->type()) {
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_VARCHAR:
       /**if this is a string type, it will be use local dictionary encoding, therefore,
        * using stringid as field value. */
-      pack_length = sizeof(uint32);
+      normalized_pack_length = sizeof(uint32);
       break;
     default:
       break;
   }
+  m_header->m_normailzed_pack_length = normalized_pack_length;
+  m_header->m_source_fld = field->clone(&rapid_mem_root);
+  m_header->m_type = field->type();
 
-  auto chunk_size = SHANNON_ROWS_IN_CHUNK * pack_length;
+  /** there's null values in, therefore, alloc the null bitmap, and del bit map will
+   * lazy allocated.*/
+  if (field->is_nullable()) {
+    m_header->m_null_mask = std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
+  }
 
+  // the SMU ptr. just like rollback ptr.
+  m_header->m_smu = std::make_unique<Snapshot_meta_unit>();
+
+  auto chunk_size = SHANNON_ROWS_IN_CHUNK * m_header->m_normailzed_pack_length;
   ut_ad(field && chunk_size < ShannonBase::rpd_mem_sz_max);
 
   /**m_data_base，here, we use the same psi key with buffer pool which used in
@@ -87,21 +102,6 @@ Chunk::Chunk(const Field *field) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
     return;
   }
-
-  m_header = std::make_unique<Chunk_header>();
-  ut_a(m_header);
-  m_header->m_source_fld = field->clone(&rapid_mem_root);
-  m_header->m_type = field->type();
-  m_header->m_normailzed_pack_length = pack_length;
-
-  /** there's null values in, therefore, alloc the null bitmap, and del bit map will
-   * lazy allocated.*/
-  if (field->is_nullable()) {
-    m_header->m_null_mask = std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
-  }
-
-  // the SMU ptr. just like rollback ptr.
-  m_header->m_smu = std::make_unique<Snapshot_meta_unit>();
 }
 
 Chunk::~Chunk() {
@@ -212,6 +212,7 @@ uchar *Chunk::read(uchar *data, size_t len) {
     return nullptr;
   }
 
+  ut_a(len == m_header->m_normailzed_pack_length);
   auto ret = reinterpret_cast<uchar *>(std::memcpy(data, m_rdata, len));
   m_rdata.fetch_add(len);
 
@@ -230,12 +231,8 @@ uchar *Chunk::write(uchar *data, size_t len) {
      * mask, then writting a placehold to chunk, we dont care about what read data
      * was written down.*/
     Utils::Util::bit_array_set(m_header->m_null_mask.get(), m_header->m_prows);
-    // if the field type is text type, then using dictionar encoding alg to encode it.
-    if (m_header->m_source_fld->type() == MYSQL_TYPE_VARCHAR || m_header->m_source_fld->type() == MYSQL_TYPE_STRING ||
-        m_header->m_source_fld->type() == MYSQL_TYPE_VAR_STRING)
-      len = sizeof(uint32);  // has been encoded by local dictionary.
-    else
-      len = m_header->m_source_fld->pack_length();
+
+    len = m_header->m_normailzed_pack_length;
     data = (uchar *)SHANNON_NULL_PLACEHOLDER;
   }
 
@@ -257,7 +254,26 @@ uchar *Chunk::write(uchar *data, size_t len) {
   return ret;
 }
 
-uchar *Chunk::update(uchar *where, uchar *new_data, size_t len) { return where; }
+uchar *Chunk::update(row_id_t where, uchar *new_data, size_t len) {
+  ut_a((!new_data && len == UNIV_SQL_NULL) || (new_data && len != UNIV_SQL_NULL));
+  check_data_type(len);
+
+  ut_a(where < m_header->m_prows);
+
+  auto where_ptr = m_base + where * m_header->m_normailzed_pack_length;
+  if (len == UNIV_SQL_NULL) {
+    Utils::Util::bit_array_set(m_header->m_null_mask.get(), where);
+    len = m_header->m_normailzed_pack_length;
+    std::memcpy(where_ptr, reinterpret_cast<void *>((uchar *)SHANNON_BLANK_PLACEHOLDER), len);
+  } else {
+    len = m_header->m_normailzed_pack_length;
+    std::memcpy(where_ptr, new_data, len);
+  }
+
+  update_meta_info(ShannonBase::OPER_TYPE::OPER_UPDATE, new_data);
+
+  return where_ptr;
+}
 
 uchar *Chunk::del(uchar *data, size_t len) {
   ut_a(data && len == m_header->m_source_fld->pack_length());

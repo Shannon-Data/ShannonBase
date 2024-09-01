@@ -36,7 +36,6 @@
 #include "my_inttypes.h"
 #include "sql/field.h"
 #include "sql/handler.h"
-
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -46,10 +45,11 @@ namespace ShannonBase {
 class Rapid_load_context;
 namespace Imcs {
 class DataTable;
-/** An IMCS is consist of CUs. Some chunks are made of a CU. Header and body is two parts of a CU.
- *  Header has meta information about this CU, and the body has the read data. All chunks stored
- *  consecutively in a CU.  key format of a  CU is listed as following: `db_name_str` + ":" +
- *  `table_name_str` + ":" + `field_index`. */
+/** An IMCS is consist of CUs. Some chunks are made of a CU. Header and body is
+ * two parts of a CU. Header has meta information about this CU, and the body
+ * has the read data. All chunks stored consecutively in a CU.  key format of a
+ * CU is listed as following: `db_name_str` + ":" + `table_name_str` + ":" +
+ * `field_index`. */
 class Imcs : public MemoryObject {
  public:
   // make ctor and dctor private.
@@ -90,12 +90,15 @@ class Imcs : public MemoryObject {
   // delete a row in IMCS by using its rowid.
   int delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &rowids);
 
-  // update a row in IMCS by using its rowid.
+  // update a cu in IMCS by using its rowid.
   int update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key, const uchar *new_field_data,
-                 size_t len);
+                 size_t nlen);
 
-  int update_row(const Rapid_load_context *context,
-                 std::vector<std::tuple<row_id_t, std::string, std::unique_ptr<uchar[]>>> &upds);
+  /** row_id[in], which row will be updated.
+   *  upd_recs[in], new values of updating row at row_id.
+   */
+  int update_row(const Rapid_load_context *context, row_id_t row_id,
+                 std::map<std::string, std::unique_ptr<uchar[]>> &upd_recs);
 
  private:
   Imcs(Imcs &&) = delete;

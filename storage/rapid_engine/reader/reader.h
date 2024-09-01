@@ -29,6 +29,7 @@
 #ifndef __SHANNONBASE_READER_READER_H__
 #define __SHANNONBASE_READER_READER_H__
 #include <string>
+
 #include "include/my_inttypes.h"
 #include "sql/sql_lex.h"
 #include "storage/rapid_engine/include/rapid_object.h"

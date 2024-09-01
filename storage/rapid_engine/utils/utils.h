@@ -33,8 +33,7 @@
 
 #include "include/field_types.h"
 #include "include/my_inttypes.h"
-#include "sql/field.h"  //Field
-
+#include "sql/field.h"                                  //Field
 #include "storage/rapid_engine/include/rapid_object.h"  // bit_array_t
 
 class TABLE;
@@ -63,8 +62,8 @@ class Util {
   static int get_range_value(enum_field_types, Compress::Dictionary *&, key_range *, key_range *, double &, double &);
   static int mem2string(uchar *buff, uint length, std::string &result);
 
-  // convert a string padding format(with padding). if the length is less then pack
-  // length, then padding the string with `space`(0x20) with dest charset.
+  // convert a string padding format(with padding). if the length is less then
+  // pack length, then padding the string with `space`(0x20) with dest charset.
   static uchar *pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, uchar *to, size_t to_length,
                          const CHARSET_INFO *to_cs);
 

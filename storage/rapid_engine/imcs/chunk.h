@@ -33,7 +33,6 @@
 #include "my_inttypes.h"
 #include "sql/field.h"  //Field
 #include "sql/sql_class.h"
-
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
@@ -46,8 +45,8 @@ namespace Imcs {
  * The format of rows is following: (ref to:
  * https://github.com/Shannon-Data/ShannonBase/issues/8)
  * Every chunk has some validity bitmap in its header. they are used to describ
- * whether data is null or valid in this position. and all text data are encoding
- *  with dictionarycompression algorithm. */
+ * whether data is null or valid in this position. and all text data are
+ * encoding with dictionarycompression algorithm. */
 template <typename T>
 struct chunk_deleter_helper {
   void operator()(T *ptr) {
@@ -63,11 +62,15 @@ class Chunk : public MemoryObject {
 
   using Chunk_header = struct alignas(CACHE_LINE_SIZE) Chunk_header_t {
    public:
-    // a copy of source field info, only use its meta info. do NOT use it directly.
+    // a copy of source field info, only use its meta info. do NOT use it
+    // directly.
     Field *m_source_fld;
 
     // data type in mysql.
     enum_field_types m_type{MYSQL_TYPE_NULL};
+
+    // original pack length
+    size_t m_pack_length;
 
     // normalized pack length.
     size_t m_normailzed_pack_length{0};
@@ -92,8 +95,9 @@ class Chunk : public MemoryObject {
     std::atomic<double> m_avg{0};
     std::atomic<double> m_sum{0};
 
-    // physical row count. If you want to get logical rows, you should consider MVCC to decide
-    // that whether this phyical row is visiable or not to this transaction.
+    // physical row count. If you want to get logical rows, you should consider
+    // MVCC to decide that whether this phyical row is visiable or not to this
+    // transaction.
     std::atomic<uint64> m_prows{0};
   };
 
@@ -141,7 +145,7 @@ class Chunk : public MemoryObject {
    * [in] new_dat, the data value to update.
    * [in] len, the data len.
    * return the address where the data update start from.*/
-  uchar *update(uchar *where, uchar *new_data, size_t len);
+  uchar *update(row_id_t where, uchar *new_data, size_t len);
 
   /**start to delete the data to chunk. just mark it down.
    * [in] data, the data to delete.

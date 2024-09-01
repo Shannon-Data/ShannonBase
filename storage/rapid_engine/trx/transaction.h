@@ -62,8 +62,8 @@ class Transaction : public MemoryObject {
 
  private:
   THD *m_thd;
-  /**here, we use innodb's trx as ours. in future, we will impl rpl own transaction.
-   * But, now that, we use innodb's.*/
+  /**here, we use innodb's trx as ours. in future, we will impl rpl own
+   * transaction. But, now that, we use innodb's.*/
   trx_t *m_trx_impl{nullptr};
   ISOLATION_LEVEL m_iso_level{ISOLATION_LEVEL::READ_REPEATABLE};
 };

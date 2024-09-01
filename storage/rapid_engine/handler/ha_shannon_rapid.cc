@@ -26,6 +26,7 @@
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 
 #include <stddef.h>
+
 #include <algorithm>
 #include <cassert>
 #include <map>
@@ -53,11 +54,7 @@
 #include "sql/sql_lex.h"
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
-#include "template_utils.h"
-#include "thr_lock.h"
-
-#include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
-
+#include "storage/innobase/handler/ha_innodb.h"        //thd_to_trx
 #include "storage/rapid_engine/imcs/data_table.h"      //DataTable
 #include "storage/rapid_engine/imcs/imcs.h"            // IMCS
 #include "storage/rapid_engine/include/rapid_const.h"  //const
@@ -66,6 +63,8 @@
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/trx/transaction.h"
 #include "storage/rapid_engine/utils/utils.h"
+#include "template_utils.h"
+#include "thr_lock.h"
 
 namespace dd {
 class Table;
@@ -166,8 +165,8 @@ handler::Table_flags ha_rapid::table_flags() const {
   // return HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE |
   //               HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
 
-  // TODO:[remove when index supported] Secondary engines do not support index access.
-  // Indexes are only used for cost estimates.
+  // TODO:[remove when index supported] Secondary engines do not support index
+  // access. Indexes are only used for cost estimates.
   return HA_NO_INDEX_ACCESS;
 }
 
@@ -354,7 +353,8 @@ static int rapid_commit(handlerton *hton,  /*!< in: handlerton */
                                             false - the current SQL statement
                                             ended */
 
-  // here, we do not do anything in rapid engine, all the logics were done in innodb.
+  // here, we do not do anything in rapid engine, all the logics were done in
+  // innodb.
   return 0;
 }
 
@@ -367,7 +367,8 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
                           bool rollback_trx) { /*!< in: true - rollback entire
                                               transaction false - rollback the
                                               current statement only */
-  // here, we do not do anything in rapid engine, all the logics were done in innodb.
+  // here, we do not do anything in rapid engine, all the logics were done in
+  // innodb.
   return 0;
 }
 
@@ -393,7 +394,8 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
   // here, the trx should be regiestered in innodb.
   assert(trx_is_registered_for_2pc(trx));
 
-  if (!trx_is_started(trx)) {  // maybe the some error in primary engine. it should be started. here,in case.
+  if (!trx_is_started(trx)) {  // maybe the some error in primary engine. it
+                               // should be started. here,in case.
     trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
     if (trx->isolation_level == TRX_ISO_REPEATABLE_READ) trx_assign_read_view(trx);
   }
@@ -451,8 +453,8 @@ static void AssertSupportedPath(const AccessPath *path) {
     case AccessPath::NESTED_LOOP_JOIN: /* purecov: deadcode */
     case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
     case AccessPath::BKA_JOIN:
-    // Index access is disabled in ha_rapid::table_flags(), so we should see none
-    // of these access types.
+    // Index access is disabled in ha_rapid::table_flags(), so we should see
+    // none of these access types.
     case AccessPath::INDEX_SCAN:
     case AccessPath::REF:
     case AccessPath::REF_OR_NULL:
@@ -554,7 +556,8 @@ static SHOW_VAR rapid_status_variables[] = {
 
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
-/** Callback function for accessing the Rapid variables from MySQL:  SHOW VARIABLES. */
+/** Callback function for accessing the Rapid variables from MySQL:  SHOW
+ * VARIABLES. */
 static int show_rapid_vars(THD *, SHOW_VAR *var, char *) {
   // gets the latest variables of shannonbase rapid.
   var->type = SHOW_ARRAY;

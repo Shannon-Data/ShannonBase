@@ -191,7 +191,7 @@ class LogParser {
   /** parse a rec and get all feidls data in mysql format and save these values
    * into a vector. return the last field key name, all field values store in 
    * 'feild_values'*/
-  std::string parse_rec_get_fields(Rapid_load_context* context,
+  std::string parse_rec_fields(Rapid_load_context* context,
                                    const rec_t *rec, const dict_index_t *index,
                                    const dict_index_t *real_index,
                                    const ulint *offsets,
@@ -200,9 +200,11 @@ class LogParser {
   /**to find a row in imcs. a row divids into fields, and store int a map.
    * return position of first matched row.
    * key_name [in] main search column name in 'db:table_name:field_name' format.
-   * field_values_to_find [in], the all fields values of a row to find */
-  row_id_t find_matched_row(Rapid_load_context* context, std::string& key_name,
-                            std::map<std::string, std::unique_ptr<uchar[]>>& field_values_to_find);
+   * field_values_to_find [in], the all fields values of a row to find
+   * with_sys_col[in], sys col to do comparision or not. */
+  int find_matched_rows(Rapid_load_context* context, std::string& key_name, bool with_sys_col,
+                            std::map<std::string, std::unique_ptr<uchar[]>>& field_values_to_find,
+                            std::set<std::string>& ignore_field, std::vector<row_id_t>& matched_rows);
 };
 
 }  // namespace Populate
