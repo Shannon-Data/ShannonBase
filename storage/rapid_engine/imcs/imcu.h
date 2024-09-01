@@ -56,7 +56,6 @@
 #include "my_inttypes.h"
 #include "my_list.h"    //for LIST
 #include "sql/table.h"  //for TABLE
-
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/cu.h"

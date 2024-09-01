@@ -32,6 +32,7 @@
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+
 #include "include/my_inttypes.h"
 #include "include/mysql/strings/m_ctype.h"  //CHARSET_INFO
 #include "include/sql_string.h"             //String
@@ -62,8 +63,8 @@ class Dictionary {
   // the encoding type of this dictionary used.
   Encoding_type m_encoding_type{Encoding_type::NONE};
 
-  // compressed cotent string mapp, key: compressed string, value: compressed string id in
-  // this map.
+  // compressed cotent string mapp, key: compressed string, value: compressed
+  // string id in this map.
   std::map<std::string, uint64> m_content;
 
   // string id<--> original string. for access accleration.

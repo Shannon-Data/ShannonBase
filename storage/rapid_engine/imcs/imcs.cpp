@@ -192,24 +192,24 @@ int Imcs::delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &
 }
 
 int Imcs::update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
-                     const uchar *new_field_data, size_t len) {
+                     const uchar *new_field_data, size_t nlen) {
   ut_a(context);
 
   ut_a(m_cus[field_key].get());
-  auto ret = m_cus[field_key].get()->update_row(context, rowid, const_cast<uchar *>(new_field_data), len);
+  auto ret = m_cus[field_key].get()->update_row(context, rowid, const_cast<uchar *>(new_field_data), nlen);
   if (!ret) return HA_ERR_GENERIC;
   return 0;
 }
 
-int Imcs::update_row(const Rapid_load_context *context,
-                     std::vector<std::tuple<row_id_t, std::string, std::unique_ptr<uchar[]>>> &upds) {
+int Imcs::update_row(const Rapid_load_context *context, row_id_t row_id,
+                     std::map<std::string, std::unique_ptr<uchar[]>> &upd_recs) {
   ut_a(context);
-  for (auto &upd : upds) {
-    auto rowid [[maybe_unused]] = std::get<0>(upd);
-    auto field_key [[maybe_unused]] = std::get<1>(upd);
-    auto field_data [[maybe_unused]] = std::get<2>(upd).get();
-    // do update operation here.
+
+  for (auto &rec : upd_recs) {
+    auto pack_length = m_cus[rec.first]->pack_length();
+    if (!m_cus[rec.first]->update_row(context, row_id, rec.second.get(), pack_length)) return HA_ERR_GENERIC;
   }
+
   return 0;
 }
 

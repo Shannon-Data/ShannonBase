@@ -82,6 +82,7 @@ jobs:
         -DWITH_SSL_PATH=/usr/include/openssl/ \
         -DDEFAULT_SET=community \
         -DWITH_UNIT_TESTS=OFF \
+        -DWITH_HYPERGRAPH_OPTIMIZER=ON \
         -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j5 && \
         sed -i '61s/^/#/' cmake_install.cmake && sed -i '62s/^/#/' cmake_install.cmake && sed -i '63s/^/#/' cmake_install.cmake && \
         sudo make install

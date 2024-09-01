@@ -28,7 +28,6 @@
 
 #include "include/trx0types.h"  //trx_id_t
 #include "sql/sql_lex.h"        //Secondary_engine_execution_context
-
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 

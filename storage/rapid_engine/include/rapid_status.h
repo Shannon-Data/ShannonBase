@@ -84,7 +84,8 @@ class LoadedTables {
 // all the loaded tables information.
 extern LoadedTables *shannon_loaded_tables;
 
-// all column infos of all loaded tables, which's used for performance_schema.rpd_column_xxx.
+// all column infos of all loaded tables, which's used for
+// performance_schema.rpd_column_xxx.
 extern rpd_columns_container rpd_columns_info;
 
 // the max memory size of rpd engine, initialized in xx_rapid.cc
