@@ -28,7 +28,8 @@
 #include <string>
 
 #include "include/my_inttypes.h"
-#include "include/thr_lock.h"     //TL_READ
+#include "include/thr_lock.h"  //TL_READ
+#include "mysqld_error.h"
 #include "sql-common/json_dom.h"  //Json_wrapper.
 #include "sql/current_thd.h"
 #include "sql/derror.h"  //ER_TH
@@ -36,7 +37,6 @@
 #include "sql/mysqld.h"
 #include "sql/sql_base.h"
 #include "sql/table.h"
-#include "mysqld_error.h"
 
 #include "ml_utils.h"                                       //ml utils
 #include "storage/innobase/include/ut0dbg.h"                //for ut_a

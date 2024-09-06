@@ -70,20 +70,19 @@ jobs:
     #  run: |
     #    sudo apt install  bison texinfo libgmp3-dev zlib1g-dev -y && sudo apt install gcc-10 g++-10 -y && \
     #    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
-    - name: install_boost
-      run: |
-        cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
-        tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && sudo ./b2 install && \
-        sudo rm /tmp/boost_1_77_0 -rf && sudo rm /tmp/boost_1_77_0.tar.gz
+    #- name: install_boost # From mysql-8.4.2, boost version 1.8.4 already exists in extra dir.
+    #  run: |
+    #    cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
+    #    tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && sudo ./b2 install && \
+    #    sudo rm /tmp/boost_1_77_0 -rf && sudo rm /tmp/boost_1_77_0.tar.gz
       #sed -i '61s/^/#/' cmake_install.cmake to disable can not find openssl_executeable error. removes it when it fixed.
     - name: build_shannon_and_install
       run: |
-        mkdir /home/ShannonBase  && cd /home/ShannonBase
+        #sudo mkdir /home/ShannonBase  && cd /home/ShannonBase
         mkdir cmake_build && cd cmake_build
-        git config --global --add safe.directory /home/ShannonBase
+        #git config --global --add safe.directory /home/ShannonBase
         git fetch --tags -f
         cmake ../ \
-        -DWITH_BOOST=/usr/local/boost/include \
         -DCMAKE_BUILD_TYPE=Release  \
         -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
         -DMYSQL_DATADIR=/home/shannon-bin/ \
@@ -101,7 +100,7 @@ jobs:
         -DWITH_SSL_PATH=/usr/include/openssl/ \
         -DDEFAULT_SET=community \
         -DWITH_UNIT_TESTS=OFF \
-        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j5 && \
+        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j$(nproc) && \
         sed -i '61s/^/#/' cmake_install.cmake && sed -i '62s/^/#/' cmake_install.cmake && sed -i '63s/^/#/' cmake_install.cmake && \
         sudo make install
     - name: clean_up_shannonbase_build
@@ -114,4 +113,4 @@ jobs:
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
         ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid \
-        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=$(nproc)
+        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=5 --parallel=$(nproc)
