@@ -20,6 +20,7 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
+
 INCLUDE_DIRECTORIES(SYSTEM ${BOOST_PATCHES_DIR} ${BOOST_INCLUDE_DIR})
 
 ADD_WSHADOW_WARNING()
@@ -986,18 +987,14 @@ ADD_DEPENDENCIES(sql_dd GenKeywordList)
 TARGET_LINK_LIBRARIES(sql_dd sql_gis sql_main)
 SET_TARGET_PROPERTIES(sql_dd PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
-INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/include/)
-LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/lib)
 ADD_LIBRARY(sql_ml STATIC ${ML_SOURCES})
-LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/ml/)
-TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC
-                          ${CMAKE_SOURCE_DIR}/extra/rapidjson/include
-                          ${CMAKE_SOURCE_DIR}/ml/3rd_party/lightgbm/include/)
-TARGET_LINK_LIBRARIES(sql_ml _lightgbm)
+#gomp required by lightgbm
+TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp)
+TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC 
+                           ${CMAKE_SOURCE_DIR}/extra/lightgbm/LightGBM/include 
+                           ${CMAKE_SOURCE_DIR}/extra/jerryscript/jerry-core/include)
 SET_TARGET_PROPERTIES(sql_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
-INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/extra/jerryscript/include/)
-LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/extra/jerryscript/lib)
 #
 # On Windows platform we compile in the client-side Windows Native Authentication
 # plugin which is used by the client connection code included in the server.
