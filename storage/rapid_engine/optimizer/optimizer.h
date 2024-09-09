@@ -29,6 +29,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "storage/rapid_engine/include/rapid_object.h"
