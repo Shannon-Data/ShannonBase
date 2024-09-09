@@ -39,7 +39,7 @@ jobs:
   lint:
     name: lint
     # if: ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-testing') && github.event.pull_request.merged != true }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,17 +59,13 @@ jobs:
 
   build:
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: install_lib
       run: |
-        sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev libudev-dev g++ libbison-dev flex clang-format lcov pkg-config \
-        cmake zlib1g-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev -y
-    #- name: install_gcc
-    #  run: |
-    #    sudo apt install  bison texinfo libgmp3-dev zlib1g-dev -y && sudo apt install gcc-10 g++-10 -y && \
-    #    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
+        sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev libudev-dev libbison-dev flex clang-format lcov pkg-config \
+        cmake zlib1g-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev libtirpc-dev -y
     - name: install_boost
       run: |
         cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
@@ -78,9 +74,9 @@ jobs:
       #sed -i '61s/^/#/' cmake_install.cmake to disable can not find openssl_executeable error. removes it when it fixed.
     - name: build_shannon_and_install
       run: |
-        mkdir /home/ShannonBase  && cd /home/ShannonBase
+        cd ${{ github.workspace }}
         mkdir cmake_build && cd cmake_build
-        git config --global --add safe.directory /home/ShannonBase
+        git config --global --add safe.directory ${{ github.workspace }}
         git fetch --tags -f
         cmake ../ \
         -DWITH_BOOST=/usr/local/boost/include \
@@ -98,12 +94,10 @@ jobs:
         -DWITH_LIBEVENT=bundled \
         -DEXTRA_CHARSETS=all \
         -DWITH_PROTOBUF=bundled \
-        -DWITH_SSL_PATH=/usr/include/openssl/ \
         -DDEFAULT_SET=community \
         -DWITH_UNIT_TESTS=OFF \
         -DWITH_HYPERGRAPH_OPTIMIZER=ON \
         -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j5 && \
-        sed -i '61s/^/#/' cmake_install.cmake && sed -i '62s/^/#/' cmake_install.cmake && sed -i '63s/^/#/' cmake_install.cmake && \
         sudo make install
     - name: clean_up_shannonbase_build
       run: |
@@ -114,5 +108,6 @@ jobs:
         sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
-        ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid \
-        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=0 --parallel=$(nproc)
+        ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
+        information_schema \
+        --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
