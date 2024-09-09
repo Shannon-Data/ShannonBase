@@ -52,7 +52,7 @@
 #include "sql/system_variables.h"
 #include "sql/table.h"
 
-#include "extra/jerryscript/include/jerryscript.h"  //for jerryscript
+#include "extra/jerryscript/jerry-core/include/jerryscript.h"  //for jerryscript
 class Field;
 class Item;
 class Item_trigger_field;

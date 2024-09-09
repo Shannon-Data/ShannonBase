@@ -21,7 +21,8 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
 MESSAGE(STATUS "Running cmake version ${CMAKE_VERSION}")
-
+add_subdirectory(extra/lightgbm/LightGBM)
+add_subdirectory(extra/jerryscript)
 IF(WIN32)
   # Load policies. This is needed in order to parse the wmic version check.
   CMAKE_MINIMUM_REQUIRED(VERSION 3.5.1)

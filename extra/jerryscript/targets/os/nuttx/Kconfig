@@ -1,0 +1,20 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config INTERPRETERS_JERRYSCRIPT
+	bool "Jerryscript JavaScript engine"
+	default n
+
+if INTERPRETERS_JERRYSCRIPT
+
+config INTERPRETERS_JERRYSCRIPT_PRIORITY
+	int "Jerryscript priority"
+	default 100
+
+config INTERPRETERS_JERRYSCRIPT_STACKSIZE
+	int "Jerryscript stack size"
+	default 16384
+
+endif # INTERPRETERS_JERRYSCRIPT

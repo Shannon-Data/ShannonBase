@@ -43,7 +43,8 @@
 #include "storage/innobase/include/ut0dbg.h"                //for ut_a
 #include "storage/rapid_engine/include/rapid_status.h"      //loaded table.
 
-#include "LightGBM/c_api.h"
+#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
+
 // clang-format off
 // clang-format on
 namespace ShannonBase {
