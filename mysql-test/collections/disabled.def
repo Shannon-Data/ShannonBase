@@ -124,6 +124,3 @@ group_replication.gr_xa_commit_failure_before_gtid_externalization @windows : BU
 group_replication.gr_xa_commit_one_phase_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 group_replication.gr_xa_prepare_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
 group_replication.gr_xa_rollback_failure_before_gtid_externalization @windows : BUG#34155238 Disabled until bug is fixed
-
-# shannonbase disabled we dont support myisam engine and dont test it anaymore
-main.mysql_load_data_local_dir : WL#123456 2024-01-05 shannonbase disable mysisam will be fixed
