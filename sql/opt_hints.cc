@@ -1,16 +1,15 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -896,7 +895,7 @@ bool hint_key_state(const THD *thd, const Table_ref *table, uint keyno,
   if (table_hints && keyno != MAX_KEY) {
     Opt_hints_key *key_hints = table_hints->keyinfo_array.size() > 0
                                    ? table_hints->keyinfo_array[keyno]
-                                   : nullptr;
+                                   : NULL;
     bool ret_val = false;
     if (get_hint_state(key_hints, table_hints, type_arg, &ret_val))
       return ret_val;

@@ -1,25 +1,25 @@
 # Adding debug point 'use_old_heartbeat_version' to @@GLOBAL.debug
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
 [connection slave]
-include/rpl/stop_replica.inc
+include/stop_slave.inc
 CHANGE REPLICATION SOURCE TO SOURCE_HEARTBEAT_PERIOD = 2;
-include/rpl/start_replica.inc
+include/start_slave.inc
 [connection master]
 CREATE TABLE t(s int);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 [connection master]
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 [connection master]
 include/assert_grep.inc [Found heartbeat related message in the error log]
 # Removing debug point 'use_old_heartbeat_version' from @@GLOBAL.debug
 INSERT INTO t VALUES(10);
 include/assert_grep.inc [Found heartbeat related message in the error log]
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 [connection master]
 DROP TABLE t;
-include/rpl/sync_to_replica.inc
-include/rpl/deinit.inc
+include/sync_slave_sql_with_master.inc
+include/rpl_end.inc

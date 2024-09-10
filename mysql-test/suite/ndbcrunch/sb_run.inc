@@ -13,9 +13,6 @@ if ($bench_threads) {
 if ($bench_secondary_index) {
   let $args = $args --secondary=$bench_secondary_index;
 }
-if ($bench_args) {
-  let $args = $args $bench_args;
-}
 #echo args: $args;
 
 --exec perl $MYSQL_TEST_DIR/suite/ndbcrunch/sb_run.pl $args
@@ -24,4 +21,3 @@ if ($bench_args) {
 let $benchmark=;
 let $bench_tables=;
 let $bench_threads=;
-let $bench_args=;

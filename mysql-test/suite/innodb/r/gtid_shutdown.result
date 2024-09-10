@@ -1,4 +1,4 @@
-reset binary logs and gtids;
+reset master;
 create table t1 (col1 int primary key);
 
 Test GTID with innodb_fast_shutdown = 0

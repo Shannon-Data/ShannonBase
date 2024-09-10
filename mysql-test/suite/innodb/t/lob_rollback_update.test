@@ -47,4 +47,5 @@ ROLLBACK;
 connection default;
 disconnect conn1;
 DROP TABLE t1;
---source include/wait_until_count_sessions.inc
+--source include/count_sessions.inc
+

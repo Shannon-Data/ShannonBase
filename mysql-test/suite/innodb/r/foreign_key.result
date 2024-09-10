@@ -19,9 +19,6 @@ drop table t2, t1;
 # Bug #20031243 CREATE TABLE FAILS TO CHECK IF FOREIGN KEY COLUMN
 # NULL/NOT NULL MISMATCH
 #
-SET restrict_fk_on_non_standard_key=OFF;
-Warnings:
-Warning	4166	'restrict_fk_on_non_standard_key' is deprecated and will be removed in a future release. Foreign key referring to non-unique or partial keys is unsafe and may break replication.
 set foreign_key_checks = 1;
 show variables like 'foreign_key_checks';
 Variable_name	Value
@@ -36,8 +33,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE CASCADE ON UPDATE CASCADE)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 show create table t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
@@ -84,9 +79,6 @@ NewDD TODO: Runtime Bug#25722221 - RENAME COLUMN DID NOT UPDATE MYSQL.FOREIGN_KE
 # Operations on child table
 TODO: Waiting for Bug#24666169
 DROP TABLE t2, t1;
-SET restrict_fk_on_non_standard_key=ON;
-Warnings:
-Warning	1681	'restrict_fk_on_non_standard_key' is deprecated and will be removed in a future release.
 #
 # Bug#20752436: INNODB: FAILING ASSERTION: 0 IN FILE HANDLER0ALTER.CC
 # LINE 6647
@@ -172,9 +164,6 @@ DROP TABLE parent_table;
 SELECT @@foreign_key_checks;
 @@foreign_key_checks
 1
-SET restrict_fk_on_non_standard_key=OFF;
-Warnings:
-Warning	4166	'restrict_fk_on_non_standard_key' is deprecated and will be removed in a future release. Foreign key referring to non-unique or partial keys is unsafe and may break replication.
 CREATE TABLE t1 (
 pk int(11) NOT NULL AUTO_INCREMENT,
 unique1 int(11) DEFAULT NULL,
@@ -241,9 +230,6 @@ PRIMARY KEY (pk),
 CONSTRAINT fk6 FOREIGN KEY (sixty) REFERENCES t1(sixty)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ERROR HY000: Failed to add the foreign key constraint. Missing index for constraint 'fk6' in the referenced table 't1'
-SET restrict_fk_on_non_standard_key=ON;
-Warnings:
-Warning	1681	'restrict_fk_on_non_standard_key' is deprecated and will be removed in a future release.
 DROP TABLE t1;
 #
 # Bug#27014308 - UPGRADING TO 8.0.3 FAILS IF FOREIGN KEYS OF EXACTLY 64 CHARACTERS ARE PRESENT
@@ -290,9 +276,6 @@ ON DELETE CASCADE
 ERROR 42000: Identifier name 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' is too long
 DROP TABLE parent;
 # Test delete/update rules combination.
-SET restrict_fk_on_non_standard_key=OFF;
-Warnings:
-Warning	4166	'restrict_fk_on_non_standard_key' is deprecated and will be removed in a future release. Foreign key referring to non-unique or partial keys is unsafe and may break replication.
 CREATE TABLE t1
 (a INT NOT NULL,
 b INT NOT NULL,
@@ -303,8 +286,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a))
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	48
@@ -315,8 +296,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE CASCADE)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	33
@@ -327,8 +306,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE SET NULL)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	34
@@ -339,8 +316,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE NO ACTION)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	48
@@ -351,8 +326,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON UPDATE CASCADE)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	20
@@ -363,8 +336,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON UPDATE SET NULL)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	24
@@ -375,8 +346,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON UPDATE NO ACTION)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	48
@@ -387,8 +356,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE CASCADE ON UPDATE CASCADE)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	5
@@ -399,8 +366,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE CASCADE ON UPDATE SET NULL)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	9
@@ -411,8 +376,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE CASCADE ON UPDATE NO ACTION)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	33
@@ -423,8 +386,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE CASCADE ON UPDATE RESTRICT)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	1
@@ -435,8 +396,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE SET NULL ON UPDATE CASCADE)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	6
@@ -447,8 +406,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE SET NULL ON UPDATE SET NULL)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	10
@@ -459,8 +416,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE SET NULL ON UPDATE NO ACTION)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	34
@@ -471,8 +426,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE SET NULL ON UPDATE RESTRICT)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	2
@@ -483,8 +436,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE NO ACTION ON UPDATE CASCADE)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	20
@@ -495,8 +446,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE NO ACTION ON UPDATE SET NULL)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	24
@@ -507,8 +456,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE NO ACTION ON UPDATE NO ACTION)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	48
@@ -519,8 +466,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE NO ACTION ON UPDATE RESTRICT)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	16
@@ -531,8 +476,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE RESTRICT ON UPDATE CASCADE)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	4
@@ -543,8 +486,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE RESTRICT ON UPDATE SET NULL)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	8
@@ -555,8 +496,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE RESTRICT ON UPDATE NO ACTION)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	32
@@ -567,8 +506,6 @@ b INT,
 INDEX ind(b),
 FOREIGN KEY (b) REFERENCES t1(a) ON DELETE RESTRICT ON UPDATE RESTRICT)
 ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 SELECT * FROM INFORMATION_SCHEMA.INNODB_FOREIGN;
 ID	FOR_NAME	REF_NAME	N_COLS	TYPE
 test/t2_ibfk_1	test/t2	test/t1	1	0
@@ -579,12 +516,7 @@ DROP TABLE t1;
 #
 CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, INDEX idx(a)) ENGINE=InnoDB;
 CREATE TABLE t2 (a INT KEY, b INT, INDEX ind(b), FOREIGN KEY (b) REFERENCES t1(a) ON DELETE CASCADE ON UPDATE CASCADE) ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 ALTER TABLE t1 CHANGE a id INT;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
@@ -594,12 +526,7 @@ test.t2	check	status	OK
 DROP TABLE t1, t2;
 CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL, INDEX idx(a)) ENGINE=InnoDB;
 CREATE TABLE t2 (a INT KEY, b INT, INDEX ind(b), FOREIGN KEY (b) REFERENCES t1(a) ON DELETE CASCADE ON UPDATE CASCADE) ENGINE=InnoDB;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 ALTER TABLE t1 CHANGE a id INT NOT NULL;
-Warnings:
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
-Warning	6124	Foreign key 't2_ibfk_1' refers to non-unique key or partial key. This is deprecated and will be removed in a future release.
 CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
@@ -607,9 +534,6 @@ CHECK TABLE t2;
 Table	Op	Msg_type	Msg_text
 test.t2	check	status	OK
 DROP TABLE t1, t2;
-SET restrict_fk_on_non_standard_key=ON;
-Warnings:
-Warning	1681	'restrict_fk_on_non_standard_key' is deprecated and will be removed in a future release.
 #
 # Bug #27020089 "I_S.INNODB_SYS_FOREIGN LOST FOREIGN KEY INFORMATION."
 #

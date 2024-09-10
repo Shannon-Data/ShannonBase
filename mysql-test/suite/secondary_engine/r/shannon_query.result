@@ -1,0 +1,201 @@
+create database test_query;
+use test_query;
+set use_secondary_engine=forced;
+create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
+insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt secondary_load;
+select * from tt where score >=1  and score < 3;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+select * from tt where score >=1  and id < 3;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+select * from tt where id >=1  and id < 3;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+drop table tt;
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
+alter table tt1 secondary_load;
+select * from tt1 where score >=1  and id < 3;
+score	name	id	gender
+10	n1	1	m
+20	n2	2	f
+select * from tt1 where score >=1  and score < 3;
+score	name	id	gender
+select * from tt1 where id >=1  and id < 3;
+score	name	id	gender
+10	n1	1	m
+20	n2	2	f
+select score from tt1 where id > 2  and score = 30 ;
+score
+30
+drop table tt1;
+create table tt2 (score int, name char(10), id int, gender char(1));
+insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt2 secondary_engine=rapid;
+alter table tt2 secondary_load;
+ERROR 42000: This table type requires a primary key
+select * from tt2;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+3	n3	3	m
+drop table tt2;
+create table tt3 (score int, name char(10), id int, gender char(1), key(id, score));
+insert into tt3 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt3 secondary_engine=rapid;
+alter table tt3 secondary_load;
+ERROR 42000: This table type requires a primary key
+select * from tt3 where score >1;
+score	name	id	gender
+2	n2	2	f
+3	n3	3	m
+drop table tt3;
+create table tt4 (score double primary key, name char(10), id int, gender char(1));
+insert into tt4 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
+alter table tt4 secondary_engine=rapid;
+alter table tt4 secondary_load;
+select * from tt4;
+score	name	id	gender
+1.1	n1	1	m
+2.2	n2	2	f
+3.3	n3	3	m
+select * from tt4 where score > 1.1;
+score	name	id	gender
+3.3	n3	3	m
+2.2	n2	2	f
+select * from tt4 where score =1.1;
+score	name	id	gender
+1.1	n1	1	m
+select * from tt4 where id =2;
+score	name	id	gender
+2.2	n2	2	f
+select * from tt4 where score > 1.1 and id > 1;
+score	name	id	gender
+3.3	n3	3	m
+2.2	n2	2	f
+select * from tt4 where score < 2.3 and id < 4;
+score	name	id	gender
+2.2	n2	2	f
+1.1	n1	1	m
+drop table tt4;
+create table tt5 (dt datetime primary key, name char(10), id int, gender char(1));
+insert into tt5 values('2022-12-12 01:10:10', 'n1', 1, 'm'), ('2023-11-11 01:10:10', 'n2', 2, 'f'), ('2020-11-11 01:10:10', 'n3', 3, 'm');
+alter table tt5 secondary_engine=rapid;
+alter table tt5 secondary_load;
+select * from tt5 where dt > '2022-11-11 01:10:10';
+dt	name	id	gender
+2022-12-12 01:10:10	n1	1	m
+2023-11-11 01:10:10	n2	2	f
+select * from tt5 where dt < '2024-11-11 01:10:10';
+dt	name	id	gender
+2020-11-11 01:10:10	n3	3	m
+2022-12-12 01:10:10	n1	1	m
+2023-11-11 01:10:10	n2	2	f
+select * from tt5 where dt = '2023-11-11 01:10:10';
+dt	name	id	gender
+2023-11-11 01:10:10	n2	2	f
+drop table tt5;
+create table tt6 (score float primary key, name char(10), id int, gender char(1));
+insert into tt6 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
+alter table tt6 secondary_engine=rapid;
+alter table tt6 secondary_load;
+select * from tt6;
+score	name	id	gender
+1.1	n1	1	m
+2.2	n2	2	f
+3.3	n3	3	m
+drop table tt6;
+create table tt7 (score float, name char(10) primary key, id int, gender char(1));
+insert into tt7 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
+alter table tt7 secondary_engine=rapid;
+alter table tt7 secondary_load;
+select * from tt7 where name >= 'n1';
+score	name	id	gender
+select gender, id from tt7 where name >= 'n1';
+gender	id
+drop table tt7;
+create table tt8 (score double primary key);
+insert into tt8 values(1.1), (2.2), (3.3);
+alter table tt8 secondary_engine=rapid;
+alter table tt8 secondary_load;
+select score from tt8;
+score
+1.1
+2.2
+3.3
+drop table tt8;
+create table tt9 (score int, name char(10), id int, gender char(1), index score_idx(score), primary key(id, score));
+insert into tt9 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt9 secondary_engine=rapid;
+alter table tt9 secondary_load;
+select score, gender from tt9 where id =2;
+score	gender
+2	f
+select score, gender from tt9 where id >2;
+score	gender
+3	m
+select score, gender from tt9 where id <2;
+score	gender
+1	m
+select score, gender from tt9 where score =2;
+score	gender
+2	f
+select score, gender from tt9 where score >2;
+score	gender
+3	m
+select score, gender from tt9 where score <2;
+score	gender
+1	m
+select score, gender from tt9 where score <2 and id >1;
+score	gender
+drop table tt9;
+create table tt10 (score int, name char(10), id int, gender char(1), weight double, index score_idx(score), primary key(id, score, weight));
+insert into tt10 values(1, 'n1', 1, 'm', 1.1), (2, 'n2', 2, 'f', 2.2), (3, 'n3', 3, 'm', 3.3);
+alter table tt10 secondary_engine=rapid;
+alter table tt10 secondary_load;
+select * from tt10;
+score	name	id	gender	weight
+1	n1	1	m	1.1
+2	n2	2	f	2.2
+3	n3	3	m	3.3
+select score, weight, gender from tt10;
+score	weight	gender
+1	1.1	m
+2	2.2	f
+3	3.3	m
+select * from tt10 where id >1 and weight < 4.4;
+score	name	id	gender	weight
+2	n2	2	f	2.2
+3	n3	3	m	3.3
+select * from tt10 where id >1 and weight < 4.4 and score > 2;
+score	name	id	gender	weight
+3	n3	3	m	3.3
+select * from tt10 where id =1;
+score	name	id	gender	weight
+1	n1	1	m	1.1
+select * from tt10 where weight = 3.3;
+score	name	id	gender	weight
+3	n3	3	m	3.3
+select * from tt10 where score =2;
+score	name	id	gender	weight
+2	n2	2	f	2.2
+drop table tt10;
+create table tt11 (id int, score double, primary key(score, id));
+insert into tt11 values(1, 1.1), (1,1.11), (3, 3.3), (2, 2.2), (2, 2.22);
+alter table tt11 secondary_engine=rapid;
+alter table tt11 secondary_load;
+select * from tt11;
+id	score
+1	1.1
+1	1.11
+2	2.2
+2	2.22
+3	3.3
+drop table tt11;
+set use_secondary_engine=off;
+drop database test_query;

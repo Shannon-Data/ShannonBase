@@ -1,9 +1,11 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
-STOP REPLICA;
+STOP SLAVE;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 CREATE DATABASE ndbsynctest;
 USE ndbsynctest;
 CREATE DATABASE ndbsynctest;
@@ -57,8 +59,10 @@ SELECT @the_epoch;
 CHANGE REPLICATION SOURCE TO
 SOURCE_LOG_FILE = 'master-bin.000001',
 SOURCE_LOG_POS = <the_pos> ;
-START REPLICA;
-include/rpl/assert_replica_running.inc
+START SLAVE;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
+include/check_slave_is_running.inc
 SELECT hex(c1),hex(c2),c3 FROM t1 ORDER BY c3;
 hex(c1)	hex(c2)	c3
 1	1	row1
@@ -72,11 +76,15 @@ hex(c2)	hex(c3)	c1
 1	0	CD
 0	0	DEFGHIJKL
 DROP DATABASE ndbsynctest;
-STOP REPLICA;
-reset binary logs and gtids;
+STOP SLAVE;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
+reset master;
 select * from mysql.ndb_binlog_index;
 Position	File	epoch	inserts	updates	deletes	schemaops	orig_server_id	orig_epoch	gci	next_position	next_file
-RESET REPLICA;
+reset slave;
+Warnings:
+Warning	1287	'RESET SLAVE' is deprecated and will be removed in a future release. Please use RESET REPLICA instead
 select * from mysql.ndb_apply_status;
 server_id	epoch	log_name	start_pos	end_pos
-include/rpl/deinit.inc
+include/rpl_end.inc

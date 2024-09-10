@@ -4,10 +4,10 @@
 # unecessary server restarts.
 
 set binlog_format=statement;
-source common/binlog/database.test;
+source extra/binlog_tests/database.test;
 set binlog_format=mixed;
-source common/binlog/database.test;
+source extra/binlog_tests/database.test;
 set binlog_format='row';
-source common/binlog/database.test;
+source extra/binlog_tests/database.test;
 
 show databases;

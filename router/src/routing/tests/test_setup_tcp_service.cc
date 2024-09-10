@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,9 +36,6 @@
 #include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/stdx/expected_ostream.h"
 #include "mysqlrouter/routing.h"
-#include "router_test_helpers.h"
-#include "stdx_expected_no_error.h"
-#include "tcp_port_pool.h"
 #include "test/helpers.h"  // init_test_loggers
 
 using ::testing::_;
@@ -56,6 +52,12 @@ std::ostream &operator<<(std::ostream &os, const std::pair<int, int> &v) {
 class TestSetupTcpService : public ::testing::Test {
  public:
   TestSetupTcpService() {
+    routing_conf_.routing_strategy = routing::RoutingStrategy::kFirstAvailable;
+    routing_conf_.bind_address = mysql_harness::TCPAddress{"0.0.0.0", 7001};
+    routing_conf_.protocol = Protocol::Type::kXProtocol;
+    routing_conf_.connect_timeout = 1;
+    routing_conf_.max_connections = 10;
+
     std::unique_ptr<net::impl::socket::SocketServiceBase> socket_service =
         std::make_unique<::testing::StrictMock<MockSocketService>>();
     std::unique_ptr<net::IoServiceBase> io_service =
@@ -67,7 +69,6 @@ class TestSetupTcpService : public ::testing::Test {
 
     io_ctx_ = std::make_unique<net::io_context>(std::move(socket_service),
                                                 std::move(io_service));
-    bind_port_ = tcp_port_pool_.get_next_available();
   }
 
  protected:
@@ -108,16 +109,14 @@ class TestSetupTcpService : public ::testing::Test {
   }
 
  protected:
+  RoutingConfig routing_conf_;
   std::unique_ptr<net::io_context> io_ctx_;
   MockSocketService *sock_ops_;
   MockIoService *io_ops_;
-  TcpPortPool tcp_port_pool_;
-  uint16_t bind_port_;
 };
 
 TEST_F(TestSetupTcpService, single_addr_ok) {
-  AcceptingEndpointTcpSocket tcp_acceptor(*io_ctx_, "routing", "127.0.0.1",
-                                          bind_port_);
+  MySQLRouting r(routing_conf_, *io_ctx_);
 
   EXPECT_CALL(*sock_ops_, getaddrinfo(_, _, _))
       .WillOnce(Return(ByMove(get_test_addresses_list(1))));
@@ -133,50 +132,49 @@ TEST_F(TestSetupTcpService, single_addr_ok) {
   EXPECT_CALL(*sock_ops_, close(_));
   expect_io_ctx_cancel_calls(1);
 
-  EXPECT_NO_ERROR(tcp_acceptor.setup());
+  EXPECT_THAT(r.setup_tcp_service(),
+              ::testing::Truly([](const auto &v) { return bool(v); }));
 }
 
 TEST_F(TestSetupTcpService, getaddrinfo_fails) {
-  AcceptingEndpointTcpSocket tcp_acceptor(*io_ctx_, "routing", "127.0.0.1",
-                                          bind_port_);
+  MySQLRouting r(routing_conf_, *io_ctx_);
 
   EXPECT_CALL(*sock_ops_, getaddrinfo(_, _, _))
-      .WillOnce(Return(ByMove(stdx::unexpected(
+      .WillOnce(Return(ByMove(stdx::make_unexpected(
           make_error_code(net::ip::resolver_errc::host_not_found)))));
 
-  EXPECT_EQ(tcp_acceptor.setup(), stdx::unexpected(make_error_code(
-                                      net::ip::resolver_errc::host_not_found)));
+  EXPECT_EQ(r.setup_tcp_service(),
+            stdx::make_unexpected(
+                make_error_code(net::ip::resolver_errc::host_not_found)));
 }
 
 TEST_F(TestSetupTcpService, socket_fails_for_all_addr) {
-  AcceptingEndpointTcpSocket tcp_acceptor(*io_ctx_, "routing", "127.0.0.1",
-                                          bind_port_);
+  MySQLRouting r(routing_conf_, *io_ctx_);
 
   EXPECT_CALL(*sock_ops_, getaddrinfo(_, _, _))
       .WillOnce(Return(ByMove(get_test_addresses_list(2))));
 
   // make all calls to socket() fail
   EXPECT_CALL(*sock_ops_, socket(_, _, _))
-      .WillOnce(Return(stdx::unexpected(
+      .WillOnce(Return(stdx::make_unexpected(
           make_error_code(std::errc::address_family_not_supported))))
-      .WillOnce(Return(stdx::unexpected(
+      .WillOnce(Return(stdx::make_unexpected(
           make_error_code(std::errc::address_family_not_supported))));
 
-  EXPECT_EQ(tcp_acceptor.setup(),
-            stdx::unexpected(
+  EXPECT_EQ(r.setup_tcp_service(),
+            stdx::make_unexpected(
                 make_error_code(std::errc::address_family_not_supported)));
 }
 
 TEST_F(TestSetupTcpService, socket_fails) {
-  AcceptingEndpointTcpSocket tcp_acceptor(*io_ctx_, "routing", "127.0.0.1",
-                                          bind_port_);
+  MySQLRouting r(routing_conf_, *io_ctx_);
 
   EXPECT_CALL(*sock_ops_, getaddrinfo(_, _, _))
       .WillOnce(Return(ByMove(get_test_addresses_list(2))));
 
   // make the first call to socket() fail
   EXPECT_CALL(*sock_ops_, socket(_, _, _))
-      .WillOnce(Return(stdx::unexpected(
+      .WillOnce(Return(stdx::make_unexpected(
           make_error_code(std::errc::address_family_not_supported))))
       .WillOnce(Return(1));
 
@@ -190,14 +188,13 @@ TEST_F(TestSetupTcpService, socket_fails) {
   EXPECT_CALL(*sock_ops_, close(_));
   expect_io_ctx_cancel_calls(1);
 
-  EXPECT_THAT(tcp_acceptor.setup(),
+  EXPECT_THAT(r.setup_tcp_service(),
               ::testing::Truly([](const auto &v) { return bool(v); }));
 }
 
 #ifndef _WIN32
 TEST_F(TestSetupTcpService, setsockopt_fails) {
-  AcceptingEndpointTcpSocket tcp_acceptor(*io_ctx_, "routing", "127.0.0.1",
-                                          bind_port_);
+  MySQLRouting r(routing_conf_, *io_ctx_);
 
   EXPECT_CALL(*sock_ops_, getaddrinfo(_, _, _))
       .WillOnce(Return(ByMove(get_test_addresses_list(2))));
@@ -208,8 +205,8 @@ TEST_F(TestSetupTcpService, setsockopt_fails) {
 
   // make the first call to setsockopt() fail
   EXPECT_CALL(*sock_ops_, setsockopt(_, _, _, _, _))
-      .WillOnce(Return(
-          stdx::unexpected(make_error_code(std::errc::bad_file_descriptor))))
+      .WillOnce(Return(stdx::make_unexpected(
+          make_error_code(std::errc::bad_file_descriptor))))
       .WillOnce(Return(result<void>{}));
 
   EXPECT_CALL(*sock_ops_, bind(_, _, _)).WillOnce(Return(result<void>{}));
@@ -220,13 +217,13 @@ TEST_F(TestSetupTcpService, setsockopt_fails) {
   EXPECT_CALL(*sock_ops_, close(_)).Times(2);
   expect_io_ctx_cancel_calls(2);
 
-  EXPECT_NO_ERROR(tcp_acceptor.setup());
+  EXPECT_THAT(r.setup_tcp_service(),
+              ::testing::Truly([](const auto &v) { return bool(v); }));
 }
 #endif
 
 TEST_F(TestSetupTcpService, bind_fails) {
-  AcceptingEndpointTcpSocket tcp_acceptor(*io_ctx_, "routing", "127.0.0.1",
-                                          bind_port_);
+  MySQLRouting r(routing_conf_, *io_ctx_);
 
   EXPECT_CALL(*sock_ops_, getaddrinfo(_, _, _))
       .WillOnce(Return(ByMove(get_test_addresses_list(2))));
@@ -241,7 +238,7 @@ TEST_F(TestSetupTcpService, bind_fails) {
       .WillOnce(Return(result<void>{}));
   EXPECT_CALL(*sock_ops_, bind(_, _, _))
       .WillOnce(Return(
-          stdx::unexpected(make_error_code(std::errc::invalid_argument))))
+          stdx::make_unexpected(make_error_code(std::errc::invalid_argument))))
       .WillOnce(Return(result<void>{}));
 
   EXPECT_CALL(*sock_ops_, listen(_, _)).WillOnce(Return(result<void>{}));
@@ -250,12 +247,12 @@ TEST_F(TestSetupTcpService, bind_fails) {
   EXPECT_CALL(*sock_ops_, close(_)).Times(2);
   expect_io_ctx_cancel_calls(2);
 
-  EXPECT_NO_ERROR(tcp_acceptor.setup());
+  EXPECT_THAT(r.setup_tcp_service(),
+              ::testing::Truly([](const auto &v) { return bool(v); }));
 }
 
 TEST_F(TestSetupTcpService, listen_fails) {
-  AcceptingEndpointTcpSocket tcp_acceptor(*io_ctx_, "routing", "127.0.0.1",
-                                          bind_port_);
+  MySQLRouting r(routing_conf_, *io_ctx_);
 
   EXPECT_CALL(*sock_ops_, getaddrinfo(_, _, _))
       .WillOnce(Return(ByMove(get_test_addresses_list(2))));
@@ -269,19 +266,19 @@ TEST_F(TestSetupTcpService, listen_fails) {
 
   EXPECT_CALL(*sock_ops_, listen(_, _))
       .WillOnce(Return(
-          stdx::unexpected(make_error_code(std::errc::invalid_argument))));
+          stdx::make_unexpected(make_error_code(std::errc::invalid_argument))));
 
   // those are called in the MySQLRouting destructor
   EXPECT_CALL(*sock_ops_, close(_));
   expect_io_ctx_cancel_calls(1);
 
   // the listen()'s error-code
-  EXPECT_EQ(tcp_acceptor.setup(),
-            stdx::unexpected(make_error_code(std::errc::invalid_argument)));
+  EXPECT_EQ(
+      r.setup_tcp_service(),
+      stdx::make_unexpected(make_error_code(std::errc::invalid_argument)));
 }
 
 int main(int argc, char *argv[]) {
-  init_windows_sockets();
   ::testing::InitGoogleTest(&argc, argv);
 
   init_test_logger();

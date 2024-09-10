@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -312,7 +311,7 @@ static void *handle_connection(void *arg) {
 
     // Clean up errors now, before possibly waiting for a new connection.
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
-    ERR_remove_thread_state(nullptr);
+    ERR_remove_thread_state(0);
 #endif /* OPENSSL_VERSION_NUMBER < 0x10100000L */
     thd_manager->remove_thd(thd);
     Connection_handler_manager::dec_connection_count();
@@ -441,11 +440,4 @@ handle_error:
 
 uint Per_thread_connection_handler::get_max_threads() const {
   return max_connections;
-}
-
-ulong Per_thread_connection_handler::get_blocked_pthread_count() {
-  mysql_mutex_lock(&LOCK_thread_cache);
-  const ulong res = blocked_pthread_count;
-  mysql_mutex_unlock(&LOCK_thread_cache);
-  return res;
 }

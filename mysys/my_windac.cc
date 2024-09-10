@@ -1,16 +1,15 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -76,10 +75,10 @@ int my_security_attr_create(SECURITY_ATTRIBUTES **psa, const char **perror,
                             DWORD owner_rights, DWORD everyone_rights) {
   /* Top-level SID authority */
   SID_IDENTIFIER_AUTHORITY world_auth = SECURITY_WORLD_SID_AUTHORITY;
-  PSID everyone_sid = nullptr;
-  HANDLE htoken = nullptr;
-  SECURITY_ATTRIBUTES *sa = nullptr;
-  PACL dacl = nullptr;
+  PSID everyone_sid = 0;
+  HANDLE htoken = 0;
+  SECURITY_ATTRIBUTES *sa = 0;
+  PACL dacl = 0;
   DWORD owner_token_length, dacl_length;
   SECURITY_DESCRIPTOR *sd;
   PTOKEN_USER owner_token;
@@ -107,7 +106,7 @@ int my_security_attr_create(SECURITY_ATTRIBUTES **psa, const char **perror,
     *perror = "Failed to retrieve thread access token";
     goto error;
   }
-  GetTokenInformation(htoken, TokenUser, nullptr, 0, &owner_token_length);
+  GetTokenInformation(htoken, TokenUser, 0, 0, &owner_token_length);
 
   if (!my_multi_malloc(
           key_memory_win_SECURITY_ATTRIBUTES, MYF(MY_WME), &sa,
@@ -177,7 +176,7 @@ error:
   if (htoken) CloseHandle(htoken);
   my_free(sa);
   my_free(dacl);
-  *psa = nullptr;
+  *psa = 0;
   return 1;
 }
 

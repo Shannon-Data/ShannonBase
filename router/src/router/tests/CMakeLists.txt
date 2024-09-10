@@ -1,16 +1,15 @@
-# Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2023, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is designed to work with certain software (including
+# This program is also distributed with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have either included with
-# the program or referenced in the documentation.
+# separately licensed software that they have included with MySQL.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -51,6 +50,7 @@ ADD_HARNESS_TEST_FILE(test_certificate_handler.cc
     harness_stdx
     router_lib
   INCLUDE_DIRS
+    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
     ../src/
   SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS})
 
@@ -58,29 +58,57 @@ ADD_HARNESS_TEST_FILE(test_uri.cc
   MODULE ${TEST_MODULE}
   LIB_DEPENDS
     test-helpers
-    router_utils
+  EXTRA_SOURCES
+    ../src/uri.cc
+  INCLUDE_DIRS
+    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
   SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS})
+SET_TARGET_PROPERTIES(
+  routertest_${TEST_MODULE}_uri
+  PROPERTIES
+  COMPILE_DEFINITIONS ROUTER_LIB_STATIC_DEFINE=1)
 
 ADD_HARNESS_TEST_FILE(test_utils.cc
   MODULE ${TEST_MODULE}
   LIB_DEPENDS
     test-helpers
-    router_utils
+  EXTRA_SOURCES
+    ../src/utils.cc
+  INCLUDE_DIRS
+    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
   SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS})
+SET_TARGET_PROPERTIES(
+  routertest_${TEST_MODULE}_utils
+  PROPERTIES
+  COMPILE_DEFINITIONS ROUTER_LIB_STATIC_DEFINE=1)
 
 ADD_HARNESS_TEST_FILE(test_mysqlrouter_utils.cc
   MODULE ${TEST_MODULE}
   LIB_DEPENDS
     test-helpers
-    router_utils
+  EXTRA_SOURCES
+    ../src/utils.cc
+  INCLUDE_DIRS
+    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
   SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS})
+SET_TARGET_PROPERTIES(
+  routertest_${TEST_MODULE}_mysqlrouter_utils
+  PROPERTIES
+  COMPILE_DEFINITIONS ROUTER_LIB_STATIC_DEFINE=1)
 
 ADD_HARNESS_TEST_FILE(test_log_filter.cc
   MODULE ${TEST_MODULE}
   LIB_DEPENDS
     test-helpers
-    router_mysql
+  EXTRA_SOURCES
+    ../src/common/log_filter.cc
+  INCLUDE_DIRS
+    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
   SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS})
+SET_TARGET_PROPERTIES(
+  routertest_${TEST_MODULE}_log_filter
+  PROPERTIES
+  COMPILE_DEFINITIONS ROUTER_LIB_STATIC_DEFINE=1)
 
 ADD_HARNESS_TEST_FILE(test_config_files.cc
   MODULE ${TEST_MODULE}
@@ -100,11 +128,18 @@ SET_TARGET_PROPERTIES(
 ADD_HARNESS_TEST_FILE(test_mysql_session.cc
   MODULE ${TEST_MODULE}
   LIB_DEPENDS
-    test-helpers
-    router_mysql
+    test-helpers mysqlclient
+  EXTRA_SOURCES
+    ../src/common/mysql_session.cc
+    ../src/common/log_filter.cc
   INCLUDE_DIRS
+    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
     ../src/
   SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS})
+SET_TARGET_PROPERTIES(
+  routertest_${TEST_MODULE}_mysql_session
+  PROPERTIES
+  COMPILE_DEFINITIONS ROUTER_LIB_STATIC_DEFINE=1)
 
 FOREACH(test_file
     test_instance_attributes.cc
@@ -112,9 +147,9 @@ FOREACH(test_file
   ADD_HARNESS_TEST_FILE(${test_file}
     MODULE ${TEST_MODULE}
     LIB_DEPENDS
-      test-helpers router_cluster
+      test-helpers mysqlclient router_lib
     INCLUDE_DIRS
-      $<TARGET_PROPERTY:router_cluster,INCLUDE_DIRECTORIES>
+      $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
       ../src/
       ../../../tests/helpers/
     SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS})
@@ -123,7 +158,7 @@ ENDFOREACH()
 ADD_HARNESS_TEST_FILE(test_windows_service.cc
   MODULE ${TEST_MODULE}
   LIB_DEPENDS
-    test-helpers
+    test-helpers mysqlclient
   EXTRA_SOURCES
     ../src/windows/main-windows.cc
     ../src/windows/nt_servc.cc
@@ -132,22 +167,22 @@ ADD_HARNESS_TEST_FILE(test_windows_service.cc
     ../src/default_paths.cc
     ../../../tests/helpers/filesystem_utils.cc
   INCLUDE_DIRS
-    $<TARGET_PROPERTY:router_utils,INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
     ../src/
     ../../../tests/helpers/
   SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS})
 SET_TARGET_PROPERTIES(
   routertest_${TEST_MODULE}_windows_service
   PROPERTIES
-  COMPILE_DEFINITIONS ROUTER_UTILS_STATIC_DEFINE=1)
+  COMPILE_DEFINITIONS ROUTER_LIB_STATIC_DEFINE=1)
 
 
 ADD_HARNESS_TEST_FILE(test_mysqlrouter_app.cc
   MODULE ${TEST_MODULE}
   LIB_DEPENDS
     test-helpers
+    router_lib
     router_frontend_lib
-    routing_frontend_lib
   EXTRA_SOURCES
     ../../../tests/helpers/filesystem_utils.cc
   INCLUDE_DIRS
@@ -159,14 +194,13 @@ ADD_HARNESS_TEST_FILE(test_keyring_frontend.cc
   MODULE ${TEST_MODULE}
   LIB_DEPENDS
     test-helpers
-    router_utils
+    router_lib
   EXTRA_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/keyring_frontend.cc
   INCLUDE_DIRS
     ../src/
   SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS}
   )
-DOWNGRADE_STRINGOP_WARNINGS(routertest_router_keyring_frontend)
 
 FOREACH(test_file
     issues/test_bug22084430.cc
@@ -176,26 +210,36 @@ FOREACH(test_file
     MODULE issues
     LIB_DEPENDS
       test-helpers
-      router_utils
-      router_frontend_lib  # init_keyring
+      router_lib
+      router_frontend_lib
+    EXTRA_SOURCES
     INCLUDE_DIRS
-      $<TARGET_PROPERTY:router_utils,INCLUDE_DIRECTORIES>
       ../src/
     SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS}
   )
 ENDFOREACH()
-DOWNGRADE_STRINGOP_WARNINGS(routertest_issues_bug24909259)
 
 ADD_HARNESS_TEST_FILE(test_default_paths.cc
   MODULE ${TEST_MODULE}
   SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS}
-  LIB_DEPENDS
-    router_utils
+  INCLUDE_DIRS
+    $<TARGET_PROPERTY:router_lib,INCLUDE_DIRECTORIES>
+    ../src/
+  EXTRA_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/default_paths.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/utils.cc
   )
+SET_TARGET_PROPERTIES(
+  routertest_${TEST_MODULE}_default_paths
+  PROPERTIES
+  COMPILE_DEFINITIONS ROUTER_LIB_STATIC_DEFINE=1)
 
 IF(MY_COMPILER_IS_CLANG)
   STRING_APPEND(CMAKE_CXX_FLAGS " -Wno-deprecated")
 ENDIF()
+
+# TODO(sgunders): Remove when all GMock tests use MOCK_METHOD().
+STRING(REPLACE "-Wsuggest-override" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
 # Use configuration file templates to generate configuration files
 SET(FILE_TEMPLATES

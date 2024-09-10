@@ -1,7 +1,7 @@
 ###############################################################################
 # Bug#23532304 SECONDS_BEHIND_MASTER REPORTS IO_THREAD TIME WHEN USING MTS &
 #              ROTATING RELAY-LOG
-# Problem: The value of 'Seconds_Behind_Source' (SBM) reports distorted number
+# Problem: The value of 'Seconds_Behind_Master' (SBM) reports distorted number
 #         when rotating a relay-log.
 #
 # Steps to reproduce:
@@ -16,28 +16,28 @@
 ###############################################################################
 --source include/have_debug_sync.inc
 --let rpl_skip_start_slave=1
---source include/rpl/init_source_replica.inc
+--source include/master-slave.inc
 
 # Step-1 Set sync debug point to calculate sbm exactly after fake
 #  rotate log event.
---source include/rpl/connection_replica.inc
+--source include/rpl_connection_slave.inc
 SET @save_global_debug=@@GLOBAL.DEBUG;
 # This debug point internally fake that IO thread is started 3 minutes ago.
 SET @@GLOBAL.DEBUG= '+d,dbug.calculate_sbm_after_fake_rotate_log_event';
-# Start replica threads after enabling the debug point.
+# Start slave threads after enabling the debug point.
 --disable_warnings
---source include/rpl/start_replica.inc
+--source include/start_slave.inc
 --enable_warnings
 
 # Step-2 Flush logs on master which will generate a fake rotate event.
---source include/rpl/connection_source.inc
+--source include/rpl_connection_master.inc
 FLUSH LOGS;
 
 # Step-3 There will be two fake rotate events (first one while the initial setup
-# in rpl/init_source_replica.inc and second one due to FLUSH LOGS execution on master).
+# in master-slave.inc and second one due to FLUSH LOGS execution on master).
 # The following will test SBM calculation while both events are getting
 # executed.
---source include/rpl/connection_replica.inc
+--source include/rpl_connection_slave.inc
 --let $iter=0
 while ($iter < 2)
 {
@@ -47,7 +47,7 @@ while ($iter < 2)
 # I/O thread age that it should be atleast less
 # than the age of I/O thread.
 SET DEBUG_SYNC="now wait_for signal.reached";
-let $sbm= query_get_value("SHOW REPLICA STATUS", Seconds_Behind_Source, 1);
+let $sbm= query_get_value("SHOW SLAVE STATUS", Seconds_Behind_Master, 1);
 --let $assert_text= Seconds Behind Master should be less than IO_THREAD's time.
 --let $assert_cond= $sbm < 180
 --source include/assert.inc
@@ -58,4 +58,4 @@ SET DEBUG_SYNC="now signal signal.done_sbm_calculation";
 # Step-5: Cleanup
 SET @@GLOBAL.DEBUG=@save_global_debug;
 
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

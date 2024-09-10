@@ -135,8 +135,7 @@ SELECT CURRENT_ROLE();
 --echo # granted roles but the exceptions are picked.
 SET ROLE ALL EXCEPT role1;
 SELECT CURRENT_ROLE();
---let $user = current_user() USING `engineering`@`%`,`role`@`%`
---source include/show_grants.inc
+SHOW GRANTS FOR current_user() USING `engineering`@`%`,`role`@`%`;
 GRANT role1 TO current_user();
 SET ROLE ALL EXCEPT role1;
 SELECT CURRENT_ROLE();
@@ -605,7 +604,7 @@ SHOW GRANTS FOR u1@localhost;
 connect(con1, localhost, u1, foo, test);
 --echo ++ Shows default r1.
 SELECT CURRENT_ROLE();
---echo ++ charset should be utf8mb3
+--echo ++ charset should be utf8
 SELECT CHARSET(CURRENT_ROLE());
 SET ROLE DEFAULT;
 SELECT CURRENT_ROLE();

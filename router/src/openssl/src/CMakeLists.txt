@@ -1,16 +1,15 @@
-# Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2020, 2023, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is designed to work with certain software (including
+# This program is also distributed with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have either included with
-# the program or referenced in the documentation.
+# separately licensed software that they have included with MySQL.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,26 +24,19 @@ INCLUDE(GenerateExportHeader)
 
 ADD_HARNESS_PLUGIN(router_openssl SOURCES
   openssl_plugin.cc
-  REQUIRES
-  OpenSSL::SSL
-  OpenSSL::Crypto
-  harness_tls
+  REQUIRES ${SSL_LIBRARIES};harness_tls
   DESTINATION "${ROUTER_INSTALL_PLUGINDIR}"
   )
-TARGET_INCLUDE_DIRECTORIES(router_openssl PRIVATE
+TARGET_INCLUDE_DIRECTORIES(router_openssl PUBLIC
   ${CMAKE_CURRENT_BINARY_DIR}/../include/
-  ${CMAKE_CURRENT_SOURCE_DIR}/../include/
+  ${CMAKE_BINARY_DIR}/router/src/harness/include/
   )
+
 GENERATE_EXPORT_HEADER(router_openssl
   EXPORT_FILE_NAME
   ${CMAKE_CURRENT_BINARY_DIR}/../include/mysqlrouter/router_openssl_export.h
   )
 
-ADD_INSTALL_RPATH_FOR_OPENSSL(router_openssl)
+STRING(REPLACE "-Wsuggest-override" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
-ADD_LIBRARY(router_tls INTERFACE)
-TARGET_INCLUDE_DIRECTORIES(router_tls INTERFACE
-  ${CMAKE_CURRENT_BINARY_DIR}/../include/
-  ${CMAKE_CURRENT_SOURCE_DIR}/../include/
-  $<TARGET_PROPERTY:harness_stdx,INCLUDE_DIRECTORIES>
-  )
+ADD_INSTALL_RPATH_FOR_OPENSSL(router_openssl)

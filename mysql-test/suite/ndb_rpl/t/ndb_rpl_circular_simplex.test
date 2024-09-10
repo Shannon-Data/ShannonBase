@@ -1,5 +1,5 @@
 --source include/have_ndb.inc
---source suite/ndb_rpl/ndb_rpl_init_source_replica.inc
+--source suite/ndb_rpl/ndb_master-slave.inc
 
 connection master;
 CREATE TABLE t1 (a int key, b int) ENGINE=NDB;
@@ -9,7 +9,7 @@ SHOW TABLES;
 # Lose the events from the slave binary log: there is no
 # need to re-create the table on the master.
 connection slave;
-RESET BINARY LOGS AND GTIDS;
+RESET MASTER;
 
 # Insert some values on the slave and master
 connection master;
@@ -29,13 +29,13 @@ INSERT INTO t1 VALUES (2,3);
 #SHOW BINLOG EVENTS;
 
 # Replicate back to the master to test this mixed event on the master
-STOP REPLICA;
+STOP SLAVE;
 
 --let $rpl_topology= 1->2->1
---source include/rpl/change_topology.inc
+--source include/rpl_change_topology.inc
 connection master;
 
-START REPLICA;
+START SLAVE;
 
 connection slave;
 sync_slave_with_master master;
@@ -46,10 +46,10 @@ sync_slave_with_master master;
 #SHOW BINLOG EVENTS;
 
 # Wait for slave threads to start before SHOWing status
---source include/rpl/wait_for_replica_to_start.inc
+--source include/wait_for_slave_to_start.inc
 
 # Check that there is no error in replication
-source include/rpl/assert_replica_running.inc;
+source include/check_slave_is_running.inc;
 
 # Check that we have the data on the master
 SELECT * FROM t1 ORDER BY a;
@@ -63,25 +63,25 @@ SELECT * FROM t1 ORDER BY a;
 #SHOW BINLOG EVENTS;
 
 # now lets see that this data is applied correctly on the slave
-STOP REPLICA;
+STOP SLAVE;
 save_master_pos;
 
 connection slave;
-START REPLICA;
+START SLAVE;
 
 # check that we have the data on the slave
 sync_with_master;
 SELECT * FROM t1 ORDER BY a;
 
 # Wait for slave threads to start before SHOWing status
---source include/rpl/wait_for_replica_to_start.inc
+--source include/wait_for_slave_to_start.inc
 
 # Check that there is no error in replication
-source include/rpl/assert_replica_running.inc;
+source include/check_slave_is_running.inc;
 
 -- connection master
 DROP TABLE t1;
 -- sync_slave_with_master
 
 --let $rpl_only_running_threads= 1
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

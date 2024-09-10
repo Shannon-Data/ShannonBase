@@ -31,23 +31,25 @@
 # - Slave configuration:
 #   C1. partial JSON enabled/disabled
 #   C2. binlog_row_image=MINIMAL/NOBLOB/FULL
-#   C3. replica_exec_mode=idempotent/strict
-#!   C4. replica_skip_errors includes expected error, or not
+#   C3. slave_rows_search_algorithms=INDEX_SCAN/HASH_SCAN/TABLE_SCAN
+#   C4. replica_exec_mode=idempotent/strict
+#!   C5. replica_skip_errors includes expected error, or not
 
 
 --source include/have_binlog_format_row.inc
 # mysqlbinlog.inc with $only_decoded_rows needs have_grep.inc
 --source include/have_grep.inc
 --let $rpl_topology= 1->2->3
---source include/rpl/init.inc
---source include/rpl/default_connections.inc
+--source include/rpl_init.inc
+--source include/rpl_default_connections.inc
 
---source include/rpl/connection_replica.inc
+--source include/rpl_connection_slave.inc
 SET @old_binlog_row_image= @@GLOBAL.BINLOG_ROW_IMAGE;
 SET @old_binlog_row_value_options= @@GLOBAL.BINLOG_ROW_VALUE_OPTIONS;
+SET @old_slave_rows_search_algorithms= @@GLOBAL.SLAVE_ROWS_SEARCH_ALGORITHMS;
 SET @old_replica_exec_mode= @@GLOBAL.REPLICA_EXEC_MODE;
 
---source include/rpl/connection_source.inc
+--source include/rpl_connection_master.inc
 SET @@SESSION.BINLOG_ROW_IMAGE = 'MINIMAL';
 SET @@SESSION.BINLOG_ROW_VALUE_OPTIONS = 'PARTIAL_JSON';
 
@@ -118,7 +120,7 @@ while (!$done)
   --let $set=
   --let $rpl_diff_statement= SELECT i
 
-  --source include/rpl/connection_replica.inc
+  --source include/rpl_connection_slave.inc
 
   if ($verb==3) { echo # Decide master_column_count; }
   --let $rand_type= int
@@ -189,6 +191,22 @@ while (!$done)
     SET @@GLOBAL.BINLOG_ROW_IMAGE = 'FULL';
   }
 
+  if ($verb==3) { echo # Decide slave_rows_search_algorithms; }
+  --let $rand_type= int
+  --let $rand_min= 0
+  --let $rand_max= 3
+  --source include/rand.inc
+  --let $slave_rows_search_algorithms=$rand
+  if ($verb>=2) { echo # - slave_rows_search_algorithms=$slave_rows_search_algorithms; }
+  if ($slave_rows_search_algorithms == 0) {
+    SET @@GLOBAL.SLAVE_ROWS_SEARCH_ALGORITHMS = 'INDEX_SCAN,HASH_SCAN';
+  }
+  if ($slave_rows_search_algorithms == 1) {
+    SET @@GLOBAL.SLAVE_ROWS_SEARCH_ALGORITHMS = 'INDEX_SCAN,TABLE_SCAN';
+  }
+  if ($slave_rows_search_algorithms == 2) {
+    SET @@GLOBAL.SLAVE_ROWS_SEARCH_ALGORITHMS = 'HASH_SCAN,TABLE_SCAN';
+  }
 
   if ($verb==3) { echo # Decide replica_exec_mode; }
   --let $rand_type= decide
@@ -205,7 +223,7 @@ while (!$done)
 
   if ($verb<3) { disable_query_log; }
 
-  --source include/rpl/connection_source.inc
+  --source include/rpl_connection_master.inc
 
   --let $col_i= 1
   while ($col_i <= $master_column_count)
@@ -419,13 +437,13 @@ while (!$done)
   if ($set)
   {
     if ($verb==3) { echo # Create and populate table; }
-    --source include/rpl/connection_source.inc
+    --source include/rpl_connection_master.inc
     SET SQL_LOG_BIN = 0;
     eval $table_def_master;
     SET SQL_LOG_BIN = 1;
-    --source include/rpl/connection_replica.inc
+    --source include/rpl_connection_slave.inc
     eval $table_def_slave;
-    --source include/rpl/connection_source.inc
+    --source include/rpl_connection_master.inc
     BEGIN;
     --let $row_i= 1
     while ($row_i <= $row_count)
@@ -443,26 +461,26 @@ while (!$done)
 
     if ($verb==3) { echo # Replicate, reset binlogs, reset replication, pickup new slave config; }
 
-    --source include/rpl/sync.inc
+    --source include/rpl_sync.inc
 
-    --source include/rpl/connection_source.inc
-    RESET BINARY LOGS AND GTIDS;
+    --source include/rpl_connection_master.inc
+    RESET MASTER;
 
-    --source include/rpl/connection_replica.inc
-    --source include/rpl/stop_replica.inc
-    RESET BINARY LOGS AND GTIDS;
-    RESET REPLICA;
-    --source include/rpl/start_replica.inc
+    --source include/rpl_connection_slave.inc
+    --source include/stop_slave.inc
+    RESET MASTER;
+    RESET SLAVE;
+    --source include/start_slave.inc
 
     --let $rpl_connection_name=server_3
-    --source include/connection.inc
-    --source include/rpl/stop_replica.inc
-    RESET BINARY LOGS AND GTIDS;
-    RESET REPLICA;
-    --source include/rpl/start_replica.inc
+    --source include/rpl_connection.inc
+    --source include/stop_slave.inc
+    RESET MASTER;
+    RESET SLAVE;
+    --source include/start_slave.inc
 
-    --source include/rpl/connection_source.inc
-    --source include/rpl/save_binlog_file_position.inc
+    --source include/rpl_connection_master.inc
+    --source include/save_binlog_position.inc
 
     if ($verb==3) { echo # Execute UPDATE; }
     --let $statement= UPDATE t SET $set
@@ -473,14 +491,14 @@ while (!$done)
     if ($verb>=1) {
       --let $mysqlbinlog_only_decoded_rows= 1
       --let $mysqlbinlog_allow_error= 1
-      --source include/rpl/mysqlbinlog.inc
+      --source include/mysqlbinlog.inc
     }
 
-    --source include/rpl/sync.inc
-    --source include/rpl/diff.inc
+    --source include/rpl_sync.inc
+    --source include/rpl_diff.inc
 
     DROP TABLE t;
-    --source include/rpl/sync.inc
+    --source include/rpl_sync.inc
   }
 
   --inc $iteration
@@ -496,10 +514,11 @@ while (!$done)
   }
 }
 
---source include/rpl/connection_replica.inc
+--source include/rpl_connection_slave.inc
 --enable_query_log
 SET @@GLOBAL.BINLOG_ROW_IMAGE= @old_binlog_row_image;
 SET @@GLOBAL.BINLOG_ROW_VALUE_OPTIONS= @old_binlog_row_value_options;
+SET @@GLOBAL.SLAVE_ROWS_SEARCH_ALGORITHMS= @old_slave_rows_search_algorithms;
 SET @@GLOBAL.REPLICA_EXEC_MODE= @old_replica_exec_mode;
 
 --disable_query_log
@@ -508,4 +527,4 @@ if ($verb < 3) {
   --enable_warnings
 }
 
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

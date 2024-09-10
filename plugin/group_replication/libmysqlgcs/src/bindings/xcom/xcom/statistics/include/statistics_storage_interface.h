@@ -1,16 +1,15 @@
-/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -74,11 +73,15 @@ class Xcom_statistics_storage_interface {
 
   /**
    * @brief Adds to bytes received in this member
+   *
+   * @param bytes_received
    */
   virtual void add_bytes_received(uint64_t bytes_received) = 0;
 
   /**
    * @brief Sets the last proposal time
+   *
+   * @param proposal_time
    */
   virtual void set_last_proposal_time(unsigned long long proposal_time) = 0;
 };

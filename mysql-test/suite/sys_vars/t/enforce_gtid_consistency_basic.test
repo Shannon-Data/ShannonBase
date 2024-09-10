@@ -1,7 +1,7 @@
 
 # default value
 
-RESET BINARY LOGS AND GTIDS;
+RESET MASTER;
 SET @start_global_value = @@global.enforce_gtid_consistency;
 SELECT @start_global_value;
 

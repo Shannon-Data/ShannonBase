@@ -1,16 +1,15 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -70,7 +69,6 @@ int init_events_stages_history_long(uint events_stages_history_long_sizing) {
   events_stages_history_long_index.m_u32.store(0);
 
   if (events_stages_history_long_size == 0) {
-    events_stages_history_long_array = nullptr;
     return 0;
   }
 
@@ -78,12 +76,7 @@ int init_events_stages_history_long(uint events_stages_history_long_sizing) {
       &builtin_memory_stages_history_long, events_stages_history_long_size,
       sizeof(PFS_events_stages), PFS_events_stages, MYF(MY_ZEROFILL));
 
-  if (events_stages_history_long_array == nullptr) {
-    events_stages_history_long_size = 0;
-    return 1;
-  }
-
-  return 0;
+  return (events_stages_history_long_array ? 0 : 1);
 }
 
 /** Cleanup table EVENTS_STAGES_HISTORY_LONG. */
@@ -92,7 +85,6 @@ void cleanup_events_stages_history_long() {
                  events_stages_history_long_size, sizeof(PFS_events_stages),
                  events_stages_history_long_array);
   events_stages_history_long_array = nullptr;
-  events_stages_history_long_size = 0;
 }
 
 static inline void copy_events_stages(PFS_events_stages *dest,

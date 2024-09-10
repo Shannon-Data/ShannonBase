@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -85,7 +84,7 @@ MySQLServerMock::MySQLServerMock(net::io_context &io_ctx,
 void MySQLServerMock::close_all_connections() {
   client_sessions_([](auto &socks) {
     for (auto &conn : socks) {
-      conn->terminate();
+      conn->cancel();
     }
   });
 }
@@ -113,29 +112,29 @@ class Acceptor {
     net::ip::tcp::resolver resolver(io_ctx_);
 
     auto resolve_res = resolver.resolve(address, std::to_string(port));
-    if (!resolve_res) return stdx::unexpected(resolve_res.error());
+    if (!resolve_res) return resolve_res.get_unexpected();
 
     for (auto ainfo : resolve_res.value()) {
       net::ip::tcp::acceptor sock(io_ctx_);
 
       auto res = sock.open(ainfo.endpoint().protocol());
-      if (!res) return stdx::unexpected(res.error());
+      if (!res) return res.get_unexpected();
 
       res = sock.set_option(net::socket_base::reuse_address{true});
-      if (!res) return stdx::unexpected(res.error());
+      if (!res) return res.get_unexpected();
 
       res = sock.bind(ainfo.endpoint());
-      if (!res) return stdx::unexpected(res.error());
+      if (!res) return res.get_unexpected();
 
       res = sock.listen(256);
-      if (!res) return stdx::unexpected(res.error());
+      if (!res) return res.get_unexpected();
 
       sock_ = std::move(sock);
 
       return {};
     }
 
-    return stdx::unexpected(
+    return stdx::make_unexpected(
         make_error_code(std::errc::no_such_file_or_directory));
   }
 
@@ -145,11 +144,12 @@ class Acceptor {
     auto session_it = client_sessions_([&](auto &socks) {
       if (protocol_name_ == "classic") {
         socks.emplace_back(std::make_unique<MySQLServerMockSessionClassic>(
-            std::move(client_sock), client_ep_, tls_server_ctx_,
+            MySQLClassicProtocol{std::move(client_sock), client_ep_,
+                                 tls_server_ctx_},
             std::move(reader), false, with_tls_));
       } else {
         socks.emplace_back(std::make_unique<MySQLServerMockSessionX>(
-            std::move(client_sock), client_ep_, tls_server_ctx_,
+            MySQLXProtocol{std::move(client_sock), client_ep_, tls_server_ctx_},
             std::move(reader), false, with_tls_));
       }
       return std::prev(socks.end());

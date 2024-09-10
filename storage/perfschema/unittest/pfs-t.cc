@@ -1,16 +1,15 @@
-/* Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -42,7 +41,6 @@
 #include "storage/perfschema/unittest/stub_pfs_tls_channel.h"
 #include "storage/perfschema/unittest/stub_print_error.h"
 #include "storage/perfschema/unittest/stub_server_telemetry.h"
-#include "storage/perfschema/unittest/stub_telemetry_metrics.h"
 #include "unittest/mytap/tap.h"
 
 /* test helpers, to simulate the setup */
@@ -146,8 +144,6 @@ static void test_bootstrap() {
   param.m_program_sizing = 0;
   param.m_statement_stack_sizing = 0;
   param.m_memory_class_sizing = 0;
-  param.m_meter_class_sizing = 0;
-  param.m_metric_class_sizing = 0;
   param.m_metadata_lock_sizing = 0;
   param.m_max_digest_length = 0;
   param.m_max_sql_text_length = 0;
@@ -389,8 +385,6 @@ static void load_perfschema(
   param.m_program_sizing = 0;
   param.m_statement_stack_sizing = 10;
   param.m_memory_class_sizing = 10;
-  param.m_meter_class_sizing = 5;
-  param.m_metric_class_sizing = 10;
   param.m_metadata_lock_sizing = 10;
   param.m_max_digest_length = 0;
   param.m_max_sql_text_length = 1000;
@@ -577,7 +571,7 @@ static void test_bad_registration() {
   ok(dummy_rwlock_key == 0, "zero key");
   dummy_rwlock_key = 9999;
   rwlock_service->register_rwlock("123456789012", bad_rwlock_1, 1);
-  ok(dummy_rwlock_key == 3, "assigned key");
+  ok(dummy_rwlock_key == 1, "assigned key");
 
   /*
     Test that length('wait/synch/rwlock/' (18) + category + '/' (1) + name) <=
@@ -622,7 +616,7 @@ static void test_bad_registration() {
   ok(dummy_rwlock_key == 0, "zero key");
 
   rwlock_service->register_rwlock("X", bad_rwlock_3, 1);
-  ok(dummy_rwlock_key == 4, "assigned key");
+  ok(dummy_rwlock_key == 2, "assigned key");
 
   dummy_rwlock_key = 9999;
   PSI_rwlock_info bad_rwlock_3_sx[] = {
@@ -637,7 +631,7 @@ static void test_bad_registration() {
   ok(dummy_rwlock_key == 0, "zero key SX");
 
   rwlock_service->register_rwlock("Y", bad_rwlock_3_sx, 1);
-  ok(dummy_rwlock_key == 5, "assigned key SX");
+  ok(dummy_rwlock_key == 3, "assigned key SX");
 
   /*
     Test that length('wait/synch/cond/' (16) + category + '/' (1)) < 32
@@ -1897,8 +1891,6 @@ static void test_event_name_index() {
   param.m_program_sizing = 0;
   param.m_statement_stack_sizing = 10;
   param.m_memory_class_sizing = 12;
-  param.m_meter_class_sizing = 5;
-  param.m_metric_class_sizing = 10;
   param.m_metadata_lock_sizing = 10;
   param.m_max_digest_length = 0;
   param.m_max_sql_text_length = 1000;
@@ -2036,10 +2028,10 @@ static void test_event_name_index() {
   rwlock_service->register_rwlock("X", dummy_rwlocks, 2);
   rwlock_class = find_rwlock_class(dummy_rwlock_key_1);
   ok(rwlock_class != nullptr, "rwlock class 1");
-  ok(rwlock_class->m_event_name_index == 16, "index 16");
+  ok(rwlock_class->m_event_name_index == 14, "index 14");
   rwlock_class = find_rwlock_class(dummy_rwlock_key_2);
   ok(rwlock_class != nullptr, "rwlock class 2");
-  ok(rwlock_class->m_event_name_index == 17, "index 17");
+  ok(rwlock_class->m_event_name_index == 15, "index 15");
 
   PFS_cond_class *cond_class;
   PSI_cond_key dummy_cond_key_1;
@@ -2244,8 +2236,6 @@ static void test_leaks() {
   param.m_events_statements_history_long_sizing = 1000;
   param.m_session_connect_attrs_sizing = 1000;
   param.m_memory_class_sizing = 10;
-  param.m_meter_class_sizing = 5;
-  param.m_metric_class_sizing = 10;
   param.m_metadata_lock_sizing = 1000;
   param.m_digest_sizing = 1000;
   param.m_program_sizing = 1000;

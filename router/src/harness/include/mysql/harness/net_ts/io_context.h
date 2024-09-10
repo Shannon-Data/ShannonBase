@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2020, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -499,10 +498,9 @@ class io_context : public execution_context {
         // code should be similar to ::cancel(fd)
         std::lock_guard<std::mutex> lk(mtx_);
 
-        if (auto async_op =
-                active_ops_.extract_first(fd, static_cast<short>(wt))) {
-          async_op->cancel();
-          cancelled_ops_.push_back(std::move(async_op));
+        if (auto op = active_ops_.extract_first(fd, static_cast<short>(wt))) {
+          op->cancel();
+          cancelled_ops_.push_back(std::move(op));
         }
       }
     }
@@ -1176,7 +1174,7 @@ inline io_context::count_type io_context::do_one(
     // timer
     std::chrono::milliseconds min_duration{0};
     {
-      std::lock_guard<std::mutex> lock(mtx_);
+      std::lock_guard<std::mutex> lk(mtx_);
       // check the smallest timestamp of all timer-queues
       for (auto q : timer_queues_) {
         const auto duration = q->next();
@@ -1194,21 +1192,21 @@ inline io_context::count_type io_context::do_one(
       }
     }
 
-    // if we have a timer that has fired or was cancelled, run it right away
-    if (timer_q && min_duration <= min_duration.zero()) continue;
+    // if we have a timer that has fired, run it right away
+    if (timer_q && min_duration == min_duration.zero()) continue;
 
     if (auto op = [this]() -> std::unique_ptr<async_op> {
           // handle all the cancelled ops without polling first
-          std::lock_guard<std::mutex> lock(mtx_);
+          std::lock_guard<std::mutex> lk(mtx_);
 
           // ops have all cancelled operators at the front
           if (!cancelled_ops_.empty() &&
               cancelled_ops_.front()->is_cancelled()) {
-            auto cancelled_op = std::move(cancelled_ops_.front());
+            auto op = std::move(cancelled_ops_.front());
 
             cancelled_ops_.pop_front();
 
-            return cancelled_op;
+            return op;
           }
 
           return {};
@@ -1274,7 +1272,7 @@ inline io_context::count_type io_context::do_one(
 
     if (auto op = [this](native_handle_type fd,
                          short events) -> std::unique_ptr<async_op> {
-          std::lock_guard<std::mutex> lock(mtx_);
+          std::lock_guard<std::mutex> lk(mtx_);
 
           return active_ops_.extract_first(fd, events);
         }(res->fd, res->event)) {

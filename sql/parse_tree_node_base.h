@@ -1,16 +1,15 @@
-/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -67,15 +66,15 @@ enum enum_parsing_context {
   CTX_INSERT_VALUES,  ///< INSERT ... VALUES
   CTX_INSERT_UPDATE,  ///< INSERT ... ON DUPLICATE KEY UPDATE ...
   CTX_JOIN,
+  CTX_GATHER,
   CTX_QEP_TAB,
   CTX_MATERIALIZATION,
   CTX_DUPLICATES_WEEDOUT,
   CTX_DERIVED,                  ///< "Derived" subquery
-  CTX_WHERE,                    ///< Inside WHERE condition
-  CTX_ON,                       ///< Inside ON condition
+  CTX_WHERE,                    ///< Subquery in WHERE clause item tree
+  CTX_ON,                       ///< ON clause context
   CTX_WINDOW,                   ///< Named or unnamed window
-  CTX_HAVING,                   ///< Inside HAVING condition
-  CTX_QUALIFY,                  ///< Inside QUALIFY condition
+  CTX_HAVING,                   ///< Subquery in HAVING clause item tree
   CTX_ORDER_BY,                 ///< ORDER BY clause execution context
   CTX_GROUP_BY,                 ///< GROUP BY clause execution context
   CTX_SIMPLE_ORDER_BY,          ///< ORDER BY clause execution context
@@ -256,7 +255,11 @@ class Parse_tree_node_tmpl {
                               const std::nothrow_t &) noexcept {}
 
  protected:
-  Parse_tree_node_tmpl() = delete;
+  Parse_tree_node_tmpl() {
+#ifndef NDEBUG
+    contextualized = false;
+#endif  // NDEBUG
+  }
 
   explicit Parse_tree_node_tmpl(const POS &pos) : m_pos(pos) {}
 

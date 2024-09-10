@@ -78,7 +78,9 @@ connection default;
 --error 2013
 reap;
 
+--enable_reconnect
 --source include/wait_until_connected_again.inc
+--disable_reconnect
 
 CHECK TABLE t1;
 
@@ -148,7 +150,9 @@ connection default;
 --error 2013
 reap;
 
+--enable_reconnect
 --source include/wait_until_connected_again.inc
+--disable_reconnect
 
 CHECK TABLE t1,t2,t3;
 SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;
@@ -190,7 +194,9 @@ connection default;
 --error 2013
 reap;
 
+--enable_reconnect
 --source include/wait_until_connected_again.inc
+--disable_reconnect
 
 CHECK TABLE t1,t2,t3;
 SELECT a, RIGHT(b,20), RIGHT(c,20) FROM t3;

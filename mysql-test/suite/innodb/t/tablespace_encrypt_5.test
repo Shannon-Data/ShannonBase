@@ -12,7 +12,6 @@
 # --source include/no_valgrind_without_big.inc
 # Disable in valgrind because of timeout, cf. Bug#22760145
 --source include/not_valgrind.inc
---source include/have_component_keyring_file.inc
 # Waiting time when (re)starting the server
 --let $explicit_default_wait_counter=10000
 
@@ -30,9 +29,10 @@ let search_pattern=samplerecord;
 let ts_name=encrypt_ts.ibd;
 
 --echo #########################################################################
---echo # RESTART 1 : WITH KEYRING COMPONENT
+--echo # RESTART 1 : WITH KEYRING PLUGIN
 --echo #########################################################################
---source suite/component_keyring_file/inc/setup_component.inc
+let $restart_parameters = restart: --early-plugin-load=keyring_file=$KEYRING_PLUGIN --loose-keyring_file_data=$MYSQL_TMP_DIR/mysecret_keyring $KEYRING_PLUGIN_OPT;
+--source include/restart_mysqld_no_echo.inc
 
 --echo # Create a new 'unencrypted' tablespace 'encrypt_ts'
 SELECT NAME, FLAG, SPACE_TYPE FROM information_schema.INNODB_TABLESPACES
@@ -157,7 +157,7 @@ let $wait_condition = select count(*) = 0
 DROP TABLE test.t1;
 DROP TABLESPACE encrypt_ts;
 remove_file $MYSQLTEST_VARDIR/tmpfile.txt;
---source suite/component_keyring_file/inc/teardown_component.inc
+remove_file $MYSQL_TMP_DIR/mysecret_keyring;
 
 --echo # Restarting server without keyring to restore server state
 let $restart_parameters = restart: ;

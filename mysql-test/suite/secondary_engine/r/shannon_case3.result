@@ -1,0 +1,61 @@
+create database sh_test_case3;
+use sh_test_case3;
+set use_secondary_engine=forced;
+create table tt1 (score int, name varchar(1024), id int, content varchar(1024), primary key(id, score)) secondary_engine=rapid;
+insert into tt1 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm'), (4,'n4',4,'f');
+select * from tt1 order by id;
+score	name	id	content
+1	n1	1	m
+2	n2	2	f
+3	n3	3	m
+4	n4	4	f
+alter table tt1 secondary_load;
+select * from tt1 order by id;
+score	name	id	content
+1	n1	1	m
+2	n2	2	f
+3	n3	3	m
+4	n4	4	f
+insert into tt1 values(10, 'n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n \
+                            1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n \
+                            1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n \
+                            1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n \
+                            1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n',
+1,'m   This program is also distributed with certain software (including but not limited to OpenSSL) that is licensed under separate terms, \
+                        as designated in a particular file or component or in included license documentation.  The authors of MySQL hereby grant you an additional\
+                        permission to link the program and your derivative works with the separately licensed software that they have included with MySQL. You\
+                         should have received a copy of the GNU General Public License
+                         along with this program; if not, write to the Free Software   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA'),
+(20,'n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2\
+                        n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n\
+                        n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2\
+                        n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2',
+2,' The fundmental code for imcs. The chunk is used to store the data which  transfer from row-based format to column-based format\
+                          The fundmental code for imcs. The chunk is used to store the data which  transfer from row-based format to column-based format.\
+                          This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License, version 2.0,\
+                          as published by the Free Software Foundation.  how to use LogReader to read the red log file'),
+(30, 'n3', 3, 'm');
+select * from tt1 order by id;
+score	name	id	content
+1	n1	1	m
+10	n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n 
+                            1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n 
+                            1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n 
+                            1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n 
+                            1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n	1	m   This program is also distributed with certain software (including but not limited to OpenSSL) that is licensed under separate terms, 
+                        as designated in a particular file or component or in included license documentation.  The authors of MySQL hereby grant you an additional
+                        permission to link the program and your derivative works with the separately licensed software that they have included with MySQL. You
+                         should have received a copy of the GNU General Public License
+                         along with this program; if not, write to the Free Software   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+2	n2	2	f
+20	n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2
+                        n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n
+                        n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2
+                        n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2n2	2	 The fundmental code for imcs. The chunk is used to store the data which  transfer from row-based format to column-based format
+                          The fundmental code for imcs. The chunk is used to store the data which  transfer from row-based format to column-based format.
+                          This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License, version 2.0,
+                          as published by the Free Software Foundation.  how to use LogReader to read the red log file
+3	n3	3	m
+30	n3	3	m
+4	n4	4	f
+drop database sh_test_case3;

@@ -16,7 +16,6 @@ SET foreign_key_checks=0;
 
 DROP TABLE IF EXISTS bug56143_1;
 DROP TABLE IF EXISTS bug56143_2;
-SET restrict_fk_on_non_standard_key=OFF;
 
 CREATE TABLE bug56143_1 (a INT, KEY(a)) ENGINE=INNODB;
 
@@ -584,7 +583,6 @@ SHOW CREATE TABLE bug56143_2;
 -- disable_result_log
 DROP TABLE bug56143_1;
 DROP TABLE bug56143_2;
-SET restrict_fk_on_non_standard_key=ON;
 
 -- enable_query_log
 -- enable_result_log

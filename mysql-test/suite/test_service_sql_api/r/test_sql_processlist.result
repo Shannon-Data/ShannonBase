@@ -1,8 +1,6 @@
 /*first*/SELECT * FROM information_schema.processlist WHERE command LIKE 'query';
 ID	USER	HOST	DB	COMMAND	TIME	STATE	INFO
 <ID>	root	<HOST_NAME>	test	Query	<TIME>	executing	/*first*/SELECT * FROM information_schema.processlist WHERE command LIKE 'query'
-Warnings:
-<ID>	1287	<HOST_NAME>
 ##########################################
 # Run plugin
 ##########################################
@@ -25,7 +23,7 @@ root			[NULL]			Query			PLUGIN: /*Session_1*/ SELECT user,db,command,info FROM i
 
 affected rows : 0
 server status : 34
-warn count    : 1
+warn count    : 0
 
 Opening Session 2
 -----------------------------------------------------------------
@@ -41,7 +39,7 @@ root			[NULL]			Sleep			PLUGIN
 
 affected rows : 0
 server status : 34
-warn count    : 1
+warn count    : 0
 -----------------------------------------------------------------
 Session 2 : 
 -----------------------------------------------------------------
@@ -55,7 +53,7 @@ root			[NULL]			Query			PLUGIN: /*Session_2*/ SELECT user,db,command,info FROM i
 
 affected rows : 0
 server status : 34
-warn count    : 1
+warn count    : 0
 
 Close Session 1
 -----------------------------------------------------------------
@@ -70,7 +68,7 @@ root			[NULL]			Query			PLUGIN: /*Session_2*/ SELECT user,db,command,info FROM i
 
 affected rows : 0
 server status : 34
-warn count    : 1
+warn count    : 0
 
 Close Session 2
 Follows threaded run
@@ -89,7 +87,7 @@ root			[NULL]			Query			PLUGIN: /*Session_1*/ SELECT user,db,command,info FROM i
 
 affected rows : 0
 server status : 34
-warn count    : 1
+warn count    : 0
 
 Opening Session 2
 -----------------------------------------------------------------
@@ -105,7 +103,7 @@ root			[NULL]			Sleep			PLUGIN
 
 affected rows : 0
 server status : 34
-warn count    : 1
+warn count    : 0
 -----------------------------------------------------------------
 Session 2 : 
 -----------------------------------------------------------------
@@ -119,7 +117,7 @@ root			[NULL]			Query			PLUGIN: /*Session_2*/ SELECT user,db,command,info FROM i
 
 affected rows : 0
 server status : 34
-warn count    : 1
+warn count    : 0
 
 Close Session 1
 -----------------------------------------------------------------
@@ -134,7 +132,7 @@ root			[NULL]			Query			PLUGIN: /*Session_2*/ SELECT user,db,command,info FROM i
 
 affected rows : 0
 server status : 34
-warn count    : 1
+warn count    : 0
 
 Close Session 2
 deinit thread
@@ -145,5 +143,3 @@ UNINSTALL PLUGIN test_sql_processlist;
 /*second*/SELECT * FROM information_schema.processlist WHERE command LIKE 'query';
 ID	USER	HOST	DB	COMMAND	TIME	STATE	INFO
 <ID>	root	<HOST_NAME>	test	Query	<TIME>	executing	/*second*/SELECT * FROM information_schema.processlist WHERE command LIKE 'query'
-Warnings:
-<ID>	1287	<HOST_NAME>

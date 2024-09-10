@@ -1,16 +1,15 @@
-/* Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,16 +24,18 @@
 #include <array>
 
 #include <gtest/gtest.h>
-#include "mysql/binlog/event/binary_log.h"
-#include "mysql/binlog/event/compression/none_comp.h"
-#include "mysql/binlog/event/compression/none_dec.h"
-#include "mysql/binlog/event/compression/zstd_comp.h"
-#include "mysql/binlog/event/compression/zstd_dec.h"
-#include "mysql/binlog/event/string/concat.h"
+#include "libbinlogevents/include/binary_log.h"
+#include "libbinlogevents/include/compression/none_comp.h"
+#include "libbinlogevents/include/compression/none_dec.h"
+#include "libbinlogevents/include/compression/zstd_comp.h"
+#include "libbinlogevents/include/compression/zstd_dec.h"
+#include "libbinlogevents/include/string/concat.h"
 
-using mysql::binlog::event::string::concat;
+using mysqlns::string::concat;
 
-namespace mysql::binlog::event::compression::unittests {
+namespace binary_log {
+namespace transaction {
+namespace unittests {
 
 static std::size_t MAX_BUFFER_SIZE = 1024 * 1024 * 512;
 
@@ -43,16 +44,17 @@ static std::array<std::size_t, 10> buffer_sizes{
 
 class TransactionPayloadCompressionTest : public ::testing::Test {
  public:
-  using Compressor_t = mysql::binlog::event::compression::Compressor;
+  using Compressor_t = binary_log::transaction::compression::Compressor;
   using Managed_buffer_sequence_t = Compressor_t::Managed_buffer_sequence_t;
-  using Decompressor_t = mysql::binlog::event::compression::Decompressor;
+  using Decompressor_t = binary_log::transaction::compression::Decompressor;
   using Managed_buffer_t = Decompressor_t::Managed_buffer_t;
   using Size_t = Decompressor_t::Size_t;
   using Char_t = Decompressor_t::Char_t;
   using String_t = std::basic_string<Char_t>;
   using Decompress_status_t =
-      mysql::binlog::event::compression::Decompress_status;
-  using Compress_status_t = mysql::binlog::event::compression::Compress_status;
+      binary_log::transaction::compression::Decompress_status;
+  using Compress_status_t =
+      binary_log::transaction::compression::Compress_status;
 
   static String_t constant_data(Size_t size) {
     return String_t(size, (Char_t)'a');
@@ -68,7 +70,7 @@ class TransactionPayloadCompressionTest : public ::testing::Test {
   static void compression_idempotency_test(Compressor_t &c, Decompressor_t &d,
                                            String_t data) {
     auto debug_string = concat(
-        mysql::binlog::event::compression::type_to_string(c.get_type_code()),
+        binary_log::transaction::compression::type_to_string(c.get_type_code()),
         " ", data.size());
     Managed_buffer_sequence_t managed_buffer_sequence;
     c.feed(data.data(), data.size());
@@ -77,7 +79,7 @@ class TransactionPayloadCompressionTest : public ::testing::Test {
 
     // assert that it is smaller than the uncompressed size
     auto compressed_size = managed_buffer_sequence.read_part().size();
-    if (c.get_type_code() != mysql::binlog::event::compression::NONE) {
+    if (c.get_type_code() != binary_log::transaction::compression::NONE) {
       // For very small data the constant overhead results in size inflation
       if (data.size() > 100) {
         ASSERT_LT(compressed_size, data.size()) << debug_string;
@@ -95,7 +97,7 @@ class TransactionPayloadCompressionTest : public ::testing::Test {
     auto ret = d.decompress(managed_buffer, data.size());
     auto expected_status = Decompress_status_t::success;
     if (data.empty() &&
-        c.get_type_code() == mysql::binlog::event::compression::NONE)
+        c.get_type_code() == binary_log::transaction::compression::NONE)
       expected_status = Decompress_status_t::end;
     ASSERT_EQ(ret, expected_status) << debug_string;
 
@@ -113,8 +115,8 @@ class TransactionPayloadCompressionTest : public ::testing::Test {
 
 TEST_F(TransactionPayloadCompressionTest, CompressDecompressZstdTest) {
   for (auto size : buffer_sizes) {
-    mysql::binlog::event::compression::Zstd_dec d;
-    mysql::binlog::event::compression::Zstd_comp c;
+    binary_log::transaction::compression::Zstd_dec d;
+    binary_log::transaction::compression::Zstd_comp c;
     String_t data{TransactionPayloadCompressionTest::constant_data(size)};
     TransactionPayloadCompressionTest::compression_idempotency_test(c, d, data);
     c.set_compression_level(22);
@@ -124,11 +126,13 @@ TEST_F(TransactionPayloadCompressionTest, CompressDecompressZstdTest) {
 
 TEST_F(TransactionPayloadCompressionTest, CompressDecompressNoneTest) {
   for (auto size : buffer_sizes) {
-    mysql::binlog::event::compression::None_dec d;
-    mysql::binlog::event::compression::None_comp c;
+    binary_log::transaction::compression::None_dec d;
+    binary_log::transaction::compression::None_comp c;
     String_t data{TransactionPayloadCompressionTest::constant_data(size)};
     TransactionPayloadCompressionTest::compression_idempotency_test(c, d, data);
   }
 }
 
-}  // namespace mysql::binlog::event::compression::unittests
+}  // namespace unittests
+}  // namespace transaction
+}  // namespace binary_log

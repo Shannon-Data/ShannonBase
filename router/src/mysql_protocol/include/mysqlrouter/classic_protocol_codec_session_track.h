@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -92,11 +91,11 @@ class Codec<borrowable::session_track::TransactionState>
     namespace bw = borrowable::wire;
 
     const auto payload_length_res = accu.template step<bw::VarInt>();
-    if (!accu.result()) return stdx::unexpected(accu.result().error());
+    if (!accu.result()) return stdx::make_unexpected(accu.result().error());
 
     if (payload_length_res->value() != 0x08) {
       // length of the payload that follows.
-      return stdx::unexpected(make_error_code(std::errc::bad_message));
+      return stdx::make_unexpected(make_error_code(std::errc::bad_message));
     }
 
     const auto trx_type_res = accu.template step<bw::FixedInt<1>>();
@@ -108,7 +107,7 @@ class Codec<borrowable::session_track::TransactionState>
     const auto resultset_res = accu.template step<bw::FixedInt<1>>();
     const auto locked_tables_res = accu.template step<bw::FixedInt<1>>();
 
-    if (!accu.result()) return stdx::unexpected(accu.result().error());
+    if (!accu.result()) return stdx::make_unexpected(accu.result().error());
 
     return std::make_pair(
         accu.result().value(),
@@ -169,7 +168,7 @@ class Codec<borrowable::session_track::TransactionCharacteristics<Borrowed>>
 
     auto characteristics_res = accu.template step<bw::VarString<Borrowed>>();
 
-    if (!accu.result()) return stdx::unexpected(accu.result().error());
+    if (!accu.result()) return stdx::make_unexpected(accu.result().error());
 
     return std::make_pair(accu.result().value(),
                           value_type(characteristics_res->value()));
@@ -224,7 +223,7 @@ class Codec<session_track::State>
 
     auto state_res = accu.template step<bw::FixedInt<1>>();
 
-    if (!accu.result()) return stdx::unexpected(accu.result().error());
+    if (!accu.result()) return stdx::make_unexpected(accu.result().error());
 
     return std::make_pair(accu.result().value(),
                           value_type(state_res->value()));
@@ -280,7 +279,7 @@ class Codec<borrowable::session_track::Schema<Borrowed>>
 
     auto schema_res = accu.template step<bw::VarString<Borrowed>>();
 
-    if (!accu.result()) return stdx::unexpected(accu.result().error());
+    if (!accu.result()) return stdx::make_unexpected(accu.result().error());
 
     return std::make_pair(accu.result().value(),
                           value_type(schema_res->value()));
@@ -339,7 +338,7 @@ class Codec<borrowable::session_track::SystemVariable<Borrowed>>
     auto key_res = accu.template step<bw::VarString<Borrowed>>();
     auto value_res = accu.template step<bw::VarString<Borrowed>>();
 
-    if (!accu.result()) return stdx::unexpected(accu.result().error());
+    if (!accu.result()) return stdx::make_unexpected(accu.result().error());
 
     return std::make_pair(accu.result().value(),
                           value_type(key_res->value(), value_res->value()));
@@ -406,7 +405,7 @@ class Codec<borrowable::session_track::Gtid<Borrowed>>
     auto spec_res = accu.template step<bw::FixedInt<1>>();
     auto gtid_res = accu.template step<bw::VarString<Borrowed>>();
 
-    if (!accu.result()) return stdx::unexpected(accu.result().error());
+    if (!accu.result()) return accu.result().get_unexpected();
 
     return std::make_pair(accu.result().value(),
                           value_type(spec_res->value(), gtid_res->value()));
@@ -476,7 +475,7 @@ class Codec<borrowable::session_track::Field<Borrowed>>
     auto type_res = accu.template step<bw::FixedInt<1>>();
     auto data_res = accu.template step<bw::VarString<Borrowed>>();
 
-    if (!accu.result()) return stdx::unexpected(accu.result().error());
+    if (!accu.result()) return stdx::make_unexpected(accu.result().error());
 
     return std::make_pair(accu.result().value(),
                           value_type(type_res->value(), data_res->value()));

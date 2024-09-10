@@ -1,16 +1,15 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -162,12 +161,6 @@ static SHOW_VAR simple_status[] = {
 
     {nullptr, nullptr, SHOW_UNDEF, SHOW_SCOPE_GLOBAL}};
 
-static void increment_counter(volatile int *counter) {
-  int value = *counter;
-  int new_value = value + 1;
-  *counter = new_value;
-}
-
 /*
   Define plugin variables.
 */
@@ -251,7 +244,6 @@ static int audit_null_plugin_init(void *arg [[maybe_unused]]) {
 */
 
 static int audit_null_plugin_deinit(void *arg [[maybe_unused]]) {
-  assert(arg);
   if (g_plugin_installed == true) {
     my_free((void *)(g_record_buffer));
 
@@ -463,7 +455,7 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
   bool consume_event = true;
 
   /* prone to races, oh well */
-  increment_counter(&number_of_calls);
+  number_of_calls++;
 
   if (event_class == MYSQL_AUDIT_GENERAL_CLASS) {
     const struct mysql_event_general *event_general =
@@ -471,16 +463,16 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
 
     switch (event_general->event_subclass) {
       case MYSQL_AUDIT_GENERAL_LOG:
-        increment_counter(&number_of_calls_general_log);
+        number_of_calls_general_log++;
         break;
       case MYSQL_AUDIT_GENERAL_ERROR:
-        increment_counter(&number_of_calls_general_error);
+        number_of_calls_general_error++;
         break;
       case MYSQL_AUDIT_GENERAL_RESULT:
-        increment_counter(&number_of_calls_general_result);
+        number_of_calls_general_result++;
         break;
       case MYSQL_AUDIT_GENERAL_STATUS:
-        increment_counter(&number_of_calls_general_status);
+        number_of_calls_general_status++;
         break;
       default:
         break;
@@ -491,16 +483,16 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
 
     switch (event_connection->event_subclass) {
       case MYSQL_AUDIT_CONNECTION_CONNECT:
-        increment_counter(&number_of_calls_connection_connect);
+        number_of_calls_connection_connect++;
         break;
       case MYSQL_AUDIT_CONNECTION_DISCONNECT:
-        increment_counter(&number_of_calls_connection_disconnect);
+        number_of_calls_connection_disconnect++;
         break;
       case MYSQL_AUDIT_CONNECTION_CHANGE_USER:
-        increment_counter(&number_of_calls_connection_change_user);
+        number_of_calls_connection_change_user++;
         break;
       case MYSQL_AUDIT_CONNECTION_PRE_AUTHENTICATE:
-        increment_counter(&number_of_calls_connection_pre_authenticate);
+        number_of_calls_connection_pre_authenticate++;
         break;
       default:
         break;
@@ -511,10 +503,10 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
 
     switch (event_parse->event_subclass) {
       case MYSQL_AUDIT_PARSE_PREPARSE:
-        increment_counter(&number_of_calls_parse_preparse);
+        number_of_calls_parse_preparse++;
         break;
       case MYSQL_AUDIT_PARSE_POSTPARSE:
-        increment_counter(&number_of_calls_parse_postparse);
+        number_of_calls_parse_postparse++;
         break;
       default:
         break;
@@ -566,11 +558,11 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
   else if (event_class == MYSQL_AUDIT_SERVER_STARTUP_CLASS) {
     /* const struct mysql_event_server_startup *event_startup=
        (const struct mysql_event_server_startup *) event; */
-    increment_counter(&number_of_calls_server_startup);
+    number_of_calls_server_startup++;
   } else if (event_class == MYSQL_AUDIT_SERVER_SHUTDOWN_CLASS) {
     /* const struct mysql_event_server_shutdown *event_startup=
        (const struct mysql_event_server_shutdown *) event; */
-    increment_counter(&number_of_calls_server_shutdown);
+    number_of_calls_server_shutdown++;
   } else if (event_class == MYSQL_AUDIT_COMMAND_CLASS) {
     const struct mysql_event_command *local_event_command =
         (const struct mysql_event_command *)event;
@@ -580,10 +572,10 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
 
     switch (local_event_command->event_subclass) {
       case MYSQL_AUDIT_COMMAND_START:
-        increment_counter(&number_of_calls_command_start);
+        number_of_calls_command_start++;
         break;
       case MYSQL_AUDIT_COMMAND_END:
-        increment_counter(&number_of_calls_command_end);
+        number_of_calls_command_end++;
         break;
       default:
         break;
@@ -597,16 +589,16 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
 
     switch (event_query->event_subclass) {
       case MYSQL_AUDIT_QUERY_START:
-        increment_counter(&number_of_calls_query_start);
+        number_of_calls_query_start++;
         break;
       case MYSQL_AUDIT_QUERY_NESTED_START:
-        increment_counter(&number_of_calls_query_nested_start);
+        number_of_calls_query_nested_start++;
         break;
       case MYSQL_AUDIT_QUERY_STATUS_END:
-        increment_counter(&number_of_calls_query_status_end);
+        number_of_calls_query_status_end++;
         break;
       case MYSQL_AUDIT_QUERY_NESTED_STATUS_END:
-        increment_counter(&number_of_calls_query_nested_status_end);
+        number_of_calls_query_nested_status_end++;
         break;
       default:
         break;
@@ -621,16 +613,16 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
 
     switch (event_table->event_subclass) {
       case MYSQL_AUDIT_TABLE_ACCESS_INSERT:
-        increment_counter(&number_of_calls_table_access_insert);
+        number_of_calls_table_access_insert++;
         break;
       case MYSQL_AUDIT_TABLE_ACCESS_DELETE:
-        increment_counter(&number_of_calls_table_access_delete);
+        number_of_calls_table_access_delete++;
         break;
       case MYSQL_AUDIT_TABLE_ACCESS_UPDATE:
-        increment_counter(&number_of_calls_table_access_update);
+        number_of_calls_table_access_update++;
         break;
       case MYSQL_AUDIT_TABLE_ACCESS_READ:
-        increment_counter(&number_of_calls_table_access_read);
+        number_of_calls_table_access_read++;
         break;
       default:
         break;
@@ -657,10 +649,10 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
 
     switch (event_gvar->event_subclass) {
       case MYSQL_AUDIT_GLOBAL_VARIABLE_GET:
-        increment_counter(&number_of_calls_global_variable_get);
+        number_of_calls_global_variable_get++;
         break;
       case MYSQL_AUDIT_GLOBAL_VARIABLE_SET:
-        increment_counter(&number_of_calls_global_variable_set);
+        number_of_calls_global_variable_set++;
         break;
       default:
         break;
@@ -707,10 +699,10 @@ static int audit_null_notify(MYSQL_THD thd, mysql_event_class_t event_class,
 
     switch (evt->event_subclass) {
       case MYSQL_AUDIT_MESSAGE_INTERNAL:
-        increment_counter(&number_of_calls_message_internal);
+        number_of_calls_message_internal++;
         break;
       case MYSQL_AUDIT_MESSAGE_USER:
-        increment_counter(&number_of_calls_message_user);
+        number_of_calls_message_user++;
         break;
       default:
         break;

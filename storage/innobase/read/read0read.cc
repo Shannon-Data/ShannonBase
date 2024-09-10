@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2024, Oracle and/or its affiliates.
+Copyright (c) 1996, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -328,6 +327,12 @@ ReadView::~ReadView() {
   // Do nothing
 }
 
+void ReadView::Copy_readView(const ReadView &view) {
+  copy_prepare(view);
+  copy_complete();
+  m_creator_trx_id = view.m_creator_trx_id;
+}
+
 /** Constructor
 @param size             Number of views to pre-allocate */
 MVCC::MVCC(ulint size) : m_free(), m_views() {
@@ -346,6 +351,18 @@ MVCC::~MVCC() {
   }
 
   ut_a(UT_LIST_GET_LEN(m_views) == 0);
+}
+
+/** Insert the view in the proper order into the view list.
+@param	view	view to add */
+void MVCC::view_add(const ReadView *view) {
+  ut_ad(trx_sys_mutex_own());
+
+  UT_LIST_ADD_FIRST(m_views, const_cast<ReadView *>(view));
+
+  ut_ad(!view->is_closed());
+
+  ut_ad(validate());
 }
 
 /**
@@ -494,6 +511,34 @@ ReadView *MVCC::get_view() {
   return (view);
 }
 
+/**
+Release a view that is inactive but not closed. Caller must own
+the trx_sys_t::mutex.
+@param view             View to release */
+void MVCC::view_release(ReadView *&view) {
+  ut_ad(!srv_read_only_mode);
+  ut_ad(trx_sys_mutex_own());
+
+  uintptr_t p = reinterpret_cast<uintptr_t>(view);
+
+  ut_a(p & 0x1);
+
+  view = reinterpret_cast<ReadView *>(p & ~1);
+
+  ut_ad(view->m_closed);
+
+  /** RW transactions should not free their views here. Their views
+  should freed using view_close_view() */
+
+  ut_ad(view->m_creator_trx_id == 0);
+
+  UT_LIST_REMOVE(m_views, view);
+
+  UT_LIST_ADD_LAST(m_free, view);
+
+  view = nullptr;
+}
+
 /** Allocate and create a view.
 @param view     View owned by this class created for the caller. Must be
 freed by calling view_close()
@@ -549,6 +594,25 @@ void MVCC::view_open(ReadView *&view, trx_t *trx) {
   }
 
   trx_sys_mutex_exit();
+}
+
+ReadView *MVCC::get_view_created_by_trx_id(trx_id_t trx_id) const {
+  ReadView *view;
+
+  ut_ad(trx_sys_mutex_own());
+
+  for (view = UT_LIST_GET_LAST(m_views); view != nullptr;
+       view = UT_LIST_GET_PREV(m_view_list, view)) {
+    if (view->is_closed()) {
+      continue;
+    }
+
+    if (view->m_creator_trx_id == trx_id) {
+      break;
+    }
+  }
+
+  return (view);
 }
 
 /**
@@ -616,6 +680,55 @@ void ReadView::copy_complete() {
 
   /* We added the creator transaction ID to the m_ids. */
   m_creator_trx_id = 0;
+}
+
+/**
+Clones a read view object. The resulting read view has identical change
+visibility as the donor read view
+@param	result	pointer to resulting read view. If NULL, a view will be
+        allocated. If non-NULL, a view will overwrite a previously-existing
+        in-use or released view.
+@param	from_trx	transation owning the donor read view. */
+
+void ReadView::clone(ReadView *&result, trx_t *from_trx) const {
+  ut_ad(from_trx->read_view == this);
+  ut_ad(trx_sys_mutex_own());
+
+  if (!result)
+    result = trx_sys->mvcc->get_view();
+  else {
+    result =
+        reinterpret_cast<ReadView *>(reinterpret_cast<uintptr_t>(result) & ~1);
+  }
+
+  // Set the creating trx id of the clone to that of donor.
+  trx_id_t from_trx_id;
+  if (from_trx->read_view->m_creator_trx_id != 0) {
+    // The donor transaction is RO, and a clone itself
+    from_trx_id = from_trx->read_view->m_creator_trx_id;
+  } else if (from_trx->id == 0) {
+    // The donor transaction is RO, thus does not have a trx ID
+    // yet which the cloned view must see, if it assigned later
+    if (!from_trx->preallocated_id) {
+      // Preallocate a transaction id for the donor
+      from_trx_id = from_trx->preallocated_id = trx_sys_allocate_trx_id();
+    } else {
+      // This transaction has already been cloned
+      from_trx_id = from_trx->preallocated_id;
+    }
+  } else {
+    // The donor transaction is RW
+    from_trx_id = from_trx->id;
+  }
+
+  result->copy_prepare(*this);
+  // Calling copy_complete would be redundant for us and would force
+  // a too early trx sys mutex release.
+  result->m_creator_trx_id = from_trx_id;
+  // If the clone transaction is RO and is later promoted to RW, make
+  // sure not to add its own id to its view
+  result->m_cloned = true;
+  result->m_closed = false;
 }
 
 /** Clones the oldest view and stores it in view. No need to
@@ -691,8 +804,10 @@ void MVCC::view_close(ReadView *&view, bool own_mutex) {
 
     view->close();
 
-    UT_LIST_REMOVE(m_views, view);
-    UT_LIST_ADD_LAST(m_free, view);
+    if (!view->skip_view_list) {
+      UT_LIST_REMOVE(m_views, view);
+      UT_LIST_ADD_LAST(m_free, view);
+    }
 
     ut_ad(validate());
 

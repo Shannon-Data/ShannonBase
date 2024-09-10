@@ -1,6 +1,6 @@
 #
 # 1. Create source-replica topology
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -27,24 +27,24 @@ call mtr.add_suppression("Replica SQL for channel '': ... The replica coordinato
 call mtr.add_suppression("Replica SQL for channel '':.*failed executing transaction.*");
 call mtr.add_suppression("Replica SQL for channel '': Error 'Table 'mysql.time_zone' doesn't exist' on query.*");
 call mtr.add_suppression("Replica: Unknown or incorrect time zone: 'UTC'.*");
-include/rpl/start_receiver.inc
-include/rpl/wait_for_receiver_to_start.inc
+include/start_slave_io.inc
+include/wait_for_slave_io_to_start.inc
 START REPLICA SQL_THREAD;
 #
 # 7. Verify that replica sql thread failed with error
-include/rpl/wait_for_applier_error.inc [errno=1146]
+include/wait_for_slave_sql_error.inc [errno=1146]
 #
 # 8. Cleanup
-include/rpl/stop_receiver.inc
+include/stop_slave_io.inc
 RESET REPLICA ALL;
 CHANGE REPLICATION SOURCE TO SOURCE_USER= 'root', SOURCE_HOST= "127.0.0.1", SOURCE_PORT= MASTER_MYPORT;;
 Warnings:
 Note	1759	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	1760	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 RENAME TABLE mysql.time_zone_bkup TO mysql.time_zone;
-include/rpl/start_replica.inc
+include/start_slave.inc
 [connection master]
 DROP USER u1;
 DROP DATABASE db1;
 set time_zone= @save.time_zone;
-include/rpl/deinit.inc
+include/rpl_end.inc

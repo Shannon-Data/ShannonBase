@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,11 +36,9 @@
 #include <errmsg.h>
 #include <mysql.h>
 
-#include "configuration_update_schema.h"
 #include "dim.h"
 #include "group_replication_metadata.h"
 #include "log_suppressor.h"
-#include "mysql/harness/dynamic_config.h"
 #include "mysql/harness/event_state_tracker.h"
 #include "mysql/harness/logging/logging.h"
 #include "mysql/harness/utility/string.h"  // string_format
@@ -184,8 +181,11 @@ ClusterMetadata::get_and_check_metadata_schema_version(
   if (!metadata_schema_version_is_compatible(
           mysqlrouter::kRequiredRoutingMetadataSchemaVersion, version)) {
     throw metadata_cache::metadata_error(mysql_harness::utility::string_format(
-        "Instance '%s': %s", session.get_address().c_str(),
-        mysqlrouter::get_metadata_schema_uncompatible_msg(version).c_str()));
+        "Unsupported metadata schema on %s. Expected Metadata Schema version "
+        "compatible to %s, got %s",
+        session.get_address().c_str(),
+        to_string(mysqlrouter::kRequiredRoutingMetadataSchemaVersion).c_str(),
+        to_string(version).c_str()));
   }
 
   return version;
@@ -266,27 +266,38 @@ bool ClusterMetadata::update_router_attributes(
   // MetadataUpgradeInProgressException
   get_and_check_metadata_schema_version(*connection);
 
-  sqlstring query =
-      "UPDATE mysql_innodb_cluster_metadata.v2_routers "
-      "SET version = ?, last_check_in = NOW(), attributes = "
-      "JSON_SET(JSON_SET(JSON_SET(JSON_SET(JSON_SET(JSON_SET(JSON_SET( "
-      "IF(attributes IS NULL, '{}', attributes), "
-      "'$.RWEndpoint', ?), "
-      "'$.ROEndpoint', ?), "
-      "'$.RWSplitEndpoint', ?), "
-      "'$.RWXEndpoint', ?), "
-      "'$.ROXEndpoint', ?), "
-      "'$.MetadataUser', ?), "
-      "'$.Configuration', CAST(? as JSON)) "
-      "WHERE router_id = ?";
+  sqlstring query;
+  if (get_cluster_type() == ClusterType::GR_V1) {
+    query =
+        "UPDATE mysql_innodb_cluster_metadata.routers "
+        "SET attributes = "
+        "JSON_SET(JSON_SET(JSON_SET(JSON_SET(JSON_SET(JSON_SET( "
+        "IF(attributes IS NULL, '{}', attributes), "
+        "'$.version', ?), "
+        "'$.RWEndpoint', ?), "
+        "'$.ROEndpoint', ?), "
+        "'$.RWXEndpoint', ?), "
+        "'$.ROXEndpoint', ?), "
+        "'$.MetadataUser', ?) "
+        "WHERE router_id = ?";
+  } else {
+    query =
+        "UPDATE mysql_innodb_cluster_metadata.v2_routers "
+        "SET version = ?, last_check_in = NOW(), attributes = "
+        "JSON_SET(JSON_SET(JSON_SET(JSON_SET(JSON_SET( "
+        "IF(attributes IS NULL, '{}', attributes), "
+        "'$.RWEndpoint', ?), "
+        "'$.ROEndpoint', ?), "
+        "'$.RWXEndpoint', ?), "
+        "'$.ROXEndpoint', ?), "
+        "'$.MetadataUser', ?) "
+        "WHERE router_id = ?";
+  }
 
   const auto &ra{router_attributes};
   query << MYSQL_ROUTER_VERSION << ra.rw_classic_port << ra.ro_classic_port
-        << ra.rw_split_classic_port << ra.rw_x_port << ra.ro_x_port
-        << ra.metadata_user_name
-        << mysql_harness::DynamicConfig::instance().get_json_as_string(
-               mysql_harness::DynamicConfig::ValueType::ConfiguredValue)
-        << router_id << sqlstring::end;
+        << ra.rw_x_port << ra.ro_x_port << ra.metadata_user_name << router_id
+        << sqlstring::end;
 
   connection->execute(query);
 
@@ -298,6 +309,9 @@ bool ClusterMetadata::update_router_attributes(
 bool ClusterMetadata::update_router_last_check_in(
     const metadata_cache::metadata_server_t &rw_server,
     const unsigned router_id) {
+  // only relevant to for metadata V2
+  if (get_cluster_type() == ClusterType::GR_V1) return true;
+
   auto connection = std::make_unique<MySQLSession>(
       std::make_unique<MySQLSession::LoggingStrategyDebugLogger>());
   if (!do_connect(*connection, rw_server)) {
@@ -436,8 +450,7 @@ std::optional<metadata_cache::metadata_server_t>
 ClusterMetadata::find_rw_server(
     const std::vector<metadata_cache::ManagedCluster> &clusters) {
   for (auto &cluster : clusters) {
-    if (cluster.is_primary && cluster.has_quorum && !cluster.is_invalidated)
-      return find_rw_server(cluster.members);
+    if (cluster.is_primary) return find_rw_server(cluster.members);
   }
 
   return {};

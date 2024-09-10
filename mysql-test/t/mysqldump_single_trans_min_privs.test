@@ -54,5 +54,5 @@ SHOW GRANTS FOR test@localhost;
 # Cleanup
 DROP USER test@localhost;
 DROP DATABASE bug_test;
-RESET BINARY LOGS AND GTIDS;
+RESET MASTER;
 --remove_file $mysqldumpfile

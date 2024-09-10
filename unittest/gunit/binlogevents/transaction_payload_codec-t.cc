@@ -1,16 +1,15 @@
-/* Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,10 +23,12 @@
 
 #include <gtest/gtest.h>
 #include <vector>
-#include "mysql/binlog/event/binary_log.h"
-#include "mysql/binlog/event/codecs/binary.h"
+#include "libbinlogevents/include/binary_log.h"
+#include "libbinlogevents/include/codecs/binary.h"
 
-namespace mysql::binlog::event::codecs::unittests {
+namespace binary_log {
+namespace codecs {
+namespace unittests {
 
 class TransactionPayloadCodecTest : public ::testing::Test {
  protected:
@@ -38,12 +39,12 @@ class TransactionPayloadCodecTest : public ::testing::Test {
 
   void TearDown() override { m_payloads.clear(); }
 
-  void run_codec_idempotency_test(mysql::binlog::event::codecs::Codec &codec) {
+  void run_codec_idempotency_test(binary_log::codecs::Codec &codec) {
     for (auto payload_size : m_payloads) {
       unsigned char *payload = new unsigned char[payload_size];
 
       memset(payload, 'a', payload_size);
-      auto ctype = mysql::binlog::event::compression::type::ZSTD;
+      auto ctype = binary_log::transaction::compression::type::ZSTD;
       TransactionPayloadCodecTest::codec_idempotency_test(
           codec, payload, payload_size, ctype, payload_size * 2);
 
@@ -52,9 +53,9 @@ class TransactionPayloadCodecTest : public ::testing::Test {
   }
 
   static void codec_idempotency_test(
-      mysql::binlog::event::codecs::Codec &codec, unsigned char *payload,
+      binary_log::codecs::Codec &codec, unsigned char *payload,
       size_t payload_size,
-      mysql::binlog::event::compression::type compression_type,
+      binary_log::transaction::compression::type compression_type,
       size_t uncompressed_size) {
     const Format_description_event fde(BINLOG_VERSION, "8.0.17");
 
@@ -83,7 +84,7 @@ class TransactionPayloadCodecTest : public ::testing::Test {
 
     Transaction_payload_event decoded(
         static_cast<const char *>(nullptr), static_cast<uint64_t>(0),
-        mysql::binlog::event::compression::type::NONE, payload_size);
+        transaction::compression::type::NONE, payload_size);
 
     // decode the post LOG_EVENT header
     auto buffer = enc_buffer;
@@ -110,8 +111,10 @@ class TransactionPayloadCodecTest : public ::testing::Test {
 };
 
 TEST_F(TransactionPayloadCodecTest, EncodeDecodeIdempotencyBinaryTest) {
-  mysql::binlog::event::codecs::binary::Transaction_payload codec;
+  binary_log::codecs::binary::Transaction_payload codec;
   TransactionPayloadCodecTest::run_codec_idempotency_test(codec);
 }
 
-}  // namespace mysql::binlog::event::codecs::unittests
+}  // namespace unittests
+}  // namespace codecs
+}  // namespace binary_log

@@ -1,16 +1,15 @@
-/* Copyright (c) 2012, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -39,7 +38,6 @@
 #include "mysql/components/services/bits/mysql_mutex_bits.h"
 #include "mysql/components/services/bits/psi_mutex_bits.h"
 #include "mysql/psi/mysql_mutex.h"
-#include "sql/aggregated_stats.h"
 #include "sql/handler.h"
 #include "sql/sql_base.h"
 #include "sql/sql_class.h"
@@ -50,7 +48,6 @@
 class Table_cache_element;
 
 extern ulong table_cache_size_per_instance, table_cache_instances;
-extern struct aggregated_stats global_aggregated_stats;
 
 /**
   Cache for open TABLE objects.
@@ -327,8 +324,6 @@ void Table_cache::free_unused_tables_if_necessary(THD *thd) {
       remove_table(table_to_free);
       intern_close_table(table_to_free);
       thd->status_var.table_open_cache_overflows++;
-      global_aggregated_stats.get_shard(thd->thread_id())
-          .table_open_cache_overflows++;
     }
     mysql_mutex_unlock(&LOCK_open);
   }

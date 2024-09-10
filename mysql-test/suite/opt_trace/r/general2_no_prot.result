@@ -322,10 +322,10 @@ TRACE
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_group_by_or_distinct"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "potential_skip_scan_indexes": [
                       {
@@ -1460,32 +1460,26 @@ TRACE
               "select#": 2,
               "steps": [
                 {
-                  "no de-duplication": {
+                  "temp_table_aggregate": {
+                    "select#": 2,
                     "steps": [
                       {
-                        "temp_table_aggregate": {
-                          "select#": 2,
-                          "steps": [
-                            {
-                              "creating_tmp_table": {
-                                "tmp_table_info": {
-                                  "table": "<temporary>",
-                                  "in_plan_at_position": 1,
-                                  "columns": 2,
-                                  "row_length": 22,
-                                  "key_length": 5,
-                                  "unique_constraint": false,
-                                  "makes_grouped_rows": true,
-                                  "cannot_insert_duplicates": false,
-                                  "location": "TempTable"
-                                } /* tmp_table_info */
-                              } /* creating_tmp_table */
-                            }
-                          ] /* steps */
-                        } /* temp_table_aggregate */
+                        "creating_tmp_table": {
+                          "tmp_table_info": {
+                            "table": "<temporary>",
+                            "in_plan_at_position": 1,
+                            "columns": 2,
+                            "row_length": 22,
+                            "key_length": 5,
+                            "unique_constraint": false,
+                            "makes_grouped_rows": true,
+                            "cannot_insert_duplicates": false,
+                            "location": "TempTable"
+                          } /* tmp_table_info */
+                        } /* creating_tmp_table */
                       }
                     ] /* steps */
-                  } /* no de-duplication */
+                  } /* temp_table_aggregate */
                 }
               ] /* steps */
             } /* materialize */
@@ -3429,10 +3423,10 @@ from t0 where a in
                       } /* best_covering_index_scan */,
                       "setup_range_conditions": [
                       ] /* setup_range_conditions */,
-                      "group_index_skip_scan": {
+                      "group_index_range": {
                         "chosen": false,
                         "cause": "not_single_table"
-                      } /* group_index_skip_scan */,
+                      } /* group_index_range */,
                       "skip_scan_range": {
                         "chosen": false,
                         "cause": "not_single_table"
@@ -3714,10 +3708,10 @@ select 497, tmp.ID, NULL from (select 497 as ID, MAX(t3.DATA) as DATA      from 
                         ] /* potential_range_indexes */,
                         "setup_range_conditions": [
                         ] /* setup_range_conditions */,
-                        "group_index_skip_scan": {
+                        "group_index_range": {
                           "chosen": false,
                           "cause": "not_single_table"
-                        } /* group_index_skip_scan */,
+                        } /* group_index_range */,
                         "skip_scan_range": {
                           "chosen": false,
                           "cause": "not_single_table"
@@ -3898,12 +3892,6 @@ select 497, tmp.ID, NULL from (select 497 as ID, MAX(t3.DATA) as DATA      from 
             "materialize": {
               "select#": 2,
               "steps": [
-                {
-                  "no de-duplication": {
-                    "steps": [
-                    ] /* steps */
-                  } /* no de-duplication */
-                }
               ] /* steps */
             } /* materialize */
           }
@@ -4303,10 +4291,10 @@ link_alias_148._field_156	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"
@@ -4379,10 +4367,10 @@ link_alias_148._field_156	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"
@@ -4455,10 +4443,10 @@ link_alias_148._field_156	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"
@@ -5030,10 +5018,10 @@ GROUP BY field2 ORDER BY alias1.col_int_key,alias2.pk	{
                   ] /* potential_range_indexes */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"

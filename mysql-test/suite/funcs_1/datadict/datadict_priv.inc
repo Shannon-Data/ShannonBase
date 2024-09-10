@@ -71,8 +71,7 @@ eval REVOKE ALL ON $table FROM current_user;
 --error ER_DBACCESS_DENIED_ERROR
 eval GRANT INSERT,UPDATE ON $table TO current_user;
 
---let $user = 0
---source include/show_grants.inc
+SHOW GRANTS;
 
 #----------------------------------------------------------------------
 # table access

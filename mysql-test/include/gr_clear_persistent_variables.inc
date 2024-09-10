@@ -33,9 +33,9 @@ while ($_rpl_server <= $_rpl_server_max)
   {
     --let $rpl_connection_name= server_aux_$_rpl_server
     --let $rpl_server_number= $_rpl_server
-    --source include/rpl/connect.inc
+    --source include/rpl_connect.inc
     --let $rpl_connection_name= server_aux_$_rpl_server
-    --source include/connection.inc
+    --source include/rpl_connection.inc
 
     --disable_query_log
     # variables might not be there for some connections

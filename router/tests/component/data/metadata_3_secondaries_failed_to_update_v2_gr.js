@@ -2,8 +2,10 @@
 var common_stmts = require("common_statements");
 var gr_memberships = require("gr_memberships");
 
-var group_replication_members_online = gr_memberships.gr_members(
-    mysqld.global.gr_node_host, mysqld.global.gr_nodes);
+var gr_node_host = "127.0.0.1";
+
+var group_replication_members_online =
+    gr_memberships.gr_members(gr_node_host, mysqld.global.gr_nodes);
 
 var options = {
   group_replication_members: group_replication_members_online,
@@ -12,10 +14,16 @@ var options = {
   metadata_schema_version: [1, 0, 2],
 };
 
+// first node is PRIMARY
+options.group_replication_primary_member =
+    options.group_replication_members[0][0];
+
 var router_select_metadata =
     common_stmts.get("router_select_metadata", options);
-var router_select_group_membership =
-    common_stmts.get("router_select_group_membership", options);
+var router_select_group_membership_with_primary_mode = common_stmts.get(
+    "router_select_group_membership_with_primary_mode", options);
+var router_select_group_replication_primary_member =
+    common_stmts.get("router_select_group_replication_primary_member", options);
 
 // prepare the responses for common statements
 var common_responses = common_stmts.prepare_statement_responses(
@@ -57,9 +65,21 @@ if (mysqld.global.GR_health_failed === undefined) {
           }
         };
       }
-    } else if (stmt === router_select_group_membership.stmt) {
+    } else if (stmt === router_select_group_replication_primary_member.stmt) {
+      if (!mysqld.global.GR_primary_failed) {
+        return router_select_group_replication_primary_member;
+      } else {
+        return {
+          error: {
+            code: 1273,
+            sql_state: "HY001",
+            message: "Syntax Error at: " + stmt
+          }
+        };
+      }
+    } else if (stmt === router_select_group_membership_with_primary_mode.stmt) {
       if (!mysqld.global.GR_health_failed) {
-        return router_select_group_membership;
+        return router_select_group_membership_with_primary_mode;
       } else {
         return {
           error: {

@@ -1,12 +1,18 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
 CREATE TABLE t1 (c1 INT);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 [connection master]
+SET @saved_expire_logs_days= @@GLOBAL.expire_logs_days;
+Warnings:
+Warning	1287	'@@expire_logs_days' is deprecated and will be removed in a future release. Please use binlog_expire_logs_seconds instead.
 SET @saved_binlog_expire_logs_seconds= @@GLOBAL.binlog_expire_logs_seconds;
+SET @@GLOBAL.expire_logs_days= 0;
+Warnings:
+Warning	1287	'@@expire_logs_days' is deprecated and will be removed in a future release. Please use binlog_expire_logs_seconds instead.
 SET @@GLOBAL.binlog_expire_logs_seconds= 1;
 [connection master1]
 LOCK INSTANCE FOR BACKUP;
@@ -23,11 +29,11 @@ INSERT INTO t1 VALUES (5);
 INSERT INTO t1 VALUES (6);
 FLUSH LOCAL LOGS;
 INSERT INTO t1 VALUES (7);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 [connection master]
 FLUSH LOCAL LOGS;
 INSERT INTO t1 VALUES (8);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 SHOW RELAYLOG EVENTS IN 'FIRST_RELAY_LOG_FILE';
 SHOW RELAYLOG EVENTS IN 'LAST_RELAY_LOG_FILE';
 [connection master]
@@ -41,9 +47,12 @@ UNLOCK INSTANCE;
 FLUSH LOCAL LOGS;
 include/assert.inc [1st to 3rd binary log file should be not available]
 DROP TABLE t1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 SHOW RELAYLOG EVENTS IN 'FIRST_RELAY_LOG_FILE';
 SHOW RELAYLOG EVENTS IN 'LAST_RELAY_LOG_FILE';
 [connection master]
 SET @@GLOBAL.binlog_expire_logs_seconds= @saved_binlog_expire_logs_seconds;
-include/rpl/deinit.inc
+SET @@GLOBAL.expire_logs_days= @saved_expire_logs_days;
+Warnings:
+Warning	1287	'@@expire_logs_days' is deprecated and will be removed in a future release. Please use binlog_expire_logs_seconds instead.
+include/rpl_end.inc

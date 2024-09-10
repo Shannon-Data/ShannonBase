@@ -31,7 +31,7 @@
 --source include/have_debug.inc
 
 # Make sure the test is repeatable
-RESET BINARY LOGS AND GTIDS;
+RESET MASTER;
 SET GTID_NEXT = 'ANONYMOUS';
 CREATE TABLE t1 (a int) ENGINE=MyISAM;
 SET GTID_NEXT = 'ANONYMOUS';

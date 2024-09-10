@@ -6,7 +6,7 @@
 # could cause any issue.
 
 source include/have_debug.inc;
-source include/rpl/init_source_replica.inc;
+source include/master-slave.inc;
 
 # End of tests
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2001, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2001, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -47,16 +46,16 @@
   Kindahl.
 */
 
-#include "my_bitmap.h"
-
 #include <string.h>
 #include <sys/types.h>
 #include <algorithm>
-#include <bit>
 
+#include "my_bit.h"
+#include "my_bitmap.h"
 #include "my_byteorder.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
+#include "my_macros.h"
 #include "my_sys.h"
 #include "mysql/service_mysql_alloc.h"
 #include "mysys/mysys_priv.h"
@@ -420,10 +419,10 @@ uint bitmap_bits_set(const MY_BITMAP *map) {
   assert(map->bitmap);
   assert(map->n_bits > 0);
 
-  for (; data_ptr < end; data_ptr++) res += std::popcount(*data_ptr);
+  for (; data_ptr < end; data_ptr++) res += my_count_bits_uint32(*data_ptr);
 
   /*Reset last bits to zero*/
-  res += std::popcount(*map->last_word_ptr & ~map->last_word_mask);
+  res += my_count_bits_uint32(*map->last_word_ptr & ~map->last_word_mask);
   return res;
 }
 

@@ -1,16 +1,15 @@
-/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -69,9 +68,9 @@ This file contains the implementation of error and warnings related
 #include "mysql/strings/m_ctype.h"
 #include "mysql_time.h"
 #include "mysqld_error.h"
-#include "sql-common/my_decimal.h"
 #include "sql/derror.h"  // ER_THD
 #include "sql/item.h"
+#include "sql/my_decimal.h"
 #include "sql/protocol.h"
 #include "sql/sql_class.h"  // THD
 #include "sql/sql_const.h"
@@ -108,7 +107,7 @@ using std::min;
   In both cases, the message is retrieved from ER(ER_XXX), which in turn
   is read from the resource file errmsg.sys at server startup.
   The strings stored in the errmsg.sys file are expressed in the character set
-  that corresponds to the server --lc-messages start option
+  that corresponds to the server --language start option
   (see error_message_charset_info).
 
   When executing:
@@ -353,7 +352,6 @@ Diagnostics_area::Diagnostics_area(bool allow_unlimited_conditions)
   memset(m_current_statement_cond_count_by_qb, 0,
          sizeof(m_current_statement_cond_count_by_qb));
   m_message_text[0] = '\0';
-  m_message_text_length = 0;
 }
 
 Diagnostics_area::~Diagnostics_area() {}
@@ -364,7 +362,6 @@ void Diagnostics_area::reset_diagnostics_area() {
   set_overwrite_status(false);
   // Don't take chances in production.
   m_message_text[0] = '\0';
-  m_message_text_length = 0;
   m_mysql_errno = 0;
   m_affected_rows = 0;
   m_last_insert_id = 0;
@@ -389,13 +386,10 @@ void Diagnostics_area::set_ok_status(ulonglong affected_rows,
   m_last_statement_cond_count = current_statement_cond_count();
   m_affected_rows = affected_rows;
   m_last_insert_id = last_insert_id;
-  if (message_text) {
+  if (message_text)
     strmake(m_message_text, message_text, sizeof(m_message_text) - 1);
-    m_message_text_length = strlen(m_message_text);
-  } else {
+  else
     m_message_text[0] = '\0';
-    m_message_text_length = 0;
-  }
   m_status = DA_OK;
 }
 
@@ -454,7 +448,6 @@ void Diagnostics_area::set_error_status(uint mysql_errno,
   memcpy(m_returned_sqlstate, returned_sqlstate, SQLSTATE_LENGTH);
   m_returned_sqlstate[SQLSTATE_LENGTH] = '\0';
   strmake(m_message_text, message_text, sizeof(m_message_text) - 1);
-  m_message_text_length = strlen(m_message_text);
 
   m_status = DA_ERROR;
 }

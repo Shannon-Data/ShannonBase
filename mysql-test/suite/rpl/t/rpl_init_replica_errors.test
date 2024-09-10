@@ -1,6 +1,6 @@
 ######################################################################
 # Some errors that cause the slave SQL thread to stop are not shown in 
-# the Last_SQL_Error column of "SHOW REPLICA STATUS". Instead, the error 
+# the Slave_SQL_Error column of "SHOW SLAVE STATUS". Instead, the error 
 # is only in the server's error log.
 #
 # Two failures and their respective reporting are verified:
@@ -29,14 +29,14 @@
 #                    Configuring the Environment
 ######################################################################
 source include/have_debug.inc;
-source include/rpl/init_source_replica.inc;
+source include/master-slave.inc;
 
 connection slave;
 
 --disable_warnings
-STOP REPLICA;
+stop slave;
 --enable_warnings
-RESET REPLICA;
+reset slave;
 
 ######################################################################
 #           Injecting faults in the threads' initialization
@@ -49,7 +49,7 @@ connection slave;
 --let $debug_point= simulate_sql_replica_error_on_init
 --source include/add_debug_point.inc
 
-START REPLICA;
+start slave;
 
 #
 # slave is going to stop because of emulated failures
@@ -57,7 +57,7 @@ START REPLICA;
 #
 --let $slave_sql_errno= convert_error(ER_REPLICA_FATAL_ERROR)
 --let $show_slave_sql_error= 1
---source include/rpl/wait_for_applier_error.inc
+--source include/wait_for_slave_sql_error.inc
 
 SET SESSION sql_log_bin= 0;
 call mtr.add_suppression("Failed during replica.* thread initialization");
@@ -68,7 +68,7 @@ SET SESSION sql_log_bin= 1;
 # safe updating to @@global.debug
 --let $slave_io_errno= convert_error(ER_REPLICA_FATAL_ERROR)
 --let $show_slave_io_error= 1
---source include/rpl/wait_for_receiver_error.inc
+--source include/wait_for_slave_io_error.inc
 
 --let $debug_point= simulate_io_replica_error_on_init
 --source include/remove_debug_point.inc
@@ -80,15 +80,15 @@ SET SESSION sql_log_bin= 1;
 ######################################################################
 connection slave;
 
-RESET REPLICA;
+reset slave;
 
 SET GLOBAL init_replica= "garbage";
 
-START REPLICA;
+start slave;
 # 13145 = ER_SERVER_REPLICA_INIT_QUERY_FAILED
 --let $slave_sql_errno= 13145
 --let $show_slave_sql_error= 1
---source include/rpl/wait_for_applier_error.inc
+--source include/wait_for_slave_sql_error.inc
 
 ######################################################################
 #                             Clean up
@@ -96,7 +96,7 @@ START REPLICA;
 SET GLOBAL init_replica= "";
 
 # Clean up Last_SQL_Error
---source include/rpl/stop_receiver.inc
-RESET REPLICA;
+--source include/stop_slave_io.inc
+RESET SLAVE;
 --let $rpl_only_running_threads= 1
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

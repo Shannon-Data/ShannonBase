@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -58,20 +57,20 @@
 #include "mysql/udf_registration_types.h"
 #include "mysql_time.h"
 #include "mysqld_error.h"
-#include "sql-common/my_decimal.h"
 #include "sql/item.h"
-#include "sql/item_cmpfunc.h"  // Item_func_any_value
-#include "sql/item_func.h"     // Item_func_udf_str
-#include "sql/item_geofunc.h"  // Item_func_st_area
-#include "sql/item_gtid_func.h"  // Item_wait_for_executed_gtid_set Item_func_gtid_subset
-#include "sql/item_inetfunc.h"     // Item_func_inet_ntoa
-#include "sql/item_json_func.h"    // Item_func_json
-#include "sql/item_pfs_func.h"     // Item_pfs_func_thread_id
+#include "sql/item_cmpfunc.h"    // Item_func_any_value
+#include "sql/item_func.h"       // Item_func_udf_str
+#include "sql/item_geofunc.h"    // Item_func_st_area
+#include "sql/item_gtid_func.h"  // Item_wait_for_executed_gtid_set Item_master_gtid_set_wait Item_func_gtid_subset
+#include "sql/item_inetfunc.h"   // Item_func_inet_ntoa
+#include "sql/item_json_func.h"  // Item_func_json
+#include "sql/item_pfs_func.h"   // Item_pfs_func_thread_id
 #include "sql/item_regexp_func.h"  // Item_func_regexp_xxx
 #include "sql/item_strfunc.h"      // Item_func_aes_encrypt
 #include "sql/item_sum.h"          // Item_sum_udf_str
 #include "sql/item_timefunc.h"     // Item_func_add_time
 #include "sql/item_xmlfunc.h"      // Item_func_xml_extractvalue
+#include "sql/my_decimal.h"
 #include "sql/parse_location.h"
 #include "sql/parse_tree_helpers.h"  // PT_item_list
 #include "sql/parser_yystype.h"
@@ -968,7 +967,8 @@ class Make_set_instantiator {
   static const uint Max_argcount = MAX_ARGLIST_SIZE;
 
   Item *instantiate(THD *thd, PT_item_list *args) {
-    return new (thd->mem_root) Item_func_make_set(POS(), args);
+    Item *param_1 = args->pop_front();
+    return new (thd->mem_root) Item_func_make_set(POS(), param_1, args);
   }
 };
 
@@ -1509,6 +1509,16 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"MBRTOUCHES", SQL_FN(Item_func_mbrtouches, 2)},
     {"MBRWITHIN", SQL_FN(Item_func_mbrwithin, 2)},
     {"MD5", SQL_FN(Item_func_md5, 1)},
+    {"ML_TRAIN", SQL_FN_V_LIST(Item_func_ml_train, 3, 4)},
+    {"ML_MODEL_LOAD", SQL_FN_LIST(Item_func_ml_model_load, 3)},
+    {"ML_MODEL_UNLOAD", SQL_FN_LIST(Item_func_ml_model_unload, 2)},
+    {"ML_MODEL_IMPORT", SQL_FN_LIST(Item_func_ml_model_import, 4)},
+    {"ML_SCORE", SQL_FN_V_LIST(Item_func_ml_score, 5, 6)},
+    {"ML_PREDICT_ROW", SQL_FN_LIST(Item_func_ml_predicte_row, 2)},
+    {"ML_PREDICT_TABLE", SQL_FN_V_LIST(Item_func_ml_predicte_table, 3, 4)},
+    {"ML_EXPLAIN", SQL_FN_V_LIST(Item_func_ml_explain, 3, 4)},
+    {"ML_EXPLAIN_ROW", SQL_FN_V_LIST(Item_func_ml_explain_row, 2, 3)},
+    {"ML_EXPLAIN_TABLE", SQL_FN_V_LIST(Item_func_ml_explain_table, 3, 4)},
     {"MONTHNAME", SQL_FN(Item_func_monthname, 1)},
     {"NAME_CONST", SQL_FN(Item_name_const, 2)},
     {"NULLIF", SQL_FN(Item_func_nullif, 2)},
@@ -1551,6 +1561,8 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"STATEMENT_DIGEST_TEXT", SQL_FN(Item_func_statement_digest_text, 1)},
     {"WAIT_FOR_EXECUTED_GTID_SET",
      SQL_FN_V(Item_wait_for_executed_gtid_set, 1, 2)},
+    {"WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS",
+     SQL_FN_V(Item_master_gtid_set_wait, 1, 3)},
     {"SQRT", SQL_FN(Item_func_sqrt, 1)},
     {"STRCMP", SQL_FN(Item_func_strcmp, 2)},
     {"STR_TO_DATE", SQL_FN(Item_func_str_to_date, 2)},
@@ -1661,6 +1673,11 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"TO_BASE64", SQL_FN(Item_func_to_base64, 1)},
     {"TO_DAYS", SQL_FN(Item_func_to_days, 1)},
     {"TO_SECONDS", SQL_FN(Item_func_to_seconds, 1)},
+    {"TO_VECTOR", SQL_FN(Item_func_to_vector, 1)},
+    {"STRING_TO_VECTOR", SQL_FN(Item_func_to_vector, 1)},
+    {"FROM_VECTOR", SQL_FN(Item_func_from_vector, 1)},
+    {"VECTOR_TO_STRING", SQL_FN(Item_func_from_vector, 1)},
+    {"VECTOR_DIM", SQL_FN(Item_func_vector_dim, 1)},    
     {"UCASE", SQL_FN(Item_func_upper, 1)},
     {"UNCOMPRESS", SQL_FN(Item_func_uncompress, 1)},
     {"UNCOMPRESSED_LENGTH", SQL_FN(Item_func_uncompressed_length, 1)},
@@ -1784,8 +1801,6 @@ static const std::pair<const char *, Create_func *> func_array[] = {
      SQL_FN_INTERNAL(Item_func_internal_get_mandatory_roles_json, 0)},
     {"INTERNAL_IS_MANDATORY_ROLE",
      SQL_FN_INTERNAL(Item_func_internal_is_mandatory_role, 2)},
-    {"INTERNAL_USE_TERMINOLOGY_PREVIOUS",
-     SQL_FN_INTERNAL(Item_func_internal_use_terminology_previous, 0)},
     {"INTERNAL_IS_ENABLED_ROLE",
      SQL_FN_INTERNAL(Item_func_internal_is_enabled_role, 2)}};
 

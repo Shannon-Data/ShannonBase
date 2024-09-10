@@ -1,5 +1,0 @@
-!include suite/ndb_rpl/my.cnf
-
-[mysqld]
-ndb-log-apply-status=1
-ndb-log-orig=1

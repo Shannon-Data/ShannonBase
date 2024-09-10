@@ -31,5 +31,3 @@ select * from t;
 
 drop table t;
 
-exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT;
-remove_file $NDB_TOOLS_OUTPUT;

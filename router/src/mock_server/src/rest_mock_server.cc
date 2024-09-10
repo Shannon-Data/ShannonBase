@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -45,8 +44,7 @@
 #include "mysql/harness/plugin.h"
 #include "mysql/harness/plugin_config.h"
 
-#include "http/base/request.h"
-#include "mysqlrouter/component/http_server_component.h"
+#include "mysqlrouter/http_server_component.h"
 #include "mysqlrouter/mock_server_component.h"
 #include "scope_guard.h"
 
@@ -74,7 +72,7 @@ using JsonDocument =
 using JsonValue =
     rapidjson::GenericValue<rapidjson::UTF8<>, rapidjson::CrtAllocator>;
 
-static const char *http_method_to_string(const HttpMethod::key_type method) {
+static const char *http_method_to_string(const HttpMethod::type method) {
   switch (method) {
     case HttpMethod::Get:
       return "GET";
@@ -99,13 +97,13 @@ static const char *http_method_to_string(const HttpMethod::key_type method) {
   return "UNKNOWN";
 }
 
-class RestApiV1MockServerGlobals : public http::base::RequestHandler {
+class RestApiV1MockServerGlobals : public BaseRequestHandler {
  public:
   RestApiV1MockServerGlobals() : last_modified_(time(nullptr)) {}
 
   // GET|PUT
   //
-  void handle_request(http::base::Request &req) override {
+  void handle_request(HttpRequest &req) override {
     last_modified_ =
         std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 
@@ -118,12 +116,12 @@ class RestApiV1MockServerGlobals : public http::base::RequestHandler {
       return;
     }
 
-    if (req.get_input_headers().find("Content-Range")) {
+    if (req.get_input_headers().get("Content-Range")) {
       req.send_reply(HttpStatusCode::NotImplemented);
       return;
     }
 
-    if (http::base::method::Get & req.get_method()) {
+    if (HttpMethod::Get & req.get_method()) {
       if (!req.is_modified_since(last_modified_)) {
         req.send_reply(HttpStatusCode::NotModified);
         return;
@@ -141,17 +139,20 @@ class RestApiV1MockServerGlobals : public http::base::RequestHandler {
  private:
   time_t last_modified_;
 
-  void handle_global_put_all(http::base::Request &req) {
-    auto content_type = req.get_input_headers().find("Content-Type");
+  void handle_global_put_all(HttpRequest &req) {
+    const char *content_type = req.get_input_headers().get("Content-Type");
     // PUT
     //
     // required content-type: application/json
-    if (nullptr == content_type || *content_type != "application/json") {
+    if (nullptr == content_type ||
+        std::string(content_type) != "application/json") {
       log_debug("HTTP[%d]", HttpStatusCode::UnsupportedMediaType);
       req.send_reply(HttpStatusCode::UnsupportedMediaType);
       return;
     }
-    auto str_data = req.get_input_body();
+    auto body = req.get_input_buffer();
+    auto data = body.pop_front(body.length());
+    std::string str_data(data.begin(), data.end());
 
     log_debug("HTTP> %s", str_data.c_str());
 
@@ -159,18 +160,18 @@ class RestApiV1MockServerGlobals : public http::base::RequestHandler {
     body_doc.Parse(str_data.c_str());
 
     if (body_doc.HasParseError()) {
-      auto &out_hdrs = req.get_output_headers();
-      //      auto out_buf = req.get_output_buffer();
+      auto out_hdrs = req.get_output_headers();
+      auto out_buf = req.get_output_buffer();
       out_hdrs.add("Content-Type", "text/plain");
 
       std::string parse_error(
           rapidjson::GetParseError_En(body_doc.GetParseError()));
 
-      //      out_buf.add(parse_error.data(), parse_error.size());
+      out_buf.add(parse_error.data(), parse_error.size());
 
       log_debug("HTTP[%d]", HttpStatusCode::UnprocessableEntity);
       req.send_reply(HttpStatusCode::UnprocessableEntity,
-                     "Unprocessable Entity", parse_error);
+                     "Unprocessable Entity", out_buf);
       return;
     }
 
@@ -200,10 +201,11 @@ class RestApiV1MockServerGlobals : public http::base::RequestHandler {
     req.send_reply(HttpStatusCode::NoContent);
   }
 
-  void handle_global_get_all(http::base::Request &req) {
-    rapidjson::StringBuffer json_buf;
+  void handle_global_get_all(HttpRequest &req) {
+    auto chunk = req.get_output_buffer();
 
     {
+      rapidjson::StringBuffer json_buf;
       {
         rapidjson::Writer<rapidjson::StringBuffer> json_writer(json_buf);
         JsonDocument json_doc;
@@ -233,29 +235,32 @@ class RestApiV1MockServerGlobals : public http::base::RequestHandler {
         json_doc.Accept(json_writer);
       }  // free json_doc and json_writer early
 
+      // perhaps we could use evbuffer_add_reference() and a unique-ptr on
+      // json_buf here. needs to be benchmarked
+      chunk.add(json_buf.GetString(), json_buf.GetSize());
+
       log_debug("HTTP[%d]< %s", HttpStatusCode::Ok, json_buf.GetString());
     }  // free json_buf early
 
-    auto &out_hdrs = req.get_output_headers();
+    auto out_hdrs = req.get_output_headers();
     out_hdrs.add("Content-Type", "application/json");
 
-    req.send_reply(HttpStatusCode::Ok, "Ok",
-                   {json_buf.GetString(), json_buf.GetSize()});
+    req.send_reply(HttpStatusCode::Ok, "Ok", chunk);
   }
 };
 
-class RestApiV1MockServerConnections : public http::base::RequestHandler {
+class RestApiV1MockServerConnections : public BaseRequestHandler {
  public:
   // allow methods: DELETE
   //
-  void handle_request(http::base::Request &req) override {
+  void handle_request(HttpRequest &req) override {
     if (!((HttpMethod::Delete)&req.get_method())) {
       req.get_output_headers().add("Allow", "DELETE");
       req.send_reply(HttpStatusCode::MethodNotAllowed);
       return;
     }
 
-    if (req.get_input_headers().find("Content-Range")) {
+    if (req.get_input_headers().get("Content-Range")) {
       req.send_reply(HttpStatusCode::NotImplemented);
       return;
     }
@@ -267,7 +272,7 @@ class RestApiV1MockServerConnections : public http::base::RequestHandler {
   /**
    * close all connections.
    */
-  void handle_connections_delete_all(http::base::Request &req) {
+  void handle_connections_delete_all(HttpRequest &req) {
     // tell the mock_server to close all connections
     MockServerComponent::get_instance().close_all_connections();
 
@@ -330,15 +335,17 @@ mysql_harness::Plugin DLLEXPORT harness_plugin_rest_mock_server = {
     "REST_MOCK_SERVER",                      // name
     VERSION_NUMBER(0, 0, 1),
     // requires
-    plugin_requires.size(), plugin_requires.data(),
+    plugin_requires.size(),
+    plugin_requires.data(),
     // conflicts
-    0, nullptr,
+    0,
+    nullptr,
     init,     // init
     nullptr,  // deinit
     run,      // run
     nullptr,  // stop
     true,     // declares_readiness
-    0, nullptr,
-    nullptr,  // expose_configuration
+    0,
+    nullptr,
 };
 }

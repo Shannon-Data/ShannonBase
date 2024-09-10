@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,7 +28,6 @@
 #include "classic_frame.h"
 #include "classic_lazy_connect.h"
 #include "harness_assert.h"
-#include "hexify.h"
 #include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/tls_error.h"
 #include "mysqlrouter/classic_protocol_clone.h"
@@ -83,7 +81,7 @@ stdx::expected<Processor::Result, std::error_code> CloneForwarder::command() {
     tr.trace(Tracer::Event().stage("clone::switch"));
   }
 
-  auto &server_conn = connection()->server_conn();
+  auto &server_conn = connection()->socket_splicer()->server_conn();
   if (!server_conn.is_open()) {
     stage(Stage::Connect);
     return Result::Again;
@@ -103,22 +101,25 @@ stdx::expected<Processor::Result, std::error_code> CloneForwarder::connect() {
 }
 
 stdx::expected<Processor::Result, std::error_code> CloneForwarder::connected() {
-  auto &server_conn = connection()->server_conn();
+  auto &server_conn = connection()->socket_splicer()->server_conn();
   if (!server_conn.is_open()) {
-    auto &src_conn = connection()->client_conn();
+    auto *socket_splicer = connection()->socket_splicer();
+    auto *src_channel = socket_splicer->client_channel();
+    auto *src_protocol = connection()->client_protocol();
 
     // take the client::command from the connection.
-    auto recv_res = ClassicFrame::ensure_has_full_frame(src_conn);
+    auto recv_res =
+        ClassicFrame::ensure_has_full_frame(src_channel, src_protocol);
     if (!recv_res) return recv_client_failed(recv_res.error());
 
-    discard_current_msg(src_conn);
+    discard_current_msg(src_channel, src_protocol);
 
     if (auto &tr = tracer()) {
       tr.trace(Tracer::Event().stage("clone::connect::error"));
     }
 
     stage(Stage::Done);
-    return reconnect_send_error_msg(src_conn);
+    return reconnect_send_error_msg(src_channel, src_protocol);
   }
 
   if (auto &tr = tracer()) {
@@ -129,13 +130,15 @@ stdx::expected<Processor::Result, std::error_code> CloneForwarder::connected() {
 }
 
 stdx::expected<Processor::Result, std::error_code> CloneForwarder::response() {
-  auto &src_conn = connection()->server_conn();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = connection()->server_protocol();
 
-  auto read_res = ClassicFrame::ensure_has_msg_prefix(src_conn);
+  auto read_res =
+      ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) return recv_server_failed(read_res.error());
 
-  const uint8_t msg_type = src_protocol.current_msg_type().value();
+  const uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     Ok = ClassicFrame::cmd_byte<classic_protocol::message::server::Ok>(),
@@ -155,7 +158,7 @@ stdx::expected<Processor::Result, std::error_code> CloneForwarder::response() {
     tr.trace(Tracer::Event().stage("clone::response"));
   }
 
-  return stdx::unexpected(make_error_code(std::errc::bad_message));
+  return stdx::make_unexpected(make_error_code(std::errc::bad_message));
 }
 
 stdx::expected<Processor::Result, std::error_code> CloneForwarder::ok() {
@@ -180,16 +183,15 @@ stdx::expected<Processor::Result, std::error_code> CloneForwarder::error() {
 
 stdx::expected<Processor::Result, std::error_code>
 CloneForwarder::clone_command() {
-  auto &src_conn = connection()->client_conn();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto src_channel = socket_splicer->client_channel();
+  auto src_protocol = connection()->client_protocol();
 
-  auto &dst_conn = connection()->server_conn();
-  auto &dst_protocol = dst_conn.protocol();
-
-  auto read_res = ClassicFrame::ensure_has_msg_prefix(src_conn);
+  auto read_res =
+      ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) return recv_client_failed(read_res.error());
 
-  const uint8_t msg_type = src_protocol.current_msg_type().value();
+  const uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     Init = ClassicFrame::cmd_byte<classic_protocol::clone::client::Init>(),
@@ -202,12 +204,6 @@ CloneForwarder::clone_command() {
   };
 
   clone_cmd_ = msg_type;
-
-  // if the command starts with seq-id, reset the destinations seq-id (which
-  // gets incremented before it is used).
-  if (src_protocol.current_frame()->seq_id_ == 0) {
-    dst_protocol.seq_id(0xff);
-  }
 
   switch (Msg{msg_type}) {
     case Msg::Init:
@@ -234,7 +230,7 @@ CloneForwarder::clone_command() {
     tr.trace(Tracer::Event().stage("clone::clone::*"));
   }
 
-  return stdx::unexpected(make_error_code(std::errc::bad_message));
+  return stdx::make_unexpected(make_error_code(std::errc::bad_message));
 }
 
 stdx::expected<Processor::Result, std::error_code>
@@ -304,28 +300,21 @@ CloneForwarder::clone_exit() {
 
 stdx::expected<Processor::Result, std::error_code>
 CloneForwarder::clone_response() {
-  auto &src_conn = connection()->server_conn();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = connection()->server_protocol();
 
-  auto &dst_conn = connection()->client_conn();
-  auto &dst_protocol = dst_conn.protocol();
-
-  auto read_res = ClassicFrame::ensure_has_msg_prefix(src_conn);
+  auto read_res =
+      ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) return recv_server_failed(read_res.error());
 
-  const uint8_t msg_type = src_protocol.current_msg_type().value();
+  const uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     Complete =
         ClassicFrame::cmd_byte<classic_protocol::clone::server::Complete>(),
     Error = ClassicFrame::cmd_byte<classic_protocol::clone::server::Error>(),
   };
-
-  // if the response starts with seq-id == 0,
-  // reset the destinations seq-id (which gets incremented before it is used).
-  if (src_protocol.current_frame()->seq_id_ == 0) {
-    dst_protocol.seq_id(0xff);
-  }
 
   switch (Msg{msg_type}) {
     case Msg::Error:
@@ -354,10 +343,7 @@ CloneForwarder::clone_data() {
 stdx::expected<Processor::Result, std::error_code>
 CloneForwarder::clone_complete() {
   if (auto &tr = tracer()) {
-    tr.trace(Tracer::Event().stage(
-        "clone::complete: " +
-        std::to_string(
-            connection()->server_conn().protocol().current_frame()->seq_id_)));
+    tr.trace(Tracer::Event().stage("clone::complete"));
   }
 
   if (clone_cmd_ ==

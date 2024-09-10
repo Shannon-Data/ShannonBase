@@ -1,16 +1,15 @@
-/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -132,7 +131,7 @@ static Item *handle_sql2003_note184_exception(Parse_context *pc, Item *left,
 
   DBUG_TRACE;
 
-  if (expr->type() == Item::SUBQUERY_ITEM) {
+  if (expr->type() == Item::SUBSELECT_ITEM) {
     Item_subselect *expr2 = (Item_subselect *)expr;
 
     if (expr2->subquery_type() == Item_subselect::SCALAR_SUBQUERY) {
@@ -395,13 +394,11 @@ bool PTI_simple_ident_ident::do_itemize(Parse_context *pc, Item **res) {
         raw.start, raw.end);
     lex->safe_to_cache_query = false;
   } else {
-    if ((pc->select->parsing_place == CTX_HAVING &&
-         pc->select->get_in_sum_expr() == 0u) ||
-        (pc->select->parsing_place == CTX_QUALIFY &&
-         pc->select->in_window_expr == 0u)) {
-      *res = new (pc->mem_root) Item_ref(POS(), NullS, NullS, ident.str);
-    } else {
+    if ((pc->select->parsing_place != CTX_HAVING) ||
+        (pc->select->get_in_sum_expr() > 0)) {
       *res = new (pc->mem_root) Item_field(POS(), NullS, NullS, ident.str);
+    } else {
+      *res = new (pc->mem_root) Item_ref(POS(), NullS, NullS, ident.str);
     }
     if (*res == nullptr || (*res)->itemize(pc, res)) return true;
   }
@@ -694,9 +691,7 @@ bool PTI_int_splocal::do_itemize(Parse_context *pc, Item **res) {
   if (v == nullptr) {
     return true;  // undefined variable or OOM
   }
-  // Data type for a routine field is resolved during parsing, so this is OK:
-  if (v->type() == Item::ROUTINE_FIELD_ITEM &&
-      !is_integer_type(v->data_type())) {
+  if (v->type() != Item::INT_ITEM) {
     pc->thd->syntax_error_at(m_location, ER_SPVAR_NONINTEGER_TYPE, m_name.str);
     return true;
   }

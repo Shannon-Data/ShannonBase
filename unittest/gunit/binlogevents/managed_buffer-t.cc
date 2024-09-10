@@ -1,16 +1,15 @@
-/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,28 +21,25 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 */
 
-#include "mysql/binlog/event/compression/buffer/managed_buffer.h"
+#include "libbinlogevents/include/buffer/managed_buffer.h"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <functional>  // std::function
 #include <iterator>    // std::distance
 
-#include "mysql/binlog/event/math/math.h"
-#include "mysql/binlog/event/string/concat.h"
+#include "libbinlogevents/include/math/math.h"
+#include "libbinlogevents/include/string/concat.h"
 
-using mysql::binlog::event::string::concat;
+using mysqlns::string::concat;
 
-namespace mysql::binlog::event::compression::buffer {
-namespace managed_buffer::unittest {
+namespace mysqlns::buffer::managed_buffer::unittest {
 
-using Grow_calculator_t =
-    mysql::binlog::event::compression::buffer::Grow_calculator;
-using Grow_status_t = mysql::binlog::event::compression::buffer::Grow_status;
-using Size_t = mysql::binlog::event::compression::buffer::Buffer_view<>::Size_t;
+using Grow_calculator_t = mysqlns::buffer::Grow_calculator;
+using Grow_status_t = mysqlns::buffer::Grow_status;
+using Size_t = mysqlns::buffer::Buffer_view<>::Size_t;
 using Debug_function = const std::function<std::string(std::string)>;
-using Difference_t =
-    mysql::binlog::event::compression::buffer::Rw_buffer<>::Difference_t;
+using Difference_t = mysqlns::buffer::Rw_buffer<>::Difference_t;
 
 // Return the current file and line as a string delimited and ended by
 // colons.
@@ -360,5 +356,4 @@ TEST(ManagedBufferTest, CombinatorialGrowTestUchar) {
   Grow_tester<unsigned char>().combinatorial_grow_test();
 }
 
-}  // namespace managed_buffer::unittest
-}  // namespace mysql::binlog::event::compression::buffer
+}  // namespace mysqlns::buffer::managed_buffer::unittest

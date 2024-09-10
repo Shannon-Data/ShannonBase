@@ -168,6 +168,9 @@ ch2 Char(120;utf8mb4_0900_ai_ci) NULL AT=FIXED ST=MEMORY DEFAULT "alter table"
 -- Indexes -- 
 PRIMARY KEY(i) - UniqueHashIndex
 PRIMARY(i) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 -- bit1 --
 Version: Any
 Fragment type: HashMapPartition
@@ -201,6 +204,9 @@ b5 Bit(63) NULL AT=FIXED ST=MEMORY DEFAULT H'0x2B
 -- Indexes -- 
 PRIMARY KEY(pk) - UniqueHashIndex
 PRIMARY(pk) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 SELECT pk,BIN(b1),BIN(b2),BIN(b3),BIN(b4),BIN(b5) FROM bit1 ORDER BY pk;
 pk	BIN(b1)	BIN(b2)	BIN(b3)	BIN(b4)	BIN(b5)
 1	111	101	110	11	11111
@@ -272,6 +278,9 @@ timestamp_c Timestamp NOT NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(i) - UniqueHashIndex
 PRIMARY(i) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 -- bit1 --
 Version: Any
 Fragment type: DistrKeyHash
@@ -304,6 +313,9 @@ b5 Bit(63) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(pk) - UniqueHashIndex
 PRIMARY(pk) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 USE test;
 SHOW CREATE TABLE bit1;
 Table	Create Table
@@ -392,6 +404,9 @@ PRIMARY KEY(i) - UniqueHashIndex
 PRIMARY(i) - OrderedIndex
 t2_unique_index(j) - OrderedIndex
 t2_unique_index$unique(j) - UniqueHashIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO t2 VALUES();
 SELECT * FROM t2 ORDER BY i;
 i	j	f	d
@@ -442,6 +457,9 @@ c Char(4;utf8mb4_0900_ai_ci) NOT NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 DROP TABLE t1;
 **************************************************************
 * Test mix of null, not-null, default etc..
@@ -493,6 +511,9 @@ i Char(8;utf8mb4_0900_ai_ci) NULL AT=FIXED ST=MEMORY DEFAULT "66"
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 DROP TABLE t1;
 ******************************************
 * Test binary default with null char value
@@ -542,6 +563,9 @@ c Varbinary(100) NULL AT=SHORT_VAR ST=MEMORY DEFAULT 0x4142430045464748494A
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 DROP TABLE t1;
 ***********************************
 * Test timestamp column weirdness
@@ -590,6 +614,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -638,6 +665,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -686,6 +716,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -737,6 +770,9 @@ c Int NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a,c) VALUES (1,1);
 SELECT * from variant;
 a	b	c
@@ -789,6 +825,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY DEFAULT 0
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -837,6 +876,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY DEFAULT 235861201
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -888,6 +930,9 @@ c Timestamp2(0) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b	c
@@ -939,6 +984,9 @@ c Timestamp2(0) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b	c
@@ -994,6 +1042,9 @@ c Timestamp2(0) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b	c
@@ -1042,6 +1093,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -1090,6 +1144,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY DEFAULT 0
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -1138,6 +1195,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY DEFAULT 235861201
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -1186,6 +1246,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -1237,6 +1300,9 @@ c Int NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a,c) VALUES (1,1);
 SELECT * from variant;
 a	b	c
@@ -1289,6 +1355,9 @@ b Timestamp2(0) NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(a) - UniqueHashIndex
 PRIMARY(a) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 INSERT INTO variant (a) VALUES (1);
 SELECT * from variant;
 a	b
@@ -1400,6 +1469,9 @@ newTwo Bigint NULL AT=FIXED ST=MEMORY
 -- Indexes -- 
 PRIMARY KEY(i) - UniqueHashIndex
 PRIMARY(i) - OrderedIndex
+
+NDBT_ProgramExit: 0 - OK
+
 SELECT i, j, f, d, d2, ch, HEX(b), HEX(vb), HEX(blob1), text1, timestamp_c, newOne, newTwo from t1 order by i;
 i	j	f	d	d2	ch	HEX(b)	HEX(vb)	HEX(blob1)	text1	timestamp_c	newOne	newTwo
 1	6	6.6	8.8	0	aaa	63636300000000000000000000000000000000	646464	NULL	NULL	2008-12-18 17:41:02	Comment field default	NULL

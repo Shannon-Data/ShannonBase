@@ -1,16 +1,15 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -137,7 +136,7 @@ static bool verify_individual_certificate(const char *ssl_cert,
   }
 
   if (!X509_STORE_CTX_init(store_ctx.get(), store.get(), server_cert.get(),
-                           nullptr)) {
+                           NULL)) {
     /* purecov: begin inspected */
     LogErr(ERROR_LEVEL, ER_TLS_LIBRARY_ERROR_INTERNAL);
     report_errors();
@@ -170,7 +169,7 @@ static bool verify_ca_certificates(const char *ssl_ca, const char *ssl_capath,
                                    const char *ssl_crl_path) {
   bool r_value = false;
   if (ssl_ca && ssl_ca[0]) {
-    if (verify_individual_certificate(ssl_ca, nullptr, nullptr, ssl_crl,
+    if (verify_individual_certificate(ssl_ca, NULL, NULL, ssl_crl,
                                       ssl_crl_path))
       r_value = true;
   }
@@ -197,8 +196,8 @@ static bool verify_ca_certificates(const char *ssl_ca, const char *ssl_capath,
       if (!MY_S_ISDIR(ca_dir->dir_entry[file_count].mystat->st_mode)) {
         file_path.length = dir_path_length;
         dynstr_append(&file_path, ca_dir->dir_entry[file_count].name);
-        if ((r_value = verify_individual_certificate(
-                 file_path.str, nullptr, nullptr, ssl_crl, ssl_crl_path)))
+        if ((r_value = verify_individual_certificate(file_path.str, NULL, NULL,
+                                                     ssl_crl, ssl_crl_path)))
           r_value = true;
       }
     }
@@ -281,7 +280,7 @@ Ssl_acceptor_context_property_type &operator++(
 }
 
 Ssl_acceptor_context_data::Ssl_acceptor_context_data(
-    std::string channel, Ssl_init_callback *callbacks,
+    std::string channel, bool use_ssl_arg, Ssl_init_callback *callbacks,
     bool report_ssl_error /* = true */, enum enum_ssl_init_error *out_error)
     : channel_(channel), ssl_acceptor_fd_(nullptr), acceptor_(nullptr) {
   enum enum_ssl_init_error error_num = SSL_INITERR_NOERROR;
@@ -293,55 +292,58 @@ Ssl_acceptor_context_data::Ssl_acceptor_context_data(
         &current_tls_session_cache_timeout_);
   }
 
-  /* Verify server certificate */
-  if (verify_individual_certificate(
-          current_cert_.c_str(), current_ca_.c_str(), current_capath_.c_str(),
-          current_crl_.c_str(), current_crlpath_.c_str())) {
-    LogErr(WARNING_LEVEL, ER_SERVER_CERT_VERIFY_FAILED, current_cert_.c_str());
-    /* Verify possible issues in CA certificates*/
-    if (verify_ca_certificates(current_ca_.c_str(), current_capath_.c_str(),
-                               current_crl_.c_str(),
-                               current_crlpath_.c_str())) {
-      LogErr(WARNING_LEVEL, ER_WARN_CA_CERT_VERIFY_FAILED);
+  if (use_ssl_arg) {
+    /* Verify server certificate */
+    if (verify_individual_certificate(
+            current_cert_.c_str(), current_ca_.c_str(), current_capath_.c_str(),
+            current_crl_.c_str(), current_crlpath_.c_str())) {
+      LogErr(WARNING_LEVEL, ER_SERVER_CERT_VERIFY_FAILED,
+             current_cert_.c_str());
+      /* Verify possible issues in CA certificates*/
+      if (verify_ca_certificates(current_ca_.c_str(), current_capath_.c_str(),
+                                 current_crl_.c_str(),
+                                 current_crlpath_.c_str())) {
+        LogErr(WARNING_LEVEL, ER_WARN_CA_CERT_VERIFY_FAILED);
+      }
+      error_num = SSL_INITERR_INVALID_CERTIFICATES;
+      if (opt_tls_certificates_enforced_validation) {
+        if (out_error) *out_error = error_num;
+        assert(ssl_acceptor_fd_ == nullptr);
+        return;
+      }
     }
-    error_num = SSL_INITERR_INVALID_CERTIFICATES;
-    if (opt_tls_certificates_enforced_validation) {
-      if (out_error) *out_error = error_num;
-      assert(ssl_acceptor_fd_ == nullptr);
-      return;
+    long ssl_flags = process_tls_version(current_version_.c_str());
+
+    /* Turn off server's ticket sending for TLS 1.2 if requested */
+    if (!current_tls_session_cache_mode_) ssl_flags |= SSL_OP_NO_TICKET;
+
+    ssl_acceptor_fd_ = new_VioSSLAcceptorFd(
+        current_key_.c_str(), current_cert_.c_str(), current_ca_.c_str(),
+        current_capath_.c_str(), current_cipher_.c_str(),
+        current_ciphersuites_.c_str(), &error_num, current_crl_.c_str(),
+        current_crlpath_.c_str(), ssl_flags);
+
+    if (!ssl_acceptor_fd_ && report_ssl_error) {
+      LogErr(WARNING_LEVEL, ER_WARN_TLS_CHANNEL_INITIALIZATION_ERROR,
+             channel_.c_str());
+      LogErr(WARNING_LEVEL, ER_SSL_LIBRARY_ERROR, sslGetErrString(error_num));
     }
-  }
-  long ssl_flags = process_tls_version(current_version_.c_str());
 
-  /* Turn off server's ticket sending for TLS 1.2 if requested */
-  if (!current_tls_session_cache_mode_) ssl_flags |= SSL_OP_NO_TICKET;
+    if (ssl_acceptor_fd_) acceptor_ = SSL_new(ssl_acceptor_fd_->ssl_context);
 
-  ssl_acceptor_fd_ = new_VioSSLAcceptorFd(
-      current_key_.c_str(), current_cert_.c_str(), current_ca_.c_str(),
-      current_capath_.c_str(), current_cipher_.c_str(),
-      current_ciphersuites_.c_str(), &error_num, current_crl_.c_str(),
-      current_crlpath_.c_str(), ssl_flags);
-
-  if (!ssl_acceptor_fd_ && report_ssl_error) {
-    LogErr(WARNING_LEVEL, ER_WARN_TLS_CHANNEL_INITIALIZATION_ERROR,
-           channel_.c_str());
-    LogErr(WARNING_LEVEL, ER_SSL_LIBRARY_ERROR, sslGetErrString(error_num));
-  }
-
-  if (ssl_acceptor_fd_) acceptor_ = SSL_new(ssl_acceptor_fd_->ssl_context);
-
-  if (ssl_acceptor_fd_ && acceptor_) {
-    SSL_CTX_set_session_cache_mode(ssl_acceptor_fd_->ssl_context,
-                                   current_tls_session_cache_mode_
-                                       ? SSL_SESS_CACHE_SERVER
-                                       : SSL_SESS_CACHE_OFF);
-    SSL_CTX_set_timeout(ssl_acceptor_fd_->ssl_context,
-                        current_tls_session_cache_timeout_);
+    if (ssl_acceptor_fd_ && acceptor_) {
+      SSL_CTX_set_session_cache_mode(ssl_acceptor_fd_->ssl_context,
+                                     current_tls_session_cache_mode_
+                                         ? SSL_SESS_CACHE_SERVER
+                                         : SSL_SESS_CACHE_OFF);
+      SSL_CTX_set_timeout(ssl_acceptor_fd_->ssl_context,
+                          current_tls_session_cache_timeout_);
 #ifdef HAVE_TLSv13
-    /* Turn off server's ticket sending for TLS 1.3 if requested */
-    if (!current_tls_session_cache_mode_ && !(ssl_flags & SSL_OP_NO_TLSv1_3))
-      SSL_CTX_set_num_tickets(ssl_acceptor_fd_->ssl_context, 0);
+      /* Turn off server's ticket sending for TLS 1.3 if requested */
+      if (!current_tls_session_cache_mode_ && !(ssl_flags & SSL_OP_NO_TLSv1_3))
+        SSL_CTX_set_num_tickets(ssl_acceptor_fd_->ssl_context, 0);
 #endif
+    }
   }
   if (out_error) *out_error = error_num;
 }

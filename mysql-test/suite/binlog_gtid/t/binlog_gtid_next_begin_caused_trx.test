@@ -9,7 +9,7 @@
 #
 # ==== Implementation ====
 #
-# See common/binlog/gtid_next_begin_caused_trx.test
+# See extra/binlog_tests/gtid_next_begin_caused_trx.test
 #
 # ==== References ====
 #
@@ -21,7 +21,7 @@
 --source include/have_binlog_format_row.inc
 
 # Make sure the test is repeatable
-RESET BINARY LOGS AND GTIDS;
+RESET MASTER;
 
---source common/binlog/gtid_next_begin_caused_trx.test
+--source extra/binlog_tests/gtid_next_begin_caused_trx.test
 

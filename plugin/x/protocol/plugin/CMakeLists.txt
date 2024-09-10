@@ -1,16 +1,15 @@
-# Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is designed to work with certain software (including
+# This program is also distributed with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have either included with
-# the program or referenced in the documentation.
+# separately licensed software that they have included with MySQL.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -38,13 +37,12 @@ MYSQL_ADD_EXECUTABLE(
   ${PROTOC_PLUGIN_SRC}
   SKIP_INSTALL
 )
-DOWNGRADE_STRINGOP_WARNINGS(xprotocol_plugin)
 
 TARGET_LINK_LIBRARIES(
   xprotocol_plugin
   ${MYSQLX_PROTOCOL_FULL_LIB}
-  ext::libprotoc
-  ext::libprotobuf
+  ${PROTOBUF_PROTOC_LIBRARY}
+  ${PROTOBUF_LIBRARY}
 )
 
 # Workaround for an issue present on Debian 5.3.7-1

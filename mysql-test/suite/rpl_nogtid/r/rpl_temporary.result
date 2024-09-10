@@ -1,19 +1,19 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
 call mtr.add_suppression("Replica: Can\'t find record in \'user\' Error_code: 1032");
-reset binary logs and gtids;
+reset master;
 CREATE TEMPORARY TABLE t1 (a char(1));
 INSERT INTO t1 VALUES ('a');
-include/rpl/sync_to_replica.inc
-include/rpl/stop_replica.inc
-include/rpl/start_replica.inc
+include/sync_slave_sql_with_master.inc
+include/stop_slave.inc
+include/start_slave.inc
 INSERT INTO t1 VALUES ('b');
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 DROP TABLE t1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 SET @save_select_limit=@@session.sql_select_limit;
 SET @@session.sql_select_limit=10, @@session.pseudo_thread_id=100;
 ERROR 42000: Access denied; you need (at least one of) the SUPER, SYSTEM_VARIABLES_ADMIN or SESSION_VARIABLES_ADMIN privilege(s) for this operation
@@ -87,13 +87,15 @@ f
 7
 drop table t1,t2;
 create temporary table t3 (f int);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 create temporary table t4 (f int);
 create table t5 (f int);
-include/rpl/sync_to_replica.inc
-STOP REPLICA;
+include/sync_slave_sql_with_master.inc
+stop slave;
 insert into t5 select * from t4;
-START REPLICA;
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 select * from t5 /* must be 1 after reconnection */;
 f
 drop temporary table t4;
@@ -111,19 +113,19 @@ create temporary table t302 (id int);
 create temporary table `#sql_not_user_table303` (id int);
 create table t1(f int);
 insert into t1 values (1);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 select * from t1 /* must be 1 */;
 f
 1
 drop table t1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 select * from t1;
 a
 1
 drop table t1;
-include/rpl/sync_to_replica.inc
-include/rpl/stop_replica.inc
-include/rpl/reset.inc
+include/sync_slave_sql_with_master.inc
+include/stop_slave.inc
+include/rpl_reset.inc
 -- Bug#43748
 -- make a user on the slave that can list but not kill system threads.
 FLUSH PRIVILEGES;
@@ -131,11 +133,9 @@ CREATE USER user43748@127.0.0.1 IDENTIFIED BY 'meow';
 GRANT PROCESS ON *.* TO user43748@127.0.0.1;
 -- try to KILL system-thread as that non-privileged user (on slave).
 SELECT id INTO @id FROM information_schema.processlist WHERE user='system user' LIMIT 1;
-Warnings:
-Warning	1287	'INFORMATION_SCHEMA.PROCESSLIST' is deprecated and will be removed in a future release. Please use performance_schema.processlist instead
 KILL @id;
 Got one of the listed errors
 -- throw out test-user on slave.
 DROP USER user43748@127.0.0.1;
 End of 5.1 tests
-include/rpl/deinit.inc
+include/rpl_end.inc

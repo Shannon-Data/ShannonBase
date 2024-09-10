@@ -33,7 +33,9 @@ let $restart_file= $MYSQLTEST_VARDIR/tmp/mysqld.1.expect;
 --copy_file std_data/server-key.pem $DATADIR_LOCATION/server-key.pem
 
 --exec echo "restart:--log-error=$server_log --log-error-verbosity=3" > $restart_file
+--enable_reconnect
 --source include/wait_until_connected_again.inc
+--disable_reconnect
 --echo # Restart completed.
 
 --echo # Search for : Found ca.pem, server-cert.pem and server-key.pem in data directory. Trying to enable SSL support using them.
@@ -47,7 +49,7 @@ let SEARCH_PATTERN= CA certificate .* is self signed.;
 connect (ssl_root_1,localhost,root,,,,,SSL);
 --replace_regex $ALLOWED_CIPHERS_REGEX
 SHOW STATUS LIKE 'Ssl_cipher';
-SELECT VALUE FROM performance_schema.tls_channel_status WHERE CHANNEL = 'mysql_main' AND PROPERTY = 'Enabled';
+SHOW VARIABLES LIKE 'have_ssl';
 
 --echo # Check values of ssl_ca, ssl_cert and ssl_key.
 --echo # They should refer to certificate/key files in data directory.
@@ -80,13 +82,14 @@ let $restart_file= $MYSQLTEST_VARDIR/tmp/mysqld.1.expect;
 --remove_file $DATADIR_LOCATION/server-key.pem
 
 --exec echo "restart: --log-error=$server_log" > $restart_file
+--enable_reconnect
 --source include/wait_until_connected_again.inc
+--disable_reconnect
 --echo # Restart completed.
 
---echo # Check if SSL is enabled. It must be DISABLED.
+--echo # Check value of have_ssl. It must be DISABLED.
 connect (root_2,localhost,root,,,,,);
-SELECT VALUE FROM performance_schema.tls_channel_status WHERE CHANNEL = 'mysql_main' AND PROPERTY = 'Enabled';
-
+SHOW VARIABLES LIKE 'have_ssl';
 
 connection default;
 disconnect root_2;
@@ -110,8 +113,10 @@ let $restart_file= $MYSQLTEST_VARDIR/tmp/mysqld.1.expect;
 
 --copy_file std_data/server-key.pem $DATADIR_LOCATION/server-key.pem
 
---exec echo "restart: --log-error=$server_log --ssl-cipher=ECDHE-RSA-AES128-GCM-SHA256 --log-error-verbosity=3 " > $restart_file
+--exec echo "restart: --log-error=$server_log --ssl-cipher=DHE-RSA-AES256-SHA --log-error-verbosity=3 " > $restart_file
+--enable_reconnect
 --source include/wait_until_connected_again.inc
+--disable_reconnect
 --echo # Restart completed.
 
 --echo # Search for : Found ca.pem, server-cert.pem and server-key.pem in data directory. Trying to enable SSL support using them.

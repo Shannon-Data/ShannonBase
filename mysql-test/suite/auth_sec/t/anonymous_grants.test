@@ -4,8 +4,7 @@
 
 create user ''@'localhost';
 grant all privileges on *.* to ''@'localhost';
---let $user = ''@'localhost'
---source include/show_grants.inc
+show grants for ''@'localhost';
 
 --echo # cleanup
 drop user ''@'localhost';

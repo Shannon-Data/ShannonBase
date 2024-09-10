@@ -1,4 +1,4 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -18,9 +18,13 @@ Aaron
 Aaron
 Ababa
 Ababa
-STOP REPLICA;
+STOP SLAVE;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 SET PASSWORD FOR root@"localhost" = 'foo';
-START REPLICA;
+START SLAVE;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 SET PASSWORD FOR root@"localhost" = '';
 CREATE TABLE t3(n INT);
 INSERT INTO t3 VALUES(1),(2);
@@ -33,30 +37,32 @@ SUM(LENGTH(word))
 1022
 DROP TABLE t1,t3;
 CREATE TABLE t1 (n INT) ENGINE=NDB;
-RESET BINARY LOGS AND GTIDS;
-include/rpl/stop_replica.inc
-RESET REPLICA;
+RESET MASTER;
+include/stop_slave.inc
+RESET SLAVE;
+Warnings:
+Warning	1287	'RESET SLAVE' is deprecated and will be removed in a future release. Please use RESET REPLICA instead
 SELECT COUNT(*) FROM t1;
 COUNT(*)
 5000
-include/rpl/save_server_position.inc
-RESET BINARY LOGS AND GTIDS;
+include/save_master_pos.inc
+RESET MASTER;
 LOCK TABLES t1 READ;
-include/rpl/start_replica.inc
-include/rpl/sync_received_with_saved.inc
+include/start_slave.inc
+include/sync_slave_io.inc
 UNLOCK TABLES;
-include/rpl/sync_with_recieved.inc
+include/sync_slave_sql_with_io.inc
 SELECT COUNT(*) FROM t1;
 COUNT(*)
 5000
 DROP TABLE t1;
 CREATE TABLE t1 (n INT);
 INSERT INTO t1 VALUES(3456);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 SELECT n FROM t1;
 n
 3456
 DROP TABLE t1;
 # mysql.user table restored to original values.
-include/rpl/sync_to_replica.inc
-include/rpl/deinit.inc
+include/sync_slave_sql_with_master.inc
+include/rpl_end.inc

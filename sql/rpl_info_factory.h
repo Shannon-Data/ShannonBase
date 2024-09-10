@@ -1,16 +1,15 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -38,6 +37,9 @@ class Relay_log_info;
 class Rpl_info;
 class Slave_worker;
 
+extern ulong opt_mi_repository_id;
+extern ulong opt_rli_repository_id;
+
 class Rpl_info_factory {
  public:
   static bool create_slave_info_objects(uint mi_option, uint rli_option,
@@ -60,11 +62,17 @@ class Rpl_info_factory {
 
   static Master_info *create_mi_and_rli_objects(uint mi_option, uint rli_option,
                                                 const char *channel,
+                                                bool convert_repo,
                                                 Multisource_info *channel_map);
 
-  static Master_info *create_mi(uint rli_option, const char *channel);
+  static Master_info *create_mi(uint rli_option, const char *channel,
+                                bool conver_repo);
+  static bool change_mi_repository(Master_info *mi, const uint mi_option,
+                                   const char **msg);
   static Relay_log_info *create_rli(uint rli_option, bool is_slave_recovery,
-                                    const char *channel);
+                                    const char *channel, bool convert_repo);
+  static bool change_rli_repository(Relay_log_info *rli, const uint rli_option,
+                                    const char **msg);
   static Slave_worker *create_worker(uint rli_option, uint worker_id,
                                      Relay_log_info *rli,
                                      bool is_gaps_collecting_phase);
@@ -78,6 +86,15 @@ class Rpl_info_factory {
   static void invalidate_repository_position(Master_info *mi);
 
  private:
+  typedef struct file_data {
+    uint n_fields;
+    char name[FN_REFLEN];
+    char pattern[FN_REFLEN];
+    bool name_indexed;  // whether file name should include instance number
+    MY_BITMAP nullable_fields;
+    virtual ~file_data() { bitmap_free(&nullable_fields); }
+  } struct_file_data;
+
   typedef struct table_data {
     uint n_fields;
     const char *schema;
@@ -89,41 +106,69 @@ class Rpl_info_factory {
   } struct_table_data;
 
   static struct_table_data rli_table_data;
+  static struct_file_data rli_file_data;
   static struct_table_data mi_table_data;
+  static struct_file_data mi_file_data;
   static struct_table_data worker_table_data;
+  static struct_file_data worker_file_data;
 
   static void init_repository_metadata();
+  static bool decide_repository(Rpl_info *info, uint option,
+                                Rpl_info_handler **handler_src,
+                                Rpl_info_handler **handler_dest,
+                                const char **msg);
+  static bool init_repositories(const struct_table_data &table_data,
+                                const struct_file_data &file_data, uint option,
+                                Rpl_info_handler **handler_src,
+                                Rpl_info_handler **handler_dest,
+                                const char **msg);
 
-  static bool init_repository(const struct_table_data &table_data, uint option,
-                              Rpl_info_handler **handler);
-
-  static bool init_repository(Rpl_info *info, Rpl_info_handler **handler);
+  static enum_return_check check_src_repository(Rpl_info *info, uint option,
+                                                Rpl_info_handler **handler_src);
+  static bool check_error_repository(Rpl_info_handler *handler_src,
+                                     Rpl_info_handler *handler_dst,
+                                     enum_return_check err_src,
+                                     enum_return_check err_dst,
+                                     const char **msg);
+  static bool init_repositories(Rpl_info *info, Rpl_info_handler **handler_src,
+                                Rpl_info_handler **handler_dst,
+                                const char **msg);
   /**
-    Scan table for repositories.
+    Scan table and files for repositories.
+    If both file and table repositories are found an error is returned.
     This method returns the number of repository instances found which
     might imply a table scan.
 
     @param[out] found_instances  the number of repo instances found
-    @param[out] found_rep_option what is the type of repo found
+    @param[out] found_rep_option what is the type of repo found (FILE or TABLE)
     @param[in]  table_data       the data on the tables to scan
+    @param[in]  file_data        the data on the files to scan
+    @param[out] msg              the error message returned
 
     @return true if an error occurs, false otherwise
   */
   static bool scan_and_count_repositories(ulonglong &found_instances,
                                           uint &found_rep_option,
-                                          const struct_table_data &table_data);
+                                          const struct_table_data &table_data,
+                                          const struct_file_data &file_data,
+                                          std::string &msg);
   /**
-    Scan table for repositories.
+    Scan table and files for repositories.
+    If both file and table repositories are found an error is returned.
     This method does not try to count the number of repositories, only
     checks if they are present
 
-    @param[out] found_rep_option what is the type of repo found
+    @param[out] found_rep_option what is the type of repo found (FILE or TABLE)
     @param[in]  table_data       the data on the tables to scan
+    @param[in]  file_data        the data on the files to scan
+    @param[out] msg              the error message returned
 
     @return true if an error occurs, false otherwise
   */
   static bool scan_and_check_repositories(uint &found_rep_option,
-                                          const struct_table_data &table_data);
+                                          const struct_table_data &table_data,
+                                          const struct_file_data &file_data,
+                                          std::string &msg);
   static bool load_channel_names_from_repository(
       std::vector<std::string> &channel_list, uint mi_instances,
       uint mi_repository, const char *default_channel,

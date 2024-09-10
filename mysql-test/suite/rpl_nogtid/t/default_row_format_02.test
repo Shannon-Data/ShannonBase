@@ -15,14 +15,14 @@
 #          row_format=Compact (mysql-5.6).
 # **************************************************************
 --source include/not_group_replication_plugin.inc
---source include/rpl/init_source_replica.inc
+--source include/master-slave.inc
 # This test should not run with GTID=on
 
 # Set expected error nos on slave side
 connection slave;
-STOP REPLICA;
+stop slave;
 SET GLOBAL SQL_REPLICA_SKIP_COUNTER=4;
-START REPLICA;
+start slave;
 
 connection master;
 USE test;
@@ -38,7 +38,7 @@ ENGINE= InnoDB;
 INSERT INTO tab(a,b) VALUES(1,'Check with max prefix');
 
 # Connect to slave
---source include/rpl/sync_to_replica.inc
+--source include/sync_slave_sql_with_master.inc
 
 # Check Compact (default)
 SELECT @@innodb_default_row_format;
@@ -52,6 +52,6 @@ connection master;
 DROP TABLE tab;
 
 # Before closing sync slave
---source include/rpl/sync_to_replica.inc
+--source include/sync_slave_sql_with_master.inc
 
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

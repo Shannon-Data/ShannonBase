@@ -1,6 +1,0 @@
-INSTALL COMPONENT "file://component_test_sys_var_service";
-SELECT @@test_component.str_sys_var;
-@@test_component.str_sys_var
-12
-UNINSTALL COMPONENT "file://component_test_sys_var_service";
-# restart:

@@ -8,7 +8,7 @@ INSERT INTO tmp_t (a, b) VALUES (0, '');
 SET GLOBAL innodb_monitor_enable = module_log;
 
 if ($freeze_background_mtr == 1) {
-  --source stop_dirty_page_flushing_and_background_redo_producers.inc
+  --source log_disable_page_cleaners.inc
 }
 
 # Always validate order in flush list - after each insertion

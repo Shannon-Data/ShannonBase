@@ -221,5 +221,4 @@ length(gtid_executed)
 86081
 # restart:
 DROP PROCEDURE p1;
-RESET BINARY LOGS AND GTIDS;
 UNINSTALL PLUGIN clone;

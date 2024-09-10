@@ -1,16 +1,15 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -340,18 +339,9 @@ bool get_stmt_hton(THD *thd, const LEX_CSTRING &engine, const char *object_name,
   return false;
 }
 
-enum class Tablespace_engine_clause { allowed, invalid };
-
 bool get_dd_hton(THD *thd, const dd::String_type &dd_engine,
                  const LEX_CSTRING &stmt_engine, const char *tblspc,
-                 const char *stmt, handlerton **htonp,
-                 Tablespace_engine_clause engine_clause) {
-  if (stmt_engine.str && engine_clause == Tablespace_engine_clause::invalid) {
-    // Support for engine clause in the caller's context has been removed,
-    // so now this constitutes a syntax error
-    my_error(ER_SYNTAX_ERROR, MYF(0));
-    return true;
-  }
+                 const char *stmt, handlerton **htonp) {
   if (stmt_engine.str && dd_engine != real_engine_name(thd, stmt_engine)) {
     my_error(ER_TABLESPACE_ENGINE_MISMATCH, MYF(0), stmt_engine.str,
              dd_engine.c_str(), tblspc);
@@ -445,6 +435,7 @@ Sql_cmd_tablespace::Sql_cmd_tablespace(const LEX_STRING &name,
 
 /* purecov: begin inspected */
 enum_sql_command Sql_cmd_tablespace::sql_command_code() const {
+  assert(false);
   return SQLCOM_ALTER_TABLESPACE;
 }
 /* purecov: end */
@@ -683,8 +674,7 @@ bool Sql_cmd_drop_tablespace::execute(THD *thd) {
 
   handlerton *hton = nullptr;
   if (get_dd_hton(thd, old_ts_def->engine(), m_options->engine_name,
-                  m_tablespace_name.str, "DROP TABLESPACE", &hton,
-                  Tablespace_engine_clause::invalid)) {
+                  m_tablespace_name.str, "DROP TABLESPACE", &hton)) {
     return true;
   }
   rollback_on_return.m_hton = hton;
@@ -947,8 +937,7 @@ bool Sql_cmd_alter_tablespace::execute(THD *thd) {
   handlerton *hton = nullptr;
   if (get_dd_hton(thd, tsmp.first->engine(), m_options->engine_name,
                   m_tablespace_name.str,
-                  "ALTER TABLESPACE ... <tablespace_options>", &hton,
-                  Tablespace_engine_clause::invalid)) {
+                  "ALTER TABLESPACE ... <tablespace_options>", &hton)) {
     return true;
   }
   rollback_on_return.m_hton = hton;
@@ -1096,7 +1085,7 @@ bool Sql_cmd_alter_tablespace_add_datafile::execute(THD *thd) {
   handlerton *hton = nullptr;
   if (get_dd_hton(thd, tsmp.first->engine(), m_options->engine_name,
                   m_tablespace_name.str, "ALTER TABLESPACE ... ADD DATAFILE",
-                  &hton, Tablespace_engine_clause::allowed)) {
+                  &hton)) {
     return true;
   }
   rollback_on_return.m_hton = hton;
@@ -1184,7 +1173,7 @@ bool Sql_cmd_alter_tablespace_drop_datafile::execute(THD *thd) {
   handlerton *hton = nullptr;
   if (get_dd_hton(thd, tsmp.first->engine(), m_options->engine_name,
                   m_tablespace_name.str, "ALTER TABLESPACE ... DROP DATAFILE",
-                  &hton, Tablespace_engine_clause::invalid)) {
+                  &hton)) {
     return true;
   }
   rollback_on_return.m_hton = hton;
@@ -1277,7 +1266,7 @@ bool Sql_cmd_alter_tablespace_rename::execute(THD *thd) {
   handlerton *hton = nullptr;
   if (get_dd_hton(thd, tsmp.first->engine(), {nullptr, 0},
                   m_tablespace_name.str, "ALTER TABLESPACE ... RENAME TO",
-                  &hton, Tablespace_engine_clause::invalid)) {
+                  &hton)) {
     return true;
   }
   if (ha_is_storage_engine_disabled(hton)) {

@@ -1,16 +1,15 @@
-/* Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -65,27 +64,28 @@
     Crossproducts and Non-Inner Joins”.
  */
 
-#include <assert.h>
 #include <stddef.h>
 
-#include <limits>
+#include <string>
 #include <vector>
 
 #include "my_compiler.h"
 #include "priority_queue.h"
 #include "sql/join_optimizer/hypergraph.h"
 #include "sql/join_optimizer/online_cycle_finder.h"
-#include "sql/mem_root_allocator.h"
 #include "sql/mem_root_array.h"
 #include "sql/sql_array.h"
 
 class THD;
 struct JoinHypergraph;
+struct MEM_ROOT;
+template <class T>
+class Mem_root_allocator;
 
 // Exposed for unit testing.
 class GraphSimplifier {
  public:
-  GraphSimplifier(THD *thd, JoinHypergraph *graph);
+  GraphSimplifier(JoinHypergraph *graph, MEM_ROOT *mem_root);
 
   // Do a single simplification step. The return enum is mostly for unit tests;
   // general code only needs to care about whether it returned
@@ -200,7 +200,6 @@ class GraphSimplifier {
   SimplificationStep ConcretizeSimplificationStep(
       GraphSimplifier::ProposedSimplificationStep step);
 
-  THD *m_thd;
   // Steps that we have applied so far, in chronological order.
   // Used so that we can undo them easily on UndoSimplificationStep().
   Mem_root_array<SimplificationStep> m_done_steps;
@@ -305,6 +304,7 @@ void SetNumberOfSimplifications(int num_simplifications,
 
 // See comment in .cc file.
 void SimplifyQueryGraph(THD *thd, int subgraph_pair_limit,
-                        JoinHypergraph *graph, GraphSimplifier *simplifier);
+                        JoinHypergraph *graph, GraphSimplifier *simplifier,
+                        std::string *trace);
 
 #endif  // SQL_JOIN_OPTIMIZER_GRAPH_SIMPLIFICATION_H_

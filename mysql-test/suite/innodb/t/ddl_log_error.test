@@ -5,7 +5,6 @@
 
 --source include/have_debug.inc
 --source include/not_valgrind.inc
---source include/have_component_keyring_file.inc
 
 --disable_query_log
 call mtr.add_suppression("\\[Error\\] \\[[^]]*\\] \\[[^]]*\\] Couldn't insert entry in ddl log for ddl.");
@@ -37,8 +36,7 @@ SET SESSION DEBUG="-d,ddl_log_return_error_from_insert";
 
 
 --echo # Restart with keyring plugin
---source suite/component_keyring_file/inc/setup_component.inc
-let $restart_parameters = restart: $PLUGIN_DIR_OPT;
+let $restart_parameters = restart: --early-plugin-load=keyring_file=$KEYRING_PLUGIN --loose-keyring_file_data=$MYSQL_TMP_DIR/mysecret_keyring $KEYRING_PLUGIN_OPT;
 --source include/restart_mysqld_no_echo.inc
 
 # Return error from insert into ddl_log
@@ -52,7 +50,7 @@ SET SESSION DEBUG="-d,ddl_log_return_error_from_insert";
 --echo # Cleanup
 DROP TABLESPACE my_ts;
 DROP TABLE t1;
---source suite/component_keyring_file/inc/teardown_component.inc
+remove_file $MYSQL_TMP_DIR/mysecret_keyring;
 
 --echo # Restarting server without keyring to restore server state
 let $restart_parameters = restart: ;

@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -63,7 +62,9 @@ AuthCachingSha2Sender::process() {
 
 stdx::expected<Processor::Result, std::error_code>
 AuthCachingSha2Sender::init() {
-  auto &dst_conn = connection()->server_conn();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto dst_channel = socket_splicer->server_channel();
+  auto dst_protocol = connection()->server_protocol();
 
   auto scramble_res = Auth::scramble(
       AuthBase::strip_trailing_null(initial_server_auth_data_), password_);
@@ -72,8 +73,9 @@ AuthCachingSha2Sender::init() {
   }
 
   auto send_res = ClassicFrame::send_msg(
-      dst_conn, classic_protocol::borrowed::message::client::AuthMethodData{
-                    *scramble_res});
+      dst_channel, dst_protocol,
+      classic_protocol::borrowed::message::client::AuthMethodData{
+          *scramble_res});
   if (!send_res) return send_server_failed(send_res.error());
 
   stage(Stage::Response);
@@ -83,16 +85,19 @@ AuthCachingSha2Sender::init() {
 
 stdx::expected<Processor::Result, std::error_code>
 AuthCachingSha2Sender::send_password() {
-  auto &dst_conn = connection()->server_conn();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto dst_channel = socket_splicer->server_channel();
+  auto dst_protocol = connection()->server_protocol();
 
-  if (dst_conn.is_secure_transport()) {
+  if (socket_splicer->server_conn().is_secure_transport()) {
     if (auto &tr = tracer()) {
       tr.trace(
           Tracer::Event().stage("caching_sha2::sender::plaintext_password"));
     }
     auto send_res = ClassicFrame::send_msg(
-        dst_conn, classic_protocol::borrowed::message::client::AuthMethodData{
-                      password_ + '\0'});
+        dst_channel, dst_protocol,
+        classic_protocol::borrowed::message::client::AuthMethodData{password_ +
+                                                                    '\0'});
     if (!send_res) return send_server_failed(send_res.error());
 
     stage(Stage::Response);
@@ -102,7 +107,7 @@ AuthCachingSha2Sender::send_password() {
           Tracer::Event().stage("caching_sha2::sender::public_key_request"));
     }
 
-    auto send_res = Auth::send_public_key_request(dst_conn);
+    auto send_res = Auth::send_public_key_request(dst_channel, dst_protocol);
     if (!send_res) return send_server_failed(send_res.error());
 
     stage(Stage::PublicKey);
@@ -113,15 +118,16 @@ AuthCachingSha2Sender::send_password() {
 
 stdx::expected<Processor::Result, std::error_code>
 AuthCachingSha2Sender::response() {
-  auto &src_conn = connection()->server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = connection()->server_protocol();
 
   // ensure the recv_buf has at last frame-header (+ msg-byte)
-  auto read_res = ClassicFrame::ensure_has_msg_prefix(src_conn);
+  auto read_res =
+      ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) return recv_server_failed(read_res.error());
 
-  const uint8_t msg_type = src_protocol.current_msg_type().value();
+  const uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     Ok = ClassicFrame::cmd_byte<classic_protocol::message::server::Ok>(),
@@ -143,10 +149,10 @@ AuthCachingSha2Sender::response() {
   }
 
   // if there is another packet, dump its payload for now.
-  const auto &recv_buf = src_channel.recv_plain_view();
+  auto &recv_buf = src_channel->recv_plain_view();
 
   // get as much data of the current frame from the recv-buffers to log it.
-  (void)ClassicFrame::ensure_has_full_frame(src_conn);
+  (void)ClassicFrame::ensure_has_full_frame(src_channel, src_protocol);
 
   log_debug("received unexpected message from server in caching-sha2-auth:\n%s",
             hexify(recv_buf).c_str());
@@ -156,10 +162,13 @@ AuthCachingSha2Sender::response() {
 
 stdx::expected<Processor::Result, std::error_code>
 AuthCachingSha2Sender::public_key() {
-  auto &dst_conn = connection()->server_conn();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto dst_channel = socket_splicer->server_channel();
+  auto dst_protocol = connection()->server_protocol();
 
   auto msg_res = ClassicFrame::recv_msg<
-      classic_protocol::borrowed::message::server::AuthMethodData>(dst_conn);
+      classic_protocol::borrowed::message::server::AuthMethodData>(
+      dst_channel, dst_protocol);
   if (!msg_res) return recv_server_failed(msg_res.error());
 
   auto msg = *msg_res;
@@ -169,7 +178,7 @@ AuthCachingSha2Sender::public_key() {
 
   // discard _after_ msg. is used as msg borrows from the dst_channel's
   // recv_buffer.
-  discard_current_msg(dst_conn);
+  discard_current_msg(dst_channel, dst_protocol);
 
   auto nonce = initial_server_auth_data_;
 
@@ -183,7 +192,8 @@ AuthCachingSha2Sender::public_key() {
       Auth::rsa_encrypt_password(*pubkey_res, password_, nonce);
   if (!encrypted_res) return send_server_failed(encrypted_res.error());
 
-  auto send_res = Auth::send_encrypted_password(dst_conn, *encrypted_res);
+  auto send_res =
+      Auth::send_encrypted_password(dst_channel, dst_protocol, *encrypted_res);
   if (!send_res) return send_server_failed(send_res.error());
 
   stage(Stage::Response);
@@ -193,10 +203,13 @@ AuthCachingSha2Sender::public_key() {
 
 stdx::expected<Processor::Result, std::error_code>
 AuthCachingSha2Sender::auth_data() {
-  auto &dst_conn = connection()->server_conn();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto dst_channel = socket_splicer->server_channel();
+  auto dst_protocol = connection()->server_protocol();
 
   auto msg_res = ClassicFrame::recv_msg<
-      classic_protocol::borrowed::message::server::AuthMethodData>(dst_conn);
+      classic_protocol::borrowed::message::server::AuthMethodData>(
+      dst_channel, dst_protocol);
   if (!msg_res) return recv_server_failed(msg_res.error());
 
   if (msg_res->auth_method_data() == std::string_view("\x04")) {
@@ -205,7 +218,7 @@ AuthCachingSha2Sender::auth_data() {
           Tracer::Event().stage("caching_sha2::sender::request_full_auth"));
     }
 
-    discard_current_msg(dst_conn);
+    discard_current_msg(dst_channel, dst_protocol);
 
     return send_password();
   } else if (msg_res->auth_method_data() == std::string_view("\x03")) {
@@ -214,7 +227,7 @@ AuthCachingSha2Sender::auth_data() {
     }
 
     // as the client did the slow path, it doesn't expect a fast-auth-ok.
-    discard_current_msg(dst_conn);
+    discard_current_msg(dst_channel, dst_protocol);
 
     // next should be an Ok
     stage(Stage::Response);

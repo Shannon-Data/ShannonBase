@@ -17,8 +17,8 @@
 #
 # BUG#22150112 REPLICATION BREAKS WITH NOT PRESERVE EVENTS
 
---source include/rpl/set_privilege_checks_user_as_system_user.inc
---source include/rpl/init_source_replica.inc
+--source include/set_privilege_checks_user_as_system_user.inc
+--source include/master-slave.inc
 
 # Save current event scheduler status
 SET @saved_event_scheduler= @@GLOBAL.event_scheduler;
@@ -44,21 +44,21 @@ SET GLOBAL EVENT_SCHEDULER= ON;
 --source include/wait_condition.inc
 SET GLOBAL EVENT_SCHEDULER= OFF;
 
---source include/rpl/sync_to_replica.inc
+--source include/sync_slave_sql_with_master.inc
 
 # check that we can create another event with the same name
---source include/rpl/connection_source.inc
+--source include/rpl_connection_master.inc
 CREATE EVENT e1
   ON SCHEDULE EVERY 1 SECOND
   STARTS NOW() ENDS NOW() + INTERVAL 3 SECOND
   ON COMPLETION NOT PRESERVE
   DO SELECT 1;
 
---source include/rpl/sync_to_replica.inc
+--source include/sync_slave_sql_with_master.inc
 
 #cleanup
---source include/rpl/connection_source.inc
+--source include/rpl_connection_master.inc
 DROP EVENT e1;
 # Restore the scheduler
 SET GLOBAL EVENT_SCHEDULER= @saved_event_scheduler;
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

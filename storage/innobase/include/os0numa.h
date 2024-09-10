@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+Copyright (c) 2015, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -100,7 +99,7 @@ inline int os_numa_num_configured_cpus() {
   SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *buf;
   DWORD buf_bytes = 0;
 
-  if (GetLogicalProcessorInformationEx(RelationGroup, nullptr, &buf_bytes)) {
+  if (GetLogicalProcessorInformationEx(RelationGroup, NULL, &buf_bytes)) {
     /* GetLogicalProcessorInformationEx() unexpectedly succeeded. */
     return (1);
   }
@@ -116,7 +115,7 @@ inline int os_numa_num_configured_cpus() {
   buf = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(
       LocalAlloc(LMEM_FIXED, buf_bytes));
 
-  if (buf == nullptr) {
+  if (buf == NULL) {
     return (1);
   }
 
@@ -184,16 +183,16 @@ inline int os_numa_node_of_cpu(int cpu) {
 /** Allocate a memory on a given NUMA node.
 @param[in]      size    number of bytes to allocate
 @param[in]      node    NUMA node on which to allocate the memory
-@return pointer to allocated memory or nullptr if allocation failed */
+@return pointer to allocated memory or NULL if allocation failed */
 inline void *os_numa_alloc_onnode(size_t size, int node) {
 #if defined(HAVE_LIBNUMA)
   return (numa_alloc_onnode(size, node));
 #elif defined(HAVE_WINNUMA)
-  return (VirtualAllocExNuma(GetCurrentProcess(), nullptr, size,
+  return (VirtualAllocExNuma(GetCurrentProcess(), NULL, size,
                              MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE, node));
 #else
   ut_error;
-  return (nullptr);
+  return (NULL);
 #endif
 }
 

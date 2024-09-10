@@ -1,16 +1,15 @@
-/* Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -42,12 +41,12 @@
 #include "decimal.h"                       // E_DEC_FATAL_ERROR
 #include "field_types.h"                   // MYSQL_TYPE_DATE
                                            // assert
+#include "my_decimal.h"                    // my_decimal, my_decimal_cmp
 #include "my_inttypes.h"                   // longlong, ulonglong
 #include "my_time.h"                       // TIME_to_longlong_datetime_packed
 #include "mysql/strings/dtoa.h"            // DECIMAL_NOT_SPECIFIED
 #include "mysql/udf_registration_types.h"  // INT_RESULT, STRING_RESULT
 #include "mysql_time.h"                    // MYSQL_TIME
-#include "sql-common/my_decimal.h"         // my_decimal, my_decimal_cmp
 #include "sql/field.h"                     // Field_real, Field
 #include "sql/item.h"                      // Item, Item_field, Item_int
 #include "sql/item_cmpfunc.h"              // Item_bool_func2, Item_cond
@@ -237,7 +236,7 @@ static bool analyze_int_field_constant(THD *thd, Item_field *f,
     case INT_RESULT:
       break;
     case STRING_RESULT: {
-      if ((*const_val)->type() == Item::HEX_BIN_ITEM) {
+      if ((*const_val)->type() == Item::VARBIN_ITEM) {
         /*
           0x digits have STRING_RESULT but are ints in int
           context.
@@ -471,7 +470,7 @@ static bool analyze_decimal_field_constant(THD *thd, const Item_field *f,
     0xnnn numbers, which also have STRING result type, but should be treated
     the same as ints.
   */
-  if (ir == STRING_RESULT && (*const_val)->type() != Item::HEX_BIN_ITEM) {
+  if (ir == STRING_RESULT && (*const_val)->type() != Item::VARBIN_ITEM) {
     was_string_or_real = true;
     ir = DECIMAL_RESULT;
   }
@@ -725,12 +724,11 @@ static bool analyze_year_field_constant(THD *thd, Item **const_val,
     case REAL_RESULT:
     case INT_RESULT: {
       const double year = (*const_val)->val_real();
-      if (year > static_cast<double>(Field_year::MAX_YEAR)) {
+      if (year > Field_year::MAX_YEAR) {
         *place = RP_OUTSIDE_HIGH;
       } else if (year < 0.0) {
         *place = RP_OUTSIDE_LOW;
-      } else if (year > 0.0 &&
-                 year < static_cast<double>(Field_year::MIN_YEAR)) {
+      } else if (year > 0.0 && year < Field_year::MIN_YEAR) {
         /*
           These values can be given as constants, but are not allowed to be
           stored in the field, so an = or <> comparison can be folded. For
@@ -1338,9 +1336,9 @@ bool fold_condition(THD *thd, Item *cond, Item **retcond,
         [1] See `create_tmp_field_from_item' case INT_RESULT.
       */
       seen_field = true;
-    } else if (args[i]->const_for_execution() && type != Item::SUBQUERY_ITEM) {
+    } else if (args[i]->const_for_execution() && type != Item::SUBSELECT_ITEM) {
       /*
-        Re test on Item::SUBQUERY_ITEM above: we exclude optimize time
+        Re test on Item::SUBSELECT_ITEM above: we exclude optimize time
         evaluation of constant subqueries for now; since it could still be
         expensive to evaluate and we have no cost model to decide whether
         folding it would save total time spent. It may turn out not to be

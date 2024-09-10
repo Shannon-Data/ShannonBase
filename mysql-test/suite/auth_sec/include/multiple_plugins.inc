@@ -1,15 +1,17 @@
 #
 # Input(s) :
-# $server_default_authentication_policy
+# $server_default_authentication_plugin
 #
 
---echo # Restart the server with --authentication_policy=$server_default_authentication_policy
+--echo # Restart the server with $server_default_authentication_plugin as default authnetication plugin
 let $restart_file= $MYSQLTEST_VARDIR/tmp/mysqld.1.expect;
 --exec echo "wait" > $restart_file
 --shutdown_server
 --source include/wait_until_disconnected.inc
---exec echo "restart:--authentication_policy=$server_default_authentication_policy" > $restart_file
+--exec echo "restart:--default-authentication-plugin=$server_default_authentication_plugin" > $restart_file
+--enable_reconnect
 --source include/wait_until_connected_again.inc
+--disable_reconnect
 
 
 --echo # Create users

@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
 /* Insert of records */
@@ -189,6 +190,8 @@ static bool check_insert_fields(THD *thd, Table_ref *table_list,
     if (check_grant_all_columns(thd, INSERT_ACL, &it)) return true;
 
     for (it.set(table_list); !it.end_of_fields(); it.next()) {
+      //ghost column skip.
+      if (it.field()->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       if (it.field()->is_hidden()) continue;
       Item *item = it.create_item(thd);
       if (item == nullptr) return true;
@@ -311,6 +314,7 @@ bool validate_default_values_of_unset_fields(THD *thd, TABLE *table) {
   DBUG_TRACE;
 
   for (Field **field = table->field; *field; field++) {
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue; /*ghost column*/
     if (!bitmap_is_set(write_set, (*field)->field_index()) &&
         !(*field)->is_flag_set(NO_DEFAULT_VALUE_FLAG)) {
       if ((*field)->validate_stored_val(thd) && thd->is_error()) return true;
@@ -399,6 +403,7 @@ static bool mysql_prepare_blob_values(THD *thd,
     Field *lhs_field = field->field;
 
     if (lhs_field->type() == MYSQL_TYPE_BLOB ||
+        lhs_field->type() == MYSQL_TYPE_VECTOR ||
         lhs_field->type() == MYSQL_TYPE_GEOMETRY)
       blob_update_field_set.insert_unique(down_cast<Field_blob *>(lhs_field));
   }
@@ -1696,7 +1701,7 @@ bool Sql_cmd_insert_base::resolve_update_expressions(THD *thd) {
 
   lex->in_update_value_clause = false;
 
-  if (select_insert && !lex->using_hypergraph_optimizer()) {
+  if (select_insert && !lex->using_hypergraph_optimizer) {
     /*
       Traverse the update values list and substitute fields from the
       select for references (Item_ref objects) to them. This is done in
@@ -2220,6 +2225,7 @@ bool check_that_all_fields_are_given_values(THD *thd, TABLE *entry,
   MY_BITMAP *write_set = entry->fields_set_during_insert;
 
   for (Field **field = entry->field; *field; field++) {
+    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue; //ghost column.
     if (!bitmap_is_set(write_set, (*field)->field_index()) &&
         ((*field)->is_flag_set(NO_DEFAULT_VALUE_FLAG) &&
          ((*field)->m_default_val_expr == nullptr)) &&
@@ -2908,6 +2914,8 @@ bool Query_result_create::start_execution(THD *thd) {
   }
   /* Mark all fields that are given values */
   for (Field **f = table_fields; *f != nullptr; f++) {
+    //skip ghost column.
+    if ((*f)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     bitmap_set_bit(table->write_set, (*f)->field_index());
     bitmap_set_bit(table->fields_set_during_insert, (*f)->field_index());
   }
@@ -3342,12 +3350,12 @@ bool Sql_cmd_insert_base::accept(THD *thd, Select_lex_visitor *visitor) {
 }
 
 const MYSQL_LEX_CSTRING *
-Sql_cmd_insert_select::eligible_secondary_storage_engine(THD *thd) const {
+Sql_cmd_insert_select::eligible_secondary_storage_engine() const {
   // ON DUPLICATE KEY UPDATE cannot be offloaded
   if (!update_field_list.empty()) return nullptr;
 
   // Don't use secondary storage engines for REPLACE INTO SELECT statements
   if (is_replace) return nullptr;
 
-  return get_eligible_secondary_engine(thd);
+  return get_eligible_secondary_engine();
 }

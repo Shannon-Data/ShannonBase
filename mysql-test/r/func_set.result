@@ -116,10 +116,10 @@ CAST(DATE(NULL) AS DECIMAL), CAST(DATE(NULL) AS DECIMAL))
 8
 End of 5.0 tests
 drop table if exists t1;
-create table t1 (f1 set('test1','test2','test3') character set utf8mb3 default null)
+create table t1 (f1 set('test1','test2','test3') character set utf8 default null)
 default charset=latin1;
 Warnings:
-Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
 insert into t1 values (''),(null),(null),(''),(''),('');
 select find_in_set(f1,f1) as a from t1,(select find_in_set(f1,f1) as b from t1) a;
 a
@@ -259,6 +259,7 @@ from( make_set( ( extract( minute_second from
 ;
 Warnings:
 Warning	1287	'macce' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1292	Truncated incorrect date value: '1.01'
 Warning	1411	Incorrect datetime value: '1.01' for function str_to_date
 # Bug#21547779 Assertion failed: select_lex->leaf_table_count == 0
 CREATE TABLE t(a INTEGER) engine=innodb;

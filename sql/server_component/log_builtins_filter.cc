@@ -1,16 +1,15 @@
-/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -92,10 +91,6 @@
 
 static bool filter_inited = false;
 static ulong filter_rule_uuid = 0;
-// The number of built-in rules in the log_filter_builtin_rules ruleset. This
-// counter should be incremented for each built-in rule we add in
-// log_builtins_filter_set_defaults().
-static uint32 builtin_count = 0;
 
 log_filter_ruleset *log_filter_builtin_rules = nullptr;
 log_filter_tag rule_tag_builtin = {"log_filter_builtin", nullptr};
@@ -129,7 +124,7 @@ static log_filter_rule *log_builtins_filter_rule_init(
     log_filter_ruleset *ruleset) {
   log_filter_rule *r = &ruleset->rule[ruleset->count];
 
-  new (r) log_filter_rule{};
+  memset(r, 0, sizeof(log_filter_rule));
 
   r->id = ++filter_rule_uuid;
   r->throttle_window_size =
@@ -210,7 +205,7 @@ static log_filter_ruleset *log_builtins_filter_ruleset_new(log_filter_tag *tag,
       (log_filter_ruleset *)my_malloc(0, sizeof(log_filter_ruleset), MYF(0));
 
   if (ruleset != nullptr) {
-    new (ruleset) log_filter_ruleset{};
+    memset(ruleset, 0, sizeof(log_filter_ruleset));
     ruleset->tag = tag;
     ruleset->alloc = (count < 1) ? LOG_FILTER_RULE_MAX : count;
 
@@ -293,12 +288,11 @@ static void log_builtins_filter_ruleset_free(log_filter_ruleset **ruleset) {
 }
 
 /**
-  Defaults for when the configuration engine isn't loaded; aim for 5.7
-  compatibility.
+  Defaults for when the configuration engine isn't loaded;
+  aim for 5.7 compatibility.
 */
 static void log_builtins_filter_set_defaults(log_filter_ruleset *ruleset) {
   log_filter_rule *r;
-  builtin_count = 0;
 
   assert(ruleset != nullptr);
 
@@ -313,7 +307,6 @@ static void log_builtins_filter_set_defaults(log_filter_ruleset *ruleset) {
   r->verb = LOG_FILTER_RETURN;
 
   ruleset->count++;
-  builtin_count++;
 
   // sys_var: log_error_verbosity
   r = log_builtins_filter_rule_init(ruleset);
@@ -324,7 +317,6 @@ static void log_builtins_filter_set_defaults(log_filter_ruleset *ruleset) {
   r->verb = LOG_FILTER_DROP;
 
   ruleset->count++;
-  builtin_count++;
 
   // example: remove all source-line log items
   // these are not desirable by default, only while debugging.
@@ -335,29 +327,6 @@ static void log_builtins_filter_set_defaults(log_filter_ruleset *ruleset) {
   // aux optional
 
   ruleset->count++;
-  builtin_count++;
-
-  // Throttle background histogram update errors.
-
-  // Initialize a new rule.
-  r = log_builtins_filter_rule_init(ruleset);
-
-  // Condition/comparator: equal.
-  r->cond = LOG_FILTER_COND_EQ;
-
-  // Match information: MySQL error code.
-  log_item_set(&r->match, LOG_ITEM_SQL_ERRCODE)->data_integer =
-      ER_BACKGROUND_HISTOGRAM_UPDATE;
-
-  // Action/verb: throttle (rate-limit).
-  r->verb = LOG_FILTER_THROTTLE;
-
-  // Auxiliary information: maximum number of messages per minute.
-  log_item_set(&r->aux, LOG_ITEM_GEN_INTEGER)->data_integer = 1;
-
-  // Rule complete, be counted.
-  ruleset->count++;
-  builtin_count++;
 }
 
 /**
@@ -1000,15 +969,15 @@ int log_builtins_filter_parse_suppression_list(char *list, bool update) {
     }
 
     /*
-      During check-phase, make sure the requested number of error-codes (and
-      therefore, the requested number of DROP rules) will fit into the built-in
-      rule-set. Without this check, we'd still catch the (attempted) overflow
-      during assignment, but if we do it during the check phase, we protect the
+      During check-phase, make sure the requested number of error-codes
+      (and therefore, the requested number of DROP rules) will fit into
+      the built-in rule-set.  Reserve one rule for --log-error-verbosity
+      and one for our "ERROR and SYSTEM always pass" shortcut.
+      Without this check, we'd still catch the (attempted) overflow during
+      assignment, but if we do it during the check phase, we protect the
       integrity of both the current rule-set and the variable's value.
     */
-    else if (uint32_t max_user_rules_in_list =
-                 log_filter_builtin_rules->alloc - builtin_count;
-             ++list_len > max_user_rules_in_list)
+    else if (++list_len >= (log_filter_builtin_rules->alloc - 2))
       goto fail;
 
     start = end;
@@ -1065,7 +1034,7 @@ DEFINE_METHOD(int, log_builtins_filter_imp::filter_ruleset_move,
 
   for (rule_index = 0; rule_index < from->count; rule_index++) {
     to->rule[rule_index] = from->rule[rule_index];
-    new (&from->rule[rule_index]) log_filter_rule{};
+    memset(&from->rule[rule_index], 0, sizeof(log_filter_rule));
   }
 
   to->count = from->count;

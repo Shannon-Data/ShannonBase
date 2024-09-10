@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,9 +32,8 @@
 #include <stdlib.h>
 #include <sys/types.h>
 
-#include "client/include/caching_sha2_passwordopt-vars.h"
-#include "client/include/client_priv.h"
-#include "client/include/sslopt-vars.h"
+#include "caching_sha2_passwordopt-vars.h"
+#include "client/client_priv.h"
 #include "compression.h"
 #include "m_string.h"
 #include "my_alloc.h"
@@ -48,6 +46,7 @@
 #include "mysql/strings/m_ctype.h"
 #include "nulls.h"
 #include "print_version.h"
+#include "sslopt-vars.h"
 #include "strxnmov.h"
 #include "typelib.h"
 #include "welcome_copyright_notice.h" /* ORACLE_WELCOME_COPYRIGHT_NOTICE */
@@ -67,10 +66,10 @@ static bool using_opt_enable_cleartext_plugin = false;
 static uint opt_zstd_compress_level = default_zstd_compression_level;
 static char *opt_compress_algorithm = nullptr;
 
-#include "client/include/multi_factor_passwordopt-vars.h"
+#include "multi_factor_passwordopt-vars.h"
 
 #if defined(_WIN32)
-static char *shared_memory_base_name = nullptr;
+static char *shared_memory_base_name = 0;
 #endif
 static uint opt_protocol = 0;
 static char *opt_bind_addr = nullptr;
@@ -194,6 +193,8 @@ int main(int argc, char **argv) {
     my_end(my_end_arg);
     exit(1);
   }
+  mysql.reconnect = true;
+
   switch (argc) {
     case 0:
       error = list_dbs(&mysql, wild);
@@ -264,7 +265,7 @@ static struct my_option my_long_options[] = {
      nullptr},
     {"keys", 'k', "Show keys for table.", &opt_show_keys, &opt_show_keys,
      nullptr, GET_BOOL, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
-#include "client/include/multi_factor_passwordopt-longopts.h"
+#include "multi_factor_passwordopt-longopts.h"
     {"plugin_dir", OPT_PLUGIN_DIR, "Directory for client-side plugins.",
      &opt_plugin_dir, &opt_plugin_dir, nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0,
      nullptr, 0, nullptr},
@@ -278,8 +279,8 @@ static struct my_option my_long_options[] = {
      &opt_mysql_port, &opt_mysql_port, nullptr, GET_UINT, REQUIRED_ARG, 0, 0, 0,
      nullptr, 0, nullptr},
 #ifdef _WIN32
-    {"pipe", 'W', "Use named pipes to connect to server.", nullptr, nullptr,
-     nullptr, GET_NO_ARG, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
+    {"pipe", 'W', "Use named pipes to connect to server.", 0, 0, 0, GET_NO_ARG,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
 #endif
     {"protocol", OPT_MYSQL_PROTOCOL,
      "The protocol to use for connection (tcp, socket, pipe, memory).", nullptr,
@@ -287,16 +288,16 @@ static struct my_option my_long_options[] = {
 #if defined(_WIN32)
     {"shared-memory-base-name", OPT_SHARED_MEMORY_BASE_NAME,
      "Base name of shared memory.", &shared_memory_base_name,
-     &shared_memory_base_name, nullptr, GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0,
-     nullptr, 0, nullptr},
+     &shared_memory_base_name, 0, GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0,
+     0},
 #endif
     {"show-table-type", 't', "Show table type column.", &opt_table_type,
      &opt_table_type, nullptr, GET_BOOL, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
     {"socket", 'S', "The socket file to use for connection.",
      &opt_mysql_unix_port, &opt_mysql_unix_port, nullptr, GET_STR, REQUIRED_ARG,
      0, 0, 0, nullptr, 0, nullptr},
-#include "client/include/caching_sha2_passwordopt-longopts.h"
-#include "client/include/sslopt-longopts.h"
+#include "caching_sha2_passwordopt-longopts.h"
+#include "sslopt-longopts.h"
 
     {"user", 'u', "User for login if not current user.", &user, &user, nullptr,
      GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr, 0, nullptr},
@@ -365,7 +366,7 @@ static bool get_one_option(int optid, const struct my_option *opt,
       DBUG_PUSH(argument ? argument : "d:t:o");
       debug_check_flag = true;
       break;
-#include "client/include/sslopt-case.h"
+#include "sslopt-case.h"
 
     case 'V':
       print_version();
@@ -509,7 +510,7 @@ static int list_tables(MYSQL *mysql, const char *db, const char *table) {
   const char *header;
   size_t head_length;
   uint counter = 0;
-  char query[2 * NAME_LEN + 100], rows[2 * NAME_LEN + 2], fields[16];
+  char query[NAME_LEN + 100], rows[NAME_LEN], fields[16];
   MYSQL_FIELD *field;
   MYSQL_RES *result = nullptr;
   MYSQL_ROW row, rrow;
@@ -567,12 +568,7 @@ static int list_tables(MYSQL *mysql, const char *db, const char *table) {
     counter++;
     if (opt_verbose > 0) {
       if (!(mysql_select_db(mysql, db))) {
-        mysql_real_escape_string_quote(mysql, rows, row[0],
-                                       (unsigned long)strlen(row[0]), '`');
-        snprintf(query, sizeof(query), "SELECT * FROM `%s` LIMIT 0", rows);
-        MYSQL_RES *rresult = (0 == mysql_query(mysql, query))
-                                 ? mysql_store_result(mysql)
-                                 : nullptr;
+        MYSQL_RES *rresult = mysql_list_fields(mysql, row[0], nullptr);
         ulong rowcount = 0L;
         if (!rresult) {
           my_stpcpy(fields, "N/A");

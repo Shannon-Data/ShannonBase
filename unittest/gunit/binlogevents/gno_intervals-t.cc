@@ -1,16 +1,15 @@
-/* Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,9 +24,9 @@
 #include <sstream>
 #include <string>
 
-#include "mysql/gtid/gtidset.h"
+#include "libbinlogevents/include/gtids/gtidset.h"
 
-namespace mysql::gtid::unittests {
+namespace binary_log::gtids::unittests {
 
 class GnoIntervalTest : public ::testing::Test {
  protected:
@@ -39,8 +38,8 @@ class GnoIntervalTest : public ::testing::Test {
 };
 
 TEST_F(GnoIntervalTest, GnoIntervalBasic) {
-  mysql::gtid::Gno_interval i1{1, 1};
-  mysql::gtid::Gno_interval i2{100, 200};
+  binary_log::gtids::Gno_interval i1{1, 1};
+  binary_log::gtids::Gno_interval i2{100, 200};
 
   ASSERT_EQ(i1.get_start(), 1);
   ASSERT_EQ(i1.get_end(), 1);
@@ -50,29 +49,27 @@ TEST_F(GnoIntervalTest, GnoIntervalBasic) {
 }
 
 TEST_F(GnoIntervalTest, GnoIntervalComparison) {
-  mysql::gtid::Gno_interval i_1_1{1, 1};
-  mysql::gtid::Gno_interval i_1_1_copy{1, 1};
-  mysql::gtid::Gno_interval i_1_2{1, 2};
+  binary_log::gtids::Gno_interval i_1_1{1, 1};
+  binary_log::gtids::Gno_interval i_1_1_copy{1, 1};
+  binary_log::gtids::Gno_interval i_1_2{1, 2};
 
   ASSERT_TRUE(i_1_1 == i_1_1_copy);
   ASSERT_FALSE(i_1_1 == i_1_2);
 }
 
 TEST_F(GnoIntervalTest, GnoIntervalCopyAssignment) {
-  mysql::gtid::Gno_interval i2{100, 200};
-  mysql::gtid::Gno_interval i2_assigned = i2;
-  // checking copy assignment operator
+  binary_log::gtids::Gno_interval i2{100, 200};
+  binary_log::gtids::Gno_interval i2_assigned = i2;
+
   ASSERT_EQ(i2_assigned, i2);
-  // silence clang-tidy warning
-  i2_assigned.add(i2);
 }
 
 TEST_F(GnoIntervalTest, GnoIntervalLessThan) {
-  mysql::gtid::Gno_interval i_1_1{1, 1};
-  mysql::gtid::Gno_interval i_1_1_copy{1, 1};
-  mysql::gtid::Gno_interval i_1_2{1, 2};
-  mysql::gtid::Gno_interval i_100_200{100, 200};
-  mysql::gtid::Gno_interval i_100_150{100, 150};
+  binary_log::gtids::Gno_interval i_1_1{1, 1};
+  binary_log::gtids::Gno_interval i_1_1_copy{1, 1};
+  binary_log::gtids::Gno_interval i_1_2{1, 2};
+  binary_log::gtids::Gno_interval i_100_200{100, 200};
+  binary_log::gtids::Gno_interval i_100_150{100, 150};
 
   ASSERT_TRUE(i_1_1 < i_100_200);
   ASSERT_TRUE(i_1_1 < i_1_2);
@@ -82,106 +79,106 @@ TEST_F(GnoIntervalTest, GnoIntervalLessThan) {
 }
 
 TEST_F(GnoIntervalTest, GnoIntervalIntersection) {
-  mysql::gtid::Gno_interval orig{10, 20};
+  binary_log::gtids::Gno_interval orig{10, 20};
 
-  mysql::gtid::Gno_interval i1{8, 9};
+  binary_log::gtids::Gno_interval i1{8, 9};
   ASSERT_FALSE(orig.intersects(i1));
   ASSERT_FALSE(i1.intersects(orig));
 
-  mysql::gtid::Gno_interval i2{22, 23};
+  binary_log::gtids::Gno_interval i2{22, 23};
   ASSERT_FALSE(orig.intersects(i2));
   ASSERT_FALSE(i2.intersects(orig));
 
-  mysql::gtid::Gno_interval i3{5, 11};
+  binary_log::gtids::Gno_interval i3{5, 11};
   ASSERT_TRUE(orig.intersects(i3));
   ASSERT_TRUE(i3.intersects(orig));
 
-  mysql::gtid::Gno_interval i4{20, 25};
+  binary_log::gtids::Gno_interval i4{20, 25};
   ASSERT_TRUE(orig.intersects(i4));
   ASSERT_TRUE(i4.intersects(orig));
 
-  mysql::gtid::Gno_interval i5{21, 1000};
+  binary_log::gtids::Gno_interval i5{21, 1000};
   ASSERT_FALSE(orig.intersects(i5));
   ASSERT_FALSE(i5.intersects(orig));
 
-  mysql::gtid::Gno_interval i6{8, 8};
+  binary_log::gtids::Gno_interval i6{8, 8};
   ASSERT_FALSE(i6.intersects(orig));
 }
 
 TEST_F(GnoIntervalTest, GnoIntervalContiguous) {
-  mysql::gtid::Gno_interval i1{10, 20};
-  mysql::gtid::Gno_interval i2{8, 10};
+  binary_log::gtids::Gno_interval i1{10, 20};
+  binary_log::gtids::Gno_interval i2{8, 10};
   ASSERT_FALSE(i1.contiguous(i2));
   ASSERT_FALSE(i2.contiguous(i1));
 
-  mysql::gtid::Gno_interval i2_1{8, 9};
+  binary_log::gtids::Gno_interval i2_1{8, 9};
   ASSERT_TRUE(i1.contiguous(i2_1));
   ASSERT_TRUE(i2_1.contiguous(i1));
 
-  mysql::gtid::Gno_interval i3{10, 20};
-  mysql::gtid::Gno_interval i4{21, 22};
+  binary_log::gtids::Gno_interval i3{10, 20};
+  binary_log::gtids::Gno_interval i4{21, 22};
   ASSERT_TRUE(i4.contiguous(i3));
   ASSERT_TRUE(i3.contiguous(i4));
 
-  mysql::gtid::Gno_interval i5{10, 20};
-  mysql::gtid::Gno_interval i6{100, 200};
+  binary_log::gtids::Gno_interval i5{10, 20};
+  binary_log::gtids::Gno_interval i6{100, 200};
   ASSERT_FALSE(i5.contiguous(i6));
   ASSERT_FALSE(i6.contiguous(i5));
 
-  mysql::gtid::Gno_interval i7{10, 20};
-  mysql::gtid::Gno_interval i8{15, 18};
+  binary_log::gtids::Gno_interval i7{10, 20};
+  binary_log::gtids::Gno_interval i8{15, 18};
   ASSERT_FALSE(i7.contiguous(i8));
   ASSERT_FALSE(i8.contiguous(i7));
 }
 
 TEST_F(GnoIntervalTest, GnoIntervalAdd) {
-  mysql::gtid::Gno_interval i1{10, 20};
-  mysql::gtid::Gno_interval i2{8, 10};
+  binary_log::gtids::Gno_interval i1{10, 20};
+  binary_log::gtids::Gno_interval i2{8, 10};
 
   ASSERT_FALSE(i1.add(i2));
 
-  mysql::gtid::Gno_interval i3{10, 20};
-  mysql::gtid::Gno_interval i4{8, 8};
+  binary_log::gtids::Gno_interval i3{10, 20};
+  binary_log::gtids::Gno_interval i4{8, 8};
 
   ASSERT_TRUE(i3.add(i4));
   ASSERT_TRUE(i4.add(i3));
 
-  mysql::gtid::Gno_interval i5{10, 20};
-  mysql::gtid::Gno_interval i6{21, 100};
+  binary_log::gtids::Gno_interval i5{10, 20};
+  binary_log::gtids::Gno_interval i6{21, 100};
 
   ASSERT_FALSE(i5.add(i6));
 }
 
 TEST_F(GnoIntervalTest, GnoIntervalCount) {
-  mysql::gtid::Gno_interval i1{10, 20};
+  binary_log::gtids::Gno_interval i1{10, 20};
 
   // the interval has eleven elements, first one is 10, last one is 20.
   ASSERT_EQ(i1.count(), 11);
 
-  mysql::gtid::Gno_interval i2{10, 10};
+  binary_log::gtids::Gno_interval i2{10, 10};
   ASSERT_EQ(i2.count(), 1);
 }
 
 TEST_F(GnoIntervalTest, GnoIntervalToString) {
-  mysql::gtid::Gno_interval i1{1, 1};
+  binary_log::gtids::Gno_interval i1{1, 1};
   ASSERT_EQ(i1.to_string(), "1");
 
-  mysql::gtid::Gno_interval i2{1, 9};
+  binary_log::gtids::Gno_interval i2{1, 9};
   ASSERT_EQ(i2.to_string(), "1-9");
 }
 
 TEST_F(GnoIntervalTest, GnoIntervalInvalid) {
-  mysql::gtid::Gno_interval i1{1, 1};
+  binary_log::gtids::Gno_interval i1{1, 1};
   ASSERT_TRUE(i1.is_valid());
 
-  mysql::gtid::Gno_interval i2{1, 2};
+  binary_log::gtids::Gno_interval i2{1, 2};
   ASSERT_TRUE(i2.is_valid());
 
-  mysql::gtid::Gno_interval i3{2, 1};
+  binary_log::gtids::Gno_interval i3{2, 1};
   ASSERT_FALSE(i3.is_valid());
 
-  mysql::gtid::Gno_interval i4{-1, 1};
+  binary_log::gtids::Gno_interval i4{-1, 1};
   ASSERT_FALSE(i4.is_valid());
 }
 
-}  // namespace mysql::gtid::unittests
+}  // namespace binary_log::gtids::unittests

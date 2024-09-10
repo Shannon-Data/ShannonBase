@@ -1,16 +1,15 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -204,7 +203,7 @@ static struct st_mysql_client_plugin *do_add_plugin(
 #if defined(CLIENT_PROTOCOL_TRACING) && !defined(MYSQL_SERVER)
   /*
     If we try to load a protocol trace plugin but one is already
-    loaded (global trace_plugin pointer is not nullptr) then we ignore
+    loaded (global trace_plugin pointer is not NULL) then we ignore
     the new trace plugin and give error. This is done before the
     new plugin gets initialized.
   */
@@ -244,7 +243,7 @@ static struct st_mysql_client_plugin *do_add_plugin(
 #if defined(CLIENT_PROTOCOL_TRACING) && !defined(MYSQL_SERVER)
   /*
     If loaded plugin is a protocol trace one, then set the global
-    trace_plugin pointer to point at it. When trace_plugin is not nullptr,
+    trace_plugin pointer to point at it. When trace_plugin is not NULL,
     each new connection will be traced using the plugin pointed by it
     (see MYSQL_TRACE_STAGE() macro in libmysql/mysql_trace.h).
   */
@@ -414,63 +413,6 @@ struct st_mysql_client_plugin *mysql_client_register_plugin(
   return plugin;
 }
 
-#ifdef _WIN32
-/**
-  The aim of this function is to enable the dll loader to find 3. party dlls
-  provided with MySQL installation. These dlls are normally located in the same
-  directory as mysql executables both in build layout and installation layout.
-
-  The code from this source file is compiled into executables -native MySQL
-  clients (e.g. mysql.exe) and a dll (libmysql.dll) that may be linked by
-  external clients. The loader by default looks for dependencied into the dir of
-  corrent executable which is right for the native clients.
-
-  In the case of external clients we expect libmysql.dll is copied to the client
-  dir (to make the loader find it). We expect 3. party dependant dlls used by
-  client plugins are copied there too. This function adds dir of the current
-  module (exe or dll) to the dll search path, so 3. party dlls are found both in
-  native MySQL client scenario nad external client scenario.
-
-  The function computes path to the current (one where the local functions like
-  mysql_load_plugin_v() are located) module and adds directory of the module to
-  dll lookup path. When successful, it returns flags indicating the modified way
-  of dll search to be used by LoadModuleEx().
-
-  @retval 0
-          on failure
-
-  @retval LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS
-          on success
-*/
-static int curr_module_dir_to_dll_lookup() {
-  WCHAR path[MAX_PATH];
-  HMODULE dll_handle;
-  int path_len(0);
-  if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                         reinterpret_cast<LPCSTR>(&mysql_load_plugin_v),
-                         &dll_handle)) {
-    DBUG_PRINT("info", ("Cannot get dll handle."));
-    return 0;
-  }
-  path_len = GetModuleFileNameW(dll_handle, path, sizeof(path));
-  if ((path_len == 0) || (path_len == sizeof(path))) {
-    DBUG_PRINT("info", ("Cannot get dll name."));
-    return 0;
-  }
-  auto pos = wcsrchr(path, '\\');
-  if (pos != nullptr) {
-    *pos = '\0';
-  }
-  DBUG_PRINT("info", ("DLL lookup directory: %ls", path));
-  if (!AddDllDirectory(path)) {
-    DBUG_PRINT("info", ("Cannot add dll directory."));
-    return 0;
-  }
-  return LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS;
-}
-#endif
-
 /* see <mysql/client_plugin.h> for a full description */
 struct st_mysql_client_plugin *mysql_load_plugin_v(MYSQL *mysql,
                                                    const char *name, int type,
@@ -542,10 +484,7 @@ struct st_mysql_client_plugin *mysql_load_plugin_v(MYSQL *mysql,
 
   DBUG_PRINT("info", ("dlopeninig %s", dlpath));
   /* Open new dll handle */
-#ifdef _WIN32
-  if (!(dlhandle =
-            LoadLibraryEx(dlpath, nullptr, curr_module_dir_to_dll_lookup())))
-#elif defined(HAVE_ASAN) || defined(HAVE_LSAN)
+#if defined(HAVE_ASAN) || defined(HAVE_LSAN)
   // Do not unload the shared object during dlclose().
   // LeakSanitizer needs this in order to match entries in lsan.supp
   if (!(dlhandle = dlopen(dlpath, RTLD_NOW | RTLD_NODELETE)))
@@ -562,8 +501,8 @@ struct st_mysql_client_plugin *mysql_load_plugin_v(MYSQL *mysql,
 #ifdef _WIN32
     /* There should be no win32 calls between failed dlopen() and GetLastError()
      */
-    if (FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, nullptr, GetLastError(), 0,
-                      win_errormsg, 2048, nullptr))
+    if (FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, GetLastError(), 0,
+                      win_errormsg, 2048, NULL))
       errmsg = win_errormsg;
     else
       errmsg = "";

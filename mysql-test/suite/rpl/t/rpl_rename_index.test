@@ -3,10 +3,10 @@
 # successfully replicated.
 ################################################################################
 
---source include/rpl/init_source_replica.inc
+--source include/master-slave.inc
 
 --let $master= master
 --let $slave= slave
---source common/rpl/rename_index.inc
+--source extra/rpl_tests/rpl_rename_index.inc
 
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

@@ -1,17 +1,16 @@
 /*
-Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+Copyright (c) 2020, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is designed to work with certain software (including
+This program is also distributed with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+separately licensed software that they have included with MySQL.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,7 +22,7 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include "mysqlrouter/channel.h"
+#include "channel.h"
 
 #include <cassert>
 
@@ -39,7 +38,7 @@ stdx::expected<void, std::error_code> Channel::tls_accept() {
 
   const auto res = SSL_accept(ssl);
   if (res != 1) {
-    return stdx::unexpected(make_tls_ssl_error(ssl, res));
+    return stdx::make_unexpected(make_tls_ssl_error(ssl, res));
   }
 
   return {};
@@ -50,7 +49,7 @@ stdx::expected<void, std::error_code> Channel::tls_connect() {
 
   const auto res = SSL_connect(ssl);
   if (res != 1) {
-    return stdx::unexpected(make_tls_ssl_error(ssl, res));
+    return stdx::make_unexpected(make_tls_ssl_error(ssl, res));
   }
 
   return {};
@@ -65,7 +64,7 @@ stdx::expected<bool, std::error_code> Channel::tls_shutdown() {
 
   const auto res = SSL_shutdown(ssl);
   if (res < 0) {
-    return stdx::unexpected(make_tls_ssl_error(ssl, res));
+    return stdx::make_unexpected(make_tls_ssl_error(ssl, res));
   }
 
   if (res == 0) {
@@ -92,14 +91,15 @@ stdx::expected<size_t, std::error_code> Channel::read_plain(
   if (ssl_) {
     const auto res = SSL_read(ssl_.get(), b.data(), b.size());
     if (res <= 0) {
-      return stdx::unexpected(make_tls_ssl_error(ssl_.get(), res));
+      return stdx::make_unexpected(make_tls_ssl_error(ssl_.get(), res));
     }
 
     return res;
   }
 
   if (recv_view_.empty()) {
-    return stdx::unexpected(make_error_code(std::errc::operation_would_block));
+    return stdx::make_unexpected(
+        make_error_code(std::errc::operation_would_block));
   }
 
   auto transferred = net::buffer_copy(
@@ -130,7 +130,7 @@ stdx::expected<size_t, std::error_code> Channel::flush_from_recv_buf() {
       if (bio_res < 0) {
         if (transferred != 0) return transferred;
 
-        return stdx::unexpected(
+        return stdx::make_unexpected(
             make_error_code(std::errc::operation_would_block));
       }
 
@@ -165,7 +165,7 @@ stdx::expected<size_t, std::error_code> Channel::flush_to_send_buf() {
 
     const auto res = SSL_write(ssl_.get(), spn.data(), spn.size());
     if (res <= 0) {
-      return stdx::unexpected(make_tls_ssl_error(ssl_.get(), res));
+      return stdx::make_unexpected(make_tls_ssl_error(ssl_.get(), res));
     }
 
     // remove the data that has been sent.
@@ -195,12 +195,13 @@ stdx::expected<size_t, std::error_code> Channel::flush_to_send_buf() {
       dyn_buf.shrink(grow_size);
 
       if (!BIO_should_retry(wbio)) {
-        return stdx::unexpected(make_error_code(std::errc::invalid_argument));
+        return stdx::make_unexpected(
+            make_error_code(std::errc::invalid_argument));
       }
 
       if (transferred != 0) return transferred;
 
-      return stdx::unexpected(
+      return stdx::make_unexpected(
           make_error_code(std::errc::operation_would_block));
     }
 
@@ -222,7 +223,7 @@ stdx::expected<size_t, std::error_code> Channel::read_to_plain(size_t sz) {
 
   {
     const auto flush_res = flush_from_recv_buf();
-    if (!flush_res) return stdx::unexpected(flush_res.error());
+    if (!flush_res) return stdx::make_unexpected(flush_res.error());
   }
 
   auto &plain_buf = recv_plain_buffer_;
@@ -237,23 +238,20 @@ stdx::expected<size_t, std::error_code> Channel::read_to_plain(size_t sz) {
 
     // append to the plain buffer
     const auto read_res = read(dyn_buf, sz);
-
-    // sync the plain-view as the read() may have resized it.
-    view_sync_plain();
-
     if (read_res) {
       const size_t transferred = read_res.value();
 
       sz -= transferred;
       bytes_read += transferred;
 
+      view_sync_plain();
     } else {
       // read from client failed.
 
       if (read_res.error() != TlsErrc::kWantRead &&
           read_res.error() !=
               make_error_code(std::errc::operation_would_block)) {
-        return stdx::unexpected(read_res.error());
+        return read_res.get_unexpected();
       }
 
       break;

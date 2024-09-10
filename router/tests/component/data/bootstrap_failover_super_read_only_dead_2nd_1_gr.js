@@ -1,16 +1,16 @@
 var common_stmts = require("common_statements");
 var gr_memberships = require("gr_memberships");
 
+
+var gr_members = gr_memberships.members(mysqld.global.gr_members);
+
 var options = {
   cluster_type: "gr",
   gr_id: mysqld.global.gr_id,
   innodb_cluster_name: mysqld.global.cluster_name,
-  replication_group_members: gr_memberships.gr_members(
-      mysqld.global.gr_node_host, mysqld.global.gr_nodes),
-  innodb_cluster_instances: gr_memberships.cluster_nodes(
-      mysqld.global.gr_node_host, mysqld.global.cluster_nodes),
+  replication_group_members: gr_members,
+  innodb_cluster_instances: gr_members,
   innodb_cluster_hosts: [[8, "dont.query.dns", null]],
-  router_version: mysqld.global.router_version,
 };
 
 var common_responses = common_stmts.prepare_statement_responses(
@@ -37,8 +37,6 @@ var common_responses = common_stmts.prepare_statement_responses(
 var common_responses_regex = common_stmts.prepare_statement_responses_regex(
     [
       "router_insert_into_routers",
-      "router_check_auth_plugin",
-      "router_select_config_defaults_stored_gr_cluster",
     ],
     options);
 

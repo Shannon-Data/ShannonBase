@@ -88,7 +88,6 @@ let $restart_parameters = restart: $PLUGIN_DIR_OPT;
 --let $crash_point_desc=just before flushing page 0 at the end
 --source suite/innodb/include/resume_test_encryption.inc
 --source suite/innodb/include/resume_test_unencryption.inc
---source include/keyring_tests/helper/instance_restore_manifest.inc
 
 --echo #-------------------------- TEST 2 -------------------------------------#
 
@@ -101,7 +100,6 @@ let $restart_parameters = restart: $PLUGIN_DIR_OPT;
 --let $crash_point_desc=just after flushing page 0 at the end
 --source suite/innodb/include/resume_test_encryption.inc
 --source suite/innodb/include/resume_test_unencryption.inc
---source include/keyring_tests/helper/instance_restore_manifest.inc
 
 --echo #-------------------------- TEST 3 -------------------------------------#
 
@@ -114,7 +112,6 @@ let $restart_parameters = restart: $PLUGIN_DIR_OPT;
 --let $crash_point_desc=just before resetting_progress on page 0
 --source suite/innodb/include/resume_test_encryption.inc
 --source suite/innodb/include/resume_test_unencryption.inc
---source include/keyring_tests/helper/instance_restore_manifest.inc
 
 --echo #-------------------------- TEST 4 -------------------------------------#
 
@@ -129,7 +126,6 @@ ALTER TABLESPACE encrypt_ts ENCRYPTION='Y';
 --let $crash_point=alter_encrypt_tablespace_crash_before_updating_flags
 --let $crash_point_desc=just before updating flags
 --source suite/innodb/include/resume_test_unencryption.inc
---source include/keyring_tests/helper/instance_restore_manifest.inc
 
 --echo #-------------------------- TEST 5 -------------------------------------#
 
@@ -142,7 +138,6 @@ let $restart_parameters = restart: $PLUGIN_DIR_OPT;
 --let $crash_point_desc=just before encryption processing is started
 --source suite/innodb/include/resume_test_encryption.inc
 --source suite/innodb/include/resume_test_unencryption.inc
---source include/keyring_tests/helper/instance_restore_manifest.inc
 
 --echo #-------------------------- TEST 6 -------------------------------------#
 
@@ -155,7 +150,6 @@ let $restart_parameters = restart: $PLUGIN_DIR_OPT;
 --let $crash_point_desc=just after encryption processing is finished
 --source suite/innodb/include/resume_test_encryption.inc
 --source suite/innodb/include/resume_test_unencryption.inc
---source include/keyring_tests/helper/instance_restore_manifest.inc
 
 --echo #-------------------------- TEST 7 -------------------------------------#
 
@@ -168,7 +162,6 @@ let $restart_parameters = restart: $PLUGIN_DIR_OPT;
 --let $crash_point_desc=just after inserting DDL Log Entry
 --source suite/innodb/include/resume_test_encryption.inc
 --source suite/innodb/include/resume_test_unencryption.inc
---source include/keyring_tests/helper/instance_restore_manifest.inc
 
 --echo ###########
 --echo # Cleanup #

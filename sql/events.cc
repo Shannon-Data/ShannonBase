@@ -1,16 +1,15 @@
-/* Copyright (c) 2005, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -97,13 +96,13 @@
  TODO list :
  - CREATE EVENT should not go into binary log! Does it now? The SQL statements
    issued by the EVENT are replicated.
-   I have an idea how to solve the problem at failover. So the internal table
-   status field will be ENUM('DISABLED', 'ENABLED', 'SLAVESIDE_DISABLED').
+   I have an idea how to solve the problem at failover. So the status field
+   will be ENUM('DISABLED', 'ENABLED', 'SLAVESIDE_DISABLED').
    In this case when CREATE EVENT is replicated it should go into the binary
-   as DISABLE ON REPLICA if it is ENABLED, when it's created as DISABLEd it
+   as SLAVESIDE_DISABLED if it is ENABLED, when it's created as DISABLEd it
    should be replicated as disabled. If an event is ALTERed as DISABLED the
    query should go untouched into the binary log, when ALTERed as enable then
-   it should go as DISABLE ON REPLICA. This is regarding the SQL interface.
+   it should go as SLAVESIDE_DISABLED. This is regarding the SQL interface.
    TT routines however modify mysql.event internally and this does not go the
    log so in this case queries has to be injected into the log...somehow... or
    maybe a solution is RBR for this case, because the event may go only from

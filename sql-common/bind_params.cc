@@ -1,16 +1,15 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -113,7 +112,7 @@ static void store_param_type(unsigned char **pos, MYSQL_BIND *param) {
   DESCRIPTION
     These functions are invoked from mysql_stmt_execute() by
     MYSQL_BIND::store_param_func pointer. This pointer is set once per
-    many executions in mysql_stmt_bind_named_param(). The caller must ensure
+    many executions in mysql_stmt_bind_param(). The caller must ensure
     that network buffer have enough capacity to store parameter
     (MYSQL_BIND::buffer_length contains needed number of bytes).
 */
@@ -223,10 +222,9 @@ static void store_param_datetime(NET *net, MYSQL_BIND *param) {
 }
 
 static void store_param_str(NET *net, MYSQL_BIND *param) {
-  /* param->length is always set in mysql_stmt_bind_named_param */
+  /* param->length is always set in mysql_stmt_bind_param */
   const ulong length = *param->length;
   uchar *to = net_store_length(net->write_pos, length);
-  assert(param->buffer != nullptr);
   memcpy(to, param->buffer, length);
   net->write_pos = to + length;
 }
@@ -285,55 +283,6 @@ static bool store_param(NET *net, MYSQL_BIND *param, my_off_t null_pos_ofs) {
   return false;
 }
 
-/*
-  Iterates bind parameters array in following order:
-   - first iterate unnamed parameters
-   - next iterate named parameters
-*/
-class bind_params_iterator {
- public:
-  bind_params_iterator(MYSQL_BIND *params, const char **names,
-                       unsigned int count)
-      : m_params(params),
-        m_names(names),
-        m_count(count),
-        m_pos(0),
-        m_scan_named(false) {}
-
-  // return false when no more items, array index returned by reference on
-  // success
-  bool next(unsigned int &idx) {
-    // 1st scan pass iterates unnamed params only
-    // 2nd scan pass iterates named params only
-    while (true) {
-      for (unsigned int i = m_pos; i < m_count; i++) {
-        const bool is_named = (m_names != nullptr && m_names[i] != nullptr);
-        if (m_scan_named == is_named) {
-          idx = i;
-          m_pos = i + 1;
-          return true;
-        }
-      }
-      // finish if 2nd pass done
-      if (m_scan_named) break;
-      // else start 2nd pass
-      m_scan_named = true;
-      m_pos = 0;
-    }
-
-    return false;  // no more items
-  }
-
- protected:
-  // input
-  MYSQL_BIND *m_params;
-  const char **m_names;
-  unsigned int m_count;
-  // state
-  unsigned int m_pos;
-  bool m_scan_named;
-};
-
 /**
   Serialize the query parameters.
 
@@ -365,7 +314,8 @@ bool mysql_int_serialize_param_data(
     uchar send_types_to_server, bool send_named_params,
     bool send_parameter_set_count, bool send_parameter_count_when_zero) {
   uint null_count;
-  MYSQL_BIND *param;
+  MYSQL_BIND *param, *param_end;
+  const char **names_ptr = names;
   my_off_t null_pos_ofs;
   DBUG_TRACE;
 
@@ -402,6 +352,7 @@ bool mysql_int_serialize_param_data(
     }
     memset(net->write_pos, 0, null_count);
     net->write_pos += null_count;
+    param_end = params + param_count;
 
     /* In case if buffers (type) altered, indicate to server */
     *(net->write_pos)++ = send_types_to_server;
@@ -411,20 +362,16 @@ bool mysql_int_serialize_param_data(
         return true;
       }
       /*
-        Store types of parameters in first package
+        Store types of parameters in first in first package
         that is sent to the server.
       */
-      bind_params_iterator it(params, names, param_count);
-      unsigned int idx;
-
-      while (it.next(idx)) {
-        param = &params[idx];
+      for (param = params; param < param_end; param++) {
         store_param_type(&net->write_pos, param);
         if (send_named_params) {
           const char *name = nullptr;
           size_t len = 0;
           if (names) {
-            name = names[idx];
+            name = *names_ptr++;
             len = name ? strlen(name) : 0;
           }
           my_realloc_str(net, len + net_length_size(len));
@@ -435,11 +382,7 @@ bool mysql_int_serialize_param_data(
       }
     }
 
-    bind_params_iterator it(params, names, param_count);
-    unsigned int idx;
-
-    while (it.next(idx)) {
-      param = &params[idx];
+    for (param = params; param < param_end; param++) {
       /* check if mysql_stmt_send_long_data() was used */
       if (param->long_data_used)
         param->long_data_used = false; /* Clear for next execute call */
@@ -522,6 +465,7 @@ bool fix_param_bind(MYSQL_BIND *param, uint idx) {
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_STRING:

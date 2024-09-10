@@ -1,13 +1,13 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
 call mtr.add_suppression(".* You need to use --log-bin to make .* work.");
 CALL mtr.add_suppression("Failed to open log");
-include/rpl/stop_replica.inc
+include/stop_slave.inc
 CHANGE REPLICATION SOURCE TO SOURCE_AUTO_POSITION= 0;
-include/rpl/start_replica.inc
+include/start_slave.inc
 [connection master]
 #
 # Error: binlog file doesn't exist
@@ -39,26 +39,28 @@ FLUSH BINARY LOGS;
 # Error: Client requests from a position less than 4
 #
 [connection slave]
-include/rpl/stop_replica.inc
+include/stop_slave.inc
 # Adding debug point 'request_source_log_pos_3' to @@GLOBAL.debug
-START REPLICA IO_THREAD;
+START SLAVE IO_THREAD;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 call mtr.add_suppression(".* Got fatal error 1236 from source when reading data from binary log");
-include/rpl/wait_for_receiver_error.inc [errno=13114]
+include/wait_for_slave_io_error.inc [errno=13114]
 # Removing debug point 'request_source_log_pos_3' from @@GLOBAL.debug
 #
 # Error: Binary log is not open on master
 #
-include/rpl/restart_server.inc [server_number=1 parameters: --disable-log-bin --gtid-mode=off]
+include/rpl_restart_server.inc [server_number=1 parameters: --disable-log-bin --gtid-mode=off]
 #
 # Error: master's gtid_mode is not on
 #
-include/rpl/restart_server.inc [server_number=1 parameters: --gtid-mode=off]
-include/rpl/restart_server.inc [server_number=1]
+include/rpl_restart_server.inc [server_number=1 parameters: --gtid-mode=off]
+include/rpl_restart_server.inc [server_number=1]
 #
 # Error: Dump thread is killed
 #
 [connection master]
-RESET BINARY LOGS AND GTIDS;
+RESET MASTER;
 CREATE TABLE t1(c1 INT);
 # Adding debug point 'simulate_kill_dump' to @@GLOBAL.debug
 #
@@ -70,7 +72,9 @@ INSERT INTO t1 VALUES(1);
 # Removing debug point 'simulate_flush_error' from @@GLOBAL.debug
 DROP TABLE t1;
 [connection slave]
-RESET BINARY LOGS AND GTIDS;
-RESET REPLICA;
-include/rpl/start_replica.inc
-include/rpl/deinit.inc
+RESET MASTER;
+RESET SLAVE;
+Warnings:
+Warning	1287	'RESET SLAVE' is deprecated and will be removed in a future release. Please use RESET REPLICA instead
+include/start_slave.inc
+include/rpl_end.inc

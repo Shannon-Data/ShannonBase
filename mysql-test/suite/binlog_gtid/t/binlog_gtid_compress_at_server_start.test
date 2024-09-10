@@ -23,7 +23,7 @@
 --let $server_uuid= `SELECT @@GLOBAL.SERVER_UUID`
 
 #Clean the table before starting the test.
-RESET BINARY LOGS AND GTIDS;
+RESET MASTER;
 
 --echo #
 --echo # 1. Create a table with 2 values.

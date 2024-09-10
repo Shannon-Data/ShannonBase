@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -336,21 +335,20 @@ class NetworkInterfaceResults {
     std::string out;
 
     // first, call it with 0 to get the buffer length
-    auto out_len = WideCharToMultiByte(CP_UTF8, 0, ws.data(), ws.size(),
-                                       nullptr, 0, nullptr, nullptr);
+    auto out_len =
+        WideCharToMultiByte(CP_UTF8, 0, ws.data(), ws.size(), nullptr, 0, 0, 0);
 
     if (0 == out_len) {
-      return stdx::unexpected(
+      return stdx::make_unexpected(
           std::error_code(GetLastError(), std::system_category()));
     }
 
     out.resize(out_len);
 
-    out_len =
-        WideCharToMultiByte(CP_UTF8, 0, ws.data(), ws.size(), &out.front(),
-                            out.capacity(), nullptr, nullptr);
+    out_len = WideCharToMultiByte(CP_UTF8, 0, ws.data(), ws.size(),
+                                  &out.front(), out.capacity(), 0, 0);
     if (0 == out_len) {
-      return stdx::unexpected(
+      return stdx::make_unexpected(
           std::error_code(GetLastError(), std::system_category()));
     }
 
@@ -414,7 +412,7 @@ class NetworkInterfaceResolver {
         ::GetAdaptersAddresses(AF_UNSPEC, 0, nullptr, nullptr, &ifs_size);
 
     if (res != ERROR_BUFFER_OVERFLOW) {
-      return stdx::unexpected(
+      return stdx::make_unexpected(
           std::error_code{static_cast<int>(res), std::system_category()});
     }
 
@@ -423,7 +421,7 @@ class NetworkInterfaceResolver {
 
     res = ::GetAdaptersAddresses(AF_UNSPEC, 0, nullptr, ifs.get(), &ifs_size);
     if (ERROR_SUCCESS != res) {
-      return stdx::unexpected(
+      return stdx::make_unexpected(
           std::error_code{static_cast<int>(res), std::system_category()});
     }
 
@@ -432,7 +430,7 @@ class NetworkInterfaceResolver {
     ifaddrs *ifs = nullptr;
 
     if (-1 == ::getifaddrs(&ifs)) {
-      return stdx::unexpected(net::impl::socket::last_error_code());
+      return stdx::make_unexpected(net::impl::socket::last_error_code());
     }
 
     return NetworkInterfaceResults{ifs};

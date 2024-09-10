@@ -1,19 +1,18 @@
 #ifndef ITEM_ROW_INCLUDED
 #define ITEM_ROW_INCLUDED
 
-/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +21,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #include <sys/types.h>
 
@@ -134,7 +135,7 @@ class Item_row : public Item {
                          Query_block *removed_query_block) override;
   bool propagate_type(THD *thd, const Type_properties &type) override;
   void cleanup() override;
-  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
   table_map used_tables() const override { return used_tables_cache; }
   enum Item_result result_type() const override { return ROW_RESULT; }
@@ -145,8 +146,7 @@ class Item_row : public Item {
 
   bool walk(Item_processor processor, enum_walk walk, uchar *arg) override;
   Item *transform(Item_transformer transformer, uchar *arg) override;
-  Item *compile(Item_analyzer analyzer, uchar **arg_p,
-                Item_transformer transformer, uchar *arg_t) override;
+
   uint cols() const override { return arg_count; }
   Item *element_index(uint i) override { return items[i]; }
   Item **addr(uint i) override { return items + i; }

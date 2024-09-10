@@ -1,15 +1,19 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
-STOP REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 #
 # Generate a big enough master's binlog to cause relay log rotations
 #
 create table t1 (a int);
 drop table t1;
-RESET REPLICA;
+reset slave;
+Warnings:
+Warning	1287	'RESET SLAVE' is deprecated and will be removed in a future release. Please use RESET REPLICA instead
 #
 # Test 1
 #
@@ -21,56 +25,78 @@ Warning	1292	Truncated incorrect max_relay_log_size value: '8191'
 select @@global.max_relay_log_size;
 @@global.max_relay_log_size
 4096
-START REPLICA;
-include/rpl/assert_replica_running.inc
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
+include/check_slave_is_running.inc
 #
 # Test 2
 #
-STOP REPLICA;
-RESET REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
+reset slave;
+Warnings:
+Warning	1287	'RESET SLAVE' is deprecated and will be removed in a future release. Please use RESET REPLICA instead
 set global max_relay_log_size=(5*4096);
 select @@global.max_relay_log_size;
 @@global.max_relay_log_size	20480
-START REPLICA;
-include/rpl/assert_replica_running.inc
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
+include/check_slave_is_running.inc
 #
 # Test 3: max_relay_log_size = 0
 #
-STOP REPLICA;
-RESET REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
+reset slave;
+Warnings:
+Warning	1287	'RESET SLAVE' is deprecated and will be removed in a future release. Please use RESET REPLICA instead
 set global max_relay_log_size=0;
 select @@global.max_relay_log_size;
 @@global.max_relay_log_size	0
-START REPLICA;
-include/rpl/assert_replica_running.inc
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
+include/check_slave_is_running.inc
 #
 # Test 4: Tests below are mainly to ensure that we have not coded with wrong assumptions
 #
-STOP REPLICA;
-RESET REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
+reset slave;
+Warnings:
+Warning	1287	'RESET SLAVE' is deprecated and will be removed in a future release. Please use RESET REPLICA instead
 flush logs;
 #
 # Test 5
 #
-RESET REPLICA;
-START REPLICA;
+reset slave;
+Warnings:
+Warning	1287	'RESET SLAVE' is deprecated and will be removed in a future release. Please use RESET REPLICA instead
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 flush logs;
 create table t1 (a int);
-include/rpl/sync_to_replica.inc
-include/rpl/assert_replica_running.inc
+include/sync_slave_sql_with_master.inc
+include/check_slave_is_running.inc
 #
 # Test 6: one more rotation, to be sure Relay_Log_Space is correctly updated
 #
 flush logs;
 drop table t1;
-include/rpl/sync_to_replica.inc
-include/rpl/assert_replica_running.inc
+include/sync_slave_sql_with_master.inc
+include/check_slave_is_running.inc
 flush logs;
-show binary log status;
+show master status;
 File	Position	Binlog_Do_DB	Binlog_Ignore_DB	Executed_Gtid_Set
 master-bin.000002	#	<Binlog_Do_DB>	<Binlog_Ignore_DB>	<Executed_Gtid_Set>
 set global max_binlog_size= @my_max_binlog_size;
 #
 # End of 4.1 tests
 # 
-include/rpl/deinit.inc
+include/rpl_end.inc

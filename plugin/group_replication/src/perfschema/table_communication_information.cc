@@ -1,16 +1,8 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; version 2 of the License.
-
-   This program is designed to work with certain software (including
-   but not limited to OpenSSL) that is licensed under separate terms,
-   as designated in a particular file or component or in included license
-   documentation.  The authors of MySQL hereby grant you an additional
-   permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -107,31 +99,15 @@ bool Replication_group_communication_information_table_handle::
   }
 
   for (const auto &preferred_leader : preferred_leaders) {
-    Group_member_info *member_info = new Group_member_info();
-    if (nullptr == member_info) {
-      return ERROR;
-    }
-
-    if (!group_member_mgr->get_group_member_info_by_member_id(preferred_leader,
-                                                              *member_info)) {
-      row.found_preferred_leaders.emplace_back(member_info);
-    } else {
-      delete member_info;
-    }
+    auto member_id =
+        group_member_mgr->get_group_member_info_by_member_id(preferred_leader);
+    if (member_id) row.found_preferred_leaders.emplace_back(member_id);
   }
 
   for (const auto &actual_leader : actual_leaders) {
-    Group_member_info *member_info = new Group_member_info();
-    if (nullptr == member_info) {
-      return ERROR;
-    }
-
-    if (!group_member_mgr->get_group_member_info_by_member_id(actual_leader,
-                                                              *member_info)) {
-      row.found_actual_leaders.emplace_back(member_info);
-    } else {
-      delete member_info;
-    }
+    auto member_id =
+        group_member_mgr->get_group_member_info_by_member_id(actual_leader);
+    if (member_id) row.found_actual_leaders.emplace_back(member_id);
   }
 
   // If we are running a version that does not support Single Leader,

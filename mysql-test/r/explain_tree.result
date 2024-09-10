@@ -413,18 +413,7 @@ Warnings:
 Note	1003	insert into `test`.`t1` values (10)
 EXPLAIN FORMAT=tree INSERT INTO t1 VALUES (10);
 EXPLAIN
--> Insert into t1
-    -> Rows fetched before execution
-
-EXPLAIN REPLACE INTO t1 VALUES (10);
-id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	REPLACE	t1	NULL	ALL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-Warnings:
-Note	1003	replace into `test`.`t1` values (10)
-EXPLAIN FORMAT=tree REPLACE INTO t1 VALUES (10);
-EXPLAIN
--> Replace into t1
-    -> Rows fetched before execution
+<not executable by iterator executor>
 
 DROP TABLE t1;
 CREATE TABLE t1 (a INTEGER, b INTEGER);
@@ -720,7 +709,7 @@ test.t1	analyze	status	OK
 EXPLAIN ANALYZE SELECT * FROM t1 AS a JOIN t1 AS b ON a.a=b.b ORDER BY a.b+b.a LIMIT 3;
 EXPLAIN
 -> Limit: 3 row(s)  (actual rows=1 loops=1)
-    -> Sort: `(a.b + b.a)`, limit input to 3 row(s) per chunk  (actual rows=1 loops=1)
+    -> Sort: (a.b + b.a), limit input to 3 row(s) per chunk  (actual rows=1 loops=1)
         -> Stream results  (cost=1.6 rows=3) (actual rows=1 loops=1)
             -> Nested loop inner join  (cost=1.6 rows=3) (actual rows=1 loops=1)
                 -> Filter: (b.b is not null)  (cost=0.55 rows=3) (actual rows=3 loops=1)
@@ -900,7 +889,7 @@ EXPLAIN FORMAT=tree
 UNION ALL
 SELECT 1 IN (SELECT 1 FROM t1) FROM t1 WHERE 1=2;
 EXPLAIN
--> Append  (cost=0.35..0.35 rows=1)
+-> Append  (cost=0.35 rows=1)
     -> Stream results  (cost=0.35 rows=1)
         -> Table scan on t1  (cost=0.35 rows=1)
     -> Stream results  (cost=0..0 rows=0)
@@ -939,8 +928,8 @@ test.t1	analyze	status	OK
 EXPLAIN FORMAT=tree
 SELECT /*+ SKIP_SCAN(t1) */ * FROM t1 WHERE a IN (2,4,6,8,10) AND b=5 AND e BETWEEN 100 AND 200;
 EXPLAIN
--> Filter: ((t1.b = 5) and (t1.a in (2,4,6,8,10)) and (t1.e between 100 and 200))  (cost=0.301..1.5 rows=5)
-    -> Covering index skip scan on t1 using idx1 over a IN (2, 4, (3 more)), b = 5, 100 <= e <= 200  (cost=0.301..1.5 rows=5)
+-> Filter: ((t1.b = 5) and (t1.a in (2,4,6,8,10)) and (t1.e between 100 and 200))  (cost=1.5 rows=5)
+    -> Covering index skip scan on t1 using idx1 over a IN (2, 4, (3 more)), b = 5, 100 <= e <= 200  (cost=1.5 rows=5)
 
 DROP TABLE t1;
 #
@@ -1143,11 +1132,10 @@ EXPLAIN
 
 EXPLAIN ANALYZE
 WITH x1 AS (SELECT MAX(a) AS m1 FROM t1 GROUP BY b)
-SELECT * FROM x1 y1 WHERE
-y1.m1 = (SELECT MAX(m1) FROM x1) AND ABS(y1.m1) = (SELECT MIN(m1) FROM x1);
+SELECT * FROM x1 y1 WHERE y1.m1 = (SELECT MAX(m1) FROM x1);
 EXPLAIN
--> Filter: (y1.m1 = (select #3))  (cost=2.73..2.73 rows=1) (actual rows=1 loops=1)
-    -> Table scan on y1  (cost=2.5..2.5 rows=0) (actual rows=1 loops=1)
+-> Filter: (y1.m1 = (select #3))  (cost=0.35..0.35 rows=1) (actual rows=1 loops=1)
+    -> Covering index lookup on y1 using <auto_key0> (m1=(select #3))  (cost=0.35..0.35 rows=1) (actual rows=1 loops=1)
         -> Materialize CTE x1 if needed (query plan printed elsewhere)  (cost=0..0 rows=0) (never executed)
     -> Select #3 (subquery in condition; run only once)
         -> Aggregate: max(x1.m1)  (cost=2.5..2.5 rows=1) (actual rows=1 loops=1)
@@ -1273,59 +1261,3 @@ EXPLAIN
         -> Index range scan on t1 (re-planned for each iteration)  (rows=160) (actual rows=72 loops=160)
 
 DROP TABLE t;
-#
-# Bug#35537921 Contribution by Tencent:
-# explain format=tree lost the subquery in the hash join
-#
-SET optimizer_switch=default;
-CREATE TABLE t1 (a INT NOT NULL, b INT NOT NULL);
-EXPLAIN FORMAT=TREE
-SELECT * FROM t1 x1 JOIN t1 x2 ON x2.a=
-(SELECT MIN(x3.a) FROM t1 x3 WHERE x1.a=x3.a);
-EXPLAIN
--> Inner hash join (x2.a = (select #2))  (rows=1)
-    -> Table scan on x2  (rows=1)
-    -> Hash
-        -> Table scan on x1  (rows=1)
-    -> Select #2 (subquery in condition; dependent)
-        -> Aggregate: min(x3.a)  (rows=1)
-            -> Filter: (x1.a = x3.a)  (rows=1)
-                -> Table scan on x3  (rows=1)
-
-Warnings:
-Note	1276	Field or reference 'test.x1.a' of SELECT #2 was resolved in SELECT #1
-EXPLAIN FORMAT=TREE
-SELECT * FROM t1 x1 LEFT JOIN t1 x2 ON x2.a<
-(SELECT MIN(x3.a) FROM t1 x3 WHERE x1.a=x3.a);
-EXPLAIN
--> Left hash join (no condition), extra conditions: (x2.a < (select #2))  (rows=1)
-    -> Table scan on x1  (rows=1)
-    -> Hash
-        -> Table scan on x2  (rows=1)
-    -> Select #2 (subquery in extra conditions; dependent)
-        -> Aggregate: min(x3.a)  (rows=1)
-            -> Filter: (x1.a = x3.a)  (rows=1)
-                -> Table scan on x3  (rows=1)
-
-Warnings:
-Note	1276	Field or reference 'test.x1.a' of SELECT #2 was resolved in SELECT #1
-DROP TABLE t1;
-#
-# Bug#34569685 No explain output for subquery
-#
-CREATE TABLE t1 (a INT PRIMARY KEY, b INT);
-ANALYZE TABLE  t1;
-Table	Op	Msg_type	Msg_text
-test.t1	analyze	status	OK
-EXPLAIN FORMAT=TREE SELECT LAST_VALUE((SELECT x1.a FROM t1))
-OVER (PARTITION BY b) FROM t1 x1;
-EXPLAIN
--> Window aggregate with buffering: last_value((select #2)) OVER (PARTITION BY x1.b )   (...)
-    -> Sort: x1.b  (...)
-        -> Table scan on x1  (...)
-    -> Select #2 (subquery in projection; dependent)
-        -> Covering index scan on t1 using PRIMARY  (...)
-
-Warnings:
-Note	1276	Field or reference 'test.x1.a' of SELECT #2 was resolved in SELECT #1
-DROP TABLE t1;

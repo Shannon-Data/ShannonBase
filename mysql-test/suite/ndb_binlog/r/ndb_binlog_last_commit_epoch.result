@@ -1,5 +1,5 @@
 Reset binlog and show no state held
-reset binary logs and gtids;
+reset master;
 select count(1) from mysql.ndb_binlog_index;
 count(1)
 0

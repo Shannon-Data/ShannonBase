@@ -1,4 +1,4 @@
-RESET BINARY LOGS AND GTIDS;
+RESET MASTER;
 SET GTID_NEXT= 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1';
 CREATE TABLE t1 (c1 INT);
 SET GTID_NEXT= 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:2';

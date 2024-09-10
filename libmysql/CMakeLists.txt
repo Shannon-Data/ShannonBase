@@ -1,16 +1,15 @@
-# Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2006, 2023, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is designed to work with certain software (including
+# This program is also distributed with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have either included with
-# the program or referenced in the documentation.
+# separately licensed software that they have included with MySQL.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -70,7 +69,6 @@ SET(CLIENT_API_FUNCTIONS
   mysql_query
   mysql_set_server_option
   mysql_stmt_bind_param
-  mysql_stmt_bind_named_param
   mysql_stmt_bind_result
   mysql_stmt_execute
   mysql_stmt_fetch
@@ -208,12 +206,6 @@ IF (WIN32 AND OPENSSL_APPLINK_C)
   )
 ENDIF()
 
-IF ((NOT WITHOUT_MYSQL_NATIVE_PASSWORD)
-  OR (WITHOUT_MYSQL_NATIVE_PASSWORD EQUAL 0))
-  LIST(APPEND CLIENT_SOURCES
-    ../sql-common/mysql_native_authentication_client.cc)
-ENDIF()
-
 #
 # Include protocol tracing infrastructure and the test
 # trace plugin if enabled by build options.
@@ -234,7 +226,6 @@ ENDIF (WITH_CLIENT_PROTOCOL_TRACING)
 ADD_CONVENIENCE_LIBRARY(clientlib ${CLIENT_SOURCES}
   DEPENDENCIES GenError
   LINK_LIBRARIES ext::zlib
-  OpenSSL::SSL OpenSSL::Crypto
   )
 
 SET(LIBS_TO_MERGE
@@ -254,11 +245,7 @@ ELSE()
   LIST(APPEND LIBS_TO_LINK ext::zstd)
 ENDIF()
 
-LIST(APPEND LIBS_TO_LINK OpenSSL::SSL OpenSSL::Crypto)
-
-IF(WITH_EXT_BACKTRACE)
-  LIST(APPEND LIBS_TO_MERGE backtrace)
-ENDIF()
+LIST(APPEND LIBS_TO_LINK ${SSL_LIBRARIES})
 
 UNSET(HAVE_WIN32_DNS_SRV)
 UNSET(HAVE_UNIX_DNS_SRV)
@@ -298,14 +285,14 @@ ENDIF()
 # LDAP authentication SASL client plug-in
 ADD_SUBDIRECTORY(authentication_ldap)
 
+# FIDO authentication client plugin
+ADD_SUBDIRECTORY(authentication_fido)
+
 # authentication kerberos client plug-in
 ADD_SUBDIRECTORY(authentication_kerberos)
 
 # authentication IAM client plug-in
 ADD_SUBDIRECTORY(authentication_oci_client)
-
-# Fido and Webauthn clients
-ADD_SUBDIRECTORY(fido_client)
 
 # Merge several convenience libraries into one big mysqlclient
 MERGE_CONVENIENCE_LIBRARIES(mysqlclient ${LIBS_TO_MERGE}

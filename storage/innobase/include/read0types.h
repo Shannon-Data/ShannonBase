@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2024, Oracle and/or its affiliates.
+Copyright (c) 1997, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -151,6 +150,9 @@ class ReadView {
  public:
   ReadView();
   ~ReadView();
+
+  void Copy_readView(const ReadView &);
+
   /** Check whether transaction id is valid.
   @param[in]    id              transaction id to check
   @param[in]    name            table name */
@@ -231,6 +233,16 @@ class ReadView {
   @return true if there are no transaction ids in the snapshot */
   bool empty() const { return (m_ids.empty()); }
 
+  /**
+  Clones a read view object. The resulting read view has identical change
+  visibility as the donor read view
+  @param	result	pointer to resulting read view. If NULL, a view will be
+  allocated. If non-NULL, a view will overwrite a previously-existing
+  in-use or released view.
+  @param	from_trx	transation owning the donor read view. */
+
+  void clone(ReadView *&result, trx_t *from_trx) const;
+
 #ifdef UNIV_DEBUG
   /**
   @return the view low limit number */
@@ -273,9 +285,11 @@ class ReadView {
 
   friend class MVCC;
 
+ public:
+  bool skip_view_list{false};
+
  private:
   // Disable copying
-  ReadView(const ReadView &);
   ReadView &operator=(const ReadView &);
 
  private:
@@ -308,6 +322,11 @@ class ReadView {
   variable INNODB_PURGE_VIEW_TRX_ID_AGE. */
   trx_id_t m_view_low_limit_no;
 #endif /* UNIV_DEBUG */
+
+  /** This is a view cloned by clone but not by
+  MVCC::clone_oldest_view. Used to make sure the cloned transaction does
+  not see its own changes. */
+  bool m_cloned;
 
   /** AC-NL-RO transaction view that has been "closed". */
   bool m_closed;

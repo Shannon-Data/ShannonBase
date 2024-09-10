@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2020, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -82,16 +81,18 @@ TEST(NetTS_io_context, run_one_empty) {
 TEST(NetTS_io_context, poll_io_service_remove_invalid_socket) {
   net::poll_io_service io_service;
 
-  EXPECT_EQ(io_service.remove_fd(net::impl::socket::kInvalidSocket),
-            stdx::unexpected(make_error_code(std::errc::invalid_argument)));
+  EXPECT_EQ(
+      io_service.remove_fd(net::impl::socket::kInvalidSocket),
+      stdx::make_unexpected(make_error_code(std::errc::invalid_argument)));
 }
 
 TEST(NetTS_io_context, poll_io_service_add_invalid_socket) {
   net::poll_io_service io_service;
 
-  EXPECT_EQ(io_service.add_fd_interest(net::impl::socket::kInvalidSocket,
-                                       net::impl::socket::wait_type::wait_read),
-            stdx::unexpected(make_error_code(std::errc::invalid_argument)));
+  EXPECT_EQ(
+      io_service.add_fd_interest(net::impl::socket::kInvalidSocket,
+                                 net::impl::socket::wait_type::wait_read),
+      stdx::make_unexpected(make_error_code(std::errc::invalid_argument)));
 }
 
 namespace net {
@@ -109,7 +110,7 @@ TEST(NetTS_io_context, poll_io_service_poll_one_empty) {
   using namespace std::chrono_literals;
 
   EXPECT_EQ(io_service.poll_one(1ms),
-            stdx::unexpected(make_error_code(std::errc::timed_out)));
+            stdx::make_unexpected(make_error_code(std::errc::timed_out)));
 }
 
 TEST(NetTS_io_context, work_guard_blocks_run) {
@@ -122,7 +123,7 @@ TEST(NetTS_io_context, work_guard_blocks_run) {
   // should result in a poll(-1) as a signal that we wanted block forever
   EXPECT_CALL(*io_service, poll_one(std::chrono::milliseconds(-1)))
       .WillRepeatedly(
-          Return(stdx::unexpected(make_error_code(std::errc::timed_out))));
+          Return(stdx::make_unexpected(make_error_code(std::errc::timed_out))));
 
   net::io_context io_ctx(
       std::make_unique<::testing::StrictMock<MockSocketService>>(),
@@ -141,8 +142,8 @@ TEST(NetTS_io_context, io_service_open_fails) {
   auto io_service = std::make_unique<::testing::StrictMock<MockIoService>>();
 
   EXPECT_CALL(*io_service, open)
-      .WillOnce(Return(
-          stdx::unexpected(make_error_code(std::errc::too_many_files_open))));
+      .WillOnce(Return(stdx::make_unexpected(
+          make_error_code(std::errc::too_many_files_open))));
 
   // no call to poll_one
 
@@ -150,8 +151,9 @@ TEST(NetTS_io_context, io_service_open_fails) {
       std::make_unique<::testing::StrictMock<MockSocketService>>(),
       std::move(io_service));
 
-  EXPECT_EQ(io_ctx.open_res(),
-            stdx::unexpected(make_error_code(std::errc::too_many_files_open)));
+  EXPECT_EQ(
+      io_ctx.open_res(),
+      stdx::make_unexpected(make_error_code(std::errc::too_many_files_open)));
 
   // work guard is need to trigger the poll_one() as otherwise the run() would
   // just leave as there is no work to do without blocking

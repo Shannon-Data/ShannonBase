@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -77,7 +76,7 @@ stdx::expected<std::string, std::error_code> openssl_msg_content_to_string(
   switch (ct) {
     case SSL3_RT_ALERT:
       if (len < 2) {
-        return stdx::unexpected(make_error_code(std::errc::bad_message));
+        return stdx::make_unexpected(make_error_code(std::errc::bad_message));
       }
 
       // buf[0] is alert-type "fatal|warning"
@@ -95,30 +94,10 @@ stdx::expected<std::string, std::error_code> openssl_msg_content_to_string(
           return "handshake_failure";
         case SSL3_AD_NO_CERTIFICATE:
           return "no_certificate";
-        case SSL3_AD_CERTIFICATE_UNKNOWN:
-          return "certificate_unknown";
-        case SSL3_AD_CERTIFICATE_REVOKED:
-          return "certificate_revoked";
-        case SSL3_AD_CERTIFICATE_EXPIRED:
-          return "certificate_expired";
-        case TLS1_AD_UNKNOWN_CA:
-          return "unknown_ca";  // 48
-        case TLS1_AD_ACCESS_DENIED:
-          return "access_denied";  // 49
-        case TLS1_AD_DECODE_ERROR:
-          return "decode_error";  // 50
-        case TLS1_AD_DECRYPT_ERROR:
-          return "decrypt_error";  // 51
-        case TLS1_AD_EXPORT_RESTRICTION:
-          return "export_restriction";  // 60
         case TLS1_AD_PROTOCOL_VERSION:
-          return "protocol_version";  // 70
-        case TLS1_AD_INSUFFICIENT_SECURITY:
-          return "insufficient_security";  // 71
+          return "protocol_version";
         case TLS1_AD_INTERNAL_ERROR:
-          return "internal_error";  // 80
-        case TLS1_AD_USER_CANCELLED:
-          return "user_cancelled";  // 90
+          return "internal_error";
         default:
           return std::to_string(code);
       }
@@ -126,7 +105,7 @@ stdx::expected<std::string, std::error_code> openssl_msg_content_to_string(
       break;
     case SSL3_RT_HANDSHAKE:
       if (len < 1) {
-        return stdx::unexpected(make_error_code(std::errc::bad_message));
+        return stdx::make_unexpected(make_error_code(std::errc::bad_message));
       }
 
       switch (auto msg_type = buf[0]) {
@@ -159,5 +138,5 @@ stdx::expected<std::string, std::error_code> openssl_msg_content_to_string(
       }
   }
 
-  return stdx::unexpected(make_error_code(std::errc::invalid_argument));
+  return stdx::make_unexpected(make_error_code(std::errc::invalid_argument));
 }

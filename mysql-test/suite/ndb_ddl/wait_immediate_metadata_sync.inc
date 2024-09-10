@@ -9,7 +9,7 @@
 SET GLOBAL ndb_metadata_sync = true;
 
 # Wait for synchronization to complete
-let $metadata_sync_value = `SELECT @@ndb_metadata_sync`;
+let $metadata_sync_value = query_get_value(SELECT @@ndb_metadata_sync, @@ndb_metadata_sync, 1);
 expr $max_wait_intervals = $max_wait + $max_wait;
 while ($metadata_sync_value != 0)
 {
@@ -19,5 +19,5 @@ while ($metadata_sync_value != 0)
   {
     die Timed out waiting for metadata changes to be synced;
   }
-  let $metadata_sync_value = `SELECT @@ndb_metadata_sync`;
+  let $metadata_sync_value = query_get_value(SELECT @@ndb_metadata_sync, @@ndb_metadata_sync, 1);
 }

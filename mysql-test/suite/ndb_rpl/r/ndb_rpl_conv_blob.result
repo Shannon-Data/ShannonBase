@@ -1,4 +1,4 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -11,9 +11,13 @@ PRIMARY KEY (id)
 ) ENGINE=ndbcluster DEFAULT CHARSET=latin1;
 Warnings:
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
-STOP REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 set global replica_type_conversions='ALL_LOSSY,ALL_NON_LOSSY';
-START REPLICA;
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 use test;
 drop table t1;
 CREATE TABLE t1 (
@@ -41,4 +45,4 @@ id	length(value)	value
 update t1 set value=repeat('S', 2000);
 drop table test.t1;
 set global replica_type_conversions='';
-include/rpl/deinit.inc
+include/rpl_end.inc

@@ -1,16 +1,15 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,7 +18,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /**
   @file
@@ -100,9 +101,7 @@ bool Item_func_pfs_thread_id::do_itemize(Parse_context *pc, Item **res) {
   return false;
 }
 
-bool Item_func_pfs_thread_id::resolve_type(THD *thd) {
-  if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_LONGLONG)) return true;
-
+bool Item_func_pfs_thread_id::resolve_type(THD *) {
   unsigned_flag = true;
   set_nullable(true);
   return false;
@@ -155,9 +154,7 @@ longlong Item_func_pfs_thread_id::val_int() {
 
 /** format_bytes() */
 
-bool Item_func_pfs_format_bytes::resolve_type(THD *thd) {
-  if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_DOUBLE)) return true;
-
+bool Item_func_pfs_format_bytes::resolve_type(THD *) {
   /* Format is 'AAAA.BB UUU' = 11 characters or 'AAAA bytes' = 10 characters. */
   set_data_type_string(11U, &my_charset_utf8mb3_general_ci);
   return false;
@@ -227,9 +224,7 @@ String *Item_func_pfs_format_bytes::val_str(String *) {
 
 /** format_pico_time() */
 
-bool Item_func_pfs_format_pico_time::resolve_type(THD *thd) {
-  if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_DOUBLE)) return true;
-
+bool Item_func_pfs_format_pico_time::resolve_type(THD *) {
   set_nullable(true);
   /* Format is 'AAAA.BB UUU' = 11 characters or 'AAA ps' = 6 characters. */
   set_data_type_string(11U, &my_charset_utf8mb3_general_ci);

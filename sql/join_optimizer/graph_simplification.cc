@@ -1,16 +1,15 @@
-/* Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,14 +26,14 @@
 #include <stdint.h>
 
 #include <algorithm>
-#include <bit>
 #include <cmath>
-#include <ostream>
+#include <new>
 #include <string>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "my_alloc.h"
-#include "my_base.h"
 #include "sql/handler.h"
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/bit_utils.h"
@@ -43,7 +42,6 @@
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/node_map.h"
 #include "sql/join_optimizer/online_cycle_finder.h"
-#include "sql/join_optimizer/optimizer_trace.h"
 #include "sql/join_optimizer/print_utils.h"
 #include "sql/join_optimizer/relational_expression.h"
 #include "sql/join_optimizer/subgraph_enumeration.h"
@@ -58,12 +56,12 @@
 using hypergraph::Hyperedge;
 using hypergraph::Hypergraph;
 using hypergraph::NodeMap;
-using std::fill_n;
-using std::has_single_bit;
+using std::fill;
 using std::max;
 using std::min;
 using std::string;
 using std::swap;
+using std::vector;
 
 namespace {
 
@@ -153,8 +151,7 @@ template <class Func>
 void ConnectComponentsThroughJoins(const JoinHypergraph &graph,
                                    const OnlineCycleFinder &cycles,
                                    Func &&callback_on_join, NodeMap *components,
-                                   int *in_component,
-                                   NodeMap *lateral_dependencies) {
+                                   int *in_component) {
   bool did_anything;
   do {
     did_anything = false;
@@ -171,13 +168,6 @@ void ConnectComponentsThroughJoins(const JoinHypergraph &graph,
       }
       if (Overlaps(e.right, components[left_component])) {
         // This join is already applied.
-        continue;
-      }
-      if (Overlaps(e.right, lateral_dependencies[left_component]) &&
-          !OperatorIsCommutative(*graph.edges[edge_idx].expr)) {
-        // A lateral dependency in "left" requires "right" to be on the left
-        // side, but we're not free to reorder them due to a non-commutative
-        // operator. So we cannot connect the components with this edge.
         continue;
       }
       int right_component = GetComponent(components, in_component, e.right);
@@ -201,17 +191,7 @@ void ConnectComponentsThroughJoins(const JoinHypergraph &graph,
         ++num_changed;
       }
       assert(num_changed > 0);
-      const NodeMap combined_nodes =
-          components[left_component] | components[right_component];
-      components[left_component] = combined_nodes;
-
-      // The lateral dependencies of the combined component include all the
-      // lateral dependencies of the original components, except those that were
-      // resolved in this join.
-      lateral_dependencies[left_component] =
-          (lateral_dependencies[left_component] |
-           lateral_dependencies[right_component]) &
-          ~combined_nodes;
+      components[left_component] |= components[right_component];
 
       if (callback_on_join(left_component, right_component,
                            graph.edges[edge_idx], num_changed)) {
@@ -234,27 +214,23 @@ void ConnectComponentsThroughJoins(const JoinHypergraph &graph,
   tables_to_join, as many of the hyperedges will share endpoints, but it does
   not seem to be worth it (based on the microbenchmark profiles).
  */
-double GetCardinality(THD *thd, NodeMap tables_to_join,
-                      const JoinHypergraph &graph,
+double GetCardinality(NodeMap tables_to_join, const JoinHypergraph &graph,
                       const OnlineCycleFinder &cycles) {
   NodeMap components[MAX_TABLES];  // Which tables belong to each component.
   int in_component[MAX_TABLES];    // Which component each table belongs to.
   double component_cardinality[MAX_TABLES];
-  NodeMap lateral_dependencies[MAX_TABLES];
-  fill_n(&in_component[0], graph.nodes.size(), -1);
+  fill(&in_component[0], &in_component[graph.nodes.size()], -1);
 
   // Start with each (relevant) table in a separate component.
   int num_components = 0;
   for (int node_idx : BitsSetIn(tables_to_join)) {
-    const JoinHypergraph::Node &node = graph.nodes[node_idx];
-    components[num_components] = TableBitmap(node_idx);
+    components[num_components] = NodeMap{1} << node_idx;
     in_component[node_idx] = num_components;
     // Assume we have to read at least one row from each table, so that we don't
     // end up with zero costs in the rudimentary cost model used by the graph
     // simplification.
     component_cardinality[num_components] =
-        max(ha_rows{1}, node.table()->file->stats.records);
-    lateral_dependencies[num_components] = node.lateral_dependencies();
+        max(ha_rows{1}, graph.nodes[node_idx].table->file->stats.records);
     ++num_components;
   }
 
@@ -276,7 +252,7 @@ double GetCardinality(THD *thd, NodeMap tables_to_join,
       // so it doesn't matter when we apply them.
       component_cardinality[0] *= pred.selectivity;
     } else if (IsSubset(pred.total_eligibility_set, tables_to_join) &&
-               has_single_bit(pred.total_eligibility_set)) {
+               IsSingleBitSet(pred.total_eligibility_set)) {
       int node_idx = FindLowestBitSet(pred.total_eligibility_set);
       component_cardinality[node_idx] *= pred.selectivity;
     }
@@ -290,7 +266,7 @@ double GetCardinality(THD *thd, NodeMap tables_to_join,
   auto func = [&](int left_component, int right_component,
                   const JoinPredicate &pred, int num_changed [[maybe_unused]]) {
     double cardinality =
-        FindOutputRowsForJoin(thd, component_cardinality[left_component],
+        FindOutputRowsForJoin(component_cardinality[left_component],
                               component_cardinality[right_component], &pred);
 
     // Mark off which multiple equalities we've seen.
@@ -328,7 +304,7 @@ double GetCardinality(THD *thd, NodeMap tables_to_join,
     return active_components == 0b1;
   };
   ConnectComponentsThroughJoins(graph, cycles, std::move(func), components,
-                                in_component, lateral_dependencies);
+                                in_component);
 
   // In rare situations, we could be left in a situation where an edge
   // doesn't contain a joinable set (ie., they are joinable, but only through
@@ -350,12 +326,11 @@ double GetCardinality(THD *thd, NodeMap tables_to_join,
   predicates; this allows it to just make a single pass over those predicates
   and do no other work.
  */
-double GetCardinalitySingleJoin(THD *thd, NodeMap left, NodeMap right,
-                                double left_rows, double right_rows,
-                                const JoinHypergraph &graph,
+double GetCardinalitySingleJoin(NodeMap left, NodeMap right, double left_rows,
+                                double right_rows, const JoinHypergraph &graph,
                                 const JoinPredicate &pred) {
   assert(!Overlaps(left, right));
-  double cardinality = FindOutputRowsForJoin(thd, left_rows, right_rows, &pred);
+  double cardinality = FindOutputRowsForJoin(left_rows, right_rows, &pred);
 
   // Mark off which multiple equalities we've seen.
   uint64_t multiple_equality_bitmap = 0;
@@ -475,7 +450,7 @@ struct JoinStatus {
 
   NOTE: Keep this in sync with the cost estimation in ProposeHashJoin().
  */
-JoinStatus SimulateJoin(THD *thd, JoinStatus left, JoinStatus right,
+JoinStatus SimulateJoin(JoinStatus left, JoinStatus right,
                         const JoinPredicate &pred) {
   // If the build cost per row is higher than the probe cost per row, it is
   // beneficial to use the smaller table as build table. Reorder to get the
@@ -486,8 +461,8 @@ JoinStatus SimulateJoin(THD *thd, JoinStatus left, JoinStatus right,
     swap(left, right);
   }
 
-  double num_output_rows = FindOutputRowsForJoin(thd, left.num_output_rows,
-                                                 right.num_output_rows, &pred);
+  double num_output_rows =
+      FindOutputRowsForJoin(left.num_output_rows, right.num_output_rows, &pred);
   double build_cost = right.num_output_rows * kHashBuildOneRowCost;
   double join_cost = build_cost + left.num_output_rows * kHashProbeOneRowCost +
                      num_output_rows * kHashReturnOneRowCost;
@@ -498,20 +473,20 @@ JoinStatus SimulateJoin(THD *thd, JoinStatus left, JoinStatus right,
 // Helper overloads to call SimulateJoin() for base cases,
 // where we don't really care about the cost that went into them
 // (they are assumed to be zero).
-JoinStatus SimulateJoin(THD *thd, double left_rows, JoinStatus right,
+JoinStatus SimulateJoin(double left_rows, JoinStatus right,
                         const JoinPredicate &pred) {
-  return SimulateJoin(thd, JoinStatus{0.0, left_rows}, right, pred);
+  return SimulateJoin(JoinStatus{0.0, left_rows}, right, pred);
 }
 
-JoinStatus SimulateJoin(THD *thd, JoinStatus left, double right_rows,
+JoinStatus SimulateJoin(JoinStatus left, double right_rows,
                         const JoinPredicate &pred) {
-  return SimulateJoin(thd, left, JoinStatus{0.0, right_rows}, pred);
+  return SimulateJoin(left, JoinStatus{0.0, right_rows}, pred);
 }
 
-JoinStatus SimulateJoin(THD *thd, double left_rows, double right_rows,
+JoinStatus SimulateJoin(double left_rows, double right_rows,
                         const JoinPredicate &pred) {
-  return SimulateJoin(thd, JoinStatus{0.0, left_rows},
-                      JoinStatus{0.0, right_rows}, pred);
+  return SimulateJoin(JoinStatus{0.0, left_rows}, JoinStatus{0.0, right_rows},
+                      pred);
 }
 
 /**
@@ -538,14 +513,11 @@ bool GraphIsJoinable(const JoinHypergraph &graph,
                      const OnlineCycleFinder &cycles) {
   NodeMap components[MAX_TABLES];  // Which tables belong to each component.
   int in_component[MAX_TABLES];    // Which component each table belongs to.
-  NodeMap lateral_dependencies[MAX_TABLES];
 
   // Start with each table in a separate component.
   for (size_t node_idx = 0; node_idx < graph.nodes.size(); ++node_idx) {
-    components[node_idx] = TableBitmap(node_idx);
+    components[node_idx] = NodeMap{1} << node_idx;
     in_component[node_idx] = node_idx;
-    lateral_dependencies[node_idx] =
-        graph.nodes[node_idx].lateral_dependencies();
   }
 
   size_t num_in_component0 = 1;
@@ -559,29 +531,28 @@ bool GraphIsJoinable(const JoinHypergraph &graph,
     return false;
   };
   ConnectComponentsThroughJoins(graph, cycles, std::move(func), components,
-                                in_component, lateral_dependencies);
+                                in_component);
   return num_in_component0 == graph.nodes.size();
 }
 
 }  // namespace
 
-GraphSimplifier::GraphSimplifier(THD *thd, JoinHypergraph *graph)
-    : m_thd(thd),
-      m_done_steps(m_thd->mem_root),
-      m_undone_steps(m_thd->mem_root),
+GraphSimplifier::GraphSimplifier(JoinHypergraph *graph, MEM_ROOT *mem_root)
+    : m_done_steps(mem_root),
+      m_undone_steps(mem_root),
       m_edge_cardinalities(Bounds_checked_array<EdgeCardinalities>::Alloc(
-          m_thd->mem_root, graph->edges.size())),
+          mem_root, graph->edges.size())),
       m_graph(graph),
-      m_cycles(FindJoinDependencies(graph->graph, m_thd->mem_root)),
-      m_cache(Bounds_checked_array<NeighborCache>::Alloc(m_thd->mem_root,
+      m_cycles(FindJoinDependencies(graph->graph, mem_root)),
+      m_cache(Bounds_checked_array<NeighborCache>::Alloc(mem_root,
                                                          graph->edges.size())),
       m_pq(CompareByBenefit(),
-           {Mem_root_allocator<NeighborCache *>{m_thd->mem_root}}) {
+           {Mem_root_allocator<NeighborCache *>{mem_root}}) {
   for (size_t edge_idx = 0; edge_idx < graph->edges.size(); ++edge_idx) {
-    m_edge_cardinalities[edge_idx].left = GetCardinality(
-        m_thd, graph->graph.edges[edge_idx * 2].left, *graph, m_cycles);
+    m_edge_cardinalities[edge_idx].left =
+        GetCardinality(graph->graph.edges[edge_idx * 2].left, *graph, m_cycles);
     m_edge_cardinalities[edge_idx].right = GetCardinality(
-        m_thd, graph->graph.edges[edge_idx * 2].right, *graph, m_cycles);
+        graph->graph.edges[edge_idx * 2].right, *graph, m_cycles);
     m_cache[edge_idx].best_step.benefit = -HUGE_VAL;
   }
 
@@ -673,15 +644,10 @@ bool GraphSimplifier::EdgesAreNeighboring(
 
   const JoinPredicate &j1 = m_graph->edges[edge1_idx];
   const JoinPredicate &j2 = m_graph->edges[edge2_idx];
-
-  // Get the cardinality of the left and right side of each edge. Make sure all
-  // the cardinalities are at least 0.1 rows just to avoid problems with
-  // division by zero when calculating the ratio between the cost estimates at
-  // the end of the function.
-  const double e1l = max(0.1, m_edge_cardinalities[edge1_idx].left);
-  const double e1r = max(0.1, m_edge_cardinalities[edge1_idx].right);
-  const double e2l = max(0.1, m_edge_cardinalities[edge2_idx].left);
-  const double e2r = max(0.1, m_edge_cardinalities[edge2_idx].right);
+  const double e1l = m_edge_cardinalities[edge1_idx].left;
+  const double e1r = m_edge_cardinalities[edge1_idx].right;
+  const double e2l = m_edge_cardinalities[edge2_idx].left;
+  const double e2r = m_edge_cardinalities[edge2_idx].right;
 
   double cost_e1_before_e2;
   double cost_e2_before_e1;
@@ -741,30 +707,30 @@ bool GraphSimplifier::EdgesAreNeighboring(
     // for overall quality of the simplifications.
     double common = max(e1l, e2l);
     cost_e1_before_e2 =
-        SimulateJoin(m_thd, SimulateJoin(m_thd, common, e1r, j1), e2r, j2).cost;
+        SimulateJoin(SimulateJoin(common, e1r, j1), e2r, j2).cost;
     cost_e2_before_e1 =
-        SimulateJoin(m_thd, SimulateJoin(m_thd, common, e2r, j2), e1r, j1).cost;
+        SimulateJoin(SimulateJoin(common, e2r, j2), e1r, j1).cost;
   } else if (IsSubset(e1.left, e2.right) || IsSubset(e2.right, e1.left)) {
     // Analogous to the case above, but e1's left meets e2's right.
     double common = max(e1l, e2r);
     cost_e1_before_e2 =
-        SimulateJoin(m_thd, e2l, SimulateJoin(m_thd, common, e1r, j1), j2).cost;
+        SimulateJoin(e2l, SimulateJoin(common, e1r, j1), j2).cost;
     cost_e2_before_e1 =
-        SimulateJoin(m_thd, SimulateJoin(m_thd, e2l, common, j2), e1r, j1).cost;
+        SimulateJoin(SimulateJoin(e2l, common, j2), e1r, j1).cost;
   } else if (IsSubset(e1.right, e2.right) || IsSubset(e2.right, e1.right)) {
     // Meets in their right endpoints.
     double common = max(e1r, e2r);
     cost_e1_before_e2 =
-        SimulateJoin(m_thd, e2l, SimulateJoin(m_thd, e1l, common, j1), j2).cost;
+        SimulateJoin(e2l, SimulateJoin(e1l, common, j1), j2).cost;
     cost_e2_before_e1 =
-        SimulateJoin(m_thd, e1l, SimulateJoin(m_thd, e2l, common, j2), j1).cost;
+        SimulateJoin(e1l, SimulateJoin(e2l, common, j2), j1).cost;
   } else if (IsSubset(e1.right, e2.left) || IsSubset(e2.left, e1.right)) {
     // e1's right meets e2's left.
     double common = max(e1r, e2l);
     cost_e1_before_e2 =
-        SimulateJoin(m_thd, SimulateJoin(m_thd, e1l, common, j1), e2r, j2).cost;
+        SimulateJoin(SimulateJoin(e1l, common, j1), e2r, j2).cost;
     cost_e2_before_e1 =
-        SimulateJoin(m_thd, e1l, SimulateJoin(m_thd, common, e2r, j2), j1).cost;
+        SimulateJoin(e1l, SimulateJoin(common, e2r, j2), j1).cost;
   } else {
     // Not neighboring.
     return false;
@@ -803,8 +769,7 @@ GraphSimplifier::ConcretizeSimplificationStep(
       IsSubset(e1.right, e2.left) || IsSubset(e2.left, e1.right)) {
     if (!Overlaps(e2.right, e1.left | e1.right)) {
       m_edge_cardinalities[step.after_edge_idx].left = GetCardinalitySingleJoin(
-          m_thd, e1.left, e1.right,
-          m_edge_cardinalities[step.before_edge_idx].left,
+          e1.left, e1.right, m_edge_cardinalities[step.before_edge_idx].left,
           m_edge_cardinalities[step.before_edge_idx].right, *m_graph,
           m_graph->edges[step.before_edge_idx]);
       full_step.new_edge.left |= e1.left | e1.right;
@@ -815,7 +780,7 @@ GraphSimplifier::ConcretizeSimplificationStep(
       NodeMap nodes_to_add = (e1.left | e1.right) & ~e2.right;
       full_step.new_edge.left |= nodes_to_add;
       m_edge_cardinalities[step.after_edge_idx].left =
-          GetCardinality(m_thd, full_step.new_edge.left, *m_graph, m_cycles);
+          GetCardinality(full_step.new_edge.left, *m_graph, m_cycles);
     }
   } else {
     assert(IsSubset(e1.left, e2.right) || IsSubset(e2.right, e1.left) ||
@@ -823,7 +788,7 @@ GraphSimplifier::ConcretizeSimplificationStep(
     if (!Overlaps(e2.left, e1.left | e1.right)) {
       m_edge_cardinalities[step.after_edge_idx].right =
           GetCardinalitySingleJoin(
-              m_thd, e1.left, e1.right,
+              e1.left, e1.right,
               m_edge_cardinalities[step.before_edge_idx].left,
               m_edge_cardinalities[step.before_edge_idx].right, *m_graph,
               m_graph->edges[step.before_edge_idx]);
@@ -835,7 +800,7 @@ GraphSimplifier::ConcretizeSimplificationStep(
       NodeMap nodes_to_add = (e1.left | e1.right) & ~e2.left;
       full_step.new_edge.right |= nodes_to_add;
       m_edge_cardinalities[step.after_edge_idx].right =
-          GetCardinality(m_thd, full_step.new_edge.right, *m_graph, m_cycles);
+          GetCardinality(full_step.new_edge.right, *m_graph, m_cycles);
     }
   }
   assert(!Overlaps(full_step.new_edge.left, full_step.new_edge.right));
@@ -963,10 +928,12 @@ void SetNumberOfSimplifications(int num_simplifications,
   afresh.
  */
 void SimplifyQueryGraph(THD *thd, int subgraph_pair_limit,
-                        JoinHypergraph *graph, GraphSimplifier *simplifier) {
-  if (TraceStarted(thd)) {
-    Trace(thd) << "\nQuery became too complicated, doing heuristic graph "
-                  "simplification.\n";
+                        JoinHypergraph *graph, GraphSimplifier *simplifier,
+                        string *trace) {
+  if (trace != nullptr) {
+    *trace +=
+        "\nQuery became too complicated, doing heuristic graph "
+        "simplification.\n";
   }
 
   MEM_ROOT counting_mem_root;
@@ -984,10 +951,10 @@ void SimplifyQueryGraph(THD *thd, int subgraph_pair_limit,
           // If this happens, the user has set the limit way too low. The query
           // will run with all the simplifications we have found, but the number
           // of subgraph pairs is still above the limit.
-          if (TraceStarted(thd)) {
-            Trace(thd)
-                << "Cannot do any more simplification steps, just running "
-                   "the query as-is.\n";
+          if (trace != nullptr) {
+            *trace +=
+                "Cannot do any more simplification steps, just running "
+                "the query as-is.\n";
           }
           return;
         }
@@ -1040,8 +1007,8 @@ void SimplifyQueryGraph(THD *thd, int subgraph_pair_limit,
   // Now upper_bound is the correct number of steps to use.
   SetNumberOfSimplifications(upper_bound, simplifier);
 
-  if (TraceStarted(thd)) {
-    Trace(thd) << StringPrintf(
+  if (trace != nullptr) {
+    *trace += StringPrintf(
         "After %d simplification steps, the query graph contains %d "
         "subgraph pairs, which is below the limit.\n",
         upper_bound, num_subgraph_pairs_upper);

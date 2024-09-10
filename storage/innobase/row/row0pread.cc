@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+Copyright (c) 2018, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -39,6 +38,7 @@ Created 2018-01-27 by Sunny Bains */
 #include "row0pread.h"
 #include "row0row.h"
 #include "row0vers.h"
+#include "row0sel.h"
 #include "ut0new.h"
 
 #ifdef UNIV_PFS_THREAD
@@ -53,6 +53,16 @@ static constexpr size_t SPLIT_THRESHOLD{3};
 /** No. of pages to scan, in the case of large tables, before the check for
 trx interrupted is made as the call is expensive. */
 static constexpr size_t TRX_IS_INTERRUPTED_PROBE{50000};
+
+ICP_RESULT row_search_idx_cond_check(
+    byte *mysql_rec,          /*!< out: record
+                              in MySQL format (invalid unless
+                              prebuilt->idx_cond == true and
+                              we return ICP_MATCH) */
+    row_prebuilt_t *prebuilt, /*!< in/out: prebuilt struct
+                              for the table handle */
+    const rec_t *rec,         /*!< in: InnoDB record */
+    const ulint *offsets);    /*!< in: rec_get_offsets() */
 
 std::string Parallel_reader::Scan_range::to_string() const {
   std::ostringstream os;
@@ -86,6 +96,14 @@ Parallel_reader::Scan_ctx::Iter::~Iter() {
   mem_heap_free(m_heap);
   m_heap = nullptr;
 }
+
+Parallel_reader::Ctx::~Ctx() {
+  if (m_blob_heap) mem_heap_free(m_blob_heap);
+
+  if (m_heap) mem_heap_free(m_heap);
+}
+
+Parallel_reader::Scan_ctx::~Scan_ctx() {}
 
 Parallel_reader::~Parallel_reader() {
   mutex_destroy(&m_mutex);
@@ -220,10 +238,18 @@ class PCursor {
   /** Resume from savepoint. */
   void resume() noexcept;
 
+  /** Check if there are threads waiting on the index latch. Yield the latch
+  so that other threads can progress. */
+  void yield();
+  void yield_prev();
+
   /** Move to the next block.
   @param[in]  index             Index being traversed.
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t move_to_next_block(dict_index_t *index);
+
+  dberr_t move_to_prev_block(dict_index_t *index)
+      MY_ATTRIBUTE((warn_unused_result));
 
   /** Restore the cursor position. */
   void restore_position() noexcept {
@@ -337,6 +363,35 @@ void PCursor::savepoint() noexcept {
   m_pcur->store_position(m_mtr);
 
   m_mtr->commit();
+}
+
+void PCursor::yield_prev() {
+  /* We should always yield on a block boundary. */
+  ut_ad(m_pcur->is_before_first_on_page());
+
+  /* Store the cursor position on the first user record on the page. */
+  m_pcur->move_to_next_on_page();
+
+  m_pcur->store_position(m_mtr);
+
+  m_mtr->commit();
+
+  /* Yield so that another thread can proceed. */
+  std::this_thread::yield();
+
+  m_mtr->start();
+
+  m_mtr->set_log_mode(MTR_LOG_NO_REDO);
+
+  /* Restore position on the record, or its predecessor if the record
+  was purged meanwhile. */
+
+  restore_position();
+
+  if (!m_pcur->is_before_first_on_page()) {
+    /* Move to the successor of the saved record. */
+    m_pcur->move_to_prev_on_page();
+  }
 }
 
 void PCursor::resume() noexcept {
@@ -461,6 +516,45 @@ dberr_t PCursor::move_to_next_block(dict_index_t *index) {
   }
 
   return err;
+}
+
+dberr_t PCursor::move_to_prev_block(dict_index_t *index) {
+  ut_ad(m_pcur->is_before_first_on_page());
+
+  if (rw_lock_get_waiters(dict_index_get_lock(index))) {
+    /* There are waiters on the index tree lock. Store and restore
+    the cursor position, and yield so that scanning a large table
+    will not starve other threads. */
+
+    yield_prev();
+
+    /* It's possible that the restore places the cursor in the middle of
+    the block. We need to account for that too. */
+
+    if (m_pcur->is_on_user_rec()) {
+      return (DB_SUCCESS);
+    }
+  }
+
+  auto cur = m_pcur->get_page_cur();
+
+  auto prev_page_no = btr_page_get_prev(page_cur_get_page(cur), m_mtr);
+
+  if (prev_page_no == FIL_NULL) {
+    m_mtr->commit();
+
+    return (DB_END_OF_INDEX);
+  }
+
+  m_pcur->move_backward_from_page(m_mtr);
+
+  /* Skip the supremum record. */
+  page_cur_move_to_prev(cur);
+
+  /* Page can't be empty unless it is a root page. */
+  ut_ad(!page_cur_is_before_first(cur));
+
+  return (DB_SUCCESS);
 }
 
 bool Parallel_reader::Scan_ctx::check_visibility(const rec_t *&rec,
@@ -931,6 +1025,10 @@ void Parallel_reader::worker(Parallel_reader::Thread_ctx *thread_ctx) {
   ut_a(is_error_set() || (m_n_completed == m_ctx_id && is_queue_empty()));
 }
 
+void Parallel_reader::ctx_completed_inc() {
+  m_n_completed.fetch_add(1, std::memory_order_relaxed);
+}
+
 page_no_t Parallel_reader::Scan_ctx::search(const buf_block_t *block,
                                             const dtuple_t *key) const {
   ut_ad(index_s_own());
@@ -1392,7 +1490,7 @@ dberr_t Parallel_reader::run(size_t n_threads) {
 
 dberr_t Parallel_reader::add_scan(trx_t *trx,
                                   const Parallel_reader::Config &config,
-                                  Parallel_reader::F &&f) {
+                                  Parallel_reader::F &&f, bool split) {
   // clang-format off
 
   auto scan_ctx = std::shared_ptr<Scan_ctx>(

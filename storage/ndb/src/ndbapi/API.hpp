@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,11 +25,11 @@
 #ifndef API_H
 #define API_H
 
+#include <ndb_global.h>
 #include <BlockNumbers.h>
 #include <GlobalSignalNumbers.h>
-#include <ndb_global.h>
-#include <NdbOut.hpp>
 #include <RefConvert.hpp>
+#include <NdbOut.hpp>
 
 #include "NdbApiSignal.hpp"
 #include "NdbDictionaryImpl.hpp"
@@ -38,19 +37,19 @@
 #include "NdbUtil.hpp"
 
 #include <Ndb.hpp>
-#include <NdbBlob.hpp>
-#include <NdbBlobImpl.hpp>
+#include <NdbTransaction.hpp>
+#include <NdbOperation.hpp>
 #include <NdbIndexOperation.hpp>
+#include <NdbScanOperation.hpp>
 #include <NdbIndexScanOperation.hpp>
 #include <NdbIndexStat.hpp>
-#include <NdbInterpretedCode.hpp>
-#include <NdbOperation.hpp>
+#include "NdbIndexStatImpl.hpp"
 #include <NdbRecAttr.hpp>
 #include <NdbReceiver.hpp>
-#include <NdbScanOperation.hpp>
-#include <NdbTransaction.hpp>
+#include <NdbBlob.hpp>
+#include <NdbBlobImpl.hpp>
+#include <NdbInterpretedCode.hpp>
 #include <NdbWaitGroup.hpp>
-#include "NdbIndexStatImpl.hpp"
 
 #include <NdbEventOperation.hpp>
 #include "NdbEventOperationImpl.hpp"

@@ -1,16 +1,15 @@
-/* Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2003, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +26,7 @@
 #include "SignalData.hpp"
 
 #define JAM_FILE_ID 193
+
 
 struct IndexStatReq {
   enum RequestType {
@@ -71,10 +71,7 @@ struct IndexStatImplReq {
 struct IndexStatConf {
   static constexpr Uint32 SignalLength = 3;
   Uint32 senderRef;
-  union {
-    Uint32 senderData;
-    Uint32 clientData;
-  };
+  union { Uint32 senderData; Uint32 clientData; };
   Uint32 transId;
 };
 
@@ -98,10 +95,7 @@ struct IndexStatRef {
   };
   static constexpr Uint32 SignalLength = 7;
   Uint32 senderRef;
-  union {
-    Uint32 senderData;
-    Uint32 clientData;
-  };
+  union { Uint32 senderData; Uint32 clientData; };
   Uint32 transId;
   Uint32 errorCode;
   Uint32 errorLine;
@@ -133,6 +127,7 @@ struct IndexStatRep {
   Uint32 fragId;
   Uint32 loadTime;
 };
+
 
 #undef JAM_FILE_ID
 

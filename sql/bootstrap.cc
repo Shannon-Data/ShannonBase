@@ -1,16 +1,15 @@
-/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -52,7 +51,6 @@
 #include "sql/mysqld_thd_manager.h"  // Global_THD_manager
 #include "sql/protocol_classic.h"
 #include "sql/query_options.h"
-#include "sql/sd_notify.h"  // for sysd::notify(..) calls
 #include "sql/set_var.h"
 #include "sql/sql_bootstrap.h"
 #include "sql/sql_class.h"    // THD
@@ -142,8 +140,6 @@ static bool handle_bootstrap_impl(handle_bootstrap_args *args) {
     */
     assert(thd->system_thread == SYSTEM_THREAD_SERVER_INITIALIZE);
 
-    sysd::notify("STATUS=Initialization of MySQL system tables in progress\n");
-
     /*
       The server must avoid logging compiled statements into the binary log
       (and generating GTIDs for them when GTID_MODE is ON) during bootstrap/
@@ -159,9 +155,6 @@ static bool handle_bootstrap_impl(handle_bootstrap_args *args) {
 
     thd->system_thread = SYSTEM_THREAD_INIT_FILE;
 
-    sysd::notify("STATUS=Initialization of MySQL system tables ",
-                 rc ? "unsuccessful" : "successful", "\n");
-
     if (rc != 0) {
       return true;
     }
@@ -176,15 +169,9 @@ static bool handle_bootstrap_impl(handle_bootstrap_args *args) {
     */
     assert(thd->system_thread == SYSTEM_THREAD_INIT_FILE);
 
-    sysd::notify(
-        "STATUS=Execution of SQL Commands from Init-file in progress\n");
-
     File_command_iterator file_iter(args->m_file_name, args->m_file,
                                     mysql_file_fgets_fn);
     rc = process_iterator(thd, &file_iter, false);
-
-    sysd::notify("STATUS=Execution of SQL Commands from Init-file ",
-                 rc ? "unsuccessful" : "successful", "\n");
     if (rc != 0) {
       return true;
     }

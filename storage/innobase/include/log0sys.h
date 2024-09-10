@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+Copyright (c) 2013, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -156,6 +155,23 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) log_t {
   Protected by: locking sn not to add. */
   alignas(ut::INNODB_CACHE_LINE_SIZE) Link_buf<lsn_t> recent_closed;
 
+  /** @} */
+
+  /**************************************************/ /**
+
+   @name  shannonbase rapid engine
+
+   *******************************************************/
+
+  /** @{ */
+
+  alignas(ut::INNODB_CACHE_LINE_SIZE) atomic_lsn_t rapid_lsn;
+
+  alignas(ut::INNODB_CACHE_LINE_SIZE) os_event_t *rapid_events;
+
+  size_t rapid_events_size;
+
+  mutable ib_mutex_t rapid_populator_mutex;
   /** @} */
 
   /**************************************************/ /**
@@ -440,10 +456,6 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) log_t {
 
   /** Event used by log files governor thread to wait. */
   os_event_t m_files_governor_event;
-
-  /** Mutex which can be used to pause log governor thread. */
-  alignas(ut::INNODB_CACHE_LINE_SIZE) mutable ib_mutex_t
-      governor_iteration_mutex;
 
   /** Event used by other threads to wait until log files governor finished
   its next iteration. This is useful when some sys_var gets changed to wait

@@ -1,16 +1,15 @@
-# Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2016, 2023, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is designed to work with certain software (including
+# This program is also distributed with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have either included with
-# the program or referenced in the documentation.
+# separately licensed software that they have included with MySQL.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -96,20 +95,19 @@ IF (DEB_PRODUCT STREQUAL "commercial")
   SET (DEB_INSTALL_SERVER_PLUGINS
 "
 usr/lib/mysql/plugin/audit_log.so
-usr/lib/mysql/plugin/authentication_kerberos.so
+usr/lib/mysql/plugin/authentication_pam.so
 usr/lib/mysql/plugin/authentication_ldap_sasl.so
 usr/lib/mysql/plugin/authentication_ldap_simple.so
-usr/lib/mysql/plugin/authentication_pam.so
-usr/lib/mysql/plugin/authentication_webauthn.so
-usr/lib/mysql/plugin/component_enterprise_encryption.so
-usr/lib/mysql/plugin/component_keyring_encrypted_file.so
-usr/lib/mysql/plugin/component_keyring_oci.so
+usr/lib/mysql/plugin/authentication_kerberos.so
 usr/lib/mysql/plugin/data_masking.so
-usr/lib/mysql/plugin/firewall.so
 usr/lib/mysql/plugin/keyring_okv.so
+usr/lib/mysql/plugin/keyring_encrypted_file.so
 usr/lib/mysql/plugin/keyring_hashicorp.so
+usr/lib/mysql/plugin/keyring_oci.so
+usr/lib/mysql/plugin/openssl_udf.so
 usr/lib/mysql/plugin/thread_pool.so
 usr/lib/mysql/plugin/firewall.so
+usr/lib/mysql/plugin/authentication_fido.so
 usr/lib/mysql/plugin/component_keyring_encrypted_file.so
 usr/lib/mysql/plugin/component_keyring_oci.so
 usr/lib/mysql/plugin/component_enterprise_encryption.so
@@ -173,15 +171,15 @@ override_dh_strip:
 	dh_strip -pmysql-server
 	dh_strip -pmysql-client
 	dh_strip -pmysql-testsuite
-	dh_strip -plibmysqlclient24 --dbg-package=libmysqlclient24-dbgsym
+	dh_strip -plibmysqlclient22 --dbg-package=libmysqlclient22-dbgsym
 	dh_strip -plibmysqlclient-dev
 ")
 SET (DEB_CONTROL_DBGSYM_DEFAULT
 "
-Package: libmysqlclient24-dbgsym
+Package: libmysqlclient22-dbgsym
 Architecture: any
 Section: debug
-Depends: libmysqlclient24 (=\${binary:Version}), \${misc:Depends}
+Depends: libmysqlclient22 (=\${binary:Version}), \${misc:Depends}
 Description: Debugging symbols for client library
 
 Package: mysql-${DEB_PRODUCTNAME}-test-dbgsym
@@ -254,7 +252,11 @@ ENDIF()
 
 # Enable various apparmor systems for Ubuntu
 IF(DEB_ID STREQUAL "ubuntu")
-  SET (DEB_CONTROL_BDEPS ", dh-apparmor")
+  IF(DEB_CODENAME STREQUAL "bionic")
+    SET (DEB_CONTROL_BDEPS ", dh-apparmor, gcc-8, g++-8")
+  ELSE()
+    SET (DEB_CONTROL_BDEPS ", dh-apparmor")
+  ENDIF()
   SET (DEB_RULES_INSTALL_APPARMOR "install -g root -o root -m 0644 -D debian/extra/apparmor-profile debian/tmp/etc/apparmor.d/usr.sbin.mysqld")
   SET (DEB_RULES_APPARMOR_LOAD "dh_apparmor -pmysql-${DEB_PRODUCTNAME}-server --profile-name=usr.sbin.mysqld")
   SET (DEB_INSTALL_SERVER_APPARMOR "etc/apparmor.d/usr.sbin.mysqld")
@@ -262,6 +264,11 @@ IF(DEB_ID STREQUAL "ubuntu")
   SET (DEB_INIT_SERVER_APPARMOR "/lib/apparmor/profile-load usr.sbin.mysqld")
   SET (DEB_INIT_ROUTER_APPARMOR "/lib/apparmor/profile-load usr.bin.mysqlrouter")
 
+  # Ubuntu 16.04 doesn't automatically create debug symbol packages
+  IF(DEB_CODENAME STREQUAL "xenial")
+    SET (DEB_CONTROL_DBGSYM ${DEB_CONTROL_DBGSYM_DEFAULT})
+    SET (DEB_RULES_STRIP ${DEB_RULES_STRIP_DEFAULT})
+  ENDIF()
 ENDIF()
 
 IF (NOT DEFINED DEB_NOROUTER)
@@ -273,7 +280,7 @@ ENDIF()
 if (DEFINED DEB_WITH_DEBUG)
   INCLUDE(deb_debug.cmake)
 ENDIF()
-# All files are configured and copied to the debian/ directory, which is used
+# All files are configured and copied to the debian/ directory, which is used 
 # by debuild to make the packages
 SET (DEB_ROOT ${CMAKE_SOURCE_DIR}/packaging/deb-in)
 FILE(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/debian)

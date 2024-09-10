@@ -13,7 +13,8 @@ SELECT * FROM t1;
 id
 1
 SELECT * FROM t2;
-ERROR HY000: Table definition has changed, please retry transaction
+id
+1
 ROLLBACK;
 SET autocommit = 1;
 drop table t1;
@@ -23,7 +24,8 @@ SELECT * FROM t1;
 id
 1
 SELECT * FROM t2;
-ERROR HY000: Table definition has changed, please retry transaction
+id
+1
 ALTER TABLE t1 ADD val INT;
 ROLLBACK;
 SET autocommit = 1;

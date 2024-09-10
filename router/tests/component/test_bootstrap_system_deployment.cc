@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,7 +27,6 @@
 
 #include <gmock/gmock.h>
 
-#include "mock_server_testutils.h"
 #include "router_component_system_layout.h"
 #include "router_component_test.h"
 #include "tcp_port_pool.h"
@@ -69,15 +67,20 @@ class RouterBootstrapSystemDeploymentTest : public RouterComponentBootstrapTest,
   auto &run_server_mock() {
     const std::string json_stmts = get_data_dir().join("bootstrap_gr.js").str();
     server_port_ = port_pool_.get_next_available();
-    const auto http_port = port_pool_.get_next_available();
 
     // launch mock server and wait for it to start accepting connections
-    auto &server_mock = launch_mysql_server_mock(
-        json_stmts, server_port_, EXIT_SUCCESS, false, http_port);
-    set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                      classic_ports_to_gr_nodes({server_port_}), 0,
-                      {server_port_});
+    auto &server_mock = launch_mysql_server_mock(json_stmts, server_port_);
     return server_mock;
+  }
+
+  ProcessWrapper &launch_router_for_bootstrap(
+      const std::vector<std::string> &params,
+      int expected_exit_code = EXIT_SUCCESS,
+      ProcessWrapper::OutputResponder output_responder =
+          RouterComponentBootstrapTest::kBootstrapOutputResponder) {
+    return ProcessManager::launch_router(
+        params, expected_exit_code, /*catch_stderr=*/true, /*with_sudo=*/false,
+        /*wait_for_notify_ready=*/-1s, output_responder);
   }
 
   uint16_t server_port_;
@@ -95,6 +98,8 @@ TEST_F(RouterBootstrapSystemDeploymentTest, BootstrapPass) {
   auto &router = launch_router_for_bootstrap({
       "--bootstrap=127.0.0.1:" + std::to_string(server_port_),
       "--connect-timeout=1",
+      "--report-host",
+      "dont.query.dns",
   });
 
   // check if the bootstrapping was successful
@@ -102,7 +107,7 @@ TEST_F(RouterBootstrapSystemDeploymentTest, BootstrapPass) {
 
   EXPECT_TRUE(
       router.expect_output("MySQL Router configured for the "
-                           "InnoDB Cluster 'test'"));
+                           "InnoDB Cluster 'mycluster'"));
 }
 
 /*
@@ -124,6 +129,8 @@ TEST_F(RouterBootstrapSystemDeploymentTest,
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port_),
           "--connect-timeout=1",
+          "--report-host",
+          "dont.query.dns",
       },
       EXIT_FAILURE);
 
@@ -156,6 +163,8 @@ TEST_F(RouterBootstrapSystemDeploymentTest,
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port_),
           "--connect-timeout=1",
+          "--report-host",
+          "dont.query.dns",
       },
       EXIT_FAILURE);
 
@@ -200,6 +209,8 @@ TEST_F(RouterBootstrapSystemDeploymentTest,
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port_),
           "--connect-timeout=1",
+          "--report-host",
+          "dont.query.dns",
       },
       EXIT_FAILURE);
 
@@ -239,6 +250,8 @@ TEST_F(RouterBootstrapSystemDeploymentTest,
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port_),
           "--connect-timeout=1",
+          "--report-host",
+          "dont.query.dns",
       },
       EXIT_FAILURE);
 

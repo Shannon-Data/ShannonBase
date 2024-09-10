@@ -40,8 +40,6 @@ select connection_id() into @con_user0_id;
 
 ## New SHOW PROCESSLIST
 set @@global.performance_schema_show_processlist = on;
-Warnings:
-Warning	4166	'@@performance_schema_show_processlist' is deprecated and will be removed in a future release. When it is removed, SHOW PROCESSLIST will always use the performance schema implementation.
 
 SHOW FULL PROCESSLIST;
 Id	User	Host	db	Command	Time	State	Info
@@ -76,20 +74,15 @@ ID	USER	HOST	DB	COMMAND	TIME	STATE	INFO
 <Id>	user2	<Host>	test	<Command>	<Time>	<State>	NULL
 <Id>	user3	<Host>	test	<Command>	<Time>	<State>	NULL
 <Id>	user4	<Host>	test	<Command>	<Time>	<State>	NULL
-Warnings:
-<Id>	1287	<Host>
 
 # Connection user1
 # Get Host:Port, new
 
 ## Legacy SHOW PROCESSLIST
 set @@global.performance_schema_show_processlist = off;
-Warnings:
-Warning	4166	'@@performance_schema_show_processlist' is deprecated and will be removed in a future release. When it is removed, SHOW PROCESSLIST will always use the performance schema implementation.
 
 SHOW FULL PROCESSLIST;
 Id	User	Host	db	Command	Time	State	Info
-<Id>	1287	<Host>
 <Id>	event_scheduler	<Host>	NULL	<Command>	<Time>	<State>	NULL
 <Id>	root	<Host>	test	<Command>	<Time>	<State>	NULL
 <Id>	user0	<Host>	test	Query	<Time>	<State>	SHOW FULL PROCESSLIST
@@ -97,7 +90,6 @@ Id	User	Host	db	Command	Time	State	Info
 <Id>	user2	<Host>	test	<Command>	<Time>	<State>	NULL
 <Id>	user3	<Host>	test	<Command>	<Time>	<State>	NULL
 <Id>	user4	<Host>	test	<Command>	<Time>	<State>	NULL
-Warnings:
 
 # Performance Schema processlist table
 
@@ -122,8 +114,6 @@ ID	USER	HOST	DB	COMMAND	TIME	STATE	INFO
 <Id>	user2	<Host>	test	<Command>	<Time>	<State>	NULL
 <Id>	user3	<Host>	test	<Command>	<Time>	<State>	NULL
 <Id>	user4	<Host>	test	<Command>	<Time>	<State>	NULL
-Warnings:
-<Id>	1287	<Host>
 
 # Connection user1
 # Get Host:Port, legacy
@@ -153,5 +143,3 @@ drop user user3@localhost;
 drop user user4@localhost;
 
 set @@global.performance_schema_show_processlist = @save_processlist;
-Warnings:
-Warning	4166	'@@performance_schema_show_processlist' is deprecated and will be removed in a future release. When it is removed, SHOW PROCESSLIST will always use the performance schema implementation.

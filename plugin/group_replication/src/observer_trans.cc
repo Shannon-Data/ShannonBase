@@ -1,16 +1,15 @@
-/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -122,6 +121,14 @@ int group_replication_trans_before_dml(Trans_param *param, int &out) {
   if ((out += (param->trans_ctx_info.binlog_format != BINLOG_FORMAT_ROW))) {
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_INVALID_BINLOG_FORMAT);
     return 0;
+  }
+
+  if ((out += (param->trans_ctx_info.transaction_write_set_extraction ==
+               HASH_ALGORITHM_OFF))) {
+    /* purecov: begin inspected */
+    LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_TRANS_WRITE_SET_EXTRACTION_NOT_SET);
+    return 0;
+    /* purecov: end */
   }
 
   if (local_member_info->has_enforces_update_everywhere_checks() &&
@@ -276,20 +283,15 @@ int group_replication_trans_before_commit(Trans_param *param) {
   const ulong transaction_size_limit = get_transaction_size_limit();
   my_off_t transaction_size = 0;
 
-  bool is_gtid_specified = param->gtid_info.type == ASSIGNED_GTID;
-
-  mysql::gtid::Tag_plain automatic_tag;
-  automatic_tag.clear();
-
+  const bool is_gtid_specified = param->gtid_info.type == ASSIGNED_GTID;
   Gtid gtid = {param->gtid_info.sidno, param->gtid_info.gno};
   if (!is_gtid_specified) {
-    // sidno and gno are dummy values that will be replaced after certification
+    // Dummy values that will be replaced after certification.
     gtid.sidno = 1;
     gtid.gno = 1;
-    automatic_tag = param->gtid_info.automatic_tag;
   }
 
-  Gtid_specification gtid_specification = {ASSIGNED_GTID, gtid, automatic_tag};
+  const Gtid_specification gtid_specification = {ASSIGNED_GTID, gtid};
   Gtid_log_event *gle = nullptr;
 
   Transaction_context_log_event *tcle = nullptr;

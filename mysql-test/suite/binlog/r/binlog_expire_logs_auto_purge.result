@@ -1,3 +1,6 @@
+SET @@global.expire_logs_days = 0;
+Warnings:
+Warning	1287	'@@expire_logs_days' is deprecated and will be removed in a future release. Please use binlog_expire_logs_seconds instead.
 SET @@global.binlog_expire_logs_auto_purge = OFF;
 FLUSH LOGS;
 FLUSH LOGS;
@@ -23,4 +26,7 @@ PURGE BINARY LOGS BEFORE 'DATE';
 FLUSH LOGS;
 SET GLOBAL binlog_expire_logs_seconds=2592000;
 SET GLOBAL binlog_expire_logs_auto_purge=1;
-RESET BINARY LOGS AND GTIDS;
+SET GLOBAL expire_logs_days=0;
+Warnings:
+Warning	1287	'@@expire_logs_days' is deprecated and will be removed in a future release. Please use binlog_expire_logs_seconds instead.
+RESET MASTER;

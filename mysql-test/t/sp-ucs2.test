@@ -148,7 +148,7 @@ delimiter ;|
 #
 # Bug#48766 SHOW CREATE FUNCTION returns extra data in return clause
 #
-SET NAMES utf8mb3;
+SET NAMES utf8;
 --disable_warnings
 DROP FUNCTION IF EXISTS bug48766;
 --enable_warnings

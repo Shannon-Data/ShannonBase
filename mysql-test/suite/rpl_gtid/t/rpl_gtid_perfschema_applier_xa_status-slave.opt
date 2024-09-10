@@ -1,1 +1,1 @@
---skip-replica-preserve-commit-order
+--relay-log-info-repository=FILE --skip-replica-preserve-commit-order

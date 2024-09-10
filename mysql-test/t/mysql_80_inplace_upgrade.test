@@ -65,6 +65,7 @@ if ($lctn == 2)
 --replace_result $MYSQLD MYSQLD $MYSQLD_DATADIR1 MYSQLD_DATADIR1 $MYSQLD_LOG MYSQLD_LOG
 --exec echo "restart: --datadir=$MYSQLD_DATADIR1 --upgrade=MINIMAL --skip-grant-tables --log-error=$MYSQLD_LOG" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
 --let $wait_counter= 10000
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 --let $shutdown_server_timeout = 300
@@ -99,6 +100,7 @@ if ($lctn == 2)
 --replace_result $MYSQLD MYSQLD $MYSQLD_DATADIR1 MYSQLD_DATADIR1 $MYSQLD_LOG MYSQLD_LOG
 --exec echo "restart: --datadir=$MYSQLD_DATADIR1 --log-error=$MYSQLD_LOG" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
 --let $wait_counter= 10000
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 --echo # There should be no errors
@@ -108,7 +110,7 @@ if ($lctn == 2)
 
 # It should have created a file in the MySQL Servers datadir
 --let $MYSQLD_DATADIR= `select @@datadir`
---file_exists $MYSQLD_DATADIR/mysql_upgrade_history
+--file_exists $MYSQLD_DATADIR/mysql_upgrade_info
 
 --echo ###########################################################################
 --echo # Test upgrade of help tables
@@ -157,6 +159,7 @@ SELECT COUNT(*) != 0 FROM mysql.help_topic;
 --replace_result $MYSQLD MYSQLD $MYSQLD_DATADIR1 MYSQLD_DATADIR1 $MYSQLD_LOG MYSQLD_LOG
 --exec echo "restart: --datadir=$MYSQLD_DATADIR1 --log-error=$MYSQLD_LOG" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
 --let $wait_counter= 10000
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 --echo # There should be no errors
@@ -166,7 +169,7 @@ SELECT COUNT(*) != 0 FROM mysql.help_topic;
 
 # It should have created a file in the MySQL Servers datadir
 --let $MYSQLD_DATADIR= `select @@datadir`
---file_exists $MYSQLD_DATADIR/mysql_upgrade_history
+--file_exists $MYSQLD_DATADIR/mysql_upgrade_info
 
 --echo # Stop DB server
 --let $shutdown_server_timeout = 300

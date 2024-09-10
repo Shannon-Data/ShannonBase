@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2024, Oracle and/or its affiliates.
+Copyright (c) 1996, 2023, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 Copyright (c) 2009, Percona Inc.
 
@@ -21,13 +21,12 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -126,6 +125,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0crc32.h"
 #include "ut0new.h"
 
+#include "storage/rapid_engine/populate/populate.h"
 /** fil_space_t::flags for hard-coded tablespaces */
 extern uint32_t predefined_flags;
 
@@ -189,8 +189,6 @@ mysql_pfs_key_t srv_worker_thread_key;
 mysql_pfs_key_t trx_recovery_rollback_thread_key;
 mysql_pfs_key_t srv_ts_alter_encrypt_thread_key;
 mysql_pfs_key_t parallel_rseg_init_thread_key;
-mysql_pfs_key_t bulk_flusher_thread_key;
-mysql_pfs_key_t bulk_alloc_thread_key;
 #endif /* UNIV_PFS_THREAD */
 
 #ifdef HAVE_PSI_STAGE_INTERFACE
@@ -569,7 +567,7 @@ dberr_t srv_undo_tablespace_open(undo::Tablespace &undo_space) {
   }
 
   /* Check if this file supports atomic write. */
-#ifdef UNIV_LINUX
+#if !defined(NO_FALLOCATE) && defined(UNIV_LINUX)
   if (!dblwr::is_enabled()) {
     atomic_write = fil_fusionio_enable_atomic_write(fh);
   } else {
@@ -577,7 +575,7 @@ dberr_t srv_undo_tablespace_open(undo::Tablespace &undo_space) {
   }
 #else
   atomic_write = false;
-#endif /* UNIV_LINUX */
+#endif /* !NO_FALLOCATE && UNIV_LINUX */
 
   if (space == nullptr) {
     /* Load the tablespace into InnoDB's internal data structures.
@@ -1273,7 +1271,7 @@ static dberr_t srv_open_tmp_tablespace(bool create_new_db,
     ib::error(ER_IB_MSG_1100, tmp_space->name());
 
   } else if ((err = tmp_space->open_or_create(true, create_new_db,
-                                              &sum_of_new_sizes, nullptr)) !=
+                                              &sum_of_new_sizes, nullptr, nullptr)) !=
              DB_SUCCESS) {
     ib::error(ER_IB_MSG_1101, tmp_space->name());
 
@@ -1528,7 +1526,7 @@ static dberr_t recreate_redo_files(lsn_t &flushed_lsn) {
                 LOG_BLOCK_HDR_SIZE;
 
   /* `true` parameter makes sure new files are created */
-  dberr_t err = log_sys_init(true, flushed_lsn, flushed_lsn);
+  dberr_t err = log_sys_init(true, flushed_lsn, flushed_lsn, flushed_lsn);
   if (err != DB_SUCCESS) {
     return err;
   }
@@ -1536,6 +1534,11 @@ static dberr_t recreate_redo_files(lsn_t &flushed_lsn) {
   ut_d(log_sys->disable_redo_writes = false);
 
   fil_open_system_tablespace_files();
+
+  err = log_start(*log_sys, flushed_lsn, flushed_lsn);
+  if (err != DB_SUCCESS) {
+    return err;
+  }
 
   return DB_SUCCESS;
 }
@@ -1814,10 +1817,10 @@ dberr_t srv_start(bool create_new_db) {
 
   /* Open or create the data files. */
   page_no_t sum_of_new_sizes;
-  lsn_t flushed_lsn;
+  lsn_t flushed_lsn, rapid_lsn;
 
   err = srv_sys_space.open_or_create(false, create_new_db, &sum_of_new_sizes,
-                                     &flushed_lsn);
+                                     &flushed_lsn, &rapid_lsn);
 
   switch (err) {
     case DB_SUCCESS:
@@ -1852,7 +1855,7 @@ dberr_t srv_start(bool create_new_db) {
 
   lsn_t new_files_lsn;
 
-  err = log_sys_init(create_new_db, flushed_lsn, new_files_lsn);
+  err = log_sys_init(create_new_db, flushed_lsn, rapid_lsn, new_files_lsn);
 
   if (err != DB_SUCCESS) {
     return srv_init_abort(err);
@@ -2033,10 +2036,10 @@ dberr_t srv_start(bool create_new_db) {
       would write new redo records in the current fmt,
       and end up with file in both formats = invalid. */
 
-      recv_apply_hashed_log_recs(*log_sys,
-                                 !recv_sys->is_cloned_db && !log_upgrade);
+      err = recv_apply_hashed_log_recs(*log_sys,
+                                       !recv_sys->is_cloned_db && !log_upgrade);
 
-      if (recv_sys->found_corrupt_log) {
+      if (recv_sys->found_corrupt_log || err != DB_SUCCESS) {
         err = DB_ERROR;
         return (srv_init_abort(err));
       }
@@ -2594,10 +2597,22 @@ bool srv_shutdown_waits_for_rollback_of_recovered_transactions() {
   return (srv_force_recovery < SRV_FORCE_NO_TRX_UNDO && srv_fast_shutdown == 0);
 }
 
+static void srv_shutdown_pop_stop() {
+  while (ShannonBase::Populate::Populator::log_pop_thread_is_active()) {
+    ShannonBase::Populate::sys_pop_started.store(false);
+    os_event_set(log_sys->rapid_events[0]);
+    std::this_thread::sleep_for(
+        std::chrono::microseconds(SHUTDOWN_SLEEP_TIME_US));
+  }
+}
+
 /** Shut down all InnoDB background tasks that may look up objects in
 the data dictionary. */
 void srv_pre_dd_shutdown() {
   ut_a(srv_shutdown_state.load() == SRV_SHUTDOWN_NONE);
+
+  /*stop the pop thread.*/
+  srv_shutdown_pop_stop();
 
   /* Warn and wait if there are still some query threads alive.
   If all is correct, then all user threads should already be gone,

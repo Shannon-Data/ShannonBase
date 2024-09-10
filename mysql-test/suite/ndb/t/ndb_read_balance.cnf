@@ -1,5 +1,0 @@
-!include suite/ndb/my.cnf
-
-[cluster_config]
-IndexStatAutoCreate=0
-IndexStatAutoUpdate=0

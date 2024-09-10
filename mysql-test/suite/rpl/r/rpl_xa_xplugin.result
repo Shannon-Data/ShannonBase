@@ -1,4 +1,4 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -10,7 +10,7 @@ Starting the slave server
 RUN CHANGE REPLICATION SOURCE TO SOURCE_HOST= '127.0.0.1', SOURCE_USER= 'root'
 
 0 rows affected
-RUN START REPLICA
+RUN START SLAVE
 
 0 rows affected
 Mysqlx.Ok {
@@ -18,7 +18,7 @@ Mysqlx.Ok {
 }
 ok
 [connection master]
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 RUN USE test
 
 0 rows affected
@@ -87,16 +87,18 @@ Mysqlx.Ok {
   msg: "bye!"
 }
 ok
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 Stopping slave
-RUN STOP REPLICA;
+RUN STOP SLAVE;
 
 0 rows affected
+Warnings generated:
+WARNING | 1287 | 'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 Mysqlx.Ok {
   msg: "bye!"
 }
 ok
 [connection master]
 [connection slave]
-include/rpl/start_replica.inc
-include/rpl/deinit.inc
+include/start_slave.inc
+include/rpl_end.inc

@@ -1,16 +1,15 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -43,10 +42,10 @@ enum enum_timer_state { TIMER_SET = false, TIMER_EXPIRED = true };
 static my_thread_handle timer_notify_thread;
 
 // IO completion port handle
-HANDLE io_compl_port = nullptr;
+HANDLE io_compl_port = 0;
 
 // Timer queue handle
-HANDLE timer_queue = nullptr;
+HANDLE timer_queue = 0;
 
 /**
   Callback function registered to execute on timer expiration.
@@ -61,9 +60,9 @@ static void CALLBACK timer_callback_function(PVOID timer_data,
                                              BOOLEAN timer_or_wait_fired
                                              [[maybe_unused]]) {
   my_timer_t *timer = (my_timer_t *)timer_data;
-  assert(timer != nullptr);
+  assert(timer != NULL);
   timer->id.timer_state = TIMER_EXPIRED;
-  PostQueuedCompletionStatus(io_compl_port, 0, (ULONG_PTR)timer, nullptr);
+  PostQueuedCompletionStatus(io_compl_port, 0, (ULONG_PTR)timer, 0);
 }
 
 /**
@@ -91,7 +90,7 @@ static void *timer_notify_thread_func(void *arg [[maybe_unused]]) {
 
   my_thread_end();
 
-  return nullptr;
+  return NULL;
 }
 
 /**
@@ -108,15 +107,15 @@ static int delete_timer(my_timer_t *timer, int *state) {
   int ret_val;
   int retry_count = 3;
 
-  assert(timer != nullptr);
-  assert(timer_queue != nullptr);
+  assert(timer != 0);
+  assert(timer_queue != 0);
 
-  if (state != nullptr) *state = 0;
+  if (state != NULL) *state = 0;
 
   if (timer->id.timer_handle) {
     do {
       ret_val =
-          DeleteTimerQueueTimer(timer_queue, timer->id.timer_handle, nullptr);
+          DeleteTimerQueueTimer(timer_queue, timer->id.timer_handle, NULL);
 
       if (ret_val != 0) {
         /**
@@ -170,10 +169,9 @@ static int delete_timer(my_timer_t *timer, int *state) {
           Setting state to 1(non-signaled) if timer_state is not set to
           "TIMER_EXPIRED"
         */
-        if (timer->id.timer_state != TIMER_EXPIRED && state != nullptr)
-          *state = 1;
+        if (timer->id.timer_state != TIMER_EXPIRED && state != NULL) *state = 1;
 
-        timer->id.timer_handle = nullptr;
+        timer->id.timer_handle = 0;
       } else if (GetLastError() == ERROR_IO_PENDING) {
         /**
           Timer is expired and timer callback function execution is not
@@ -185,7 +183,7 @@ static int delete_timer(my_timer_t *timer, int *state) {
                 Currently we are not accessing timer->id.timer_state
                 here so not using any synchronization mechanism.
         */
-        timer->id.timer_handle = nullptr;
+        timer->id.timer_handle = 0;
         ret_val = 1;
       } else {
         /**
@@ -218,15 +216,15 @@ int my_timer_initialize(void) {
   }
 
   // Create IO completion port.
-  io_compl_port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
+  io_compl_port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, 0, 0, 0);
   if (!io_compl_port) {
     my_message_local(ERROR_LEVEL, EE_FAILED_TO_CREATE_IO_COMPLETION_PORT,
                      errno);
     goto err;
   }
 
-  if (mysql_thread_create(key_thread_timer_notifier, &timer_notify_thread,
-                          nullptr, timer_notify_thread_func, nullptr)) {
+  if (mysql_thread_create(key_thread_timer_notifier, &timer_notify_thread, 0,
+                          timer_notify_thread_func, 0)) {
     my_message_local(ERROR_LEVEL, EE_FAILED_TO_START_TIMER_NOTIFY_THREAD,
                      errno);
     goto err;
@@ -236,13 +234,13 @@ int my_timer_initialize(void) {
 
 err:
   if (timer_queue) {
-    DeleteTimerQueueEx(timer_queue, nullptr);
-    timer_queue = nullptr;
+    DeleteTimerQueueEx(timer_queue, NULL);
+    timer_queue = 0;
   }
 
   if (io_compl_port) {
     CloseHandle(io_compl_port);
-    io_compl_port = nullptr;
+    io_compl_port = 0;
   }
 
   return -1;
@@ -253,21 +251,21 @@ err:
 */
 void my_timer_deinitialize() {
   if (timer_queue) {
-    DeleteTimerQueueEx(timer_queue, nullptr);
-    timer_queue = nullptr;
+    DeleteTimerQueueEx(timer_queue, NULL);
+    timer_queue = 0;
   }
 
   if (io_compl_port) {
     CloseHandle(io_compl_port);
-    io_compl_port = nullptr;
+    io_compl_port = 0;
   }
 
-  my_thread_join(&timer_notify_thread, nullptr);
+  my_thread_join(&timer_notify_thread, NULL);
 }
 
 int my_timer_create(my_timer_t *timer) {
-  assert(timer_queue != nullptr);
-  timer->id.timer_handle = nullptr;
+  assert(timer_queue != 0);
+  timer->id.timer_handle = 0;
   return 0;
 }
 
@@ -281,15 +279,15 @@ int my_timer_create(my_timer_t *timer) {
           On error, -1.
 */
 int my_timer_set(my_timer_t *timer, unsigned long time) {
-  assert(timer != nullptr);
-  assert(timer_queue != nullptr);
+  assert(timer != NULL);
+  assert(timer_queue != 0);
 
   /**
     If timer set previously is expired then it will not be
     removed from the timer queue. Removing it before creating
     a new timer queue timer.
   */
-  if (timer->id.timer_handle != nullptr) my_timer_delete(timer);
+  if (timer->id.timer_handle != 0) my_timer_delete(timer);
 
   timer->id.timer_state = TIMER_SET;
 
@@ -312,7 +310,7 @@ int my_timer_set(my_timer_t *timer, unsigned long time) {
           On error,  -1.
 */
 int my_timer_cancel(my_timer_t *timer, int *state) {
-  assert(state != nullptr);
+  assert(state != NULL);
 
   return delete_timer(timer, state);
 }
@@ -322,5 +320,5 @@ int my_timer_cancel(my_timer_t *timer, int *state) {
 
   @param  timer   Timer Object.
 */
-void my_timer_delete(my_timer_t *timer) { delete_timer(timer, nullptr); }
+void my_timer_delete(my_timer_t *timer) { delete_timer(timer, NULL); }
 #endif

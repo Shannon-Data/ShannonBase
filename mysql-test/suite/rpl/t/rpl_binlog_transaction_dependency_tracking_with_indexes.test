@@ -1,7 +1,7 @@
 # ==== Purpose ====
 #
 # Verify that logical timestamps are generated correctly for all types
-# of indexes.
+# of indexes when binlog_transaction_dependency_tracking=WRITESET.
 #
 # The following properties are tested:
 #
@@ -89,17 +89,23 @@
 # WL#9556: Writeset-based MTS dependency tracking on master
 
 --source include/have_binlog_format_row.inc
---source include/rpl/init_source_replica.inc
+--source include/have_transaction_write_set_extraction.inc
+--source include/master-slave.inc
 
 --echo #### INITIALIZE ####
 
---source include/rpl/connection_replica.inc
---source include/rpl/stop_replica.inc
+--source include/rpl_connection_slave.inc
+--source include/stop_slave.inc
 SET @save_replica_parallel_workers= @@GLOBAL.replica_parallel_workers;
 SET @@GLOBAL.replica_parallel_workers= 4;
---source include/rpl/start_replica.inc
+--source include/start_slave.inc
 
---source include/rpl/connection_source.inc
+--source include/rpl_connection_master.inc
+SET @save_binlog_transaction_dependency_tracking = @@GLOBAL.binlog_transaction_dependency_tracking;
+
+SET GLOBAL binlog_transaction_dependency_tracking = COMMIT_ORDER;
+SET GLOBAL binlog_transaction_dependency_tracking = WRITESET;
+
 # Tell assert_logical_timestamps to save the current position so that
 # the next call will continue where the current ended.
 --let $save_binlog_position= 1
@@ -196,14 +202,14 @@ while ($explicit_pk < 2)
         CREATE TABLE t2 (a INT PRIMARY KEY);
 
         FLUSH LOGS;
-        --source include/rpl/save_binlog_file_position.inc
+        --source include/save_binlog_position.inc
 
         --echo # TRX1: independent
         INSERT INTO t1 VALUES (1, 1, 1);
 
         --echo # now t1 contains one row: (1, 1, 1)
         --let $logical_timestamps= 0 1
-        --source include/rpl/assert_logical_timestamps.inc
+        --source include/assert_logical_timestamps.inc
 
         --echo # TRX2: independent
         BEGIN;
@@ -216,7 +222,7 @@ while ($explicit_pk < 2)
         }
         if (!$pk) { --let $logical_timestamps= 1 2
         }
-        --source include/rpl/assert_logical_timestamps.inc
+        --source include/assert_logical_timestamps.inc
 
         --echo # TRX3: independent
         INSERT INTO t2 VALUES (3);
@@ -228,7 +234,7 @@ while ($explicit_pk < 2)
         }
         if (!$pk) { --let $logical_timestamps= 1 3;3 4
         }
-        --source include/rpl/assert_logical_timestamps.inc
+        --source include/assert_logical_timestamps.inc
 
         --echo # TRX5: independent
         INSERT INTO t2 VALUES (5);
@@ -244,7 +250,7 @@ while ($explicit_pk < 2)
         }
         if (!$pk) { --let $logical_timestamps= 1 5;5 6
         }
-        --source include/rpl/assert_logical_timestamps.inc
+        --source include/assert_logical_timestamps.inc
 
         if (!$nonnull)
         {
@@ -257,7 +263,7 @@ while ($explicit_pk < 2)
           }
           if (!$pk) { --let $logical_timestamps= 6 7
           }
-          --source include/rpl/assert_logical_timestamps.inc
+          --source include/assert_logical_timestamps.inc
 
           --echo # TRX8: independent
           INSERT INTO t2 VALUES (8);
@@ -269,7 +275,7 @@ while ($explicit_pk < 2)
           }
           if (!$pk) { --let $logical_timestamps= 1 8;8 9
           }
-          --source include/rpl/assert_logical_timestamps.inc
+          --source include/assert_logical_timestamps.inc
 
           --echo # TRX10: independent
           INSERT INTO t2 VALUES (10);
@@ -281,7 +287,7 @@ while ($explicit_pk < 2)
           }
           if (!$pk) { --let $logical_timestamps= 1 10;10 11
           }
-          --source include/rpl/assert_logical_timestamps.inc
+          --source include/assert_logical_timestamps.inc
 
         }
 
@@ -298,9 +304,13 @@ while ($explicit_pk < 2)
 }
 
 --echo #### CLEAN UP ####
---source include/rpl/sync_to_replica.inc
+# Value of TWSE cannot be changed when binlog_transaction_dependency_tracking!= COMMIT_ORDER
+SET @@GLOBAL.binlog_transaction_dependency_tracking= COMMIT_ORDER;
+SET @@GLOBAL.binlog_transaction_dependency_tracking= @save_binlog_transaction_dependency_tracking;
+
+--source include/sync_slave_sql_with_master.inc
 --disable_warnings
 SET @@GLOBAL.replica_parallel_workers= @save_replica_parallel_workers;
 --enable_warnings
 
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

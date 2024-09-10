@@ -1,16 +1,15 @@
-/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -30,13 +29,13 @@
 #include <atomic>
 #include <tuple>
 
+#include "libbinlogevents/include/binlog_event.h"
 #include "my_bitmap.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "my_io.h"
 #include "my_psi_config.h"
-#include "mysql/binlog/event/binlog_event.h"
 #include "mysql/components/services/bits/mysql_cond_bits.h"
 #include "mysql/components/services/bits/mysql_mutex_bits.h"
 #include "mysql/components/services/bits/psi_bits.h"
@@ -196,7 +195,7 @@ struct Slave_job_group {
   char *checkpoint_relay_log_name;
   std::atomic<int32> done;  // Flag raised by W,  read and reset by Coordinator
   ulong shifted;            // shift the last CP bitmap at receiving a new CP
-  time_t ts;                // Group's timestamp to update Seconds_behind_source
+  time_t ts;                // Group's timestamp to update Seconds_behind_master
 #ifndef NDEBUG
   bool notified{false};  // to debug group_master_log_name change notification
 #endif
@@ -535,7 +534,7 @@ class Slave_worker : public Relay_log_info {
   ulong wq_empty_waits;            // how many times got idle
   ulong events_done;               // how many events (statements) processed
   ulong groups_done;               // how many groups (transactions) processed
-  std::atomic<int> curr_jobs;      // number of active  assignments
+  volatile int curr_jobs;          // number of active  assignments
   // number of partitions allocated to the worker at point in time
   long usage_partition;
   // symmetric to rli->mts_end_group_sets_max_dbs
@@ -596,14 +595,14 @@ class Slave_worker : public Relay_log_info {
     ERROR_LEAVING = 2,  // is set by Worker
     STOP = 3,           // is set by Coordinator upon receiving STOP
     STOP_ACCEPTED =
-        4  // is set by worker upon completing job when STOP REPLICA is issued
+        4  // is set by worker upon completing job when STOP SLAVE is issued
   };
 
   /*
     This function is used to make a copy of the worker object before we
-    destroy it on STOP REPLICA. This new object is then used to report the
-    worker status until next START REPLICA following which the new worker
-    objects will be used.
+    destroy it on STOP SLAVE. This new object is then used to report the
+    worker status until next START SLAVE following which the new worker objects
+    will be used.
   */
   void copy_values_for_PFS(ulong worker_id, en_running_state running_status,
                            THD *worker_thd, const Error &last_error,
@@ -764,8 +763,8 @@ class Slave_worker : public Relay_log_info {
         gtid_next=automatic. In this scenario, there is no reason to execute a
         Format_description_log_event. So we generate an error.
       */
-      if (info_thd->variables.gtid_next.is_automatic() ||
-          info_thd->variables.gtid_next.is_undefined()) {
+      if (info_thd->variables.gtid_next.type == AUTOMATIC_GTID ||
+          info_thd->variables.gtid_next.type == UNDEFINED_GTID) {
         bool in_active_multi_stmt =
             info_thd->in_active_multi_stmt_transaction();
 
@@ -848,21 +847,19 @@ class Slave_worker : public Relay_log_info {
     transaction if it is allowed. Retry policy and logic is similar to
     single-threaded slave.
 
-    @param[in] start_relay_pos The offset of the transaction's first event.
-    @param[in] start_event_relay_log_name The name of the relay log which
+    @param[in] start_relay_number The extension number of the relay log which
                  includes the first event of the transaction.
+    @param[in] start_relay_pos The offset of the transaction's first event.
 
-    @param[in] end_relay_pos The offset of the last event it should retry.
-    @param[in] end_event_relay_log_name The name of the relay log which
+    @param[in] end_relay_number The extension number of the relay log which
                includes the last event it should retry.
+    @param[in] end_relay_pos The offset of the last event it should retry.
 
     @retval false if transaction succeeds (possibly after a number of retries)
     @retval true  if transaction fails
   */
-  bool retry_transaction(my_off_t start_relay_pos,
-                         const char *start_event_relay_log_name,
-                         my_off_t end_relay_pos,
-                         const char *end_event_relay_log_name);
+  bool retry_transaction(uint start_relay_number, my_off_t start_relay_pos,
+                         uint end_relay_number, my_off_t end_relay_pos);
 
   bool set_info_search_keys(Rpl_info_handler *to) override;
 
@@ -914,11 +911,6 @@ class Slave_worker : public Relay_log_info {
                  va_list v_args) const override
       MY_ATTRIBUTE((format(printf, 4, 0)));
 
-  void do_report(loglevel level, int err_code,
-                 const Gtid_specification *gtid_next, const char *msg,
-                 va_list v_args) const override
-      MY_ATTRIBUTE((format(printf, 5, 0)));
-
  private:
   ulong gaq_index;           // GAQ index of the current assignment
   ulonglong master_log_pos;  // event's cached log_pos for possible error report
@@ -935,18 +927,13 @@ class Slave_worker : public Relay_log_info {
   Slave_worker &operator=(const Slave_worker &info);
   Slave_worker(const Slave_worker &info);
   bool worker_sleep(ulong seconds);
-  bool read_and_apply_events(my_off_t start_relay_pos,
-                             const char *start_event_relay_log_name,
-                             my_off_t end_relay_pos,
-                             const char *end_event_relay_log_name);
+  bool read_and_apply_events(uint start_relay_number, my_off_t start_relay_pos,
+                             uint end_relay_number, my_off_t end_relay_pos);
   void assign_partition_db(Log_event *ev);
 
- public:
-  /**
-    Set the flag the signals a deadlock to false
-  */
   void reset_commit_order_deadlock();
 
+ public:
   /**
      Returns an array with the expected column numbers of the primary key
      fields of the table repository.

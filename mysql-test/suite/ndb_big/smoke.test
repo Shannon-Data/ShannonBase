@@ -3,6 +3,7 @@
 --source suite/ndb/include/ndb_info.inc
 --source suite/ndb/include/backup_restore_setup.inc
 # --call mtr.force_restart()
+set new=on;
 
 select version();
 

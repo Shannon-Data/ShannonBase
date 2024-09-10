@@ -1,61 +1,64 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
 #### INITIALIZE ####
 [connection slave]
-include/rpl/stop_replica.inc
+include/stop_slave.inc
 SET @save_replica_parallel_workers= @@GLOBAL.replica_parallel_workers;
 SET @@GLOBAL.replica_parallel_workers= 4;
-include/rpl/start_replica.inc
+include/start_slave.inc
 [connection master]
+SET @save_binlog_transaction_dependency_tracking = @@GLOBAL.binlog_transaction_dependency_tracking;
+SET GLOBAL binlog_transaction_dependency_tracking = COMMIT_ORDER;
+SET GLOBAL binlog_transaction_dependency_tracking = WRITESET;
 
 #### 0.0.0.0: WITHOUT PK, NULLABLE, NOT UNIQUE, NO INDEX ####
 
 CREATE TABLE t1 (a INT, b INT , c INT  );
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -64,46 +67,46 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT, b INT , c INT  ,  INDEX(b));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -112,46 +115,46 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT, b INT , c INT  ,  INDEX(b, c));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -160,46 +163,46 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT, b INT , c INT  , UNIQUE INDEX(b));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -208,46 +211,46 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT, b INT , c INT  , UNIQUE INDEX(b, c));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -256,30 +259,30 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT, b INT NOT NULL, c INT NOT NULL );
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -288,30 +291,30 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT, b INT NOT NULL, c INT NOT NULL ,  INDEX(b));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -320,30 +323,30 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT, b INT NOT NULL, c INT NOT NULL ,  INDEX(b, c));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -352,30 +355,30 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT, b INT NOT NULL, c INT NOT NULL , UNIQUE INDEX(b));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -384,30 +387,30 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT, b INT NOT NULL, c INT NOT NULL , UNIQUE INDEX(b, c));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -416,46 +419,46 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT , c INT  );
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -464,46 +467,46 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT , c INT  ,  INDEX(b));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -512,46 +515,46 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT , c INT  ,  INDEX(b, c));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -560,46 +563,46 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT , c INT  , UNIQUE INDEX(b));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -608,46 +611,46 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT , c INT  , UNIQUE INDEX(b, c));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # TRX9: independent (no conflict with TRX7 since multiple NULLs are allowed)
 INSERT INTO t1 VALUES (4, NULL, 2);
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # TRX11: conflict with TRX7 (not with TRX9 since multiple NULLs are allowed)
 DELETE FROM t1 WHERE a = 3;
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -656,30 +659,30 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT NOT NULL, c INT NOT NULL );
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -688,30 +691,30 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT NOT NULL, c INT NOT NULL ,  INDEX(b));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -720,30 +723,30 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT NOT NULL, c INT NOT NULL ,  INDEX(b, c));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -752,30 +755,30 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT NOT NULL, c INT NOT NULL , UNIQUE INDEX(b));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -784,33 +787,35 @@ DROP TABLE t2;
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT NOT NULL, c INT NOT NULL , UNIQUE INDEX(b, c));
 CREATE TABLE t2 (a INT PRIMARY KEY);
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
 INSERT INTO t2 VALUES (1);
 COMMIT;
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # TRX4: depends on TRX2
 DELETE FROM t1 WHERE a = 2;
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # TRX6: conflict with TRX4 if unique, else with TRX1
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 DROP TABLE t1;
 DROP TABLE t2;
 #### CLEAN UP ####
-include/rpl/sync_to_replica.inc
+SET @@GLOBAL.binlog_transaction_dependency_tracking= COMMIT_ORDER;
+SET @@GLOBAL.binlog_transaction_dependency_tracking= @save_binlog_transaction_dependency_tracking;
+include/sync_slave_sql_with_master.inc
 SET @@GLOBAL.replica_parallel_workers= @save_replica_parallel_workers;
-include/rpl/deinit.inc
+include/rpl_end.inc

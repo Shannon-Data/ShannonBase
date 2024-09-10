@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+Copyright (c) 2015, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -406,16 +405,6 @@ in dd::Table
 @return true if consistent, otherwise false */
 bool dd_instant_columns_consistent(const dd::Table &dd_table);
 #endif /* UNIV_DEBUG */
-
-/** Scan through all the keys to identify the key parts which are
-greater than the maximum size supported by the table record format.
-@param table         MySQL table definition.
-@param max_part_len  Maximum index part length allowed.
-@param visitor       Function wrapper to invoke lambda expression.
-*/
-void dd_visit_keys_with_too_long_parts(
-    const TABLE *table, const size_t max_part_len,
-    std::function<void(const KEY &)> visitor);
 
 /** Determine if a dd::Table has any INSTANT ADD column(s) in V1
 @param[in]      table   dd::Table
@@ -910,12 +899,12 @@ void dd_mdl_release(THD *thd, MDL_ticket **mdl);
 /** Returns thd associated with the trx or current_thd
 @param[in]      trx     transaction
 @return trx->mysql_thd or current_thd */
-THD *dd_thd_for_undo(const trx_t &trx);
+THD *dd_thd_for_undo(const trx_t *trx);
 
 /** Check if current undo needs a MDL or not
 @param[in]      trx     transaction
 @return true if MDL is necessary, otherwise false */
-bool dd_mdl_for_undo(const trx_t &trx);
+bool dd_mdl_for_undo(const trx_t *trx);
 
 /** Load foreign key constraint info for the dd::Table object.
 @param[out]     m_table         InnoDB table handle
@@ -1250,13 +1239,6 @@ operation.
 @retval DB_SUCCESS on success. */
 dberr_t dd_tablespace_rename(dd::Object_id dd_space_id, bool is_system_cs,
                              const char *new_space_name, const char *new_path);
-
-/** Update the data directory flag in dd::Table key strings
-@param[in]      object_id       dd tablespace object id
-@param[in]      path            path where the ibd file is located currently
-@retval DB_SUCCESS on success. */
-dberr_t dd_update_table_and_partitions_after_dir_change(dd::Object_id object_id,
-                                                        std::string path);
 
 /** Create metadata for specified tablespace, acquiring exclusive MDL first
 @param[in,out]  dd_client       data dictionary client

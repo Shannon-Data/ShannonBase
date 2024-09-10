@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,8 +31,14 @@
 #include <stdexcept>
 #include <typeinfo>
 
-#include "mysql/harness/net_ts/internet.h"
 #include "mysql/harness/stdx/attribute.h"
+
+#define SKIP_GIT_TESTS(COND)                                       \
+  if (COND) {                                                      \
+    std::cout << "[  SKIPPED ] Tests using Git repository skipped" \
+              << std::endl;                                        \
+    return;                                                        \
+  }
 
 #define HARNESS_TEST_THROW_LIKE_(statement, expected_exception,                \
                                  expected_message, fail)                       \
@@ -127,29 +132,6 @@ void init_windows_sockets();
     uint16_t port, std::chrono::milliseconds timeout = kDefaultPortReadyTimeout,
     const std::string &hostname = "127.0.0.1");
 
-/** @brief Probes if the selected unix socket is accepting the connections.
- *
- * @param socket    name of the socket to check
- * @param timeout   maximum timeout to wait for the socket
- *
- * @returns true if the selected socket accepts connections, false otherwise
- */
-[[nodiscard]] bool wait_for_socket_ready(
-    const std::string &socket,
-    std::chrono::milliseconds timeout = kDefaultPortReadyTimeout);
-
-/** @brief Probes if the selected file exists or not.
- *
- * @param file    name of the file to check
- * @param timeout maximum timeout to wait for the file to exist or not
- * @param exists  determines if we expect the file to exist or not
- *
- * @returns true if the file exists, false otherwise
- */
-[[nodiscard]] bool wait_file_exists(
-    const std::string &file, const bool exists = true,
-    std::chrono::milliseconds timeout = std::chrono::seconds(5));
-
 /** @brief Check if a given port is open / not used by any application.
  *
  * @param port TCP port that will be checked
@@ -164,22 +146,7 @@ void init_windows_sockets();
  *
  * @returns true if the selected port can be bind to, false otherwise
  */
-[[nodiscard]] stdx::expected<void, std::error_code> is_port_bindable(
-    const uint16_t port);
-
-[[nodiscard]] stdx::expected<void, std::error_code> is_port_bindable(
-    const net::ip::tcp::endpoint &ep);
-
-[[nodiscard]] stdx::expected<void, std::error_code> is_port_bindable(
-    net::io_context &io_ctx, const net::ip::tcp::endpoint &ep);
-
-/** @brief Check if a given unix socket can be bind to.
- *
- * @param socket unix socket that will be checked
- *
- * @returns true if the selected socket can be bind to, false otherwise
- */
-[[nodiscard]] bool is_socket_bindable(const std::string &socket);
+[[nodiscard]] bool is_port_bindable(const uint16_t port);
 
 /**
  * Wait until the port is not available (is used by any application).
@@ -259,6 +226,21 @@ std::string get_file_output(const std::string &file_name,
 // need to return void to be able to use ASSERT_ macros
 void connect_client_and_query_port(unsigned router_port, std::string &out_port,
                                    bool should_fail = false);
+
+/**
+ * Add a "<key>=<value>" line in a configuration file in a given config section.
+ *
+ * @param config_path configuration file path
+ * @param section_name configuration section name
+ * @param key part of configuration to be added
+ * @param value part of configuration to be added
+ *
+ * @retval true config line inserted successfully
+ * @retval false config line not inserted
+ */
+bool add_line_to_config_file(const std::string &config_path,
+                             const std::string &section_name,
+                             const std::string &key, const std::string &value);
 
 /**
  * Wait for the nth occurrence of the log_regex in the log_file with timeout

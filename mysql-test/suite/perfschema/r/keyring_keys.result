@@ -1,9 +1,5 @@
-# ----------------------------------------------------------------------
-# Setup
-# Creating local configuration file for keyring component: component_keyring_file
-# Creating manifest file for current MySQL server instance
-# Re-starting mysql server with manifest file
-# ----------------------------------------------------------------------
+# Restart server with keyring_file plugin
+# restart:--early-plugin-load=keyring_file.so --loose-keyring_file_data=MYSQL_TMP_DIR/keyring/perf_schema
 CREATE DATABASE WL_11543_PERF_SCHEMA_KEYRING;
 USE WL_11543_PERF_SCHEMA_KEYRING;
 SELECT count(*) FROM performance_schema.keyring_keys;
@@ -23,11 +19,6 @@ SOME_KEY_ID
 SOME_KEY_ID		
 # cleanup
 DROP TABLE t1;
+UNINSTALL PLUGIN keyring_file;
 DROP DATABASE WL_11543_PERF_SCHEMA_KEYRING;
-# ----------------------------------------------------------------------
-# Teardown
-# Removing manifest file for current MySQL server instance
-# Removing local keyring file for keyring component: component_keyring_file
-# Removing local configuration file for keyring component: component_keyring_file
-# Restarting server without the manifest file
-# ----------------------------------------------------------------------
+# restart:

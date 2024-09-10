@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,8 +26,6 @@
 #define ROUTING_CLASSIC_GREETING_FORWARDER_INCLUDED
 
 #include "forwarding_processor.h"
-
-#include "router_require.h"
 
 /**
  * classic protocol handshake between client<->router and router<->server.
@@ -100,15 +97,6 @@ class ServerGreetor : public ForwardingProcessor {
   void stage(Stage stage) { stage_ = stage; }
   [[nodiscard]] Stage stage() const { return stage_; }
 
-  void failed(
-      const std::optional<classic_protocol::message::server::Error> &err) {
-    failed_ = err;
-  }
-
-  std::optional<classic_protocol::message::server::Error> failed() const {
-    return failed_;
-  }
-
  private:
   stdx::expected<Result, std::error_code> server_greeting();
   stdx::expected<Result, std::error_code> server_greeting_greeting();
@@ -125,14 +113,12 @@ class ServerGreetor : public ForwardingProcessor {
   stdx::expected<Result, std::error_code> auth_ok();
   stdx::expected<Result, std::error_code> error();
 
-  void client_greeting_server_adjust_caps(ClassicProtocolState &src_protocol,
-                                          ClassicProtocolState &dst_protocol);
+  void client_greeting_server_adjust_caps(ClassicProtocolState *src_protocol,
+                                          ClassicProtocolState *dst_protocol);
 
   bool in_handshake_;
 
   Stage stage_{Stage::ServerGreeting};
-
-  std::optional<classic_protocol::message::server::Error> failed_;
 
   std::function<void(const classic_protocol::message::server::Error &err)>
       on_error_;
@@ -221,8 +207,6 @@ class ServerFirstAuthenticator : public ForwardingProcessor {
     FinalResponse,
     AuthOk,
     AuthError,
-    FetchUserAttrs,
-    FetchUserAttrsDone,
 
     Error,
     Ok,
@@ -232,15 +216,6 @@ class ServerFirstAuthenticator : public ForwardingProcessor {
 
   void stage(Stage stage) { stage_ = stage; }
   [[nodiscard]] Stage stage() const { return stage_; }
-
-  void failed(
-      const std::optional<classic_protocol::message::server::Error> &err) {
-    failed_ = err;
-  }
-
-  std::optional<classic_protocol::message::server::Error> failed() const {
-    return failed_;
-  }
 
  private:
   stdx::expected<Result, std::error_code> client_greeting();
@@ -255,20 +230,14 @@ class ServerFirstAuthenticator : public ForwardingProcessor {
   stdx::expected<Result, std::error_code> final_response();
   stdx::expected<Result, std::error_code> auth_error();
   stdx::expected<Result, std::error_code> auth_ok();
-  stdx::expected<Result, std::error_code> fetch_user_attrs();
-  stdx::expected<Result, std::error_code> fetch_user_attrs_done();
 
-  void client_greeting_server_adjust_caps(ClassicProtocolState &rc_protocol,
-                                          ClassicProtocolState &st_protocol);
+  void client_greeting_server_adjust_caps(ClassicProtocolState *src_protocol,
+                                          ClassicProtocolState *dst_protocol);
 
   size_t client_last_recv_buf_size_{};
   size_t client_last_send_buf_size_{};
   size_t server_last_recv_buf_size_{};
   size_t server_last_send_buf_size_{};
-
-  std::optional<classic_protocol::message::server::Error> failed_;
-
-  RouterRequireFetcher::Result required_connection_attributes_fetcher_result_;
 
   Stage stage_{Stage::ClientGreeting};
 

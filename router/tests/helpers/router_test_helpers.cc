@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -59,13 +58,11 @@
 #include "mysql/harness/net_ts.h"
 #include "mysql/harness/net_ts/impl/socket.h"
 #include "mysql/harness/net_ts/impl/socket_error.h"
-#include "mysql/harness/net_ts/internet.h"
 #include "mysql/harness/net_ts/io_context.h"
 #include "mysql/harness/net_ts/socket.h"
 #include "mysql/harness/stdx/filesystem.h"
 #include "mysqlrouter/mysql_session.h"
 #include "mysqlrouter/utils.h"
-#include "scope_guard.h"
 #include "test/temp_directory.h"
 
 using mysql_harness::Path;
@@ -221,70 +218,29 @@ bool wait_for_port_ready(uint16_t port, std::chrono::milliseconds timeout,
   return status >= 0;
 }
 
-bool wait_for_socket_ready(const std::string &socket,
-                           std::chrono::milliseconds timeout) {
-  const auto sock = ::socket(AF_UNIX, SOCK_STREAM, 0);
-  if (sock < 0) {
-    throw std::system_error(net::impl::socket::last_error_code(),
-                            "wait_for_socket_ready(): socket() failed");
-  }
-
-  struct sockaddr_un endpoint_sock;
-
-  endpoint_sock.sun_family = AF_UNIX;
-  strcpy(endpoint_sock.sun_path, socket.c_str());
-  const auto len =
-      strlen(endpoint_sock.sun_path) + sizeof(endpoint_sock.sun_family);
-
-  auto step_ms = 10ms;
-  // Valgrind needs way more time
-  if (getenv("WITH_VALGRIND")) {
-    timeout *= 10;
-    step_ms *= 10;
-  }
-
-  const auto started = std::chrono::steady_clock::now();
-  int status = 0;
-  do {
-    status = connect(sock, (struct sockaddr *)&endpoint_sock, len);
-
-    if (status < 0) {
-      const auto step = std::min(timeout, step_ms);
-      std::this_thread::sleep_for(std::chrono::milliseconds(step));
-      timeout -= step;
-    }
-  } while (status < 0 && timeout > std::chrono::steady_clock::now() - started);
-
-  return status >= 0;
-}
-
-stdx::expected<void, std::error_code> is_port_bindable(const uint16_t port) {
-  return is_port_bindable(
-      net::ip::tcp::endpoint(net::ip::address_v4::loopback(), port));
-}
-
-stdx::expected<void, std::error_code> is_port_bindable(
-    const net::ip::tcp::endpoint &ep) {
+bool is_port_bindable(const uint16_t port) {
   net::io_context io_ctx;
-
-  return is_port_bindable(io_ctx, ep);
-}
-
-stdx::expected<void, std::error_code> is_port_bindable(
-    net::io_context &io_ctx, const net::ip::tcp::endpoint &ep) {
   net::ip::tcp::acceptor acceptor(io_ctx);
 
+  net::ip::tcp::resolver resolver(io_ctx);
+  const auto &resolve_res = resolver.resolve("127.0.0.1", std::to_string(port));
+  if (!resolve_res) {
+    throw std::runtime_error(std::string("resolve failed: ") +
+                             resolve_res.error().message());
+  }
+
   acceptor.set_option(net::socket_base::reuse_address(true));
-  auto open_res = acceptor.open(ep.protocol());
-  if (!open_res) return stdx::unexpected(open_res.error());
+  const auto &open_res =
+      acceptor.open(resolve_res->begin()->endpoint().protocol());
+  if (!open_res) return false;
 
-  auto bind_res = acceptor.bind(ep);
-  if (!bind_res) return stdx::unexpected(bind_res.error());
+  const auto &bind_res = acceptor.bind(resolve_res->begin()->endpoint());
+  if (!bind_res) return false;
 
-  auto listen_res = acceptor.listen(128);
-  if (!listen_res) return stdx::unexpected(listen_res.error());
+  const auto &listen_res = acceptor.listen(128);
+  if (!listen_res) return false;
 
-  return {};
+  return true;
 }
 
 bool is_port_unused(const uint16_t port) {
@@ -305,7 +261,7 @@ bool is_port_unused(const uint16_t port) {
   if (std::system(cmd.c_str()) != 0) {
     // netstat command failed, do the check by trying to bind to the port
     // instead
-    return !!is_port_bindable(port);
+    return is_port_bindable(port);
   }
 
   std::ifstream file{filename};
@@ -378,55 +334,6 @@ void init_keyring(std::map<std::string, std::string> &default_section,
   // add relevant config settings to [DEFAULT] section
   default_section["keyring_path"] = keyring_file;
   default_section["master_key_path"] = masterkey_file;
-}
-
-bool wait_file_exists(const std::string &file, const bool exists,
-                      std::chrono::milliseconds timeout) {
-  if (getenv("WITH_VALGRIND")) {
-    timeout *= 10;
-  }
-
-  const auto MSEC_STEP = 20ms;
-  bool found = false;
-  using clock_type = std::chrono::steady_clock;
-  const auto end = clock_type::now() + timeout;
-  do {
-    found = mysql_harness::Path(file).exists();
-    if (found != exists) {
-      auto step = std::min(timeout, MSEC_STEP);
-      std::this_thread::sleep_for(step);
-    }
-  } while (found != exists && clock_type::now() < end);
-
-  return found;
-}
-
-bool is_socket_bindable(const std::string &socket) {
-  net::io_context io_ctx;
-  local::stream_protocol::acceptor sock(io_ctx);
-  sock.set_option(net::socket_base::reuse_address(true));
-
-  const auto open_res = sock.open();
-  if (!open_res) {
-    return false;
-  }
-
-  local::stream_protocol::endpoint ep(socket);
-  const auto bind_res = sock.bind(ep);
-  if (!bind_res) {
-    return false;
-  }
-
-  Scope_guard on_exit([&socket]() { unlink(socket.c_str()); });
-
-  const auto listen_res = sock.listen(128);
-  if (!listen_res) {
-    return false;
-  }
-
-  sock.cancel();
-
-  return true;
 }
 
 namespace {
@@ -533,6 +440,34 @@ std::string get_file_output(const std::string &file_name,
   return result;
 }
 
+bool add_line_to_config_file(const std::string &config_path,
+                             const std::string &section_name,
+                             const std::string &key, const std::string &value) {
+  std::ifstream config_stream{config_path};
+  if (!config_stream) return false;
+
+  std::vector<std::string> config;
+  std::string line;
+  bool found{false};
+  while (std::getline(config_stream, line)) {
+    config.push_back(line);
+    if (line == "[" + section_name + "]") {
+      config.push_back(key + "=" + value);
+      found = true;
+    }
+  }
+  config_stream.close();
+  if (!found) return false;
+
+  std::ofstream out_stream{config_path};
+  if (!out_stream) return false;
+
+  std::copy(std::begin(config), std::end(config),
+            std::ostream_iterator<std::string>(out_stream, "\n"));
+  out_stream.close();
+  return true;
+}
+
 void connect_client_and_query_port(unsigned router_port, std::string &out_port,
                                    bool should_fail) {
   using mysqlrouter::MySQLSession;
@@ -585,11 +520,6 @@ static std::optional<std::string> wait_log_line(
 
     unsigned current_occurence = 0;
     for (std::string line; std::getline(ss, line);) {
-      // NOTE: when the Router queries are logged some of them contain quite
-      // large JSON documents, which leads to very slow regex matching on those
-      // This is the optimization for that: we just ignore the long lines
-      // searching for the pattern.
-      if (line.length() > 1024) continue;
       if (pattern_found(line, log_regex)) {
         current_occurence++;
         if (current_occurence == n_occurence) return {line};

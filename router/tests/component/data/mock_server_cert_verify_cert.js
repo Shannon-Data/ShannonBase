@@ -1,8 +1,8 @@
 ({
   handshake: {
     auth: {
-      username: 'username',
-      password: 'password',
+      username: 'someuser',
+      password: 'somepass',
       certificate: {},
     }
   },

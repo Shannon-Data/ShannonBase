@@ -7,6 +7,8 @@
 #   format - explain format: 'json' for json, or traditional otherwise
 #   point  - syncing point
 
+--disable_reconnect
+
 connection cq;
 --disable_result_log
 --disable_query_log
@@ -38,3 +40,6 @@ reap;
 SET DEBUG_SYNC= 'RESET';
 --enable_query_log
 --enable_result_log
+
+--enable_reconnect
+

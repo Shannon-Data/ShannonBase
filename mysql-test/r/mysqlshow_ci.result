@@ -150,6 +150,7 @@ Database: information_schema
 | TABLE_PRIVILEGES                      |
 | TABLES                                |
 | TABLES_EXTENSIONS                     |
+| TABLESPACES                           |
 | TABLESPACES_EXTENSIONS                |
 | TRIGGERS                              |
 | USER_ATTRIBUTES                       |
@@ -233,6 +234,7 @@ Database: INFORMATION_SCHEMA
 | TABLE_PRIVILEGES                      |
 | TABLES                                |
 | TABLES_EXTENSIONS                     |
+| TABLESPACES                           |
 | TABLESPACES_EXTENSIONS                |
 | TRIGGERS                              |
 | USER_ATTRIBUTES                       |

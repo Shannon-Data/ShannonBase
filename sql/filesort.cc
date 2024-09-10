@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.*/
 
 /**
   @file sql/filesort.cc
@@ -73,7 +74,6 @@
 #include "mysqld_error.h"
 #include "priority_queue.h"
 #include "sql-common/json_dom.h"  // Json_wrapper
-#include "sql-common/my_decimal.h"
 #include "sql/auth/sql_security_ctx.h"
 #include "sql/bounded_queue.h"
 #include "sql/cmp_varlen_keys.h"
@@ -90,6 +90,7 @@
 #include "sql/key_spec.h"
 #include "sql/malloc_allocator.h"
 #include "sql/merge_many_buff.h"
+#include "sql/my_decimal.h"
 #include "sql/mysqld.h"  // mysql_tmpdir
 #include "sql/opt_costmodel.h"
 #include "sql/opt_trace.h"
@@ -664,13 +665,18 @@ Filesort::Filesort(THD *thd, Mem_root_array<TABLE *> tables_arg,
                    bool unwrap_rollup)
     : m_thd(thd),
       tables(std::move(tables_arg)),
+      m_order(order),
       keep_buffers(keep_buffers_arg),
       limit(limit_arg),
       sortorder(nullptr),
       using_pq(false),
       m_remove_duplicates(remove_duplicates),
       m_force_sort_rowids(force_sort_rowids),
-      m_sort_order_length(make_sortorder(order, unwrap_rollup)) {}
+      m_sort_order_length(0) {
+      if (order) {
+        m_sort_order_length = make_sortorder(order, unwrap_rollup);
+      }
+}
 
 uint Filesort::make_sortorder(ORDER *order, bool unwrap_rollup) {
   uint count;
@@ -748,14 +754,19 @@ static void dbug_print_record(TABLE *table, bool print_rowid) {
   DBUG_LOCK_FILE;
 
   fprintf(DBUG_FILE, "record (");
-  for (pfield = table->field; *pfield; pfield++)
+  for (pfield = table->field; *pfield; pfield++) {
+    //skip ghost column.
+    if ((*pfield)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     fprintf(DBUG_FILE, "%s%s", (*pfield)->field_name, (pfield[1]) ? ", " : "");
+  }
+
   fprintf(DBUG_FILE, ") = ");
 
   fprintf(DBUG_FILE, "(");
   for (pfield = table->field; *pfield; pfield++) {
     Field *field = *pfield;
-
+    //skip the ghost column.
+    if (field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (field->is_null()) {
       if (fwrite("NULL", sizeof(char), 4, DBUG_FILE) != 4) {
         goto unlock_file_and_quit;
@@ -1523,9 +1534,7 @@ uint Sort_param::make_sortkey(Bounds_checked_array<uchar> dst,
         if (static_cast<size_t>(to_end - to) < addonf.max_length) {
           return UINT_MAX;
         }
-        if (field->table->has_null_row()) {
-          assert(field->table->is_nullable());
-        } else if (addonf.null_bit && field->is_null()) {
+        if (addonf.null_bit && field->is_null()) {
           nulls[addonf.null_offset] |= addonf.null_bit;
         } else {
           uchar *ptr [[maybe_unused]] =
@@ -2203,6 +2212,8 @@ bool SortWillBeOnRowId(const TABLE *table) {
 
   for (Field **pfield = table->field; *pfield != nullptr; ++pfield) {
     Field *field = *pfield;
+    //skip ghost column.
+    if (field && field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (!bitmap_is_set(&table->read_set_internal, field->field_index()))
       continue;
 
@@ -2292,6 +2303,8 @@ Addon_fields *Filesort::get_addon_fields(
     }
     for (Field **pfield = table->field; *pfield != nullptr; ++pfield) {
       Field *field = *pfield;
+      //skip ghost column.
+      if (field && field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       if (!bitmap_is_set(&table->read_set_internal, field->field_index()))
         continue;
 
@@ -2350,6 +2363,8 @@ Addon_fields *Filesort::get_addon_fields(
   for (const TABLE *table : tables) {
     for (Field **pfield = table->field; *pfield != nullptr; ++pfield) {
       Field *field = *pfield;
+      //skip ghost column.
+      if (field && field->type() ==MYSQL_TYPE_DB_TRX_ID) continue;
       if (!bitmap_is_set(&table->read_set_internal, field->field_index()))
         continue;
       assert(addonf != m_sort_param.addon_fields->end());

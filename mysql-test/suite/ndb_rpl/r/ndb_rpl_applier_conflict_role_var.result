@@ -1,4 +1,4 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -6,9 +6,11 @@ Note	####	Storing MySQL user name or password information in the connection meta
 show global variables like 'ndb_applier_conflict_role';
 Variable_name	Value
 ndb_applier_conflict_role	NONE
-Replica_SQL_Running = 'Yes'
-STOP REPLICA sql_thread;
-Replica_SQL_Running = 'No'
+Slave_SQL_Running = 'Yes'
+stop slave sql_thread;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
+Slave_SQL_Running = 'No'
 Show set-to-same state is ok
 set global ndb_applier_conflict_role = NONE;
 Now transition through all status, including set-to-self
@@ -60,8 +62,10 @@ ndb_applier_conflict_role	PASS
 set global ndb_applier_conflict_role = "NONE";
 Now test transitions not possible due to 
 Slave SQL thread running
-START REPLICA sql_thread;
-Replica_SQL_Running = 'Yes'
+start slave sql_thread;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
+Slave_SQL_Running = 'Yes'
 From NONE
 set global ndb_applier_conflict_role = "NONE";
 set global ndb_applier_conflict_role = "PRIMARY";
@@ -79,10 +83,14 @@ ERROR HY000: Error when executing command SET GLOBAL ndb_applier_conflict_role: 
 show global variables like 'ndb_applier_conflict_role';
 Variable_name	Value
 ndb_applier_conflict_role	NONE
-STOP REPLICA sql_thread;
+stop slave sql_thread;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 From PRIMARY
 set global ndb_applier_conflict_role = "PRIMARY";
-START REPLICA sql_thread;
+start slave sql_thread;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 set global ndb_applier_conflict_role = "PRIMARY";
 set global ndb_applier_conflict_role = "SECONDARY";
 ERROR HY000: Error when executing command SET GLOBAL ndb_applier_conflict_role: Role change from PRIMARY to SECONDARY failed : Cannot change role while Replica SQL thread is running.  Use STOP REPLICA first.
@@ -99,10 +107,14 @@ ERROR HY000: Error when executing command SET GLOBAL ndb_applier_conflict_role: 
 show global variables like 'ndb_applier_conflict_role';
 Variable_name	Value
 ndb_applier_conflict_role	PRIMARY
-STOP REPLICA sql_thread;
+stop slave sql_thread;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 From SECONDARY
 set global ndb_applier_conflict_role = "SECONDARY";
-START REPLICA sql_thread;
+start slave sql_thread;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 set global ndb_applier_conflict_role = "SECONDARY";
 set global ndb_applier_conflict_role = "PRIMARY";
 ERROR HY000: Error when executing command SET GLOBAL ndb_applier_conflict_role: Role change from SECONDARY to PRIMARY failed : Cannot change role while Replica SQL thread is running.  Use STOP REPLICA first.
@@ -119,11 +131,15 @@ ERROR HY000: Error when executing command SET GLOBAL ndb_applier_conflict_role: 
 show global variables like 'ndb_applier_conflict_role';
 Variable_name	Value
 ndb_applier_conflict_role	SECONDARY
-STOP REPLICA sql_thread;
+stop slave sql_thread;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 From PASS
 set global ndb_applier_conflict_role = "NONE";
 set global ndb_applier_conflict_role = "PASS";
-START REPLICA sql_thread;
+start slave sql_thread;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 set global ndb_applier_conflict_role = "PASS";
 set global ndb_applier_conflict_role = "PRIMARY";
 ERROR HY000: Error when executing command SET GLOBAL ndb_applier_conflict_role: Role change from PASS to PRIMARY failed : Invalid role change.
@@ -140,7 +156,9 @@ ERROR HY000: Error when executing command SET GLOBAL ndb_applier_conflict_role: 
 show global variables like 'ndb_applier_conflict_role';
 Variable_name	Value
 ndb_applier_conflict_role	PASS
-STOP REPLICA sql_thread;
+stop slave sql_thread;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 set global ndb_applier_conflict_role = "NONE";
 Test some aliases for role names
 set global ndb_applier_conflict_role = PR;
@@ -180,8 +198,10 @@ show global variables like 'ndb_applier_conflict_role';
 Variable_name	Value
 ndb_applier_conflict_role	PASS
 set global ndb_applier_conflict_role = NON;
-START REPLICA sql_thread;
-include/rpl/deinit.inc
+start slave sql_thread;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
+include/rpl_end.inc
 
 # Reboot server setting with both ndb_slave_conflict_role & ndb_applier_conflict_role variable.
 call mtr.add_suppression("mysqld startup An incident event has been written to the binary log which will stop the replicas");

@@ -1,14 +1,16 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
 Test to show that combination of Backup + Restore and
 Binlog positioning correctly recovers a slave
-STOP REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 use test;
 create table ticker (a int primary key) engine=ndb;
-reset binary logs and gtids;
+reset master;
 use test;
 create procedure tick(times int)
 begin
@@ -49,7 +51,9 @@ max(a)
 Replicate as normal
 use test;
 create table ticker (a int primary key) engine=ndb;
-START REPLICA;
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 Expect 200 entries on Slave
 select count(1) from test.ticker;
 count(1)
@@ -59,7 +63,9 @@ max(a)
 200
 Verify backup restoration is correct wrt binlog positions
 Restore backup on the slave
-STOP REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 truncate table test.ticker;
 delete from mysql.ndb_apply_status;
 select @backup_rows:=count(1) from test.ticker;
@@ -67,7 +73,9 @@ select @backup_max_val:=max(a) from test.ticker;
 select @backup_rows - @backup_max_val;
 @backup_rows - @backup_max_val
 0
-START REPLICA;
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 Expect 200 rows when backup and binlog subset combined on slave
 select count(1) from test.ticker;
 count(1)
@@ -76,10 +84,14 @@ select max(a) from test.ticker;
 max(a)
 200
 Now check Binlog apply alone
-STOP REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 truncate table test.ticker;
 delete from mysql.ndb_apply_status;
-START REPLICA;
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 select @log_rows:=count(1) from test.ticker;
 select @log_max_val:=ifnull(max(a),200) from test.ticker;
 Expect 200 when adding backup and log rows
@@ -90,7 +102,9 @@ select @log_max_val;
 @log_max_val
 200
 Restore backup on the slave
-STOP REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 truncate table test.ticker;
 delete from mysql.ndb_apply_status;
 select @backup_rows:=count(1) from test.ticker;
@@ -98,7 +112,9 @@ select @backup_max_val:=max(a) from test.ticker;
 select @backup_rows - @backup_max_val;
 @backup_rows - @backup_max_val
 0
-START REPLICA;
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 Expect 200 rows when backup and binlog subset combined on slave
 select count(1) from test.ticker;
 count(1)
@@ -107,10 +123,14 @@ select max(a) from test.ticker;
 max(a)
 200
 Now check Binlog apply alone
-STOP REPLICA;
+stop slave;
+Warnings:
+Warning	1287	'STOP SLAVE' is deprecated and will be removed in a future release. Please use STOP REPLICA instead
 truncate table test.ticker;
 delete from mysql.ndb_apply_status;
-START REPLICA;
+start slave;
+Warnings:
+Warning	1287	'START SLAVE' is deprecated and will be removed in a future release. Please use START REPLICA instead
 select @log_rows:=count(1) from test.ticker;
 select @log_max_val:=ifnull(max(a),200) from test.ticker;
 Expect 200 when adding backup and log rows
@@ -123,5 +143,5 @@ select @log_max_val;
 Cleanup
 drop procedure tick;
 drop table ticker;
-reset binary logs and gtids;
-include/rpl/deinit.inc
+reset master;
+include/rpl_end.inc

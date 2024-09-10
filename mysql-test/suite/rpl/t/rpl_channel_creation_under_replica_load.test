@@ -16,12 +16,13 @@
 #
 
 --source include/have_binlog_format_row.inc
---source include/rpl/init_source_replica.inc
+--source include/have_slave_repository_type_table.inc
+--source include/master-slave.inc
 
 --echo #
 --echo # 1. Create a table on the source and use Slap to apply load on the server
 
---source include/rpl/connection_source.inc
+--source include/rpl_connection_master.inc
 
 CREATE TABLE test.t1 (a INT NOT NULL AUTO_INCREMENT PRIMARY KEY , b INT);
 
@@ -30,7 +31,7 @@ CREATE TABLE test.t1 (a INT NOT NULL AUTO_INCREMENT PRIMARY KEY , b INT);
 --echo #
 --echo # 2. Create 20 channels, 1 per second in the replica
 
---source include/rpl/connection_replica.inc
+--source include/rpl_connection_slave.inc
 
 --let $limit=20
 
@@ -66,8 +67,8 @@ while ( $iteration <= $limit )
   --inc $iteration
 }
 
---source include/rpl/connection_source.inc
+--source include/rpl_connection_master.inc
 
 DROP TABLE test.t1;
 
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

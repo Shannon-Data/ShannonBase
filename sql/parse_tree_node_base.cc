@@ -1,16 +1,15 @@
-/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -54,10 +53,6 @@ bool Parse_context::finalize_query_expression() {
   top = top->pushdown_limit_order_by();
   select->master_query_expression()->set_query_term(top);
   if (top->validate_structure(nullptr)) return true;
-
-  // Ensure that further expressions are resolved against first query block
-  select = select->master_query_expression()->first_query_block();
-
   return false;
 }
 
@@ -163,7 +158,7 @@ std::string Show_parse_tree::get_parse_tree() {
   Json_wrapper wrapper(m_root_obj.get(), /*alias=*/true);
   StringBuffer<STRING_BUFFER_USUAL_SIZE> jsonstring;
   if (wrapper.to_pretty_string(&jsonstring, "Show_parse_tree::get_parse_tree()",
-                               JsonDepthErrorHandler)) {
+                               JsonDocumentDefaultDepthHandler)) {
     return "";
   }
   return {jsonstring.ptr(), jsonstring.length()};

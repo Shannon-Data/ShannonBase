@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -30,12 +29,14 @@
 
 #define JAM_FILE_ID 34
 
+
 class UtilLockReq {
+  
   /**
    * Receiver
    */
   friend class DbUtil;
-
+  
   /**
    * Sender
    */
@@ -43,14 +44,18 @@ class UtilLockReq {
   friend class MutexManager;
 
   friend bool printUTIL_LOCK_REQ(FILE *, const Uint32 *, Uint32, Uint16);
-
- public:
+public:
   static constexpr Uint32 SignalLength = 5;
 
-  enum RequestInfo { TryLock = 1, SharedLock = 2, Notify = 4, Granted = 8 };
+  enum RequestInfo {
+    TryLock    = 1,
+    SharedLock = 2,
+    Notify     = 4,
+    Granted    = 8
+  };
 
- public:
-  Uint32 senderData;
+public:
+  Uint32 senderData;  
   Uint32 senderRef;
   Uint32 lockId;
   Uint32 requestInfo;
@@ -58,11 +63,12 @@ class UtilLockReq {
 };
 
 class UtilLockConf {
+  
   /**
    * Receiver
    */
   friend class Dbdih;
-  friend class MutexManager;
+  friend class MutexManager;  
 
   /**
    * Sender
@@ -70,11 +76,10 @@ class UtilLockConf {
   friend class DbUtil;
 
   friend bool printUTIL_LOCK_CONF(FILE *, const Uint32 *, Uint32, Uint16);
-
- public:
+public:
   static constexpr Uint32 SignalLength = 4;
-
- public:
+  
+public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
@@ -82,32 +87,32 @@ class UtilLockConf {
 };
 
 class UtilLockRef {
+  
   /**
    * Reciver
    */
   friend class Dbdih;
   friend class MutexManager;
-
+  
   /**
    * Sender
    */
   friend class DbUtil;
-
+  
   friend bool printUTIL_LOCK_REF(FILE *, const Uint32 *, Uint32, Uint16);
-
- public:
+public:
   static constexpr Uint32 SignalLength = 5;
-
+  
   enum ErrorCode {
     OK = 0,
     NoSuchLock = 1,
     OutOfLockRecords = 2,
     DistributedLockNotSupported = 3,
     LockAlreadyHeld = 4,
-    InLockQueue = 5  // lock + notify
+    InLockQueue = 5 // lock + notify
   };
+public:
 
- public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
@@ -116,11 +121,12 @@ class UtilLockRef {
 };
 
 class UtilUnlockReq {
+  
   /**
    * Receiver
    */
   friend class DbUtil;
-
+  
   /**
    * Sender
    */
@@ -128,22 +134,22 @@ class UtilUnlockReq {
   friend class MutexManager;
 
   friend bool printUTIL_UNLOCK_REQ(FILE *, const Uint32 *, Uint32, Uint16);
-
- public:
+public:
   static constexpr Uint32 SignalLength = 3;
-
- public:
-  Uint32 senderData;
+  
+public:
+  Uint32 senderData;  
   Uint32 senderRef;
   Uint32 lockId;
 };
 
 class UtilUnlockConf {
+  
   /**
    * Receiver
    */
   friend class Dbdih;
-  friend class MutexManager;
+  friend class MutexManager;  
 
   /**
    * Sender
@@ -151,41 +157,39 @@ class UtilUnlockConf {
   friend class DbUtil;
 
   friend bool printUTIL_UNLOCK_CONF(FILE *, const Uint32 *, Uint32, Uint16);
-
- public:
+public:
   static constexpr Uint32 SignalLength = 3;
-
- public:
+  
+public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
 };
 
 class UtilUnlockRef {
+  
   /**
    * Reciver
    */
   friend class Dbdih;
   friend class MutexManager;
-
+  
   /**
    * Sender
    */
   friend class DbUtil;
-
+  
   friend bool printUTIL_UNLOCK_REF(FILE *, const Uint32 *, Uint32, Uint16);
-
- public:
+public:
   static constexpr Uint32 SignalLength = 4;
-
+  
   enum ErrorCode {
     OK = 0,
     NoSuchLock = 1,
     NotLockOwner = 2,
     NotInLockQueue = 3
   };
-
- public:
+public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
@@ -200,22 +204,21 @@ class UtilCreateLockReq {
    * Receiver
    */
   friend class DbUtil;
-
+  
   /**
    * Sender
    */
   friend class MutexManager;
-
-  friend bool printUTIL_CREATE_LOCK_REQ(FILE *, const Uint32 *, Uint32, Uint16);
-
- public:
+  
+  friend bool printUTIL_CREATE_LOCK_REQ(FILE *, const Uint32*, Uint32, Uint16);
+public:
   enum LockType {
-    Mutex = 0  // Lock with only exclusive locks
+    Mutex = 0 // Lock with only exclusive locks
   };
 
   static constexpr Uint32 SignalLength = 4;
 
- public:
+public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
@@ -227,15 +230,14 @@ class UtilCreateLockRef {
    * Sender
    */
   friend class DbUtil;
-
+  
   /**
    * Receiver
    */
   friend class MutexManager;
 
-  friend bool printUTIL_CREATE_LOCK_REF(FILE *, const Uint32 *, Uint32, Uint16);
-
- public:
+  friend bool printUTIL_CREATE_LOCK_REF(FILE *, const Uint32*, Uint32, Uint16);
+public:
   enum ErrorCode {
     OK = 0,
     OutOfLockQueueRecords = 1,
@@ -245,7 +247,7 @@ class UtilCreateLockRef {
 
   static constexpr Uint32 SignalLength = 4;
 
- public:
+public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
@@ -257,19 +259,17 @@ class UtilCreateLockConf {
    * Sender
    */
   friend class DbUtil;
-
+  
   /**
    * Receiver
    */
   friend class MutexManager;
 
-  friend bool printUTIL_CREATE_LOCK_CONF(FILE *, const Uint32 *, Uint32,
-                                         Uint16);
-
- public:
+  friend bool printUTIL_CREATE_LOCK_CONF(FILE*, const Uint32*, Uint32, Uint16);
+public:
   static constexpr Uint32 SignalLength = 3;
 
- public:
+public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
@@ -283,19 +283,17 @@ class UtilDestroyLockReq {
    * Receiver
    */
   friend class DbUtil;
-
+  
   /**
    * Sender
    */
   friend class MutexManager;
-
-  friend bool printUTIL_DESTROY_LOCK_REQ(FILE *, const Uint32 *, Uint32,
-                                         Uint16);
-
- public:
+  
+  friend bool printUTIL_DESTROY_LOCK_REQ(FILE *, const Uint32*, Uint32, Uint16);
+public:
   static constexpr Uint32 SignalLength = 4;
 
- public:
+public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
@@ -306,21 +304,23 @@ class UtilDestroyLockRef {
    * Sender
    */
   friend class DbUtil;
-
+  
   /**
    * Receiver
    */
   friend class MutexManager;
 
-  friend bool printUTIL_DESTROY_LOCK_REF(FILE *, const Uint32 *, Uint32,
-                                         Uint16);
-
- public:
-  enum ErrorCode { OK = 0, NoSuchLock = 1, NotLockOwner = 2 };
+  friend bool printUTIL_DESTROY_LOCK_REF(FILE *, const Uint32*, Uint32, Uint16);
+public:
+  enum ErrorCode {
+    OK = 0,
+    NoSuchLock = 1,
+    NotLockOwner = 2
+  };
 
   static constexpr Uint32 SignalLength = 4;
 
- public:
+public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
@@ -332,23 +332,22 @@ class UtilDestroyLockConf {
    * Sender
    */
   friend class DbUtil;
-
+  
   /**
    * Receiver
    */
   friend class MutexManager;
 
-  friend bool printUTIL_DESTROY_LOCK_CONF(FILE *, const Uint32 *, Uint32,
-                                          Uint16);
-
- public:
+  friend bool printUTIL_DESTROY_LOCK_CONF(FILE*, const Uint32*, Uint32, Uint16);
+public:
   static constexpr Uint32 SignalLength = 3;
 
- public:
+public:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 lockId;
 };
+
 
 #undef JAM_FILE_ID
 

@@ -1,0 +1,12 @@
+prefix=/workshop/tools/jerryscript/install
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libjerry-core
+Description: JerryScript: lightweight JavaScript engine (core engine library)
+URL: https://github.com/jerryscript-project/jerryscript
+Version: 
+Requires.private:  # NOTE: libjerry-port is not added as a required package
+Libs: -L${libdir} -ljerry-core
+Libs.private:  -lm
+Cflags: -I${includedir}  -flto

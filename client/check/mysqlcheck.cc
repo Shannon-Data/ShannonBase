@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2001, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2001, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,9 +28,8 @@
 #include <mysqld_error.h>
 #include <stdlib.h>
 
-#include "client/include/caching_sha2_passwordopt-vars.h"
-#include "client/include/client_priv.h"
-#include "client/include/sslopt-vars.h"
+#include "caching_sha2_passwordopt-vars.h"
+#include "client/client_priv.h"
 #include "compression.h"
 #include "my_alloc.h"
 #include "my_dbug.h"
@@ -42,6 +40,7 @@
 #include "mysql/strings/m_ctype.h"
 #include "nulls.h"
 #include "print_version.h"
+#include "sslopt-vars.h"
 #include "typelib.h"
 #include "welcome_copyright_notice.h" /* ORACLE_WELCOME_COPYRIGHT_NOTICE */
 
@@ -76,12 +75,12 @@ static const char *opt_skip_database = "";
 static uint opt_zstd_compress_level = default_zstd_compression_level;
 static char *opt_compress_algorithm = nullptr;
 #if defined(_WIN32)
-static char *shared_memory_base_name = nullptr;
+static char *shared_memory_base_name = 0;
 #endif
 static uint opt_protocol = 0;
 static char *opt_bind_addr = nullptr;
 
-#include "client/include/multi_factor_passwordopt-vars.h"
+#include "multi_factor_passwordopt-vars.h"
 
 static struct my_option my_long_options[] = {
     {"all-databases", 'A',
@@ -186,10 +185,10 @@ static struct my_option my_long_options[] = {
      nullptr, 0, nullptr},
     {"optimize", 'o', "Optimize table.", nullptr, nullptr, nullptr, GET_NO_ARG,
      NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
-#include "client/include/multi_factor_passwordopt-longopts.h"
+#include "multi_factor_passwordopt-longopts.h"
 #ifdef _WIN32
-    {"pipe", 'W', "Use named pipes to connect to server.", nullptr, nullptr,
-     nullptr, GET_NO_ARG, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
+    {"pipe", 'W', "Use named pipes to connect to server.", 0, 0, 0, GET_NO_ARG,
+     NO_ARG, 0, 0, 0, 0, 0, 0},
 #endif
     {"plugin_dir", OPT_PLUGIN_DIR, "Directory for client-side plugins.",
      &opt_plugin_dir, &opt_plugin_dir, nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0,
@@ -220,8 +219,8 @@ static struct my_option my_long_options[] = {
 #if defined(_WIN32)
     {"shared-memory-base-name", OPT_SHARED_MEMORY_BASE_NAME,
      "Base name of shared memory.", &shared_memory_base_name,
-     &shared_memory_base_name, nullptr, GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0,
-     nullptr, 0, nullptr},
+     &shared_memory_base_name, 0, GET_STR_ALLOC, REQUIRED_ARG, 0, 0, 0, 0, 0,
+     0},
 #endif
     {"silent", 's', "Print only error messages.", &opt_silent, &opt_silent,
      nullptr, GET_BOOL, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
@@ -231,8 +230,8 @@ static struct my_option my_long_options[] = {
     {"socket", 'S', "The socket file to use for connection.",
      &opt_mysql_unix_port, &opt_mysql_unix_port, nullptr, GET_STR, REQUIRED_ARG,
      0, 0, 0, nullptr, 0, nullptr},
-#include "client/include/caching_sha2_passwordopt-longopts.h"
-#include "client/include/sslopt-longopts.h"
+#include "caching_sha2_passwordopt-longopts.h"
+#include "sslopt-longopts.h"
 
     {"tables", OPT_TABLES, "Overrides option --databases (-B).", nullptr,
      nullptr, nullptr, GET_NO_ARG, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
@@ -347,7 +346,7 @@ static bool get_one_option(int optid, const struct my_option *opt,
       DBUG_PUSH(argument ? argument : "d:t:o");
       debug_check_flag = true;
       break;
-#include "client/include/sslopt-case.h"
+#include "sslopt-case.h"
 
     case OPT_TABLES:
       opt_databases = false;
@@ -495,6 +494,7 @@ static int dbConnect(char *host, char *user) {
     DBerror(&mysql_connection, "when trying to connect");
     return 1;
   }
+  mysql_connection.reconnect = true;
   return 0;
 } /* dbConnect */
 

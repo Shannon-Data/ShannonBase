@@ -1,7 +1,6 @@
 # Test clone command
 
 --source include/have_example_plugin.inc
---source include/have_log_bin.inc
 --source ../include/clone_connection_begin.inc
 --let $CLONE_DATADIR = $MYSQL_TMP_DIR/data_new
 
@@ -253,7 +252,6 @@ SELECT length(gtid_executed) from performance_schema.clone_status;
 --source include/restart_mysqld.inc
 
 DROP PROCEDURE p1;
-RESET BINARY LOGS AND GTIDS;
 
 UNINSTALL PLUGIN clone;
 

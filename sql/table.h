@@ -1,19 +1,18 @@
 #ifndef TABLE_INCLUDED
 #define TABLE_INCLUDED
 
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +21,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.*/
 
 #include <assert.h>
 #include <string.h>
@@ -31,13 +32,13 @@
 
 #include "field_types.h"
 #include "lex_string.h"
+#include "libbinlogevents/include/table_id.h"  // Table_id
 #include "map_helpers.h"
 #include "mem_root_deque.h"
 #include "my_alloc.h"
 #include "my_base.h"
 #include "my_bitmap.h"
 #include "my_compiler.h"
-#include "mysql/binlog/event/table_id.h"  // Table_id
 
 #include "my_inttypes.h"
 #include "my_sys.h"
@@ -45,7 +46,6 @@
 #include "mysql/components/services/bits/mysql_mutex_bits.h"
 #include "mysql/components/services/bits/psi_table_bits.h"
 #include "mysql/strings/m_ctype.h"
-#include "sql/auth/auth_acls.h"        // Access_bitmask
 #include "sql/dd/types/foreign_key.h"  // dd::Foreign_key::enum_rule
 #include "sql/enum_query_type.h"       // enum_query_type
 #include "sql/key.h"
@@ -62,7 +62,6 @@
 #include "sql/sql_plist.h"
 #include "sql/sql_plugin_ref.h"
 #include "sql/sql_sort.h"  // Sort_result
-#include "sql/tablesample.h"
 #include "thr_lock.h"
 #include "typelib.h"
 
@@ -290,13 +289,6 @@ struct ORDER {
   ORDER *next{nullptr};
 
   /**
-    If the query block includes non-primitive grouping, then these modifiers are
-    represented as grouping sets. The variable 'grouping_set_info' functions as
-    a bitvector, containing the grouping set details. If the 'ith' bit of the
-    variable is set, then the corresponding element is included in the 'ith'
-    grouping set. */
-  MY_BITMAP *grouping_set_info{nullptr};
-  /**
     The initial ordering expression. Usually substituted during resolving
     and must not be used during optimization and execution.
   */
@@ -402,7 +394,7 @@ struct GRANT_INFO {
 
      The set is implemented as a bitmap, with the bits defined in sql_acl.h.
    */
-  Access_bitmask privilege{0};
+  ulong privilege{0};
   /** The grant state for internal tables. */
   GRANT_INTERNAL_INFO m_internal;
 };
@@ -807,7 +799,7 @@ struct TABLE_SHARE {
   inline handlerton *db_type() const /* table_type for handler */
   {
     // assert(db_plugin);
-    return db_plugin ? plugin_data<handlerton *>(db_plugin) : nullptr;
+    return db_plugin ? plugin_data<handlerton *>(db_plugin) : NULL;
   }
   /**
     Value of ROW_FORMAT option for the table as provided by user.
@@ -855,9 +847,7 @@ struct TABLE_SHARE {
   /**
     Whether this is a temporary table that already has a UNIQUE index (removing
     duplicate rows on insert), so that the optimizer does not need to run
-    DISTINCT itself. Also used for INTERSECT and EXCEPT as a fall-back if
-    hashing fails (secondary overflow of in-memory hash table, in which case
-    we revert to de-duplication using the unique key in the output table).
+    DISTINCT itself.
   */
   bool is_distinct{false};
 
@@ -930,7 +920,7 @@ struct TABLE_SHARE {
   bool crashed{false};
   bool is_view{false};
   bool m_open_in_progress{false}; /* True: alloc'ed, false: def opened */
-  mysql::binlog::event::Table_id table_map_id; /* for row-based replication */
+  Table_id table_map_id;          /* for row-based replication */
 
   /*
     Cache for row-based replication table share checks that does not
@@ -1511,6 +1501,8 @@ struct TABLE {
   Field **gen_def_fields_ptr{nullptr};
   /// Field used by unique constraint
   Field *hash_field{nullptr};
+  /// Field used by connect by order
+  Field *connect_by_field{nullptr};  
   // ----------------------------------------------------------------------
   // The next few members are used if this (temporary) file is used solely for
   // the materialization/computation of an INTERSECT or EXCEPT set operation
@@ -1524,7 +1516,7 @@ struct TABLE {
   // we have distinct semantics, we squash duplicates. This all happens in the
   // reading step of the tmp table (TableScanIterator::Read),
   // cf. m_last_operation_is_distinct. For explanation if the logic of the set
-  // counter, see MaterializeIterator<Profiler>::MaterializeOperand.
+  // counter, see MaterializeIterator<Profiler>::MaterializeQueryBlock.
   //
 
   /// A priori unlimited. We pass this on to TableScanIterator at construction
@@ -1541,8 +1533,12 @@ struct TABLE {
   /// holding the counter used to compute INTERSECT and EXCEPT, in record[0].
   /// For EXCEPT [DISTINCT | ALL] and INTERSECT DISTINCT this is a simple 64
   /// bits counter. For INTERSECT ALL, it is subdivided into two sub counters
-  /// cf. class HalfCounter, cf. MaterializeOperand. See set_counter().
+  /// cf. class HalfCounter, cf. MaterializeQueryBlock. See set_counter().
   Field_longlong *m_set_counter{nullptr};
+
+  /// True if we have EXCEPT, else we have INTERSECT. See is_except() and
+  /// is_intersect().
+  bool m_except{false};
 
   /// If m_set_counter is set: true if last block has DISTINCT semantics,
   /// either because it is marked as such, or because we have computed this
@@ -1550,76 +1546,28 @@ struct TABLE {
   /// It will be true if any DISTINCT is given in the merged N-ary set
   /// operation. See is_distinct().
   bool m_last_operation_is_distinct{false};
-  /// If false, any de-duplication happens via an index on this table
-  /// (e.g. SELECT DISTINCT, set operation). If true, this table represents the
-  /// output of a set operation, and de-duplication happens via an in-memory
-  /// hash map, in which case we do not use any index, unless we get secondary
-  /// overflow.
-  bool m_deduplicate_with_hash_map{false};
-
- public:
-  enum Set_operator_type {
-    SOT_NONE,
-    SOT_UNION_ALL,
-    SOT_UNION_DISTINCT,
-    SOT_INTERSECT_ALL,
-    SOT_INTERSECT_DISTINCT,
-    SOT_EXCEPT_ALL,
-    SOT_EXCEPT_DISTINCT
-  };
-
- private:
-  /// Holds the set operation type
-  Set_operator_type m_set_op_type{SOT_NONE};
 
  public:
   /// Test if this tmp table stores the result of a UNION set operation or
   /// a single table.
   /// @return true if so, else false.
   bool is_union_or_table() const { return m_set_counter == nullptr; }
-
-  void set_use_hash_map(bool use_hash_map) {
-    m_deduplicate_with_hash_map = use_hash_map;
-  }
-
-  bool uses_hash_map() const { return m_deduplicate_with_hash_map; }
-
-  /// Returns the set operation type
-  Set_operator_type set_op_type() {
-    if (m_set_op_type == SOT_NONE) {
-      assert(is_union_or_table());  // EXCEPT and INTERSECT are already set up
-      m_set_op_type = is_distinct() ? SOT_UNION_DISTINCT : SOT_UNION_ALL;
-    }
-    return m_set_op_type;
-  }
-
-  bool is_intersect() const {
-    return m_set_op_type == SOT_INTERSECT_ALL ||
-           m_set_op_type == SOT_INTERSECT_DISTINCT;
-  }
-
-  bool is_except() const {
-    return m_set_op_type == SOT_EXCEPT_ALL ||
-           m_set_op_type == SOT_EXCEPT_DISTINCT;
-  }
-
+  bool is_intersect() const { return m_set_counter != nullptr && !m_except; }
+  bool is_except() const { return m_set_counter != nullptr && m_except; }
   bool is_distinct() const { return m_last_operation_is_distinct; }
   /**
     Initialize the set counter field pointer and the type of set operation
-    *other than UNION*.
+    other than UNION.
     @param set_counter the field in the materialized table that holds the
                        counter we use to compute intersect or except
-    @param except      if true, EXCEPT, else INTERSECT
-    @param distinct    if true, the set operation is DISTINCT, else ALL
+    @param is_except   if true, EXCEPT, else INTERSECT
   */
-  void set_set_op(Field_longlong *set_counter, bool except, bool distinct) {
+  void set_set_counter(Field_longlong *set_counter, bool is_except) {
     m_set_counter = set_counter;
-    m_last_operation_is_distinct = distinct;
-    assert(m_set_op_type == SOT_NONE);
-    m_set_op_type = except
-                        ? (distinct ? SOT_EXCEPT_DISTINCT : SOT_EXCEPT_ALL)
-                        : distinct ? SOT_INTERSECT_DISTINCT : SOT_INTERSECT_ALL;
+    m_except = is_except;
   }
+
+  void set_distinct(bool distinct) { m_last_operation_is_distinct = distinct; }
 
   Field_longlong *set_counter() { return m_set_counter; }
   //
@@ -2471,12 +2419,6 @@ struct TABLE {
   /**
     Find the histogram for the given field index.
 
-    @note If this is called on a TABLE object that belongs to a secondary
-    engine, it will take a round-trip through the handler in order to obtain the
-    histogram from the TABLE object associated with the primary engine. This is
-    done to avoid storing histograms on both the primary and secondary
-    TABLE_SHARE.
-
     @param field_index The index of the field we want to find a histogram for.
 
     @retval nullptr if no histogram is found.
@@ -2624,7 +2566,6 @@ struct LEX_MFA {
   LEX_CSTRING auth;
   LEX_CSTRING generated_password;
   LEX_CSTRING challenge_response;
-  LEX_CSTRING client_plugin;
   uint nth_factor;
   /*
     The following flags are indicators for the SQL syntax used while
@@ -2662,7 +2603,6 @@ struct LEX_MFA {
     auth = NULL_CSTR;
     generated_password = NULL_CSTR;
     challenge_response = NULL_CSTR;
-    client_plugin = NULL_CSTR;
     nth_factor = 1;
     uses_identified_by_clause = false;
     uses_authentication_string_clause = false;
@@ -3542,9 +3482,7 @@ class Table_ref {
 
     @param privilege   Privileges granted for this table.
   */
-  void set_privileges(Access_bitmask privilege) {
-    grant.privilege |= privilege;
-  }
+  void set_privileges(ulong privilege) { grant.privilege |= privilege; }
 
   bool save_properties();
   void restore_properties();
@@ -3585,7 +3523,6 @@ class Table_ref {
     A table that takes part in a join operation must be assigned a unique
     table number.
   */
-  uint m_tableno{0};   ///< Table number within query block
   table_map m_map{0};  ///< Table map, derived from m_tableno
   /**
      If this table or join nest is the Y in "X [LEFT] JOIN Y ON C", this
@@ -3597,6 +3534,7 @@ class Table_ref {
   bool m_is_sj_or_aj_nest{false};
 
  public:
+   uint m_tableno{0};   ///< Table number within query block
   /*
     (Valid only for semi-join nests) Bitmap of tables that are within the
     semi-join (this is different from bitmap of all nest's children because
@@ -3639,8 +3577,7 @@ class Table_ref {
   /* Index names in a "... JOIN ... USE/IGNORE INDEX ..." clause. */
   List<Index_hint> *index_hints{nullptr};
   TABLE *table{nullptr}; /* opened table */
-  mysql::binlog::event::Table_id
-      table_id{}; /* table id (from binlog) for opened table */
+  Table_id table_id{};   /* table id (from binlog) for opened table */
   /*
     Query_result for derived table to pass it from table creation to table
     filling procedure
@@ -3668,14 +3605,6 @@ class Table_ref {
     for a new (identical) one.
    */
   AccessPath *access_path_for_derived{nullptr};
-  Item *sampling_percentage{nullptr};
-
- private:
-  /// Sampling information.
-  tablesample_type sampling_type{
-      tablesample_type::UNSPECIFIED_TABLESAMPLE_TYPE};
-
-  double sampling_percentage_val{0};
 
   /**
      This field is set to non-null for derived tables and views. It points
@@ -3684,7 +3613,7 @@ class Table_ref {
      @verbatim SELECT * FROM (SELECT a FROM t1) b @endverbatim
   */
   Query_expression *derived{nullptr}; /* Query_expression of derived table */
-
+ private:
   /// If non-NULL, the CTE which this table is derived from.
   Common_table_expr *m_common_table_expr{nullptr};
   /**
@@ -3763,24 +3692,6 @@ class Table_ref {
   LEX_STRING source{nullptr, 0};       ///< source of CREATE VIEW
   LEX_STRING timestamp{nullptr, 0};    ///< GMT time stamp of last operation
   LEX_USER definer;                    ///< definer of view
-  void set_tablesample(tablesample_type sampling_type_arg,
-                       Item *sampling_percentage_arg) {
-    sampling_type = sampling_type_arg;
-    sampling_percentage = sampling_percentage_arg;
-  }
-
-  bool has_tablesample() const {
-    return sampling_type != tablesample_type::UNSPECIFIED_TABLESAMPLE_TYPE;
-  }
-
-  bool update_sampling_percentage();
-
-  double get_sampling_percentage() const;
-
-  bool validate_tablesample_clause(THD *thd);
-
-  tablesample_type get_sampling_type() const { return sampling_type; }
-
   /**
     @note: This field is currently not reliable when read from dictionary:
     If an underlying view is changed, updatable_view is not changed,
@@ -3800,9 +3711,9 @@ class Table_ref {
   ulonglong view_suid{0};   ///< view is suid (true by default)
   ulonglong with_check{0};  ///< WITH CHECK OPTION
 
- private:
   /// The view algorithm that is actually used, if this is a view.
   enum_view_algorithm effective_algorithm{VIEW_ALGORITHM_UNDEFINED};
+ private:
   Lock_descriptor m_lock_descriptor;
 
  public:
@@ -4359,7 +4270,26 @@ inline bool is_perfschema_db(const char *name) {
   return !my_strcasecmp(system_charset_info, PERFORMANCE_SCHEMA_DB_NAME.str,
                         name);
 }
-
+inline bool is_dd_schema_name(const char* name) {
+  return !my_strcasecmp(system_charset_info, MYSQL_SCHEMA_NAME.str,
+                        name);
+}
+inline bool is_dd_schema_name(const char* name, size_t len) {
+  return (MYSQL_SCHEMA_NAME.length == len &&
+          !my_strcasecmp(system_charset_info, MYSQL_SCHEMA_NAME.str,
+                         name));
+}
+inline bool is_system_db (const char* name) {
+  return (is_infoschema_db(name) ||
+          is_perfschema_db(name) ||
+          is_dd_schema_name(name));
+}
+inline bool is_system_db(const char* name, size_t len) {
+  return (is_infoschema_db(name, len) ||
+          is_perfschema_db(name, len) ||
+          is_dd_schema_name(name, len));
+}
+bool is_system_object(const char* db_name, const char* table_name);
 /**
   Check if the table belongs to the P_S, excluding setup and threads tables.
 
@@ -4380,7 +4310,9 @@ inline bool is_user_table(TABLE *table) {
   const char *name = table->s->table_name.str;
   return strncmp(name, tmp_file_prefix, tmp_file_prefix_length);
 }
-
+inline bool is_tmp_table(const char* name) {
+    return !strncmp(name, tmp_file_prefix, tmp_file_prefix_length);
+}
 bool is_simple_order(ORDER *order);
 
 uint add_pk_parts_to_sk(KEY *sk, uint sk_n, KEY *pk, uint pk_n,

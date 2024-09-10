@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -110,6 +109,12 @@ constexpr uint32_t FIL_PAGE_SPACE_ID = FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID;
 /** start of the data on the page */
 constexpr uint32_t FIL_PAGE_DATA = 38;
 
+/** this is only defined for the first page of the system tablespace: the change
+has been populated to rapid at least up to this LSN. 8 bytes, at the frist plance
+of data on page 0. it's only valid in system tablespace (0,0), whic page type is
+TRX_SYS_SPACE */
+constexpr uint32_t FIL_PAGE_FILE_RAPID_LSN = FIL_PAGE_DATA;
+
 /** File page trailer */
 /** the low 4 bytes of this are used to store the page checksum, the
 last 4 bytes should be identical to the last 4 bytes of FIL_PAGE_LSN */
@@ -143,14 +148,6 @@ struct Fil_page_header {
   /** Get the page number from the page header.
   @return the page number. */
   [[nodiscard]] page_no_t get_page_no() const noexcept;
-
-  /** Get the FIL_PAGE_PREV header value.
-  @return the previous page number. */
-  [[nodiscard]] page_no_t get_page_prev() const noexcept;
-
-  /** Get the FIL_PAGE_NEXT header value.
-  @return the next page number. */
-  [[nodiscard]] page_no_t get_page_next() const noexcept;
 
   /** Get the page type from the page header.
   @return the page type. */

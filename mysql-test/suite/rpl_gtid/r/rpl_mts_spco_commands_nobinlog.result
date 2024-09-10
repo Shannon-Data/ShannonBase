@@ -1,4 +1,4 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -16,8 +16,10 @@ Warnings:
 Warning	1287	'@@replica_parallel_type' is deprecated and will be removed in a future release.
 SET GLOBAL replica_parallel_workers= 10;
 SET GLOBAL replica_preserve_commit_order= ON;
-include/rpl/start_replica.inc
+include/start_slave.inc
 [connection master1]
+SET @save_binlog_transaction_dependency_tracking= @@global.binlog_transaction_dependency_tracking;
+SET @@global.binlog_transaction_dependency_tracking = COMMIT_ORDER;
 
 #################################################################
 # 1. Check for ANALYZE TABLE
@@ -27,7 +29,7 @@ include/rpl/start_replica.inc
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -60,8 +62,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; TRUNCATE TABLE t2;
-include/rpl/sync_to_replica.inc
-include/rpl/connect.inc [creating master]
+include/sync_slave_sql_with_master.inc
+include/rpl_connect.inc [creating master]
 
 #################################################################
 # 2. Check for REPAIR TABLE
@@ -71,7 +73,7 @@ include/rpl/connect.inc [creating master]
 
 [connection master]
 CREATE TABLE t3(a INT PRIMARY KEY)Engine=MyISAM; INSERT INTO t3 VALUES(1),(2),(3);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -104,8 +106,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; TRUNCATE TABLE t2; DROP TABLE t3;
-include/rpl/sync_to_replica.inc
-include/rpl/connect.inc [creating master]
+include/sync_slave_sql_with_master.inc
+include/rpl_connect.inc [creating master]
 
 #################################################################
 # 3. Check for OPTIMIZE TABLE
@@ -115,7 +117,7 @@ include/rpl/connect.inc [creating master]
 
 [connection master]
 CREATE TABLE t3 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t4 (c1 INT PRIMARY KEY) ENGINE = InnoDB;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -149,8 +151,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 DROP TABLE t3; DROP TABLE t4;
-include/rpl/sync_to_replica.inc
-include/rpl/connect.inc [creating master]
+include/sync_slave_sql_with_master.inc
+include/rpl_connect.inc [creating master]
 
 #################################################################
 # 4. Check for RENAME TABLE
@@ -162,7 +164,7 @@ include/rpl/connect.inc [creating master]
 
 [connection master]
 INSERT INTO t1 VALUES (10);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -195,7 +197,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 RENAME TABLE t10 to t1; TRUNCATE TABLE t1; TRUNCATE TABLE t2;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # 4.2 Check for RENAME multiple tables
 
@@ -203,7 +205,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 CREATE TABLE t3 (c1 INT PRIMARY KEY) ENGINE = InnoDB;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -236,7 +238,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 DROP TABLE t10, t2, t30;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 ####################################################################
 # 5. CREATE TABLE and CREATE TABLE IF NOT EXISTS
@@ -246,7 +248,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -279,7 +281,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 DROP TABLE t10, t20; TRUNCATE TABLE t1; TRUNCATE TABLE t2;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 ####################################################################
 # 6. DROP TABLE and DROP TABLE IF EXISTS
@@ -289,7 +291,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 CREATE TABLE t3 LIKE t1; CREATE TABLE t4 LIKE t1; CREATE TABLE t5 LIKE t1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -324,7 +326,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 ####################################################################
 # 7. Check for CREATE DATABASE and CREATE DATABASE IF NOT EXISTS
@@ -334,7 +336,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 CREATE DATABASE db1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -368,7 +370,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; TRUNCATE TABLE t2; DROP DATABASE db1; DROP DATABASE db10; DROP DATABASE db20;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 #################################################################
 # 8. Check for DROP DATABASE and DROP DATABASE IF EXISTS
@@ -378,7 +380,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 CREATE DATABASE db1; CREATE DATABASE db2;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -414,7 +416,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; TRUNCATE TABLE t2;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 #################################################################
 # 9. Check for CREATE TABLESPACE
@@ -424,7 +426,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 INSERT INTO t1 VALUES (10);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -457,7 +459,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; TRUNCATE TABLE t2; DROP TABLESPACE ts1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 #################################################################
 # 10. Check for ALTER TABLESPACE
@@ -467,7 +469,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 INSERT INTO t1 VALUES (10); CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd' Engine=InnoDB; CREATE TABLE t11 (a INT, b INT) ENGINE = InnoDB TABLESPACE=ts1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -500,7 +502,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; TRUNCATE TABLE t2; DROP TABLE t11; DROP TABLESPACE ts11;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 #################################################################
 # 11. Check for DROP TABLESPACE
@@ -510,7 +512,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 INSERT INTO t1 VALUES (10); CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd' Engine=InnoDB;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -543,7 +545,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; TRUNCATE TABLE t2;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 #################################################################
 # 12. Check for CREATE INDEX
@@ -553,7 +555,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 INSERT INTO t1 VALUES (10); CREATE TABLE t3 (col1 INT, col2 INT, INDEX func_index ((ABS(col1)))); INSERT INTO t3 VALUES(1,1);
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -586,7 +588,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; TRUNCATE TABLE t2; DROP INDEX idx1 ON t3; DROP TABLE t3;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 #################################################################
 # 13. Check for DROP INDEX
@@ -596,7 +598,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 INSERT INTO t1 VALUES (10); CREATE TABLE t3 (col1 INT, col2 INT, INDEX func_index ((ABS(col1)))); INSERT INTO t3 VALUES(1,1); CREATE INDEX idx1 ON t3 ((col1 + col2));
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -629,7 +631,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1; DROP TABLE t2, t3;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 ####################################################################
 # 13. DROP FUNCTION and DROP FUNCTION IF EXISTS
@@ -639,7 +641,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 CREATE FUNCTION func1 (param1 INT) returns CHAR(50) return 'test'; CREATE FUNCTION func2 (param1 INT) returns CHAR(50) return 'test';
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -673,7 +675,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 DROP TABLE t1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 ####################################################################
 # 14. DROP PROCEDURE and DROP PROCEDURE IF EXISTS
@@ -684,7 +686,7 @@ include/rpl/sync_to_replica.inc
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
 CREATE PROCEDURE proc_t1 (OUT param1 INT) BEGIN SELECT 'test'; END; CREATE PROCEDURE proc_t2 (OUT param1 INT) BEGIN SELECT 'test'; END//
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -718,7 +720,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 ####################################################################
 # 15. DROP VIEW and DROP VIEW IF EXISTS
@@ -728,7 +730,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 CREATE VIEW view_t1 AS SELECT * FROM t1; CREATE VIEW view_t2 AS SELECT * FROM t1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -762,7 +764,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 DROP TABLE t1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 ####################################################################
 # 16. DROP EVENT and DROP EVENT IF EXISTS
@@ -773,7 +775,7 @@ include/rpl/sync_to_replica.inc
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
 CREATE EVENT event_t1 ON SCHEDULE EVERY 1 DAY DO BEGIN select 'test'; END; CREATE EVENT event_t2 ON SCHEDULE EVERY 1 DAY DO BEGIN select 'test'; END//
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -807,7 +809,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 TRUNCATE TABLE t1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 ####################################################################
 # 17. DROP TRIGGER and DROP TRIGGER IF EXISTS
@@ -817,7 +819,7 @@ include/rpl/sync_to_replica.inc
 
 [connection master]
 CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t3 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TRIGGER trig_t1 BEFORE INSERT ON t2 FOR EACH ROW SET @sum = @sum + NEW.c1; CREATE TRIGGER trig_t2 BEFORE INSERT ON t3 FOR EACH ROW SET @sum = @sum + NEW.c1;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 # Block slave sql applier threads
 
@@ -851,18 +853,19 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;
 DROP TABLE t1; DROP TABLE t2; DROP TABLE t3;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 
 #################################################################
 # Cleanup
 #################################################################
 [connection master1]
-include/rpl/sync_to_replica.inc
-include/rpl/stop_replica.inc
+SET GLOBAL binlog_transaction_dependency_tracking=@save_binlog_transaction_dependency_tracking;
+include/sync_slave_sql_with_master.inc
+include/stop_slave.inc
 SET GLOBAL replica_parallel_type=@save_replica_parallel_type;
 Warnings:
 Warning	1287	'@@replica_parallel_type' is deprecated and will be removed in a future release.
 SET GLOBAL replica_parallel_workers=@save_replica_parallel_workers;
 SET GLOBAL replica_preserve_commit_order=@save_replica_preserve_commit_order;
-include/rpl/start_replica.inc
-include/rpl/deinit.inc
+include/start_slave.inc
+include/rpl_end.inc

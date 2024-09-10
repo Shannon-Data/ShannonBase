@@ -1,16 +1,15 @@
-/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,20 +28,20 @@
 #if defined(_MSC_VER)  // for Visual Studio only
 
 #if defined(MYSQL_LIBSTRINGS_DLL)
-#  if defined(MYSQL_LIBSTRINGS_EXPORT)
-#    define MYSQL_STRINGS_EXPORT __declspec(dllexport)
-#  else
-#    define MYSQL_STRINGS_EXPORT __declspec(dllimport)
-#  endif
-#elif defined(MYSQL_DYNAMIC_PLUGIN)
-   // Plugins will get these symbols from mysqld. All variables
-   // used by loadable plugins must be explicitly declared for import.
-#  define MYSQL_STRINGS_EXPORT __declspec(dllimport)
-#else
+   // we are here when building strings_shared.DLL
+#  define MYSQL_STRINGS_EXPORT __declspec(dllexport)
+#elif defined(MYSQL_PROJECT) && !defined(MYSQL_DYNAMIC_PLUGIN)
+   //  we are here when building the MySQL server source tree excluding plugins
 #  define MYSQL_STRINGS_EXPORT
+#else
+   // we are here when building
+   //    a) external projects referencing this file
+   // or
+   //    b) MySQL server plugins in the MySQL server tree
+#  define MYSQL_STRINGS_EXPORT __declspec(dllimport)
 #endif
 
-#else  // For platforms other than Windows
+#else  // for platforms other than Visual Studio
 
 #define MYSQL_STRINGS_EXPORT __attribute__((visibility("default")))
 

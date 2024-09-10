@@ -707,19 +707,19 @@ GROUP_CONCAT(a)	x
 2	1,2
 1	2,3
 DROP TABLE t1;
-set names utf8mb3;
+set names utf8;
 Warnings:
-Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
 create table t1
 (
-x text character set utf8mb3 not null,
+x text character set utf8 not null,
 y integer not null
 );
 Warnings:
-Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
-insert into t1 values (repeat('a', 1022), 0), (repeat(_utf8mb3 0xc3b7, 4), 0);
+Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+insert into t1 values (repeat('a', 1022), 0), (repeat(_utf8 0xc3b7, 4), 0);
 Warnings:
-Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
 set group_concat_max_len= 1022 + 10;
 select @x:=group_concat(x) from t1 group by y;
 select @@group_concat_max_len, length(@x), char_length(@x), right(@x,12), right(HEX(@x),12);
@@ -866,9 +866,9 @@ LENGTH( GROUP_CONCAT( a ) )
 SET group_concat_max_len= DEFAULT;
 DROP TABLE t1, t2, t3;
 set names latin1;
-create table t1 (id int, name varchar(20)) DEFAULT CHARSET=utf8mb3;
+create table t1 (id int, name varchar(20)) DEFAULT CHARSET=utf8;
 Warnings:
-Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
 insert into t1 (id, name) values (1, "óra");
 insert into t1 (id, name) values (2, "óra");
 select b.id, group_concat(b.name) from t1 a, t1 b group by b.id;
@@ -1374,43 +1374,3 @@ SET SESSION group_concat_max_len=default;
 # Bug#34703610: Create view with subquery assertion error
 CREATE VIEW v(c0) AS SELECT group_concat((SELECT 1), 1);
 DROP VIEW v;
-# Bug#35730982: GROUP_CONCAT results were displayed as NULL before 8.0.23
-CREATE TABLE customer (
-c_id int NOT NULL,
-c_name varchar(255) NOT NULL,
-PRIMARY KEY (c_id)
-);
-INSERT INTO customer VALUES (1,'Messi'),(2,'Pele'),(3,'Maradona');
-CREATE TABLE employee (
-seq_id bigint NOT NULL,
-c_id int NOT NULL,
-emp_id int NOT NULL,
-emp_name varchar(30) DEFAULT NULL,
-PRIMARY KEY (seq_id)
-);
-INSERT INTO employee VALUES (1,1,10,'Zico'),(2,3,30,'Ronaldo');
-SELECT mc.c_id,
-GROUP_CONCAT(e.emp_name order by e.emp_id separator ',') AS gc
-FROM customer AS mc LEFT JOIN employee AS e
-ON mc.c_id = e.c_id AND e.seq_id = 2
-WHERE mc.c_id = 2
-GROUP BY mc.c_id;
-c_id	gc
-2	NULL
-PREPARE ps FROM
-"SELECT mc.c_id,
-       GROUP_CONCAT(e.emp_name order by e.emp_id separator ',') AS gc
-FROM customer AS mc LEFT JOIN employee AS e
-     ON mc.c_id = e.c_id AND e.seq_id = ?
-WHERE mc.c_id = ?
-GROUP BY mc.c_id";
-SET @seq_id = 2;
-SET @c_id = 2;
-EXECUTE ps USING @seq_id, @c_id;
-c_id	gc
-2	NULL
-SET @c_id = 3;
-EXECUTE ps USING @seq_id, @c_id;
-c_id	gc
-3	Ronaldo
-DROP TABLE customer, employee;

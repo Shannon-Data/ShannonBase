@@ -52,8 +52,7 @@ SELECT @@GLOBAL.innodb_extend_and_initialize;
 @@GLOBAL.innodb_extend_and_initialize
 1
 # Scenario-4: Server crashes before the checkpoint
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET @@GLOBAL.INNODB_CHECKPOINT_DISABLED='ON';
 DROP TABLE IF EXISTS ttext;
 Warnings:
 Note	1051	Unknown table 'test.ttext'
@@ -86,8 +85,7 @@ SET @@GLOBAL.innodb_extend_and_initialize='OFF';
 SELECT @@GLOBAL.innodb_extend_and_initialize;
 @@GLOBAL.innodb_extend_and_initialize
 0
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET @@GLOBAL.INNODB_CHECKPOINT_DISABLED='ON';
 CREATE TABLE ttext(c1 INT, c2 TEXT);
 INSERT INTO ttext VALUES(1, REPEAT('abcdef',10000));
 INSERT INTO ttext VALUES(2, REPEAT('abcdef',10000));

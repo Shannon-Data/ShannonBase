@@ -1,16 +1,15 @@
-/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,20 +27,20 @@
 
 #include <mysql/components/my_service.h>
 #include <mysql/components/service_implementation.h>
+#include <mysql/components/services/pfs_notification.h>
 #include <mysql/plugin.h>
 #include <string.h>
 #include <atomic>
 
 #include "my_systime.h"  // my_sleep()
 #include "pfs_thread_provider.h"
-#include "sql/log.h" /* log_errlog */
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_server.h"
-#include "storage/perfschema/pfs_services.h"
 #include "template_utils.h"
 
-void pfs_get_thread_system_attrs(PFS_thread *thread,
-                                 PSI_thread_attrs *thread_attrs);
+int pfs_get_thread_system_attrs_by_id_vc(PSI_thread *thread,
+                                         ulonglong thread_id,
+                                         PSI_thread_attrs *thread_attrs);
 
 /**
   Bitmap identifiers for PSI_notification callbacks.
@@ -202,15 +201,6 @@ struct PFS_notification_registry {
         int attempts = 0;
         while ((refs & REFS_MASK)) {
           if (++attempts > max_attempts) {
-            char buffer[128];
-            int refcount = refs & REFS_MASK;
-
-            snprintf(buffer, sizeof(buffer),
-                     "pfs_unregister_notification() failed to unregister "
-                     "handle %d, refcount %d",
-                     handle, refcount);
-
-            log_errlog(ER_LOG_PRINTF_MSG, buffer);
             return 1;
           }
           my_sleep(timeout);
@@ -222,12 +212,7 @@ struct PFS_notification_registry {
       }
       node = node->m_next.load();
     }
-
-    char buffer[128];
-    snprintf(buffer, sizeof(buffer),
-             "pfs_unregister_notification() unknown handle %d", handle);
-    log_errlog(ER_LOG_PRINTF_MSG, buffer);
-    return 2;
+    return 1;
   }
 
   /**
@@ -351,9 +336,7 @@ int pfs_unregister_notification(int handle) {
   @param thread  instrumented thread
   @sa pfs_notify_thread_create
 */
-void pfs_notify_thread_create(PFS_thread *thread) {
-  assert(thread != nullptr);
-
+void pfs_notify_thread_create(PSI_thread *thread [[maybe_unused]]) {
   auto *node = pfs_notification_registry.get_first(EVENT_THREAD_CREATE);
   if (node == nullptr) {
     return;
@@ -361,7 +344,9 @@ void pfs_notify_thread_create(PFS_thread *thread) {
 
   PSI_thread_attrs thread_attrs;
 
-  pfs_get_thread_system_attrs(thread, &thread_attrs);
+  if (pfs_get_thread_system_attrs_by_id_vc(thread, 0, &thread_attrs) != 0) {
+    return;
+  }
 
   while (node != nullptr) {
     auto callback = *node->m_cb.thread_create;
@@ -378,9 +363,7 @@ void pfs_notify_thread_create(PFS_thread *thread) {
   @param thread  instrumented thread
   @sa pfs_notify_thread_destroy
 */
-void pfs_notify_thread_destroy(PFS_thread *thread) {
-  assert(thread != nullptr);
-
+void pfs_notify_thread_destroy(PSI_thread *thread [[maybe_unused]]) {
   auto *node = pfs_notification_registry.get_first(EVENT_THREAD_DESTROY);
   if (node == nullptr) {
     return;
@@ -388,7 +371,9 @@ void pfs_notify_thread_destroy(PFS_thread *thread) {
 
   PSI_thread_attrs thread_attrs;
 
-  pfs_get_thread_system_attrs(thread, &thread_attrs);
+  if (pfs_get_thread_system_attrs_by_id_vc(thread, 0, &thread_attrs) != 0) {
+    return;
+  }
 
   while (node != nullptr) {
     auto callback = *node->m_cb.thread_destroy;
@@ -404,13 +389,15 @@ void pfs_notify_thread_destroy(PFS_thread *thread) {
   @param thread  instrumented thread
   @sa PSI_v1::notify_session_connect
 */
-void pfs_notify_session_connect(PFS_thread *thread) {
-  assert(thread != nullptr);
-
+void pfs_notify_session_connect(PSI_thread *thread [[maybe_unused]]) {
 #ifndef NDEBUG
   {
-    assert(!thread->m_debug_session_notified);
-    thread->m_debug_session_notified = true;
+    auto *pfs = reinterpret_cast<PFS_thread *>(thread);
+
+    if (pfs != nullptr) {
+      assert(!pfs->m_debug_session_notified);
+      pfs->m_debug_session_notified = true;
+    }
   }
 #endif
 
@@ -421,7 +408,9 @@ void pfs_notify_session_connect(PFS_thread *thread) {
 
   PSI_thread_attrs thread_attrs;
 
-  pfs_get_thread_system_attrs(thread, &thread_attrs);
+  if (pfs_get_thread_system_attrs_by_id_vc(thread, 0, &thread_attrs) != 0) {
+    return;
+  }
 
   while (node != nullptr) {
     auto callback = *node->m_cb.session_connect;
@@ -437,14 +426,16 @@ void pfs_notify_session_connect(PFS_thread *thread) {
   @param thread  instrumented thread
   @sa PSI_v1::notify_session_disconnect
 */
-void pfs_notify_session_disconnect(PFS_thread *thread) {
-  assert(thread != nullptr);
-
+void pfs_notify_session_disconnect(PSI_thread *thread [[maybe_unused]]) {
 #ifndef NDEBUG
   {
-    // TODO: clean all callers, and enforce
-    // assert(thread->m_debug_session_notified);
-    thread->m_debug_session_notified = false;
+    auto *pfs = reinterpret_cast<PFS_thread *>(thread);
+
+    if (pfs != nullptr) {
+      // TODO: clean all callers, and enforce
+      // assert(pfs->m_debug_session_notified);
+      pfs->m_debug_session_notified = false;
+    }
   }
 #endif
 
@@ -455,7 +446,9 @@ void pfs_notify_session_disconnect(PFS_thread *thread) {
 
   PSI_thread_attrs thread_attrs;
 
-  pfs_get_thread_system_attrs(thread, &thread_attrs);
+  if (pfs_get_thread_system_attrs_by_id_vc(thread, 0, &thread_attrs) != 0) {
+    return;
+  }
 
   while (node != nullptr) {
     auto callback = *node->m_cb.session_disconnect;
@@ -471,9 +464,7 @@ void pfs_notify_session_disconnect(PFS_thread *thread) {
   @param thread  instrumented thread
   @sa PSI_v1::notify_session_change_user
 */
-void pfs_notify_session_change_user(PFS_thread *thread) {
-  assert(thread != nullptr);
-
+void pfs_notify_session_change_user(PSI_thread *thread [[maybe_unused]]) {
   auto *node = pfs_notification_registry.get_first(EVENT_SESSION_CHANGE_USER);
   if (node == nullptr) {
     return;
@@ -481,7 +472,9 @@ void pfs_notify_session_change_user(PFS_thread *thread) {
 
   PSI_thread_attrs thread_attrs;
 
-  pfs_get_thread_system_attrs(thread, &thread_attrs);
+  if (pfs_get_thread_system_attrs_by_id_vc(thread, 0, &thread_attrs) != 0) {
+    return;
+  }
 
   while (node != nullptr) {
     auto callback = *node->m_cb.session_change_user;
@@ -507,3 +500,56 @@ int impl_unregister_notification(int handle) {
 SERVICE_TYPE(pfs_notification_v3)
 SERVICE_IMPLEMENTATION(mysql_server, pfs_notification_v3) = {
     impl_register_notification, impl_unregister_notification};
+
+/**
+  Register the Notification service with the MySQL server registry.
+  @return 0 if successful, 1 otherwise
+*/
+int register_pfs_notification_service() {
+  SERVICE_TYPE(registry) *r = nullptr;
+  int result = 0;
+
+  r = mysql_plugin_registry_acquire();
+  if (!r) {
+    return 1;
+  }
+
+  const my_service<SERVICE_TYPE(registry_registration)> reg(
+      "registry_registration", r);
+
+  if (reg->register_service(
+          "pfs_notification_v3.mysql_server",
+          pointer_cast<my_h_service>(const_cast<s_mysql_pfs_notification_v3 *>(
+              &imp_mysql_server_pfs_notification_v3)))) {
+    result = 1;
+  }
+
+  mysql_plugin_registry_release(r);
+
+  return result;
+}
+
+/**
+  Unregister the Notification service.
+  @return 0 if successful, 1 otherwise
+*/
+int unregister_pfs_notification_service() {
+  SERVICE_TYPE(registry) *r = nullptr;
+  int result = 0;
+
+  r = mysql_plugin_registry_acquire();
+  if (!r) {
+    return 1;
+  }
+
+  const my_service<SERVICE_TYPE(registry_registration)> reg(
+      "registry_registration", r);
+
+  if (reg->unregister("pfs_notification_v3.mysql_server")) {
+    result = 1;
+  }
+
+  mysql_plugin_registry_release(r);
+
+  return result;
+}

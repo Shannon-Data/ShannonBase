@@ -406,6 +406,7 @@ select @cnt_t1_7;
 
 show create table t1;
 let $ndb_describe_table=t1;
+let $ndb_describe_print_exit= 2;
 source suite/ndb/include/ndb_describe_table.inc;
 
 drop table t1;

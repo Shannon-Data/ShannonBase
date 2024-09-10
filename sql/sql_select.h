@@ -1,19 +1,18 @@
 #ifndef SQL_SELECT_INCLUDED
 #define SQL_SELECT_INCLUDED
 
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +21,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /**
   @file sql/sql_select.h
@@ -32,15 +33,13 @@
 #include <sys/types.h>
 
 #include <climits>
-#include <string_view>
 
 #include "my_base.h"
 
 #include "my_inttypes.h"
 #include "my_sqlcommand.h"
 #include "my_table_map.h"
-#include "sql/field.h"  // Copy_field
-#include "sql/handler.h"
+#include "sql/field.h"         // Copy_field
 #include "sql/item_cmpfunc.h"  // Item_cond_and
 #include "sql/opt_costmodel.h"
 #include "sql/sql_bitmap.h"
@@ -85,8 +84,7 @@ class Sql_cmd_select : public Sql_cmd_dml {
 
   bool accept(THD *thd, Select_lex_visitor *visitor) override;
 
-  const MYSQL_LEX_CSTRING *eligible_secondary_storage_engine(
-      THD *thd) const override;
+  const MYSQL_LEX_CSTRING *eligible_secondary_storage_engine() const override;
 
  protected:
   bool may_use_cursor() const override { return true; }
@@ -806,7 +804,7 @@ bool check_privileges_for_join(THD *thd, mem_root_deque<Table_ref *> *tables);
 
 /// Check privileges for all columns referenced from an expression list
 bool check_privileges_for_list(THD *thd, const mem_root_deque<Item *> &items,
-                               Access_bitmask privileges);
+                               ulong privileges);
 
 /** class to copying an field/item to a key struct */
 
@@ -923,8 +921,7 @@ bool test_if_cheaper_ordering(const JOIN_TAB *tab, ORDER_with_src *order,
                               ha_rows select_limit, int *new_key,
                               int *new_key_direction, ha_rows *new_select_limit,
                               uint *new_used_key_parts = nullptr,
-                              uint *saved_best_key_parts = nullptr,
-                              double *new_read_time = nullptr);
+                              uint *saved_best_key_parts = nullptr);
 /**
   Calculate properties of ref key: key length, number of used key parts,
   dependency map, possibility of null. After calling this function
@@ -1066,9 +1063,9 @@ const handlerton *get_secondary_engine_handlerton(const LEX *lex);
   Checks if any of the tables referenced belong to an external engine.
   If an external table is found, return true, false otherwise.
 
-  @param lex the statement
+  @param query_tables the referenced tables.
 */
-bool has_external_table(const LEX *lex);
+bool has_external_table(Table_ref *query_tables);
 
 /**
   Sets the reason of failure for the statement to the external engine.
@@ -1078,24 +1075,7 @@ bool has_external_table(const LEX *lex);
 */
 void set_external_engine_fail_reason(const LEX *lex, const char *reason);
 
-/**
-  Notify plugins about an executed SELECT statement.
-
-  @param thd the current session
-  @param cmd command to be notified about
-*/
-void notify_plugins_after_select(THD *thd, const Sql_cmd *cmd);
-
-std::string_view get_secondary_engine_fail_reason(const LEX *lex);
-
-void set_fail_reason_and_raise_error(const LEX *lex, std::string_view reason);
-
-const MYSQL_LEX_CSTRING *get_eligible_secondary_engine_from(const LEX *lex);
-
-std::string_view find_secondary_engine_fail_reason(const LEX *lex);
-
-void find_and_set_offload_fail_reason(const LEX *lex);
-
-bool reads_not_secondary_columns(const LEX *lex);
-
+store_key *get_store_key(THD *thd, Item *val, table_map used_tables,
+                         table_map const_tables, const KEY_PART_INFO *key_part,
+                         uchar *key_buff, uint maybe_null);
 #endif /* SQL_SELECT_INCLUDED */

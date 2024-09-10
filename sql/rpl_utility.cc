@@ -1,16 +1,15 @@
-/* Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,7 +18,11 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
+
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+*/
 
 #include "sql/rpl_utility.h"
 
@@ -30,10 +33,10 @@
 #include <utility>
 
 #include "lex_string.h"
+#include "libbinlogevents/export/binary_log_funcs.h"
 #include "my_byteorder.h"
 #include "my_dbug.h"
 #include "my_sys.h"
-#include "mysql/binlog/event/export/binary_log_funcs.h"
 #include "mysql/components/services/log_builtins.h"
 #include "mysql/my_loglevel.h"
 #include "mysql/service_mysql_alloc.h"
@@ -45,15 +48,14 @@ struct TYPELIB;
 
 #include <algorithm>
 
+#include "libbinlogevents/include/binlog_event.h"  // checksum_crv32
 #include "m_string.h"
 #include "my_base.h"
 #include "my_bitmap.h"
-#include "mysql/binlog/event/binlog_event.h"  // checksum_crv32
 #include "mysql/components/services/log_builtins.h"
 #include "mysql/psi/psi_memory.h"
 #include "mysql/strings/m_ctype.h"
 #include "mysqld_error.h"
-#include "sql-common/my_decimal.h"
 #include "sql/changestreams/misc/replicated_columns_view_factory.h"  // get_columns_view
 #include "sql/create_field.h"
 #include "sql/dd/dd.h"          // get_dictionary
@@ -62,7 +64,8 @@ struct TYPELIB;
 #include "sql/field.h"          // Field
 #include "sql/log.h"
 #include "sql/log_event.h"  // Log_event
-#include "sql/mysqld.h"     // replica_type_conversions_options
+#include "sql/my_decimal.h"
+#include "sql/mysqld.h"  // replica_type_conversions_options
 #include "sql/psi_memory_key.h"
 #include "sql/rpl_replica.h"
 #include "sql/rpl_rli.h"    // Relay_log_info
@@ -78,7 +81,7 @@ struct TYPELIB;
 #include "template_utils.h"  // delete_container_pointers
 #include "typelib.h"
 
-using mysql::binlog::event::checksum_crc32;
+using binary_log::checksum_crc32;
 using std::max;
 using std::min;
 using std::unique_ptr;
@@ -225,6 +228,7 @@ inline bool time_cross_check(enum_field_types type1, enum_field_types type2) {
    @param[in] is_array Whether the source field is a typed array
    @param[in] rli      Relay log info (for error reporting)
    @param[in] mflags   Flags from the table map event
+   @param[in] vector_dimensionality Dimensionality of vector column
    @param[out] order_var Order between source field and target field
 
    @return @c true if conversion is possible according to the current
@@ -234,6 +238,7 @@ inline bool time_cross_check(enum_field_types type1, enum_field_types type2) {
 static bool can_convert_field_to(Field *field, enum_field_types source_type,
                                  uint metadata, bool is_array,
                                  Relay_log_info *rli, uint16 mflags,
+                                 unsigned int vector_dimensionality,
                                  int *order_var) {
   DBUG_TRACE;
 #ifndef NDEBUG
@@ -265,6 +270,12 @@ static bool can_convert_field_to(Field *field, enum_field_types source_type,
                  ("Base types are identical, but there is no metadata"));
       *order_var = 0;
       return true;
+    }
+
+    if (field->real_type() == MYSQL_TYPE_VECTOR &&
+        down_cast<Field_vector *>(field)->get_max_dimensions() !=
+            vector_dimensionality) {
+      return false;
     }
 
     DBUG_PRINT("debug",
@@ -415,6 +426,7 @@ static bool can_convert_field_to(Field *field, enum_field_types source_type,
       }
       break;
 
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_GEOMETRY:
     case MYSQL_TYPE_JSON:
     case MYSQL_TYPE_TIMESTAMP:
@@ -431,6 +443,9 @@ static bool can_convert_field_to(Field *field, enum_field_types source_type,
     case MYSQL_TYPE_TYPED_ARRAY:
     case MYSQL_TYPE_NULL:
     case MYSQL_TYPE_INVALID:
+      return false;
+    case MYSQL_TYPE_DB_TRX_ID:
+      assert(false);
       return false;
   }
   return false;  // To keep GCC happy
@@ -532,13 +547,23 @@ bool table_def::compatible_with(THD *thd, Relay_log_info *rli, TABLE *table,
       min<ulong>(fields->filtered_size(), filtered_size(replica_has_gipk));
   TABLE *tmp_table = nullptr;
 
+  auto vector_dimensionality_it = m_vector_dimensionality.begin();
+
   for (auto it = fields->begin(); it.filtered_pos() < cols_to_check; ++it) {
     Field *const field = *it;
     size_t col = it.translated_pos();
     size_t absolute_col_pos = it.absolute_pos();
     int order;
+
+    unsigned int vector_dimensionality = 0;
+    if (type(col) == MYSQL_TYPE_VECTOR &&
+        vector_dimensionality_it != m_vector_dimensionality.end()) {
+      vector_dimensionality = *vector_dimensionality_it++;
+    }
+
     if (can_convert_field_to(field, type(col), field_metadata(col),
-                             is_array(col), rli, m_flags, &order)) {
+                             is_array(col), rli, m_flags, vector_dimensionality,
+                             &order)) {
       DBUG_PRINT("debug", ("Checking column %lu -"
                            " field '%s' can be converted - order: %d",
                            static_cast<long unsigned int>(col),
@@ -580,8 +605,8 @@ bool table_def::compatible_with(THD *thd, Relay_log_info *rli, TABLE *table,
       enum loglevel report_level = INFORMATION_LEVEL;
       String source_type(source_buf, sizeof(source_buf), &my_charset_latin1);
       String target_type(target_buf, sizeof(target_buf), &my_charset_latin1);
-      show_sql_type(type(col), is_array(col), field_metadata(col),
-                    &source_type);
+      show_sql_type(type(col), is_array(col), field_metadata(col), &source_type,
+                    nullptr, vector_dimensionality);
       field->sql_type(target_type);
       if (!ignored_error_code(ER_SERVER_REPLICA_CONVERSION_FAILED)) {
         report_level = ERROR_LEVEL;
@@ -687,7 +712,7 @@ TABLE *table_def::create_conversion_table(THD *thd, Relay_log_info *rli,
                                   unsigned_flag,  // unsigned_flag
                                   0);
     field_def->charset = default_charset_info;
-    field_def->interval = nullptr;
+    field_def->interval = 0;
   }
 
   for (auto it = fields->begin(); it.filtered_pos() < cols_to_create; ++it) {
@@ -874,6 +899,7 @@ std::pair<my_off_t, std::pair<uint, bool>> read_field_metadata(
   switch (binlog_type) {
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_DOUBLE:
@@ -929,7 +955,8 @@ std::pair<my_off_t, std::pair<uint, bool>> read_field_metadata(
 PSI_memory_key key_memory_table_def_memory;
 
 table_def::table_def(unsigned char *types, ulong size, uchar *field_metadata,
-                     int metadata_size, uchar *null_bitmap, uint16 flags)
+                     int metadata_size, uchar *null_bitmap, uint16 flags,
+                     const std::vector<unsigned int> &vector_dimensionality)
     : m_size(size),
       m_type(nullptr),
       m_field_metadata_size(metadata_size),
@@ -940,7 +967,8 @@ table_def::table_def(unsigned char *types, ulong size, uchar *field_metadata,
       m_json_column_count(-1),
       m_is_array(nullptr),
       m_is_gipk_set(false),
-      m_is_gipk_on_table(false) {
+      m_is_gipk_on_table(false),
+      m_vector_dimensionality(vector_dimensionality) {
   m_memory = (uchar *)my_multi_malloc(
       key_memory_table_def_memory, MYF(MY_WME), &m_type, size,
       &m_field_metadata, size * sizeof(uint), &m_is_array, size * sizeof(bool),
@@ -1226,6 +1254,7 @@ uint Hash_slave_rows::make_hash_key(TABLE *table, MY_BITMAP *cols) {
       */
       switch (f->type()) {
         case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_VECTOR:
         case MYSQL_TYPE_VARCHAR:
         case MYSQL_TYPE_GEOMETRY:
         case MYSQL_TYPE_JSON:
@@ -1381,6 +1410,51 @@ bool is_require_row_format_violation(const THD *thd) {
   }
 
   return false;
+}
+
+// TODO: once the old syntax is removed, remove this as well.
+static const std::unordered_map<std::string, std::string> deprecated_field_map{
+    {"Replica_IO_State", "Slave_IO_State"},
+    {"Source_Host", "Master_Host"},
+    {"Source_User", "Master_User"},
+    {"Source_Port", "Master_Port"},
+    {"Source_Log_File", "Master_Log_File"},
+    {"Read_Source_Log_Pos", "Read_Master_Log_Pos"},
+    {"Relay_Source_Log_File", "Relay_Master_Log_File"},
+    {"Replica_IO_Running", "Slave_IO_Running"},
+    {"Replica_SQL_Running", "Slave_SQL_Running"},
+    {"Exec_Source_Log_Pos", "Exec_Master_Log_Pos"},
+    {"Source_SSL_Allowed", "Master_SSL_Allowed"},
+    {"Source_SSL_CA_File", "Master_SSL_CA_File"},
+    {"Source_SSL_CA_Path", "Master_SSL_CA_Path"},
+    {"Source_SSL_Cert", "Master_SSL_Cert"},
+    {"Source_SSL_Cipher", "Master_SSL_Cipher"},
+    {"Source_SSL_Key", "Master_SSL_Key"},
+    {"Seconds_Behind_Source", "Seconds_Behind_Master"},
+    {"Source_SSL_Verify_Server_Cert", "Master_SSL_Verify_Server_Cert"},
+    {"Source_Server_Id", "Master_Server_Id"},
+    {"Source_UUID", "Master_UUID"},
+    {"Source_Info_File", "Master_Info_File"},
+    {"Replica_SQL_Running_State", "Slave_SQL_Running_State"},
+    {"Source_Retry_Count", "Master_Retry_Count"},
+    {"Source_Bind", "Master_Bind"},
+    {"Source_SSL_Crl", "Master_SSL_Crl"},
+    {"Source_SSL_Crlpath", "Master_SSL_Crlpath"},
+    {"Source_TLS_Version", "Master_TLS_Version"},
+    {"Source_public_key_path", "Master_public_key_path"},
+    {"Get_Source_public_key", "Get_master_public_key"},
+    {"Server_Id", "Server_id"},
+    {"Source_Id", "Master_id"},
+    {"Replica_UUID", "Slave_UUID"}};
+
+void rename_fields_use_old_replica_source_terms(
+    THD *thd, mem_root_deque<Item *> &field_list) {
+  for (auto &item : field_list) {
+    std::string name{item->full_name()};
+    auto itr = deprecated_field_map.find(name);
+    if (itr != deprecated_field_map.end()) name = itr->second;
+    item->rename(thd->mem_strdup(name.c_str()));
+  }
 }
 
 bool is_immediate_server_gipk_ready(THD &thd) {

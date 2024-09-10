@@ -1,1 +1,0 @@
---initialize --innodb_page_size=4k --innodb-adaptive-hash-index=ON

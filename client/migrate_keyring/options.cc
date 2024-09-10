@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2021, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -52,7 +51,7 @@
 #include "utilities.h"
 
 /* TLS variables */
-#include "client/include/sslopt-vars.h"
+#include "sslopt-vars.h"
 
 namespace options {
 
@@ -101,7 +100,7 @@ char *Options::s_socket = nullptr;
 bool Options::s_tty_password = false;
 
 /* Caching sha2 password variables */
-#include "client/include/caching_sha2_passwordopt-vars.h"
+#include "caching_sha2_passwordopt-vars.h"
 
 /** Options group */
 static const char *load_default_groups[] = {"mysql_migrate_keyring", nullptr};
@@ -164,9 +163,9 @@ static struct my_option my_long_options[] = {
      nullptr, nullptr, nullptr, GET_PASSWORD, OPT_ARG, 0, 0, 0, nullptr, 0,
      nullptr},
 /* TLS options */
-#include "client/include/sslopt-longopts.h"
+#include "sslopt-longopts.h"
 /* Caching sha2 password options */
-#include "client/include/caching_sha2_passwordopt-longopts.h"
+#include "caching_sha2_passwordopt-longopts.h"
     {"verbose", 'v', "Write more.", nullptr, nullptr, nullptr, GET_NO_ARG,
      NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
     /* Must be the last one */
@@ -219,7 +218,7 @@ bool get_one_option(int optid, const struct my_option *opt, char *argument) {
         Options::s_tty_password = true;
       break;
 /* Handle TLS options */
-#include "client/include/sslopt-case.h"
+#include "sslopt-case.h"
   }
   return false;
 }
@@ -341,6 +340,7 @@ Mysql_connection::Mysql_connection(bool connect) : ok_(false), mysql(nullptr) {
   if (!mysql_real_connect(mysql, Options::s_hostname, Options::s_username,
                           Options::s_password, NullS, Options::s_port,
                           Options::s_socket, CLIENT_REMEMBER_OPTIONS)) {
+    mysql->reconnect = true;
     log_error << "Failed to connect to server. Received error: "
               << mysql_error(mysql) << std::endl;
     return;

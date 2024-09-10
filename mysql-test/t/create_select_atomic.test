@@ -113,6 +113,7 @@ CREATE TABLE t1 AS SELECT * FROM t0;
 --echo # Recover the server.
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 let $WAIT_COUNT=6000;
 --source include/wait_time_until_connected_again.inc
 
@@ -137,6 +138,7 @@ CREATE TABLE t1 AS SELECT * FROM t0;
 --echo # Recover the server.
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 let $WAIT_COUNT=6000;
 --source include/wait_time_until_connected_again.inc
 
@@ -160,6 +162,7 @@ CREATE TABLE t1 AS SELECT * FROM t0;
 --echo # Recover the server.
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 let $WAIT_COUNT=6000;
 --source include/wait_time_until_connected_again.inc
 
@@ -184,6 +187,7 @@ CREATE TABLE t1 AS SELECT * FROM t0;
 --echo # Recover the server.
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 let $WAIT_COUNT=6000;
 --source include/wait_time_until_connected_again.inc
 

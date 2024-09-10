@@ -1,16 +1,15 @@
-# Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2010, 2023, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is designed to work with certain software (including
+# This program is also distributed with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have either included with
-# the program or referenced in the documentation.
+# separately licensed software that they have included with MySQL.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -46,12 +45,13 @@ ENDIF()
 GET_FILENAME_COMPONENT(_SCRIPT_DIR ${CMAKE_CURRENT_LIST_FILE} PATH)
 INCLUDE(${_SCRIPT_DIR}/WindowsCache.cmake)
 
-# We require at least Visual Studio 2019 Update 11 (aka 16.11),
-# which has version nr 1929.
+# We require at least Visual Studio 2019 Update 9 (aka 16.9),
+# which has version nr 1928.
+# https://docs.microsoft.com/en-us/cpp/preprocessor/predefined-macros?view=msvc-160
 MESSAGE(STATUS "MSVC_VERSION is ${MSVC_VERSION}")
-IF(NOT FORCE_UNSUPPORTED_COMPILER AND MSVC_VERSION LESS 1929)
+IF(NOT FORCE_UNSUPPORTED_COMPILER AND MSVC_VERSION LESS 1928)
   MESSAGE(FATAL_ERROR
-    "Visual Studio 2019 Update 11 or newer is required!")
+    "Visual Studio 2019 Update 9 or newer is required!")
 ENDIF()
 
 # OS display name (version_compile_os etc).
@@ -99,11 +99,7 @@ IF(MSVC)
   STRING_APPEND(WIN_STL_DEBUG_ITERATORS_DOC
     "debug checks, 1 for simple checks only, 0 for disabled.")
 
-  IF(WIN32_CLANG)
-    SET(WIN_STL_DEBUG_ITERATORS 0 CACHE STRING "${WIN_STL_DEBUG_ITERATORS_DOC}")
-  ELSE()
-    SET(WIN_STL_DEBUG_ITERATORS 2 CACHE STRING "${WIN_STL_DEBUG_ITERATORS_DOC}")
-  ENDIF()
+  SET(WIN_STL_DEBUG_ITERATORS 2 CACHE STRING "${WIN_STL_DEBUG_ITERATORS_DOC}")
   SET_PROPERTY(CACHE WIN_STL_DEBUG_ITERATORS PROPERTY STRINGS 0 1 2)
 
   OPTION(LINK_STATIC_RUNTIME_LIBRARIES "Link with /MT" OFF)
@@ -111,14 +107,13 @@ IF(MSVC)
     SET(LINK_STATIC_RUNTIME_LIBRARIES ON)
   ENDIF()
 
-  # Remove the /RTC1 debug compiler option that cmake includes by default for
-  # MSVC as its significantly slows MTR testing and rarely detects bugs.
+  # Remove the /RTC1 debug compiler option that cmake includes by default for MSVC
+  # as its presence significantly slows MTR testing and rarely detects bugs.
   IF (NOT WIN_DEBUG_RTC)
     STRING(REPLACE "/RTC1"  "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
   ENDIF()
 
-  STRING_APPEND(CMAKE_CXX_FLAGS_DEBUG
-    " -D_ITERATOR_DEBUG_LEVEL=${WIN_STL_DEBUG_ITERATORS}")
+  STRING_APPEND(CMAKE_CXX_FLAGS_DEBUG " -D_ITERATOR_DEBUG_LEVEL=${WIN_STL_DEBUG_ITERATORS}")
 
   # Enable debug info also in Release build,
   # and create PDB to be able to analyze crashes.
@@ -136,20 +131,12 @@ IF(MSVC)
   #     extern C functions never throw a C++ exception.
   # - Choose debugging information:
   #     /Z7
-  #     Used for non-PGO builds, as it embeds debug information in .obj
-  #     files which makes .lib files contain their own debug information.
-  #     /Zi
-  #     Used for PGO builds (of mysqld.exe)
-  #     Produces a .pdb file containing full symbolic debugging
+  #     Produces an .obj file containing full symbolic debugging
   #     information for use with the debugger. The symbolic debugging
   #     information includes the names and types of variables, as well as
-  #     functions and line numbers.
+  #     functions and line numbers. No .pdb file is produced by the compiler.
   #     We can't use /ZI too since it's causing __LINE__ macros to be non-
   #     constant on visual studio and hence XCom stops building correctly.
-  #     We can't use /Z7 with PGO builds as that places debug information
-  #     in the .obj files which results in .lib and .exe files exceeding
-  #     file size limitsimposed by the linker and lib tools when PGO
-  #     builds are attempted.
   # - Enable explicit inline:
   #     /Ob1
   #     Expands explicitly inlined functions. By default /Ob0 is used,
@@ -158,11 +145,7 @@ IF(MSVC)
   #     30% or so. If you do want to keep inlining off, set the
   #     cmake flag WIN_DEBUG_NO_INLINE.
   FOREACH(lang C CXX)
-    IF(FPROFILE_GENERATE OR FPROFILE_USE)
-      SET(CMAKE_${lang}_FLAGS_RELEASE "${CMAKE_${lang}_FLAGS_RELEASE} /Zi")
-    ELSE()
-      SET(CMAKE_${lang}_FLAGS_RELEASE "${CMAKE_${lang}_FLAGS_RELEASE} /Z7")
-    ENDIF()
+    SET(CMAKE_${lang}_FLAGS_RELEASE "${CMAKE_${lang}_FLAGS_RELEASE} /Z7")
   ENDFOREACH()
 
   FOREACH(flag
@@ -175,12 +158,8 @@ IF(MSVC)
     IF(LINK_STATIC_RUNTIME_LIBRARIES)
       STRING(REPLACE "/MD"  "/MT" "${flag}" "${${flag}}")
     ENDIF()
-    IF(FPROFILE_GENERATE OR FPROFILE_USE)
-      STRING(REPLACE "/ZI"  "/Zi" "${flag}" "${${flag}}")
-    ELSE()
-      STRING(REPLACE "/Zi"  "/Z7" "${flag}" "${${flag}}")
-      STRING(REPLACE "/ZI"  "/Z7" "${flag}" "${${flag}}")
-    ENDIF()
+    STRING(REPLACE "/Zi"  "/Z7" "${flag}" "${${flag}}")
+    STRING(REPLACE "/ZI"  "/Z7" "${flag}" "${${flag}}")
     IF (NOT WIN_DEBUG_NO_INLINE)
       STRING(REPLACE "/Ob0"  "/Ob1" "${flag}" "${${flag}}")
     ENDIF()
@@ -190,13 +169,13 @@ IF(MSVC)
     SET("${flag}" "${${flag}} /FC")
   ENDFOREACH()
 
-  # Turn on c++20 mode explicitly so that using c++23 features is disabled.
+  # Turn on c++17 mode explicitly so that using c++20 features is disabled.
   FOREACH(flag
       CMAKE_CXX_FLAGS_MINSIZEREL
       CMAKE_CXX_FLAGS_RELEASE  CMAKE_CXX_FLAGS_RELWITHDEBINFO
       CMAKE_CXX_FLAGS_DEBUG    CMAKE_CXX_FLAGS_DEBUG_INIT
       )
-    SET("${flag}" "${${flag}} /std:c++20")
+    SET("${flag}" "${${flag}} /std:c++17")
   ENDFOREACH()
 
   OPTION(WIN_INCREMENTAL_LINK "Enable incremental linking on Windows" OFF)
@@ -241,10 +220,6 @@ IF(MSVC)
 
   # Enable stricter standards conformance when using Visual Studio
   STRING_APPEND(CMAKE_CXX_FLAGS " /permissive-")
-
-  # Set a proper value in __cplusplus
-  # See https://learn.microsoft.com/en-us/cpp/build/reference/zc-cplusplus?view=msvc-170
-  STRING_APPEND(CMAKE_CXX_FLAGS " /Zc:__cplusplus")
 ENDIF()
 
 # Always link with socket library

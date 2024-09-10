@@ -1,16 +1,15 @@
-/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,23 +32,21 @@
 #include "sql/enum_query_type.h"
 #include "sql/handler.h"
 #include "sql/mem_root_array.h"
-#include "sql/sql_array.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
 #include "sql/table.h"
-#include "sql/thr_malloc.h"
 
 /*
   Some Window-related symbols must be known to sql_lex.h which is a frequently
   included header.
   To avoid that any change to window.h causes a recompilation of the whole
-  server, those symbols go into a separate header: sql/window_lex.h
+  Server, those symbols go into this header:
 */
+#include "sql/window_lex.h"
 
-class Arg_comparator;
 class Cached_item;
-class Func_ptr;
 class Item;
+class Item_func;
 class Item_string;
 class Item_sum;
 class PT_border;
@@ -59,9 +56,6 @@ class PT_window;
 class String;
 class THD;
 class Temp_table_param;
-template <class T>
-class mem_root_deque;
-typedef Mem_root_array<Func_ptr> Func_ptr_array;
 
 /**
   Position hints for the frame buffer are saved for these kind of row
@@ -333,13 +327,6 @@ class Window {
     See #m_tmp_pos
   */
   void restore_pos(Window_retrieve_cached_row_reason reason) {
-    if (reason == Window_retrieve_cached_row_reason::LAST_IN_FRAME &&
-        m_tmp_pos.m_rowno == -1) {
-      // restore the more useful position of first in frame row instead of -1 in
-      // order to get the sliding window positions (first,last) started
-      save_pos(Window_retrieve_cached_row_reason::FIRST_IN_FRAME);
-    }
-
     const int reason_index = static_cast<int>(reason);
     m_frame_buffer_positions[reason_index].m_rowno = m_tmp_pos.m_rowno;
     std::memcpy(m_frame_buffer_positions[reason_index].m_position,
@@ -1049,14 +1036,8 @@ class Window {
     join optimizer instead uses Item_ref objects that point to the
     base slice, which is then replaced at runtime depending on which
     temporary table we are to evaluate from.
-
-    @param thd            The session's execution thread.
-    @param items_to_copy  The expressions materialized in the temporary table.
-    @param first          True if this is the first temporary table applied to
-                          this window.
   */
-  void apply_temp_table(THD *thd, const Func_ptr_array &items_to_copy,
-                        bool first);
+  void apply_temp_table(THD *thd, const Func_ptr_array &items_to_copy);
 
   /**
     Set up cached items for an partition or an order by list

@@ -12,8 +12,6 @@ connection default;
 SELECT COUNT(USER) FROM INFORMATION_SCHEMA.PROCESSLIST;
 COUNT(USER)
 5
-Warnings:
-Warning	1287	'INFORMATION_SCHEMA.PROCESSLIST' is deprecated and will be removed in a future release. Please use performance_schema.processlist instead
 SHOW STATUS LIKE 'threads_connected';
 Variable_name	Value
 Threads_connected	4
@@ -21,8 +19,6 @@ SET GLOBAL offline_mode = ON;
 SELECT COUNT(USER) FROM INFORMATION_SCHEMA.PROCESSLIST;
 COUNT(USER)
 2
-Warnings:
-Warning	1287	'INFORMATION_SCHEMA.PROCESSLIST' is deprecated and will be removed in a future release. Please use performance_schema.processlist instead
 SHOW STATUS LIKE 'threads_connected';
 Variable_name	Value
 Threads_connected	1
@@ -32,8 +28,6 @@ connection default;
 SELECT COUNT(USER) FROM INFORMATION_SCHEMA.PROCESSLIST;
 COUNT(USER)
 2
-Warnings:
-Warning	1287	'INFORMATION_SCHEMA.PROCESSLIST' is deprecated and will be removed in a future release. Please use performance_schema.processlist instead
 SHOW STATUS LIKE 'threads_connected';
 Variable_name	Value
 Threads_connected	1
@@ -42,8 +36,6 @@ connect conu4,localhost,root;
 SELECT COUNT(USER) FROM INFORMATION_SCHEMA.PROCESSLIST;
 COUNT(USER)
 3
-Warnings:
-Warning	1287	'INFORMATION_SCHEMA.PROCESSLIST' is deprecated and will be removed in a future release. Please use performance_schema.processlist instead
 SHOW STATUS LIKE 'threads_connected';
 Variable_name	Value
 Threads_connected	2
@@ -52,8 +44,6 @@ SET GLOBAL offline_mode = OFF;
 SELECT COUNT(USER) FROM INFORMATION_SCHEMA.PROCESSLIST;
 COUNT(USER)
 3
-Warnings:
-Warning	1287	'INFORMATION_SCHEMA.PROCESSLIST' is deprecated and will be removed in a future release. Please use performance_schema.processlist instead
 SHOW STATUS LIKE 'threads_connected';
 Variable_name	Value
 Threads_connected	2
@@ -70,8 +60,6 @@ SELECT @user_count;
 SELECT COUNT(USER) FROM INFORMATION_SCHEMA.PROCESSLIST;
 COUNT(USER)
 6
-Warnings:
-Warning	1287	'INFORMATION_SCHEMA.PROCESSLIST' is deprecated and will be removed in a future release. Please use performance_schema.processlist instead
 SHOW STATUS LIKE 'threads_connected';
 Variable_name	Value
 Threads_connected	5
@@ -79,8 +67,6 @@ SET GLOBAL offline_mode = ON;
 SELECT COUNT(USER) FROM INFORMATION_SCHEMA.PROCESSLIST;
 COUNT(USER)
 3
-Warnings:
-Warning	1287	'INFORMATION_SCHEMA.PROCESSLIST' is deprecated and will be removed in a future release. Please use performance_schema.processlist instead
 SHOW STATUS LIKE 'threads_connected';
 Variable_name	Value
 Threads_connected	2

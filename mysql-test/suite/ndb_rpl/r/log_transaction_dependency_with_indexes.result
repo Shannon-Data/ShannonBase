@@ -1,15 +1,18 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
 #### INITIALIZE ####
 [connection slave]
-include/rpl/stop_replica.inc
+include/stop_slave.inc
 SET @save_replica_parallel_workers= @@GLOBAL.replica_parallel_workers;
 SET @@GLOBAL.replica_parallel_workers= 4;
-include/rpl/start_replica.inc
+include/start_slave.inc
 [connection master]
+SET @save_binlog_transaction_dependency_tracking = @@GLOBAL.binlog_transaction_dependency_tracking;
+SET GLOBAL binlog_transaction_dependency_tracking = COMMIT_ORDER;
+SET GLOBAL binlog_transaction_dependency_tracking = WRITESET;
 
 #### 0.0.0.0: WITHOUT PK, NULLABLE, NOT UNIQUE, NO INDEX ####
 
@@ -20,12 +23,12 @@ c INT
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -33,7 +36,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -41,7 +44,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -49,12 +52,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -62,7 +65,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -70,7 +73,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -83,12 +86,12 @@ c INT  ,  INDEX(b)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -96,7 +99,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -104,7 +107,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -112,12 +115,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -125,7 +128,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -133,7 +136,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -146,12 +149,12 @@ c INT  ,  INDEX(b, c)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -159,7 +162,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -167,7 +170,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -175,12 +178,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -188,7 +191,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -196,7 +199,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -209,12 +212,12 @@ c INT  , UNIQUE INDEX(b)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -222,7 +225,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -230,7 +233,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -238,12 +241,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -251,7 +254,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -259,7 +262,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -272,12 +275,12 @@ c INT  , UNIQUE INDEX(b, c)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -285,7 +288,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -293,7 +296,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -301,12 +304,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [6 7]
+include/include/assert_logical_timestamps.inc [6 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -314,7 +317,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;8 9]
+include/include/assert_logical_timestamps.inc [1 8;8 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -322,7 +325,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;10 11]
+include/include/assert_logical_timestamps.inc [1 10;10 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -335,12 +338,12 @@ c INT NOT NULL
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -348,7 +351,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -356,7 +359,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -364,7 +367,7 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -377,12 +380,12 @@ c INT NOT NULL ,  INDEX(b)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -390,7 +393,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -398,7 +401,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -406,7 +409,7 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -419,12 +422,12 @@ c INT NOT NULL ,  INDEX(b, c)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -432,7 +435,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -440,7 +443,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;3 4]
+include/include/assert_logical_timestamps.inc [1 3;3 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -448,7 +451,7 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;5 6]
+include/include/assert_logical_timestamps.inc [1 5;5 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -461,12 +464,12 @@ c INT NOT NULL , UNIQUE INDEX(b)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -474,7 +477,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -482,7 +485,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -490,7 +493,7 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -503,12 +506,12 @@ c INT NOT NULL , UNIQUE INDEX(b, c)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -516,7 +519,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -524,7 +527,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -532,7 +535,7 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -545,12 +548,12 @@ c INT
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -558,7 +561,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -566,7 +569,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -574,12 +577,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -587,7 +590,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -595,7 +598,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -608,12 +611,12 @@ c INT  ,  INDEX(b)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -621,7 +624,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -629,7 +632,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -637,12 +640,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -650,7 +653,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -658,7 +661,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -671,12 +674,12 @@ c INT  ,  INDEX(b, c)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -684,7 +687,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -692,7 +695,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -700,12 +703,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -713,7 +716,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -721,7 +724,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -734,12 +737,12 @@ c INT  , UNIQUE INDEX(b)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -747,7 +750,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -755,7 +758,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -763,12 +766,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -776,7 +779,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -784,7 +787,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -797,12 +800,12 @@ c INT  , UNIQUE INDEX(b, c)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -810,7 +813,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -818,7 +821,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -826,12 +829,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 # TRX7: independent
 INSERT INTO t1 VALUES (3, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (3, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 7]
+include/include/assert_logical_timestamps.inc [1 7]
 # TRX8: independent
 INSERT INTO t2 VALUES (8);
 # Wait for ndb_binlog thread...
@@ -839,7 +842,7 @@ INSERT INTO t2 VALUES (8);
 INSERT INTO t1 VALUES (4, NULL, 2);
 # Wait for ndb_binlog thread...
 # now t1 contains three rows: (1, 2, 2), (3, NULL, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 8;1 9]
+include/include/assert_logical_timestamps.inc [1 8;1 9]
 # TRX10: independent
 INSERT INTO t2 VALUES (10);
 # Wait for ndb_binlog thread...
@@ -847,7 +850,7 @@ INSERT INTO t2 VALUES (10);
 DELETE FROM t1 WHERE a = 3;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 2, 2), (4, NULL, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 10;7 11]
+include/include/assert_logical_timestamps.inc [1 10;7 11]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -860,12 +863,12 @@ c INT NOT NULL
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -873,7 +876,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -881,7 +884,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -889,7 +892,7 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -902,12 +905,12 @@ c INT NOT NULL ,  INDEX(b)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -915,7 +918,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -923,7 +926,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -931,7 +934,7 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -944,12 +947,12 @@ c INT NOT NULL ,  INDEX(b, c)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -957,7 +960,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -965,7 +968,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -973,7 +976,7 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;1 6]
+include/include/assert_logical_timestamps.inc [1 5;1 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -986,12 +989,12 @@ c INT NOT NULL , UNIQUE INDEX(b)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -999,7 +1002,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -1007,7 +1010,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -1015,7 +1018,7 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 DROP TABLE t1;
 DROP TABLE t2;
 
@@ -1028,12 +1031,12 @@ c INT NOT NULL , UNIQUE INDEX(b, c)
 ) engine = NDB;
 CREATE TABLE t2 (a INT PRIMARY KEY) engine = NDB;
 FLUSH LOGS;
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 # TRX1: independent
 INSERT INTO t1 VALUES (1, 1, 1);
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [0 1]
+include/include/assert_logical_timestamps.inc [0 1]
 # TRX2: independent
 BEGIN;
 INSERT INTO t1 VALUES (2, 2, 2);
@@ -1041,7 +1044,7 @@ INSERT INTO t2 VALUES (1);
 COMMIT;
 # Wait for ndb_binlog thread...
 # now t1 contains two rows: (1, 1, 1), (2, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 2]
+include/include/assert_logical_timestamps.inc [1 2]
 # TRX3: independent
 INSERT INTO t2 VALUES (3);
 # Wait for ndb_binlog thread...
@@ -1049,7 +1052,7 @@ INSERT INTO t2 VALUES (3);
 DELETE FROM t1 WHERE a = 2;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 1, 1)
-include/include/rpl/assert_logical_timestamps.inc [1 3;2 4]
+include/include/assert_logical_timestamps.inc [1 3;2 4]
 # TRX5: independent
 INSERT INTO t2 VALUES (5);
 # Wait for ndb_binlog thread...
@@ -1057,10 +1060,12 @@ INSERT INTO t2 VALUES (5);
 UPDATE t1 SET b = 2, c = 2 WHERE a = 1;
 # Wait for ndb_binlog thread...
 # now t1 contains one row: (1, 2, 2)
-include/include/rpl/assert_logical_timestamps.inc [1 5;4 6]
+include/include/assert_logical_timestamps.inc [1 5;4 6]
 DROP TABLE t1;
 DROP TABLE t2;
 #### CLEAN UP ####
-include/rpl/sync_to_replica.inc
+SET @@GLOBAL.binlog_transaction_dependency_tracking= COMMIT_ORDER;
+SET @@GLOBAL.binlog_transaction_dependency_tracking= @save_binlog_transaction_dependency_tracking;
+include/sync_slave_sql_with_master.inc
 SET @@GLOBAL.replica_parallel_workers= @save_replica_parallel_workers;
-include/rpl/deinit.inc
+include/rpl_end.inc

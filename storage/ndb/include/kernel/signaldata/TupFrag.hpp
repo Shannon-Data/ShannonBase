@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -30,6 +29,7 @@
 
 #define JAM_FILE_ID 197
 
+
 /*
  * Add fragment and add attribute signals between LQH and TUP,TUX.
  * NOTE: return signals from TUP,TUX to LQH must have same format.
@@ -40,11 +40,9 @@
 class TupFragReq {
   friend class Dblqh;
   friend class Dbtup;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 12;
-
- private:
+private:
   Uint32 userPtr;
   Uint32 userRef;
   Uint32 reqInfo;
@@ -62,11 +60,9 @@ class TupFragReq {
 class TupFragConf {
   friend class Dblqh;
   friend class Dbtup;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 4;
-
- private:
+private:
   Uint32 userPtr;
   Uint32 tupConnectPtr;
   Uint32 fragPtr;
@@ -76,11 +72,9 @@ class TupFragConf {
 class TupFragRef {
   friend class Dblqh;
   friend class Dbtup;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 2;
-
- private:
+private:
   Uint32 userPtr;
   Uint32 errorCode;
 };
@@ -90,11 +84,9 @@ class TupFragRef {
 class TuxFragReq {
   friend class Dblqh;
   friend class Dbtux;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 9;
-
- private:
+private:
   Uint32 userPtr;
   Uint32 userRef;
   Uint32 reqInfo;
@@ -109,11 +101,9 @@ class TuxFragReq {
 class TuxFragConf {
   friend class Dblqh;
   friend class Dbtux;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 4;
-
- private:
+private:
   Uint32 userPtr;
   Uint32 tuxConnectPtr;
   Uint32 fragPtr;
@@ -123,8 +113,7 @@ class TuxFragConf {
 class TuxFragRef {
   friend class Dblqh;
   friend class Dbtux;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 2;
   enum ErrorCode {
     NoError = 0,
@@ -132,8 +121,7 @@ class TuxFragRef {
     NoFreeFragment = 904,
     NoFreeAttributes = 905
   };
-
- private:
+private:
   Uint32 userPtr;
   Uint32 errorCode;
 };
@@ -143,12 +131,10 @@ class TuxFragRef {
 class TupAddAttrReq {
   friend class Dblqh;
   friend class Dbtux;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 5;
   static constexpr Uint32 DEFAULT_VALUE_SECTION_NUM = 0;
-
- private:
+private:
   Uint32 tupConnectPtr;
   Uint32 notused1;
   Uint32 attrId;
@@ -159,20 +145,17 @@ class TupAddAttrReq {
 class TupAddAttrConf {
   friend class Dblqh;
   friend class Dbtup;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 2;
-
- private:
+private:
   Uint32 userPtr;
-  Uint32 lastAttr;  // bool: got last attr and closed frag op
+  Uint32 lastAttr; // bool: got last attr and closed frag op
 };
 
 class TupAddAttrRef {
   friend class Dblqh;
   friend class Dbtup;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 2;
   enum ErrorCode {
     NoError = 0,
@@ -180,8 +163,7 @@ class TupAddAttrRef {
     TooManyBitsUsed = 831,
     UnsupportedType = 906
   };
-
- private:
+private:
   Uint32 userPtr;
   Uint32 errorCode;
 };
@@ -191,11 +173,9 @@ class TupAddAttrRef {
 class TuxAddAttrReq {
   friend class Dblqh;
   friend class Dbtux;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 6;
-
- private:
+private:
   Uint32 tuxConnectPtr;
   Uint32 notused1;
   Uint32 attrId;
@@ -207,20 +187,17 @@ class TuxAddAttrReq {
 class TuxAddAttrConf {
   friend class Dblqh;
   friend class Dbtux;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 2;
-
- private:
+private:
   Uint32 userPtr;
-  Uint32 lastAttr;  // bool: got last attr and closed frag op
+  Uint32 lastAttr; // bool: got last attr and closed frag op
 };
 
 class TuxAddAttrRef {
   friend class Dblqh;
   friend class Dbtux;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 2;
   enum ErrorCode {
     NoError = 0,
@@ -228,11 +205,11 @@ class TuxAddAttrRef {
     InvalidCharset = 907,
     InvalidNodeSize = 908
   };
-
- private:
+private:
   Uint32 userPtr;
   Uint32 errorCode;
 };
+
 
 #undef JAM_FILE_ID
 

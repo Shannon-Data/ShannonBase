@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -475,14 +474,14 @@ bool Caching_sha2_password::deserialize(const std::string &serialized_string,
   }
   const std::string iteration_info =
       serialized_string.substr(delimiter + 1, ITERATION_LENGTH);
-  unsigned long int iteration_count =
-      strtoul(iteration_info.c_str(), nullptr, 16);
-  if (!iteration_count) {
+  iterations =
+      std::min((std::stoul(iteration_info, nullptr, 16)) * ITERATION_MULTIPLIER,
+               MAX_ITERATIONS);
+  if (!iterations) {
     DBUG_PRINT("info", ("Digest string is not in expected format."
                         "Invalid iteration count information."));
     return true;
   }
-  iterations = std::min(iteration_count * ITERATION_MULTIPLIER, MAX_ITERATIONS);
 
   /* Salt */
   delimiter = delimiter_2;
@@ -744,7 +743,7 @@ static int my_vio_is_secure(MYSQL_PLUGIN_VIO *vio) {
 
   It is useful when we need to pass the scramble to another plugin.
   Especially in case when old 5.1 client with no CLIENT_PLUGIN_AUTH capability
-  tries to connect to server with default 1FA set to
+  tries to connect to server with default-authentication-plugin set to
   caching_sha2_password
 
   @param vio      Virtual Input-Output interface
@@ -941,7 +940,7 @@ static int caching_sha2_password_authenticate(MYSQL_PLUGIN_VIO *vio,
 
   /*
     Note: The nonce is split into 8 + 12 bytes according to
-    https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_v10.html
+    http://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeV10
     Native authentication sent 20 bytes + '\0' character = 21 bytes.
     This plugin must do the same to stay consistent with historical behavior
     if it is set to operate as a default plugin.

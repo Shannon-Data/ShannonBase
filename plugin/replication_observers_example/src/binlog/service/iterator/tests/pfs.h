@@ -1,16 +1,15 @@
-/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,7 +26,7 @@
 #include <mysql/components/services/binlog_storage_iterator.h>
 #include <mysql/components/services/pfs_plugin_table_service.h>
 #include <string>
-#include "mysql/binlog/event/binary_log.h"
+#include "libbinlogevents/include/binary_log.h"
 #include "mysql_version.h"
 
 namespace binlog::service::iterators::tests {
@@ -40,22 +39,21 @@ bool register_pfs_tables();
 bool unregister_pfs_tables();
 
 struct Row {
-  mysql::binlog::event::Log_event_type event_type{
-      mysql::binlog::event::UNKNOWN_EVENT};
+  binary_log::Log_event_type event_type{binary_log::UNKNOWN_EVENT};
   std::string event_name{};
   std::string storage_details{};
-  std::string trx_tsid{};
+  std::string trx_uuid{};
   uint64_t trx_seqno{0};
   uint64_t start_position{0};
   uint64_t end_position{0};
   std::string extra{};
 
   void reset() {
-    event_type = mysql::binlog::event::UNKNOWN_EVENT;
-    event_name = mysql::binlog::event::get_event_type_as_string(event_type);
+    event_type = binary_log::UNKNOWN_EVENT;
+    event_name = binary_log::get_event_type_as_string(event_type);
     storage_details = "";
     trx_seqno = 0;
-    trx_tsid = "";
+    trx_uuid = "";
     start_position = 0;
     extra = "";
   }
@@ -64,8 +62,8 @@ struct Row {
 /* A structure to define a handle for table in plugin/component code. */
 struct Cs_entries_table {
   struct Row row;
-  mysql::binlog::event::Format_description_event fde{BINLOG_VERSION,
-                                                     MYSQL_SERVER_VERSION};
+  binary_log::Format_description_event fde{BINLOG_VERSION,
+                                           MYSQL_SERVER_VERSION};
   my_h_binlog_storage_iterator iterator;
   unsigned char *buffer{nullptr};
   uint64_t buffer_capacity{0};

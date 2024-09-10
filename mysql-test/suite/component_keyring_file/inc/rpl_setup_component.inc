@@ -3,7 +3,7 @@
 --echo # ----------------------------------------------------------------------
 --echo # Setup
 --let $rpl_skip_start_slave= 1
---source include/rpl/init_source_replica.inc
+--source include/master-slave.inc
 
 --let RPL_PLUGIN_DIR_OPT = $KEYRING_FILE_COMPONENT_OPT
 
@@ -30,7 +30,7 @@
 
 # Create keyring config for replica server
 
---source include/rpl/connection_replica.inc
+--source include/rpl_connection_slave.inc
 --let CURRENT_DATADIR = `SELECT @@datadir`
 
 # Create local keyring config
@@ -45,6 +45,6 @@
 --let REPLICA_DATADIR = $CURRENT_DATADIR
 --let REPLICA_KEYRING_FILE_PATH = $KEYRING_FILE_PATH
 
---source include/rpl/connection_source.inc
+--source include/rpl_connection_master.inc
 --let CURRENT_DATADIR = `SELECT @@datadir`
 --echo # ----------------------------------------------------------------------

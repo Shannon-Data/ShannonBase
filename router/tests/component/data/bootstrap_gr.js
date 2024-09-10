@@ -1,19 +1,9 @@
 var common_stmts = require("common_statements");
-var gr_memberships = require("gr_memberships");
 
-if (mysqld.global.gr_node_host === undefined) {
-  mysqld.global.gr_node_host = "127.0.0.1";
-}
-
-if (mysqld.global.cluster_nodes === undefined) {
-  mysqld.global.cluster_nodes =
-      [["uuid-1", 5500], ["uuid-2", 5510], ["uuid-3", 5520]];
-}
-
-if (mysqld.global.gr_nodes === undefined) {
-  mysqld.global.gr_nodes = [
-    ["uuid-1", 5500, "ONLINE"], ["uuid-2", 5510, "ONLINE"],
-    ["uuid-3", 5520, "ONLINE"]
+if (mysqld.global.innodb_cluster_instances === undefined) {
+  mysqld.global.innodb_cluster_instances = [
+    ["5500", "localhost", 5500], ["5510", "localhost", 5510],
+    ["5520", "localhost", 5520]
   ];
 }
 
@@ -22,46 +12,11 @@ if (mysqld.global.cluster_name == undefined) {
 }
 
 if (mysqld.global.metadata_schema_version === undefined) {
-  mysqld.global.metadata_schema_version = [2, 2, 0];
+  mysqld.global.metadata_schema_version = [2, 0, 3];
 }
 
 if (mysqld.global.gr_id === undefined) {
   mysqld.global.gr_id = "cluster-specific-id";
-}
-
-var members = gr_memberships.gr_members(
-    mysqld.global.gr_node_host, mysqld.global.gr_nodes);
-
-const online_gr_nodes = members
-                            .filter(function(memb, indx) {
-                              return (memb[3] === "ONLINE");
-                            })
-                            .length;
-
-const recovering_gr_nodes = members
-                                .filter(function(memb, indx) {
-                                  return (memb[3] === "RECOVERING");
-                                })
-                                .length;
-
-if (mysqld.global.upd_attr_config_json === undefined) {
-  mysqld.global.upd_attr_config_json = "";
-}
-
-if (mysqld.global.upd_attr_config_defaults_and_schema_json === undefined) {
-  mysqld.global.upd_attr_config_defaults_and_schema_json = "";
-}
-
-if (mysqld.global.config_defaults_stored_is_null === undefined) {
-  mysqld.global.config_defaults_stored_is_null = 0;
-}
-
-if (mysqld.global.last_insert_id === undefined) {
-  mysqld.global.last_insert_id = 1;
-}
-
-if (mysqld.global.account_user_pattern === undefined) {
-  mysqld.global.account_user_pattern = "mysql_router1_[0-9a-z]{7}";
 }
 
 var options = {
@@ -70,16 +25,7 @@ var options = {
   gr_id: mysqld.global.gr_id,
   clusterset_present: 0,
   innodb_cluster_name: mysqld.global.cluster_name,
-  innodb_cluster_instances: gr_memberships.cluster_nodes(
-      mysqld.global.gr_node_host, mysqld.global.cluster_nodes),
-  gr_members_all: members.length,
-  gr_members_online: online_gr_nodes,
-  gr_members_recovering: recovering_gr_nodes,
-  router_version: mysqld.global.router_version,
-  config_defaults_stored_is_null: mysqld.global.config_defaults_stored_is_null,
-  last_insert_id: mysqld.global.last_insert_id,
-  account_user_pattern:
-      "mysql_router" + mysqld.global.last_insert_id + "_[0-9a-z]{7}",
+  innodb_cluster_instances: mysqld.global.innodb_cluster_instances,
 };
 
 var common_responses = common_stmts.prepare_statement_responses(
@@ -100,7 +46,8 @@ var common_responses = common_stmts.prepare_statement_responses(
 
       // account verification
       "router_select_metadata_v2_gr_account_verification",
-      "router_select_group_membership",
+      "router_select_group_replication_primary_member",
+      "router_select_group_membership_with_primary_mode",
     ],
     options);
 
@@ -114,21 +61,14 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
     [
       "router_insert_into_routers",
       "router_create_user_if_not_exists",
-      "router_check_auth_plugin",
       "router_grant_on_metadata_db",
       "router_grant_on_pfs_db",
       "router_grant_on_routers",
       "router_grant_on_v2_routers",
+      "router_update_routers_in_metadata",
       "router_update_router_options_in_metadata",
-      "router_select_config_defaults_stored_gr_cluster",
     ],
     options);
-
-var router_update_attributes =
-    common_stmts.get("router_update_routers_in_metadata", options);
-
-var router_store_config_defaults_gr_cluster =
-    common_stmts.get("router_store_config_defaults_gr_cluster", options);
 
 ({
   handshake: {
@@ -152,13 +92,6 @@ var router_store_config_defaults_gr_cluster =
         (res = common_stmts.handle_regex_stmt(stmt, common_responses_regex)) !==
         undefined) {
       return res;
-    } else if (res = stmt.match(router_update_attributes.stmt_regex)) {
-      mysqld.global.upd_attr_config_json = res[1];
-      return router_update_attributes;
-    } else if (
-        res = stmt.match(router_store_config_defaults_gr_cluster.stmt_regex)) {
-      mysqld.global.upd_attr_config_defaults_and_schema_json = res[1];
-      return router_store_config_defaults_gr_cluster;
     } else {
       return common_stmts.unknown_statement_response(stmt);
     }

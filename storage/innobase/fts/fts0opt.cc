@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 2007, 2024, Oracle and/or its affiliates.
+Copyright (c) 2007, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -110,103 +109,88 @@ enum fts_msg_type_t {
 /** Compressed list of words that have been read from FTS INDEX
 that needs to be optimized. */
 struct fts_zip_t {
-  /** Status of (un)/zip operation */
-  lint status;
+  lint status; /*!< Status of (un)/zip operation */
 
-  /** Number of words compressed */
-  ulint n_words;
+  ulint n_words; /*!< Number of words compressed */
 
-  /** Size of a block in bytes */
-  ulint block_sz;
+  ulint block_sz; /*!< Size of a block in bytes */
 
-  /** Vector of compressed blocks */
-  ib_vector_t *blocks;
+  ib_vector_t *blocks; /*!< Vector of compressed blocks */
 
-  /** Heap to use for allocations */
-  ib_alloc_t *heap_alloc;
+  ib_alloc_t *heap_alloc; /*!< Heap to use for allocations */
 
-  /** Offset into blocks */
-  ulint pos;
+  ulint pos; /*!< Offset into blocks */
 
-  /** Offset of last block in the blocks array that is of size
-  block_sz. Blocks beyond this offset are of size FTS_MAX_WORD_LEN */
-  ulint last_big_block;
+  ulint last_big_block; /*!< Offset of last block in the
+                        blocks array that is of size
+                        block_sz. Blocks beyond this offset
+                        are of size FTS_MAX_WORD_LEN */
 
-  /** ZLib state */
-  z_streamp zp;
+  z_streamp zp; /*!< ZLib state */
 
-  /** The value of the last word read from the FTS INDEX table.
-  This is used to discard duplicates (UTF-8 string) */
-  fts_string_t word;
+  /*!< The value of the last word read
+  from the FTS INDEX table. This is
+  used to discard duplicates */
 
-  /** Maximum number of words to read in one pass */
-  ulint max_words;
+  fts_string_t word; /*!< UTF-8 string */
 
-  /** Did the last pass compress all remaining words in index? */
-  bool index_scan_complete;
+  ulint max_words; /*!< maximum number of words to read
+                   in one pass */
 };
 
 /** Prepared statemets used during optimize */
 struct fts_optimize_graph_t {
-  /** Delete a word from FTS INDEX */
+  /*!< Delete a word from FTS INDEX */
   que_t *delete_nodes_graph;
-  /** Insert a word into FTS INDEX */
+  /*!< Insert a word into FTS INDEX */
   que_t *write_nodes_graph;
-  /** COMMIT a transaction */
+  /*!< COMMIT a transaction */
   que_t *commit_graph;
-  /** Read the nodes from FTS_INDEX */
+  /*!< Read the nodes from FTS_INDEX */
   que_t *read_nodes_graph;
 };
 
 /** Used by fts_optimize() to store state. */
 struct fts_optimize_t {
-  /** The transaction used for all SQL */
-  trx_t *trx;
+  trx_t *trx; /*!< The transaction used for all SQL */
 
-  /** Heap to use for allocations */
-  ib_alloc_t *self_heap;
+  ib_alloc_t *self_heap; /*!< Heap to use for allocations */
 
-  /** FTS table name prefix */
-  char *name_prefix;
+  char *name_prefix; /*!< FTS table name prefix */
 
-  /** Common table definition */
-  fts_table_t fts_index_table;
+  fts_table_t fts_index_table; /*!< Common table definition */
 
-  /** Common table definition */
+  /*!< Common table definition */
   fts_table_t fts_common_table;
 
-  /** Table that has to be queried */
-  dict_table_t *table;
+  dict_table_t *table; /*!< Table that has to be queried */
 
-  /** The FTS index to be optimized */
-  dict_index_t *index;
+  dict_index_t *index; /*!< The FTS index to be optimized */
 
-  /** doc ids to delete, we check against this vector and purge the
-  matching entries during the optimizing process. The vector entries
-  are sorted on doc id */
-  fts_doc_ids_t *to_delete;
+  fts_doc_ids_t *to_delete; /*!< doc ids to delete, we check against
+                            this vector and purge the matching
+                            entries during the optimizing
+                            process. The vector entries are
+                            sorted on doc id */
 
-  /** Offset within to_delete vector, this is used to keep track of where
-  we are up to in the vector */
-  ulint del_pos;
+  ulint del_pos; /*!< Offset within to_delete vector,
+                 this is used to keep track of where
+                 we are up to in the vector */
 
-  /** true when optimize finishes */
-  bool done;
+  bool done; /*!< true when optimize finishes */
 
-  /** Word + Nodes read from FTS_INDEX, it contains instances of fts_word_t */
-  ib_vector_t *words;
+  ib_vector_t *words; /*!< Word + Nodes read from FTS_INDEX,
+                      it contains instances of fts_word_t */
 
-  /** Words read from the FTS_INDEX */
-  fts_zip_t *zip;
+  fts_zip_t *zip; /*!< Words read from the FTS_INDEX */
 
-  /** Prepared statements used during optimize */
-  fts_optimize_graph_t graph;
+  fts_optimize_graph_t /*!< Prepared statements used during */
+      graph;           /*optimize */
 
-  /** Number of FTS indexes that have been optimized */
-  ulint n_completed;
-
-  /** BEING_DELETED list regenerated */
+  ulint n_completed; /*!< Number of FTS indexes that have
+                     been optimized */
   bool del_list_regenerated;
+  /*!< BEING_DELETED list regenerated */
 };
 
 /** Used by the optimize, to keep state during compacting nodes. */
@@ -308,8 +292,6 @@ static void fts_zip_initialize(
   ib_vector_reset(zip->blocks);
 
   memset(zip->zp, 0, sizeof(*zip->zp));
-
-  zip->index_scan_complete = false;
 }
 
 /** Create an instance of fts_zip_t.
@@ -560,16 +542,24 @@ dberr_t fts_index_fetch_nodes(
   return (error);
 }
 
-/** Extract a given number of bytes into a buffer */
-static bool fts_zip_extract_bytes(fts_zip_t *zip, /*!< in: Zip state + data */
-                                  byte *buf, /*!< out: buffer to be filled */
-                                  unsigned int size) /*!< in: size of buffer */
+/** Read a word */
+static byte *fts_zip_read_word(
+    fts_zip_t *zip,     /*!< in: Zip state + data */
+    fts_string_t *word) /*!< out: uncompressed word */
 {
-  bool complete = false;
-  zip->zp->next_out = buf;
-  zip->zp->avail_out = size;
+  short len = 0;
   void *null = nullptr;
+  byte *ptr = word->f_str;
   int flush = Z_NO_FLUSH;
+
+  /* Either there was an error or we are at the Z_STREAM_END. */
+  if (zip->status != Z_OK) {
+    return (nullptr);
+  }
+
+  zip->zp->next_out = reinterpret_cast<byte *>(&len);
+  zip->zp->avail_out = sizeof(len);
+
   while (zip->status == Z_OK && zip->zp->avail_out > 0) {
     /* Finished decompressing block. */
     if (zip->zp->avail_in == 0) {
@@ -577,7 +567,7 @@ static bool fts_zip_extract_bytes(fts_zip_t *zip, /*!< in: Zip state + data */
       if (zip->pos > 0) {
         ulint prev = zip->pos - 1;
 
-        ut_a_lt(zip->pos, ib_vector_size(zip->blocks));
+        ut_a(zip->pos < ib_vector_size(zip->blocks));
 
         ut::free(ib_vector_getp(zip->blocks, prev));
         ib_vector_set(zip->blocks, prev, &null);
@@ -602,26 +592,21 @@ static bool fts_zip_extract_bytes(fts_zip_t *zip, /*!< in: Zip state + data */
 
     switch (zip->status = inflate(zip->zp, flush)) {
       case Z_OK:
-        if (zip->zp->avail_out == 0) {
-          complete = true;
+        if (zip->zp->avail_out == 0 && len > 0) {
+          ut_a(len <= FTS_MAX_WORD_LEN);
+          ptr[len] = 0;
+
+          zip->zp->next_out = ptr;
+          zip->zp->avail_out = len;
+
+          word->f_len = len;
+          len = 0;
         }
         break;
 
-      case Z_STREAM_END:
-        if (zip->zp->avail_out == 0) {
-          complete = true;
-        }
-
-        [[fallthrough]];
       case Z_BUF_ERROR: /* No progress possible. */
+      case Z_STREAM_END:
         inflateEnd(zip->zp);
-        /* All blocks must be freed at end of inflate. */
-        for (ulint i = 0; i < ib_vector_size(zip->blocks); ++i) {
-          if (ib_vector_getp(zip->blocks, i)) {
-            ut::free(ib_vector_getp(zip->blocks, i));
-            ib_vector_set(zip->blocks, i, &null);
-          }
-        }
         break;
 
       case Z_STREAM_ERROR:
@@ -630,37 +615,21 @@ static bool fts_zip_extract_bytes(fts_zip_t *zip, /*!< in: Zip state + data */
     }
   }
 
-  return complete;
-}
-
-/** Read a word */
-static bool fts_zip_read_word(fts_zip_t *zip,     /*!< in: Zip state + data */
-                              fts_string_t *word) /*!< out: uncompressed word */
-{
-  /* Either there was an error or we are at the Z_STREAM_END. */
+  /* All blocks must be freed at end of inflate. */
   if (zip->status != Z_OK) {
-    return false;
+    for (ulint i = 0; i < ib_vector_size(zip->blocks); ++i) {
+      if (ib_vector_getp(zip->blocks, i)) {
+        ut::free(ib_vector_getp(zip->blocks, i));
+        ib_vector_set(zip->blocks, i, &null);
+      }
+    }
   }
 
-  ushort len = 0;
-
-  const bool have_len =
-      fts_zip_extract_bytes(zip, reinterpret_cast<byte *>(&len), sizeof(len));
-
-  if (!have_len) {
-    return false;
+  if (ptr != nullptr) {
+    ut_ad(word->f_len == strlen((char *)ptr));
   }
 
-  ut_a_le(len, FTS_MAX_WORD_LEN);
-
-  word->f_len = len;
-  const bool have_word = fts_zip_extract_bytes(zip, word->f_str, len);
-  ut_ad(have_word);
-
-  word->f_str[len] = 0;
-  ut_ad_eq(word->f_len, strlen((char *)word->f_str));
-
-  return have_word;
+  return (zip->status == Z_OK || zip->status == Z_STREAM_END ? ptr : nullptr);
 }
 
 /** Callback function to fetch and compress the word in an FTS
@@ -787,6 +756,8 @@ static void fts_zip_deflate_end(
 {
   pars_info_t *info;
   que_t *graph;
+  ulint selected;
+  fts_zip_t *zip = nullptr;
   dberr_t error = DB_SUCCESS;
   mem_heap_t *heap = static_cast<mem_heap_t *>(optim->self_heap->arg);
   bool inited = false;
@@ -799,26 +770,12 @@ static void fts_zip_deflate_end(
     fts_zip_initialize(optim->zip);
   }
 
-  fts_zip_t *zip = optim->zip;
-
-  /* 'aux index' for these variables means 0-based ordinal of an FTS aux table;
-  each FTS index is represented by FTS_NUM_AUX_INDEX (6) aux tables:
-  *_aux_idx==0 means 1st table, 1 means 2nd table etc. */
-  auto selected_aux_idx = fts_select_index(optim->fts_index_table.charset,
-                                           word->f_str, word->f_len);
-
-  ut_a(optim->zip->n_words == 0);
-  ut_a(n_words > 0);
-  /* Iterate over aux tables starting with table for last word
-  previous tables were covered by previous OPTIMIZE passes.
-  Word limit is checked after fetching all words from an aux table:
-  this means we can go over the limit, but ensures that either all
-  instances of a given word were fetched, or none were. */
-  for (; selected_aux_idx < FTS_NUM_AUX_INDEX && optim->zip->n_words < n_words;
-       ++selected_aux_idx) {
+  for (selected = fts_select_index(optim->fts_index_table.charset, word->f_str,
+                                   word->f_len);
+       selected < FTS_NUM_AUX_INDEX; selected++) {
     char table_name[MAX_FULL_NAME_LEN];
 
-    optim->fts_index_table.suffix = fts_get_suffix(selected_aux_idx);
+    optim->fts_index_table.suffix = fts_get_suffix(selected);
 
     info = pars_info_create();
 
@@ -888,10 +845,11 @@ static void fts_zip_deflate_end(
     }
 
     fts_que_graph_free(graph);
-  }
 
-  if (selected_aux_idx == FTS_NUM_AUX_INDEX) {
-    zip->index_scan_complete = true;
+    /* Check if max word to fetch is exceeded */
+    if (optim->zip->n_words >= n_words) {
+      break;
+    }
   }
 
   if (error == DB_SUCCESS && zip->status == Z_OK && zip->n_words > 0) {
@@ -1681,7 +1639,6 @@ static void fts_optimize_words(
 
     /* Read the index records to optimize. */
     fetch.total_memory = 0;
-
     error = fts_index_fetch_nodes(trx, &graph, &optim->fts_index_table, word,
                                   &fetch);
     ut_ad(fetch.total_memory < fts_result_cache_limit);
@@ -1773,38 +1730,39 @@ static void fts_optimize_words(
  @return DB_SUCCESS if all OK */
 [[nodiscard]] static dberr_t fts_optimize_index_read_words(
     fts_optimize_t *optim, /*!< in: optimize instance */
-    dict_index_t *index)   /*!< in: table with one FTS index */
+    dict_index_t *index,   /*!< in: table with one FTS index */
+    fts_string_t *word)    /*!< in: buffer to use */
 {
   dberr_t error = DB_SUCCESS;
 
-  fts_string_t word;
-  byte str[FTS_MAX_WORD_LEN + 1];
-
-  /* We need to read the last word optimized so that we start from
-  the next word. */
-  word.f_str = str;
-
-  /* We set the length of word to the size of str since we
-  need to pass the max len info to the fts_get_config_value() function. */
-  word.f_len = sizeof(str) - 1;
-
   if (optim->del_list_regenerated) {
-    word.f_len = 0;
+    word->f_len = 0;
   } else {
     /* Get the last word that was optimized from
     the config table. */
     error = fts_config_get_index_value(optim->trx, index,
-                                       FTS_LAST_OPTIMIZED_WORD, &word);
+                                       FTS_LAST_OPTIMIZED_WORD, word);
   }
 
   /* If record not found then we start from the top. */
   if (error == DB_RECORD_NOT_FOUND) {
-    word.f_len = 0;
+    word->f_len = 0;
     error = DB_SUCCESS;
   }
 
-  if (error == DB_SUCCESS) {
-    error = fts_index_fetch_words(optim, &word, fts_num_word_optimize);
+  while (error == DB_SUCCESS) {
+    error = fts_index_fetch_words(optim, word, fts_num_word_optimize);
+
+    if (error == DB_SUCCESS) {
+      /* Reset the last optimized word to '' if no
+      more words could be read from the FTS index. */
+      if (optim->zip->n_words == 0) {
+        word->f_len = 0;
+        *word->f_str = 0;
+      }
+
+      break;
+    }
   }
 
   return (error);
@@ -1817,52 +1775,63 @@ static void fts_optimize_words(
     fts_optimize_t *optim, /*!< in: optimize instance */
     dict_index_t *index)   /*!< in: table with one FTS index */
 {
+  fts_string_t word;
+  dberr_t error;
+  byte str[FTS_MAX_WORD_LEN + 1];
+
   /* Set the current index that we have to optimize. */
   optim->fts_index_table.index_id = index->id;
   optim->fts_index_table.charset = fts_index_get_charset(index);
 
   optim->done = false; /* Optimize until !done */
 
-  /* Read the words that will be optimized in this pass. */
-  if (const auto error = fts_optimize_index_read_words(optim, index);
-      error != DB_SUCCESS) {
-    return error;
-  }
-
-  int zip_error;
-
-  ut_a(optim->zip->pos == 0);
-  ut_a(optim->zip->zp->total_in == 0);
-  ut_a(optim->zip->zp->total_out == 0);
-
-  zip_error = inflateInit(optim->zip->zp);
-  ut_a(zip_error == Z_OK);
-
-  /* Buffer for uncompressing words */
-  fts_string_t word;
-  byte str[FTS_MAX_WORD_LEN + 1];
-  word.f_len = 0;
+  /* We need to read the last word optimized so that we start from
+  the next word. */
   word.f_str = str;
 
-  /* Read the first word to optimize from the Zip buffer. */
-  if (!fts_zip_read_word(optim->zip, &word)) {
-    optim->done = true;
-  } else {
-    fts_optimize_words(optim, index, &word);
-  }
+  /* We set the length of word to the size of str since we
+  need to pass the max len info to the fts_get_config_value() function. */
+  word.f_len = sizeof(str) - 1;
 
-  /* If all remaining words in index have been read in this pass, perform
-  final actions to complete the index optimization. */
-  if (optim->zip->index_scan_complete) {
-    if (const auto error = fts_optimize_index_completed(optim, index);
-        error != DB_SUCCESS) {
-      return error;
+  memset(word.f_str, 0x0, word.f_len);
+
+  /* Read the words that will be optimized in this pass. */
+  error = fts_optimize_index_read_words(optim, index, &word);
+
+  if (error == DB_SUCCESS) {
+    int zip_error;
+
+    ut_a(optim->zip->pos == 0);
+    ut_a(optim->zip->zp->total_in == 0);
+    ut_a(optim->zip->zp->total_out == 0);
+
+    zip_error = inflateInit(optim->zip->zp);
+    ut_a(zip_error == Z_OK);
+
+    word.f_len = 0;
+    word.f_str = str;
+
+    /* Read the first word to optimize from the Zip buffer. */
+    if (!fts_zip_read_word(optim->zip, &word)) {
+      optim->done = true;
+    } else {
+      fts_optimize_words(optim, index, &word);
     }
 
-    ++optim->n_completed;
+    /* If we couldn't read any records then optimize is
+    complete. Increment the number of indexes that have
+    been optimized and set FTS index optimize state to
+    completed. */
+    if (error == DB_SUCCESS && optim->zip->n_words == 0) {
+      error = fts_optimize_index_completed(optim, index);
+
+      if (error == DB_SUCCESS) {
+        ++optim->n_completed;
+      }
+    }
   }
 
-  return DB_SUCCESS;
+  return (error);
 }
 
 /** Delete the document ids in the delete, and delete cache tables.

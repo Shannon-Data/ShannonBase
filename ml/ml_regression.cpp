@@ -36,7 +36,6 @@
 #include "sql/mysqld.h"
 #include "sql/sql_base.h"
 #include "sql/table.h"
-#include "mysqld_error.h"
 
 #include "ml_utils.h"                                       //ml utils
 #include "storage/innobase/include/ut0dbg.h"                //for ut_a

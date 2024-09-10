@@ -1,15 +1,14 @@
-/* Copyright (c) 2021, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,7 +26,6 @@
 
 #include "mysql/components/services/log_builtins.h"
 #include "mysql/plugin_auth.h"
-#include "sql/auth/authentication_policy.h"
 #include "sql/auth/sql_mfa.h"
 #include "sql/derror.h" /* ER_THD */
 #include "sql/mysqld.h"
@@ -308,41 +306,42 @@ void Multi_factor_auth_list::alter_mfa(I_multi_factor_auth *m) {
   This method checks the modified Multi factor authentication interface methods
   based on ALTER USER sql against authentication policy.
 
-  @param [in]  thd              Connection handle
-  @param [in]  policy_factors   Authentication policy factors
+  @param thd          connection handle
 
   @returns status of the validation
     @retval false Success (modified mfa methods match policy)
     @retval true  Failure (authentication policy is vioalted)
 */
-bool Multi_factor_auth_list::validate_against_authentication_policy(
-    THD *thd, const authentication_policy::Factors &policy_factors) {
+bool Multi_factor_auth_list::validate_against_authentication_policy(THD *thd) {
   bool policy_priv_exist =
       thd->security_context()
           ->has_global_grant(STRING_WITH_LEN("AUTHENTICATION_POLICY_ADMIN"))
           .first;
   uint nth_factor = 1;
+  mysql_mutex_lock(&LOCK_authentication_policy);
+  std::vector<std::string> &list = authentication_policy_list;
+  mysql_mutex_unlock(&LOCK_authentication_policy);
   auto acl_it = m_factor.begin();
-  auto factors_it = policy_factors.begin();
+  auto policy_list = list.begin();
   /* skip first factor plugin name in policy list */
-  factors_it++;
-  for (; (acl_it != m_factor.end() && factors_it != policy_factors.end());
-       ++factors_it, ++acl_it) {
+  policy_list++;
+  for (; (acl_it != m_factor.end() && policy_list != list.end());
+       ++policy_list, ++acl_it) {
     Multi_factor_auth_info *acl_factor =
         (*acl_it)->get_multi_factor_auth_info();
     nth_factor = acl_factor->get_nth_factor();
-    /* mfa plugin method is not mandatory so allow */
-    if (!factors_it->is_mandatory_specified()) continue;
+    /* mfa plugin method is optional so allow */
+    if (policy_list->length() == 0) continue;
+    /* mfa plugin method can be anything so allow */
+    if (policy_list->compare("*") == 0) continue;
     /* mfa plugin method does not match against policy */
-    if (factors_it->get_mandatory_plugin().compare(
-            acl_factor->get_plugin_str()))
-      goto error;
+    if (policy_list->compare(acl_factor->get_plugin_str())) goto error;
   }
   nth_factor++;
   /* if more plugin exists in policy check that its optional only */
-  while (factors_it != policy_factors.end()) {
-    if (!factors_it->is_optional()) goto error;
-    factors_it++;
+  while (policy_list != list.end()) {
+    if (policy_list->length()) goto error;
+    policy_list++;
   }
   return false;
 error:
@@ -376,16 +375,14 @@ void Multi_factor_auth_list::sort_mfa() {
   the user_attributes in mysql.user table.
 
   @param [in]  thd              Connection handler
-  @param [in]  policy_factors   Authentication policy factors
 
   @returns status of the validation
     @retval false Success
     @retval true  Failure
 */
-bool Multi_factor_auth_list::validate_plugins_in_auth_chain(
-    THD *thd, const authentication_policy::Factors &policy_factors) {
+bool Multi_factor_auth_list::validate_plugins_in_auth_chain(THD *thd) {
   for (auto m : m_factor) {
-    if (m->validate_plugins_in_auth_chain(thd, policy_factors)) return true;
+    if (m->validate_plugins_in_auth_chain(thd)) return true;
   }
   return false;
 }
@@ -526,10 +523,10 @@ void Multi_factor_auth_list::get_generated_passwords(Userhostpassword_list &gp,
   @param [out]   sc       Buffer to hold server challenge
 
 */
-void Multi_factor_auth_list::get_server_challenge_info(
-    server_challenge_info_vector &sc) {
+void Multi_factor_auth_list::get_server_challenge(
+    std::vector<std::string> &sc) {
   for (auto m : m_factor) {
-    m->get_server_challenge_info(sc);
+    m->get_server_challenge(sc);
   }
 }
 
@@ -557,20 +554,19 @@ Multi_factor_auth_info::Multi_factor_auth_info(MEM_ROOT *mem_root, LEX_MFA *m)
   ALTER/CREATE USER sql.
 
   @param [in]  thd              Connection handler
-  @param [in]  policy_factors   Authentication policy factors
 
   @returns status of the validation
     @retval false Success
     @retval true  Failure
 */
-bool Multi_factor_auth_info::validate_plugins_in_auth_chain(
-    THD *thd, const authentication_policy::Factors &policy_factors) {
+bool Multi_factor_auth_info::validate_plugins_in_auth_chain(THD *thd) {
   if (is_identified_by() && !is_identified_with()) {
-    if (policy_factors.size() < get_nth_factor()) return true;
-    auto policy_factor = policy_factors[get_nth_factor() - 1];
-    const std::string &plugin_name(
-        policy_factor.get_mandatory_or_default_plugin());
-    set_plugin_str(plugin_name.c_str(), plugin_name.length());
+    /* get plugin name from @@authentication_policy */
+    mysql_mutex_lock(&LOCK_authentication_policy);
+    std::vector<std::string> &list = authentication_policy_list;
+    mysql_mutex_unlock(&LOCK_authentication_policy);
+    auto s = list[get_nth_factor() - 1];
+    set_plugin_str(s.c_str(), s.length());
   }
   plugin_ref plugin = my_plugin_lock_by_name(nullptr, plugin_name(),
                                              MYSQL_AUTHENTICATION_PLUGIN);
@@ -818,7 +814,11 @@ bool Multi_factor_auth_info::deserialize(uint nth_factor, Json_dom *mfa_dom) {
 bool Multi_factor_auth_info::init_registration(THD *thd, uint nth_factor) {
   /* check if we are registerting correct multi-factor authentication method */
   if (get_nth_factor() != nth_factor) return false;
-
+  /*
+    in case init registration is done, then server challenge will be
+    in auth string
+  */
+  if (get_auth_str_len()) return false;
   plugin_ref plugin = my_plugin_lock_by_name(nullptr, plugin_name(),
                                              MYSQL_AUTHENTICATION_PLUGIN);
   /* check if plugin is loaded */
@@ -832,18 +832,6 @@ bool Multi_factor_auth_info::init_registration(THD *thd, uint nth_factor) {
     plugin_unlock(nullptr, plugin);
     return (true);
   }
-
-  /*
-    in case init registration is done, then server challenge will be
-    in auth string
-  */
-  if (get_auth_str_len()) {
-    const char *client_plugin = auth->client_auth_plugin;
-    set_client_plugin(client_plugin, strlen(client_plugin));
-    plugin_unlock(nullptr, plugin);
-    return false;
-  }
-
   unsigned char *plugin_buf = nullptr;
   unsigned int plugin_buf_len = 0;
 
@@ -869,14 +857,12 @@ bool Multi_factor_auth_info::init_registration(THD *thd, uint nth_factor) {
   }
   srv_registry->release(h_reg_svc);
 
-  /* `user name` + '@' + `host name` */
-  Auth_id id(thd->security_context()->priv_user().str,
-             thd->security_context()->priv_host().str);
-  const std::string user_str = id.auth_str();
-  size_t user_str_len = user_str.length();
+  const size_t user_name_len = thd->security_context()->user().length +
+                               thd->security_context()->host().length;
 
   /* append user name to random challenge(32bit salt + RP id). */
-  size_t buflen = plugin_buf_len + user_str_len + net_length_size(user_str_len);
+  const size_t buflen =
+      plugin_buf_len + user_name_len + net_length_size(user_name_len);
   unsigned char *buf = new unsigned char[buflen];
   unsigned char *pos = buf;
 
@@ -885,9 +871,13 @@ bool Multi_factor_auth_info::init_registration(THD *thd, uint nth_factor) {
 
   if (plugin_buf) delete[] plugin_buf;
 
-  pos = net_store_length(pos, user_str_len);
-  memcpy(pos, user_str.c_str(), user_str_len);
-  pos += user_str_len;
+  pos = net_store_length(pos, user_name_len);
+  memcpy(pos, thd->security_context()->user().str,
+         thd->security_context()->user().length);
+  pos += thd->security_context()->user().length;
+  memcpy(pos, thd->security_context()->host().str,
+         thd->security_context()->host().length);
+  pos += thd->security_context()->host().length;
 
   assert(buflen == (uint)(pos - buf));
 
@@ -906,9 +896,6 @@ bool Multi_factor_auth_info::init_registration(THD *thd, uint nth_factor) {
 
   /* save buffer in auth_string */
   set_auth_str(reinterpret_cast<const char *>(outbuf), outbuflen);
-  /* save client plugin information */
-  const char *client_plugin = auth->client_auth_plugin;
-  set_client_plugin(client_plugin, strlen(client_plugin));
   plugin_unlock(nullptr, plugin);
   return false;
 }
@@ -993,7 +980,7 @@ bool Multi_factor_auth_info::finish_registration(THD *thd, LEX_USER *user_name,
   if (is_passwordless()) {
     /*
       In below case:
-      CREATE USER u1 IDENTIFIED WITH authentication_webauthn INITIAL
+      CREATE USER u1 IDENTIFIED WITH authentication_fido INITIAL
           AUTHENTICATION BY 'pass';
       server for above ddl will interchange 1FA and 2FA so that user,
       for first time is expected to authenticate with an initial
@@ -1006,7 +993,7 @@ bool Multi_factor_auth_info::finish_registration(THD *thd, LEX_USER *user_name,
       user: u1
       plugin: caching_sha2_password
       user_attributes: {"Multi_factor_authentication": [{"plugin":
-          "authentication_webauthn", "passwordless": 1,
+          "authentication_fido", "passwordless": 1,
       "authentication_string":
           "", "requires_registration": 1}]}
 
@@ -1015,7 +1002,7 @@ bool Multi_factor_auth_info::finish_registration(THD *thd, LEX_USER *user_name,
       mysql.user WHERE user='u1'\G
       *************************** 1. row ***************************
       user: u1
-      plugin: authentication_webauthn
+      plugin: authentication_fido
       authentication_string: <fido credentials>
       user_attributes: NULL
     */
@@ -1116,13 +1103,10 @@ void Multi_factor_auth_info::get_generated_passwords(Userhostpassword_list &gp,
 
   @param [out]   sc        List holding all generated server challenges.
 */
-void Multi_factor_auth_info::get_server_challenge_info(
-    server_challenge_info_vector &sc) {
+void Multi_factor_auth_info::get_server_challenge(
+    std::vector<std::string> &sc) {
   if (get_requires_registration() && get_auth_str_len()) {
-    auto result = std::make_pair(
-        std::string(get_auth_str(), get_auth_str_len()),
-        std::string(get_client_plugin_str(), get_client_plugin_len()));
-    sc.push_back(result);
+    sc.push_back({std::string(get_auth_str(), get_auth_str_len())});
   }
 }
 
@@ -1175,14 +1159,6 @@ const char *Multi_factor_auth_info::get_plugin_str() {
 }
 size_t Multi_factor_auth_info::get_plugin_str_len() {
   return m_multi_factor_auth->plugin.length;
-}
-
-const char *Multi_factor_auth_info::get_client_plugin_str() {
-  return m_multi_factor_auth->client_plugin.str;
-}
-
-size_t Multi_factor_auth_info::get_client_plugin_len() {
-  return m_multi_factor_auth->client_plugin.length;
 }
 
 nthfactor Multi_factor_auth_info::get_factor() {
@@ -1242,10 +1218,6 @@ void Multi_factor_auth_info::set_plugin_str(const char *str, size_t l) {
 void Multi_factor_auth_info::set_generated_password(const char *str, size_t l) {
   lex_string_strmake(m_mem_root, &m_multi_factor_auth->generated_password, str,
                      l);
-}
-
-void Multi_factor_auth_info::set_client_plugin(const char *str, size_t l) {
-  lex_string_strmake(m_mem_root, &m_multi_factor_auth->client_plugin, str, l);
 }
 
 void Multi_factor_auth_info::set_factor(nthfactor f) {

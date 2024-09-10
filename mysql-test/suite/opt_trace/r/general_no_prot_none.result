@@ -958,30 +958,18 @@ SELECT (SELECT 1 FROM t6 WHERE d = ifnull(c,null) UNION SELECT 2 FROM t6 WHERE d
                   "join_execution": {
                     "steps": [
                       {
-                        "materialize for union": {
+                        "materialize": {
                           "select#": 2,
                           "steps": [
-                            {
-                              "de-duplicate with index": {
-                                "steps": [
-                                ] /* steps */
-                              } /* de-duplicate with index */
-                            }
                           ] /* steps */
-                        } /* materialize for union */
+                        } /* materialize */
                       },
                       {
-                        "materialize for union": {
+                        "materialize": {
                           "select#": 3,
                           "steps": [
-                            {
-                              "de-duplicate with index": {
-                                "steps": [
-                                ] /* steps */
-                              } /* de-duplicate with index */
-                            }
                           ] /* steps */
-                        } /* materialize for union */
+                        } /* materialize */
                       }
                     ] /* steps */
                   } /* join_execution */
@@ -1279,30 +1267,18 @@ SELECT * FROM t5 WHERE 5 IN (SELECT 1 FROM t6 WHERE d = ifnull(c,null) UNION SEL
                   "join_execution": {
                     "steps": [
                       {
-                        "materialize for union": {
+                        "materialize": {
                           "select#": 2,
                           "steps": [
-                            {
-                              "de-duplicate with index": {
-                                "steps": [
-                                ] /* steps */
-                              } /* de-duplicate with index */
-                            }
                           ] /* steps */
-                        } /* materialize for union */
+                        } /* materialize */
                       },
                       {
-                        "materialize for union": {
+                        "materialize": {
                           "select#": 3,
                           "steps": [
-                            {
-                              "de-duplicate with index": {
-                                "steps": [
-                                ] /* steps */
-                              } /* de-duplicate with index */
-                            }
                           ] /* steps */
-                        } /* materialize for union */
+                        } /* materialize */
                       }
                     ] /* steps */
                   } /* join_execution */
@@ -1334,17 +1310,17 @@ select (@query:=QUERY)+NULL, (@trace:=TRACE)+NULL from information_schema.OPTIMI
 NULL	NULL
 select length(@trace);
 length(@trace)
-13424
+12844
 set @max_mem_size=13307;
 set optimizer_trace_max_mem_size=@max_mem_size;
 select length(@query)+length(@trace) > @@optimizer_trace_max_mem_size;
 length(@query)+length(@trace) > @@optimizer_trace_max_mem_size
-1
+0
 SELECT * FROM t5 WHERE 5 IN (SELECT 1 FROM t6 WHERE d = ifnull(c,null) UNION SELECT 2 FROM t6 WHERE d = ifnull(c,null));
 c
 select (@missing_bytes:=missing_bytes_beyond_max_mem_size) from information_schema.OPTIMIZER_TRACE;
 (@missing_bytes:=missing_bytes_beyond_max_mem_size)
-217
+0
 Warnings:
 Warning	1287	Setting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.
 select (@query2:=QUERY)+NULL,(@trace2:=TRACE)+NULL from information_schema.OPTIMIZER_TRACE;
@@ -1354,12 +1330,12 @@ select length(@trace2),
 (length(@trace2) + @missing_bytes) = length(@trace),
 @query2 = @query;
 length(@trace2)	(length(@trace2) + @missing_bytes) = length(@trace)	@query2 = @query
-13207	1	1
+12844	1	1
 select length(@query2) + length(@trace2)
 between (@@optimizer_trace_max_mem_size-200) and (@@optimizer_trace_max_mem_size+200);
 length(@query2) + length(@trace2)
 between (@@optimizer_trace_max_mem_size-200) and (@@optimizer_trace_max_mem_size+200)
-1
+0
 select instr(@trace, @trace2) = 1;
 instr(@trace, @trace2) = 1
 1
@@ -4130,30 +4106,18 @@ SELECT * FROM t1 WHERE c1=5 UNION SELECT * FROM t2 WHERE c2=5	{
       "join_execution": {
         "steps": [
           {
-            "materialize for union": {
+            "materialize": {
               "select#": 1,
               "steps": [
-                {
-                  "de-duplicate with index": {
-                    "steps": [
-                    ] /* steps */
-                  } /* de-duplicate with index */
-                }
               ] /* steps */
-            } /* materialize for union */
+            } /* materialize */
           },
           {
-            "materialize for union": {
+            "materialize": {
               "select#": 2,
               "steps": [
-                {
-                  "de-duplicate with index": {
-                    "steps": [
-                    ] /* steps */
-                  } /* de-duplicate with index */
-                }
               ] /* steps */
-            } /* materialize for union */
+            } /* materialize */
           }
         ] /* steps */
       } /* join_execution */
@@ -5841,10 +5805,10 @@ update t6 set d=5 where d is NULL	{
         ] /* potential_range_indexes */,
         "setup_range_conditions": [
         ] /* setup_range_conditions */,
-        "group_index_skip_scan": {
+        "group_index_range": {
           "chosen": false,
           "cause": "no_join"
-        } /* group_index_skip_scan */,
+        } /* group_index_range */,
         "skip_scan_range": {
           "chosen": false,
           "cause": "no_join"
@@ -5943,10 +5907,10 @@ delete from t6 where d=5	{
         ] /* potential_range_indexes */,
         "setup_range_conditions": [
         ] /* setup_range_conditions */,
-        "group_index_skip_scan": {
+        "group_index_range": {
           "chosen": false,
           "cause": "no_join"
-        } /* group_index_skip_scan */,
+        } /* group_index_range */,
         "skip_scan_range": {
           "chosen": false,
           "cause": "no_join"
@@ -6076,10 +6040,10 @@ insert into t6 select * from t6 where d>7	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_group_by_or_distinct"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "potential_skip_scan_indexes": [
                       {
@@ -6218,12 +6182,6 @@ insert into t6 select * from t6 where d>7	{
             "materialize": {
               "select#": 1,
               "steps": [
-                {
-                  "no de-duplication": {
-                    "steps": [
-                    ] /* steps */
-                  } /* no de-duplication */
-                }
               ] /* steps */
             } /* materialize */
           }
@@ -6322,10 +6280,10 @@ update t5, t6 set t6.d=t6.d+t5.c+4-t5.c-4 where d>7000	{
                   ] /* potential_range_indexes */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"
@@ -6550,10 +6508,10 @@ delete t6 from t5, t6 where d>7000	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"
@@ -6986,10 +6944,10 @@ select * from t6 where d in (select f1() from t2 where s="c")	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_group_by_or_distinct"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "disjuntive_predicate_present"
@@ -7988,10 +7946,10 @@ select d into res from t6 where d in (select f1() from t2 where s=arg)	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_group_by_or_distinct"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "disjuntive_predicate_present"
@@ -9035,10 +8993,10 @@ insert into t2 select d,100,200 from t6 where d is not null	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_group_by_or_distinct"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "potential_skip_scan_indexes": [
                       {
@@ -10057,10 +10015,10 @@ select d into res from t6 where d in (select f1() from t2 where s=arg)	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_skip_scan": {
+                  "group_index_range": {
                     "chosen": false,
                     "cause": "not_group_by_or_distinct"
-                  } /* group_index_skip_scan */,
+                  } /* group_index_range */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "disjuntive_predicate_present"
@@ -11610,28 +11568,16 @@ select TRACE into dumpfile 'MYSQLTEST_VARDIR/tmp/optimizer_trace.txt' from infor
       "join_execution": {
         "steps": [
           {
-            "materialize for union": {
+            "materialize": {
               "select#": 1,
               "steps": [
-                {
-                  "de-duplicate with index": {
-                    "steps": [
-                    ]
-                  }
-                }
               ]
             }
           },
           {
-            "materialize for union": {
+            "materialize": {
               "select#": 2,
               "steps": [
-                {
-                  "de-duplicate with index": {
-                    "steps": [
-                    ]
-                  }
-                }
               ]
             }
           }
@@ -12326,12 +12272,6 @@ SELECT a + (SELECT SUM(a) + (SELECT COUNT(a) FROM t1) FROM t1) AS cnt FROM t2	{
             "materialize": {
               "select#": 2,
               "steps": [
-                {
-                  "no de-duplication": {
-                    "steps": [
-                    ]
-                  }
-                }
               ]
             }
           }

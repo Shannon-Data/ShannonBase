@@ -161,21 +161,7 @@ create view min_baseline_diff_type as
          bl.table_id = t.table_id and
          bl.fragment_num = t.fragment_num;
 
-create view min_baseline_diff_typesonly as
-    select obj_type, fragment_type
-      from min_baseline_diff_type
-  order by obj_type, fragment_type;
-
 create table unrelated(a int primary key) engine=ndb;
-
-# Randomise offsets of hinted + unhinted TC selection
-let $offset=query_get_value('select floor(rand() * 10) as r', r, 1);
-while ($offset)
-{
-  begin; select * from unrelated;
-  begin; select * from unrelated where a=7;
-  dec $offset;
-}
 
 --enable_result_log
 --enable_query_log
@@ -201,9 +187,7 @@ commit;
 
 select distinct obj_type, fragment_type from min_baseline_diff_type order by obj_type, fragment_type;
 
---echo Test a number of scenarios repeatedly to show read routing variants
-
---let $reps=10
+--echo Test a number of scenarios to show read routing
 
 --let $idx=$KEYS
 while ($idx)
@@ -213,127 +197,79 @@ while ($idx)
   --echo ****
   --echo Row with key : $idx
   --echo
-  --echo Unhinted PK read, no lock
-  --disable_result_log
-  delete from baseline;
-  insert into baseline select * from counters_of_interest;
-  --let $r=$reps
-  while ($r)
-  {
-    begin;
-    select * from unrelated;
-    --eval select * from test.t1 where a=$idx;
-    commit;
-    --dec $r
-  }
-  --enable_result_log
-
-  select * from min_baseline_diff_typesonly;
-
-  --echo
   --echo Hinted PK read, no lock
   --disable_result_log
   delete from baseline;
   insert into baseline select * from counters_of_interest;
-  --let $r=$reps
-  while ($r)
-  {
-    --eval select * from test.t1 where a=$idx;
-    --dec $r
-  }
+  --eval select * from test.t1 where a=$idx;
   --enable_result_log
   
-  select * from min_baseline_diff_typesonly;
+  select * from min_baseline_diff_type;
 
   --echo
   --echo Unhinted PK read, shared lock
   --disable_result_log
   delete from baseline;
   insert into baseline select * from counters_of_interest;
-  --let $r=$reps
-  while ($r)
-  {
-    begin;
-    select * from unrelated;
-    --eval select * from test.t1 where a=$idx lock in share mode;
-    commit;
-    --dec $r
-  }
+  begin;
+  select * from unrelated;
+  --eval select * from test.t1 where a=$idx lock in share mode;
+  commit;
   --enable_result_log
   
-  select * from min_baseline_diff_typesonly;
+  select * from min_baseline_diff_type;
   
   --echo
   --echo Unhinted PK read, exclusive lock
   --disable_result_log
   delete from baseline;
   insert into baseline select * from counters_of_interest;
-  --let $r=$reps
-  while ($r)
-  {
-    begin;
-    select * from unrelated;
-    --eval select * from test.t1 where a=$idx for update;
-    commit;
-    --dec $r
-  }
+  begin;
+  select * from unrelated;
+  --eval select * from test.t1 where a=$idx for update;
+  commit;
   --enable_result_log
   
-  select * from min_baseline_diff_typesonly;
+  select * from min_baseline_diff_type;
 
   --echo 
   --echo Unhinted UI read, no lock
   --disable_result_log
   delete from baseline;
   insert into baseline select * from counters_of_interest;
-  --let $r=$reps
-  while ($r)
-  {
-    begin;
-    select * from unrelated;
-    --eval select * from test.t1 where b=$idx;
-    commit;
-    --dec $r
-  }
+  begin;
+  select * from unrelated;
+  --eval select * from test.t1 where b=$idx;
+  commit;
   --enable_result_log
   
-  select * from min_baseline_diff_typesonly;
+  select * from min_baseline_diff_type;
 
   --echo
   --echo Unhinted UI read, shared lock
   --disable_result_log
   delete from baseline;
   insert into baseline select * from counters_of_interest;
-  --let $r=$reps
-  while ($r)
-  {
-    begin;
-    select * from unrelated;
-    --eval select * from test.t1 where b=$idx lock in share mode;
-    commit;
-    --dec $r
-  }
+  begin;
+  select * from unrelated;
+  --eval select * from test.t1 where b=$idx lock in share mode;
+  commit;
   --enable_result_log
   
-  select * from min_baseline_diff_typesonly;
+  select * from min_baseline_diff_type;
 
   --echo
   --echo Unhinted UI read, exclusive lock
   --disable_result_log
   delete from baseline;
   insert into baseline select * from counters_of_interest;
-  --let $r=$reps
-  while ($r)
-  {
-    begin;
-    select * from unrelated;
-    --eval select * from test.t1 where b=$idx for update;
-    commit;
-    --dec $r
-  }
+  begin;
+  select * from unrelated;
+  --eval select * from test.t1 where b=$idx for update;
+  commit;
   --enable_result_log
   
-  select * from min_baseline_diff_typesonly;
+  select * from min_baseline_diff_type;
 
   --enable_query_log
 
@@ -428,6 +364,5 @@ drop table baseline;
 drop view baseline_diff;
 drop view min_baseline_diff;
 drop view min_baseline_diff_type;
-drop view min_baseline_diff_typesonly;
 drop table test.t1;
 --enable_query_log

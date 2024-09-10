@@ -1,16 +1,15 @@
-/* Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -51,7 +50,7 @@ namespace memory {
 static inline size_t _cache_line_size() {
   size_t line_size{0};
   size_t sizeof_line_size = sizeof(line_size);
-  sysctlbyname("hw.cachelinesize", &line_size, &sizeof_line_size, nullptr, 0);
+  sysctlbyname("hw.cachelinesize", &line_size, &sizeof_line_size, 0, 0);
   return line_size;
 }
 
@@ -60,9 +59,9 @@ static inline size_t _cache_line_size() {
   size_t line_size{0};
   DWORD buffer_size = 0;
   DWORD i = 0;
-  SYSTEM_LOGICAL_PROCESSOR_INFORMATION *buffer = nullptr;
+  SYSTEM_LOGICAL_PROCESSOR_INFORMATION *buffer = 0;
 
-  GetLogicalProcessorInformation(nullptr, &buffer_size);
+  GetLogicalProcessorInformation(0, &buffer_size);
   buffer = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION *)malloc(buffer_size);
   GetLogicalProcessorInformation(&buffer[0], &buffer_size);
 
@@ -78,23 +77,22 @@ static inline size_t _cache_line_size() {
   return line_size;
 }
 
-#elif defined(__GLIBC__)
+#elif defined(__linux__)
 static inline size_t _cache_line_size() {
   long size = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
   if (size == -1) return 64;
-
-  // returns 0 on s390x RHEL 7.x and some __arch64__ configurations.
+#if defined(__s390x__)
+  // returns 0 on s390x RHEL 7.x
   if (size == 0) {
     FILE *p = fopen(
         "/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r");
     if (p) {
-      if (fscanf(p, "%ld", &size) != 1) size = 0;
+      fscanf(p, "%ld", &size);
       fclose(p);
     }
   }
-
-  if (size > 0) return static_cast<size_t>(size);
-  return 64;
+#endif
+  return static_cast<size_t>(size);
 }
 
 #else
@@ -135,10 +133,6 @@ static inline size_t minimum_cacheline_for() {
   static const size_t size{memory::_cacheline_for<T>()};
   return size;
 }
-
-/// @brief Template that may access Aligned_atomic internals
-template <class T>
-class Aligned_atomic_accessor;
 
 /**
   @class memory::Aligned_atomic
@@ -299,9 +293,6 @@ class Aligned_atomic {
     @return The in-memory size of the allocated byte buffer.
    */
   size_t allocated_size() const;
-
-  template <typename Accessor_type>
-  friend class Aligned_atomic_accessor;
 
  private:
   /** The size of the byte buffer. */

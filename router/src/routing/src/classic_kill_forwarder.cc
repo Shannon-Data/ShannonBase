@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -69,7 +68,7 @@ stdx::expected<Processor::Result, std::error_code> KillForwarder::command() {
   trace_event_connect_and_forward_command_ =
       trace_connect_and_forward_command(trace_event_command_);
 
-  auto &server_conn = connection()->server_conn();
+  auto &server_conn = connection()->socket_splicer()->server_conn();
   if (!server_conn.is_open()) {
     stage(Stage::Connect);
   } else {
@@ -90,15 +89,18 @@ stdx::expected<Processor::Result, std::error_code> KillForwarder::connect() {
 }
 
 stdx::expected<Processor::Result, std::error_code> KillForwarder::connected() {
-  auto &server_conn = connection()->server_conn();
+  auto &server_conn = connection()->socket_splicer()->server_conn();
   if (!server_conn.is_open()) {
-    auto &src_conn = connection()->client_conn();
+    auto *socket_splicer = connection()->socket_splicer();
+    auto *src_channel = socket_splicer->client_channel();
+    auto *src_protocol = connection()->client_protocol();
 
     // take the client::command from the connection.
-    auto recv_res = ClassicFrame::ensure_has_full_frame(src_conn);
+    auto recv_res =
+        ClassicFrame::ensure_has_full_frame(src_channel, src_protocol);
     if (!recv_res) return recv_client_failed(recv_res.error());
 
-    discard_current_msg(src_conn);
+    discard_current_msg(src_channel, src_protocol);
 
     if (auto &tr = tracer()) {
       tr.trace(Tracer::Event().stage("kill::connected::error"));
@@ -108,7 +110,7 @@ stdx::expected<Processor::Result, std::error_code> KillForwarder::connected() {
     trace_command_end(trace_event_command_);
 
     stage(Stage::Done);
-    return reconnect_send_error_msg(src_conn);
+    return reconnect_send_error_msg(src_channel, src_protocol);
   }
 
   if (auto &tr = tracer()) {
@@ -138,17 +140,19 @@ KillForwarder::forward_done() {
 }
 
 stdx::expected<Processor::Result, std::error_code> KillForwarder::response() {
-  auto &src_conn = connection()->server_conn();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = connection()->server_protocol();
 
-  auto read_res = ClassicFrame::ensure_has_msg_prefix(src_conn);
+  auto read_res =
+      ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) return recv_server_failed(read_res.error());
 
   if (auto &tr = tracer()) {
     tr.trace(Tracer::Event().stage("kill::response"));
   }
 
-  const uint8_t msg_type = src_protocol.current_msg_type().value();
+  const uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     Ok = ClassicFrame::cmd_byte<classic_protocol::message::server::Ok>(),
@@ -164,19 +168,19 @@ stdx::expected<Processor::Result, std::error_code> KillForwarder::response() {
       return Result::Again;
   }
 
-  return stdx::unexpected(make_error_code(std::errc::bad_message));
+  return stdx::make_unexpected(make_error_code(std::errc::bad_message));
 }
 
 stdx::expected<Processor::Result, std::error_code> KillForwarder::ok() {
-  auto &src_conn = connection()->server_conn();
-  auto &src_protocol = src_conn.protocol();
-
-  auto &dst_conn = connection()->client_conn();
-  auto &dst_protocol = dst_conn.protocol();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto *src_channel = socket_splicer->server_channel();
+  auto *src_protocol = connection()->server_protocol();
+  auto *dst_channel = socket_splicer->client_channel();
+  auto *dst_protocol = connection()->client_protocol();
 
   auto msg_res =
       ClassicFrame::recv_msg<classic_protocol::borrowed::message::server::Ok>(
-          src_conn);
+          src_channel, src_protocol);
   if (!msg_res) return recv_server_failed(msg_res.error());
 
   auto msg = *msg_res;
@@ -185,7 +189,7 @@ stdx::expected<Processor::Result, std::error_code> KillForwarder::ok() {
     tr.trace(Tracer::Event().stage("kill::ok"));
   }
 
-  dst_protocol.status_flags(msg.status_flags());
+  dst_protocol->status_flags(msg.status_flags());
 
   if (auto *ev = trace_span(trace_event_command_, "mysql/response")) {
     ClassicFrame::trace_set_attributes(ev, src_protocol, msg);
@@ -203,10 +207,10 @@ stdx::expected<Processor::Result, std::error_code> KillForwarder::ok() {
   if (!connection()->events().empty()) {
     msg.warning_count(msg.warning_count() + 1);
 
-    auto send_res = ClassicFrame::send_msg(dst_conn, msg);
-    if (!send_res) return stdx::unexpected(send_res.error());
+    auto send_res = ClassicFrame::send_msg(dst_channel, dst_protocol, msg);
+    if (!send_res) return stdx::make_unexpected(send_res.error());
 
-    discard_current_msg(src_conn);
+    discard_current_msg(src_channel, src_protocol);
 
     return Result::SendToClient;
   }
@@ -215,11 +219,13 @@ stdx::expected<Processor::Result, std::error_code> KillForwarder::ok() {
 }
 
 stdx::expected<Processor::Result, std::error_code> KillForwarder::error() {
-  auto &src_conn = connection()->server_conn();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = connection()->socket_splicer();
+  auto *src_channel = socket_splicer->server_channel();
+  auto *src_protocol = connection()->server_protocol();
 
   auto msg_res = ClassicFrame::recv_msg<
-      classic_protocol::borrowed::message::server::Error>(src_conn);
+      classic_protocol::borrowed::message::server::Error>(src_channel,
+                                                          src_protocol);
   if (!msg_res) return recv_server_failed(msg_res.error());
 
   auto msg = *msg_res;

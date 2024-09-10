@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -67,7 +66,7 @@ StatisticsForwarder::command() {
   trace_event_connect_and_forward_command_ =
       trace_connect_and_forward_command(trace_event_command_);
 
-  auto &server_conn = connection()->server_conn();
+  auto &server_conn = connection()->socket_splicer()->server_conn();
   if (!server_conn.is_open()) {
     stage(Stage::Connect);
   } else {
@@ -91,15 +90,18 @@ StatisticsForwarder::connect() {
 
 stdx::expected<Processor::Result, std::error_code>
 StatisticsForwarder::connected() {
-  auto &server_conn = connection()->server_conn();
+  auto &server_conn = connection()->socket_splicer()->server_conn();
   if (!server_conn.is_open()) {
-    auto &src_conn = connection()->client_conn();
+    auto *socket_splicer = connection()->socket_splicer();
+    auto *src_channel = socket_splicer->client_channel();
+    auto *src_protocol = connection()->client_protocol();
 
     // take the client::command from the connection.
-    auto recv_res = ClassicFrame::ensure_has_full_frame(src_conn);
+    auto recv_res =
+        ClassicFrame::ensure_has_full_frame(src_channel, src_protocol);
     if (!recv_res) return recv_client_failed(recv_res.error());
 
-    discard_current_msg(src_conn);
+    discard_current_msg(src_channel, src_protocol);
 
     if (auto &tr = tracer()) {
       tr.trace(Tracer::Event().stage("statistics::connect::error"));
@@ -109,7 +111,7 @@ StatisticsForwarder::connected() {
     trace_command_end(trace_event_command_);
 
     stage(Stage::Done);
-    return reconnect_send_error_msg(src_conn);
+    return reconnect_send_error_msg(src_channel, src_protocol);
   }
 
   if (auto &tr = tracer()) {

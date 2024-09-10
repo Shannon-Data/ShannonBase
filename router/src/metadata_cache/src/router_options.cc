@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -57,7 +56,7 @@ class MetadataJsonOptions {
     json_doc.Parse(options);
 
     if (!json_doc.IsObject()) {
-      return stdx::unexpected("not a valid JSON object");
+      return stdx::make_unexpected("not a valid JSON object");
     }
 
     const auto it = json_doc.FindMember(name);
@@ -66,7 +65,7 @@ class MetadataJsonOptions {
     }
 
     if (!it->value.IsString()) {
-      return stdx::unexpected("options." + name + " not a string");
+      return stdx::make_unexpected("options." + name + " not a string");
     }
 
     return it->value.GetString();
@@ -81,7 +80,7 @@ class MetadataJsonOptions {
     json_doc.Parse(options);
 
     if (!json_doc.IsObject()) {
-      return stdx::unexpected("not a valid JSON object");
+      return stdx::make_unexpected("not a valid JSON object");
     }
 
     const auto it = json_doc.FindMember(name);
@@ -93,8 +92,8 @@ class MetadataJsonOptions {
       rapidjson::StringBuffer sb;
       rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
       it->value.Accept(writer);
-      return stdx::unexpected("options." + name + "='" + sb.GetString() +
-                              "'; not an unsigned int");
+      return stdx::make_unexpected("options." + name + "='" + sb.GetString() +
+                                   "'; not an unsigned int");
     }
 
     return it->value.GetUint();
@@ -109,7 +108,7 @@ class MetadataJsonOptions {
     json_doc.Parse(options);
 
     if (json_doc.HasParseError() || !json_doc.IsObject()) {
-      return stdx::unexpected("not a valid JSON object");
+      return stdx::make_unexpected("not a valid JSON object");
     }
 
     const auto it = json_doc.FindMember(name);
@@ -122,8 +121,8 @@ class MetadataJsonOptions {
       rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
       it->value.Accept(writer);
 
-      return stdx::unexpected("options." + name + "='" + sb.GetString() +
-                              "'; not a boolean");
+      return stdx::make_unexpected("options." + name + "='" + sb.GetString() +
+                                   "'; not a boolean");
     }
 
     return it->value.GetBool();
@@ -337,66 +336,5 @@ std::string to_string(const ReadOnlyTargets mode) {
       return "read_replicas";
     default:
       return "secondaries";
-  }
-}
-
-QuorumConnectionLostAllowTraffic
-RouterOptions::get_unreachable_quorum_allowed_traffic() const {
-  QuorumConnectionLostAllowTraffic result =
-      kDefaultQuorumConnectionLostAllowTraffic;
-  auto &log_suppressor = LogSuppressor::instance();
-  std::string warning;
-  const auto mode_op = MetadataJsonOptions::get_router_option_str(
-      options_str_, "unreachable_quorum_allowed_traffic");
-
-  if (!mode_op) {
-    warning =
-        "Error reading unreachable_quorum_allowed_traffic from the "
-        "router_options: " +
-        mode_op.error() + ". Using default value.";
-  } else {
-    if (!mode_op.value()) {
-      // value not in options, use default
-    } else if (*mode_op.value() == "none") {
-      result = QuorumConnectionLostAllowTraffic::none;
-    } else if (*mode_op.value() == "read") {
-      result = QuorumConnectionLostAllowTraffic::read;
-    } else if (*mode_op.value() == "all") {
-      result = QuorumConnectionLostAllowTraffic::all;
-    } else {
-      warning =
-          "Unknown unreachable_quorum_allowed_traffic read from the "
-          "metadata: '" +
-          *mode_op.value() + "'. Using default value. (" + options_str_ + ")";
-    }
-  }
-
-  // we want to log the warning only when it's changing
-  std::string message;
-  if (!warning.empty()) {
-    message =
-        "Error parsing unreachable_quorum_allowed_traffic from options JSON "
-        "string: " +
-        warning + "; Using '" + to_string(result) + "' value";
-  } else {
-    message =
-        "Using unreachable_quorum_allowed_traffic='" + to_string(result) + "'";
-  }
-
-  log_suppressor.log_message(
-      LogSuppressor::MessageId::kUnreachableQuorumAllowedTraffic, "", message,
-      !warning.empty(), mysql_harness::logging::LogLevel::kWarning,
-      mysql_harness::logging::LogLevel::kInfo, true);
-  return result;
-}
-
-std::string to_string(const QuorumConnectionLostAllowTraffic allow) {
-  switch (allow) {
-    case QuorumConnectionLostAllowTraffic::read:
-      return "read";
-    case QuorumConnectionLostAllowTraffic::all:
-      return "all";
-    default:
-      return "none";
   }
 }

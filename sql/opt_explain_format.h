@@ -1,16 +1,15 @@
-/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -135,7 +134,8 @@ class context;
 }
 
 // Table modification type
-enum enum_mod_type { MT_NONE, MT_INSERT, MT_UPDATE, MT_DELETE, MT_REPLACE };
+enum enum_mod_type { MT_NONE, MT_INSERT, MT_UPDATE, MT_DELETE, MT_REPLACE,
+                     MT_GATHER};
 
 /**
   Helper class for table property buffering
@@ -515,10 +515,6 @@ class Explain_format {
  private:
   std::optional<std::string_view> m_explain_into_variable_name;
 
- public:
-  /* Which schema this EXPLAIN statement should be run for. */
-  LEX_CSTRING m_schema_name_for_explain;
-
  protected:
   Explain_format() : output(nullptr) {}
   explicit Explain_format(
@@ -562,19 +558,6 @@ class Explain_format {
    */
   bool is_explain_into() const {
     return m_explain_into_variable_name.has_value();
-  }
-
-  /**
-   * Whether the EXPLAIN statement should be run in another schema than the
-   * current active schema. If this returns true, m_schema_name_for_explain
-   * contains the name of the schema to use for EXPLAIN.
-   *
-   * @return true       The EXPLAIN statement should be run in another schema.
-   * @return false      The EXPLAIN statement should be run in the current
-   *                    active schema.
-   */
-  bool is_explain_for_schema() const {
-    return m_schema_name_for_explain.length != 0;
   }
 
   /**

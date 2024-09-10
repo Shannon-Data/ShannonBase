@@ -44,9 +44,9 @@
 --replace_result $_group_replication_local_address GROUP_REPLICATION_LOCAL_ADDRESS $_group_replication_group_seeds GROUP_REPLICATION_GROUP_SEEDS
 --source include/restart_mysqld.inc
 
-# Needed as we are not using rpl/restart_server.inc
+# Needed as we are not using rpl_restart_server.inc
 --let $rpl_server_number= 2
---source include/rpl/reconnect.inc
+--source include/rpl_reconnect.inc
 
 --let $_init_server2_auto_increment= `SELECT @@GLOBAL.AUTO_INCREMENT_INCREMENT`
 --let $_init_server2_auto_offset= `SELECT @@GLOBAL.AUTO_INCREMENT_OFFSET`
@@ -56,14 +56,10 @@
 
 --source include/stop_group_replication.inc
 
-# A RESET BINARY LOGS AND GTIDS was executed in the context of include/rpl/init_source_replica.inc after
+# A RESET MASTER was executed in the context of include/master-slave.inc after
 # the server auto started group replication.
 # The server applier logs will be reset to avoid recovery problems.
-RESET REPLICA ALL FOR CHANNEL "group_replication_applier";
-
-SET SESSION sql_log_bin = 0;
-CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
-SET SESSION sql_log_bin = 1;
+RESET SLAVE ALL FOR CHANNEL "group_replication_applier";
 
 --echo #
 --echo # Add some data to server 1.
@@ -71,12 +67,10 @@ SET SESSION sql_log_bin = 1;
 
 --connection server1
 
-SET SESSION sql_log_bin = 0;
 CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
-SET SESSION sql_log_bin = 1;
 INSERT INTO t1 VALUES (1);
 
-SET @@GLOBAL.DEBUG='+d,dump_thread_before_read_event';
+SET @@GLOBAL.DEBUG='+d,block_applier_updates';
 
 --echo #
 --echo # On server 2 uninstall and install the plugin with auto start.
@@ -96,6 +90,9 @@ SET @@GLOBAL.DEBUG='+d,dump_thread_before_read_event';
 --let $group_replication_member_state= RECOVERING
 --source include/gr_wait_for_member_state.inc
 
+--let $wait_condition= SELECT COUNT(*)=1 FROM information_schema.tables WHERE table_name = 't1'
+--source include/wait_condition.inc
+
 # install plugin return before set super_read_only, wait to confirm change
 --let $wait_condition= SELECT @@GLOBAL.super_read_only = '1'
 --source include/wait_condition.inc
@@ -109,10 +106,9 @@ INSERT INTO t1 VALUES (2);
 
 --connection server1
 
---let $wait_condition=SELECT COUNT(*)=1 FROM INFORMATION_SCHEMA.PROCESSLIST WHERE State = 'debug sync point: now'
---source include/wait_condition.inc
-SET @@GLOBAL.DEBUG='-d,dump_thread_before_read_event';
-SET DEBUG_SYNC = "now SIGNAL signal.continue";
+SET DEBUG_SYNC = "now WAIT_FOR applier_read_blocked";
+SET @@GLOBAL.DEBUG='-d,block_applier_updates';
+SET DEBUG_SYNC = "now SIGNAL resume_applier_read";
 
 --connection server2
 
@@ -133,7 +129,7 @@ SET DEBUG_SYNC= 'RESET';
 --connection server2
 DROP TABLE t1;
 
---source include/rpl/sync.inc
+--source include/rpl_sync.inc
 
 #Stop group replication and set the auto_increment values recorded on start
 --source include/stop_group_replication.inc

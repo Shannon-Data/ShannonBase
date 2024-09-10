@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2024, Oracle and/or its affiliates.
+Copyright (c) 1994, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -84,6 +83,7 @@ static inline int innobase_mysql_cmp(ulint prtype, const byte *a,
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_VARCHAR:
       break;
@@ -650,9 +650,15 @@ int cmp_dtuple_rec_with_match_low(const dtuple_t *dtuple, const rec_t *rec,
     ut_ad(!rec_offs_nth_default(index, offsets, i));
 
     ulint rec_f_len;
+    const byte *rec_b_ptr = nullptr;
+    if (index->has_instant_cols()) {
+      rec_b_ptr = rec_get_nth_field_instant(rec, offsets, i, index, &rec_f_len);
+    } else {
+      /* So does the field with default value */
+      ut_ad(!rec_offs_nth_default(index, offsets, i));
 
-    const auto rec_b_ptr =
-        rec_get_nth_field(index, rec, offsets, i, &rec_f_len);
+      rec_b_ptr = rec_get_nth_field(index, rec, offsets, i, &rec_f_len);
+    }
 
     ut_ad(!dfield_is_ext(dtuple_field));
 
@@ -688,6 +694,80 @@ int cmp_dtuple_rec_with_match_low(const dtuple_t *dtuple, const rec_t *rec,
 
   /* If we ran out of fields, dtuple was equal to rec up to the common fields */
   *matched_fields = n_cmp;
+
+  return (0);
+}
+
+int cmp_sec_dtuple_pri_rec_with_match(const dtuple_t *dtuple, const rec_t *rec,
+                                      const dict_index_t *index,
+                                      const dict_index_t *clust_index,
+                                      const ulint *offsets, ulint n_cmp) {
+  ut_ad(dtuple_check_typed(dtuple));
+  ut_ad(rec_offs_validate(rec, clust_index, offsets));
+  ut_ad(n_cmp > 0);
+  ut_ad(n_cmp <= dtuple_get_n_fields(dtuple));
+
+  for (ulint i = 0; i < n_cmp; ++i) {
+    const auto dtuple_field = dtuple_get_nth_field(dtuple, i);
+
+    const auto dtuple_b_ptr =
+        static_cast<const byte *>(dfield_get_data(dtuple_field));
+
+    const auto type = dfield_get_type(dtuple_field);
+
+    auto dtuple_f_len = dfield_get_len(dtuple_field);
+
+    ut_ad(!rec_offs_nth_extern(clust_index, offsets, i));
+
+    ut_ad(!rec_offs_nth_default(clust_index, offsets, i));
+
+    // caculate the pos
+    auto pos = dict_index_get_nth_field_pos(clust_index, index, i);
+
+    ulint rec_f_len;
+
+    const auto rec_b_ptr =
+        rec_get_nth_field(clust_index, rec, offsets, pos, &rec_f_len);
+
+    ut_ad(!dfield_is_ext(dtuple_field));
+
+    int ret{};
+
+    if (dfield_is_multi_value(dtuple_field) &&
+        (dtuple_f_len == UNIV_MULTI_VALUE_ARRAY_MARKER ||
+         dtuple_f_len == UNIV_NO_INDEX_VALUE)) {
+      /* If it's the value parsed from the array, or NULL, then
+      the calculation can be done in a normal way in the else branch */
+      ut_ad(index->is_multi_value());
+      if (dtuple_f_len == UNIV_NO_INDEX_VALUE) {
+        ret = 1;
+      } else {
+        multi_value_data *mv_data =
+            static_cast<multi_value_data *>(dtuple_field->data);
+        ret = mv_data->has(type, rec_b_ptr, rec_f_len) ? 0 : 1;
+      }
+    } else {
+      /* For now, change buffering is only supported on
+      indexes with ascending order on the columns. */
+      if (dtuple_f_len != UNIV_SQL_NULL && rec_f_len != UNIV_SQL_NULL &&
+          dtuple_f_len < rec_f_len) {
+        const dict_field_t *field = index->get_field(i);
+        if (field->prefix_len > 0) {
+          rec_f_len = dtype_get_at_most_n_mbchars(
+              field->col->prtype, field->col->mbminmaxlen, field->prefix_len,
+              rec_f_len, reinterpret_cast<const char *>(rec_b_ptr));
+        }
+      }
+      ret = cmp_data(
+          type->mtype, type->prtype,
+          dict_index_is_ibuf(index) || index->get_field(i)->is_ascending,
+          dtuple_b_ptr, dtuple_f_len, rec_b_ptr, rec_f_len);
+    }
+
+    if (ret) {
+      return (ret);
+    }
+  }
 
   return (0);
 }
@@ -992,8 +1072,8 @@ int cmp_rec_rec_with_match(const rec_t *rec1, const rec_t *rec2,
   ut_ad(rec1 != nullptr);
   ut_ad(rec2 != nullptr);
   ut_ad(index != nullptr);
-  ut_ad(rec_offs_validate(rec1, index, offsets1, cmp_btree_recs));
-  ut_ad(rec_offs_validate(rec2, index, offsets2, cmp_btree_recs));
+  ut_ad(rec_offs_validate(rec1, index, offsets1));
+  ut_ad(rec_offs_validate(rec2, index, offsets2));
   ut_ad(rec_offs_comp(offsets1) == rec_offs_comp(offsets2));
 
   const auto comp = rec_offs_comp(offsets1);
@@ -1125,4 +1205,10 @@ int dtuple_t::compare(const rec_t *rec, const dict_index_t *index,
                       const ulint *offsets, ulint *matched_fields) const {
   return (cmp_dtuple_rec_with_match_low(this, rec, index, offsets, n_fields_cmp,
                                         matched_fields));
+}
+
+int dtuple_t::compare(const rec_t *rec, const dict_index_t *index,
+                      const dict_index_t *index2, const ulint *offsets) {
+  return cmp_sec_dtuple_pri_rec_with_match(this, rec, index, index2, offsets,
+                                           n_fields_cmp);
 }

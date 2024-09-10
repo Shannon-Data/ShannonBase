@@ -1,17 +1,16 @@
-# Copyright (c) 2009, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2009, 2023, Oracle and/or its affiliates.
 #
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is designed to work with certain software (including
+# This program is also distributed with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have either included with
-# the program or referenced in the documentation.
+# separately licensed software that they have included with MySQL.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -63,7 +62,6 @@ pfs_instr.h
 pfs_instr_class.h
 pfs_lock.h
 pfs_memory.h
-pfs_metrics_service_imp.h
 pfs_name.h
 pfs_plugin_table.h
 pfs_prepared_stmt.h
@@ -79,7 +77,6 @@ pfs_tls_channel.h
 pfs_user.h
 pfs_variable.h
 pfs_visitor.h
-mysql_server_telemetry_metrics_service_imp.h
 mysql_server_telemetry_traces_service_imp.h
 table_accounts.h
 table_all_instr.h
@@ -151,6 +148,11 @@ table_replication_applier_status_by_worker.h
 table_replication_connection_configuration.h
 table_replication_connection_status.h
 table_replication_group_member_stats.h
+table_rpd_column_id.h
+table_rpd_columns.h
+table_rpd_table_id.h
+table_rpd_tables.h
+table_rpd_preload_stats.h
 table_replication_group_members.h
 table_session_account_connect_attrs.h
 table_session_connect.h
@@ -160,8 +162,6 @@ table_session_variables.h
 table_setup_actors.h
 table_setup_consumers.h
 table_setup_instruments.h
-table_setup_meters.h
-table_setup_metrics.h
 table_setup_objects.h
 table_setup_threads.h
 table_socket_instances.h
@@ -201,7 +201,6 @@ table_log_status.h
 table_plugin_table.h
 table_replication_applier_filters.h
 table_replication_applier_global_filters.h
-telemetry_pfs_metrics.h
 cursor_by_account.cc
 cursor_by_error_log.cc
 cursor_by_host.cc
@@ -233,7 +232,6 @@ pfs_host.cc
 pfs_instr.cc
 pfs_instr_class.cc
 pfs_memory.cc
-pfs_metrics_service_imp.cc
 pfs_name.cc
 pfs_plugin_table.cc
 pfs_prepared_stmt.cc
@@ -247,7 +245,6 @@ pfs_tls_channel.cc
 pfs_user.cc
 pfs_variable.cc
 pfs_visitor.cc
-mysql_server_telemetry_metrics_service_imp.cc
 mysql_server_telemetry_traces_service_imp.cc
 service_pfs_notification.cc
 service_pfs_resource_group.cc
@@ -324,6 +321,11 @@ table_replication_connection_configuration.cc
 table_replication_connection_status.cc
 table_replication_group_member_stats.cc
 table_replication_group_members.cc
+table_rpd_column_id.cc
+table_rpd_columns.cc
+table_rpd_table_id.cc
+table_rpd_tables.cc
+table_rpd_preload_stats.cc
 table_session_account_connect_attrs.cc
 table_session_connect.cc
 table_session_connect_attrs.cc
@@ -332,8 +334,6 @@ table_session_variables.cc
 table_setup_actors.cc
 table_setup_consumers.cc
 table_setup_instruments.cc
-table_setup_meters.cc
-table_setup_metrics.cc
 table_setup_objects.cc
 table_setup_threads.cc
 table_socket_instances.cc
@@ -374,11 +374,10 @@ table_plugin_table.cc
 table_replication_applier_filters.cc
 table_replication_applier_global_filters.cc
 table_binary_log_transaction_compression_stats.cc
-telemetry_pfs_metrics.cc
 )
 MYSQL_ADD_PLUGIN(perfschema ${PERFSCHEMA_SOURCES}
   STORAGE_ENGINE MANDATORY STATIC_ONLY
-  LINK_LIBRARIES extra::rapidjson ext::zlib mysql_gtid)
+  LINK_LIBRARIES extra::rapidjson ext::zlib)
 
 IF(WITH_UNIT_TESTS)
   ADD_SUBDIRECTORY(unittest)
@@ -407,7 +406,6 @@ OPTION(DISABLE_PSI_ERROR "Exclude the performance schema server error instrument
 OPTION(DISABLE_PSI_DATA_LOCK "Exclude the performance schema data lock instrumentation" OFF)
 OPTION(DISABLE_PSI_TLS_CHANNEL "Exclude the performance schema tls channel instrumentation" OFF)
 OPTION(DISABLE_PSI_SERVER_TELEMETRY_TRACES "Exclude the performance schema server telemetry traces instrumentation" OFF)
-OPTION(DISABLE_PSI_METRICS "Exclude the performance schema server telemetry metrics instrumentation" OFF)
 
 MARK_AS_ADVANCED(DISABLE_PSI_THREAD)
 
@@ -430,5 +428,4 @@ MARK_AS_ADVANCED(DISABLE_PSI_ERROR)
 MARK_AS_ADVANCED(DISABLE_PSI_DATA_LOCK)
 MARK_AS_ADVANCED(DISABLE_PSI_TLS_CHANNEL)
 MARK_AS_ADVANCED(DISABLE_PSI_SERVER_TELEMETRY_TRACES)
-MARK_AS_ADVANCED(DISABLE_PSI_METRICS)
 

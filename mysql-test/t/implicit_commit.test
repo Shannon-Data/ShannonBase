@@ -424,7 +424,7 @@ drop temporary table t4;
 --echo #
 
 let $statement=
-  show binary log status;
+  show master status;
 source include/implicit_commit_helper.inc;
 
 --echo #
@@ -432,7 +432,7 @@ source include/implicit_commit_helper.inc;
 --echo #
 
 let $statement=
-  SHOW REPLICA STATUS;
+  show slave status;
 source include/implicit_commit_helper.inc;
 
 --echo #
@@ -653,11 +653,11 @@ source include/implicit_commit_helper.inc;
 --echo #
 
 --echo #
---echo # SQLCOM_REPLICA_START
+--echo # SQLCOM_SLAVE_START
 --echo #
 
 --echo #
---echo # SQLCOM_REPLICA_STOP
+--echo # SQLCOM_SLAVE_STOP
 --echo #
 
 --echo #
@@ -669,7 +669,7 @@ let $statement=
 source include/implicit_commit_helper.inc;
 
 --echo #
---echo # SQLCOM_CHANGE_REPLICATION_SOURCE
+--echo # SQLCOM_CHANGE_MASTER
 --echo #
 
 --echo #
@@ -725,7 +725,7 @@ source include/implicit_commit_helper.inc;
 --echo #
 
 let $statement=
-  SHOW REPLICAS;
+  show slave hosts;
 source include/implicit_commit_helper.inc;
 
 --echo #
@@ -1005,7 +1005,7 @@ let $statement=
 source include/implicit_commit_helper.inc;
 
 let $statement=
-  DROP TABLESPACE ts1;
+  DROP TABLESPACE ts1  ENGINE=INNODB;
 source include/implicit_commit_helper.inc;
 
 

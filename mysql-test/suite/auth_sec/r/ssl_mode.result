@@ -36,24 +36,25 @@ Database: mysql  Table: user  Wildcard: user
 | User  | char(32) | utf8mb3_bin | NO   | PRI |         |       | select,insert,update,references |         |
 +-------+----------+-------------+------+-----+---------+-------+---------------------------------+---------+
 mysql.test: Records: 1  Deleted: 0  Skipped: 0  Warnings: 1
+# Tests related to deprecation of ssl options
 # Tests related to invalid option of --ssl-mode
 # Tests related to valid values of --ssl-mode
 Variable_name	Value
 Ssl_cipher	
 Variable_name	Value
-Ssl_cipher	ECDHE-RSA-AES128-GCM-SHA256
+Ssl_cipher	DHE-RSA-AES256-SHA
 Variable_name	Value
-Ssl_cipher	ECDHE-RSA-AES128-GCM-SHA256
+Ssl_cipher	DHE-RSA-AES256-SHA
 Variable_name	Value
-Ssl_cipher	ECDHE-RSA-AES128-GCM-SHA256
+Ssl_cipher	DHE-RSA-AES256-SHA
 Variable_name	Value
-Ssl_cipher	ECDHE-RSA-AES128-GCM-SHA256
+Ssl_cipher	DHE-RSA-AES256-SHA
 # Check behavior when --ssl-mode is not passed explicitly
 Variable_name	Value
-Ssl_cipher	ECDHE-RSA-AES128-GCM-SHA256
+Ssl_cipher	DHE-RSA-AES256-SHA
 # Check behavior when multiple times --ssl-mode is passed
 Variable_name	Value
-Ssl_cipher	ECDHE-RSA-AES128-GCM-SHA256
+Ssl_cipher	DHE-RSA-AES256-SHA
 # Check the legacy options
 # Cleanup
 DROP USER 'user1'@'%';

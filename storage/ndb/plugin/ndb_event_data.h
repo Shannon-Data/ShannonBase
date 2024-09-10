@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -103,11 +102,6 @@ class Ndb_event_data {
   // Bitmap with all primary key columns, used for "minimal bitmap"
   MY_BITMAP pk_bitmap;
 
-  // Bitmap with all primary key columns not being a character data type.
-  // Note that char PK columns may compare-as-equal even if not being binary
-  // identical. Thus they can not be eliminated from a "minimal bitmap".
-  MY_BITMAP pk_nonchar_bitmap;
-
  public:
   void generate_minimal_bitmap(MY_BITMAP *before, MY_BITMAP *after) const;
 
@@ -121,8 +115,6 @@ class Ndb_event_data {
 
   // Read uint32 value directly from NdbRecAttr in received event
   uint32 unpack_uint32(unsigned attr_id) const;
-  // Read uint64 value directly from NdbRecAttr in received event
-  uint64 unpack_uint64(unsigned attr_id) const;
   // Read string value directly from NdbRecAttr in received event
   const char *unpack_string(unsigned attr_id) const;
 

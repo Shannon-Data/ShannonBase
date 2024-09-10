@@ -9,10 +9,9 @@
 --source include/only_with_option.inc
 
 #
-# ROW mode is chosen because formats are varied inside the sourced tests.
+# MIXED mode is chosen because formats are varied inside the sourced tests.
 #
-
-# This test is binary_log format agnostic so row is chosen.
---source include/have_binlog_format_row.inc
+--source include/have_binlog_format_mixed.inc
 CALL mtr.add_suppression("Statement is unsafe because it is being used inside a XA transaction");
---source common/binlog/binlog_xa_prepared.test
+--source extra/binlog_tests/binlog_xa_prepared.test
+

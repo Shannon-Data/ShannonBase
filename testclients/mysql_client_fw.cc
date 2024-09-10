@@ -1,16 +1,15 @@
-/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -51,7 +50,7 @@ static char *opt_password = nullptr;
 static char *opt_host = nullptr;
 static char *opt_unix_socket = nullptr;
 #if defined(_WIN32)
-static char *shared_memory_base_name = nullptr;
+static char *shared_memory_base_name = 0;
 #endif
 static unsigned int opt_port;
 static bool tty_password = false;
@@ -172,16 +171,16 @@ static void die(const char *file, int line, const char *expr) {
     DIE_UNLESS(r != 0);           \
   }
 
-#define check_stmt(stmt)                   \
-  {                                        \
-    if (stmt == nullptr) myerror(nullptr); \
-    DIE_UNLESS(stmt != nullptr);           \
+#define check_stmt(stmt)          \
+  {                               \
+    if (stmt == 0) myerror(NULL); \
+    DIE_UNLESS(stmt != 0);        \
   }
 
-#define check_stmt_r(stmt)                 \
-  {                                        \
-    if (stmt == nullptr) myerror(nullptr); \
-    DIE_UNLESS(stmt == nullptr);           \
+#define check_stmt_r(stmt)        \
+  {                               \
+    if (stmt == 0) myerror(NULL); \
+    DIE_UNLESS(stmt == 0);        \
   }
 
 #define mytest(x)      \
@@ -208,7 +207,8 @@ static void die(const char *file, int line, const char *expr) {
 [[maybe_unused]] static void do_verify_prepare_field(
     MYSQL_RES *result, unsigned int no, const char *name, const char *org_name,
     enum enum_field_types type, const char *table, const char *org_table,
-    const char *db, unsigned long length, const char *file, int line);
+    const char *db, unsigned long length, const char *def, const char *file,
+    int line);
 [[maybe_unused]] static void verify_st_affected_rows(MYSQL_STMT *stmt,
                                                      ulonglong exp_count);
 [[maybe_unused]] static void verify_affected_rows(ulonglong exp_count);
@@ -324,10 +324,11 @@ opt_port and opt_unix_socket.
 
 @param flag           client_flag passed on to mysql_real_connect
 @param protocol       MYSQL_PROTOCOL_* to use for this connection
+@param auto_reconnect set to 1 for auto reconnect
 
 @return pointer to initialized and connected MYSQL object
 */
-static MYSQL *client_connect(ulong flag, uint protocol) {
+static MYSQL *client_connect(ulong flag, uint protocol, bool auto_reconnect) {
   MYSQL *mysql;
   int rc;
   static char query[MAX_TEST_QUERY_LENGTH];
@@ -360,6 +361,8 @@ static MYSQL *client_connect(ulong flag, uint protocol) {
     fprintf(stdout, "\n Check the connection options using --help or -?\n");
     exit(1);
   }
+  mysql->reconnect = auto_reconnect;
+
   if (!opt_silent) fprintf(stdout, "OK");
 
   /* set AUTOCOMMIT to ON*/
@@ -686,16 +689,18 @@ static void verify_col_data(const char *table, const char *col,
 /* Utility function to verify the field members */
 
 #define verify_prepare_field(result, no, name, org_name, type, table,          \
-                             org_table, db, length)                            \
+                             org_table, db, length, def)                       \
   do_verify_prepare_field((result), (no), (name), (org_name), (type), (table), \
-                          (org_table), (db), (length), __FILE__, __LINE__)
+                          (org_table), (db), (length), (def), __FILE__,        \
+                          __LINE__)
 
 static void do_verify_prepare_field(MYSQL_RES *result, unsigned int no,
                                     const char *name, const char *org_name,
                                     enum enum_field_types type,
                                     const char *table, const char *org_table,
                                     const char *db, unsigned long length,
-                                    const char *file, int line) {
+                                    const char *def, const char *file,
+                                    int line) {
   MYSQL_FIELD *field;
   CHARSET_INFO *cs;
   ulonglong expected_field_length;
@@ -727,6 +732,8 @@ static void do_verify_prepare_field(MYSQL_RES *result, unsigned int no,
             expected_field_length);
     fprintf(stdout, "\n    maxlength:`%ld`", field->max_length);
     fprintf(stdout, "\n    charsetnr:`%d`", field->charsetnr);
+    fprintf(stdout, "\n    default  :`%s`\t(expected: `%s`)",
+            field->def ? field->def : "(null)", def ? def : "(null)");
     fprintf(stdout, "\n");
   }
   DIE_UNLESS(strcmp(field->name, name) == 0);
@@ -759,6 +766,7 @@ static void do_verify_prepare_field(MYSQL_RES *result, unsigned int no,
             expected_field_length, field->length);
     DIE_UNLESS(field->length == expected_field_length);
   }
+  if (def) DIE_UNLESS(strcmp(field->def, def) == 0);
 }
 
 /* Utility function to verify the parameter count */
@@ -1037,6 +1045,7 @@ static bool thread_query(const char *query) {
     error = true;
     goto end;
   }
+  l_mysql->reconnect = true;
   if (mysql_query(l_mysql, query)) {
     fprintf(stderr, "Query failed (%s)\n", mysql_error(l_mysql));
     error = true;
@@ -1085,8 +1094,8 @@ static struct my_option client_test_long_options[] = {
      NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
 #if defined(_WIN32)
     {"shared-memory-base-name", 'm', "Base name of shared memory.",
-     &shared_memory_base_name, (uchar **)&shared_memory_base_name, nullptr,
-     GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr, 0, nullptr},
+     &shared_memory_base_name, (uchar **)&shared_memory_base_name, 0, GET_STR,
+     REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
 #endif
     {"socket", 'S', "Socket file to use for connection", &opt_unix_socket,
      &opt_unix_socket, nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr, 0,
@@ -1241,8 +1250,8 @@ int main(int argc, char **argv) {
   if (mysql_server_init(0, nullptr, nullptr))
     DIE("Can't initialize MySQL server");
 
-  /* connect to server with no flags, default protocol */
-  mysql = client_connect(0, MYSQL_PROTOCOL_DEFAULT);
+  /* connect to server with no flags, default protocol, auto reconnect true */
+  mysql = client_connect(0, MYSQL_PROTOCOL_DEFAULT, true);
 
   total_time = 0;
   for (iter_count = 1; iter_count <= opt_count; iter_count++) {

@@ -40,15 +40,15 @@
 ## Install Mysqlx plugin on all servers.
 
 --let $rpl_connection_name= server1
---source include/connection.inc
+--source include/rpl_connection.inc
 --source include/xplugin_wait_for_interfaces.inc
 
 --let $rpl_connection_name= server2
---source include/connection.inc
+--source include/rpl_connection.inc
 --source include/xplugin_wait_for_interfaces.inc
 
 --let $rpl_connection_name= server3
---source include/connection.inc
+--source include/rpl_connection.inc
 --source include/xplugin_wait_for_interfaces.inc
 
 # File for starting GR through mysqlx
@@ -73,11 +73,11 @@ EOF
 
 # Starting GR on all the servers through mysqlx
 --echo Starting GR on server 1
---exec $MYSQLXTEST --ssl-cipher='ECDHE-RSA-AES128-GCM-SHA256' -u root --port=$MASTER_X_MYPORT_1 --file=$MYSQL_TMP_DIR/bootstrap_server.tmp 2>&1
+--exec $MYSQLXTEST --ssl-cipher='DHE-RSA-AES256-SHA' -u root --port=$MASTER_X_MYPORT_1 --file=$MYSQL_TMP_DIR/bootstrap_server.tmp 2>&1
 --echo Starting GR on server 2
---exec $MYSQLXTEST --ssl-cipher='ECDHE-RSA-AES128-GCM-SHA256' -u root --port=$MASTER_X_MYPORT_2 --file=$MYSQL_TMP_DIR/non_bootstrap_server.tmp 2>&1
+--exec $MYSQLXTEST --ssl-cipher='DHE-RSA-AES256-SHA' -u root --port=$MASTER_X_MYPORT_2 --file=$MYSQL_TMP_DIR/non_bootstrap_server.tmp 2>&1
 --echo Starting GR on server 3
---exec $MYSQLXTEST --ssl-cipher='ECDHE-RSA-AES128-GCM-SHA256' -u root --port=$MASTER_X_MYPORT_3 --file=$MYSQL_TMP_DIR/non_bootstrap_server.tmp 2>&1
+--exec $MYSQLXTEST --ssl-cipher='DHE-RSA-AES256-SHA' -u root --port=$MASTER_X_MYPORT_3 --file=$MYSQL_TMP_DIR/non_bootstrap_server.tmp 2>&1
 
 --echo Waiting for GR members to come online.
 --let $wait_condition=SELECT COUNT(*)=3 FROM performance_schema.replication_group_members where MEMBER_STATE="ONLINE"
@@ -344,10 +344,10 @@ Mysqlx.Crud.Find {
 EOF
 
 # Crud operations for collection characters
---exec $MYSQLXTEST --ssl-cipher='ECDHE-RSA-AES128-GCM-SHA256' -u root --port=$MASTER_X_MYPORT_1 --file=$MYSQL_TMP_DIR/crud_on_server1.tmp 2>&1
+--exec $MYSQLXTEST --ssl-cipher='DHE-RSA-AES256-SHA' -u root --port=$MASTER_X_MYPORT_1 --file=$MYSQL_TMP_DIR/crud_on_server1.tmp 2>&1
 
 ## Wait for synchronization between the nodes.
---source include/rpl/sync.inc
+--source include/rpl_sync.inc
 
 ## Temp file for performing crud operation on collection "characters" from server2
 --write_file $MYSQL_TMP_DIR/crud_on_server2.tmp
@@ -526,10 +526,10 @@ Mysqlx.Crud.Find {
 }
 -->recvresult
 EOF
---exec $MYSQLXTEST --ssl-cipher='ECDHE-RSA-AES128-GCM-SHA256' -u root --port=$MASTER_X_MYPORT_2 --file=$MYSQL_TMP_DIR/crud_on_server2.tmp 2>&1
+--exec $MYSQLXTEST --ssl-cipher='DHE-RSA-AES256-SHA' -u root --port=$MASTER_X_MYPORT_2 --file=$MYSQL_TMP_DIR/crud_on_server2.tmp 2>&1
 
 ## Wait for synchronization between the nodes.
---source include/rpl/sync.inc
+--source include/rpl_sync.inc
 
 ## Temp file for performing crud operation on collection "characters" from server3
 --write_file $MYSQL_TMP_DIR/crud_on_server3.tmp
@@ -704,14 +704,14 @@ Mysqlx.Crud.Find {
 -->stmtadmin drop_collection	{"schema":"test", "name":"characters"}
 -->recvresult
 EOF
---exec $MYSQLXTEST --ssl-cipher='ECDHE-RSA-AES128-GCM-SHA256' -u root --port=$MASTER_X_MYPORT_3 --file=$MYSQL_TMP_DIR/crud_on_server3.tmp 2>&1
+--exec $MYSQLXTEST --ssl-cipher='DHE-RSA-AES256-SHA' -u root --port=$MASTER_X_MYPORT_3 --file=$MYSQL_TMP_DIR/crud_on_server3.tmp 2>&1
 
 ## Cannot use diff_tables.inc because of the following warning.
 ## Warning 1235 This version of MySQL doesn't yet support 'sorting of
 ## non-scalar JSON values'
 
 ## Wait for synchronization between the nodes.
---source include/rpl/sync.inc
+--source include/rpl_sync.inc
 
 # Creating temp file to stop GR.
 --write_file $MYSQL_TMP_DIR/stop_group_replication.tmp
@@ -721,27 +721,27 @@ EOF
 
 # Stopping GR on all the servers
 --echo Stopping GR on server 1
---exec $MYSQLXTEST --ssl-cipher='ECDHE-RSA-AES128-GCM-SHA256' -u root --port=$MASTER_X_MYPORT_1 --file=$MYSQL_TMP_DIR/stop_group_replication.tmp 2>&1
+--exec $MYSQLXTEST --ssl-cipher='DHE-RSA-AES256-SHA' -u root --port=$MASTER_X_MYPORT_1 --file=$MYSQL_TMP_DIR/stop_group_replication.tmp 2>&1
 --echo Stopping GR on server 2
---exec $MYSQLXTEST --ssl-cipher='ECDHE-RSA-AES128-GCM-SHA256' -u root --port=$MASTER_X_MYPORT_2 --file=$MYSQL_TMP_DIR/stop_group_replication.tmp 2>&1
+--exec $MYSQLXTEST --ssl-cipher='DHE-RSA-AES256-SHA' -u root --port=$MASTER_X_MYPORT_2 --file=$MYSQL_TMP_DIR/stop_group_replication.tmp 2>&1
 --echo Stopping GR on server 3
---exec $MYSQLXTEST --ssl-cipher='ECDHE-RSA-AES128-GCM-SHA256' -u root --port=$MASTER_X_MYPORT_3 --file=$MYSQL_TMP_DIR/stop_group_replication.tmp 2>&1
+--exec $MYSQLXTEST --ssl-cipher='DHE-RSA-AES256-SHA' -u root --port=$MASTER_X_MYPORT_3 --file=$MYSQL_TMP_DIR/stop_group_replication.tmp 2>&1
 
 # Uninstall mysqlx
 --let $rpl_connection_name= server1
---source include/connection.inc
+--source include/rpl_connection.inc
 --let $group_replication_member_state= OFFLINE
 --source include/gr_wait_for_member_state.inc
 --source include/assert_and_disable_read_only.inc
 
 --let $rpl_connection_name= server2
---source include/connection.inc
+--source include/rpl_connection.inc
 --let $group_replication_member_state= OFFLINE
 --source include/gr_wait_for_member_state.inc
 --source include/assert_and_disable_read_only.inc
 
 --let $rpl_connection_name= server3
---source include/connection.inc
+--source include/rpl_connection.inc
 --let $group_replication_member_state= OFFLINE
 --source include/gr_wait_for_member_state.inc
 --source include/assert_and_disable_read_only.inc

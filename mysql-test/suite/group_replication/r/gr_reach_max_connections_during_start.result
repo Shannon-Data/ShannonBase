@@ -20,7 +20,7 @@ include/assert_grep.inc [Found the expected error log message about exceeded max
 
 ############################################################
 # 2. Shutdown server.
-include/rpl/reconnect.inc
+include/rpl_reconnect.inc
 
 ############################################################
 # 3. Clean up.

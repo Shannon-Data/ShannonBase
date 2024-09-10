@@ -1,16 +1,15 @@
-/* Copyright (c) 2008, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -35,7 +34,6 @@
 #include "mysql/strings/m_ctype.h"
 #include "mysys_err.h"
 #include "sql/mysqld.h"
-#include "storage/perfschema/mysql_server_telemetry_metrics_service_imp.h"
 #include "storage/perfschema/mysql_server_telemetry_traces_service_imp.h"
 #include "storage/perfschema/pfs.h"
 #include "storage/perfschema/pfs_account.h"
@@ -52,7 +50,6 @@
 #include "storage/perfschema/pfs_host.h"
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
-#include "storage/perfschema/pfs_metrics_service_imp.h"
 #include "storage/perfschema/pfs_plugin_table.h"
 #include "storage/perfschema/pfs_prepared_stmt.h"
 #include "storage/perfschema/pfs_program.h"
@@ -163,8 +160,7 @@ int initialize_performance_schema(
       init_account_hash(param) || init_digest(param) ||
       init_digest_hash(param) || init_program(param) ||
       init_program_hash(param) || init_prepared_stmt(param) ||
-      init_meter_class(param->m_meter_class_sizing) ||
-      init_metric_class(param->m_metric_class_sizing) || init_error(param)) {
+      init_error(param)) {
     /*
       The performance schema initialization failed.
       Free the memory used, and disable the instrumentation.
@@ -272,23 +268,7 @@ int initialize_performance_schema(
   init_pfs_tls_channels_instrumentation();
 
   /*
-    Initialize telemetry metrics instrument service.
-    This must be done:
-    - after the memory allocation for rwlock instrumentation,
-      so that rwlock LOCK_pfs_metrics gets instrumented
-      (if the instrumentation is enabled),
-    - Even if the rwlock LOCK_pfs_metrics ends up not instrumented,
-       it still needs to be initialized.
-  */
-  initialize_mysql_server_metrics_instrument_service();
-
-  /*
-    Initialize telemetry metrics service.
-  */
-  initialize_mysql_server_telemetry_metrics_service();
-
-  /*
-    Initialize telemetry tracing service.
+     Initialize telemetry tracing service.
     This must be done:
     - after the memory allocation for mutex instrumentation,
       so that mutex LOCK_pfs_tracing_callback gets instrumented
@@ -357,8 +337,6 @@ static void cleanup_performance_schema() {
     find_XXX_class(key)
     will return PSI_NOT_INSTRUMENTED
   */
-  cleanup_mysql_server_telemetry_metrics_service();
-  cleanup_mysql_server_metrics_instrument_service();
   cleanup_mysql_server_telemetry_traces_service();
   cleanup_pfs_tls_channels_instrumentation();
   cleanup_pfs_plugin_table();
@@ -375,8 +353,6 @@ static void cleanup_performance_schema() {
   cleanup_statement_class();
   cleanup_socket_class();
   cleanup_memory_class();
-  cleanup_meter_class();
-  cleanup_metric_class();
 
   cleanup_instruments();
 }

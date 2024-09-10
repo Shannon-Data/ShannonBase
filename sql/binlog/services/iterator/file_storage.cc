@@ -1,16 +1,15 @@
-/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is designed to work with certain software (including
+This program is also distributed with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+separately licensed software that they have included with MySQL.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -36,9 +35,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "sql/current_thd.h"
 
 extern bool opt_source_verify_checksum;
-
-using Format_description_event = mysql::binlog::event::Format_description_event;
-using Log_event_type = mysql::binlog::event::Log_event_type;
 
 /// @brief This class holds the context of the iterator.
 ///
@@ -89,11 +85,11 @@ class Binlog_iterator_ctx {
   File_reader *m_reader{nullptr};
   /// @brief  This is a reference to the current format description event.
   Format_description_event m_current_fde{BINLOG_VERSION, server_version};
-  /// @brief The local tsid map
-  Tsid_map m_local_tsid_map{nullptr};
+  /// @brief The local sid map
+  Sid_map m_local_sid_map{nullptr};
   /// @brief  This is the set of gtids that are to be excluded while using this
   /// iterator.
-  Gtid_set m_excluded_gtid_set{&m_local_tsid_map};
+  Gtid_set m_excluded_gtid_set{&m_local_sid_map};
   /// @brief  This is a reference to the buffer used to store events read.
   unsigned char *m_buffer{nullptr};
   /// @brief  This a the capacity of the buffer used to store events read.
@@ -249,15 +245,14 @@ class Binlog_iterator_ctx {
     DBUG_TRACE;
     auto event_type = static_cast<Log_event_type>(buffer[EVENT_TYPE_OFFSET]);
     switch (event_type) {
-      case mysql::binlog::event::GTID_LOG_EVENT:
-      case mysql::binlog::event::GTID_TAGGED_LOG_EVENT: {
+      case binary_log::GTID_LOG_EVENT: {
         Gtid_log_event gtid_ev(reinterpret_cast<const char *>(buffer),
                                &m_current_fde);
         if (!gtid_ev.is_valid())
           return std::make_tuple<bool, bool, uint64_t>(true, false, 0);
         Gtid gtid{};
-        const auto &tsid = gtid_ev.get_tsid();
-        gtid.sidno = m_local_tsid_map.tsid_to_sidno(tsid);
+        const auto *const sid = gtid_ev.get_sid();
+        gtid.sidno = m_local_sid_map.sid_to_sidno(*sid);
         if (gtid.sidno == 0)
           return std::make_tuple<bool, bool, uint64_t>(
               false, false, static_cast<uint64_t>(gtid_ev.transaction_length));
@@ -337,6 +332,7 @@ class Binlog_iterator_ctx {
     auto saved_pos{reader.position()};
 
     unsigned char buffer[LOG_EVENT_HEADER_LEN];
+    memset(buffer, 0, LOG_EVENT_HEADER_LEN);
 
     while (true) {
       // save the position so that we can seek to it later on
@@ -363,23 +359,21 @@ class Binlog_iterator_ctx {
         // have we read a gtid? if so, we need to check if we skip the
         // transaction
         switch (static_cast<Log_event_type>(buffer[EVENT_TYPE_OFFSET])) {
-          case mysql::binlog::event::GTID_LOG_EVENT:
-          case mysql::binlog::event::GTID_TAGGED_LOG_EVENT: {
+          case binary_log::GTID_LOG_EVENT: {
             // seek to the beginning of the log event and deserialize the GTID
             // event
             unsigned int bytes_read{0};
-            unsigned char gtid_buffer_stack
-                [mysql::binlog::event::Gtid_event::get_max_event_length()];
+            unsigned char
+                gtid_buffer_stack[binary_log::Gtid_event::MAX_EVENT_LENGTH];
             memset(gtid_buffer_stack, 0,
-                   mysql::binlog::event::Gtid_event::get_max_event_length());
+                   binary_log::Gtid_event::MAX_EVENT_LENGTH);
             unsigned char *gtid_buffer = gtid_buffer_stack;
 
             // swap buffer in the context
             auto *saved_buffer = get_buffer();
             auto saved_buffer_capacity = get_buffer_capacity();
             set_buffer(gtid_buffer);
-            set_buffer_capacity(
-                mysql::binlog::event::Gtid_event::get_max_event_length());
+            set_buffer_capacity(binary_log::Gtid_event::MAX_EVENT_LENGTH);
             auto swap_and_free_buffer_guard{create_scope_guard([&]() {
               set_buffer(saved_buffer);
               set_buffer_capacity(saved_buffer_capacity);
@@ -465,7 +459,7 @@ static Previous_gtids_log_event *find_previous_gtids_event(
     auto *ev = binlog_file_reader.read_event_object();
     if (ev == nullptr) return nullptr;
 
-    if (ev->get_type_code() == mysql::binlog::event::PREVIOUS_GTIDS_LOG_EVENT) {
+    if (ev->get_type_code() == binary_log::PREVIOUS_GTIDS_LOG_EVENT) {
       return dynamic_cast<Previous_gtids_log_event *>(ev);
     }
 
@@ -484,7 +478,7 @@ static Previous_gtids_log_event *find_previous_gtids_event(
 static bool has_purged_needed_gtids_already(const Gtid_set &excluded) {
   DBUG_TRACE;
   const auto *purged = gtid_state->get_lost_gtids();
-  Checkable_rwlock::Guard guard(*purged->get_tsid_map()->get_tsid_lock(),
+  Checkable_rwlock::Guard guard(*purged->get_sid_map()->get_sid_lock(),
                                 Checkable_rwlock::enum_lock_type::WRITE_LOCK);
   return !purged->is_subset(&excluded);
 }
@@ -523,8 +517,8 @@ static bool find_files(std::list<std::string> &files_in_index,
     // binary log file sequence. In that case, we continue the iteration.
     if (prev_gtids_ev == nullptr) continue;
 
-    Tsid_map local_tsid_map{nullptr};
-    Gtid_set previous{&local_tsid_map};
+    Sid_map local_sid_map{nullptr};
+    Gtid_set previous{&local_sid_map};
     prev_gtids_ev->add_to_set(&previous);
     delete prev_gtids_ev;
 
@@ -553,8 +547,8 @@ DEFINE_METHOD(Binlog_iterator_service_init_status, FileStorage::init,
   if (files_in_index.empty() || error != LOG_INFO_EOF)
     return kBinlogIteratorInitErrorUnspecified;
   // initialize the excluded gtid set
-  Tsid_map local_tsid_map{nullptr};
-  Gtid_set excluded{&local_tsid_map};
+  Sid_map local_sid_map{nullptr};
+  Gtid_set excluded{&local_sid_map};
   if (excluded.add_gtid_text(excluded_gtids_as_string) != RETURN_STATUS_OK)
     return kBinlogIteratorInitErrorUnspecified;
 
@@ -641,6 +635,7 @@ DEFINE_METHOD(Binlog_iterator_service_get_status, FileStorage::get,
   auto &ctx = *it->m_ctx;
   auto &reader = ctx.get_reader();
   *bytes_read = 0;
+  memset(buffer, 0, buffer_capacity);
 
   // update the file cursor (and get the event size, which we can disregard
   // here)
@@ -678,7 +673,7 @@ DEFINE_METHOD(Binlog_iterator_service_get_status, FileStorage::get,
   // save FORMAT_DESCRIPTION event
   *bytes_read = bytes_read_by_lowlevel_function;
   switch (static_cast<Log_event_type>(buffer[EVENT_TYPE_OFFSET])) {
-    case mysql::binlog::event::FORMAT_DESCRIPTION_EVENT: {
+    case binary_log::FORMAT_DESCRIPTION_EVENT: {
       // If we are processing a format description event we save it. This is
       // probably a bit pedantic, since we read binary logs generated by
       // this server. Therefore, instantiating a format description event
@@ -686,7 +681,7 @@ DEFINE_METHOD(Binlog_iterator_service_get_status, FileStorage::get,
       // to the fact that some users may edit the index file and force
       // binary logs into the server from different versions, we play it
       // safe here.
-      mysql::binlog::event::Format_description_event fde(
+      binary_log::Format_description_event fde(
           reinterpret_cast<const char *>(buffer), &ctx.get_fde());
       ctx.set_fde(fde);
       break;
@@ -714,8 +709,7 @@ DEFINE_BOOL_METHOD(FileStorage::get_next_entry_size,
 
   // events cannot be larger than 1GB (MAX_MAX_ALLOWED_PACKET)
   // if this limitation is ever lifted, this needs to be removed
-  if (event_size >
-      static_cast<uint64_t>(mysql::binlog::event::max_log_event_size))
+  if (event_size > static_cast<uint64_t>(binary_log::max_log_event_size))
     return 1;
   *size = event_size;
 

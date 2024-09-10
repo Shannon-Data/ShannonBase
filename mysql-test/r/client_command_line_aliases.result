@@ -1,4 +1,4 @@
-include/rpl/save_binlog_file_position.inc
+include/save_binlog_position.inc
 mysqlbinlog --read-from-remote-source: expect no warning
 mysqlbinlog --read-from-remote-master: expect warning
 WARNING: --read-from-remote-master is deprecated and will be removed in a future version. Use --read-from-remote-source instead.

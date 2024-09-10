@@ -5,7 +5,6 @@
 # loaded
 
 --source include/have_debug.inc
---source include/have_component_keyring_file.inc
 
 call mtr.add_suppression(".*Encryption can't find master key.*");
 call mtr.add_suppression(".*Encryption information in datafile.*");
@@ -20,8 +19,10 @@ ALTER TABLE t1 ENCRYPTION="Y", algorithm=copy;
 
 DROP TABLE t1;
 
---source suite/component_keyring_file/inc/setup_component.inc
-
+--let $restart_parameters= restart: --early-plugin-load="keyring_file=$KEYRING_PLUGIN"  --loose-keyring_file_data=$MYSQL_TMP_DIR/mysecret_keyring  $KEYRING_PLUGIN_OPT
+--replace_result $MYSQL_TMP_DIR MYSQL_TMP_DIR $KEYRING_PLUGIN_OPT --plugin-dir=KEYRING_PLUGIN_PATH
+--replace_regex /\.dll/.so/
+-- source include/restart_mysqld.inc
 
 # Create a table with encryption
 CREATE TABLE t1(c1 INT, c2 char(20)) ENCRYPTION="Y" ENGINE = InnoDB;
@@ -51,9 +52,8 @@ SET DEBUG='+d,os_block_cache_busy';
 --enable_query_log
 
 # Restart without key ring to check the encrypted table can't be open.
---source include/keyring_tests/helper/instance_backup_manifest.inc
---let $restart_parameters= restart: $PLUGIN_DIR_OPT
---replace_result $PLUGIN_DIR_OPT PLUGIN_DIR_OPT
+--let $restart_parameters= restart:
+--replace_result $MYSQL_TMP_DIR MYSQL_TMP_DIR $KEYRING_PLUGIN_OPT --plugin-dir=KEYRING_PLUGIN_PATH
 --replace_regex /\.dll/.so/
 -- source include/restart_mysqld.inc
 
@@ -61,8 +61,8 @@ SET DEBUG='+d,os_block_cache_busy';
 SELECT * FROM t1 ORDER BY c1 LIMIT 10;
 
 # Restart with keyring to check that we can now open the table
---source include/keyring_tests/helper/instance_restore_manifest.inc
---replace_result $PLUGIN_DIR_OPT PLUGIN_DIR_OPT
+--let $restart_parameters= restart: --early-plugin-load="keyring_file=$KEYRING_PLUGIN"  --loose-keyring_file_data=$MYSQL_TMP_DIR/mysecret_keyring  $KEYRING_PLUGIN_OPT
+--replace_result $MYSQL_TMP_DIR MYSQL_TMP_DIR $KEYRING_PLUGIN_OPT --plugin-dir=KEYRING_PLUGIN_PATH
 --replace_regex /\.dll/.so/
 --source include/restart_mysqld.inc
 
@@ -73,8 +73,10 @@ SET DEBUG='-d,os_block_cache_busy';
 SELECT * FROM t1 ORDER BY c1 LIMIT 10;
 
 DROP TABLE t1;
---source suite/component_keyring_file/inc/teardown_component.inc
 
 --let $restart_parameters= restart:
+--replace_result $MYSQL_TMP_DIR MYSQL_TMP_DIR $KEYRING_PLUGIN_OPT --plugin-dir=KEYRING_PLUGIN_PATH
 --replace_regex /\.dll/.so/
 --source include/restart_mysqld.inc
+
+--remove_file $MYSQL_TMP_DIR/mysecret_keyring

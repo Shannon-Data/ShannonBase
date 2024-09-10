@@ -44,7 +44,6 @@ call mtr.add_suppression("Started auto-rejoin procedure attempt*");
 call mtr.add_suppression("Auto-rejoin procedure attempt*");
 call mtr.add_suppression("The member configuration is not compatible with the group configuration. Variables such as group_replication_single_primary_mode or group_replication_enforce_update_everywhere_checks.*");
 call mtr.add_suppression("The server was automatically set into read only mode after an error was detected.");
-call mtr.add_suppression("The server was automatically set into offline mode after an error was detected.");
 SET sql_log_bin = 1;
 
 --source include/gr_autorejoin_monitoring.inc
@@ -56,12 +55,12 @@ SET @@GLOBAL.DEBUG='+d,group_replication_stop_before_rejoin';
 --source include/start_and_bootstrap_group_replication.inc
 
 --let $rpl_connection_name = server2
---source include/connection.inc
+--source include/rpl_connection.inc
 
 --source include/start_group_replication.inc
 
 --let $rpl_connection_name = server3
---source include/connection.inc
+--source include/rpl_connection.inc
 
 --source include/start_group_replication.inc
 
@@ -71,7 +70,7 @@ SET @@GLOBAL.DEBUG='+d,group_replication_stop_before_rejoin';
 --echo ####
 --echo
 --let $rpl_connection_name = server1
---source include/connection.inc
+--source include/rpl_connection.inc
 
 # First, enable auto-rejoin
 SET GLOBAL group_replication_autorejoin_tries = 1;
@@ -88,7 +87,7 @@ SET GLOBAL group_replication_autorejoin_tries = 1;
 --echo ####
 --echo
 --let $rpl_connection_name = server1
---source include/connection.inc
+--source include/rpl_connection.inc
 
 SET DEBUG_SYNC = "now WAIT_FOR signal.autorejoin_waiting";
 
@@ -113,7 +112,7 @@ SET DEBUG_SYNC = "now WAIT_FOR signal.autorejoin_waiting";
 --echo ####
 --echo
 --let $rpl_connection_name = server2
---source include/connection.inc
+--source include/rpl_connection.inc
 --echo
 --echo # Switch M2 and M3 to Single-Primary
 SELECT group_replication_switch_to_single_primary_mode();
@@ -125,7 +124,7 @@ SELECT group_replication_switch_to_single_primary_mode();
 --echo ####
 --echo
 --let $rpl_connection_name = server1
---source include/connection.inc
+--source include/rpl_connection.inc
 SET DEBUG_SYNC = "now SIGNAL signal.autorejoin_continue";
 
 # Verify that the auto-rejoin process has terminated
@@ -140,7 +139,7 @@ SET DEBUG_SYNC = "now SIGNAL signal.autorejoin_continue";
 --source include/gr_wait_for_number_of_members.inc
 
 --let $rpl_connection_name = server2
---source include/connection.inc
+--source include/rpl_connection.inc
 --let $wait_condition=SELECT COUNT(*)=2 FROM performance_schema.replication_group_members where MEMBER_STATE="ONLINE"
 --source include/wait_condition.inc
 
@@ -148,7 +147,7 @@ SET DEBUG_SYNC = "now SIGNAL signal.autorejoin_continue";
 --source include/gr_wait_for_number_of_members.inc
 
 --let $rpl_connection_name = server3
---source include/connection.inc
+--source include/rpl_connection.inc
 --let $wait_condition=SELECT COUNT(*)=2 FROM performance_schema.replication_group_members where MEMBER_STATE="ONLINE"
 --source include/wait_condition.inc
 
@@ -161,7 +160,7 @@ SET DEBUG_SYNC = "now SIGNAL signal.autorejoin_continue";
 --echo ####
 --echo
 --let $rpl_connection_name = server1
---source include/connection.inc
+--source include/rpl_connection.inc
 --source include/stop_group_replication.inc
 
 SET @@GLOBAL.DEBUG = @debug_saved;

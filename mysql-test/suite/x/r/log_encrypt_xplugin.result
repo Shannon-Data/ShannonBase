@@ -1,9 +1,3 @@
-# ----------------------------------------------------------------------
-# Setup
-# Creating custom global manifest file for MySQL server
-# Creating custom global configuration file for keyring component: component_keyring_file
-# Re-starting mysql server with manifest file
-# ----------------------------------------------------------------------
 # Stop the MTR default DB server
 # create bootstrap file
 # Prepare new datadir
@@ -245,11 +239,4 @@ c2	SUBSTRING(c3,1,10)
 1	aaaaaaaaaa
 1	aaaaaaaaaa
 DROP DATABASE tde_db;
-# restart: PLUGIN_DIR_OPT
-# ----------------------------------------------------------------------
-# Teardown
-# Removing local keyring file for keyring component: component_keyring_file
-# Removing global configuration file for keyring component: component_keyring_file
-# Removing global manifest file for MySQL server
-# Restarting server without the manifest file
-# ----------------------------------------------------------------------
+# restart

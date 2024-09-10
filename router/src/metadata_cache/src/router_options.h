@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,28 +26,16 @@
 #define METADATA_CACHE_ROUTER_OPTIONS_INCLUDED
 
 #include "mysqlrouter/cluster_metadata.h"
-#include "mysqlrouter/metadata_cache_export.h"
 #include "mysqlrouter/mysql_session.h"
 
 #include <chrono>
 #include <optional>
 
-static const auto kDefautlInvalidatedClusterRoutingPolicy =
-    mysqlrouter::TargetCluster::InvalidatedClusterRoutingPolicy::DropAll;
-
 enum class ReadOnlyTargets { all, read_replicas, secondaries };
 static const ReadOnlyTargets kDefaultReadOnlyTargets =
     ReadOnlyTargets::secondaries;
 
-METADATA_CACHE_EXPORT std::string to_string(const ReadOnlyTargets mode);
-
-enum class QuorumConnectionLostAllowTraffic { none, read, all };
-static const QuorumConnectionLostAllowTraffic
-    kDefaultQuorumConnectionLostAllowTraffic =
-        QuorumConnectionLostAllowTraffic::none;
-
-METADATA_CACHE_EXPORT std::string to_string(
-    const QuorumConnectionLostAllowTraffic allow);
+std::string to_string(const ReadOnlyTargets mode);
 
 /** @class RouterOptions
  *
@@ -92,12 +79,6 @@ class RouterOptions {
    * given Router in the metadata
    */
   bool get_use_replica_primary_as_rw() const;
-
-  /** @brief Get the unreachable_quorum_allowed_traffic value assigned for a
-   * given Router in the metadata
-   */
-  QuorumConnectionLostAllowTraffic get_unreachable_quorum_allowed_traffic()
-      const;
 
   /** @brief Get the target_cluster assigned for a given Router in the metadata
    *

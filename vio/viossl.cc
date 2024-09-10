@@ -1,16 +1,15 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -398,7 +397,7 @@ void vio_ssl_delete(Vio *vio) {
   }
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
-  ERR_remove_thread_state(nullptr);
+  ERR_remove_thread_state(0);
 #endif /* OPENSSL_VERSION_NUMBER < 0x10100000L */
 
   vio_delete(vio);
@@ -644,8 +643,7 @@ static int ssl_do(struct st_VioSSLFd *ptr, Vio *vio, long timeout,
 #endif
 
   DBUG_TRACE;
-  DBUG_PRINT("enter", ("ptr: %p, sd: " MY_SOCKET_FMT "  ctx: %p", ptr, sd,
-                       ptr->ssl_context));
+  DBUG_PRINT("enter", ("ptr: %p, sd: %d  ctx: %p", ptr, sd, ptr->ssl_context));
 
   if (!sslptr) {
     sslptr = &ssl;

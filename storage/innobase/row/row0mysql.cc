@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -21,7 +20,9 @@ for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
+
+Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
 *****************************************************************************/
 
@@ -574,7 +575,7 @@ static void row_mysql_convert_row_to_innobase(
     bool is_multi_val = false;
 
     templ = prebuilt->mysql_template + i;
-
+    if (templ->mysql_type == MYSQL_TYPE_DB_TRX_ID) continue; //ghost col.
     if (templ->is_virtual) {
       ut_ad(n_v_col < dtuple_get_n_v_fields(row));
       dfield = dtuple_get_nth_v_field(row, n_v_col);
@@ -2422,8 +2423,15 @@ run_again:
     }
   }
 
-  row_update_statistics_if_needed(prebuilt->table);
+  /* We update table statistics only if it is a DELETE or UPDATE
+  that changes indexed columns, UPDATEs that change only non-indexed
+  columns would not affect statistics. */
+  if (node->is_delete || !(node->cmpl_info & UPD_NODE_NO_ORD_CHANGE)) {
+    row_update_statistics_if_needed(prebuilt->table);
+  }
+
   trx->op_info = "";
+
   return err;
 
 error:
@@ -2442,9 +2450,7 @@ dberr_t row_update_for_mysql(const byte *mysql_rec, row_prebuilt_t *prebuilt) {
   if (prebuilt->table->is_intrinsic()) {
     return (row_del_upd_for_mysql_using_cursor(prebuilt));
   } else {
-    ut_a(prebuilt->template_type == ROW_MYSQL_WHOLE_ROW ||
-         (dict_table_get_n_v_cols(prebuilt->table) > 0 &&
-          prebuilt->read_just_key));
+    ut_a(prebuilt->template_type == ROW_MYSQL_WHOLE_ROW);
     return (row_update_for_mysql_using_upd_graph(mysql_rec, prebuilt));
   }
 }
@@ -4596,8 +4602,6 @@ dberr_t row_scan_index_for_mysql(row_prebuilt_t *prebuilt, dict_index_t *index,
 skip_parallel_read:
 #endif /* UNIV_DEBUG */
 
-  DBUG_EXECUTE_IF("ib_die_if_not_parallel_read", ut_error;);
-
   bool contains_null;
   rec_t *rec = nullptr;
   ulint matched_fields;
@@ -4782,9 +4786,8 @@ bool row_prebuilt_t::skip_concurrency_ticket() const {
 
   /* Skip concurrency ticket while implicitly updating GTID table. This is to
   avoid deadlock otherwise possible with low innodb_thread_concurrency.
-  Session: RESET BINARY LOGS AND GTIDS -> FLUSH LOGS -> get innodb ticket
-           -> wait for GTID flush GTID
-  Background: Write to GTID table -> wait for innodb ticket. */
+  Session: RESET MASTER -> FLUSH LOGS -> get innodb ticket -> wait for GTID
+  flush GTID Background: Write to GTID table -> wait for innodb ticket. */
   auto thd = trx->mysql_thd;
   if (thd == nullptr) {
     thd = current_thd;

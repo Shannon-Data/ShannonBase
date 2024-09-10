@@ -1,16 +1,15 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -166,11 +165,8 @@ class Plugin_gcs_message {
     // senders/consumers outside the GR plugin.
     CT_MESSAGE_SERVICE_MESSAGE = 13,
 
-    // This cargo type is used for GR Recovery Metadata
-    CT_RECOVERY_METADATA_MESSAGE = 14,
-
     // No valid type codes can appear after this one.
-    CT_MAX = 15
+    CT_MAX = 14
   };
 
  private:
@@ -254,26 +250,6 @@ class Plugin_gcs_message {
   static void get_first_payload_item_raw_data(
       const unsigned char *buffer, const unsigned char **payload_item_data,
       size_t *payload_item_length);
-
-  /**
-    Return the raw data of the payload item of a given payload type of a given
-    message buffer.
-
-    @param[in]  buffer              the buffer to decode from.
-    @param[in]  end                 the end of buffer from which it decode.
-    @param[in]  payload_item_type   the payload type to be searched.
-    @param[out] payload_item_data   the data for the given payload type.
-    @param[out] payload_item_length the length of the data for the given
-                                    payload type.
-
-    @return the operation status
-      @retval false    OK
-      @retval true     Error
-  */
-  static bool get_payload_item_type_raw_data(
-      const unsigned char *buffer, const unsigned char *end,
-      uint16 payload_item_type, const unsigned char **payload_item_data,
-      unsigned long long *payload_item_length);
 
  protected:
   /**

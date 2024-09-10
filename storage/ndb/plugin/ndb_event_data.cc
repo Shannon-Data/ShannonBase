@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2011, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -46,7 +45,6 @@ Ndb_event_data::Ndb_event_data(NDB_SHARE *the_share, size_t num_columns,
   // Initialize bitmaps, using dynamically allocated bitbuf
   bitmap_init(&stored_columns, nullptr, num_columns);
   bitmap_init(&pk_bitmap, nullptr, num_columns);
-  bitmap_init(&pk_nonchar_bitmap, nullptr, num_columns);
 
   // Initialize mem_root where the shadow_table will be allocated
   init_sql_alloc(PSI_INSTRUMENT_ME, &mem_root, 1024);
@@ -59,7 +57,6 @@ Ndb_event_data::~Ndb_event_data() {
 
   bitmap_free(&stored_columns);
   bitmap_free(&pk_bitmap);
-  bitmap_free(&pk_nonchar_bitmap);
 }
 
 /*
@@ -88,9 +85,6 @@ void Ndb_event_data::init_pk_bitmap() {
   const uint key_parts = key->user_defined_key_parts;
   for (uint i = 0; i < key_parts; i++, key_part_info++) {
     bitmap_set_bit(&pk_bitmap, key_part_info->fieldnr - 1);
-    if (key_part_info->bin_cmp) {
-      bitmap_set_bit(&pk_nonchar_bitmap, key_part_info->fieldnr - 1);
-    }
   }
   assert(!bitmap_is_clear_all(&pk_bitmap));
 }
@@ -106,12 +100,6 @@ void Ndb_event_data::init_pk_bitmap() {
  * If no PK is defined, bitmaps revert to default behaviour:
  *  - before and after bitmaps are identical
  *  - bitmaps contain all/updated cols as per ndb_log_updated_only
- *
- * Note that character PK columns may be updated to 'equal'
- * (by collation rule) values, eg 'xyz' -> 'XYZ'. Such updates
- * need to be contained even in the MINIMAL binlog format.
- * Thus we can only exclude non-character PK columns from the
- * after image as non-updatable.
  */
 void Ndb_event_data::generate_minimal_bitmap(MY_BITMAP *before,
                                              MY_BITMAP *after) const {
@@ -125,8 +113,8 @@ void Ndb_event_data::generate_minimal_bitmap(MY_BITMAP *before,
   assert(!bitmap_is_clear_all(&pk_bitmap));
   // set Before Image to contain only primary keys
   bitmap_copy(before, &pk_bitmap);
-  // remove non-character primary keys from After Image
-  bitmap_subtract(after, &pk_nonchar_bitmap);
+  // remove primary keys from After Image
+  bitmap_subtract(after, &pk_bitmap);
 }
 
 void Ndb_event_data::init_stored_columns() {
@@ -265,10 +253,6 @@ void Ndb_event_data::destroy(const Ndb_event_data *event_data) {
 
 uint32 Ndb_event_data::unpack_uint32(unsigned attr_id) const {
   return ndb_value[0][attr_id].rec->u_32_value();
-}
-
-uint64 Ndb_event_data::unpack_uint64(unsigned attr_id) const {
-  return ndb_value[0][attr_id].rec->u_64_value();
 }
 
 const char *Ndb_event_data::unpack_string(unsigned attr_id) const {

@@ -1,5 +1,5 @@
 #########################################################################
-# START : WITHOUT KEYRING COMPONENT
+# START : WITHOUT KEYRING PLUGIN
 #########################################################################
 
 #########
@@ -30,14 +30,8 @@ ERROR HY000: Can't find master key from keyring, please check in the server log 
 #############################################################
 
 #########################################################################
-# RESTART 1 : WITH KEYRING COMPONENT
+# RESTART 1 : WITH KEYRING PLUGIN
 #########################################################################
-# ----------------------------------------------------------------------
-# Setup
-# Creating local configuration file for keyring component: component_keyring_file
-# Creating manifest file for current MySQL server instance
-# Re-starting mysql server with manifest file
-# ----------------------------------------------------------------------
 ############################################################
 # ALTER TABLESPACE 1 :    Unencrypted => Encrypted         #
 #                         (crash at page 10)               #
@@ -66,15 +60,13 @@ SOME VALUES
 SOME VALUES
 SOME VALUES
 #########################################################################
-# RESTART 2 : WITHOUT KEYRING COMPONENT
+# RESTART 2 : WITHOUT KEYRING PLUGIN
 #########################################################################
-# Taking backup of local manifest file for MySQL server instance
 SELECT * FROM t1 LIMIT 10;
 ERROR HY000: Can't find master key from keyring, please check in the server log if a keyring is loaded and initialized successfully.
 #########################################################################
-# RESTART 3 : WITH KEYRING COMPONENT
+# RESTART 3 : WITH KEYRING PLUGIN
 #########################################################################
-# Restore local manifest file for MySQL server instance from backup
 SELECT NAME, ENCRYPTION FROM INFORMATION_SCHEMA.INNODB_TABLESPACES WHERE NAME='encrypt_ts';
 NAME	ENCRYPTION
 encrypt_ts	Y
@@ -118,9 +110,8 @@ SOME VALUES
 SOME VALUES
 SOME VALUES
 #########################################################################
-# RESTART 4 : WITHOUT KEYRING COMPONENT
+# RESTART 4 : WITHOUT KEYRING PLUGIN
 #########################################################################
-# Taking backup of local manifest file for MySQL server instance
 SELECT NAME, ENCRYPTION FROM INFORMATION_SCHEMA.INNODB_TABLESPACES WHERE NAME='encrypt_ts';
 NAME	ENCRYPTION
 encrypt_ts	N
@@ -162,9 +153,8 @@ SOME VALUES
 SOME VALUES
 SOME VALUES
 #########################################################################
-# RESTART 5 : WITH KEYRING COMPONENT
+# RESTART 5 : WITH KEYRING PLUGIN
 #########################################################################
-# Restore local manifest file for MySQL server instance from backup
 ############################################################
 # ALTER TABLESPACE 1 :    Unencrypted => Encrypted         #
 #                         (crash at page 10)               #
@@ -194,15 +184,13 @@ SOME VALUES
 SOME VALUES
 SOME VALUES
 #########################################################################
-# RESTART 6 : WITHOUT KEYRING COMPONENT
+# RESTART 6 : WITHOUT KEYRING PLUGIN
 #########################################################################
-# Taking backup of local manifest file for MySQL server instance
 SELECT * FROM t2 LIMIT 10;
 ERROR HY000: Can't find master key from keyring, please check in the server log if a keyring is loaded and initialized successfully.
 #########################################################################
-# RESTART 7 WITH KEYRING COMPONENT
+# RESTART 7 WITH KEYRING PLUGIN
 #########################################################################
-# Restore local manifest file for MySQL server instance from backup
 SELECT NAME, ENCRYPTION FROM INFORMATION_SCHEMA.INNODB_TABLESPACES
 WHERE NAME='compress_ts';
 NAME	ENCRYPTION
@@ -248,9 +236,8 @@ SOME VALUES
 SOME VALUES
 SOME VALUES
 #########################################################################
-# RESTART 8 : WITHOUT KEYRING COMPONENT
+# RESTART 8 : WITHOUT KEYRING PLUGIN
 #########################################################################
-# Taking backup of local manifest file for MySQL server instance
 SELECT NAME, ENCRYPTION FROM INFORMATION_SCHEMA.INNODB_TABLESPACES WHERE NAME='encrypt_ts';
 NAME	ENCRYPTION
 encrypt_ts	N
@@ -273,9 +260,8 @@ DROP TABLESPACE compress_ts;
 #############################################################
 
 #########################################################################
-# RESTART 9 : WITH KEYRING COMPONENT
+# RESTART 9 : WITH KEYRING PLUGIN
 #########################################################################
-# Restore local manifest file for MySQL server instance from backup
 ALTER TABLESPACE encrypt_ts ENCRYPTION='Y';
 SELECT * FROM t1 LIMIT 10;
 c1
@@ -313,7 +299,7 @@ encrypt_ts	N
 #############################################################
 
 #########################################################################
-# RESTART 10 : WITH KEYRING COMPONENT
+# RESTART 10 : WITH KEYRING PLUGIN
 #########################################################################
 ALTER TABLESPACE encrypt_ts ENCRYPTION='Y';
 SELECT * FROM t1 LIMIT 10;
@@ -430,12 +416,5 @@ t1	CREATE TABLE `t1` (
 ###########
 DROP TABLE t1;
 DROP TABLESPACE encrypt_ts;
-# ----------------------------------------------------------------------
-# Teardown
-# Removing manifest file for current MySQL server instance
-# Removing local keyring file for keyring component: component_keyring_file
-# Removing local configuration file for keyring component: component_keyring_file
-# Restarting server without the manifest file
-# ----------------------------------------------------------------------
 # Restarting server without keyring to restore server state
 # restart: 

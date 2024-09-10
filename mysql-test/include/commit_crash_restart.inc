@@ -5,4 +5,6 @@
 --error 2013
 commit;
 --echo "restarting after commit crash"
+--enable_reconnect
 --source include/wait_until_connected_again.inc
+--disable_reconnect

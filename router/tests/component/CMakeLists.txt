@@ -1,16 +1,15 @@
-# Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is designed to work with certain software (including
+# This program is also distributed with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have either included with
-# the program or referenced in the documentation.
+# separately licensed software that they have included with MySQL.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -60,9 +59,6 @@ FOREACH(test_file
     test_logging_eventlog.cc
     test_master_key_reader_writer.cc
     test_metadata_ttl.cc
-    test_cluster_metadata.cc
-    test_node_attributes.cc
-    test_gr_state.cc
     test_pidfile.cc
     test_read_replica.cc
     test_rest_api.cc
@@ -78,10 +74,8 @@ FOREACH(test_file
     test_routing_connection.cc
     test_routing_connection_errors.cc
     test_routing_retry.cc
-    test_routing_router_require.cc
     test_routing_strategy.cc
     test_routing_sharing.cc
-    test_routing_splitting.cc
     test_sd_notify.cc
     test_shutdown.cc
     test_state_file.cc
@@ -94,8 +88,11 @@ FOREACH(test_file
 add_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   MODULE "component"
   INCLUDE_DIRS
+    ${PROJECT_SOURCE_DIR}/src/harness/shared/include/
+    ${PROJECT_SOURCE_DIR}/src/http/include/
     ${PROJECT_SOURCE_DIR}/src/mock_server/include/mysqlrouter/
-  SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/plugin/x/client
+  SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS} ${LIBEVENT_INCLUDE_DIRS}
                       ${PROTOBUF_INCLUDE_DIR} ${MYSQLX_GENERATE_DIR}
   LIB_DEPENDS
   http_client
@@ -104,7 +101,7 @@ add_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   mysql_protocol
   mysqlxclient_lite
   mysqlxmessages_lite
-  router_cluster
+  ${PROTOBUF_LITE_LIBRARY}
 
   DEPENDS
   http_auth_backend
@@ -120,12 +117,12 @@ add_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   rest_metadata_cache
   rest_router
   rest_routing
+  router_openssl
+  router_protobuf
   routing
   routertestplugin_logger
   signal_me
   )
-  ROUTERTEST_GET_TARGET(ttt ${test_file} "component")
-  DOWNGRADE_STRINGOP_WARNINGS(${ttt})
 ENDFOREACH()
 
 FOREACH(test_file
@@ -134,15 +131,13 @@ FOREACH(test_file
     )
 add_router_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   MODULE "component"
-  SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS}
+  SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS} ${LIBEVENT_INCLUDE_DIRS}
                       ${PROTOBUF_INCLUDE_DIR} ${MYSQLX_GENERATE_DIR}
-  INCLUDE_DIRS
-  ${CMAKE_SOURCE_DIR}/plugin/x/client/
-  $<TARGET_PROPERTY:routing_connections,INCLUDE_DIRECTORIES>
-
+  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/plugin/x/client/
   LIB_DEPENDS
   mysqlxclient_lite
   mysqlxmessages_lite
+  ${PROTOBUF_LITE_LIBRARY}
 
   DEPENDS
   http_auth_backend
@@ -171,6 +166,3 @@ ENDFOREACH()
 IF(WIN32 OR NOT INSTALL_LAYOUT STREQUAL "STANDALONE")
   ADD_DEFINITIONS(-DSKIP_BOOTSTRAP_SYSTEM_DEPLOYMENT_TESTS)
 ENDIF()
-
-ADD_DEFINITIONS(
-  -DROUTER_SRC_DIR="${CMAKE_SOURCE_DIR}/router")

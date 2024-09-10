@@ -1,18 +1,17 @@
 #ifndef SYS_VARS_H_INCLUDED
 #define SYS_VARS_H_INCLUDED
-/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -35,7 +34,6 @@
 
 #include <sys/types.h>
 
-#include <bit>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -46,6 +44,7 @@
 #include "keycache.h"  // dflt_key_cache
 #include "lex_string.h"
 #include "my_base.h"
+#include "my_bit.h"  // my_count_bits
 #include "my_compiler.h"
 #include "my_dbug.h"
 #include "my_getopt.h"
@@ -122,16 +121,16 @@ constexpr const unsigned long MAX_CONNECTIONS_DEFAULT{151};
       sizeof(X)
 #define SESSION_VAR(X)                             \
   sys_var::SESSION, offsetof(System_variables, X), \
-      sizeof(((System_variables *)nullptr)->X)
+      sizeof(((System_variables *)0)->X)
 #define SESSION_ONLY(X)                                 \
   sys_var::ONLY_SESSION, offsetof(System_variables, X), \
-      sizeof(((System_variables *)nullptr)->X)
+      sizeof(((System_variables *)0)->X)
 #define NO_CMD_LINE CMD_LINE(NO_ARG, -1)
 /*
   the define below means that there's no *second* mutex guard,
   LOCK_global_system_variables always guards all system variables
 */
-#define NO_MUTEX_GUARD ((PolyLock *)nullptr)
+#define NO_MUTEX_GUARD ((PolyLock *)0)
 #define IN_BINLOG sys_var::SESSION_VARIABLE_IN_BINLOG
 #define NOT_IN_BINLOG sys_var::VARIABLE_NOT_IN_BINLOG
 #define ON_READ(X) X
@@ -1293,7 +1292,7 @@ class Sys_var_dbug : public sys_var {
 #endif
 
 #define KEYCACHE_VAR(X) \
-  sys_var::GLOBAL, offsetof(KEY_CACHE, X), sizeof(((KEY_CACHE *)nullptr)->X)
+  sys_var::GLOBAL, offsetof(KEY_CACHE, X), sizeof(((KEY_CACHE *)0)->X)
 #define keycache_var_ptr(KC, OFF) (((uchar *)(KC)) + (OFF))
 #define keycache_var(KC, OFF) (*(ulonglong *)keycache_var_ptr(KC, OFF))
 typedef bool (*keycache_update_function)(THD *, KEY_CACHE *, ptrdiff_t,
@@ -1932,7 +1931,7 @@ class Sys_var_bit : public Sys_var_typelib {
                         on_check_func, on_update_func, substitute) {
     option.var_type = GET_BOOL;
     pre_update = pre_update_func;
-    reverse_semantics = std::popcount(bitmask_arg) > 1;
+    reverse_semantics = my_count_bits(bitmask_arg) > 1;
     bitmask = reverse_semantics ? ~bitmask_arg : bitmask_arg;
     set(global_var_ptr(), def_val);
     assert(getopt.id == -1);  // force NO_CMD_LINE
@@ -2440,10 +2439,10 @@ class Sys_var_gtid_next : public sys_var {
                                  std::string_view) override {
     DBUG_TRACE;
     char buf[Gtid_specification::MAX_TEXT_LENGTH + 1];
-    global_tsid_lock->rdlock();
+    global_sid_lock->rdlock();
     ((Gtid_specification *)session_var_ptr(target_thd))
-        ->to_string(global_tsid_map, buf);
-    global_tsid_lock->unlock();
+        ->to_string(global_sid_map, buf);
+    global_sid_lock->unlock();
     char *ret = running_thd->mem_strdup(buf);
     return (uchar *)ret;
   }
@@ -2484,11 +2483,11 @@ class Sys_var_gtid_set : public sys_var {
   }
   void session_save_default(THD *thd, set_var *var) {
     DBUG_TRACE;
-    global_tsid_lock->rdlock();
+    global_sid_lock->rdlock();
     char *ptr = (char *)(intptr)option.def_value;
     var->save_result.string_value.str = ptr;
     var->save_result.string_value.length = ptr ? strlen(ptr) : 0;
-    global_tsid_lock->unlock();
+    global_sid_lock->unlock();
     return;
   }
   void global_save_default(THD *thd, set_var *var) { assert(false); }
@@ -2497,13 +2496,13 @@ class Sys_var_gtid_set : public sys_var {
     DBUG_TRACE;
     String str;
     String *res = var->value->val_str(&str);
-    if (res == nullptr) {
-      var->save_result.string_value.str = nullptr;
+    if (res == NULL) {
+      var->save_result.string_value.str = NULL;
       return false;
     }
-    assert(res->ptr() != nullptr);
+    assert(res->ptr() != NULL);
     var->save_result.string_value.str = thd->strmake(res->ptr(), res->length());
-    if (var->save_result.string_value.str == nullptr) {
+    if (var->save_result.string_value.str == NULL) {
       my_error(ER_OUT_OF_RESOURCES, MYF(0));  // thd->strmake failed
       return 1;
     }
@@ -2517,20 +2516,20 @@ class Sys_var_gtid_set : public sys_var {
     DBUG_TRACE;
     Gtid_set_or_null *gsn = (Gtid_set_or_null *)session_var_ptr(target_thd);
     Gtid_set *gs = gsn->get_gtid_set();
-    if (gs == nullptr) return nullptr;
+    if (gs == NULL) return NULL;
     char *buf;
-    global_tsid_lock->rdlock();
+    global_sid_lock->rdlock();
     buf = (char *)running_thd->alloc(gs->get_string_length() + 1);
     if (buf)
       gs->to_string(buf);
     else
       my_error(ER_OUT_OF_RESOURCES, MYF(0));  // thd->alloc failed
-    global_tsid_lock->unlock();
+    global_sid_lock->unlock();
     return (uchar *)buf;
   }
   uchar *global_value_ptr(THD *thd, const std::string &) override {
     assert(false);
-    return nullptr;
+    return NULL;
   }
 };
 #endif
@@ -2596,14 +2595,14 @@ class Sys_var_gtid_executed : Sys_var_charptr_func {
 
   const uchar *global_value_ptr(THD *thd, std::string_view) override {
     DBUG_TRACE;
-    global_tsid_lock->wrlock();
+    global_sid_lock->wrlock();
     const Gtid_set *gs = gtid_state->get_executed_gtids();
     char *buf = (char *)thd->alloc(gs->get_string_length() + 1);
     if (buf == nullptr)
       my_error(ER_OUT_OF_RESOURCES, MYF(0));
     else
       gs->to_string(buf);
-    global_tsid_lock->unlock();
+    global_sid_lock->unlock();
     return (uchar *)buf;
   }
 };
@@ -2696,7 +2695,7 @@ class Sys_var_gtid_purged : public sys_var {
   const uchar *global_value_ptr(THD *thd, std::string_view) override {
     DBUG_TRACE;
     const Gtid_set *gs;
-    global_tsid_lock->wrlock();
+    global_sid_lock->wrlock();
     if (opt_bin_log)
       gs = gtid_state->get_lost_gtids();
     else
@@ -2713,7 +2712,7 @@ class Sys_var_gtid_purged : public sys_var {
       my_error(ER_OUT_OF_RESOURCES, MYF(0));
     else
       gs->to_string(buf);
-    global_tsid_lock->unlock();
+    global_sid_lock->unlock();
     return (uchar *)buf;
   }
 
@@ -2745,9 +2744,9 @@ class Sys_var_gtid_owned : Sys_var_charptr_func {
       buf = (char *)running_thd->alloc(
           target_thd->owned_gtid_set.get_string_length() + 1);
       if (buf) {
-        global_tsid_lock->rdlock();
+        global_sid_lock->rdlock();
         target_thd->owned_gtid_set.to_string(buf);
-        global_tsid_lock->unlock();
+        global_sid_lock->unlock();
       } else
         my_error(ER_OUT_OF_RESOURCES, MYF(0));
 #else
@@ -2757,9 +2756,9 @@ class Sys_var_gtid_owned : Sys_var_charptr_func {
       buf = (char *)running_thd->alloc(Gtid::MAX_TEXT_LENGTH + 1);
       if (buf) {
         /* Take the lock if accessing another session. */
-        if (remote) global_tsid_lock->rdlock();
-        running_thd->owned_gtid.to_string(target_thd->owned_tsid, buf);
-        if (remote) global_tsid_lock->unlock();
+        if (remote) global_sid_lock->rdlock();
+        running_thd->owned_gtid.to_string(target_thd->owned_sid, buf);
+        if (remote) global_sid_lock->unlock();
       } else
         my_error(ER_OUT_OF_RESOURCES, MYF(0));
     }
@@ -2769,13 +2768,13 @@ class Sys_var_gtid_owned : Sys_var_charptr_func {
   const uchar *global_value_ptr(THD *thd, std::string_view) override {
     DBUG_TRACE;
     const Owned_gtids *owned_gtids = gtid_state->get_owned_gtids();
-    global_tsid_lock->wrlock();
+    global_sid_lock->wrlock();
     char *buf = (char *)thd->alloc(owned_gtids->get_max_string_length());
     if (buf)
       owned_gtids->to_string(buf);
     else
       my_error(ER_OUT_OF_RESOURCES, MYF(0));  // thd->alloc failed
-    global_tsid_lock->unlock();
+    global_sid_lock->unlock();
     return (uchar *)buf;
   }
 };
@@ -2822,8 +2821,5 @@ class Sys_var_binlog_encryption : public Sys_var_bool {
                      on_check_func) {}
   bool global_update(THD *thd, set_var *var) override;
 };
-
-void update_parser_max_mem_size();
-void update_optimizer_switch();
 
 #endif /* SYS_VARS_H_INCLUDED */

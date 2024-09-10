@@ -32,8 +32,7 @@ GRANT SELECT ON db1.t1 TO r1;
 GRANT INSERT ON *.* TO r2;
 ALTER USER u1@localhost DEFAULT ROLE r1,r2;
 --echo -------------------------------------
---let $user = 0
---source include/show_grants.inc
+SHOW GRANTS;
 --echo -------------------------------------
 SHOW GRANTS FOR u1@localhost USING r1;
 --echo -------------------------------------

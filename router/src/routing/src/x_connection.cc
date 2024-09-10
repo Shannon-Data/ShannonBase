@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2020, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,13 +39,11 @@
 
 #include "hexify.h"
 #include "mysql/harness/logging/logging.h"
-#include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/tls_error.h"
 #include "mysqlrouter/classic_protocol_wire.h"
 #include "mysqlrouter/connection_pool_component.h"
 #include "mysqlrouter/routing_component.h"
-#include "mysqlrouter/ssl_mode.h"
-#include "tls_content_type.h"
+#include "router/src/routing/src/ssl_mode.h"
 
 IMPORT_LOG_FUNCTIONS()
 
@@ -89,12 +86,12 @@ static constexpr uint8_t xproto_frame_msg_type(
   return Mysqlx::ClientMessages::CON_CAPABILITIES_GET;
 }
 
-static bool has_frame_header(XProtocolState &src_protocol) {
-  return src_protocol.current_frame().has_value();
+static bool has_frame_header(XProtocolState *src_protocol) {
+  return src_protocol->current_frame().has_value();
 }
 
-static bool has_msg_type(XProtocolState &src_protocol) {
-  return src_protocol.current_msg_type().has_value();
+static bool has_msg_type(XProtocolState *src_protocol) {
+  return src_protocol->current_msg_type().has_value();
 }
 
 static stdx::expected<std::pair<size_t, XProtocolState::FrameInfo>,
@@ -108,9 +105,9 @@ decode_frame_header(const net::const_buffer &recv_buf) {
     auto ec = decode_res.error();
 
     if (ec == classic_protocol::codec_errc::not_enough_input) {
-      return stdx::unexpected(make_error_code(TlsErrc::kWantRead));
+      return stdx::make_unexpected(make_error_code(TlsErrc::kWantRead));
     }
-    return stdx::unexpected(decode_res.error());
+    return decode_res.get_unexpected();
   }
 
   const auto frame_header_res = decode_res.value();
@@ -123,26 +120,26 @@ decode_frame_header(const net::const_buffer &recv_buf) {
 }
 
 static stdx::expected<size_t, std::error_code> ensure_frame_header(
-    Channel &src_channel, XProtocolState &src_protocol) {
-  auto &recv_buf = src_channel.recv_plain_view();
+    Channel *src_channel, XProtocolState *src_protocol) {
+  auto &recv_buf = src_channel->recv_plain_view();
 
   size_t min_size{4};
   auto cur_size = recv_buf.size();
   if (cur_size < min_size) {
     // read the rest of the header.
-    auto read_res = src_channel.read_to_plain(min_size - cur_size);
-    if (!read_res) return stdx::unexpected(read_res.error());
+    auto read_res = src_channel->read_to_plain(min_size - cur_size);
+    if (!read_res) return read_res.get_unexpected();
 
     if (recv_buf.size() < min_size) {
-      return stdx::unexpected(make_error_code(TlsErrc::kWantRead));
+      return stdx::make_unexpected(make_error_code(TlsErrc::kWantRead));
     }
   }
 
   auto decode_frame_res = decode_frame_header(net::buffer(recv_buf));
-  if (!decode_frame_res) return stdx::unexpected(decode_frame_res.error());
+  if (!decode_frame_res) return decode_frame_res.get_unexpected();
 
   const size_t header_size = decode_frame_res.value().first;
-  src_protocol.current_frame() = decode_frame_res.value().second;
+  src_protocol->current_frame() = decode_frame_res.value().second;
 
   return header_size;
 }
@@ -160,49 +157,49 @@ static stdx::expected<size_t, std::error_code> ensure_frame_header(
  * - TlsErrc::kWantRead for more data is needed.
  */
 static stdx::expected<void, std::error_code> ensure_has_msg_prefix(
-    Channel &src_channel, XProtocolState &src_protocol) {
+    Channel *src_channel, XProtocolState *src_protocol) {
   if (has_frame_header(src_protocol) && has_msg_type(src_protocol)) return {};
 
   if (!has_frame_header(src_protocol)) {
     const auto decode_frame_res =
         ensure_frame_header(src_channel, src_protocol);
-    if (!decode_frame_res) return stdx::unexpected(decode_frame_res.error());
+    if (!decode_frame_res) return decode_frame_res.get_unexpected();
   }
 
   if (!has_msg_type(src_protocol)) {
-    auto &current_frame = src_protocol.current_frame().value();
+    auto &current_frame = src_protocol->current_frame().value();
 
     if (current_frame.frame_size_ < 5) {
       // expected a frame with at least one msg-type-byte
-      return stdx::unexpected(make_error_code(std::errc::bad_message));
+      return stdx::make_unexpected(make_error_code(std::errc::bad_message));
     }
 
     if (current_frame.forwarded_frame_size_ >= 4) {
-      return stdx::unexpected(make_error_code(std::errc::bad_message));
+      return stdx::make_unexpected(make_error_code(std::errc::bad_message));
     }
 
     const size_t msg_type_pos = 4 - current_frame.forwarded_frame_size_;
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     if (msg_type_pos >= recv_buf.size()) {
       // read some more data.
-      auto read_res = src_channel.read_to_plain(1);
-      if (!read_res) return stdx::unexpected(read_res.error());
+      auto read_res = src_channel->read_to_plain(1);
+      if (!read_res) return read_res.get_unexpected();
 
       if (msg_type_pos >= recv_buf.size()) {
-        return stdx::unexpected(make_error_code(TlsErrc::kWantRead));
+        return stdx::make_unexpected(make_error_code(TlsErrc::kWantRead));
       }
     }
 
-    src_protocol.current_msg_type() = recv_buf[msg_type_pos];
+    src_protocol->current_msg_type() = recv_buf[msg_type_pos];
   }
 
 #if defined(DEBUG_IO)
   std::cerr << __LINE__ << ": "
-            << "seq-id: " << (int)src_protocol.current_frame()->seq_id_
+            << "seq-id: " << (int)src_protocol->current_frame()->seq_id_
             << ", frame-size: "
-            << (int)src_protocol.current_frame()->frame_size_
-            << ", msg-type: " << (int)src_protocol.current_msg_type().value()
+            << (int)src_protocol->current_frame()->frame_size_
+            << ", msg-type: " << (int)src_protocol->current_msg_type().value()
             << "\n";
 #endif
 
@@ -210,51 +207,51 @@ static stdx::expected<void, std::error_code> ensure_has_msg_prefix(
 }
 
 static stdx::expected<void, std::error_code> ensure_has_full_frame(
-    Channel &src_channel, XProtocolState &src_protocol) {
-  auto &current_frame = src_protocol.current_frame().value();
-  auto &recv_buf = src_channel.recv_plain_view();
+    Channel *src_channel, XProtocolState *src_protocol) {
+  auto &current_frame = src_protocol->current_frame().value();
+  auto &recv_buf = src_channel->recv_plain_view();
 
   const auto min_size = current_frame.frame_size_;
   const auto cur_size = recv_buf.size();
   if (cur_size >= min_size) return {};
 
-  auto read_res = src_channel.read_to_plain(min_size - cur_size);
+  auto read_res = src_channel->read_to_plain(min_size - cur_size);
 
-  if (!read_res) return stdx::unexpected(read_res.error());
+  if (!read_res) return read_res.get_unexpected();
 
   return {};
 }
 
-static void discard_current_msg(Channel &src_channel,
-                                XProtocolState &src_protocol) {
-  auto &opt_current_frame = src_protocol.current_frame();
+static void discard_current_msg(Channel *src_channel,
+                                XProtocolState *src_protocol) {
+  auto &opt_current_frame = src_protocol->current_frame();
   if (!opt_current_frame) return;
 
   auto &current_frame = *opt_current_frame;
 
-  auto &recv_buf = src_channel.recv_plain_view();
+  auto &recv_buf = src_channel->recv_plain_view();
 
   harness_assert(current_frame.frame_size_ <= recv_buf.size());
   harness_assert(current_frame.forwarded_frame_size_ == 0);
 
-  src_channel.consume_plain(current_frame.frame_size_);
+  src_channel->consume_plain(current_frame.frame_size_);
 
   // unset current frame and also current-msg
-  src_protocol.current_frame().reset();
-  src_protocol.current_msg_type().reset();
+  src_protocol->current_frame().reset();
+  src_protocol->current_msg_type().reset();
 }
 
 void MysqlRoutingXConnection::disconnect() {
   disconnect_request([this](auto &req) {
-    auto &io_ctx = client_conn().connection()->io_ctx();
+    auto &io_ctx = socket_splicer()->client_conn().connection()->io_ctx();
 
     if (io_ctx.stopped()) abort();
 
     req = true;
 
     net::dispatch(io_ctx, [this, self = shared_from_this()]() {
-      (void)client_conn().cancel();
-      (void)server_conn().cancel();
+      (void)socket_splicer()->client_conn().cancel();
+      (void)socket_splicer()->server_conn().cancel();
 
       connector().socket().cancel();
     });
@@ -359,10 +356,15 @@ void MysqlRoutingXConnection::recv_client_failed(std::error_code ec) {
 }
 
 void MysqlRoutingXConnection::server_socket_failed(std::error_code ec) {
-  auto &server_conn = this->server_conn();
+  auto &server_conn = this->socket_splicer()->server_conn();
 
   if (server_conn.is_open()) {
-    log_connection_summary();
+    auto &client_conn = this->socket_splicer()->client_conn();
+
+    log_debug("[%s] fd=%d -- %d: connection closed (up: %zub; down: %zub)",
+              this->context().get_name().c_str(), client_conn.native_handle(),
+              server_conn.native_handle(), this->get_bytes_up(),
+              this->get_bytes_down());
 
     if (ec != net::stream_errc::eof) {
       (void)server_conn.shutdown(net::socket_base::shutdown_send);
@@ -374,10 +376,23 @@ void MysqlRoutingXConnection::server_socket_failed(std::error_code ec) {
 }
 
 void MysqlRoutingXConnection::client_socket_failed(std::error_code ec) {
-  auto &client_conn = this->client_conn();
+  auto &client_conn = this->socket_splicer()->client_conn();
 
   if (client_conn.is_open()) {
-    log_connection_summary();
+    auto &server_conn = this->socket_splicer()->server_conn();
+
+    if (server_conn.is_open()) {
+      log_debug("[%s] fd=%d -- %d: connection closed (up: %zub; down: %zub)",
+                this->context().get_name().c_str(), client_conn.native_handle(),
+                server_conn.native_handle(), this->get_bytes_up(),
+                this->get_bytes_down());
+    } else {
+      log_debug(
+          "[%s] fd=%d -- (not connected): connection closed (up: %zub; down: "
+          "%zub)",
+          this->context().get_name().c_str(), client_conn.native_handle(),
+          this->get_bytes_up(), this->get_bytes_down());
+    }
 
     if (ec != net::stream_errc::eof) {
       // the other side hasn't closed yet, shutdown our send-side.
@@ -390,11 +405,12 @@ void MysqlRoutingXConnection::client_socket_failed(std::error_code ec) {
 }
 
 void MysqlRoutingXConnection::async_send_client(Function next) {
-  auto &dst_channel = client_conn().channel();
+  auto socket_splicer = this->socket_splicer();
+  auto dst_channel = socket_splicer->client_channel();
 
   ++active_work_;
-  client_conn().async_send(
-      [this, next, to_transfer = dst_channel.send_buffer().size()](
+  socket_splicer->async_send_client(
+      [this, next, to_transfer = dst_channel->send_buffer().size()](
           std::error_code ec, size_t transferred) {
         --active_work_;
         if (ec) return send_client_failed(ec);
@@ -412,7 +428,7 @@ void MysqlRoutingXConnection::async_send_client(Function next) {
 
 void MysqlRoutingXConnection::async_recv_client(Function next) {
   ++active_work_;
-  client_conn().async_recv(
+  this->socket_splicer()->async_recv_client(
       [this, next](std::error_code ec, size_t transferred) {
         (void)transferred;
 
@@ -424,11 +440,12 @@ void MysqlRoutingXConnection::async_recv_client(Function next) {
 }
 
 void MysqlRoutingXConnection::async_send_server(Function next) {
-  auto &dst_channel = server_conn().channel();
+  auto socket_splicer = this->socket_splicer();
+  auto dst_channel = socket_splicer->server_channel();
 
   ++active_work_;
-  server_conn().async_send(
-      [this, next, to_transfer = dst_channel.send_buffer().size()](
+  socket_splicer->async_send_server(
+      [this, next, to_transfer = dst_channel->send_buffer().size()](
           std::error_code ec, size_t transferred) {
         --active_work_;
         if (ec) return send_server_failed(ec);
@@ -446,7 +463,7 @@ void MysqlRoutingXConnection::async_send_server(Function next) {
 
 void MysqlRoutingXConnection::async_recv_server(Function next) {
   ++active_work_;
-  server_conn().async_recv(
+  this->socket_splicer()->async_recv_server(
       [this, next](std::error_code ec, size_t transferred) {
         (void)transferred;
 
@@ -462,8 +479,9 @@ void MysqlRoutingXConnection::client_send_server_greeting_from_router() {
 }
 
 void MysqlRoutingXConnection::client_recv_cmd() {
-  auto &src_channel = client_conn().channel();
-  auto &src_protocol = client_conn().protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->client_channel();
+  auto src_protocol = client_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -476,7 +494,7 @@ void MysqlRoutingXConnection::client_recv_cmd() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kConCapGet = Mysqlx::ClientMessages::CON_CAPABILITIES_GET,
@@ -514,7 +532,7 @@ void MysqlRoutingXConnection::client_recv_cmd() {
     case Msg::kSessAuthStart:
       break;
     default: {
-      if (!server_conn().connection()) {
+      if (!socket_splicer->server_conn().connection()) {
         server_connection_state_ok = false;
       }
     }
@@ -572,7 +590,7 @@ void MysqlRoutingXConnection::client_recv_cmd() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -587,14 +605,14 @@ void MysqlRoutingXConnection::client_recv_cmd() {
  * @returns frame-is-done on success and std::error_code on error.
  */
 static stdx::expected<bool, std::error_code> forward_frame_from_channel(
-    Channel &src_channel, XProtocolState &src_protocol, Channel &dst_channel,
-    [[maybe_unused]] XProtocolState &dst_protocol) {
+    Channel *src_channel, XProtocolState *src_protocol, Channel *dst_channel,
+    [[maybe_unused]] XProtocolState *dst_protocol) {
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
-  if (!read_res) return stdx::unexpected(read_res.error());
+  if (!read_res) return read_res.get_unexpected();
 
-  auto &current_frame = src_protocol.current_frame().value();
+  auto &current_frame = src_protocol->current_frame().value();
 
-  auto &recv_buf = src_channel.recv_plain_view();
+  auto &recv_buf = src_channel->recv_plain_view();
   // forward the (rest of the) payload.
 
   const size_t rest_of_frame_size =
@@ -604,31 +622,31 @@ static stdx::expected<bool, std::error_code> forward_frame_from_channel(
     // try to full the recv-buf up to the end of the frame
     if (rest_of_frame_size > recv_buf.size()) {
       // ... not more than 16k to avoid reading all 16M at once.
-      auto read_res = src_channel.read_to_plain(
+      auto read_res = src_channel->read_to_plain(
           std::min(rest_of_frame_size - recv_buf.size(), size_t{16 * 1024}));
-      if (!read_res) return stdx::unexpected(read_res.error());
+      if (!read_res) return read_res.get_unexpected();
     }
 
     if (recv_buf.empty()) {
-      return stdx::unexpected(make_error_code(TlsErrc::kWantRead));
+      return stdx::make_unexpected(make_error_code(TlsErrc::kWantRead));
     }
 
     const auto write_res =
-        dst_channel.write(net::buffer(recv_buf, rest_of_frame_size));
-    if (!write_res) return stdx::unexpected(write_res.error());
+        dst_channel->write(net::buffer(recv_buf, rest_of_frame_size));
+    if (!write_res) return write_res.get_unexpected();
 
     size_t transferred = write_res.value();
     current_frame.forwarded_frame_size_ += transferred;
 
-    src_channel.consume_plain(transferred);
+    src_channel->consume_plain(transferred);
   }
 
-  dst_channel.flush_to_send_buf();
+  dst_channel->flush_to_send_buf();
 
   if (current_frame.forwarded_frame_size_ == current_frame.frame_size_) {
     // frame is forwarded, reset for the next one.
-    src_protocol.current_frame().reset();
-    src_protocol.current_msg_type().reset();
+    src_protocol->current_frame().reset();
+    src_protocol->current_msg_type().reset();
 
     return true;
   } else {
@@ -637,8 +655,8 @@ static stdx::expected<bool, std::error_code> forward_frame_from_channel(
 }
 
 static stdx::expected<MysqlRoutingXConnection::ForwardResult, std::error_code>
-forward_frame(Channel &src_channel, XProtocolState &src_protocol,
-              Channel &dst_channel, XProtocolState &dst_protocol) {
+forward_frame(Channel *src_channel, XProtocolState *src_protocol,
+              Channel *dst_channel, XProtocolState *dst_protocol) {
   const auto forward_res = forward_frame_from_channel(
       src_channel, src_protocol, dst_channel, dst_protocol);
 
@@ -646,18 +664,18 @@ forward_frame(Channel &src_channel, XProtocolState &src_protocol,
     auto ec = forward_res.error();
 
     if (ec == TlsErrc::kWantRead) {
-      if (!dst_channel.send_buffer().empty()) {
+      if (!dst_channel->send_buffer().empty()) {
         return MysqlRoutingXConnection::ForwardResult::kWantSendDestination;
       }
 
       return MysqlRoutingXConnection::ForwardResult::kWantRecvSource;
     }
 
-    return stdx::unexpected(forward_res.error());
+    return forward_res.get_unexpected();
   }
 
   const auto src_is_done = forward_res.value();
-  if (!dst_channel.send_buffer().empty()) {
+  if (!dst_channel->send_buffer().empty()) {
     if (src_is_done) {
       return MysqlRoutingXConnection::ForwardResult::kFinished;
     } else {
@@ -673,13 +691,11 @@ forward_frame(Channel &src_channel, XProtocolState &src_protocol,
 
 stdx::expected<MysqlRoutingXConnection::ForwardResult, std::error_code>
 MysqlRoutingXConnection::forward_frame_from_client_to_server() {
-  auto &src_conn = client_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
-
-  auto &dst_conn = server_conn();
-  auto &dst_channel = dst_conn.channel();
-  auto &dst_protocol = dst_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->client_channel();
+  auto src_protocol = client_protocol();
+  auto dst_channel = socket_splicer->server_channel();
+  auto dst_protocol = server_protocol();
 
   return forward_frame(src_channel, src_protocol, dst_channel, dst_protocol);
 }
@@ -707,13 +723,11 @@ void MysqlRoutingXConnection::forward_client_to_server(Function this_func,
 
 stdx::expected<MysqlRoutingXConnection::ForwardResult, std::error_code>
 MysqlRoutingXConnection::forward_frame_from_server_to_client() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
-
-  auto &dst_conn = client_conn();
-  auto &dst_channel = dst_conn.channel();
-  auto &dst_protocol = dst_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
+  auto dst_channel = socket_splicer->client_channel();
+  auto dst_protocol = client_protocol();
 
   return forward_frame(src_channel, src_protocol, dst_channel, dst_protocol);
 }
@@ -807,7 +821,8 @@ void MysqlRoutingXConnection::connect() {
 
     log_fatal_error_code("connecting to backend failed", ec);
 
-    auto &dst_channel = client_conn().channel();
+    auto *socket_splicer = this->socket_splicer();
+    auto dst_channel = socket_splicer->client_channel();
 
     std::vector<uint8_t> error_frame;
     const auto encode_res = encode_error_packet(
@@ -820,15 +835,16 @@ void MysqlRoutingXConnection::connect() {
     }
 
     // send back to the client
-    dst_channel.write_plain(net::buffer(error_frame));
-    dst_channel.flush_to_send_buf();
+    dst_channel->write_plain(net::buffer(error_frame));
+    dst_channel->flush_to_send_buf();
 
     return async_send_client(Function::kFinish);
   }
 
   auto server_connection = std::move(connect_res.value());
 
-  server_conn().assign_connection(std::move(server_connection));
+  this->socket_splicer()->server_conn().assign_connection(
+      std::move(server_connection));
 
   this->connected();
 
@@ -856,19 +872,19 @@ static void set_capability_tls(Mysqlx::Connection::Capability *cap,
  * send back the router's caps.
  */
 void MysqlRoutingXConnection::client_cap_get() {
-  auto &src_conn = client_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->client_channel();
+  auto src_protocol = client_protocol();
 
   auto res = ensure_has_full_frame(src_channel, src_protocol);
   if (!res) {
     return async_recv_client(Function::kClientCapGet);
   }
 
-  const auto &recv_buf = src_channel.recv_plain_view();
+  const auto &recv_buf = src_channel->recv_plain_view();
 
   auto msg_payload =
-      net::buffer(recv_buf, src_protocol.current_frame()->frame_size_) + 5;
+      net::buffer(recv_buf, src_protocol->current_frame()->frame_size_) + 5;
   {
     auto msg = std::make_unique<Mysqlx::Connection::CapabilitiesGet>();
     if (!msg->ParseFromArray(msg_payload.data(), msg_payload.size())) {
@@ -916,9 +932,9 @@ void MysqlRoutingXConnection::client_cap_get() {
 }
 
 void MysqlRoutingXConnection::server_recv_switch_tls_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -931,7 +947,7 @@ void MysqlRoutingXConnection::server_recv_switch_tls_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -942,7 +958,7 @@ void MysqlRoutingXConnection::server_recv_switch_tls_response() {
 
   ensure_has_full_frame(src_channel, src_protocol);
 
-  const auto &recv_buf = src_channel.recv_plain_view();
+  const auto &recv_buf = src_channel->recv_plain_view();
 
   switch (Msg{msg_type}) {
     case Msg::kNotice:
@@ -951,7 +967,7 @@ void MysqlRoutingXConnection::server_recv_switch_tls_response() {
       return server_recv_switch_tls_response();
     case Msg::kError: {
       auto msg_payload =
-          net::buffer(recv_buf, src_protocol.current_frame()->frame_size_) + 5;
+          net::buffer(recv_buf, src_protocol->current_frame()->frame_size_) + 5;
 
       auto msg = std::make_unique<Mysqlx::Error>();
       if (!msg->ParseFromArray(msg_payload.data(), msg_payload.size())) {
@@ -1006,7 +1022,7 @@ void MysqlRoutingXConnection::server_recv_switch_tls_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -1018,9 +1034,9 @@ void MysqlRoutingXConnection::server_recv_switch_tls_response() {
 }
 
 void MysqlRoutingXConnection::server_recv_switch_tls_response_passthrough() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -1034,7 +1050,7 @@ void MysqlRoutingXConnection::server_recv_switch_tls_response_passthrough() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -1055,7 +1071,7 @@ void MysqlRoutingXConnection::server_recv_switch_tls_response_passthrough() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -1088,9 +1104,9 @@ void MysqlRoutingXConnection::
 }
 
 stdx::expected<void, std::error_code> MysqlRoutingXConnection::forward_tls(
-    Channel &src_channel, Channel &dst_channel) {
-  const auto &plain = src_channel.recv_plain_view();
-  src_channel.read_to_plain(5);
+    Channel *src_channel, Channel *dst_channel) {
+  const auto &plain = src_channel->recv_plain_view();
+  src_channel->read_to_plain(5);
 
   // at least the TLS record header.
   const size_t tls_header_size{5};
@@ -1109,45 +1125,46 @@ stdx::expected<void, std::error_code> MysqlRoutingXConnection::forward_tls(
                   .c_str());
 #endif
     if (plain.size() < tls_header_size + tls_payload_size) {
-      src_channel.read_to_plain(tls_header_size + tls_payload_size -
-                                plain.size());
+      src_channel->read_to_plain(tls_header_size + tls_payload_size -
+                                 plain.size());
     }
 
     if (plain.size() < tls_header_size + tls_payload_size) {
       // there isn't the full frame yet.
-      return stdx::unexpected(make_error_code(TlsErrc::kWantRead));
+      return stdx::make_unexpected(make_error_code(TlsErrc::kWantRead));
     }
 
-    const auto write_res = dst_channel.write(
+    const auto write_res = dst_channel->write(
         net::buffer(plain.subspan(0, tls_header_size + tls_payload_size)));
     if (!write_res) {
-      return stdx::unexpected(make_error_code(TlsErrc::kWantWrite));
+      return stdx::make_unexpected(make_error_code(TlsErrc::kWantWrite));
     }
 
     // if TlsAlert in handshake, the connection goes back to plain
     if (static_cast<TlsContentType>(tls_content_type) ==
             TlsContentType::kAlert &&
         plain.size() >= 6 && plain[5] == 0x02) {
-      src_channel.is_tls(false);
-      dst_channel.is_tls(false);
+      src_channel->is_tls(false);
+      dst_channel->is_tls(false);
     }
 
-    src_channel.consume_plain(*write_res);
+    src_channel->consume_plain(*write_res);
   }
 
-  dst_channel.flush_to_send_buf();
+  dst_channel->flush_to_send_buf();
 
   // want more
-  return stdx::unexpected(make_error_code(TlsErrc::kWantRead));
+  return stdx::make_unexpected(make_error_code(TlsErrc::kWantRead));
 }
 
 void MysqlRoutingXConnection::forward_tls_client_to_server() {
-  auto &src_channel = client_conn().channel();
-  auto &dst_channel = server_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->client_channel();
+  auto dst_channel = socket_splicer->server_channel();
 
   auto forward_res = forward_tls(src_channel, dst_channel);
 
-  if (!dst_channel.send_buffer().empty()) {
+  if (!dst_channel->send_buffer().empty()) {
     return async_send_server(Function::kForwardTlsClientToServer);
   }
 
@@ -1157,12 +1174,13 @@ void MysqlRoutingXConnection::forward_tls_client_to_server() {
 }
 
 void MysqlRoutingXConnection::forward_tls_server_to_client() {
-  auto &src_channel = server_conn().channel();
-  auto &dst_channel = client_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto dst_channel = socket_splicer->client_channel();
 
   auto forward_res = forward_tls(src_channel, dst_channel);
 
-  if (!dst_channel.send_buffer().empty()) {
+  if (!dst_channel->send_buffer().empty()) {
     return async_send_client(Function::kForwardTlsServerToClient);
   }
 
@@ -1172,11 +1190,12 @@ void MysqlRoutingXConnection::forward_tls_server_to_client() {
 }
 
 void MysqlRoutingXConnection::forward_tls_init() {
-  auto &src_channel = client_conn().channel();
-  auto &dst_channel = server_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->client_channel();
+  auto dst_channel = socket_splicer->server_channel();
 
-  src_channel.is_tls(true);
-  dst_channel.is_tls(true);
+  src_channel->is_tls(true);
+  dst_channel->is_tls(true);
 
   forward_tls_client_to_server();
   forward_tls_server_to_client();
@@ -1192,7 +1211,8 @@ static stdx::expected<TlsClientContext *, std::error_code> get_dest_ssl_ctx(
 }
 
 void MysqlRoutingXConnection::tls_connect_init() {
-  auto &dst_channel = server_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto *dst_channel = socket_splicer->server_channel();
 
   auto tls_client_ctx_res = get_dest_ssl_ctx(context(), get_destination_id());
   if (!tls_client_ctx_res || tls_client_ctx_res.value() == nullptr ||
@@ -1206,11 +1226,11 @@ void MysqlRoutingXConnection::tls_connect_init() {
   auto *tls_client_ctx = *tls_client_ctx_res;
   auto *ssl_ctx = tls_client_ctx->get();
 
-  dst_channel.init_ssl(ssl_ctx);
+  dst_channel->init_ssl(ssl_ctx);
 
   tls_client_ctx->get_session().and_then(
       [&](auto *sess) -> stdx::expected<void, std::error_code> {
-        SSL_set_session(dst_channel.ssl(), sess);
+        SSL_set_session(dst_channel->ssl(), sess);
         return {};
       });
 
@@ -1221,10 +1241,11 @@ void MysqlRoutingXConnection::tls_connect_init() {
  * connect server_channel to a TLS server.
  */
 void MysqlRoutingXConnection::tls_connect() {
-  auto &dst_channel = server_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto *dst_channel = socket_splicer->server_channel();
 
   {
-    const auto flush_res = dst_channel.flush_from_recv_buf();
+    const auto flush_res = dst_channel->flush_from_recv_buf();
     if (!flush_res) {
       auto ec = flush_res.error();
       log_fatal_error_code("tls_connect::recv::flush() failed", ec);
@@ -1233,13 +1254,13 @@ void MysqlRoutingXConnection::tls_connect() {
     }
   }
 
-  if (!dst_channel.tls_init_is_finished()) {
-    const auto res = dst_channel.tls_connect();
+  if (!dst_channel->tls_init_is_finished()) {
+    const auto res = dst_channel->tls_connect();
 
     if (!res) {
       if (res.error() == TlsErrc::kWantRead) {
         {
-          const auto flush_res = dst_channel.flush_to_send_buf();
+          const auto flush_res = dst_channel->flush_to_send_buf();
           if (!flush_res &&
               (flush_res.error() !=
                make_error_condition(std::errc::operation_would_block))) {
@@ -1250,7 +1271,7 @@ void MysqlRoutingXConnection::tls_connect() {
           }
         }
 
-        if (!dst_channel.send_buffer().empty()) {
+        if (!dst_channel->send_buffer().empty()) {
           return async_send_server(Function::kTlsConnect);
         }
         return async_recv_server(Function::kTlsConnect);
@@ -1279,9 +1300,9 @@ void MysqlRoutingXConnection::tls_connect() {
 }
 
 void MysqlRoutingXConnection::server_recv_cap_get_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -1294,7 +1315,7 @@ void MysqlRoutingXConnection::server_recv_cap_get_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -1311,7 +1332,7 @@ void MysqlRoutingXConnection::server_recv_cap_get_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -1334,10 +1355,10 @@ void MysqlRoutingXConnection::server_recv_cap_get_response_forward_last() {
 
 void MysqlRoutingXConnection::async_send_client_buffer(
     net::const_buffer send_buf, Function next) {
-  auto &dst_conn = client_conn();
-  auto &dst_channel = dst_conn.channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto *dst_channel = socket_splicer->client_channel();
 
-  auto write_res = dst_channel.write(send_buf);
+  auto write_res = dst_channel->write(send_buf);
   if (!write_res) {
     auto ec = write_res.error();
     log_fatal_error_code("write() to client failed", ec);
@@ -1345,17 +1366,17 @@ void MysqlRoutingXConnection::async_send_client_buffer(
     return send_client_failed(ec);
   }
 
-  dst_channel.flush_to_send_buf();
+  dst_channel->flush_to_send_buf();
 
   return async_send_client(next);
 }
 
 void MysqlRoutingXConnection::async_send_server_buffer(
     net::const_buffer send_buf, Function next) {
-  auto &dst_conn = server_conn();
-  auto &dst_channel = dst_conn.channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto *dst_channel = socket_splicer->server_channel();
 
-  auto write_res = dst_channel.write(send_buf);
+  auto write_res = dst_channel->write(send_buf);
   if (!write_res) {
     auto ec = write_res.error();
     log_fatal_error_code("write() to server failed", ec);
@@ -1363,7 +1384,7 @@ void MysqlRoutingXConnection::async_send_server_buffer(
     return send_server_failed(ec);
   }
 
-  dst_channel.flush_to_send_buf();
+  dst_channel->flush_to_send_buf();
 
   return async_send_server(next);
 }
@@ -1374,22 +1395,20 @@ void MysqlRoutingXConnection::async_send_server_buffer(
  * send back the router's caps.
  */
 void MysqlRoutingXConnection::client_cap_set() {
-  auto &src_conn = client_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
-
-  auto &dst_conn = server_conn();
-  auto &dst_protocol = dst_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->client_channel();
+  auto src_protocol = client_protocol();
+  auto dst_protocol = server_protocol();
 
   auto res = ensure_has_full_frame(src_channel, src_protocol);
   if (!res) {
     return async_recv_client(Function::kClientCapSet);
   }
 
-  const auto &recv_buf = src_channel.recv_plain_view();
+  const auto &recv_buf = src_channel->recv_plain_view();
 
   auto msg_payload =
-      net::buffer(recv_buf, src_protocol.current_frame()->frame_size_) + 5;
+      net::buffer(recv_buf, src_protocol->current_frame()->frame_size_) + 5;
 
   auto msg = std::make_unique<Mysqlx::Connection::CapabilitiesSet>();
   if (!msg->ParseFromArray(msg_payload.data(), msg_payload.size())) {
@@ -1474,7 +1493,7 @@ void MysqlRoutingXConnection::client_cap_set() {
       case SslMode::kPreferred: {
         switch (dest_ssl_mode()) {
           case SslMode::kAsClient:
-            if (!server_conn().is_open()) {
+            if (!socket_splicer->server_conn().is_open()) {
               // leave the client message in place and connect to the backend.
               //
               // connect() will eventually call this function again and the same
@@ -1483,7 +1502,7 @@ void MysqlRoutingXConnection::client_cap_set() {
             }
 
             // check if the server supports Tls
-            for (auto const &caps : dst_protocol.caps()->capabilities()) {
+            for (auto const &caps : dst_protocol->caps()->capabilities()) {
               if (!caps.has_name()) continue;
 #ifdef DEBUG_IO
               std::cerr << __LINE__ << ": " << caps.name() << "\n";
@@ -1547,9 +1566,10 @@ void MysqlRoutingXConnection::client_cap_set() {
 }
 
 void MysqlRoutingXConnection::tls_accept_init() {
-  auto &src_channel = client_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto *src_channel = socket_splicer->client_channel();
 
-  src_channel.is_tls(true);
+  src_channel->is_tls(true);
 
   auto *ssl_ctx = context().source_ssl_ctx()->get();
   // tls <-> (any)
@@ -1558,7 +1578,7 @@ void MysqlRoutingXConnection::tls_accept_init() {
     log_warning("failed to create SSL_CTX");
     return recv_client_failed(make_error_code(std::errc::invalid_argument));
   }
-  src_channel.init_ssl(ssl_ctx);
+  src_channel->init_ssl(ssl_ctx);
 
   return tls_accept();
 }
@@ -1567,32 +1587,16 @@ void MysqlRoutingXConnection::tls_accept_init() {
  * accept a TLS handshake.
  */
 void MysqlRoutingXConnection::tls_accept() {
-  auto &src_channel = client_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto *client_channel = socket_splicer->client_channel();
 
-  if (!src_channel.tls_init_is_finished()) {
-    {
-      const auto flush_res = src_channel.flush_from_recv_buf();
-      if (!flush_res) return recv_client_failed(flush_res.error());
-    }
-
-    auto res = src_channel.tls_accept();
-
-    // flush the TLS message to the send-buffer.
-    {
-      const auto flush_res = src_channel.flush_to_send_buf();
-      if (!flush_res) {
-        const auto ec = flush_res.error();
-        if (ec != make_error_code(std::errc::operation_would_block)) {
-          return recv_client_failed(flush_res.error());
-        }
-      }
-    }
-
+  if (!client_channel->tls_init_is_finished()) {
+    auto res = socket_splicer->tls_accept();
     if (!res) {
       const auto ec = res.error();
 
       // if there is something in the send_buffer, send it.
-      if (!src_channel.send_buffer().empty()) {
+      if (!client_channel->send_buffer().empty()) {
         return async_send_client(Function::kTlsAccept);
       }
 
@@ -1608,7 +1612,7 @@ void MysqlRoutingXConnection::tls_accept() {
 
   // after tls_accept() there may still be data in the send-buffer that must
   // be sent.
-  if (!src_channel.send_buffer().empty()) {
+  if (!client_channel->send_buffer().empty()) {
     return async_send_client(Function::kTlsAcceptFinalize);
   }
   // TLS is accepted, more client greeting should follow.
@@ -1617,17 +1621,18 @@ void MysqlRoutingXConnection::tls_accept() {
 }
 
 void MysqlRoutingXConnection::tls_accept_finalize() {
-  auto &src_channel = client_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto *src_channel = socket_splicer->client_channel();
 
-  if (!server_conn().is_open()) {
+  if (!socket_splicer->server_conn().is_open()) {
     return connect();
   } else if (source_ssl_mode() == SslMode::kPreferred &&
-             dest_ssl_mode() == SslMode::kAsClient && src_channel.ssl()) {
+             dest_ssl_mode() == SslMode::kAsClient && src_channel->ssl()) {
     // pre-conditions.
-    if (!server_conn().is_open()) {
+    if (!socket_splicer->server_conn().is_open()) {
       throw std::logic_error("server-conn is not opened, but should be.");
     }
-    if (server_conn().channel().ssl()) {
+    if (socket_splicer->server_channel()->ssl()) {
       throw std::logic_error(
           "server-conn is already with TLS, but should not be.");
     }
@@ -1639,8 +1644,9 @@ void MysqlRoutingXConnection::tls_accept_finalize() {
 }
 
 void MysqlRoutingXConnection::server_init_tls() {
-  auto &src_channel = client_conn().channel();
-  auto &dst_channel = server_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto *dst_channel = socket_splicer->server_channel();
+  auto *src_channel = socket_splicer->client_channel();
 
   switch (dest_ssl_mode()) {
     case SslMode::kAsClient:
@@ -1651,7 +1657,7 @@ void MysqlRoutingXConnection::server_init_tls() {
           // 1. at server-side connect().
           // 2. by tls_accept_finalize to open the server-side TLS connection
           // after the client asked to enable the client side.
-          if (src_channel.ssl()) {
+          if (src_channel->ssl()) {
             return server_send_switch_to_tls();
           } else {
             return server_send_check_caps();
@@ -1661,7 +1667,7 @@ void MysqlRoutingXConnection::server_init_tls() {
           // nothing to do.
           return client_recv_cmd();
         case SslMode::kRequired:
-          if (!dst_channel.ssl()) {
+          if (!dst_channel->ssl()) {
             return server_send_switch_to_tls();
           } else {
             return client_recv_cmd();
@@ -1674,7 +1680,7 @@ void MysqlRoutingXConnection::server_init_tls() {
       }
     case SslMode::kRequired:
     case SslMode::kPreferred:
-      if (!dst_channel.ssl()) {
+      if (!dst_channel->ssl()) {
         return server_send_switch_to_tls();
       } else {
         return client_recv_cmd();
@@ -1722,9 +1728,9 @@ void MysqlRoutingXConnection::server_send_check_caps() {
 }
 
 void MysqlRoutingXConnection::server_recv_check_caps_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -1737,7 +1743,7 @@ void MysqlRoutingXConnection::server_recv_check_caps_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -1752,10 +1758,10 @@ void MysqlRoutingXConnection::server_recv_check_caps_response() {
 
       return server_recv_check_caps_response();
     case Msg::kCaps: {
-      const auto &recv_buf = src_channel.recv_plain_view();
+      const auto &recv_buf = src_channel->recv_plain_view();
 
       auto msg_payload =
-          net::buffer(recv_buf, src_protocol.current_frame()->frame_size_) + 5;
+          net::buffer(recv_buf, src_protocol->current_frame()->frame_size_) + 5;
       {
         auto msg = std::make_unique<Mysqlx::Connection::Capabilities>();
         if (!msg->ParseFromArray(msg_payload.data(), msg_payload.size())) {
@@ -1768,7 +1774,7 @@ void MysqlRoutingXConnection::server_recv_check_caps_response() {
                                           Function::kFinish);
         }
 
-        src_protocol.caps(std::move(msg));
+        src_protocol->caps(std::move(msg));
       }
 
       discard_current_msg(src_channel, src_protocol);
@@ -1780,7 +1786,7 @@ void MysqlRoutingXConnection::server_recv_check_caps_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -1792,9 +1798,9 @@ void MysqlRoutingXConnection::server_recv_check_caps_response() {
 }
 
 void MysqlRoutingXConnection::server_recv_cap_set_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -1807,7 +1813,7 @@ void MysqlRoutingXConnection::server_recv_cap_set_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -1826,7 +1832,7 @@ void MysqlRoutingXConnection::server_recv_cap_set_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -1850,10 +1856,11 @@ void MysqlRoutingXConnection::server_recv_cap_set_response_forward_last() {
 // session auth start
 
 void MysqlRoutingXConnection::client_sess_auth_start() {
-  auto &src_channel = client_conn().channel();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->client_channel();
 
   // require TLS before authentication is started.
-  if (source_ssl_mode() == SslMode::kRequired && !src_channel.ssl()) {
+  if (source_ssl_mode() == SslMode::kRequired && !src_channel->ssl()) {
     std::vector<uint8_t> out_buf;
 
     encode_error_packet(out_buf, 5001, "Client requires TLS", "HY000",
@@ -1862,7 +1869,7 @@ void MysqlRoutingXConnection::client_sess_auth_start() {
     return async_send_client_buffer(net::buffer(out_buf), Function::kFinish);
   }
 
-  if (!server_conn().is_open()) {
+  if (!socket_splicer->server_conn().is_open()) {
     // leave the client message in place and connect to the backend.
     return connect();
   }
@@ -1872,9 +1879,9 @@ void MysqlRoutingXConnection::client_sess_auth_start() {
 }
 
 void MysqlRoutingXConnection::server_recv_auth_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -1887,7 +1894,7 @@ void MysqlRoutingXConnection::server_recv_auth_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -1909,7 +1916,7 @@ void MysqlRoutingXConnection::server_recv_auth_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -1948,9 +1955,9 @@ void MysqlRoutingXConnection::client_stmt_execute() {
 }
 
 void MysqlRoutingXConnection::server_recv_stmt_execute_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -1963,7 +1970,7 @@ void MysqlRoutingXConnection::server_recv_stmt_execute_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -1988,7 +1995,7 @@ void MysqlRoutingXConnection::server_recv_stmt_execute_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2017,9 +2024,9 @@ void MysqlRoutingXConnection::client_crud_find() {
 }
 
 void MysqlRoutingXConnection::server_recv_crud_find_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2032,7 +2039,7 @@ void MysqlRoutingXConnection::server_recv_crud_find_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2057,7 +2064,7 @@ void MysqlRoutingXConnection::server_recv_crud_find_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2086,9 +2093,9 @@ void MysqlRoutingXConnection::client_crud_delete() {
 }
 
 void MysqlRoutingXConnection::server_recv_crud_delete_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2101,7 +2108,7 @@ void MysqlRoutingXConnection::server_recv_crud_delete_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kStmtOk = Mysqlx::ServerMessages::SQL_STMT_EXECUTE_OK,
@@ -2120,7 +2127,7 @@ void MysqlRoutingXConnection::server_recv_crud_delete_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2149,9 +2156,9 @@ void MysqlRoutingXConnection::client_crud_insert() {
 }
 
 void MysqlRoutingXConnection::server_recv_crud_insert_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2164,7 +2171,7 @@ void MysqlRoutingXConnection::server_recv_crud_insert_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kStmtOk = Mysqlx::ServerMessages::SQL_STMT_EXECUTE_OK,
@@ -2183,7 +2190,7 @@ void MysqlRoutingXConnection::server_recv_crud_insert_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2212,9 +2219,9 @@ void MysqlRoutingXConnection::client_crud_update() {
 }
 
 void MysqlRoutingXConnection::server_recv_crud_update_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2227,7 +2234,7 @@ void MysqlRoutingXConnection::server_recv_crud_update_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kStmtOk = Mysqlx::ServerMessages::SQL_STMT_EXECUTE_OK,
@@ -2246,7 +2253,7 @@ void MysqlRoutingXConnection::server_recv_crud_update_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2275,9 +2282,9 @@ void MysqlRoutingXConnection::client_prepare_prepare() {
 }
 
 void MysqlRoutingXConnection::server_recv_prepare_prepare_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2290,7 +2297,7 @@ void MysqlRoutingXConnection::server_recv_prepare_prepare_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2309,7 +2316,7 @@ void MysqlRoutingXConnection::server_recv_prepare_prepare_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2340,9 +2347,9 @@ void MysqlRoutingXConnection::client_prepare_deallocate() {
 }
 
 void MysqlRoutingXConnection::server_recv_prepare_deallocate_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2355,7 +2362,7 @@ void MysqlRoutingXConnection::server_recv_prepare_deallocate_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2374,7 +2381,7 @@ void MysqlRoutingXConnection::server_recv_prepare_deallocate_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2407,9 +2414,9 @@ void MysqlRoutingXConnection::client_prepare_execute() {
 }
 
 void MysqlRoutingXConnection::server_recv_prepare_execute_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2422,7 +2429,7 @@ void MysqlRoutingXConnection::server_recv_prepare_execute_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2447,7 +2454,7 @@ void MysqlRoutingXConnection::server_recv_prepare_execute_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2478,9 +2485,9 @@ void MysqlRoutingXConnection::client_expect_open() {
 }
 
 void MysqlRoutingXConnection::server_recv_expect_open_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2493,7 +2500,7 @@ void MysqlRoutingXConnection::server_recv_expect_open_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2512,7 +2519,7 @@ void MysqlRoutingXConnection::server_recv_expect_open_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2541,9 +2548,9 @@ void MysqlRoutingXConnection::client_expect_close() {
 }
 
 void MysqlRoutingXConnection::server_recv_expect_close_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2556,7 +2563,7 @@ void MysqlRoutingXConnection::server_recv_expect_close_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2575,7 +2582,7 @@ void MysqlRoutingXConnection::server_recv_expect_close_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2604,9 +2611,9 @@ void MysqlRoutingXConnection::client_crud_create_view() {
 }
 
 void MysqlRoutingXConnection::server_recv_crud_create_view_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2619,7 +2626,7 @@ void MysqlRoutingXConnection::server_recv_crud_create_view_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2638,7 +2645,7 @@ void MysqlRoutingXConnection::server_recv_crud_create_view_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2669,9 +2676,9 @@ void MysqlRoutingXConnection::client_crud_modify_view() {
 }
 
 void MysqlRoutingXConnection::server_recv_crud_modify_view_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2684,7 +2691,7 @@ void MysqlRoutingXConnection::server_recv_crud_modify_view_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2703,7 +2710,7 @@ void MysqlRoutingXConnection::server_recv_crud_modify_view_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2734,9 +2741,9 @@ void MysqlRoutingXConnection::client_crud_drop_view() {
 }
 
 void MysqlRoutingXConnection::server_recv_crud_drop_view_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2749,7 +2756,7 @@ void MysqlRoutingXConnection::server_recv_crud_drop_view_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2768,7 +2775,7 @@ void MysqlRoutingXConnection::server_recv_crud_drop_view_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2798,9 +2805,9 @@ void MysqlRoutingXConnection::client_cursor_open() {
 }
 
 void MysqlRoutingXConnection::server_recv_cursor_open_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2813,7 +2820,7 @@ void MysqlRoutingXConnection::server_recv_cursor_open_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2836,7 +2843,7 @@ void MysqlRoutingXConnection::server_recv_cursor_open_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2865,9 +2872,9 @@ void MysqlRoutingXConnection::client_cursor_fetch() {
 }
 
 void MysqlRoutingXConnection::server_recv_cursor_fetch_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2880,7 +2887,7 @@ void MysqlRoutingXConnection::server_recv_cursor_fetch_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2905,7 +2912,7 @@ void MysqlRoutingXConnection::server_recv_cursor_fetch_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2934,9 +2941,9 @@ void MysqlRoutingXConnection::client_cursor_close() {
 }
 
 void MysqlRoutingXConnection::server_recv_cursor_close_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -2949,7 +2956,7 @@ void MysqlRoutingXConnection::server_recv_cursor_close_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -2968,7 +2975,7 @@ void MysqlRoutingXConnection::server_recv_cursor_close_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -2997,9 +3004,9 @@ void MysqlRoutingXConnection::client_session_close() {
 }
 
 void MysqlRoutingXConnection::server_recv_session_close_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -3012,7 +3019,7 @@ void MysqlRoutingXConnection::server_recv_session_close_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -3031,7 +3038,7 @@ void MysqlRoutingXConnection::server_recv_session_close_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -3061,9 +3068,9 @@ void MysqlRoutingXConnection::client_session_reset() {
 }
 
 void MysqlRoutingXConnection::server_recv_session_reset_response() {
-  auto &src_conn = server_conn();
-  auto &src_channel = src_conn.channel();
-  auto &src_protocol = src_conn.protocol();
+  auto *socket_splicer = this->socket_splicer();
+  auto src_channel = socket_splicer->server_channel();
+  auto src_protocol = server_protocol();
 
   auto read_res = ensure_has_msg_prefix(src_channel, src_protocol);
   if (!read_res) {
@@ -3076,7 +3083,7 @@ void MysqlRoutingXConnection::server_recv_session_reset_response() {
     return recv_server_failed(ec);
   }
 
-  uint8_t msg_type = src_protocol.current_msg_type().value();
+  uint8_t msg_type = src_protocol->current_msg_type().value();
 
   enum class Msg {
     kNotice = Mysqlx::ServerMessages::NOTICE,
@@ -3095,7 +3102,7 @@ void MysqlRoutingXConnection::server_recv_session_reset_response() {
   {
     ensure_has_full_frame(src_channel, src_protocol);
 
-    auto &recv_buf = src_channel.recv_plain_view();
+    auto &recv_buf = src_channel->recv_plain_view();
     log_debug("%s: %s", __FUNCTION__, hexify(recv_buf).c_str());
   }
 
@@ -3124,8 +3131,8 @@ void MysqlRoutingXConnection::server_recv_server_greeting_from_server() {
 }
 
 void MysqlRoutingXConnection::finish() {
-  auto &client_socket = client_conn();
-  auto &server_socket = server_conn();
+  auto &client_socket = this->socket_splicer()->client_conn();
+  auto &server_socket = this->socket_splicer()->server_conn();
 
   if (server_socket.is_open() && !client_socket.is_open()) {
 #if 0
@@ -3167,15 +3174,15 @@ void MysqlRoutingXConnection::wait_client_close() { finish(); }
 void MysqlRoutingXConnection::done() { this->disassociate(); }
 
 void MysqlRoutingXConnection::server_tls_shutdown() {
-  auto &channel = server_conn().channel();
-  if (channel.ssl()) {
-    (void)channel.tls_shutdown();
+  auto *channel = this->socket_splicer()->server_channel();
+  if (channel->ssl()) {
+    (void)channel->tls_shutdown();
   }
 }
 
 void MysqlRoutingXConnection::client_tls_shutdown() {
-  auto &channel = client_conn().channel();
-  if (channel.ssl()) {
-    (void)channel.tls_shutdown();
+  auto *channel = this->socket_splicer()->client_channel();
+  if (channel->ssl()) {
+    (void)channel->tls_shutdown();
   }
 }

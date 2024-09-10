@@ -1,4 +1,4 @@
-include/rpl/init_source_replica.inc
+include/master-slave.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -13,7 +13,7 @@ XA START 'xatest';
 INSERT INTO t VALUES (10);
 XA END 'xatest';
 XA PREPARE 'xatest';
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 # Wait for XA_STATE to become PREPARED on slave
 # Expecting one prepared transaction
 XA RECOVER;
@@ -23,7 +23,7 @@ Waiting until gtid is MASTER_UUID:2
 ---- XA COMMIT ----
 [connection master]
 XA COMMIT 'xatest';
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 # Wait for XA_STATE to become COMMITTED on slave
 # Expecting no prepared transactions
 XA RECOVER;
@@ -32,8 +32,8 @@ Waiting until gtid is MASTER_UUID:3
 include/diff_tables.inc [master:t,slave:t]
 [connection master]
 DROP TABLE t;
-include/rpl/sync_to_replica.inc
-include/rpl/reset.inc
+include/sync_slave_sql_with_master.inc
+include/rpl_reset.inc
 ####################################################################
 # Test Case 2: Enable Multithreaded Slave with replica_parallel_type as
 # DATABASE. Verify that slave displays appropriate XA_STATE in
@@ -43,10 +43,10 @@ include/rpl/reset.inc
 [connection slave]
 SET @save_replica_parallel_workers=@@global.replica_parallel_workers;
 SET @replica_parallel_type=@@global.replica_parallel_type;
-include/rpl/stop_replica.inc
+include/stop_slave.inc
 SET GLOBAL replica_parallel_workers=4;
 SET GLOBAL replica_parallel_type='DATABASE';
-include/rpl/start_replica.inc
+include/start_slave.inc
 [connection slave]
 TRUNCATE TABLE performance_schema.events_transactions_current;
 ---- Setup ----
@@ -57,7 +57,7 @@ XA START 'xatest';
 INSERT INTO t VALUES (10);
 XA END 'xatest';
 XA PREPARE 'xatest';
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 # Wait for XA_STATE to become PREPARED on slave
 # Expecting one prepared transaction
 XA RECOVER;
@@ -67,7 +67,7 @@ Waiting until gtid is MASTER_UUID:2
 ---- XA COMMIT ----
 [connection master]
 XA COMMIT 'xatest';
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 # Wait for XA_STATE to become COMMITTED on slave
 # Expecting no prepared transactions
 XA RECOVER;
@@ -76,18 +76,18 @@ Waiting until gtid is MASTER_UUID:3
 include/diff_tables.inc [master:t,slave:t]
 [connection master]
 DROP TABLE t;
-include/rpl/sync_to_replica.inc
-include/rpl/reset.inc
+include/sync_slave_sql_with_master.inc
+include/rpl_reset.inc
 ####################################################################
 # Test Case 3: Enable Multithreaded Slave with replica_parallel_type as
 # LOGICAL_CLOCK. Verify that slave displays appropriate XA_STATE in
 # performance schema table, post XA PREPARE AND XA COMMIT command
 # execution.
 ####################################################################
-include/rpl/stop_replica.inc
+include/stop_slave.inc
 SET GLOBAL replica_parallel_workers=4;
 SET GLOBAL replica_parallel_type='LOGICAL_CLOCK';
-include/rpl/start_replica.inc
+include/start_slave.inc
 [connection slave]
 TRUNCATE TABLE performance_schema.events_transactions_current;
 ---- Setup ----
@@ -98,7 +98,7 @@ XA START 'xatest';
 INSERT INTO t VALUES (10);
 XA END 'xatest';
 XA PREPARE 'xatest';
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 # Wait for XA_STATE to become PREPARED on slave
 # Expecting one prepared transaction
 XA RECOVER;
@@ -108,7 +108,7 @@ Waiting until gtid is MASTER_UUID:2
 ---- XA COMMIT ----
 [connection master]
 XA COMMIT 'xatest';
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 # Wait for XA_STATE to become COMMITTED on slave
 # Expecting no prepared transactions
 XA RECOVER;
@@ -117,10 +117,10 @@ Waiting until gtid is MASTER_UUID:3
 include/diff_tables.inc [master:t,slave:t]
 [connection master]
 DROP TABLE t;
-include/rpl/sync_to_replica.inc
+include/sync_slave_sql_with_master.inc
 [connection slave]
-include/rpl/stop_replica.inc
+include/stop_slave.inc
 set @@global.replica_parallel_workers= @save_replica_parallel_workers;
 set @@global.replica_parallel_type= @replica_parallel_type;
-include/rpl/start_replica.inc
-include/rpl/deinit.inc
+include/start_slave.inc
+include/rpl_end.inc

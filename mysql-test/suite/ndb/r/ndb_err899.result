@@ -68,4 +68,3 @@ INSERT INTO test.t1 values (101,102);
 ROLLBACK;
 drop table test.t1;
 compare current DBTUP resource usage w/usage before test to check for leaks
-

@@ -1,19 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2023, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -74,6 +73,14 @@ savepoint. */
 /** Change the logging mode of a mini-transaction.
 @return old mode */
 #define mtr_set_log_mode(m, d) (m)->set_log_mode((d))
+
+/** Get the poping log mode of a mini-transaction.
+@return logging mode: MTR_LOG_NONE, ... */
+#define mtr_get_pop_mode(m) (m)->get_pop_mode()
+
+/** Change the poping log mode of a mini-transaction.
+@return old mode */
+#define mtr_set_pop_mode(m, d) (m)->set_pop_mode((d))
 
 /** Get the flush observer of a mini-transaction.
 @return flush observer object */
@@ -430,6 +437,15 @@ struct mtr_t {
   @return       old mode */
   mtr_log_t set_log_mode(mtr_log_t mode);
 
+  /** Get the pop mode.
+  @return       pop mode */
+  [[nodiscard]] inline bool get_pop_mode() const;
+
+  /** Change the to pop buff mode.
+  @param mode    true, changes to pop buff.
+  @return       old mode */
+  bool set_pop_mode(bool mode);
+
   /** Read 1 - 4 bytes from a file page buffered in the buffer pool.
   @param ptr    pointer from where to read
   @param type   MLOG_1BYTE, MLOG_2BYTES, MLOG_4BYTES
@@ -641,13 +657,6 @@ struct mtr_t {
     for (auto &it : s_my_thread_active_mtrs) {
       it->check_is_not_latching();
     }
-  }
-  /** This method is useful to detect if the thread is already inside an mtr.
-  We should not do the log_free_check() in the child mtrs if a thread is
-  already inside an mtr.
-  @return true if thread is not inside an mtr, false otherwise */
-  static bool is_this_thread_inside_mtr() {
-    return !s_my_thread_active_mtrs.empty();
   }
 #endif
 

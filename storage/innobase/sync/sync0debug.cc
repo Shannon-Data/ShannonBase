@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2012, 2024, Oracle and/or its affiliates.
+Copyright (c) 2012, 2023, Oracle and/or its affiliates.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -12,13 +12,12 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -474,13 +473,13 @@ LatchDebug::LatchDebug() {
   LEVEL_MAP_INSERT(SYNC_RECV_WRITER);
   LEVEL_MAP_INSERT(SYNC_LOG_SN);
   LEVEL_MAP_INSERT(SYNC_LOG_SN_MUTEX);
+  LEVEL_MAP_INSERT(SYNC_LOG_SN_MUTEX);
   LEVEL_MAP_INSERT(SYNC_LOG_LIMITS);
   LEVEL_MAP_INSERT(SYNC_LOG_FLUSHER);
   LEVEL_MAP_INSERT(SYNC_LOG_FILES);
   LEVEL_MAP_INSERT(SYNC_LOG_WRITER);
   LEVEL_MAP_INSERT(SYNC_LOG_WRITE_NOTIFIER);
   LEVEL_MAP_INSERT(SYNC_LOG_FLUSH_NOTIFIER);
-  LEVEL_MAP_INSERT(SYNC_LOG_GOVERNOR_MUTEX);
   LEVEL_MAP_INSERT(SYNC_LOG_CLOSER);
   LEVEL_MAP_INSERT(SYNC_LOG_CHECKPOINTER);
   LEVEL_MAP_INSERT(SYNC_LOG_ARCH);
@@ -711,6 +710,7 @@ Latches *LatchDebug::check_order(const latch_t *latch,
 
     case SYNC_LOG_SN:
     case SYNC_LOG_SN_MUTEX:
+    case SYNC_LOG_RAPID_POP_MUTEX:
     case SYNC_TRX_SYS_HEADER:
     case SYNC_LOCK_FREE_HASH:
     case SYNC_MONITOR_MUTEX:
@@ -730,7 +730,6 @@ Latches *LatchDebug::check_order(const latch_t *latch,
     case SYNC_LOG_WRITE_NOTIFIER:
     case SYNC_LOG_FLUSH_NOTIFIER:
     case SYNC_LOG_LIMITS:
-    case SYNC_LOG_GOVERNOR_MUTEX:
     case SYNC_LOG_FILES:
     case SYNC_LOG_ARCH:
     case SYNC_PAGE_ARCH:
@@ -1291,12 +1290,11 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
 
   LATCH_ADD_MUTEX(LOG_FILES, SYNC_LOG_FILES, log_files_mutex_key);
 
-  LATCH_ADD_MUTEX(LOG_GOVERNOR_MUTEX, SYNC_LOG_GOVERNOR_MUTEX,
-                  log_governor_mutex_key);
-
   LATCH_ADD_RWLOCK(LOG_SN, SYNC_LOG_SN, log_sn_lock_key);
 
   LATCH_ADD_MUTEX(LOG_SN_MUTEX, SYNC_LOG_SN_MUTEX, log_sn_mutex_key);
+
+  LATCH_ADD_MUTEX(LOG_RAPID_POP, SYNC_LOG_RAPID_POP_MUTEX, log_rapid_pop_mutex_key);
 
   LATCH_ADD_MUTEX(LOG_ARCH, SYNC_LOG_ARCH, log_sys_arch_mutex_key);
 

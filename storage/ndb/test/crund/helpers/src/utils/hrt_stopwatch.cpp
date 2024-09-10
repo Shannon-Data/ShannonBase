@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2010, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,8 +27,8 @@
  *
  */
 
-#include <assert.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #include "hrt_stopwatch.h"
 
@@ -37,45 +36,70 @@
  * High-Resolution Time Stopwatch Utility -- Implementation
  */
 
-extern void hrt_sw_init(hrt_stopwatch *sw, int cap) {
-  sw->cap = cap;
-  sw->top = 0;
-  sw->tstamps = malloc(sizeof(hrt_tstamp) * cap);
+extern void
+hrt_sw_init(hrt_stopwatch* sw, int cap)
+{
+    sw->cap = cap;
+    sw->top = 0;
+    sw->tstamps = malloc(sizeof(hrt_tstamp) * cap);
 }
 
-extern void hrt_sw_close(hrt_stopwatch *sw) {
-  free(sw->tstamps);
-  sw->cap = 0;
-  sw->top = 0;
+extern void
+hrt_sw_close(hrt_stopwatch* sw)
+{
+    free(sw->tstamps);
+    sw->cap = 0;
+    sw->top = 0;
 }
 
-extern int hrt_sw_top(const hrt_stopwatch *sw) { return sw->top - 1; }
-
-extern int hrt_sw_capacity(const hrt_stopwatch *sw) { return sw->cap; }
-
-extern int hrt_sw_pushmark(hrt_stopwatch *sw) {
-  assert(sw->top < sw->cap);
-  int r = hrt_tnow(sw->tstamps + sw->top);
-  assert(r == 0);
-  (void)r;
-  return sw->top++;
+extern int
+hrt_sw_top(const hrt_stopwatch* sw)
+{
+    return sw->top - 1;
 }
 
-extern void hrt_sw_popmark(hrt_stopwatch *sw) {
-  assert(sw->top > 0);
-  sw->top--;
+extern int
+hrt_sw_capacity(const hrt_stopwatch* sw)
+{
+    return sw->cap;
 }
 
-extern double hrt_sw_rtmicros(const hrt_stopwatch *sw, int y, int x) {
-  assert(0 <= y && y < sw->top);
-  assert(0 <= x && x < sw->top);
-  return hrt_rtmicros(&sw->tstamps[y].rtstamp, &sw->tstamps[x].rtstamp);
+extern int
+hrt_sw_pushmark(hrt_stopwatch* sw)
+{
+    assert (sw->top < sw->cap);
+    int r = hrt_tnow(sw->tstamps + sw->top);
+    assert (r == 0);
+    (void)r;
+    return sw->top++;
 }
 
-extern double hrt_sw_ctmicros(const hrt_stopwatch *sw, int y, int x) {
-  assert(0 <= y && y < sw->top);
-  assert(0 <= x && x < sw->top);
-  return hrt_ctmicros(&sw->tstamps[y].ctstamp, &sw->tstamps[x].ctstamp);
+extern void
+hrt_sw_popmark(hrt_stopwatch* sw)
+{
+    assert (sw->top > 0);
+    sw->top--;
 }
 
-extern void hrt_sw_clear(hrt_stopwatch *sw) { sw->top = 0; }
+extern double
+hrt_sw_rtmicros(const hrt_stopwatch* sw, int y, int x)
+{
+    assert (0 <= y && y < sw->top);
+    assert (0 <= x && x < sw->top);
+    return hrt_rtmicros(&sw->tstamps[y].rtstamp, &sw->tstamps[x].rtstamp);
+}
+
+extern double
+hrt_sw_ctmicros(const hrt_stopwatch* sw, int y, int x)
+{
+    assert (0 <= y && y < sw->top);
+    assert (0 <= x && x < sw->top);
+    return hrt_ctmicros(&sw->tstamps[y].ctstamp, &sw->tstamps[x].ctstamp);
+}
+
+extern void
+hrt_sw_clear(hrt_stopwatch* sw)
+{
+    sw->top = 0;
+}
+

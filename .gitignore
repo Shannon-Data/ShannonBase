@@ -6,6 +6,9 @@ tags
 TAGS
 TAGS_sorted_by_file
 
+# googletest files
+source_downloads
+
 # Vim swap files
 [._]*.s[a-v][a-z]
 [._]*.sw[a-p]
@@ -28,4 +31,3 @@ scalability_jobs_*
 .cproject
 .project
 .settings/
-

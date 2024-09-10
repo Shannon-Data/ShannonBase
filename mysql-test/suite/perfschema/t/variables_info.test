@@ -36,6 +36,7 @@ select VARIABLE_NAME, VARIABLE_SOURCE, SET_TIME, SET_USER, SET_HOST
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart:--max_connections=55 --skip-networking" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 select VARIABLE_NAME, VARIABLE_SOURCE, SET_USER, SET_HOST
@@ -62,6 +63,7 @@ select VARIABLE_NAME, VARIABLE_SOURCE, SET_TIME, SET_USER, SET_HOST
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 select VARIABLE_NAME, VARIABLE_SOURCE, SET_USER, SET_HOST
@@ -117,6 +119,7 @@ let $MYSQLD_DATADIR= `select @@datadir`;
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 #
@@ -134,6 +137,7 @@ select VARIABLE_NAME, VARIABLE_SOURCE
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart:--innodb_fast_shutdown=1 --innodb_file_per_table" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 select VARIABLE_NAME, VARIABLE_SOURCE, SET_TIME, SET_USER, SET_HOST
@@ -146,6 +150,7 @@ select VARIABLE_NAME, VARIABLE_SOURCE, SET_TIME, SET_USER, SET_HOST
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 --echo #
@@ -245,6 +250,7 @@ select VARIABLE_NAME, VARIABLE_SOURCE,
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 --echo # user must be root

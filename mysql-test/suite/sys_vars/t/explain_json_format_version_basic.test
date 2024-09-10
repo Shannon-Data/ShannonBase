@@ -1,2 +1,0 @@
---source include/not_hypergraph.inc
---source suite/sys_vars/inc/explain_json_format_version.inc

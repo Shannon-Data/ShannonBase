@@ -1,16 +1,15 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -112,26 +111,22 @@ int Replication_thread_api::initialize_channel(
   return error;
 }
 
-int Replication_thread_api::start_threads(
-    bool start_receiver, bool start_applier, string *value,
-    bool wait_for_connection, enum_channel_until_condition until_condition) {
+int Replication_thread_api::start_threads(bool start_receiver,
+                                          bool start_applier, string *view_id,
+                                          bool wait_for_connection) {
   DBUG_TRACE;
 
   Channel_connection_info info;
   initialize_channel_connection_info(&info);
 
-  char *cvalue = nullptr;
+  char *cview_id = nullptr;
 
-  if (value) {
-    cvalue = new char[value->size() + 1];
-    memcpy(cvalue, value->c_str(), value->size() + 1);
+  if (view_id) {
+    cview_id = new char[view_id->size() + 1];
+    memcpy(cview_id, view_id->c_str(), view_id->size() + 1);
 
-    info.until_condition = until_condition;
-    if (until_condition == CHANNEL_UNTIL_VIEW_ID) {
-      info.view_id = cvalue;
-    } else if (until_condition == CHANNEL_UNTIL_APPLIER_AFTER_GTIDS) {
-      info.gtid = cvalue;
-    }
+    info.until_condition = CHANNEL_UNTIL_VIEW_ID;
+    info.view_id = cview_id;
   }
 
   int thread_mask = 0;
@@ -145,8 +140,8 @@ int Replication_thread_api::start_threads(
   int error = channel_start(interface_channel, &info, thread_mask,
                             wait_for_connection, true);
 
-  if (cvalue != nullptr) {
-    delete[] cvalue;
+  if (view_id) {
+    delete[] cview_id;
   }
 
   return error;

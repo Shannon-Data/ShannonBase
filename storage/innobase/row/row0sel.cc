@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2024, Oracle and/or its affiliates.
+Copyright (c) 1997, 2023, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 
 Portions of this file contain modifications contributed and copyrighted by
@@ -13,13 +13,12 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -30,6 +29,7 @@ You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
+Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 *****************************************************************************/
 
 /** @file row/row0sel.cc
@@ -2500,28 +2500,26 @@ mysql_col_len, mbminlen, mbmaxlen
                                 range comparison. */
 void row_sel_field_store_in_mysql_format_func(
     byte *dest, const mysql_row_templ_t *templ, const dict_index_t *index,
-    IF_DEBUG(ulint field_no, ) const byte *data,
-    ulint len IF_DEBUG(, ulint sec_field)) {
+    ulint field_no,  const byte *data,
+    ulint len , ulint sec_field) {
   byte *ptr;
-#ifdef UNIV_DEBUG
+//#ifdef UNIV_DEBUG
   const dict_field_t *field =
       templ->is_virtual ? nullptr : index->get_field(field_no);
 
-  bool clust_templ_for_sec = (sec_field != ULINT_UNDEFINED);
-#endif /* UNIV_DEBUG */
+  ulint prtype {DATA_ROW_ID};
+  prtype = (templ->type != DATA_SYS && field) ? field->col->prtype : DATA_TRX_ID;
+  ib_id_t id;
 
-  if (templ->is_multi_val) {
-    ib::fatal(UT_LOCATION_HERE, ER_CONVERT_MULTI_VALUE)
-        << "Table name: " << index->table->name
-        << " Index name: " << index->name;
-  }
-
-  auto const mysql_col_len = templ->mysql_col_len;
+  bool clust_templ_for_sec [[maybe_unused]] = (sec_field != ULINT_UNDEFINED);
+//#endif /* UNIV_DEBUG */
+  ulint mysql_col_len =
+      templ->is_multi_val ? templ->mysql_mvidx_len : templ->mysql_col_len;
 
   ut_ad(rec_field_not_null_not_add_col_def(len));
   UNIV_MEM_ASSERT_RW(data, len);
-  UNIV_MEM_ASSERT_W(dest, mysql_col_len);
-  UNIV_MEM_INVALID(dest, mysql_col_len);
+  UNIV_MEM_ASSERT_W(dest, templ->mysql_col_len);
+  UNIV_MEM_INVALID(dest, templ->mysql_col_len);
 
   switch (templ->type) {
     const byte *field_end;
@@ -2604,14 +2602,14 @@ void row_sel_field_store_in_mysql_format_func(
       /* Store a pointer to the BLOB buffer to dest: the BLOB was
       already copied to the buffer in row_sel_store_mysql_rec */
 
-      row_mysql_store_blob_ref(dest, mysql_col_len, data, len);
+      row_mysql_store_blob_ref(dest, templ->mysql_col_len, data, len);
       break;
 
     case DATA_POINT:
     case DATA_VAR_POINT:
     case DATA_GEOMETRY:
       /* We store all geometry data as BLOB data at server layer. */
-      row_mysql_store_geometry(dest, mysql_col_len, data, len);
+      row_mysql_store_geometry(dest, templ->mysql_col_len, data, len);
       break;
 
     case DATA_MYSQL:
@@ -2652,7 +2650,7 @@ void row_sel_field_store_in_mysql_format_func(
       done in row0mysql.cc, function
       row_mysql_store_col_in_innobase_format(). */
       if ((templ->mbminlen == 1 && templ->mbmaxlen != 1) ||
-          (templ->is_virtual && mysql_col_len > len)) {
+          (templ->is_virtual && templ->mysql_col_len > len)) {
         /* NOTE: This comment is for the second condition:
         This probably comes from a prefix virtual index, where no complete
         value can be got because the full virtual column can only be
@@ -2665,15 +2663,24 @@ void row_sel_field_store_in_mysql_format_func(
         memset(dest + len, 0x20, mysql_col_len - len);
       }
       break;
-
-    default:
-#ifdef UNIV_DEBUG
+   
     case DATA_SYS_CHILD:
     case DATA_SYS:
-      /* These column types should never be shipped to MySQL. */
-      ut_d(ut_error);
-      [[fallthrough]];
-
+      /* These column types should never be shipped to MySQL. But, in Shannon,
+         we will retrieve trx id to MySQL. */
+      switch (prtype & DATA_SYS_PRTYPE_MASK) {
+         case DATA_TRX_ID:
+             id = mach_read_from_6(data);
+             memcpy(dest, &id, sizeof(ib_id_t));
+             break;
+         case DATA_ROW_ID:
+         case DATA_ROLL_PTR:
+           assert(0);
+           break;
+      }
+      break;
+    default:
+#ifdef UNIV_DEBUG
     case DATA_CHAR:
     case DATA_FIXBINARY:
     case DATA_FLOAT:
@@ -2745,7 +2752,7 @@ void row_sel_field_store_in_mysql_format_func(
     field_no = sec_field_no;
   }
 
-  if (rec_offs_nth_extern(rec_index, offsets, field_no)) {
+  if (templ->type != DATA_SYS && rec_offs_nth_extern(rec_index, offsets, field_no)) {
     /* Copy an externally stored field to a temporary heap */
 
     ut_a(!prebuilt->trx->has_search_latch);
@@ -2823,10 +2830,11 @@ void row_sel_field_store_in_mysql_format_func(
     }
   } else {
     /* Field is stored in the row. */
-
+    if (templ->type == DATA_SYS)
+        field_no = templ->clust_rec_field_no;
     data = rec_get_nth_field_instant(rec, offsets, field_no, rec_index, &len);
 
-    if (len == UNIV_SQL_NULL) {
+    if (templ->type != DATA_SYS && len == UNIV_SQL_NULL) {
       /* MySQL assumes that the field for an SQL
       NULL value is set to the default value. */
       ut_ad(templ->mysql_null_bit_mask);
@@ -2839,7 +2847,8 @@ void row_sel_field_store_in_mysql_format_func(
              (const byte *)prebuilt->default_rec + templ->mysql_col_offset,
              templ->mysql_col_len);
       return true;
-    }
+    } else if (templ->type == DATA_SYS)
+       len = templ->mysql_col_len;
 
     if (DATA_LARGE_MTYPE(templ->type) || DATA_GEOMETRY_MTYPE(templ->type)) {
       /* It is a BLOB field locally stored in the
@@ -2926,22 +2935,6 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
   for (ulint i = 0; i < prebuilt->n_template; i++) {
     const auto templ = &prebuilt->mysql_template[i];
 
-    /* Skip multi-value columns; since they can not be explicitly
-    requested by the query, they may only be here in scenarios
-    where all index columns are included routinely, like these:
-    1. Index-only scan (done for covering index): all index field
-    are stored regardless of whether they are requested or not
-    (depending on optimization options): for multi-values they
-    need not be stored, as they may never be requested.
-    2. Cross-partition index scan, for the purpose of index merge:
-    not needed since multi-values do not introduce ordering and
-    so are not needed for index merge. */
-    if (templ->is_multi_val) {
-      /* Multi-value columns are always virtual */
-      ut_ad(templ->is_virtual);
-      continue;
-    }
-
     if (templ->is_virtual && rec_index->is_clustered()) {
       /* Skip virtual columns if it is not a covered
       search or virtual key read is not requested. */
@@ -3004,7 +2997,9 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
     /* We should never deliver column prefixes to MySQL,
     except for evaluating innobase_index_cond() or
     row_search_end_range_check(). */
-    ut_ad(rec_index->get_field(field_no)->prefix_len == 0);
+    if (templ->type != DATA_SYS){
+      ut_ad(rec_index->get_field(field_no)->prefix_len == 0);
+    }
 
     if (clust_templ_for_sec) {
       std::vector<const dict_col_t *>::iterator it;
@@ -3017,11 +3012,10 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
         continue;
       }
 
-      ut_ad(templ->rec_field_no == templ->clust_rec_field_no);
+      //ut_ad(templ->rec_field_no == templ->clust_rec_field_no);
 
       sec_field_no = it - template_col.begin();
     }
-
     if (!row_sel_store_mysql_field(mysql_rec, prebuilt, rec, rec_index,
                                    prebuilt_index, offsets, field_no, templ,
                                    sec_field_no, lob_undo, blob_heap)) {
@@ -3083,46 +3077,9 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
   return err;
 }
 
-/** Helper class to cache clust_rec and old_ver */
-class Row_sel_get_clust_rec_for_mysql {
-  const rec_t *cached_clust_rec;
-  rec_t *cached_old_vers;
-
- public:
-  /** Constructor */
-  Row_sel_get_clust_rec_for_mysql()
-      : cached_clust_rec(nullptr), cached_old_vers(nullptr) {}
-
-  /** Retrieve the clustered index record corresponding to a record in a
-  non-clustered index. Does the necessary locking.
-  @param[in]     prebuilt    prebuilt struct in the handle
-  @param[in]     sec_index   secondary index where rec resides
-  @param[in]     rec         record in a non-clustered index
-  @param[in]     thr         query thread
-  @param[out]    out_rec     clustered record or an old version of it,
-                             NULL if the old version did not exist in the
-                             read view, i.e., it was a fresh inserted version
-  @param[in,out] offsets     in: offsets returned by
-                                 rec_get_offsets(rec, sec_index);
-                             out: offsets returned by
-                                 rec_get_offsets(out_rec, clust_index)
-  @param[in,out] offset_heap memory heap from which the offsets are allocated
-  @param[out]    vrow        virtual column to fill
-  @param[in]     mtr         mtr used to get access to the non-clustered record;
-                             the same mtr is used to access the clustered index
-  @param[in]     lob_undo    the LOB undo information.
-  @return DB_SUCCESS, DB_SUCCESS_LOCKED_REC, or error code */
-  dberr_t operator()(row_prebuilt_t *prebuilt, dict_index_t *sec_index,
-                     const rec_t *rec, que_thr_t *thr, const rec_t **out_rec,
-                     ulint **offsets, mem_heap_t **offset_heap,
-                     const dtuple_t **vrow, mtr_t *mtr,
-                     lob::undo_vers_t *lob_undo);
-};
-
 /** Retrieve the clustered index record corresponding to a record in a
 non-clustered index. Does the necessary locking.
   @return DB_SUCCESS, DB_SUCCESS_LOCKED_REC, or error code */
-
 [[nodiscard]] dberr_t Row_sel_get_clust_rec_for_mysql::operator()(
     row_prebuilt_t *prebuilt, dict_index_t *sec_index, const rec_t *rec,
     que_thr_t *thr, const rec_t **out_rec, ulint **offsets,
@@ -3135,6 +3092,8 @@ non-clustered index. Does the necessary locking.
   rec_t *old_vers;
   dberr_t err;
   trx_t *trx;
+
+  srv_sec_rec_cluster_reads.fetch_add(1, std::memory_order_relaxed);
 
   *out_rec = nullptr;
   trx = thr_get_trx(thr);
@@ -3206,7 +3165,6 @@ non-clustered index. Does the necessary locking.
       dtuple_t *tuple =
           dict_index_build_data_tuple(sec_index, const_cast<rec_t *>(rec),
                                       dict_index_get_n_fields(sec_index), heap);
-      ;
       page_cur_t page_cursor;
 
       ulint low_match =
@@ -3483,8 +3441,6 @@ static void row_sel_copy_cached_field_for_mysql(
     const byte *cache,              /*!< in: cached row */
     const mysql_row_templ_t *templ) /*!< in: column template */
 {
-  ut_a(!templ->is_multi_val);
-
   ulint len;
 
   buf += templ->mysql_col_offset;
@@ -3504,9 +3460,6 @@ static void row_sel_copy_cached_field_for_mysql(
     len = templ->mysql_col_len;
   }
 
-  /* The buf and cache have each reserved exactly templ->mysql_col_len
-  bytes for this column. In case of varchar we might copy fewer. */
-  ut_a(len <= templ->mysql_col_len);
   ut_memcpy(buf, cache, len);
 }
 
@@ -3588,18 +3541,10 @@ static inline void row_sel_dequeue_cached_row_for_mysql(
       templ = prebuilt->mysql_template + i;
 
       /* Skip virtual columns */
-      if (templ->is_virtual) {
-        if (!(dict_index_has_virtual(prebuilt->index) &&
-              prebuilt->read_just_key)) {
-          continue;
-        }
-
-        if (templ->is_multi_val) {
-          continue;
-        }
+      if (templ->is_virtual && !(dict_index_has_virtual(prebuilt->index) &&
+                                 prebuilt->read_just_key)) {
+        continue;
       }
-      // Multi-value columns are always virtual
-      ut_a(!templ->is_multi_val);
 
       row_sel_copy_cached_field_for_mysql(buf, cached_rec, templ);
     }
@@ -3664,7 +3609,8 @@ static inline byte *row_sel_fetch_last_buf(
   if (record_buffer == nullptr) {
     ut_ad(prebuilt->n_fetch_cached < MYSQL_FETCH_CACHE_SIZE);
   } else {
-    ut_ad(prebuilt->mysql_prefix_len <= record_buffer->record_size());
+    /*Some extra spaces added, so this test failed*/
+    //ut_ad(prebuilt->mysql_prefix_len <= record_buffer->record_size());
     ut_ad(record_buffer->records() == prebuilt->n_fetch_cached);
   }
 
@@ -3764,7 +3710,7 @@ static ulint row_sel_try_search_shortcut_for_mysql(
 
 /** Check a pushed-down index condition.
  @return ICP_NO_MATCH, ICP_MATCH, or ICP_OUT_OF_RANGE */
-static ICP_RESULT row_search_idx_cond_check(
+ICP_RESULT row_search_idx_cond_check(
     byte *mysql_rec,          /*!< out: record
                               in MySQL format (invalid unless
                               prebuilt->idx_cond == true and

@@ -1947,10 +1947,10 @@ ON table2 .col_int_key = table1 .col_int_key
                       } /* best_covering_index_scan */,
                       "setup_range_conditions": [
                       ] /* setup_range_conditions */,
-                      "group_index_skip_scan": {
+                      "group_index_range": {
                         "chosen": false,
                         "cause": "not_single_table"
-                      } /* group_index_skip_scan */,
+                      } /* group_index_range */,
                       "skip_scan_range": {
                         "chosen": false,
                         "cause": "not_single_table"
@@ -2054,94 +2054,88 @@ ON table2 .col_int_key = table1 .col_int_key
               "select#": 1,
               "steps": [
                 {
-                  "de-duplicate with index": {
+                  "subselect_execution": {
+                    "select#": 4,
                     "steps": [
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      },
-                      {
-                        "subselect_execution": {
-                          "select#": 4,
-                          "steps": [
-                          ] /* steps */
-                        } /* subselect_execution */
-                      }
                     ] /* steps */
-                  } /* de-duplicate with index */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
+                },
+                {
+                  "subselect_execution": {
+                    "select#": 4,
+                    "steps": [
+                    ] /* steps */
+                  } /* subselect_execution */
                 }
               ] /* steps */
             } /* materialize */
@@ -2282,10 +2276,10 @@ SELECT 1 FROM t1 WHERE 1 LIKE
                                         } /* best_covering_index_scan */,
                                         "setup_range_conditions": [
                                         ] /* setup_range_conditions */,
-                                        "group_index_skip_scan": {
+                                        "group_index_range": {
                                           "chosen": false,
                                           "cause": "not_group_by_or_distinct"
-                                        } /* group_index_skip_scan */,
+                                        } /* group_index_range */,
                                         "skip_scan_range": {
                                           "potential_skip_scan_indexes": [
                                             {

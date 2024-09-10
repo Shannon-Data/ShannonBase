@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -43,17 +42,20 @@ enum mtr_log_t {
   /** Default mode: log all operations modifying disk-based data */
   MTR_LOG_ALL = 0,
 
+  /** Log all operations and set modifying to pop buff */
+  MTR_LOG_ALL_WITH_POP = 1,
+
   /** Log no operations and dirty pages are not added to the flush list */
-  MTR_LOG_NONE = 1,
+  MTR_LOG_NONE = 2,
 
   /** Don't generate REDO log but add dirty pages to flush list */
-  MTR_LOG_NO_REDO = 2,
+  MTR_LOG_NO_REDO = 3,
 
   /** Inserts are logged in a shorter form */
-  MTR_LOG_SHORT_INSERTS = 3,
+  MTR_LOG_SHORT_INSERTS = 4,
 
   /** Last element */
-  MTR_LOG_MODE_MAX = 4
+  MTR_LOG_MODE_MAX = 5
 };
 
 /** @name Log item types

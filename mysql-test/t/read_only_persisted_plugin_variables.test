@@ -42,6 +42,7 @@ SELECT count(*) from performance_schema.persisted_variables;
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 CALL mtr.add_suppression("Plugin audit_log reported *");
@@ -57,6 +58,7 @@ RESET PERSIST;
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 --echo # Install version token plugin
@@ -75,6 +77,7 @@ SELECT * FROM performance_schema.persisted_variables;
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc
 
 --echo # return 0 row
@@ -90,4 +93,5 @@ RESET PERSIST;
 --shutdown_server
 --source include/wait_until_disconnected.inc
 --exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
 --source include/wait_until_connected_again.inc

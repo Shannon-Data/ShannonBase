@@ -28,13 +28,15 @@
 # Test in this file is binlog format agnostic, thus no need
 # to rerun it for every format.
 --source include/have_binlog_format_row.inc
+# Test requires master-info-repository=TABLE, relay-log-info-repository=TABLE
+--source include/have_slave_repository_type_table.inc
 --source include/not_rpl_gtid_only.inc
---source include/rpl/init_source_replica.inc
+--source include/master-slave.inc
 
 --let $autocommit_opt= ON
---source common/rpl/rpl_ignore_super_read_only.test
+--source extra/rpl_tests/rpl_ignore_super_read_only.test
 
 --let $autocommit_opt= OFF
---source common/rpl/rpl_ignore_super_read_only.test
+--source extra/rpl_tests/rpl_ignore_super_read_only.test
 
---source include/rpl/deinit.inc
+--source include/rpl_end.inc

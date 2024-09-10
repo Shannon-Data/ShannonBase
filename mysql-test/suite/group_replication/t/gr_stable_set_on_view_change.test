@@ -25,11 +25,10 @@
 --echo #
 
 --let $rpl_connection_name= server1
---source include/connection.inc
+--source include/rpl_connection.inc
 
 SET @@GLOBAL.DEBUG= '+d,group_replication_certifier_broadcast_thread_big_period';
 
-SET @@GLOBAL.DEBUG= '+d,group_replication_version_with_vcle';
 --source include/start_and_bootstrap_group_replication.inc
 
 --echo #
@@ -53,9 +52,8 @@ INSERT INTO t1 VALUES (1);
 --echo #
 
 --let $rpl_connection_name= server2
---source include/connection.inc
+--source include/rpl_connection.inc
 
-SET @@GLOBAL.DEBUG= '+d,group_replication_version_with_vcle';
 --source include/start_group_replication.inc
 
 --echo #
@@ -63,7 +61,7 @@ SET @@GLOBAL.DEBUG= '+d,group_replication_version_with_vcle';
 --echo #
 
 --let $rpl_connection_name= server1
---source include/connection.inc
+--source include/rpl_connection.inc
 
 # The Stable set update happens before the execution of the View Change event
 --let $wait_condition= SELECT @@GLOBAL.GTID_EXECUTED = "6d387320-185d-11e6-bdf4-0800200c9a66:1-4"
@@ -80,10 +78,5 @@ SET @@GLOBAL.DEBUG= '+d,group_replication_version_with_vcle';
 
 DROP TABLE t1;
 SET @@GLOBAL.DEBUG= '-d,group_replication_certifier_broadcast_thread_big_period';
-SET @@GLOBAL.DEBUG= '-d,group_replication_version_with_vcle';
-
---let $rpl_connection_name= server2
---source include/connection.inc
-SET @@GLOBAL.DEBUG= '-d,group_replication_version_with_vcle';
 
 --source include/group_replication_end.inc

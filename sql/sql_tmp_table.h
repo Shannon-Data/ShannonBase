@@ -1,19 +1,18 @@
 #ifndef SQL_TMP_TABLE_INCLUDED
 #define SQL_TMP_TABLE_INCLUDED
 
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +21,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 /**
   @file
@@ -56,7 +57,9 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
                         const mem_root_deque<Item *> &fields, ORDER *group,
                         bool distinct, bool save_sum_fields,
                         ulonglong select_options, ha_rows rows_limit,
-                        const char *table_alias);
+                        const char *table_alias, bool force_disk_table = false,
+                        bool parallel_query = false);
+
 bool open_tmp_table(TABLE *table);
 TABLE *create_tmp_table_from_fields(THD *thd, List<Create_field> &field_list,
                                     bool is_virtual = true,

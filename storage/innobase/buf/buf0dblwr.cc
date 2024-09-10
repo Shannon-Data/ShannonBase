@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -1729,11 +1728,9 @@ void Double_write::reset_file(dblwr::File &file, bool truncate) noexcept {
     }
 
   } else if (new_size > cur_size) {
-    const auto start =
-        ut_uint64_align_down(cur_size, univ_page_size.physical());
-    auto err =
-        os_file_write_zeros(pfs_file, file.m_name.c_str(),
-                            univ_page_size.physical(), start, new_size - start);
+    auto err = os_file_write_zeros(pfs_file, file.m_name.c_str(),
+                                   univ_page_size.physical(), cur_size,
+                                   new_size - cur_size);
 
     if (err != DB_SUCCESS) {
       ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_DBLWR_1321, file.m_name.c_str());
@@ -1753,9 +1750,8 @@ void Double_write::reduced_reset_file(dblwr::File &file,
   auto pfs_file = file.m_pfs;
 
   if (new_size > cur_size) {
-    const auto start = ut_uint64_align_down(cur_size, phy_size);
     auto err = os_file_write_zeros(pfs_file, file.m_name.c_str(), phy_size,
-                                   start, new_size - start);
+                                   cur_size, new_size - cur_size);
 
     if (err != DB_SUCCESS) {
       ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_DBLWR_1321, file.m_name.c_str());
@@ -1978,8 +1974,8 @@ dberr_t Double_write::load(dblwr::File &file, recv::Pages *pages) noexcept {
   }
 
   if ((size % univ_page_size.physical())) {
-    ib::warn(ER_IB_MSG_DBLWR_LOAD_WRONG_SIZE, file.m_name.c_str(),
-             ulonglong{size}, univ_page_size.physical());
+    ib::warn(ER_IB_MSG_DBLWR_1319, file.m_name.c_str(), (ulint)size,
+             (ulint)univ_page_size.physical());
   }
 
   const uint32_t n_pages = size / univ_page_size.physical();
@@ -2025,7 +2021,7 @@ class Reduced_batch_deserializer {
   dberr_t deserialize(F &f) {
     auto page = m_buf->begin();
     for (uint32_t i = 0; i < m_n_pages; ++i) {
-      if (ut::is_zeros(page, REDUCED_BATCH_PAGE_SIZE)) {
+      if (is_zeroes(page)) {
         page += REDUCED_BATCH_PAGE_SIZE;
         continue;
       }
@@ -2108,6 +2104,17 @@ class Reduced_batch_deserializer {
           (expected_entries * REDUCED_ENTRY_SIZE));
   }
 
+  /** @return true if dblwr page is an all-zero page
+  @param[in]   page    dblwr page in batch file (.bdblwr) */
+  bool is_zeroes(const byte *page) {
+    for (ulint i = 0; i < REDUCED_BATCH_PAGE_SIZE; i++) {
+      if (page[i] != 0) {
+        return (false);
+      }
+    }
+    return (true);
+  }
+
  private:
   /** Temporary buffer to hold Reduced dblwr pages */
   Buffer *m_buf;
@@ -2133,8 +2140,8 @@ dberr_t Double_write::load_reduced_batch(dblwr::File &file,
   }
 
   if ((size % REDUCED_BATCH_PAGE_SIZE) != 0) {
-    ib::warn(ER_IB_MSG_DBLWR_LOAD_WRONG_SIZE, file.m_name.c_str(),
-             ulonglong{size}, size_t{REDUCED_BATCH_PAGE_SIZE});
+    ib::warn(ER_IB_MSG_DBLWR_1319, file.m_name.c_str(), (ulint)size,
+             (ulint)REDUCED_BATCH_PAGE_SIZE);
   }
 
   const uint32_t n_pages = size / REDUCED_BATCH_PAGE_SIZE;
@@ -2413,8 +2420,7 @@ dberr_t Double_write::create_single_segments() noexcept {
   return DB_SUCCESS;
 }
 
-file::Block *dblwr::get_encrypted_frame(buf_page_t *bpage,
-                                        IORequest &type) noexcept {
+file::Block *dblwr::get_encrypted_frame(buf_page_t *bpage) noexcept {
   space_id_t space_id = bpage->space();
   page_no_t page_no = bpage->page_no();
 
@@ -2440,6 +2446,7 @@ file::Block *dblwr::get_encrypted_frame(buf_page_t *bpage,
     return nullptr;
   }
 
+  IORequest type(IORequest::WRITE);
   void *frame{};
   uint32_t len{};
 
@@ -2527,8 +2534,7 @@ dberr_t dblwr::write(buf_flush_t flush_type, buf_page_t *bpage,
 
     /* Encrypt the page here, so that the same encrypted contents are written
     to the dblwr file and the data file. */
-    IORequest type(IORequest::WRITE);
-    file::Block *e_block = dblwr::get_encrypted_frame(bpage, type);
+    file::Block *e_block = dblwr::get_encrypted_frame(bpage);
 
     if (!sync && flush_type != BUF_FLUSH_SINGLE_PAGE) {
       MONITOR_INC(MONITOR_DBLWR_ASYNC_REQUESTS);
@@ -2741,8 +2747,8 @@ dberr_t dblwr::reduced_open() noexcept {
   auto file_size = os_file_get_size(file.m_pfs);
 
   if (file_size == 0 || (file_size % phy_size)) {
-    ib::warn(ER_IB_MSG_DBLWR_OPEN_OR_CREATE_WRONG_SIZE, file.m_name.c_str(),
-             ulonglong{file_size}, size_t{phy_size});
+    ib::warn(ER_IB_MSG_DBLWR_1322, file.m_name.c_str(), (ulint)file_size,
+             (ulint)phy_size);
   }
 
   Double_write::reduced_reset_file(file, pages_per_file, phy_size);
@@ -2761,12 +2767,16 @@ dberr_t dblwr::open() noexcept {
   /* Batch segments per dblwr file. */
   uint32_t segments_per_file{};
 
-  ut_a(dblwr::n_files != 0);
+  if (dblwr::n_files == 0) {
+    dblwr::n_files = 2;
+  }
 
   ib::info(ER_IB_MSG_DBLWR_1324)
       << "Double write buffer files: " << dblwr::n_files;
 
-  ut_a(dblwr::n_pages != 0);
+  if (dblwr::n_pages == 0) {
+    dblwr::n_pages = srv_n_write_io_threads;
+  }
 
   ib::info(ER_IB_MSG_DBLWR_1323)
       << "Double write buffer pages per instance: " << dblwr::n_pages;
@@ -2812,8 +2822,8 @@ dberr_t dblwr::open() noexcept {
     auto file_size = os_file_get_size(file.m_pfs);
 
     if (file_size == 0 || (file_size % univ_page_size.physical())) {
-      ib::warn(ER_IB_MSG_DBLWR_OPEN_OR_CREATE_WRONG_SIZE, file.m_name.c_str(),
-               ulonglong{file_size}, univ_page_size.physical());
+      ib::warn(ER_IB_MSG_DBLWR_1322, file.m_name.c_str(), (ulint)file_size,
+               (ulint)univ_page_size.physical());
     }
 
     /* Truncate the size after recovery: false. */
@@ -3616,11 +3626,9 @@ bool has_encrypted_pages() noexcept {
       byte *frame = buffer.begin();
       page_type_t page_type = fil_page_get_type(frame);
 
-      if (page_type != FIL_PAGE_TYPE_ALLOCATED) {
-        TLOG("space_id=" << page_get_space_id(frame)
-                         << ", page_no=" << page_get_page_no(frame)
-                         << ", page_type=" << fil_get_page_type_str(page_type));
-      }
+      TLOG("space_id=" << page_get_space_id(frame)
+                       << ", page_no=" << page_get_page_no(frame)
+                       << ", page_type=" << fil_get_page_type_str(page_type));
 
       if (is_encrypted_page(frame)) {
         st = true;

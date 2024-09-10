@@ -1,16 +1,15 @@
-/* Copyright (c) 2023, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -362,7 +361,7 @@ int rnd_next(PSI_table_handle *h) {
       uint64_t storage_details_buffer_size{MAX_STORAGE_NAME_SIZE};
       char storage_details_buffer[MAX_STORAGE_NAME_SIZE];
       memset(storage_details_buffer, 0, sizeof(storage_details_buffer));
-      auto current_trx_tsid{handle->row.trx_tsid};
+      auto current_trx_uuid{handle->row.trx_uuid};
       auto current_trx_seqno{handle->row.trx_seqno};
       std::stringstream extra;
       auto &row = handle->row;
@@ -378,25 +377,25 @@ int rnd_next(PSI_table_handle *h) {
 
       extra << "{ ";
 
-      row.event_type = static_cast<mysql::binlog::event::Log_event_type>(
-          buffer[EVENT_TYPE_OFFSET]);
-      row.event_name =
-          mysql::binlog::event::get_event_type_as_string(row.event_type);
+      row.event_type =
+          static_cast<binary_log::Log_event_type>(buffer[EVENT_TYPE_OFFSET]);
+      row.event_name = binary_log::get_event_type_as_string(row.event_type);
 
       switch (row.event_type) {
-        case mysql::binlog::event::ANONYMOUS_GTID_LOG_EVENT:
-        case mysql::binlog::event::FORMAT_DESCRIPTION_EVENT:
-        case mysql::binlog::event::ROTATE_EVENT:
-          row.trx_tsid = "";
+        case binary_log::ANONYMOUS_GTID_LOG_EVENT:
+        case binary_log::FORMAT_DESCRIPTION_EVENT:
+        case binary_log::ROTATE_EVENT:
+          row.trx_uuid = "";
           row.trx_seqno = 0;
 
           // TODO: extend to other events
           break;
-        case mysql::binlog::event::GTID_LOG_EVENT:
-        case mysql::binlog::event::GTID_TAGGED_LOG_EVENT: {
-          mysql::binlog::event::Gtid_event gev(buffer, &handle->fde);
+        case binary_log::GTID_LOG_EVENT: {
+          binary_log::Gtid_event gev(buffer, &handle->fde);
+          char suuid[binary_log::Uuid::TEXT_LENGTH + 1];
           row.trx_seqno = gev.get_gno();
-          row.trx_tsid = gev.get_tsid().to_string();
+          gev.get_uuid().to_string(suuid);
+          row.trx_uuid = suuid;
           extra << "\"trx_size\" : \"" << gev.transaction_length << "\", ";
           extra << "\"trx_immediate_commit_ts\" : \""
                 << gev.immediate_commit_timestamp << "\", ";
@@ -404,13 +403,13 @@ int rnd_next(PSI_table_handle *h) {
                 << gev.original_commit_timestamp << "\", ";
           break;
         }
-        case mysql::binlog::event::PREVIOUS_GTIDS_LOG_EVENT: {
-          mysql::binlog::event::Previous_gtids_event pgev(buffer, &handle->fde);
+        case binary_log::PREVIOUS_GTIDS_LOG_EVENT: {
+          binary_log::Previous_gtids_event pgev(buffer, &handle->fde);
           // TODO: show the contents on the extra part
           break;
         }
         default:
-          row.trx_tsid = current_trx_tsid;
+          row.trx_uuid = current_trx_uuid;
           row.trx_seqno = current_trx_seqno;
           break;
       }
@@ -445,9 +444,9 @@ int read_column_value(PSI_table_handle *h, PSI_field *field,
       pc_string_srv->set_varchar_utf8mb4_len(field, row.event_name.c_str(),
                                              row.event_name.size());
       break;
-    case 1: /* TRANSACTION_TSID */
-      pc_string_srv->set_char_utf8mb4(field, row.trx_tsid.c_str(),
-                                      row.trx_tsid.size());
+    case 1: /* TRANSACTION_UUID */
+      pc_string_srv->set_char_utf8mb4(field, row.trx_uuid.c_str(),
+                                      row.trx_uuid.size());
       break;
     case 2: /* TRANSACTION_GNO */
       pc_bigint_srv->set_unsigned(

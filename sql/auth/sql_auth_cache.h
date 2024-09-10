@@ -1,16 +1,15 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -161,7 +160,7 @@ class ACL_ACCESS {
   ACL_ACCESS() : host(), sort(0), access(0) {}
   ACL_HOST_AND_IP host;
   ulong sort;
-  Access_bitmask access;
+  ulong access;
 };
 
 /**
@@ -431,16 +430,16 @@ class ACL_PROXY_USER : public ACL_ACCESS {
 
 class acl_entry {
  public:
-  Access_bitmask access;
+  ulong access;
   uint16 length;
   char key[1];  // Key will be stored here
 };
 
 class GRANT_COLUMN {
  public:
-  Access_bitmask rights;
+  ulong rights;
   std::string column;
-  GRANT_COLUMN(String &c, Access_bitmask y);
+  GRANT_COLUMN(String &c, ulong y);
 };
 
 class GRANT_NAME {
@@ -449,11 +448,11 @@ class GRANT_NAME {
   char *db;
   const char *user;
   char *tname;
-  Access_bitmask privs;
+  ulong privs;
   ulong sort;
   std::string hash_key;
   GRANT_NAME(const char *h, const char *d, const char *u, const char *t,
-             Access_bitmask p, bool is_routine);
+             ulong p, bool is_routine);
   GRANT_NAME(TABLE *form, bool is_routine);
   virtual ~GRANT_NAME() = default;
   virtual bool ok() { return privs != 0; }
@@ -463,13 +462,13 @@ class GRANT_NAME {
 
 class GRANT_TABLE : public GRANT_NAME {
  public:
-  Access_bitmask cols;
+  ulong cols;
   collation_unordered_multimap<std::string,
                                unique_ptr_destroy_only<GRANT_COLUMN>>
       hash_columns;
 
   GRANT_TABLE(const char *h, const char *d, const char *u, const char *t,
-              Access_bitmask p, Access_bitmask c);
+              ulong p, ulong c);
   explicit GRANT_TABLE(TABLE *form);
   bool init(TABLE *col_privs);
   ~GRANT_TABLE() override;
@@ -651,7 +650,7 @@ class Acl_map {
   void increase_reference_count();
   void decrease_reference_count();
 
-  Access_bitmask global_acl();
+  ulong global_acl();
   Db_access_map *db_acls();
   Db_access_map *db_wild_acls();
   Table_access_map *table_acls();
@@ -669,7 +668,7 @@ class Acl_map {
   Db_access_map m_db_acls;
   Db_access_map m_db_wild_acls;
   Table_access_map m_table_acls;
-  Access_bitmask m_global_acl;
+  ulong m_global_acl;
   SP_access_map m_sp_acls;
   SP_access_map m_func_acls;
   Grant_acl_set m_with_admin_acls;

@@ -2,12 +2,12 @@
 .\"     Title: ndbd
 .\"    Author: [FIXME: author] [see http://docbook.sf.net/el/author]
 .\" Generator: DocBook XSL Stylesheets v1.79.1 <http://docbook.sf.net/>
-.\"      Date: 05/31/2024
+.\"      Date: 06/21/2023
 .\"    Manual: MySQL Database System
-.\"    Source: MySQL 8.4
+.\"    Source: MySQL 8.1
 .\"  Language: English
 .\"
-.TH "NDBD" "8" "05/31/2024" "MySQL 8\&.4" "MySQL Database System"
+.TH "NDBD" "8" "06/21/2023" "MySQL 8\&.1" "MySQL Database System"
 .\" -----------------------------------------------------------------
 .\" * Define some portability stuff
 .\" -----------------------------------------------------------------
@@ -34,27 +34,8 @@ ndbd \- the NDB Cluster data node daemon
 \fBndbd \fR\fB\fIoptions\fR\fR
 .SH "DESCRIPTION"
 .PP
-The
 \fBndbd\fR
-binary provides the single\-threaded version of the process that is used to handle all the data in tables employing the
-NDBCLUSTER
-storage engine\&. This data node process enables a data node to accomplish distributed transaction handling, node recovery, checkpointing to disk, online backup, and related tasks\&. In NDB 8\&.4\&.1 and later, when started,
-\fBndbd\fR
-logs a warning similar to that shown here:
-.sp
-.if n \{\
-.RS 4
-.\}
-.nf
-2024\-05\-28 13:32:16 [ndbd] WARNING  \-\- Running ndbd with a single thread of
-signal execution\&.  For multi\-threaded signal execution run the ndbmtd binary\&.
-.fi
-.if n \{\
-.RE
-.\}
-.PP
-\fBndbmtd\fR
-is the multi\-threaded version of this binary\&.
+is the process that is used to handle all the data in tables using the NDB Cluster storage engine\&. This is the process that empowers a data node to accomplish distributed transaction handling, node recovery, checkpointing to disk, online backup, and related tasks\&.
 .PP
 In an NDB Cluster, a set of
 \fBndbd\fR
@@ -63,7 +44,367 @@ processes cooperate in handling data\&. These processes can execute on the same 
 Options that can be used with
 \fBndbd\fR
 are shown in the following table\&. Additional descriptions follow the table\&.
+.sp
+.it 1 an-trap
+.nr an-no-space-flag 1
+.nr an-break-flag 1
+.br
+.B Table\ \&23.23.\ \&Command\-line options used with the program ndbd
+.TS
+allbox tab(:);
+lB lB lB.
+T{
+Format
+T}:T{
+Description
+T}:T{
+Added, Deprecated, or Removed
+T}
+.T&
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l
+lB l l.
+T{
 .PP
+\fB \fR\fB--bind-address=name\fR\fB \fR
+T}:T{
+Local bind address
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--character-sets-dir=path\fR\fB \fR
+T}:T{
+Directory containing character sets
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--connect-retries=#\fR\fB \fR
+T}:T{
+Set the number of times to retry a connection before giving up; 0 means
+              1 attempt only (and no retries); -1 means continue
+              retrying indefinitely
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--connect-retry-delay=#\fR\fB \fR
+T}:T{
+Time to wait between attempts to contact a management server, in
+              seconds; 0 means do not wait between attempts
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB--connect-string=connection_string\fR,
+.PP
+\fB \fR\fB-c connection_string\fR\fB \fR
+T}:T{
+Same as --ndb-connectstring
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--core-file\fR\fB \fR
+T}:T{
+Write core file on error; used in debugging
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB--daemon\fR,
+.PP
+\fB \fR\fB-d\fR\fB \fR
+T}:T{
+Start ndbd as daemon (default); override with --nodaemon
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--defaults-extra-file=path\fR\fB \fR
+T}:T{
+Read given file after global files are read
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--defaults-file=path\fR\fB \fR
+T}:T{
+Read default options from given file only
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--defaults-group-suffix=string\fR\fB \fR
+T}:T{
+Also read groups with concat(group, suffix)
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--filesystem-password=password\fR\fB \fR
+T}:T{
+Password for node file system encryption; can be passed from stdin, tty,
+              or my.cnf file
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--filesystem-password-from-stdin={TRUE|FALSE}\fR\fB \fR
+T}:T{
+Get password for node file system encryption, passed from stdin
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--foreground\fR\fB \fR
+T}:T{
+Run ndbd in foreground, provided for debugging purposes (implies
+              --nodaemon)
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB--help\fR,
+.PP
+\fB \fR\fB-?\fR\fB \fR
+T}:T{
+Display help text and exit
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--initial\fR\fB \fR
+T}:T{
+Perform initial start of ndbd, including file system cleanup; consult
+              documentation before using this option
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--initial-start\fR\fB \fR
+T}:T{
+Perform partial initial start (requires --nowait-nodes)
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--install[=name]\fR\fB \fR
+T}:T{
+Used to install data node process as Windows service; does not apply on
+              other platforms
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--logbuffer-size=#\fR\fB \fR
+T}:T{
+Control size of log buffer; for use when debugging with many log
+              messages being generated; default is sufficient for normal
+              operations
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--login-path=path\fR\fB \fR
+T}:T{
+Read given path from login file
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB--ndb-connectstring=connection_string\fR,
+.PP
+\fB \fR\fB-c connection_string\fR\fB \fR
+T}:T{
+Set connect string for connecting to ndb_mgmd. Syntax:
+              "[nodeid=id;][host=]hostname[:port]". Overrides entries in
+              NDB_CONNECTSTRING and my.cnf
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB--ndb-mgmd-host=connection_string\fR,
+.PP
+\fB \fR\fB-c connection_string\fR\fB \fR
+T}:T{
+Same as --ndb-connectstring
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--ndb-nodeid=#\fR\fB \fR
+T}:T{
+Set node ID for this node, overriding any ID set by --ndb-connectstring
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--nodaemon\fR\fB \fR
+T}:T{
+Do not start ndbd as daemon; provided for testing purposes
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--no-defaults\fR\fB \fR
+T}:T{
+Do not read default options from any option file other than login file
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB--nostart\fR,
+.PP
+\fB \fR\fB-n\fR\fB \fR
+T}:T{
+Do not start ndbd immediately; ndbd waits for command to start from
+              ndb_mgm
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--nowait-nodes=list\fR\fB \fR
+T}:T{
+Do not wait for these data nodes to start (takes comma-separated list of
+              node IDs); requires --ndb-nodeid
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--print-defaults\fR\fB \fR
+T}:T{
+Print program argument list and exit
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB \fR\fB--remove[=name]\fR\fB \fR
+T}:T{
+Used to remove data node process that was previously installed as
+              Windows service; does not apply on other platforms
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB--usage\fR,
+.PP
+\fB \fR\fB-?\fR\fB \fR
+T}:T{
+Display help text and exit; same as --help
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB--verbose\fR,
+.PP
+\fB \fR\fB-v\fR\fB \fR
+T}:T{
+Write extra debugging information to node log
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+T{
+.PP
+\fB--version\fR,
+.PP
+\fB \fR\fB-V\fR\fB \fR
+T}:T{
+Display version information and exit
+T}:T{
+.PP
+(Supported in all NDB releases based on MySQL 8.1)
+T}
+.TE
+.sp 1
 .if n \{\
 .sp
 .\}
@@ -529,7 +870,7 @@ Requires
 EncryptedFileSystem = 1\&.
 .sp
 For more information, see
-Section\ \&25.6.14, \(lqFile System Encryption for NDB Cluster\(rq\&.
+Section\ \&23.6.14, \(lqFile System Encryption for NDB Cluster\(rq\&.
 .RE
 .sp
 .RS 4
@@ -559,7 +900,7 @@ Requires
 EncryptedFileSystem = 1\&.
 .sp
 For more information, see
-Section\ \&25.6.14, \(lqFile System Encryption for NDB Cluster\(rq\&.
+Section\ \&23.6.14, \(lqFile System Encryption for NDB Cluster\(rq\&.
 .RE
 .sp
 .RS 4
@@ -643,7 +984,7 @@ to perform an initial start\&. An initial start erases any files created for rec
 \fBndbd\fR\&. It also re\-creates recovery log files\&. On some operating systems, this process can take a substantial amount of time\&.
 .sp
 The option also causes the removal of all data files associated with Disk Data tablespaces and undo log files associated with log file groups that existed previously on this data node (see
-Section\ \&25.6.11, \(lqNDB Cluster Disk Data Tables\(rq)\&.
+Section\ \&23.6.11, \(lqNDB Cluster Disk Data Tables\(rq)\&.
 .sp
 An
 \fB\-\-initial\fR
@@ -958,28 +1299,6 @@ Read given path from login file\&.
 .sp -1
 .IP \(bu 2.3
 .\}
-\fB\-\-no\-login\-paths\fR
-.TS
-allbox tab(:);
-lB l.
-T{
-Command-Line Format
-T}:T{
---no-login-paths
-T}
-.TE
-.sp 1
-Skips reading options from the login path file\&.
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
 \fB\-\-ndb\-connectstring\fR
 .TS
 allbox tab(:);
@@ -1003,12 +1322,7 @@ T}:T{
 T}
 .TE
 .sp 1
-Set connection string for connecting to
-\fBndb_mgmd\fR\&. Syntax:
-[nodeid=\fIid\fR;][host=]\fIhostname\fR[:\fIport\fR]\&. Overrides entries in
-NDB_CONNECTSTRING
-and
-my\&.cnf\&.
+Set connect string for connecting to ndb_mgmd\&. Syntax: "[nodeid=id;][host=]hostname[:port]"\&. Overrides entries in NDB_CONNECTSTRING and my\&.cnf\&.
 .RE
 .sp
 .RS 4
@@ -1044,56 +1358,6 @@ T}
 .sp 1
 Same as
 \fB\-\-ndb\-connectstring\fR\&.
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-\fB\-\-ndb\-mgm\-tls\fR
-.TS
-allbox tab(:);
-lB l
-lB l
-lB l
-lB l.
-T{
-Command-Line Format
-T}:T{
---ndb-mgm-tls=level
-T}
-T{
-Type
-T}:T{
-Enumeration
-T}
-T{
-Default Value
-T}:T{
-relaxed
-T}
-T{
-Valid Values
-T}:T{
-.PP
-relaxed
-.PP
-strict
-T}
-.TE
-.sp 1
-Sets the level of TLS support required to connect to the management server; one of
-relaxed
-or
-strict\&.
-relaxed
-(the default) means that a TLS connection is attempted, but success is not required;
-strict
-means that TLS is required to connect\&.
 .RE
 .sp
 .RS 4
@@ -1152,53 +1416,6 @@ T}
 Enable optimizations for selection of nodes for transactions\&. Enabled by default; use
 \fB\-\-skip\-ndb\-optimized\-node\-selection\fR
 to disable\&.
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-\fB\-\-ndb\-tls\-search\-path\fR
-.TS
-allbox tab(:);
-lB l
-lB l
-lB l
-lB l.
-T{
-Command-Line Format
-T}:T{
---ndb-tls-search-path=list
-T}
-T{
-Type
-T}:T{
-Path name
-T}
-T{
-Default Value (Unix)
-T}:T{
-$HOME/ndb-tls
-T}
-T{
-Default Value (Windows)
-T}:T{
-$HOMEDIR/ndb-tls
-T}
-.TE
-.sp 1
-Specify a list of directories to search for a CA file\&. On Unix platforms, the directory names are separated by colons (:); on Windows systems, the semicolon character (;) is used as the separator\&. A directory reference may be relative or absolute; it may contain one or more environment variables, each denoted by a prefixed dollar sign ($), and expanded prior to use\&.
-.sp
-Searching begins with the leftmost named directory and proceeds from left to right until a file is found\&. An empty string denotes an empty search path, which causes all searches to fail\&. A string consisting of a single dot (\&.) indicates that the search path limited to the current working directory\&.
-.sp
-If no search path is supplied, the compiled\-in default value is used\&. This value depends on the platform used: On Windows, this is
-\endb\-tls; on other platforms (including Linux), it is
-$HOME/ndb\-tls\&. This can be overridden by compiling NDB Cluster using
-\fB\-DWITH_NDB_TLS_SEARCH_PATH\fR\&.
 .RE
 .sp
 .RS 4
@@ -1284,7 +1501,7 @@ not to start automatically\&. When this option is used,
 connects to the management server, obtains configuration data from it, and initializes communication objects\&. However, it does not actually start the execution engine until specifically requested to do so by the management server\&. This can be accomplished by issuing the proper
 START
 command in the management client (see
-Section\ \&25.6.1, \(lqCommands in the NDB Cluster Management Client\(rq)\&.
+Section\ \&23.6.1, \(lqCommands in the NDB Cluster Management Client\(rq)\&.
 .RE
 .sp
 .RS 4
@@ -1629,8 +1846,8 @@ $> \fBndbd \-\-connect\-string="nodeid=2;host=ndb_mgmd\&.mysql\&.com:1186"\fR
 .\}
 .PP
 See
-Section\ \&25.4.3.3, \(lqNDB Cluster Connection Strings\(rq, for additional information about this issue\&. For more information about data node configuration parameters, see
-Section\ \&25.4.3.6, \(lqDefining NDB Cluster Data Nodes\(rq\&.
+Section\ \&23.4.3.3, \(lqNDB Cluster Connection Strings\(rq, for additional information about this issue\&. For more information about data node configuration parameters, see
+Section\ \&23.4.3.6, \(lqDefining NDB Cluster Data Nodes\(rq\&.
 .PP
 When
 \fBndbd\fR
@@ -1653,12 +1870,12 @@ process can consume up to 2 CPUs if permitted to do so\&.
 .PP
 For a machine with many CPUs it is possible to use several
 \fBndbd\fR
-processes which belong to different node groups; however, such a configuration is still considered experimental and is not supported for MySQL 8\&.4 in a production setting\&. See
-Section\ \&25.2.7, \(lqKnown Limitations of NDB Cluster\(rq\&.
+processes which belong to different node groups; however, such a configuration is still considered experimental and is not supported for MySQL 8\&.1 in a production setting\&. See
+Section\ \&23.2.7, \(lqKnown Limitations of NDB Cluster\(rq\&.
 .SH "COPYRIGHT"
 .br
 .PP
-Copyright \(co 1997, 2024, Oracle and/or its affiliates.
+Copyright \(co 1997, 2023, Oracle and/or its affiliates.
 .PP
 This documentation is free software; you can redistribute it and/or modify it only under the terms of the GNU General Public License as published by the Free Software Foundation; version 2 of the License.
 .PP

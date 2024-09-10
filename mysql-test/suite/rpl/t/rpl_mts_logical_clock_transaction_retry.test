@@ -6,13 +6,13 @@
 
 --source include/not_group_replication_plugin.inc
 --source include/have_debug.inc
---source include/rpl/init_source_replica.inc
+--source include/master-slave.inc
 
 # It makes all statements can be executed parallel.
 --let $set_commit_parent_100= 1
 
 --let $mts_parallel_type= "LOGICAL_CLOCK"
---source common/rpl/mta_transaction_retry.inc
+--source extra/rpl_tests/rpl_mts_transaction_retry.inc
 
---source include/rpl/deinit.inc
+--source include/rpl_end.inc
 

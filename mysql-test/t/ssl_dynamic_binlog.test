@@ -7,9 +7,9 @@ DROP TABLE t1;
 
 # Check that statements were executed/binlogged in correct order.
 let $show_binlog_events_mask_columns=1,2,4,5;
-source include/rpl/deprecated/show_binlog_events.inc;
+source include/show_binlog_events.inc;
 
 --echo # Cleanup
-RESET BINARY LOGS AND GTIDS;
+RESET MASTER;
 
 --echo ################## End of dynamic SSL tests

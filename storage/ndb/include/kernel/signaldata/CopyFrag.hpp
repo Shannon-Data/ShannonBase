@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,10 +25,11 @@
 #ifndef COPY_FRAG_HPP
 #define COPY_FRAG_HPP
 
-#include <ndb_limits.h>
 #include "SignalData.hpp"
+#include <ndb_limits.h>
 
 #define JAM_FILE_ID 45
+
 
 class CopyFragReq {
   /**
@@ -41,14 +41,15 @@ class CopyFragReq {
    * Receiver(s)
    */
   friend class Dblqh;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 11;
 
- private:
-  enum {
-    CFR_TRANSACTIONAL = 1,     // Copy rows >= gci in transactional fashion
-    CFR_NON_TRANSACTIONAL = 2  // Copy rows <= gci in non transactional fashion
+private:
+
+  enum
+  {
+    CFR_TRANSACTIONAL = 1,    // Copy rows >= gci in transactional fashion
+    CFR_NON_TRANSACTIONAL = 2 // Copy rows <= gci in non transactional fashion
   };
   union {
     Uint32 userPtr;
@@ -66,8 +67,8 @@ class CopyFragReq {
   Uint32 gci;
   Uint32 nodeCount;
   Uint32 nodeList[MAX_REPLICAS + 2];
-  // Uint32 maxPage; is stored in nodeList[nodeCount]
-  // Uint32 requestInfo is stored after maxPage
+  //Uint32 maxPage; is stored in nodeList[nodeCount]
+  //Uint32 requestInfo is stored after maxPage
 };
 
 class CopyFragConf {
@@ -80,11 +81,10 @@ class CopyFragConf {
    * Receiver(s)
    */
   friend class Dbdih;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 7;
 
- private:
+private:
   union {
     Uint32 userPtr;
     Uint32 senderData;
@@ -106,11 +106,10 @@ class CopyFragRef {
    * Receiver(s)
    */
   friend class Dbdih;
-
- public:
+public:
   static constexpr Uint32 SignalLength = 6;
 
- private:
+private:
   Uint32 userPtr;
   Uint32 sendingNodeId;
   Uint32 startingNodeId;
@@ -119,7 +118,8 @@ class CopyFragRef {
   Uint32 errorCode;
 };
 
-struct UpdateFragDistKeyOrd {
+struct UpdateFragDistKeyOrd
+{
   Uint32 tableId;
   Uint32 fragId;
   Uint32 fragDistributionKey;
@@ -127,7 +127,8 @@ struct UpdateFragDistKeyOrd {
   static constexpr Uint32 SignalLength = 3;
 };
 
-struct PrepareCopyFragReq {
+struct PrepareCopyFragReq
+{
   static constexpr Uint32 SignalLength = 6;
 
   Uint32 senderRef;
@@ -138,7 +139,8 @@ struct PrepareCopyFragReq {
   Uint32 startingNodeId;
 };
 
-struct PrepareCopyFragRef {
+struct PrepareCopyFragRef
+{
   Uint32 senderRef;
   Uint32 senderData;
   Uint32 tableId;
@@ -150,7 +152,8 @@ struct PrepareCopyFragRef {
   static constexpr Uint32 SignalLength = 7;
 };
 
-struct PrepareCopyFragConf {
+struct PrepareCopyFragConf
+{
   static constexpr Uint32 OldSignalLength = 7;
   static constexpr Uint32 SignalLength = 8;
 
@@ -164,7 +167,8 @@ struct PrepareCopyFragConf {
   Uint32 completedGci;
 };
 
-class HaltCopyFragReq {
+class HaltCopyFragReq
+{
   friend class Dblqh;
   static constexpr Uint32 SignalLength = 4;
 
@@ -174,18 +178,24 @@ class HaltCopyFragReq {
   Uint32 fragmentId;
 };
 
-class HaltCopyFragConf {
+class HaltCopyFragConf
+{
   friend class Dblqh;
   static constexpr Uint32 SignalLength = 4;
 
-  enum { COPY_FRAG_HALTED = 0, COPY_FRAG_COMPLETED = 1 };
+  enum
+  {
+    COPY_FRAG_HALTED = 0,
+    COPY_FRAG_COMPLETED = 1
+  };
   Uint32 senderData;
   Uint32 tableId;
   Uint32 fragmentId;
   Uint32 cause;
 };
 
-class HaltCopyFragRef {
+class HaltCopyFragRef
+{
   friend class Dblqh;
   static constexpr Uint32 SignalLength = 4;
 
@@ -195,7 +205,8 @@ class HaltCopyFragRef {
   Uint32 errorCode;
 };
 
-class ResumeCopyFragReq {
+class ResumeCopyFragReq
+{
   friend class Dblqh;
   static constexpr Uint32 SignalLength = 4;
 
@@ -205,7 +216,8 @@ class ResumeCopyFragReq {
   Uint32 fragmentId;
 };
 
-class ResumeCopyFragConf {
+class ResumeCopyFragConf
+{
   friend class Dblqh;
   static constexpr Uint32 SignalLength = 3;
 
@@ -214,7 +226,8 @@ class ResumeCopyFragConf {
   Uint32 fragmentId;
 };
 
-class ResumeCopyFragRef {
+class ResumeCopyFragRef
+{
   friend class Dblqh;
   static constexpr Uint32 SignalLength = 4;
 

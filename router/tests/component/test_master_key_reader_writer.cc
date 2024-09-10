@@ -1,17 +1,16 @@
 /*
- Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+ Copyright (c) 2018, 2023, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
  as published by the Free Software Foundation.
 
- This program is designed to work with certain software (including
+ This program is also distributed with certain software (including
  but not limited to OpenSSL) that is licensed under separate terms,
  as designated in a particular file or component or in included license
  documentation.  The authors of MySQL hereby grant you an additional
  permission to link the program and your derivative works with the
- separately licensed software that they have either included with
- the program or referenced in the documentation.
+ separately licensed software that they have included with MySQL.
 
  This program is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -47,7 +46,6 @@
 #include "process_manager.h"
 #include "random_generator.h"
 #include "router_component_test.h"
-#include "router_component_testutils.h"
 #include "script_generator.h"
 #include "tcp_port_pool.h"
 
@@ -72,7 +70,7 @@ MATCHER_P(FileContentNotEqual, master_key, "") {
   return file_content.str() != master_key;
 }
 
-class MasterKeyReaderWriterTest : public RouterComponentBootstrapTest {
+class MasterKeyReaderWriterTest : public RouterComponentTest {
  protected:
   void SetUp() override {
     RouterComponentTest::SetUp();
@@ -95,16 +93,18 @@ class MasterKeyReaderWriterTest : public RouterComponentBootstrapTest {
   }
 
   static std::pair<std::string, std::map<std::string, std::string>>
-  metadata_cache_section() {
+  metadata_cache_section(uint16_t server_port) {
     return {"metadata_cache:test",
             {{"router_id", "1"},
+             {"bootstrap_server_addresses",
+              "mysql://localhost:" + std::to_string(server_port)},
              {"user", "mysql_router1_user"},
              {"metadata_cluster", "test"},
              {"ttl", "500"}}};
   }
 
-  static std::string get_metadata_cache_section() {
-    auto section = metadata_cache_section();
+  static std::string get_metadata_cache_section(unsigned server_port) {
+    auto section = metadata_cache_section(server_port);
 
     return mysql_harness::ConfigBuilder::build_section(section.first,
                                                        section.second);
@@ -195,6 +195,16 @@ class MasterKeyReaderWriterTest : public RouterComponentBootstrapTest {
     return default_section;
   }
 
+  auto &launch_router(const std::vector<std::string> &params,
+                      int expected_exit_code = EXIT_SUCCESS) {
+    return ProcessManager::launch_router(
+        params, expected_exit_code,
+        /*catch_stderr=*/true,
+        /*with_sudo=*/false,
+        /*wait_for_notify_ready=*/-1s,
+        RouterComponentBootstrapTest::kBootstrapOutputResponder);
+  }
+
   TempDirectory tmp_dir_;
   TempDirectory bootstrap_dir_;
   std::string master_key_;
@@ -208,19 +218,18 @@ class MasterKeyReaderWriterTest : public RouterComponentBootstrapTest {
 TEST_F(MasterKeyReaderWriterTest,
        NoMasterKeyFileWhenBootstrapPassWithMasterKeyReader) {
   auto server_port = port_pool_.get_next_available();
-  auto http_port = port_pool_.get_next_available();
-  auto &server_mock =
-      launch_mysql_server_mock(get_data_dir().join("bootstrap_gr.js").str(),
-                               server_port, EXIT_SUCCESS, false, http_port);
-  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+  auto &server_mock = launch_mysql_server_mock(
+      get_data_dir().join("bootstrap_gr.js").str(), server_port, false);
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
 
   ScriptGenerator script_generator(ProcessManager::get_origin(),
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap({
+  auto &router = launch_router({
       "--bootstrap=127.0.0.1:" + std::to_string(server_port),
+      "--report-host",
+      "dont.query.dns",
       "--directory=" + bootstrap_dir_.name(),
       "--force",
       "--master-key-reader=" + script_generator.get_reader_script(),
@@ -230,7 +239,7 @@ TEST_F(MasterKeyReaderWriterTest,
   // check if the bootstrapping was successful
   ASSERT_NO_FATAL_FAILURE(check_exit_code(router, EXIT_SUCCESS, 30000ms));
   EXPECT_TRUE(router.expect_output(
-      "MySQL Router configured for the InnoDB Cluster 'test'"))
+      "MySQL Router configured for the InnoDB Cluster 'mycluster'"))
       << router.get_full_output() << std::endl
       << "server: " << server_mock.get_full_output();
 
@@ -258,28 +267,29 @@ TEST_F(MasterKeyReaderWriterTest,
 TEST_F(MasterKeyReaderWriterTest,
        CheckConfigFileWhenBootstrapPassWithMasterKeyReader) {
   auto server_port = port_pool_.get_next_available();
-  auto http_port = port_pool_.get_next_available();
-  auto &server_mock =
-      launch_mysql_server_mock(get_data_dir().join("bootstrap_gr.js").str(),
-                               server_port, EXIT_SUCCESS, false, http_port);
-  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+  auto &server_mock = launch_mysql_server_mock(
+      get_data_dir().join("bootstrap_gr.js").str(), server_port, false);
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
 
   ScriptGenerator script_generator(ProcessManager::get_origin(),
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
-      {"--directory=" + bootstrap_dir_.name(), "--force",
-       "--master-key-reader=" + script_generator.get_reader_script(),
-       "--master-key-writer=" + script_generator.get_writer_script(),
-       "--bootstrap=127.0.0.1:" + std::to_string(server_port)});
+  auto &router = launch_router({
+      "--directory=" + bootstrap_dir_.name(),
+      "--force",
+      "--master-key-reader=" + script_generator.get_reader_script(),
+      "--master-key-writer=" + script_generator.get_writer_script(),
+      "--report-host",
+      "dont.query.dns",
+      "--bootstrap=127.0.0.1:" + std::to_string(server_port),
+  });
 
   // check if the bootstrapping was successful
   ASSERT_NO_FATAL_FAILURE(check_exit_code(router, EXIT_SUCCESS, 30000ms));
   EXPECT_TRUE(
       router.expect_output("MySQL Router configured for the "
-                           "InnoDB Cluster 'test'"))
+                           "InnoDB Cluster 'mycluster'"))
       << router.get_full_output() << std::endl
       << "server: " << server_mock.get_full_output();
 
@@ -316,20 +326,19 @@ TEST_F(MasterKeyReaderWriterTest,
  */
 TEST_F(MasterKeyReaderWriterTest, BootstrapFailsWhenCannotRunMasterKeyReader) {
   auto server_port = port_pool_.get_next_available();
-  auto http_port = port_pool_.get_next_available();
-  auto &server_mock =
-      launch_mysql_server_mock(get_data_dir().join("bootstrap_gr.js").str(),
-                               server_port, EXIT_SUCCESS, false, http_port);
-  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+  auto &server_mock = launch_mysql_server_mock(
+      get_data_dir().join("bootstrap_gr.js").str(), server_port, false);
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
 
   ScriptGenerator script_generator(ProcessManager::get_origin(),
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
+  auto &router = launch_router(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port),
+          "--report-host",
+          "dont.query.dns",
           "--directory=" + bootstrap_dir_.name(),
           "--force",
           "--master-key-reader=" + script_generator.get_fake_reader_script(),
@@ -353,20 +362,19 @@ TEST_F(MasterKeyReaderWriterTest, BootstrapFailsWhenCannotRunMasterKeyReader) {
  */
 TEST_F(MasterKeyReaderWriterTest, BootstrapFailsWhenCannotRunMasterKeyWriter) {
   auto server_port = port_pool_.get_next_available();
-  auto http_port = port_pool_.get_next_available();
-  auto &server_mock =
-      launch_mysql_server_mock(get_data_dir().join("bootstrap_gr.js").str(),
-                               server_port, EXIT_SUCCESS, false, http_port);
-  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+  auto &server_mock = launch_mysql_server_mock(
+      get_data_dir().join("bootstrap_gr.js").str(), server_port, false);
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
 
   ScriptGenerator script_generator(ProcessManager::get_origin(),
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
+  auto &router = launch_router(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port),
+          "--report-host",
+          "dont.query.dns",
           "--directory=" + bootstrap_dir_.name(),
           "--force",
           "--master-key-reader=" + script_generator.get_reader_script(),
@@ -395,25 +403,23 @@ TEST_F(MasterKeyReaderWriterTest, KeyringFileRestoredWhenBootstrapFails) {
   write_to_file(keyring_path, "keyring file content");
 
   auto server_port = port_pool_.get_next_available();
-  auto http_port = port_pool_.get_next_available();
-  launch_mysql_server_mock(get_data_dir().join("bootstrap_gr.js").str(),
-                           server_port, EXIT_SUCCESS, false, http_port);
-  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+  auto &server_mock = launch_mysql_server_mock(
+      get_data_dir().join("bootstrap_gr.js").str(), server_port, false);
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
 
   ScriptGenerator script_generator(ProcessManager::get_origin(),
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
+  auto &router = launch_router(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port),
-          "--conf-set-option=DEFAULT.plugin_folder=" +
-              ProcessManager::get_plugin_dir().str(),
           "--directory=" + bootstrap_dir_.name(),
           "--force",
           "--master-key-reader=" + script_generator.get_fake_reader_script(),
           "--master-key-writer=" + script_generator.get_fake_writer_script(),
+          "--report-host",
+          "dont.query.dns",
       },
       EXIT_FAILURE);
 
@@ -437,11 +443,9 @@ TEST_F(MasterKeyReaderWriterTest, MasterKeyRestoredWhenBootstrapFails) {
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
+  auto &router = launch_router(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port),
-          "--conf-set-option=DEFAULT.plugin_folder=" +
-              ProcessManager::get_plugin_dir().str(),
           "--connect-timeout=1",
           "--directory=" + bootstrap_dir_.name(),
           "--force",
@@ -466,19 +470,18 @@ TEST_F(MasterKeyReaderWriterTest,
   write_to_file(Path(tmp_dir_.name()).join("master_key"), "");
 
   auto server_port = port_pool_.get_next_available();
-  auto http_port = port_pool_.get_next_available();
-  auto &server_mock =
-      launch_mysql_server_mock(get_data_dir().join("bootstrap_gr.js").str(),
-                               server_port, EXIT_SUCCESS, false, http_port);
-  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+  auto &server_mock = launch_mysql_server_mock(
+      get_data_dir().join("bootstrap_gr.js").str(), server_port, false);
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
 
   ScriptGenerator script_generator(ProcessManager::get_origin(),
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap({
+  auto &router = launch_router({
       "--bootstrap=127.0.0.1:" + std::to_string(server_port),
+      "--report-host",
+      "dont.query.dns",
       "--directory=" + bootstrap_dir_.name(),
       "--force",
       "--master-key-reader=" + script_generator.get_reader_script(),
@@ -489,7 +492,7 @@ TEST_F(MasterKeyReaderWriterTest,
   ASSERT_NO_FATAL_FAILURE(check_exit_code(router, EXIT_SUCCESS, 30000ms));
   EXPECT_TRUE(
       router.expect_output("MySQL Router configured for the "
-                           "InnoDB Cluster 'test'"))
+                           "InnoDB Cluster 'mycluster'"))
       << router.get_full_output() << std::endl
       << "server: " << server_mock.get_full_output();
 
@@ -509,18 +512,18 @@ TEST_F(MasterKeyReaderWriterTest,
   write_to_file(Path(tmp_dir_.name()).join("master_key"), "master key value");
 
   auto server_port = port_pool_.get_next_available();
-  auto http_port = port_pool_.get_next_available();
-  launch_mysql_server_mock(get_data_dir().join("bootstrap_gr.js").str(),
-                           server_port, EXIT_SUCCESS, false, http_port);
-  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+  auto &server_mock = launch_mysql_server_mock(
+      get_data_dir().join("bootstrap_gr.js").str(), server_port, false);
+  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
 
   ScriptGenerator script_generator(ProcessManager::get_origin(),
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap({
+  auto &router = launch_router({
       "--bootstrap=127.0.0.1:" + std::to_string(server_port),
+      "--report-host",
+      "dont.query.dns",
       "--directory=" + bootstrap_dir_.name(),
       "--force",
       "--master-key-reader=" + script_generator.get_reader_script(),
@@ -545,14 +548,13 @@ TEST_F(MasterKeyReaderWriterTest, ConnectToMetadataServerPass) {
 
   // launch server
   /*auto &server =*/launch_mysql_server_mock(
-      get_data_dir().join("metadata_dynamic_nodes_v2_gr.js").str(),
-      server_port);
+      get_data_dir().join("metadata_dynamic_nodes.js").str(), server_port);
 
   // launch the router with metadata-cache configuration
   TempDirectory conf_dir("conf");
 
   auto writer = config_writer(conf_dir.name())
-                    .section(metadata_cache_section())
+                    .section(metadata_cache_section(server_port))
                     .section(metadata_cache_routing_section(
                         "PRIMARY", "round-robin", router_port));
 
@@ -564,11 +566,6 @@ TEST_F(MasterKeyReaderWriterTest, ConnectToMetadataServerPass) {
   default_section["keyring_path"] = keyring_info.get_keyring_file();
   default_section["master_key_reader"] = keyring_info.get_master_key_reader();
   default_section["master_key_writer"] = keyring_info.get_master_key_writer();
-
-  const auto state_file = create_state_file(
-      get_test_temp_dir_name(),
-      create_state_file_content("uuid", "", {server_port}, 0));
-  default_section["dynamic_state"] = state_file;
 
   auto &router =
       router_spawner()
@@ -601,7 +598,7 @@ TEST_F(MasterKeyReaderWriterTest,
   TempDirectory conf_dir("conf");
 
   auto writer = config_writer(conf_dir.name())
-                    .section(metadata_cache_section())
+                    .section(metadata_cache_section(server_port))
                     .section(metadata_cache_routing_section(
                         "PRIMARY", "round-robin", router_port));
 
@@ -613,11 +610,6 @@ TEST_F(MasterKeyReaderWriterTest,
   default_section["keyring_path"] = keyring_info.get_keyring_file();
   default_section["master_key_reader"] = keyring_info.get_master_key_reader();
   default_section["master_key_writer"] = keyring_info.get_master_key_writer();
-
-  const auto state_file = create_state_file(
-      get_test_temp_dir_name(),
-      create_state_file_content("uuid", "", {server_port}, 0));
-  default_section["dynamic_state"] = state_file;
 
   // launch the router with metadata-cache configuration
 
@@ -646,7 +638,7 @@ TEST_F(MasterKeyReaderWriterTest,
 TEST_F(MasterKeyReaderWriterTest, CannotLaunchRouterWhenNoMasterKeyReader) {
   auto server_port = port_pool_.get_next_available();
   auto router_port = port_pool_.get_next_available();
-  std::string metadata_cache_section = get_metadata_cache_section();
+  std::string metadata_cache_section = get_metadata_cache_section(server_port);
   std::string routing_section =
       get_metadata_cache_routing_section("PRIMARY", "round-robin", router_port);
 
@@ -668,7 +660,7 @@ TEST_F(MasterKeyReaderWriterTest, CannotLaunchRouterWhenNoMasterKeyReader) {
                              metadata_cache_section + routing_section,
                              &default_section_map),
       },
-      EXIT_FAILURE, true, false, -1s);
+      EXIT_FAILURE);
 
   ASSERT_NO_FATAL_FAILURE(check_exit_code(router, EXIT_FAILURE));
 }
@@ -681,7 +673,7 @@ TEST_F(MasterKeyReaderWriterTest, CannotLaunchRouterWhenNoMasterKeyReader) {
 TEST_F(MasterKeyReaderWriterTest, CannotLaunchRouterWhenMasterKeyIncorrect) {
   auto server_port = port_pool_.get_next_available();
   auto router_port = port_pool_.get_next_available();
-  std::string metadata_cache_section = get_metadata_cache_section();
+  std::string metadata_cache_section = get_metadata_cache_section(server_port);
   std::string routing_section =
       get_metadata_cache_routing_section("PRIMARY", "round-robin", router_port);
 
@@ -701,7 +693,7 @@ TEST_F(MasterKeyReaderWriterTest, CannotLaunchRouterWhenMasterKeyIncorrect) {
       {"-c", create_config_file(conf_dir.name(),
                                 metadata_cache_section + routing_section,
                                 &incorrect_master_key_default_section_map)},
-      EXIT_FAILURE, true, false, -1s);
+      EXIT_FAILURE);
 
   ASSERT_NO_FATAL_FAILURE(check_exit_code(router, EXIT_FAILURE));
 }
@@ -778,14 +770,9 @@ class MasterKeyReaderWriterSystemDeploymentTest
   auto &run_server_mock() {
     const std::string json_stmts = get_data_dir().join("bootstrap_gr.js").str();
     server_port_ = port_pool_.get_next_available();
-    const auto http_port = port_pool_.get_next_available();
 
     // launch mock server and wait for it to start accepting connections
-    auto &server_mock = launch_mysql_server_mock(
-        json_stmts, server_port_, EXIT_SUCCESS, false, http_port);
-    set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                      classic_ports_to_gr_nodes({server_port_}), 0,
-                      {server_port_});
+    auto &server_mock = launch_mysql_server_mock(json_stmts, server_port_);
     return server_mock;
   }
 
@@ -812,8 +799,10 @@ TEST_F(MasterKeyReaderWriterSystemDeploymentTest, BootstrapPass) {
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap({
+  auto &router = launch_router({
       "--bootstrap=127.0.0.1:" + std::to_string(server_port_),
+      "--report-host",
+      "dont.query.dns",
       "--master-key-reader=" + script_generator.get_reader_script(),
       "--master-key-writer=" + script_generator.get_writer_script(),
   });
@@ -821,8 +810,9 @@ TEST_F(MasterKeyReaderWriterSystemDeploymentTest, BootstrapPass) {
   // check if the bootstrapping was successful
   ASSERT_NO_FATAL_FAILURE(check_exit_code(router, EXIT_SUCCESS));
 
-  EXPECT_TRUE(router.expect_output(
-      "MySQL Router configured for the InnoDB Cluster 'test'"))
+  EXPECT_TRUE(
+      router.expect_output("MySQL Router configured for the "
+                           "InnoDB Cluster 'mycluster'"))
       << router.get_full_output() << std::endl
       << "server: " << server_mock.get_full_output();
 
@@ -846,9 +836,11 @@ TEST_F(MasterKeyReaderWriterSystemDeploymentTest,
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
+  auto &router = launch_router(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port_),
+          "--report-host",
+          "dont.query.dns",
           "--master-key-reader=" + script_generator.get_fake_reader_script(),
           "--master-key-writer=" + script_generator.get_writer_script(),
       },
@@ -878,9 +870,11 @@ TEST_F(MasterKeyReaderWriterSystemDeploymentTest,
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
+  auto &router = launch_router(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port_),
+          "--report-host",
+          "dont.query.dns",
           "--master-key-reader=" + script_generator.get_reader_script(),
           "--master-key-writer=" + script_generator.get_fake_writer_script(),
       },
@@ -918,14 +912,14 @@ TEST_F(MasterKeyReaderWriterSystemDeploymentTest,
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
+  auto &router = launch_router(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port_),
-          "--conf-set-option=DEFAULT.plugin_folder=" +
-              ProcessManager::get_plugin_dir().str(),
           "--connect-timeout=1",
           "--master-key-reader=" + script_generator.get_fake_reader_script(),
           "--master-key-writer=" + script_generator.get_fake_writer_script(),
+          "--report-host",
+          "dont.query.dns",
       },
       EXIT_FAILURE);
 
@@ -951,11 +945,9 @@ TEST_F(MasterKeyReaderWriterSystemDeploymentTest,
                                    tmp_dir_.name());
 
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
+  auto &router = launch_router(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port),
-          "--conf-set-option=DEFAULT.plugin_folder=" +
-              ProcessManager::get_plugin_dir().str(),
           "--connect-timeout=1",
           "--master-key-reader=" + script_generator.get_reader_script(),
           "--master-key-writer=" + script_generator.get_writer_script(),

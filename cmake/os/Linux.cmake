@@ -1,16 +1,15 @@
-# Copyright (c) 2010, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2010, 2023, Oracle and/or its affiliates.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is designed to work with certain software (including
+# This program is also distributed with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have either included with
-# the program or referenced in the documentation.
+# separately licensed software that they have included with MySQL.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -65,17 +64,15 @@ IF(LINUX_FEDORA OR LINUX_RHEL OR LINUX_SUSE)
   SET(LINUX_RPM_PLATFORM 1)
 ENDIF()
 
-# We require at least GCC 10 Clang 12
+# We require at least GCC 7.1 Clang 5
 IF(NOT FORCE_UNSUPPORTED_COMPILER)
   IF(MY_COMPILER_IS_GNU)
-    # gcc9 is known to fail
-    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10)
-      MESSAGE(FATAL_ERROR "GCC 10 or newer is required")
+    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 7.1)
+      MESSAGE(FATAL_ERROR "GCC 7.1 or newer is required")
     ENDIF()
   ELSEIF(MY_COMPILER_IS_CLANG)
-    # This is the lowest version tested
-    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
-      MESSAGE(FATAL_ERROR "Clang 12 or newer is required!")
+    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 5)
+      MESSAGE(FATAL_ERROR "Clang 5 or newer is required!")
     ENDIF()
   ELSE()
     MESSAGE(FATAL_ERROR "Unsupported compiler!")

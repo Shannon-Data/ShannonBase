@@ -495,15 +495,15 @@ SELECT GROUP_CONCAT(a), x
 
 DROP TABLE t1;
 #
-# Bug#23451 GROUP_CONCAT truncates a multibyte utf8mb3 character
+# Bug#23451 GROUP_CONCAT truncates a multibyte utf8 character
 #
-set names utf8mb3;
+set names utf8;
 create table t1
 (
-  x text character set utf8mb3 not null,
+  x text character set utf8 not null,
   y integer not null
 );
-insert into t1 values (repeat('a', 1022), 0), (repeat(_utf8mb3 0xc3b7, 4), 0);
+insert into t1 values (repeat('a', 1022), 0), (repeat(_utf8 0xc3b7, 4), 0);
 let $1= 10;
 while ($1)
 {
@@ -587,7 +587,7 @@ DROP TABLE t1, t2, t3;
 #            a temporary table.
 #
 set names latin1;
-create table t1 (id int, name varchar(20)) DEFAULT CHARSET=utf8mb3;
+create table t1 (id int, name varchar(20)) DEFAULT CHARSET=utf8;
 insert into t1 (id, name) values (1, "óra");
 insert into t1 (id, name) values (2, "óra");
 select b.id, group_concat(b.name) from t1 a, t1 b group by b.id;
@@ -1023,49 +1023,3 @@ SET SESSION group_concat_max_len=default;
 CREATE VIEW v(c0) AS SELECT group_concat((SELECT 1), 1);
 
 DROP VIEW v;
-
---echo # Bug#35730982: GROUP_CONCAT results were displayed as NULL before 8.0.23
-
-CREATE TABLE customer (
-  c_id int NOT NULL,
-  c_name varchar(255) NOT NULL,
-  PRIMARY KEY (c_id)
-);
-
-INSERT INTO customer VALUES (1,'Messi'),(2,'Pele'),(3,'Maradona');
-
-CREATE TABLE employee (
-  seq_id bigint NOT NULL,
-  c_id int NOT NULL,
-  emp_id int NOT NULL,
-  emp_name varchar(30) DEFAULT NULL,
-  PRIMARY KEY (seq_id)
-);
-
-INSERT INTO employee VALUES (1,1,10,'Zico'),(2,3,30,'Ronaldo');
-
-SELECT mc.c_id,
-       GROUP_CONCAT(e.emp_name order by e.emp_id separator ',') AS gc
-FROM customer AS mc LEFT JOIN employee AS e
-     ON mc.c_id = e.c_id AND e.seq_id = 2
-WHERE mc.c_id = 2
-GROUP BY mc.c_id;
-
-PREPARE ps FROM
-"SELECT mc.c_id,
-       GROUP_CONCAT(e.emp_name order by e.emp_id separator ',') AS gc
-FROM customer AS mc LEFT JOIN employee AS e
-     ON mc.c_id = e.c_id AND e.seq_id = ?
-WHERE mc.c_id = ?
-GROUP BY mc.c_id";
-
-SET @seq_id = 2;
-SET @c_id = 2;
-
-EXECUTE ps USING @seq_id, @c_id;
-
-SET @c_id = 3;
-
-EXECUTE ps USING @seq_id, @c_id;
-
-DROP TABLE customer, employee;

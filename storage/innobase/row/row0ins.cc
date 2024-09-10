@@ -1,18 +1,17 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2024, Oracle and/or its affiliates.
+Copyright (c) 1996, 2023, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is designed to work with certain software (including
-but not limited to OpenSSL) that is licensed under separate terms,
-as designated in a particular file or component or in included license
-documentation.  The authors of MySQL hereby grant you an additional
-permission to link the program and your derivative works with the
-separately licensed software that they have either included with
-the program or referenced in the documentation.
+This program is also distributed with certain software (including but not
+limited to OpenSSL) that is licensed under separate terms, as designated in a
+particular file or component or in included license documentation. The authors
+of MySQL hereby grant you an additional permission to link the program and
+your derivative works with the separately licensed software that they have
+included with MySQL.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -2280,8 +2279,8 @@ of a clustered index entry.
 @param[in]      thd     client connection, or NULL
 @param[in]      index   clustered index
 @return error code
-@retval DB_SUCCESS           success
-@retval DB_OUT_OF_FILE_SPACE out of file-space */
+@retval DB_SUCCESS
+@retval DB_OUT_OF_FILE_SPACE */
 static dberr_t row_ins_index_entry_big_rec_func(
     trx_t *trx, const dtuple_t *entry, const big_rec_t *big_rec, ulint *offsets,
     mem_heap_t **heap, IF_DEBUG(const THD *thd, ) dict_index_t *index) {
@@ -2386,6 +2385,9 @@ dberr_t row_ins_clust_index_entry_low(uint32_t flags, ulint mode,
   ut_ad(thr != nullptr || !dup_chk_only);
 
   mtr.start();
+  if (thr && thr->prebuilt && thr->prebuilt->m_to_pop_buff) {
+      mtr.set_log_mode(MTR_LOG_ALL_WITH_POP);
+  }
 
   if (index->table->is_temporary()) {
     /* Disable REDO logging as the lifetime of temp-tables is

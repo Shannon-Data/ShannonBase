@@ -1,17 +1,16 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -78,7 +77,7 @@ extern CHARSET_INFO my_charset_utf16le_bin;
 */
 #define MSG_DEFAULT 0xC0000064L
 
-static HANDLE hEventLog = nullptr;  // global
+static HANDLE hEventLog = NULL;  // global
 #endif
 
 /**
@@ -99,7 +98,7 @@ int my_syslog(const CHARSET_INFO *cs [[maybe_unused]], enum loglevel level,
 #ifdef _WIN32
   int _level = EVENTLOG_INFORMATION_TYPE;
   wchar_t buff[MAX_SYSLOG_MESSAGE_SIZE];
-  wchar_t *u16buf = nullptr;
+  wchar_t *u16buf = NULL;
   size_t msg_len;     // bytes (not wide-chars) in input
   size_t nbytes;      // bytes (not wide-chars) in output
   uint dummy_errors;  // number of conversion errors
@@ -141,11 +140,11 @@ int my_syslog(const CHARSET_INFO *cs [[maybe_unused]], enum loglevel level,
                       _level,       // severity
                       0,            // app-defined event category
                       MSG_DEFAULT,  // event ID / message ID (see above)
-                      nullptr,      // security identifier
+                      NULL,         // security identifier
                       1,            // number of strings in u16buf
                       0,            // number of bytes in raw data
                       const_cast<LPCWSTR *>(&u16buf),  // 0-terminated strings
-                      nullptr))                        // raw (binary data)
+                      NULL))                           // raw (binary data)
       goto err;
   }
 
@@ -187,9 +186,6 @@ err:
 
 #ifdef _WIN32
 
-const char registry_prefix[] =
-    "SYSTEM\\CurrentControlSet\\services\\eventlog\\Application\\";
-
 /**
    Create a key in the Windows registry.
    We'll setup a "MySQL" key in the EventLog branch (RegCreateKey),
@@ -209,8 +205,11 @@ const char registry_prefix[] =
     -1 Error
 */
 
+const char registry_prefix[] =
+    "SYSTEM\\CurrentControlSet\\services\\eventlog\\Application\\";
+
 static int windows_eventlog_create_registry_entry(const char *key) {
-  HKEY hRegKey = nullptr;
+  HKEY hRegKey = NULL;
   DWORD dwError = 0;
   TCHAR szPath[MAX_PATH];
   DWORD dwTypes;
@@ -222,7 +221,7 @@ static int windows_eventlog_create_registry_entry(const char *key) {
 
   DBUG_TRACE;
 
-  if ((buff = (char *)my_malloc(PSI_NOT_INSTRUMENTED, l, MYF(0))) == nullptr)
+  if ((buff = (char *)my_malloc(PSI_NOT_INSTRUMENTED, l, MYF(0))) == NULL)
     return -1;
 
   snprintf(buff, l, "%s%s", registry_prefix, key);
@@ -248,7 +247,7 @@ static int windows_eventlog_create_registry_entry(const char *key) {
   }
 
   /* Name of the PE module that contains the message resource */
-  GetModuleFileName(nullptr, szPath, MAX_PATH);
+  GetModuleFileName(NULL, szPath, MAX_PATH);
 
   /* Register EventMessageFile (DLL/exec containing event identifiers) */
   dwError = RegSetValueEx(hRegKey, "EventMessageFile", 0, REG_EXPAND_SZ,
@@ -299,15 +298,15 @@ int my_openlog(const char *name, int option, int facility) {
   DBUG_TRACE;
 
   // OOM failsafe.  Not needed for syslog.
-  if (name == nullptr) return -1;
+  if (name == NULL) return -1;
 
   if ((windows_eventlog_create_registry_entry(name) != 0) ||
-      !(hEL_new = RegisterEventSource(nullptr, name))) {
+      !(hEL_new = RegisterEventSource(NULL, name))) {
     // map error appropriately
     my_osmaperr(GetLastError());
-    return (hEventLog == nullptr) ? -1 : -2;
+    return (hEventLog == NULL) ? -1 : -2;
   } else {
-    if (hEventLog != nullptr) DeregisterEventSource(hEventLog);
+    if (hEventLog != NULL) DeregisterEventSource(hEventLog);
     hEventLog = hEL_new;
   }
 #endif
@@ -331,13 +330,13 @@ int my_closelog(void) {
   closelog();
   return 0;
 #else
-  if ((hEventLog != nullptr) && (!DeregisterEventSource(hEventLog))) goto err;
+  if ((hEventLog != NULL) && (!DeregisterEventSource(hEventLog))) goto err;
 
-  hEventLog = nullptr;
+  hEventLog = NULL;
   return 0;
 
 err:
-  hEventLog = nullptr;
+  hEventLog = NULL;
   // map error appropriately
   my_osmaperr(GetLastError());
   return -1;

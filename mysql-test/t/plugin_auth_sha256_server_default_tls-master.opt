@@ -1,1 +1,1 @@
---authentication_policy=*:sha256_password,,
+--default_authentication_plugin=sha256_password

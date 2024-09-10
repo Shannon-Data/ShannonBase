@@ -1,19 +1,18 @@
 #ifndef ITEM_SUM_INCLUDED
 #define ITEM_SUM_INCLUDED
 
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -52,13 +51,13 @@
 #include "mysql/udf_registration_types.h"
 #include "mysql_time.h"
 #include "mysqld_error.h"
-#include "sql-common/my_decimal.h"
 #include "sql/enum_query_type.h"
 #include "sql/gis/geometries_cs.h"
 #include "sql/gis/wkb.h"
 #include "sql/item.h"       // Item_result_field
 #include "sql/item_func.h"  // Item_int_func
 #include "sql/mem_root_array.h"
+#include "sql/my_decimal.h"
 #include "sql/parse_location.h"     // POS
 #include "sql/parse_tree_window.h"  // PT_window
 #include "sql/sql_base.h"
@@ -506,12 +505,6 @@ class Item_sum : public Item_func {
     The value must be reset to false after execution.
   */
   bool forced_const{false};
-
-  /// true if the function is resolved to be always NULL
-  bool m_null_resolved{false};
-  /// true if the function is determined to be NULL at start of execution
-  bool m_null_executed{false};
-
   static ulonglong ram_limitation(THD *thd);
 
  public:
@@ -725,7 +718,7 @@ class Item_sum : public Item_func {
     return false;
   }
 
-  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
 
   void cleanup() override;
@@ -967,7 +960,7 @@ class Item_sum_num : public Item_sum {
 
   bool fix_fields(THD *, Item **) override;
   longlong val_int() override {
-    assert(fixed);
+    assert(fixed == 1);
     return llrint_with_overflow_check(val_real()); /* Real as default */
   }
   String *val_str(String *str) override;
@@ -1178,8 +1171,10 @@ class Item_avg_field : public Item_sum_num_field {
  public:
   uint f_precision, f_scale, dec_bin_size;
   uint prec_increment;
+  Item_sum_avg *avg_item {nullptr};
+
   Item_avg_field(Item_result res_type, Item_sum_avg *item);
-  enum Type type() const override { return AGGR_FIELD_ITEM; }
+  enum Type type() const override { return FIELD_AVG_ITEM; }
   double val_real() override;
   my_decimal *val_decimal(my_decimal *) override;
   String *val_str(String *) override;
@@ -1205,7 +1200,7 @@ class Item_sum_bit_field : public Item_sum_hybrid_field {
   bool resolve_type(THD *) override { return false; }
   bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
   bool get_time(MYSQL_TIME *ltime) override;
-  enum Type type() const override { return AGGR_FIELD_ITEM; }
+  enum Type type() const override { return FIELD_BIT_ITEM; }
   const char *func_name() const override {
     assert(0);
     return "sum_bit_field";
@@ -1350,7 +1345,7 @@ class Item_sum_avg final : public Item_sum_sum {
     m_count = 0;
     m_frame_null_count = 0;
     Item_sum_sum::cleanup();
-  }
+  }  
 };
 
 class Item_sum_variance;
@@ -1361,7 +1356,7 @@ class Item_variance_field : public Item_sum_num_field {
 
  public:
   Item_variance_field(Item_sum_variance *item);
-  enum Type type() const override { return AGGR_FIELD_ITEM; }
+  enum Type type() const override { return FIELD_VARIANCE_ITEM; }
   double val_real() override;
   String *val_str(String *str) override { return val_string_from_real(str); }
   my_decimal *val_decimal(my_decimal *dec_buf) override {
@@ -1495,7 +1490,7 @@ class Item_sum_std;
 class Item_std_field final : public Item_variance_field {
  public:
   Item_std_field(Item_sum_std *item);
-  enum Type type() const override { return AGGR_FIELD_ITEM; }
+  enum Type type() const override { return FIELD_STD_ITEM; }
   double val_real() override;
   my_decimal *val_decimal(my_decimal *) override;
   enum Item_result result_type() const override { return REAL_RESULT; }
@@ -1665,7 +1660,7 @@ class Item_sum_hybrid : public Item_sum {
   bool fix_fields(THD *, Item **) override;
   void clear() override;
   void update_after_wf_arguments_changed(THD *thd) override;
-  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
   double val_real() override;
   longlong val_int() override;
@@ -1693,7 +1688,6 @@ class Item_sum_hybrid : public Item_sum {
   Item *copy_or_same(THD *thd) override;
   bool check_wf_semantics1(THD *thd, Query_block *select,
                            Window_evaluation_requirements *r) override;
-
  private:
   /*
     These functions check if the value on the current row exceeds the maximum or
@@ -1717,7 +1711,6 @@ class Item_sum_min final : public Item_sum_hybrid {
       : Item_sum_hybrid(thd, item) {}
   enum Sumfunctype sum_func() const override { return MIN_FUNC; }
   const char *func_name() const override { return "min"; }
-
  private:
   Item_sum_min *clone_hybrid(THD *thd) const override;
 };
@@ -1731,7 +1724,7 @@ class Item_sum_max final : public Item_sum_hybrid {
       : Item_sum_hybrid(thd, item) {}
   enum Sumfunctype sum_func() const override { return MAX_FUNC; }
   const char *func_name() const override { return "max"; }
-
+  
  private:
   Item_sum_max *clone_hybrid(THD *thd) const override;
 };
@@ -1958,7 +1951,7 @@ class Item_udf_sum : public Item_sum {
   bool do_itemize(Parse_context *pc, Item **res) override;
   const char *func_name() const override { return udf.name(); }
   bool fix_fields(THD *thd, Item **ref) override {
-    assert(!fixed);
+    assert(fixed == 0);
 
     if (init_sum_func_check(thd)) return true;
 
@@ -1985,7 +1978,7 @@ class Item_sum_udf_float final : public Item_udf_sum {
   Item_sum_udf_float(THD *thd, Item_sum_udf_float *item)
       : Item_udf_sum(thd, item) {}
   longlong val_int() override {
-    assert(fixed);
+    assert(fixed == 1);
     return (longlong)rint(Item_sum_udf_float::val_real());
   }
   double val_real() override;
@@ -2013,7 +2006,7 @@ class Item_sum_udf_int final : public Item_udf_sum {
       : Item_udf_sum(thd, item) {}
   longlong val_int() override;
   double val_real() override {
-    assert(fixed);
+    assert(fixed == 1);
     return (double)Item_sum_udf_int::val_int();
   }
   String *val_str(String *str) override;
@@ -2106,6 +2099,8 @@ class Item_func_group_concat final : public Item_sum {
 
   /// True if GROUP CONCAT has the DISTINCT attribute
   bool distinct;
+  /// True if the result is always NULL
+  bool always_null{false};
   /// The number of ORDER BY items.
   uint m_order_arg_count;
   /// The number of selected items, aka the concat field list
@@ -2462,7 +2457,7 @@ class Item_ntile : public Item_non_framing_wf {
 /**
   LEAD/LAG window functions, cf. SQL 2011 Section 6.10 \<window function\>
 */
-class Item_lead_lag final : public Item_non_framing_wf {
+class Item_lead_lag : public Item_non_framing_wf {
   enum_null_treatment m_null_treatment;
   bool m_is_lead;  ///< if true, the function is LEAD, else LAG
   int64 m_n;       ///< canonicalized offset value
@@ -2503,7 +2498,6 @@ class Item_lead_lag final : public Item_non_framing_wf {
 
   bool resolve_type(THD *thd) override;
   bool fix_fields(THD *thd, Item **items) override;
-  TYPELIB *get_typelib() const override;
   void update_after_wf_arguments_changed(THD *thd) override;
   void clear() override;
   bool check_wf_semantics1(THD *thd, Query_block *select,
@@ -2532,7 +2526,7 @@ class Item_lead_lag final : public Item_non_framing_wf {
     return true;
   }
 
-  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
 
   void set_has_value(bool value) { m_has_value = value; }
@@ -2603,7 +2597,7 @@ class Item_first_last_value : public Item_sum {
     return false;
   }
 
-  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
   bool uses_only_one_row() const override { return true; }
 
@@ -2674,7 +2668,7 @@ class Item_nth_value : public Item_sum {
     return false;
   }
 
-  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
   bool uses_only_one_row() const override { return true; }
 
@@ -2708,10 +2702,6 @@ class Item_func_grouping : public Item_int_func {
   bool fix_fields(THD *thd, Item **ref) override;
   void update_used_tables() override;
   bool aggregate_check_distinct(uchar *arg) override;
-
- private:
-  /// The query block in which this function is called.
-  const Query_block *m_query_block{nullptr};
 };
 
 /**
@@ -2845,11 +2835,12 @@ class Item_sum_collect : public Item_sum {
        In contrast to Item_sum, Item_sum_collect always uses Aggregator_simple,
        and only needs to reset its aggregator when called.
        */
-    if (aggr != nullptr) {
+    if (aggr) {
       aggr->clear();
       return false;
     }
 
+    destroy(aggr);
     aggr = new (*THR_MALLOC) Aggregator_simple(this);
     return aggr ? false : true;
   }

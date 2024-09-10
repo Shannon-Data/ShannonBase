@@ -26,8 +26,7 @@ FLUSH TABLES t1 FOR EXPORT;
 UNLOCK TABLES;
 SELECT space FROM INFORMATION_SCHEMA.INNODB_TABLESPACEs
 WHERE name = 'test/t1' INTO @space_id;
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_checkpoint_disabled=1;
 SET GLOBAL innodb_doublewrite=DETECT_ONLY;
 SELECT @@innodb_doublewrite;
 @@innodb_doublewrite
@@ -42,6 +41,7 @@ SELECT @@innodb_doublewrite;
 ON
 BEGIN;
 INSERT INTO t1 VALUES (6, repeat('%', 12));
+SET GLOBAL innodb_checkpoint_disabled = 1;
 # Make the first page dirty for table t1
 SET GLOBAL innodb_saved_page_number_debug = 0;
 SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
@@ -69,8 +69,7 @@ WHERE name = 'test/t1' INTO @space_id;
 # Ensure that dirty pages of table t1 is flushed.
 FLUSH TABLES t1 FOR EXPORT;
 UNLOCK TABLES;
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_checkpoint_disabled=1;
 SELECT @@innodb_doublewrite;
 @@innodb_doublewrite
 DETECT_ONLY
@@ -80,6 +79,7 @@ SELECT @@innodb_doublewrite;
 ON
 BEGIN;
 INSERT INTO t1 VALUES (6, repeat('%', 12));
+SET GLOBAL innodb_checkpoint_disabled = 1;
 # Make the first page dirty for table t1
 SET GLOBAL innodb_saved_page_number_debug = 0;
 SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
@@ -106,8 +106,7 @@ WHERE name = 'test/t1' INTO @space_id;
 # Ensure that dirty pages of table t1 is flushed.
 FLUSH TABLES t1 FOR EXPORT;
 UNLOCK TABLES;
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_checkpoint_disabled=1;
 SELECT @@innodb_doublewrite;
 @@innodb_doublewrite
 DETECT_ONLY
@@ -117,6 +116,7 @@ SELECT @@innodb_doublewrite;
 ON
 BEGIN;
 INSERT INTO t1 VALUES (6, repeat('%', 400));
+SET GLOBAL innodb_checkpoint_disabled = 1;
 # Make the 2nd page dirty for table t1
 SET GLOBAL innodb_saved_page_number_debug = 1;
 SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
@@ -143,8 +143,7 @@ WHERE name = 'test/t1' into @space_id;
 # Ensure that dirty pages of table t1 is flushed.
 FLUSH TABLES t1 FOR EXPORT;
 UNLOCK TABLES;
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_checkpoint_disabled=1;
 SELECT @@innodb_doublewrite;
 @@innodb_doublewrite
 DETECT_ONLY
@@ -154,6 +153,7 @@ SELECT @@innodb_doublewrite;
 ON
 BEGIN;
 INSERT INTO t1 VALUES (6, repeat('%', 400));
+SET GLOBAL innodb_checkpoint_disabled = 1;
 # Make the 2nd page dirty for table t1
 SET GLOBAL innodb_saved_page_number_debug = 1;
 SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
@@ -185,8 +185,7 @@ SELECT @@innodb_doublewrite;
 ON
 BEGIN;
 INSERT INTO t1 VALUES (6, repeat('%', 400));
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_checkpoint_disabled = 1;
 # Make the first page dirty for system tablespace
 SET GLOBAL innodb_saved_page_number_debug = 0;
 SET GLOBAL innodb_fil_make_page_dirty_debug = 0;
@@ -219,8 +218,7 @@ SELECT @@innodb_doublewrite;
 ON
 BEGIN;
 INSERT INTO t1 VALUES (6, repeat('%', 400));
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_checkpoint_disabled = 1;
 # Make the first page dirty for system tablespace
 SET GLOBAL innodb_saved_page_number_debug = 0;
 SET GLOBAL innodb_fil_make_page_dirty_debug = 0;
@@ -252,8 +250,7 @@ SELECT @@innodb_doublewrite;
 ON
 BEGIN;
 INSERT INTO t1 VALUES (6, repeat('%', 400));
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_checkpoint_disabled = 1;
 # Make the second page dirty for system tablespace
 SET GLOBAL innodb_saved_page_number_debug = 1;
 SET GLOBAL innodb_fil_make_page_dirty_debug = 0;
@@ -286,8 +283,7 @@ SELECT @@innodb_doublewrite;
 ON
 BEGIN;
 INSERT INTO t1 VALUES (6, repeat('%', 400));
-SET GLOBAL innodb_log_checkpoint_now = ON;
-SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_checkpoint_disabled = 1;
 # Make the second page dirty for system tablespace
 SET GLOBAL innodb_saved_page_number_debug = 1;
 SET GLOBAL innodb_fil_make_page_dirty_debug = 0;

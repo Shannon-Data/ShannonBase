@@ -15,7 +15,6 @@
 #      method which drops all the temporary tables created in that connection
 #   5) Cleanup
 #
-# This test case is specific to binlog_format=statement
 --source include/have_binlog_format_statement.inc
 connect (con1,localhost,root,,test);
 connection con1;

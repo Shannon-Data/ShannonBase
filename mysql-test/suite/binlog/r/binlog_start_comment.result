@@ -1,4 +1,4 @@
-reset binary logs and gtids;
+reset master;
 drop table if exists t1,t2;
 create table t1 (word varchar(20)) -- create table t1;
 create table t2 (word varchar(20)) -- create table t2;
@@ -8,7 +8,7 @@ flush logs;
 select * from t2;
 word
 Ada
-reset binary logs and gtids;
+reset master;
 flush logs;
 select * from t2;
 word

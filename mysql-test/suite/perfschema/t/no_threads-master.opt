@@ -1,5 +1,4 @@
 --thread-handling=no-threads
-# Some instrumentation threads are lost when innodb is present
---loose-performance-schema-max-thread_instances=100
+--loose-performance-schema-max-thread_instances=50
 --default-storage-engine=MyISAM
 --default-tmp-storage-engine=MyISAM

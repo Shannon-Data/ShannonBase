@@ -1,17 +1,16 @@
 /*
-  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is designed to work with certain software (including
+  This program is also distributed with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -53,7 +52,6 @@
 #include "random_generator.h"
 #include "rest_api_testutils.h"
 #include "router_component_test.h"
-#include "router_config.h"        // MYSQL_ROUTER_VERSION
 #include "router_test_helpers.h"  // get_file_output
 #include "script_generator.h"
 #include "socket_operations.h"
@@ -315,12 +313,15 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
            "C.cluster_id where C.cluster_name = 'some_cluster_name'";
   }
   static std::string sql_val2() {
-    return "SELECT member_id, member_host, member_port, member_state, "
-           "member_role, @@group_replication_single_primary_mode FROM "
-           "performance_schema.replication_group_members"
-           " WHERE channel_name = 'group_replication_applier'";
+    return "show status like 'group_replication_primary_member'";
   }
   static std::string sql_val3() {
+    return "SELECT member_id, member_host, member_port, member_state, "
+           "@@group_replication_single_primary_mode FROM "
+           "performance_schema.replication_group_members WHERE channel_name = "
+           "'group_replication_applier'";
+  }
+  static std::string sql_val4() {
     return "select @@group_replication_group_name";
   }
 
@@ -368,12 +369,12 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
       const std::set<std::string> &hostnames_existing =
           {},  // must be empty if if_not_exists == false
       bool if_not_exists = true,
-      const std::string &password = kAccountUserPassword) {
+      const std::string &password_hash = kAccountUserPasswordHash) {
     CustomResponses cr;
 
     // CREATE USER [IF NOT EXISTS]
     const std::string account_auth_list =
-        make_account_auth_list(username, hostnames_requested, password);
+        make_account_auth_list(username, hostnames_requested, password_hash);
     std::set<std::string> hostnames_new;
     if (hostnames_existing.empty()) {
       cr.add(sql_create_user(account_auth_list, if_not_exists));
@@ -433,8 +434,6 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
       MockServerRestClient(server_http_port)
           .set_globals(
               "{"
-              "\"router_version\": \"" MYSQL_ROUTER_VERSION
-              "\","
               "\"custom_responses\": {" +
               custom_responses +
               "},"
@@ -473,7 +472,10 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
         "--bootstrap",
         "root"s + (root_password_on_cmdline ? ":root_password" : "") +
             "@127.0.0.1:" + std::to_string(server_port),
-        "-d", bootstrap_directory};
+        "--report-host",
+        my_hostname,
+        "-d",
+        bootstrap_directory};
     for (const std::string &a : extra_args) args.push_back(a);
 
     ProcessWrapper::OutputResponder output_responder{
@@ -487,7 +489,7 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
           return "";
         }};
 
-    return launch_router_for_bootstrap(args, exp_exit_code, true, true, true,
+    return launch_router_for_bootstrap(args, exp_exit_code, true,
                                        output_responder);
   }
 
@@ -503,12 +505,12 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
     auto ai_res = net::impl::resolver::getaddrinfo(local_hostname.c_str(),
                                                    "3306", &hints);
     if (!ai_res) {
-      return stdx::unexpected(ai_res.error());
+      return stdx::make_unexpected(ai_res.error());
     }
 
     auto localhost_ip_res = net::ip::make_address("127.0.0.1");
     if (!localhost_ip_res) {
-      return stdx::unexpected(localhost_ip_res.error());
+      return stdx::make_unexpected(localhost_ip_res.error());
     }
 
     const auto localhost_ip = localhost_ip_res.value();
@@ -519,7 +521,8 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
       net::ip::tcp::endpoint ep;
 
       if (ai->ai_addrlen > ep.capacity()) {
-        return stdx::unexpected(make_error_code(std::errc::no_space_on_device));
+        return stdx::make_unexpected(
+            make_error_code(std::errc::no_space_on_device));
       }
       std::memcpy(ep.data(), ai->ai_addr, ai->ai_addrlen);
       ep.resize(ai->ai_addrlen);
@@ -533,7 +536,7 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
       }
     }
 
-    return stdx::unexpected(
+    return stdx::make_unexpected(
         make_error_code(std::errc::no_such_file_or_directory));
   }
 
@@ -776,12 +779,14 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
 
   static std::string make_account_auth_list(
       const std::string &username, const std::set<std::string> &hostnames,
-      const std::string &password = kAccountUserPassword) {
+      const std::string &password_hash = kAccountUserPasswordHash) {
     return make_list(hostnames,
                      [&](const std::string &h) {
                        return "'" + username + "'@'" + h +
-                              "' IDENTIFIED WITH `caching_sha2_password` BY '" +
-                              password + "'";
+                              "'"
+                              " IDENTIFIED WITH mysql_native_password"
+                              " AS '" +
+                              password_hash + "'";
                      }
 
     );
@@ -906,8 +911,10 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
 
   static const std::string kAccountUser;  // passed by --account
   static const std::string kAccountUserPassword;
+  static const std::string kAccountUserPasswordHash;
   static const std::string kAutoGenUser;  // autogenerated without --account
   static const std::string kAutoGenUserPassword;
+  static const std::string kAutoGenUserPasswordHash;
 
   static const std::string kHostC_inDB;
   static const std::string kHostD_inDB;
@@ -944,6 +951,10 @@ class AccountReuseTestBase : public RouterComponentBootstrapTest {
     "fake-account-pass";
 /*static*/ const std::string AccountReuseTestBase::kAutoGenUserPassword =
     "fake-autogen-pass";
+/*static*/ const std::string AccountReuseTestBase::kAccountUserPasswordHash =
+    "*FF1D4A27A543DD464A5FFA210278E604979F781B";
+/*static*/ const std::string AccountReuseTestBase::kAutoGenUserPasswordHash =
+    "*4F7873C0ABA52D7BB5E1AE9271F636B2C48174E4";
 /*static*/ const std::string AccountReuseTestBase::kUserExistsCode =
     std::to_string(ER_USER_ALREADY_EXISTS);  // "3163"
 
@@ -1175,8 +1186,6 @@ TEST_F(AccountReuseTest, simple) {
   // no config exists yet
   TempDirectory bootstrap_directory;
 
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   // test params
   const std::vector<std::string> args;
   const std::set<std::string>
@@ -1187,6 +1196,7 @@ TEST_F(AccountReuseTest, simple) {
   const std::string exp_output = kBootstrapSuccessMsg;
   const std::string exp_username = "mysql_router1_" /* random suffix follows*/;
   const std::string exp_password = kAutoGenUserPassword;
+  const std::string exp_password_hash = kAutoGenUserPasswordHash;
   const std::set<std::string> exp_attempt_create_hosts = {"%"};
   std::vector<std::string> exp_sql = {"CREATE USER IF NOT EXISTS",
                                       "GRANT SELECT ON "};
@@ -1197,9 +1207,6 @@ TEST_F(AccountReuseTest, simple) {
   const uint16_t server_http_port = port_pool_.get_next_available();
 
   launch_mock_server(server_port, server_http_port);
-  set_mock_metadata(server_http_port, "00000000-0000-0000-0000-0000000000g1",
-                    classic_ports_to_gr_nodes({server_port}), 0, {server_port},
-                    0, false, "127.0.0.1", "", {2, 2, 0}, "mycluster");
 
   // run bootstrap
   ProcessWrapper &router =
@@ -1224,8 +1231,6 @@ TEST_F(AccountReuseTest, simple) {
 TEST_F(AccountReuseTest, no_host_patterns) {
   for (bool root_password_on_cmdline : {true, false}) {
     TempDirectory bootstrap_directory;
-
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
 
     // extract test params
     const std::vector<std::string> args = {
@@ -1278,8 +1283,6 @@ TEST_F(AccountReuseTest, no_host_patterns) {
 TEST_F(AccountReuseTest, multiple_host_patterns) {
   for (bool root_password_on_cmdline : {true, false}) {
     TempDirectory bootstrap_directory;
-
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
 
     // extract test params
     const std::vector<std::string> args = {
@@ -1768,12 +1771,10 @@ class AccountReuseCreateComboTestP
     };
   }
 };
-
 INSTANTIATE_TEST_SUITE_P(
     foo, AccountReuseCreateComboTestP,
     ::testing::ValuesIn(AccountReuseCreateComboTestP::gen_testcases()),
     [](auto p) -> std::string { return p.param.test_name; });
-
 TEST_P(AccountReuseCreateComboTestP, config_does_not_exist_yet) {
   // extract test params
   std::vector<std::string> extra_args = GetParam().extra_args;
@@ -1858,9 +1859,6 @@ TEST_P(AccountReuseCreateComboTestP, config_does_not_exist_yet) {
 
   // run bootstrap
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password, username);
@@ -1903,8 +1901,6 @@ TEST_F(AccountReuseReconfigurationTest, user_exists_then_account) {
   for (bool root_password_on_cmdline : {true, false}) {
     // no config exists yet
     TempDirectory bootstrap_directory;
-
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
 
     // test params
     const std::vector<std::string> args = {"--account", kAccountUser};
@@ -1969,8 +1965,6 @@ TEST_F(AccountReuseReconfigurationTest,
   for (bool root_password_on_cmdline : {true, false}) {
     // no config exists yet
     TempDirectory bootstrap_directory;
-
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
 
     // test params
     const std::vector<std::string> args = {"--account", kAccountUser,
@@ -2042,8 +2036,6 @@ TEST_F(AccountReuseReconfigurationTest,
     // no config exists yet
     TempDirectory bootstrap_directory;
 
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
     // test params
     const std::vector<std::string> args = {"--account", kAccountUser};
     const std::set<std::string> existing_hosts = {
@@ -2054,10 +2046,12 @@ TEST_F(AccountReuseReconfigurationTest,
     const std::string exp_output = kBootstrapSuccessMsg;
     const std::string exp_username = kAccountUser;
     const std::string exp_password = "";
+    const std::string exp_password_hash =
+        "*BE1BDEC0AA74B4DCB079943E70528096CCA985F8";
     const std::set<std::string> exp_attempt_create_hosts = {"%"};
     CustomResponses cr =
         gen_sql_for_creating_accounts(exp_username, exp_attempt_create_hosts,
-                                      existing_hosts, true, exp_password);
+                                      existing_hosts, true, exp_password_hash);
     std::vector<std::string> exp_sql = cr.exp_sql;
     std::vector<std::string> unexp_sql = {
         "GRANT"};  // account should not be created
@@ -2107,8 +2101,6 @@ TEST_F(AccountReuseReconfigurationTest,
     // no config exists yet
     TempDirectory bootstrap_directory;
 
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
     // test params
     const std::vector<std::string> args = {"--account", kAccountUser};
     const std::set<std::string> existing_hosts =
@@ -2119,10 +2111,12 @@ TEST_F(AccountReuseReconfigurationTest,
     const std::string exp_output = kBootstrapSuccessMsg;
     const std::string exp_username = kAccountUser;
     const std::string exp_password = "";
+    const std::string exp_password_hash =
+        "*BE1BDEC0AA74B4DCB079943E70528096CCA985F8";
     const std::set<std::string> exp_attempt_create_hosts = {"%"};
     CustomResponses cr =
         gen_sql_for_creating_accounts(exp_username, exp_attempt_create_hosts,
-                                      existing_hosts, true, exp_password);
+                                      existing_hosts, true, exp_password_hash);
     std::vector<std::string> exp_sql = cr.exp_sql;
     std::vector<std::string> unexp_sql = {};
 
@@ -2166,9 +2160,6 @@ TEST_F(AccountReuseReconfigurationTest, noaccount_then_account) {
   for (bool root_password_on_cmdline : {true, false}) {
     // emulate past bootstrap without --account
     TempDirectory bootstrap_directory;
-
-    // test exists empty config: no prepare_config_dir_...;
-
     create_config(bootstrap_directory.name(), kAutoGenUser);
     create_keyring(bootstrap_directory.name(), kAutoGenUser,
                    kAutoGenUserPassword);
@@ -2229,9 +2220,6 @@ TEST_F(AccountReuseReconfigurationTest, account_then_noaccount) {
   for (bool root_password_on_cmdline : {true, false}) {
     // emulate past bootstrap with --account
     TempDirectory bootstrap_directory;
-
-    // test exists empty config: no prepare_config_dir_...;
-
     create_config(bootstrap_directory.name(), kAccountUser);
     create_keyring(bootstrap_directory.name(), kAccountUser,
                    kAccountUserPassword);
@@ -2294,9 +2282,6 @@ TEST_F(AccountReuseReconfigurationTest, noaccount_then_noaccount) {
   for (bool root_password_on_cmdline : {true, false}) {
     // emulate past bootstrap without --account
     TempDirectory bootstrap_directory;
-
-    // test exists empty config: no prepare_config_dir_...;
-
     create_config(bootstrap_directory.name(), kAutoGenUser);
     create_keyring(bootstrap_directory.name(), kAutoGenUser,
                    kAutoGenUserPassword);
@@ -2313,11 +2298,12 @@ TEST_F(AccountReuseReconfigurationTest, noaccount_then_noaccount) {
     const std::string exp_output = kBootstrapSuccessMsg;
     const std::string exp_username = kAutoGenUser;
     const std::string exp_password = kAutoGenUserPassword;
+    const std::string exp_password_hash = kAutoGenUserPasswordHash;
     const std::set<std::string> exp_attempt_create_hosts = {"%"};
 
     CustomResponses cr =
         gen_sql_for_creating_accounts(exp_username, exp_attempt_create_hosts,
-                                      existing_hosts, true, exp_password);
+                                      existing_hosts, true, exp_password_hash);
     std::vector<std::string> exp_sql = cr.exp_sql;
     std::vector<std::string> unexp_sql = {"DROP USER", "GRANT"};
 
@@ -2356,9 +2342,6 @@ TEST_F(AccountReuseReconfigurationTest, noaccount_then_noaccount) {
 TEST_F(AccountReuseReconfigurationTest, account_then_noaccount___no_keyring) {
   // emulate past bootstrap with --account and deleted keyring
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   create_config(bootstrap_directory.name(), kAccountUser);
 
   // test params
@@ -2424,9 +2407,6 @@ TEST_F(AccountReuseReconfigurationTest,
 
   // emulate past bootstrap with --account and keyring without user->password
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   create_config(bootstrap_directory.name(), kAccountUser);
   create_keyring(bootstrap_directory.name(), kBogusUser, kAccountUserPassword);
   check_keyring(bootstrap_directory.name(), true, kBogusUser,
@@ -2500,9 +2480,6 @@ TEST_F(AccountReuseReconfigurationTest,
 
   // emulate past bootstrap with --account and keyring containing bad password
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   create_config(bootstrap_directory.name(), kAccountUser);
   create_keyring(bootstrap_directory.name(), kAccountUser, kIncorrectPassword);
   check_keyring(bootstrap_directory.name(), true, kAccountUser,
@@ -2526,17 +2503,19 @@ TEST_F(AccountReuseReconfigurationTest,
 
   const std::string exp_username = kAccountUser;
   const std::string exp_password = kIncorrectPassword;
+  const std::string exp_password_hash =
+      "*9069521302781A37BA17CF929625B9C91B886386";
   const std::set<std::string> exp_attempt_create_hosts = {"%"};
 
   CustomResponses cr =
       gen_sql_for_creating_accounts(exp_username, exp_attempt_create_hosts,
-                                    existing_hosts, true, exp_password);
+                                    existing_hosts, true, exp_password_hash);
   std::vector<std::string> exp_sql = cr.exp_sql;
   std::vector<std::string> unexp_sql = {
       "DROP USER",
       "GRANT",  // no new accounts were created
-      sql_val1(),
-      sql_val2()  // shouldn't get that far due to conn failure
+      sql_val1(), sql_val2(),
+      sql_val3()  // shouldn't get that far due to conn failure
   };
 
   // launch mock server and wait for it to start accepting connections
@@ -2638,9 +2617,6 @@ TEST_F(ShowWarningsProcessorTest, no_accounts_exist) {
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -2723,9 +2699,6 @@ TEST_F(ShowWarningsProcessorTest, one_account_exists) {
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -2808,9 +2781,6 @@ TEST_F(ShowWarningsProcessorTest, two_accounts_exist) {
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -2883,9 +2853,6 @@ TEST_F(ShowWarningsProcessorTest, all_accounts_exist) {
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -2983,9 +2950,6 @@ TEST_F(ShowWarningsProcessorTest,
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -3075,9 +3039,6 @@ TEST_F(ShowWarningsProcessorTest, show_warnings_returns_unrecognised_hostname) {
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -3177,9 +3138,6 @@ TEST_F(ShowWarningsProcessorTest,
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -3269,9 +3227,6 @@ TEST_F(ShowWarningsProcessorTest, show_warnings_returns_invalid_column_names) {
       extra_args.push_back(h);
     }
     TempDirectory bootstrap_directory;
-
-    // test exists empty config: no prepare_config_dir_...;
-
     ProcessWrapper &router =
         launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                          extra_args, password);
@@ -3388,9 +3343,6 @@ TEST_F(ShowWarningsProcessorTest,
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -3471,9 +3423,6 @@ TEST_F(ShowWarningsProcessorTest, show_warnings_fails_to_execute) {
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -3680,9 +3629,6 @@ TEST_P(UndoCreateUserTestP, grant_fails) {
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -3828,9 +3774,6 @@ TEST_P(UndoCreateUserTestP, grant_fails_and_drop_user_also_fails) {
     extra_args.push_back(h);
   }
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        extra_args, password);
@@ -3904,8 +3847,6 @@ TEST_F(UndoCreateUserTest, failure_after_account_creation) {
   const std::vector<std::string> unexp_sql = {};
 
   TempDirectory bootstrap_directory;
-
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
 
   // expectations: other
   int exp_exit_code = EXIT_FAILURE;
@@ -4013,8 +3954,6 @@ TEST_F(UndoCreateUserTest,
 
   TempDirectory bootstrap_directory;
 
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   // expectations: other
   int exp_exit_code = EXIT_FAILURE;
   std::vector<std::string> exp_output = undo_create_user_msg(
@@ -4113,9 +4052,6 @@ TEST_F(AccountValidationTest, sunny_day_scenario) {
 
   // run bootstrap
   TempDirectory bootstrap_directory;
-
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        args, exp_password, exp_username);
@@ -4163,8 +4099,8 @@ TEST_F(AccountValidationTest, account_exists_wrong_password) {
   std::vector<std::string> exp_sql = cr.exp_sql;
   std::vector<std::string> unexp_sql = {
       "DROP USER",  // no CREATE USER revert
-      sql_val1(),
-      sql_val2()  // shouldn't get that far due to conn failure
+      sql_val1(), sql_val2(),
+      sql_val3()  // shouldn't get that far due to conn failure
   };
 
   // launch mock server and wait for it to start accepting connections
@@ -4182,9 +4118,6 @@ TEST_F(AccountValidationTest, account_exists_wrong_password) {
 
   // run bootstrap
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        args, exp_password, exp_username);
@@ -4231,8 +4164,8 @@ TEST_F(AccountValidationTest, account_exists_wrong_password_strict) {
   std::vector<std::string> exp_sql = cr.exp_sql;
   std::vector<std::string> unexp_sql = {
       "DROP USER",  // no CREATE USER revert
-      sql_val1(),
-      sql_val2()  // shouldn't get that far due to conn failure
+      sql_val1(), sql_val2(),
+      sql_val3()  // shouldn't get that far due to conn failure
   };
 
   // launch mock server and wait for it to start accepting connections
@@ -4250,9 +4183,6 @@ TEST_F(AccountValidationTest, account_exists_wrong_password_strict) {
 
   // run bootstrap
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        args, exp_password, exp_username);
@@ -4301,8 +4231,8 @@ TEST_F(AccountValidationTest, warn_on_conn_failure) {
   std::vector<std::string> exp_sql = cr.exp_sql;
   std::vector<std::string> unexp_sql = {
       "DROP USER",  // no CREATE USER revert
-      sql_val1(),
-      sql_val2()  // shouldn't get that far due to conn failure
+      sql_val1(), sql_val2(),
+      sql_val3()  // shouldn't get that far due to conn failure
   };
 
   // launch mock server and wait for it to start accepting connections
@@ -4316,9 +4246,6 @@ TEST_F(AccountValidationTest, warn_on_conn_failure) {
 
   // run bootstrap
   TempDirectory bootstrap_directory;
-
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        args, exp_password, exp_username);
@@ -4366,8 +4293,8 @@ TEST_F(AccountValidationTest, error_on_conn_failure) {
   std::vector<std::string> exp_sql = cr.exp_sql;
   exp_sql.emplace_back("DROP USER");  // revert CREATE USER
   std::vector<std::string> unexp_sql = {
-      sql_val1(),
-      sql_val2(),  // shouldn't get that far due to conn failure
+      sql_val1(), sql_val2(),
+      sql_val3()  // shouldn't get that far due to conn failure
   };
 
   // launch mock server and wait for it to start accepting connections
@@ -4381,9 +4308,6 @@ TEST_F(AccountValidationTest, error_on_conn_failure) {
 
   // run bootstrap
   TempDirectory bootstrap_directory;
-
-  // test exists empty config: no prepare_config_dir_...;
-
   ProcessWrapper &router =
       launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                        args, exp_password, exp_username);
@@ -4413,9 +4337,10 @@ TEST_F(AccountValidationTest, error_on_conn_failure) {
 TEST_F(AccountValidationTest, warn_on_query_failure) {
   // inlining initializer_list inside the for loop segfauls on Solaris
   std::initializer_list<std::string> sql_val_stmts = {
-      // skip sql_val3() because testing with it is more complicated due to
-      // query re-use, will behave the same anyway (same code flow)
-      sql_val1(), sql_val2()};
+      // skip sql_val4() because testing with it is more complicated due to
+      // query
+      // re-use, will behave the same anyway (same code flow)
+      sql_val1(), sql_val2(), sql_val3()};
   for (const std::string &failed_val_query : sql_val_stmts) {
     // test params
     const std::vector<std::string> args = {"--account", kAccountUser,
@@ -4448,9 +4373,6 @@ TEST_F(AccountValidationTest, warn_on_query_failure) {
 
     // run bootstrap
     TempDirectory bootstrap_directory;
-
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
     ProcessWrapper &router =
         launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                          args, exp_password, exp_username);
@@ -4482,10 +4404,10 @@ TEST_F(AccountValidationTest, warn_on_query_failure) {
 TEST_F(AccountValidationTest, error_on_query_failure) {
   // inlining initializer_list inside the for loop segfauls on Solaris
   std::initializer_list<std::string> sql_val_stmts = {
-      // skip sql_val3() because testing with it is more complicated due to
+      // skip sql_val4() because testing with it is more complicated due to
       // query
       // re-use, will behave the same anyway (same code flow)
-      sql_val1(), sql_val2()};
+      sql_val1(), sql_val2(), sql_val3()};
   for (const std::string &failed_val_query : sql_val_stmts) {
     // test params
     const std::vector<std::string> args = {"--strict", "--account",
@@ -4519,9 +4441,6 @@ TEST_F(AccountValidationTest, error_on_query_failure) {
 
     // run bootstrap
     TempDirectory bootstrap_directory;
-
-    // test exists empty config: no prepare_config_dir_...;
-
     ProcessWrapper &router =
         launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                          args, exp_password, exp_username);
@@ -4556,10 +4475,10 @@ TEST_F(AccountValidationTest, error_on_query_failure) {
 TEST_F(AccountValidationTest, existing_user_missing_grants___no_strict) {
   // inlining initializer_list inside the for loop segfauls on Solaris
   std::initializer_list<std::string> sql_val_stmts = {
-      // skip sql_val3() because testing with it is more complicated due to
+      // skip sql_val4() because testing with it is more complicated due to
       // query
       // re-use, will behave the same anyway (same code flow)
-      sql_val1(), sql_val2()};
+      sql_val1(), sql_val2(), sql_val3()};
   for (const std::string &failed_val_query : sql_val_stmts) {
     // test params
     const std::vector<std::string> args = {"--account", kAccountUser};
@@ -4592,9 +4511,6 @@ TEST_F(AccountValidationTest, existing_user_missing_grants___no_strict) {
 
     // run bootstrap
     TempDirectory bootstrap_directory;
-
-    // test exists empty config: no prepare_config_dir_...;
-
     ProcessWrapper &router =
         launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                          args, exp_password, exp_username);
@@ -4630,10 +4546,10 @@ TEST_F(AccountValidationTest, existing_user_missing_grants___no_strict) {
 TEST_F(AccountValidationTest, existing_user_missing_grants___strict) {
   // inlining initializer_list inside the for loop segfauls on Solaris
   std::initializer_list<std::string> sql_val_stmts = {
-      // skip sql_val3() because testing with it is more complicated due to
+      // skip sql_val4() because testing with it is more complicated due to
       // query
       // re-use, will behave the same anyway (same code flow)
-      sql_val1(), sql_val2()};
+      sql_val1(), sql_val2(), sql_val3()};
   for (const std::string &failed_val_query : sql_val_stmts) {
     // test params
     const std::vector<std::string> args = {"--strict", "--account",
@@ -4666,9 +4582,6 @@ TEST_F(AccountValidationTest, existing_user_missing_grants___strict) {
 
     // run bootstrap
     TempDirectory bootstrap_directory;
-
-    // test exists empty config: no prepare_config_dir_...;
-
     ProcessWrapper &router =
         launch_bootstrap(exp_exit_code, server_port, bootstrap_directory.name(),
                          args, exp_password, exp_username);
@@ -4700,7 +4613,6 @@ TEST_F(RouterAccountHostTest, multiple_host_patterns) {
   // only difference that 1st time we run --bootstrap before the --account-host,
   // and second time we run it after
   const auto server_port = port_pool_.get_next_available();
-  const auto http_port = port_pool_.get_next_available();
 
   auto test_it = [&](const std::vector<std::string> &cmdline) -> void {
     const std::string json_stmts =
@@ -4709,15 +4621,11 @@ TEST_F(RouterAccountHostTest, multiple_host_patterns) {
             .str();
 
     // launch mock server that is our metadata server for the bootstrap
-    auto &server_mock = launch_mysql_server_mock(
-        json_stmts, server_port, EXIT_SUCCESS, false, http_port);
+    auto &server_mock =
+        launch_mysql_server_mock(json_stmts, server_port, EXIT_SUCCESS, false);
 
     // launch the router in bootstrap mode
     auto &router = launch_router_for_bootstrap(cmdline, EXIT_SUCCESS, true);
-    set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                      classic_ports_to_gr_nodes({server_port}), 0,
-                      {server_port}, 0, false, "127.0.0.1", "", {2, 2, 0},
-                      "mycluster");
 
     EXPECT_NO_THROW(router.wait_for_exit());
     // check if the bootstrapping was successful
@@ -4736,11 +4644,8 @@ TEST_F(RouterAccountHostTest, multiple_host_patterns) {
   // --bootstrap before --account-host
   {
     TempDirectory bootstrap_directory;
-
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
-    test_it({"--bootstrap=127.0.0.1:" + std::to_string(server_port), "-d",
-             bootstrap_directory.name(),    //
+    test_it({"--bootstrap=127.0.0.1:" + std::to_string(server_port),
+             "--report-host", my_hostname, "-d", bootstrap_directory.name(),
              "--account-host", "host1",     // 2nd CREATE USER
              "--account-host", "%",         // 1st CREATE USER
              "--account-host", "host1",     // \_ redundant, ignored
@@ -4751,11 +4656,8 @@ TEST_F(RouterAccountHostTest, multiple_host_patterns) {
   // --bootstrap after --account-host
   {
     TempDirectory bootstrap_directory;
-
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
-    test_it({"-d", bootstrap_directory.name(), "--account-host",
-             "host1",                     // 2nd CREATE USER
+    test_it({"-d", bootstrap_directory.name(), "--report-host", my_hostname,
+             "--account-host", "host1",   // 2nd CREATE USER
              "--account-host", "%",       // 1st CREATE USER
              "--account-host", "host1",   // \_ redundant, ignored
              "--account-host", "host1",   // /
@@ -4813,23 +4715,15 @@ TEST_F(RouterAccountHostTest, illegal_hostname) {
   const std::string json_stmts =
       get_data_dir().join("bootstrap_account_host_pattern_too_long.js").str();
   TempDirectory bootstrap_directory;
-
-  prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
   const auto server_port = port_pool_.get_next_available();
-  const auto http_port = port_pool_.get_next_available();
 
   // launch mock server that is our metadata server for the bootstrap
-  launch_mysql_server_mock(json_stmts, server_port, EXIT_SUCCESS, false,
-                           http_port);
-  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                    classic_ports_to_gr_nodes({server_port}), 0, {server_port},
-                    0, false, "127.0.0.1", "", {2, 2, 0}, "mycluster");
+  launch_mysql_server_mock(json_stmts, server_port, EXIT_SUCCESS, false);
 
   // launch the router in bootstrap mode
   auto &router = launch_router_for_bootstrap(
-      {"--bootstrap=127.0.0.1:" + std::to_string(server_port), "-d",
-       bootstrap_directory.name(), "--account-host",
+      {"--bootstrap=127.0.0.1:" + std::to_string(server_port), "--report-host",
+       my_hostname, "-d", bootstrap_directory.name(), "--account-host",
        "veryveryveryveryveryveryveryveryveryveryveryveryveryveryverylonghost"},
       EXIT_FAILURE, true);
 
@@ -4851,23 +4745,17 @@ class RouterReportHostTest : public RouterComponentBootstrapTest {};
  */
 TEST_F(RouterReportHostTest, typical_usage) {
   const auto server_port = port_pool_.get_next_available();
-  const auto http_port = port_pool_.get_next_available();
 
   auto test_it = [&](const std::vector<std::string> &cmdline) -> void {
     const std::string json_stmts =
         get_data_dir().join("bootstrap_report_host.js").str();
 
     // launch mock server that is our metadata server for the bootstrap
-    auto &server_mock = launch_mysql_server_mock(
-        json_stmts, server_port, EXIT_SUCCESS, false, http_port);
-    set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
-                      classic_ports_to_gr_nodes({server_port}), 0,
-                      {server_port}, 0, false, "127.0.0.1", "", {2, 2, 0},
-                      "mycluster");
+    auto &server_mock =
+        launch_mysql_server_mock(json_stmts, server_port, EXIT_SUCCESS, false);
 
     // launch the router in bootstrap mode
-    auto &router = launch_router_for_bootstrap(cmdline, EXIT_SUCCESS, true,
-                                               /*add_report_host=*/false);
+    auto &router = launch_router_for_bootstrap(cmdline, EXIT_SUCCESS, true);
 
     EXPECT_NO_THROW(router.wait_for_exit());
     // check if the bootstrapping was successful
@@ -4881,9 +4769,6 @@ TEST_F(RouterReportHostTest, typical_usage) {
 
   {
     TempDirectory bootstrap_directory;
-
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
     // --bootstrap before --report-host
     test_it({"--bootstrap=127.0.0.1:" + std::to_string(server_port), "-d",
              bootstrap_directory.name(), "--report-host", "host.foo.bar"});
@@ -4891,9 +4776,6 @@ TEST_F(RouterReportHostTest, typical_usage) {
 
   {
     TempDirectory bootstrap_directory;
-
-    prepare_config_dir_with_default_certs(bootstrap_directory.name());
-
     // --bootstrap after --report-host
     test_it({"-d", bootstrap_directory.name(), "--report-host", "host.foo.bar",
              "--bootstrap=127.0.0.1:" + std::to_string(server_port)});
@@ -4907,10 +4789,10 @@ TEST_F(RouterReportHostTest, typical_usage) {
  */
 TEST_F(RouterReportHostTest, multiple_hostnames) {
   // launch the router in bootstrap mode
-  auto &router = launch_router_for_bootstrap(
-      {"--bootstrap=1.2.3.4:5678", "--report-host", "host1", "--report-host",
-       "host2"},
-      EXIT_FAILURE, true, /*add_report_host=*/false);
+  auto &router =
+      launch_router_for_bootstrap({"--bootstrap=1.2.3.4:5678", "--report-host",
+                                   "host1", "--report-host", "host2"},
+                                  EXIT_FAILURE);
 
   EXPECT_NO_THROW(router.wait_for_exit());
   // check if the bootstrapping was successful
@@ -4929,8 +4811,7 @@ TEST_F(RouterReportHostTest, multiple_hostnames) {
 TEST_F(RouterReportHostTest, argument_missing) {
   // launch the router in bootstrap mode
   auto &router = launch_router_for_bootstrap(
-      {"--bootstrap=1.2.3.4:5678", "--report-host"}, EXIT_FAILURE, true,
-      /*add_report_host=*/false);
+      {"--bootstrap=1.2.3.4:5678", "--report-host"}, EXIT_FAILURE);
 
   EXPECT_NO_THROW(router.wait_for_exit());
   // check if the bootstrapping was successful
@@ -4948,8 +4829,7 @@ TEST_F(RouterReportHostTest, argument_missing) {
 TEST_F(RouterReportHostTest, without_bootstrap_flag) {
   // launch the router in bootstrap mode
   auto &router =
-      launch_router_for_bootstrap({"--report-host", "host1"}, EXIT_FAILURE,
-                                  true, /*add_report_host=*/false);
+      launch_router_for_bootstrap({"--report-host", "host1"}, EXIT_FAILURE);
 
   EXPECT_NO_THROW(router.wait_for_exit());
   // check if the bootstrapping was successful
@@ -4974,7 +4854,7 @@ TEST_F(RouterReportHostTest, invalid_hostname) {
   // launch the router in bootstrap mode
   auto &router = launch_router_for_bootstrap(
       {"--bootstrap", "1.2.3.4:5678", "--report-host", "^bad^hostname^"},
-      EXIT_FAILURE, true, /*add_report_host=*/false);
+      EXIT_FAILURE);
 
   EXPECT_NO_THROW(router.wait_for_exit());
   // check if the bootstrapping was successful

@@ -1,16 +1,15 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -52,8 +51,8 @@ class Replication_thread_api {
   }
 
   /**
-    Initializes a channel connection in a similar way to a change replication
-    source command.
+    Initializes a channel connection in a similar way to a change master
+    command.
 
     @param hostname      The channel hostname
     @param port          The channel port
@@ -107,8 +106,6 @@ class Replication_thread_api {
                                 until view id clause.
     @param wait_for_connection  If when starting the receiver, the method should
                                 wait for the connection to succeed
-    @param until_condition      the replication until condition that can be
-                                applied to channels for the recovery.
 
     @return the operation status
       @retval 0      OK
@@ -117,10 +114,8 @@ class Replication_thread_api {
       @retval REPLICATION_THREAD_START_IO_NOT_CONNECTED
         Error when the threads start, but the IO thread cannot connect
    */
-  int start_threads(
-      bool start_receiver, bool start_applier, std::string *view_id,
-      bool wait_for_connection,
-      enum_channel_until_condition until_condition = CHANNEL_UNTIL_VIEW_ID);
+  int start_threads(bool start_receiver, bool start_applier,
+                    std::string *view_id, bool wait_for_connection);
 
   /**
     Stops the channel threads according to the given options.

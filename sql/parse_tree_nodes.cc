@@ -1,16 +1,15 @@
-/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -80,7 +79,6 @@
 #include "sql/sql_component.h"  // Sql_cmd_component
 #include "sql/sql_const.h"
 #include "sql/sql_data_change.h"
-#include "sql/sql_db.h"
 #include "sql/sql_delete.h"  // Sql_cmd_delete...
 #include "sql/sql_do.h"      // Sql_cmd_do...
 #include "sql/sql_error.h"
@@ -292,15 +290,6 @@ bool PT_group::do_contextualize(Parse_context *pc) {
         return true;
       }
       select->olap = ROLLUP_TYPE;
-      break;
-    case CUBE_TYPE:
-      if (select->linkage == GLOBAL_OPTIONS_TYPE) {
-        my_error(ER_WRONG_USAGE, MYF(0), "CUBE", "global union parameters");
-        return true;
-      }
-      select->olap = CUBE_TYPE;
-      pc->thd->lex->set_execute_only_in_secondary_engine(
-          /*execute_only_in_secondary_engine_param=*/true, CUBE);
       break;
     default:
       assert(!"unexpected OLAP type!");
@@ -779,9 +768,6 @@ Sql_cmd *PT_select_stmt::make_cmd(THD *thd) {
 
   if (pc.finalize_query_expression()) return nullptr;
 
-  // Ensure that first query block is the current one
-  assert(pc.select->select_number == 1);
-
   if (m_into != nullptr && m_has_trailing_locking_clauses) {
     // Example: ... INTO ... FOR UPDATE;
     push_warning(thd, ER_WARN_DEPRECATED_INNER_INTO);
@@ -1109,7 +1095,8 @@ Sql_cmd *PT_insert::make_cmd(THD *thd) {
       is created correctly in this case
     */
     SQL_I_List<Table_ref> save_list;
-    pc.select->m_table_list.save_and_clear(&save_list);
+    Query_block *const save_query_block = pc.select;
+    save_query_block->m_table_list.save_and_clear(&save_list);
 
     if (insert_query_expression->contextualize(&pc)) return nullptr;
 
@@ -1119,7 +1106,7 @@ Sql_cmd *PT_insert::make_cmd(THD *thd) {
       The following work only with the local list, the global list
       is created correctly in this case
     */
-    pc.select->m_table_list.push_front(&save_list);
+    save_query_block->m_table_list.push_front(&save_list);
 
     lex->bulk_insert_row_cnt = 0;
   } else {
@@ -1131,9 +1118,6 @@ Sql_cmd *PT_insert::make_cmd(THD *thd) {
 
     lex->bulk_insert_row_cnt = row_value_list->get_many_values().size();
   }
-
-  // Ensure that further expressions are resolved against first query block
-  assert(pc.select->select_number == 1);
 
   // Create a derived table to use as a table reference to the VALUES rows,
   // which can be referred to from ON DUPLICATE KEY UPDATE. Naming the derived
@@ -1278,16 +1262,6 @@ bool PT_query_specification::do_contextualize(Parse_context *pc) {
 
   pc->select->parsing_place = CTX_SELECT_LIST;
   if (contextualize_safe(pc, opt_window_clause)) return true;
-
-  pc->select->parsing_place = CTX_QUALIFY;
-  if (itemize_safe(pc, &opt_qualify_clause)) return true;
-  pc->select->set_qualify_cond(opt_qualify_clause);
-
-  if (opt_qualify_clause != nullptr) {
-    pc->thd->lex->set_execute_only_in_hypergraph_optimizer(
-        /*execute_in_hypergraph_optimizer_param=*/true, QUALIFY_CLAUSE);
-  }
-
   pc->select->parsing_place = CTX_NONE;
 
   QueryLevel ql = pc->m_stack.back();
@@ -1666,7 +1640,7 @@ void PT_set_operation::merge_descendants(Parse_context *pc,
     for (Query_term *elt : ql.m_elts) {
       // We only collapse same kind, and only if no LIMIT on it. Also, we do
       // not collapse INTERSECT ALL due to difficulty in computing it if we
-      // do, cf. logic in MaterializeIterator<Profiler>::MaterializeOperand.
+      // do, cf. logic in MaterializeIterator<Profiler>::MaterializeQueryBlock.
       if (elt->term_type() == QT_QUERY_BLOCK || /* 1 */
           elt->term_type() != op ||             /* 2 */
           (op == QT_EXCEPT && count > 0) ||     /* 3 */
@@ -1773,7 +1747,6 @@ bool PT_set_operation::contextualize_setop(Parse_context *pc,
   if (setop == nullptr) return true;
 
   merge_descendants(pc, setop, ql);
-  setop->label_children();
 
   Query_expression *qe = pc->select->master_query_expression();
   if (setop->set_block(qe->create_post_processing_block(setop))) return true;
@@ -2399,18 +2372,17 @@ Sql_cmd *PT_create_table_stmt::make_cmd(THD *thd) {
         is created correctly in this case
       */
       SQL_I_List<Table_ref> save_list;
-      pc.select->m_table_list.save_and_clear(&save_list);
+      Query_block *const save_query_block = pc.select;
+      save_query_block->m_table_list.save_and_clear(&save_list);
 
       if (opt_query_expression->contextualize(&pc)) return nullptr;
       if (pc.finalize_query_expression()) return nullptr;
 
-      // Ensure that first query block is the current one
-      assert(pc.select->select_number == 1);
       /*
         The following work only with the local list, the global list
         is created correctly in this case
       */
-      pc.select->m_table_list.push_front(&save_list);
+      save_query_block->m_table_list.push_front(&save_list);
       qe_tables = *query_expression_tables;
     }
   }
@@ -2805,7 +2777,7 @@ Sql_cmd *PT_show_events::make_cmd(THD *thd) {
   return &m_sql_cmd;
 }
 
-Sql_cmd *PT_show_binary_log_status::make_cmd(THD *thd) {
+Sql_cmd *PT_show_master_status::make_cmd(THD *thd) {
   LEX *lex = thd->lex;
   lex->sql_command = m_sql_command;
 
@@ -3300,10 +3272,9 @@ Sql_cmd *PT_analyze_table_stmt::make_cmd(THD *thd) {
 
   thd->lex->alter_info = &m_alter_info;
   auto cmd = new (thd->mem_root) Sql_cmd_analyze_table(
-      thd, &m_alter_info, m_command, m_num_buckets, m_data, m_auto_update);
+      thd, &m_alter_info, m_command, m_num_buckets, m_data);
   if (cmd == nullptr) return nullptr;
-  if (m_command == Sql_cmd_analyze_table::Histogram_command::UPDATE_HISTOGRAM ||
-      m_command == Sql_cmd_analyze_table::Histogram_command::DROP_HISTOGRAM) {
+  if (m_command != Sql_cmd_analyze_table::Histogram_command::NONE) {
     if (cmd->set_histogram_fields(m_columns)) return nullptr;
   }
   return cmd;
@@ -3644,8 +3615,7 @@ Sql_cmd *PT_explain::make_cmd(THD *thd) {
       break;
     case Explain_format_type::JSON: {
       lex->explain_format = new (thd->mem_root) Explain_format_JSON(
-          thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER) ||
-                  thd->variables.explain_json_format_version == 2
+          thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER)
               ? Explain_format_JSON::FormatVersion::kIteratorBased
               : Explain_format_JSON::FormatVersion::kLinear,
           m_explain_into_variable_name);
@@ -3661,32 +3631,7 @@ Sql_cmd *PT_explain::make_cmd(THD *thd) {
   if (lex->explain_format == nullptr) return nullptr;  // OOM
   lex->is_explain_analyze = m_analyze;
 
-  /*
-    If this EXPLAIN statement is supposed to be run in another schema change to
-    the appropriate schema and save the current schema name.
-  */
-  lex->explain_format->m_schema_name_for_explain = m_schema_name_for_explain;
-  char saved_schema_name_buf[NAME_LEN + 1];
-  LEX_STRING saved_schema_name{saved_schema_name_buf,
-                               sizeof(saved_schema_name_buf)};
-  bool cur_db_changed = false;
-  if (m_schema_name_for_explain.length != 0 &&
-      mysql_opt_change_db(thd, m_schema_name_for_explain, &saved_schema_name,
-                          false, &cur_db_changed)) {
-    return nullptr; /* purecov: inspected */
-  }
-
   Sql_cmd *ret = m_explainable_stmt->make_cmd(thd);
-
-  /*
-    Change back to original schema to make sure current schema stays consistent
-    when preparing a statement or SP with EXPLAIN FOR SCHEMA.
-  */
-  if (cur_db_changed &&
-      mysql_change_db(thd, to_lex_cstring(saved_schema_name), true)) {
-    ret = nullptr; /* purecov: inspected */
-  }
-
   if (ret == nullptr) return nullptr;  // OOM
 
   auto code = ret->sql_command_code();
@@ -3779,24 +3724,14 @@ Sql_cmd *PT_load_table::make_cmd(THD *thd) {
 
   /* Fix lock for LOAD DATA CONCURRENT REPLACE */
   thr_lock_type lock_type = m_lock_type;
-  enum_mdl_type mdl_type = MDL_SHARED_WRITE;
+  if (lex->duplicates == DUP_REPLACE && lock_type == TL_WRITE_CONCURRENT_INSERT)
+    lock_type = TL_WRITE_DEFAULT;
 
-  if (m_cmd.is_bulk_load()) {
-    lock_type = TL_WRITE;
-    mdl_type = MDL_EXCLUSIVE;
-  } else {
-    if (lex->duplicates == DUP_REPLACE &&
-        lock_type == TL_WRITE_CONCURRENT_INSERT) {
-      lock_type = TL_WRITE_DEFAULT;
-    }
-    if (lock_type == TL_WRITE_LOW_PRIORITY) {
-      mdl_type = MDL_SHARED_WRITE_LOW_PRIO;
-    }
-  }
-
-  if (!select->add_table_to_list(thd, m_cmd.m_table, nullptr,
-                                 TL_OPTION_UPDATING, lock_type, mdl_type,
-                                 nullptr, m_cmd.m_opt_partitions))
+  if (!select->add_table_to_list(
+          thd, m_cmd.m_table, nullptr, TL_OPTION_UPDATING, lock_type,
+          lock_type == TL_WRITE_LOW_PRIORITY ? MDL_SHARED_WRITE_LOW_PRIO
+                                             : MDL_SHARED_WRITE,
+          nullptr, m_cmd.m_opt_partitions))
     return nullptr;
 
   /* We can't give an error in the middle when using LOCAL files */
@@ -3855,18 +3790,6 @@ bool PT_table_factor_table_ident::do_contextualize(Parse_context *pc) {
       thd, table_ident, opt_table_alias, 0, yyps->m_lock_type, yyps->m_mdl_type,
       opt_key_definition, opt_use_partition, nullptr, pc);
   if (m_table_ref == nullptr) return true;
-
-  if (opt_tablesample != nullptr) {
-    /* Check if the input sampling percentage is a valid argument*/
-    if (opt_tablesample->m_sample_percentage->itemize(
-            pc, &opt_tablesample->m_sample_percentage))
-      return true;
-
-    thd->lex->set_execute_only_in_secondary_engine(true, TABLESAMPLE);
-    m_table_ref->set_tablesample(opt_tablesample->m_sampling_type,
-                                 opt_tablesample->m_sample_percentage);
-  }
-
   if (pc->select->add_joined_table(m_table_ref)) return true;
 
   return false;
@@ -4387,7 +4310,7 @@ bool PT_subquery::do_contextualize(Parse_context *pc) {
   if (super::do_contextualize(pc)) return true;
 
   LEX *lex = pc->thd->lex;
-  if (!lex->expr_allows_subquery || lex->sql_command == SQLCOM_PURGE) {
+  if (!lex->expr_allows_subselect || lex->sql_command == SQLCOM_PURGE) {
     error(pc, m_pos);
     return true;
   }

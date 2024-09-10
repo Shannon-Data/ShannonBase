@@ -4,18 +4,6 @@ if (mysqld.global.session_count === undefined) {
   mysqld.global.session_count = 0;
 }
 
-if (mysqld.global.upd_attr_config_json === undefined) {
-  mysqld.global.upd_attr_config_json = "";
-}
-
-if (mysqld.global.upd_attr_config_defaults_and_schema_json === undefined) {
-  mysqld.global.upd_attr_config_defaults_and_schema_json = "";
-}
-
-if (mysqld.global.config_defaults_stored_is_null === undefined) {
-  mysqld.global.config_defaults_stored_is_null = 0;
-}
-
 var options = {
   cluster_type: "gr",
 
@@ -36,8 +24,6 @@ var options = {
           .clusters[mysqld.global.clusterset_data.this_cluster_id]
           .nodes[mysqld.global.clusterset_data.this_node_id]
           .attributes,
-  router_version: mysqld.global.router_version,
-  config_defaults_stored_is_null: mysqld.global.config_defaults_stored_is_null,
 };
 
 var common_responses = common_stmts.prepare_statement_responses(
@@ -56,7 +42,8 @@ var common_responses = common_stmts.prepare_statement_responses(
 
       // account verification
       //"router_select_metadata_v2_gr",
-      //"router_select_group_membership",
+      //"router_select_group_replication_primary_member",
+      //"router_select_group_membership_with_primary_mode",
 
       // clusterset specific
       "router_clusterset_cluster_info_by_name",
@@ -72,14 +59,13 @@ var common_responses = common_stmts.prepare_statement_responses(
 var common_responses_regex = common_stmts.prepare_statement_responses_regex(
     [
       "router_create_user_if_not_exists",
-      "router_check_auth_plugin",
       "router_grant_on_metadata_db",
       "router_grant_on_pfs_db",
       "router_grant_on_routers",
       "router_grant_on_v2_routers",
+      "router_clusterset_update_routers_in_metadata",
       "router_update_router_options_in_metadata",
       "router_clusterset_cluster_info_by_name_unknown",
-      "router_select_config_defaults_stored_clusterset",
     ],
     options);
 
@@ -88,12 +74,6 @@ var router_set_session_options =
 
 var router_insert_into_routers =
     common_stmts.get("router_insert_into_routers", options);
-
-var router_update_attributes =
-    common_stmts.get("router_clusterset_update_routers_in_metadata", options);
-
-var router_store_config_defaults_clusterset =
-    common_stmts.get("router_store_config_defaults_clusterset", options);
 
 ({
   handshake: {
@@ -129,13 +109,6 @@ var router_store_config_defaults_clusterset =
           }
         }
       }
-    } else if (res = stmt.match(router_update_attributes.stmt_regex)) {
-      mysqld.global.upd_attr_config_json = res[1];
-      return router_update_attributes;
-    } else if (
-        res = stmt.match(router_store_config_defaults_clusterset.stmt_regex)) {
-      mysqld.global.upd_attr_config_defaults_and_schema_json = res[1];
-      return router_store_config_defaults_clusterset;
     } else {
       return common_stmts.unknown_statement_response(stmt);
     }

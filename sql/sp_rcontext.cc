@@ -1,16 +1,15 @@
-/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is designed to work with certain software (including
+   This program is also distributed with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have either included with
-   the program or referenced in the documentation.
+   separately licensed software that they have included with MySQL.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +23,6 @@
 #include "sql/sp_rcontext.h"
 
 #include <atomic>
-#include <memory>
 #include <new>
 
 #include "my_alloc.h"
@@ -66,9 +64,9 @@ sp_rcontext::sp_rcontext(const sp_pcontext *root_parsing_ctx,
       m_ccount(0) {}
 
 sp_rcontext::~sp_rcontext() {
-  if (m_var_table != nullptr) {
+  if (m_var_table) {
     free_blobs(m_var_table);
-    ::destroy_at(m_var_table);
+    destroy(m_var_table);
   }
 
   delete_container_pointers(m_activated_handlers);
@@ -88,7 +86,7 @@ sp_rcontext *sp_rcontext::create(THD *thd, const sp_pcontext *root_parsing_ctx,
 
   if (ctx->alloc_arrays(thd) || ctx->init_var_table(thd) ||
       ctx->init_var_items(thd)) {
-    ::destroy_at(ctx);
+    destroy(ctx);
     return nullptr;
   }
 
