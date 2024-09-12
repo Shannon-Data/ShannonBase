@@ -74,11 +74,11 @@ int Transaction::begin(ISOLATION_LEVEL iso_level) {
 }
 
 int Transaction::commit() {
-  dberr_t error;
+  dberr_t error{DB_SUCCESS};
   if (trx_is_started(m_trx_impl)) {
     error = trx_commit_for_mysql(m_trx_impl);
   }
-  return (DB_SUCCESS == error);
+  return (error == DB_SUCCESS);
 }
 
 int Transaction::rollback() { return 0; }

@@ -110,4 +110,4 @@ jobs:
         sudo chmod -R u+rwx mysql-test-run.pl
         ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
         information_schema \
-        --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
+        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)

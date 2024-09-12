@@ -103,9 +103,10 @@ row_id_t Cu::prows() {
   }
   ut_a(total_rows_in_chunk == m_header->m_prows.load());
 #endif
-
   return m_header->m_prows.load();
 }
+
+row_id_t Cu::rows(Rapid_load_context *context) { return 0; }
 
 size_t Cu::normalized_pack_length() {
   ut_a(m_chunks.size());

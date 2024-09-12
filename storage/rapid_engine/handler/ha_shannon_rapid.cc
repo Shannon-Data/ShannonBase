@@ -94,20 +94,27 @@ bool Rapid_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
 }
 
 // Map from (db_name, table_name) to the RapidShare with table state.
-void LoadedTables::add(const std::string &db, const std::string &table) {
+void LoadedTables::add(const std::string &db, const std::string &table, RapidShare *rs) {
   std::lock_guard<std::mutex> guard(m_mutex);
-  m_tables.emplace(std::piecewise_construct, std::make_tuple(db, table), std::make_tuple());
+  m_tables.emplace(std::make_pair(db, table), rs);
 }
 
 RapidShare *LoadedTables::get(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
   auto it = m_tables.find(std::make_pair(db, table));
-  return it == m_tables.end() ? nullptr : &it->second;
+  return it == m_tables.end() ? nullptr : it->second;
 }
 
 void LoadedTables::erase(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
+  RapidShare *sh{nullptr};
+  if (m_tables.find(std::make_pair(db, table)) != m_tables.end()) sh = m_tables[std::make_pair(db, table)];
+
   m_tables.erase(std::make_pair(db, table));
+  if (sh) {
+    delete sh;
+    sh = nullptr;
+  }
 }
 
 void LoadedTables::table_infos(uint index, ulonglong &tid, std::string &schema, std::string &table) {
@@ -117,7 +124,7 @@ void LoadedTables::table_infos(uint index, ulonglong &tid, std::string &schema, 
     if (count == index) {
       schema = (item.first).first;
       table = (item.first).second;
-      tid = (item.second).m_tableid;
+      tid = (item.second)->m_tableid;
     }
     count++;
   }
@@ -217,9 +224,10 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to, thr_lock_type lo
 
 int ha_rapid::load_table(const TABLE &table_arg) {
   assert(table_arg.file != nullptr);
-  shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str);
-  if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) == nullptr) {
-    my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
+  if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
+    std::ostringstream err;
+    err << table_arg.s->db.str << "." << table_arg.s->table_name.str << " already loaded";
+    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
     return HA_ERR_KEY_NOT_FOUND;
   }
 
@@ -247,7 +255,7 @@ int ha_rapid::load_table(const TABLE &table_arg) {
   m_share = new RapidShare(table_arg);
   m_share->file = this;
   m_share->m_tableid = table_arg.s->table_map_id.id();
-  shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str);
+  shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) == nullptr) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
@@ -257,8 +265,11 @@ int ha_rapid::load_table(const TABLE &table_arg) {
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
   if (error_if_not_loaded && shannon_loaded_tables->get(db_name, table_name) == nullptr) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Table is not loaded on a secondary engine");
-    return 1;
+    std::ostringstream err;
+    err << db_name << "." << table_name << " table is not loaded into";
+    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+
+    return HA_ERR_GENERIC;
   } else {
     Imcs::Imcs::instance()->unload_table(nullptr, db_name, table_name, false);
     shannon_loaded_tables->erase(db_name, table_name);

@@ -206,7 +206,9 @@ int Imcs::update_row(const Rapid_load_context *context, row_id_t row_id,
   ut_a(context);
 
   for (auto &rec : upd_recs) {
-    auto pack_length = m_cus[rec.first]->pack_length();
+    auto pack_length = m_cus[rec.first]->normalized_pack_length();
+    if (!rec.second.get())  // null value.
+      pack_length = UNIV_SQL_NULL;
     if (!m_cus[rec.first]->update_row(context, row_id, rec.second.get(), pack_length)) return HA_ERR_GENERIC;
   }
 

@@ -50,6 +50,11 @@ namespace Populate {
 
 #define log_rapid_pop_mutex_own(log) (mutex_own(&((log).rapid_populator_mutex)) || !Populator::log_rapid_is_active())
 
+/**
+ * for populate the changes to rapid. we copy all DML opers mlog record into mtr_log_rec_t
+ * when transaction commits. `mtr_t::Command::execute`. After that cp all mtr_log_rec_t to
+ * sys_pop_buff.
+ */
 typedef struct mtr_log_rec_t {
   std::unique_ptr<uchar[]> data;
   size_t size;
@@ -86,6 +91,13 @@ the RB tree will do re-blancing when the size of items exceed a threshold,
 that's performance issue. in future, we will use co-rountine to process every
 item by a co-routine to promot the performance.
 */
+/**
+ * key, (uint64_t)lsn_t, start lsn of this mtr record. a mtr_log_rec is consisted of
+ * serveral mlog records. Taking ISNERT as an instance, an insert operation is
+ * leading by a MLOG_REC_INSERT mlog record, then a serials mlog records. if it's a
+ * multi-record. And ending with a end type MLOG. In fact, a mtr_log_rec is a transaction
+ * opers.
+ */
 extern std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
 
 class Populator {

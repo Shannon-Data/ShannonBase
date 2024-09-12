@@ -83,7 +83,7 @@ jobs:
         sudo rm /home/ShannonBase/ -rf
     - name: run_mtr_test
       run: |
-        mkdir -p /home/shannon-bin/log
+        sudo mkdir -p /home/shannon-bin/log
         sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl

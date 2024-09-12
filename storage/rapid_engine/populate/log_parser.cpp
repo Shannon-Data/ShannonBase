@@ -527,7 +527,7 @@ std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t
         *reinterpret_cast<uint32 *>(field_data.get()) =
             header->m_local_dict->store(ret_str, field_length, header->m_encoding_type);
       }
-    } else
+    } else  // if value of this field is null, then set field_data to nullptr.
       field_data.reset(nullptr);
     field_values.emplace(key_name, std::move(field_data));
   }
@@ -628,7 +628,8 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       if (find_matched_rows(context, key_name, false, row_to_del, empty, row_ids)) {
         return HA_ERR_WRONG_IN_RECORD;
       }
-      return imcs_instance->delete_row(context, row_ids[0]);
+
+      return row_ids.size() ? imcs_instance->delete_row(context, row_ids[0]) : 0;
     } break;
     case MLOG_REC_INSERT: {
       std::map<std::string, std::unique_ptr<uchar[]>> rows_to_insert;
@@ -687,9 +688,9 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
   return 0;
 }
 
-byte *LogParser::parse_cur_and_apply_delete_mark_rec(byte *ptr,           /*!< in: buffer */
-                                                     byte *end_ptr,       /*!< in: buffer end */
-                                                     buf_block_t *block,  /*!< in: page or NULL */
+byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context, byte *ptr, /*!< in: buffer */
+                                                     byte *end_ptr,                          /*!< in: buffer end */
+                                                     buf_block_t *block,                     /*!< in: page or NULL */
                                                      dict_index_t *index, /*!< in: record descriptor */
                                                      mtr_t *mtr) {        /*!< in: mtr or NULL */
   ulint pos;
@@ -765,11 +766,11 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(byte *ptr,           /*!< i
   return (ptr);
 }
 
-byte *LogParser::parse_cur_and_apply_delete_rec(byte *ptr,           /*!< in: buffer */
-                                                byte *end_ptr,       /*!< in: buffer end */
-                                                buf_block_t *block,  /*!< in: page or NULL */
-                                                dict_index_t *index, /*!< in: record descriptor */
-                                                mtr_t *mtr) {        /*!< in: mtr or NULL */
+byte *LogParser::parse_cur_and_apply_delete_rec(Rapid_load_context *context, byte *ptr, /*!< in: buffer */
+                                                byte *end_ptr,                          /*!< in: buffer end */
+                                                buf_block_t *block,                     /*!< in: page or NULL */
+                                                dict_index_t *index,                    /*!< in: record descriptor */
+                                                mtr_t *mtr) {                           /*!< in: mtr or NULL */
 
   if (end_ptr < ptr + 2) {
     return (nullptr);
@@ -781,7 +782,8 @@ byte *LogParser::parse_cur_and_apply_delete_rec(byte *ptr,           /*!< in: bu
   return (ptr);
 }
 
-byte *LogParser::parse_cur_and_apply_insert_rec(bool is_short,            /*!< in: true if short inserts */
+byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
+                                                bool is_short,            /*!< in: true if short inserts */
                                                 const byte *ptr,          /*!< in: buffer */
                                                 const byte *end_ptr,      /*!< in: buffer end */
                                                 buf_block_t *block,       /*!< in: block or NULL */
@@ -965,10 +967,10 @@ byte *LogParser::parse_and_apply_upd_rec_in_place(
   return rec;
 }
 
-byte *LogParser::parse_cur_update_in_place_and_apply(byte *ptr,                /*!< in: buffer */
-                                                     byte *end_ptr,            /*!< in: buffer end */
-                                                     buf_block_t *block,       /*!< in: block or NULL */
-                                                     page_t *page,             /*!< in: page or NULL */
+byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context, byte *ptr, /*!< in: buffer */
+                                                     byte *end_ptr,                          /*!< in: buffer end */
+                                                     buf_block_t *block,                     /*!< in: block or NULL */
+                                                     page_t *page,                           /*!< in: page or NULL */
                                                      page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
                                                      dict_index_t *index) {    /*!< in: index corresponding to page */
   ulint flags;
@@ -1047,13 +1049,13 @@ func_exit:
 
 /** Parses a log record of copying a record list end to a new created page.
  @return end of log record or NULL */
-byte *LogParser::parse_copy_rec_list_to_created_page(byte *ptr,                /*!< in: buffer */
-                                                     byte *end_ptr,            /*!< in: buffer end */
-                                                     buf_block_t *block,       /*!< in: block or NULL */
-                                                     page_t *page,             /*!< in: page or NULL */
-                                                     page_zip_des_t *page_zip, /*!< in: page or NULL */
-                                                     dict_index_t *index,      /*!< in: record descriptor */
-                                                     mtr_t *mtr) {             /*!< in: mtr or NULL */
+byte *LogParser::parse_copy_rec_list_to_created_page(Rapid_load_context *context, byte *ptr, /*!< in: buffer */
+                                                     byte *end_ptr,                          /*!< in: buffer end */
+                                                     buf_block_t *block,                     /*!< in: block or NULL */
+                                                     page_t *page,                           /*!< in: page or NULL */
+                                                     page_zip_des_t *page_zip,               /*!< in: page or NULL */
+                                                     dict_index_t *index, /*!< in: record descriptor */
+                                                     mtr_t *mtr) {        /*!< in: mtr or NULL */
 
   byte *rec_end;
   ulint log_data_len;
@@ -1077,7 +1079,7 @@ byte *LogParser::parse_copy_rec_list_to_created_page(byte *ptr,                /
   }
 
   while (ptr < rec_end) {
-    ptr = parse_cur_and_apply_insert_rec(true, ptr, end_ptr, block, page, page_zip, index, mtr);
+    ptr = parse_cur_and_apply_insert_rec(context, true, ptr, end_ptr, block, page, page_zip, index, mtr);
   }
 
   ut_a(ptr == rec_end);
@@ -1192,8 +1194,9 @@ byte *LogParser::parse_page_header(mlog_id_t type, const byte *ptr, const byte *
   return (const_cast<byte *>(ptr));
 }
 
-byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *end_ptr, space_id_t space_id,
-                                             page_no_t page_no, buf_block_t *block, mtr_t *mtr, lsn_t start_lsn) {
+byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_id_t type, byte *ptr, byte *end_ptr,
+                                             space_id_t space_id, page_no_t page_no, buf_block_t *block, mtr_t *mtr,
+                                             lsn_t start_lsn) {
   /*same as the recv_add_to_hash_table does. dont not add the the system opers
     mlogs when pop thread has been started. such as mlogs of `LOG_DUMMY` table.
   */
@@ -1338,7 +1341,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
 
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
-        ptr = parse_cur_and_apply_insert_rec(false, ptr, end_ptr, block, page, page_zip, index, mtr);
+        ptr = parse_cur_and_apply_insert_rec(context, false, ptr, end_ptr, block, page, page_zip, index, mtr);
       }
       break;
 
@@ -1350,7 +1353,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
       if (nullptr != (ptr = mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_INSERT_8027, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_and_apply_insert_rec(false, ptr, end_ptr, block, page, page_zip, index, mtr);
+        ptr = parse_cur_and_apply_insert_rec(context, false, ptr, end_ptr, block, page, page_zip, index, mtr);
       }
       break;
 
@@ -1361,7 +1364,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_and_apply_delete_mark_rec(ptr, end_ptr, block, index, mtr);
+        ptr = parse_cur_and_apply_delete_mark_rec(context, ptr, end_ptr, block, index, mtr);
       }
 
       break;
@@ -1375,7 +1378,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
           (ptr = mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_CLUST_DELETE_MARK_8027, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_and_apply_delete_mark_rec(ptr, end_ptr, block, index, mtr);
+        ptr = parse_cur_and_apply_delete_mark_rec(context, ptr, end_ptr, block, index, mtr);
       }
 
       break;
@@ -1412,7 +1415,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_update_in_place_and_apply(ptr, end_ptr, block, page, page_zip, index);
+        ptr = parse_cur_update_in_place_and_apply(context, ptr, end_ptr, block, page, page_zip, index);
       }
 
       break;
@@ -1425,7 +1428,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
       if (nullptr != (ptr = mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_UPDATE_IN_PLACE_8027, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_update_in_place_and_apply(ptr, end_ptr, block, page, page_zip, index);
+        ptr = parse_cur_update_in_place_and_apply(context, ptr, end_ptr, block, page, page_zip, index);
       }
 
       break;
@@ -1476,7 +1479,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_copy_rec_list_to_created_page(ptr, end_ptr, block, page, page_zip, index, mtr);
+        ptr = parse_copy_rec_list_to_created_page(context, ptr, end_ptr, block, page, page_zip, index, mtr);
       }
 
       break;
@@ -1490,7 +1493,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
           (ptr = mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_LIST_END_COPY_CREATED_8027, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_copy_rec_list_to_created_page(ptr, end_ptr, block, page, page_zip, index, mtr);
+        ptr = parse_copy_rec_list_to_created_page(context, ptr, end_ptr, block, page, page_zip, index, mtr);
       }
 
       break;
@@ -1603,7 +1606,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
       if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_and_apply_delete_rec(ptr, end_ptr, block, index, mtr);
+        ptr = parse_cur_and_apply_delete_rec(context, ptr, end_ptr, block, index, mtr);
       }
 
       break;
@@ -1618,7 +1621,7 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
                           ptr, end_ptr, type == MLOG_COMP_REC_DELETE_8027, &index))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
-        ptr = parse_cur_and_apply_delete_rec(ptr, end_ptr, block, index, mtr);
+        ptr = parse_cur_and_apply_delete_rec(context, ptr, end_ptr, block, index, mtr);
       }
 
       break;
@@ -1775,8 +1778,8 @@ byte *LogParser::parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr, byte *en
   return ptr;
 }
 
-ulint LogParser::parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr, space_id_t *space_id, page_no_t *page_no,
-                               byte **body) {
+ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byte *ptr, byte *end_ptr,
+                               space_id_t *space_id, page_no_t *page_no, byte **body) {
   byte *new_ptr;
 
   *body = nullptr;
@@ -1840,7 +1843,7 @@ ulint LogParser::parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr, space_
     return 0;
   }
 
-  new_ptr = parse_or_apply_log_rec_body(*type, new_ptr, end_ptr, *space_id, *page_no, nullptr, nullptr, 0);
+  new_ptr = parse_or_apply_log_rec_body(context, *type, new_ptr, end_ptr, *space_id, *page_no, nullptr, nullptr, 0);
 
   if (new_ptr == nullptr) {
     return 0;
@@ -1849,7 +1852,7 @@ ulint LogParser::parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr, space_
   return new_ptr - ptr;
 }
 
-ulint LogParser::parse_single_rec(byte *ptr, byte *end_ptr) {
+ulint LogParser::parse_single_rec(Rapid_load_context *context, byte *ptr, byte *end_ptr) {
   /* Try to parse a log record, fetching its type, space id,
   page no, and a pointer to the body of the log record */
 
@@ -1858,11 +1861,10 @@ ulint LogParser::parse_single_rec(byte *ptr, byte *end_ptr) {
   page_no_t page_no = 0;
   space_id_t space_id = 0;
 
-  ulint parsed_bytes = parse_log_rec(&type, ptr, end_ptr, &space_id, &page_no, &body);
-  return parsed_bytes;
+  return parse_log_rec(context, &type, ptr, end_ptr, &space_id, &page_no, &body);
 }
 
-ulint LogParser::parse_multi_rec(byte *ptr, byte *end_ptr) {
+ulint LogParser::parse_multi_rec(Rapid_load_context *context, byte *ptr, byte *end_ptr) {
   ut_a(end_ptr >= ptr);
   ulint parsed_bytes{0}, n_recs{0};
 
@@ -1872,7 +1874,7 @@ ulint LogParser::parse_multi_rec(byte *ptr, byte *end_ptr) {
     page_no_t page_no = 0;
     space_id_t space_id = 0;
 
-    ulint len = parse_log_rec(&type, ptr, end_ptr, &space_id, &page_no, &body);
+    ulint len = parse_log_rec(context, &type, ptr, end_ptr, &space_id, &page_no, &body);
     if (len == 0) {
       ut_a(false);
       return 0;
@@ -1917,7 +1919,7 @@ ulint LogParser::parse_multi_rec(byte *ptr, byte *end_ptr) {
 }
 
 // handle single mtr
-uint LogParser::parse_redo(byte *ptr, byte *end_ptr) {
+uint LogParser::parse_redo(Rapid_load_context *context, byte *ptr, byte *end_ptr) {
   /**
    * after secondary_load command excuted, all the data read from data file. the
    * last checkpoint lsn makes all the data lsn is samller than it were written
@@ -1939,7 +1941,7 @@ uint LogParser::parse_redo(byte *ptr, byte *end_ptr) {
       single_rec = !!(*ptr & MLOG_SINGLE_REC_FLAG);
   }
 
-  return (single_rec) ? parse_single_rec(ptr, end_ptr) : parse_multi_rec(ptr, end_ptr);
+  return (single_rec) ? parse_single_rec(context, ptr, end_ptr) : parse_multi_rec(context, ptr, end_ptr);
 }
 
 }  // namespace Populate

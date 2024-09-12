@@ -139,6 +139,9 @@ class Cu : public MemoryObject {
   // rows.
   row_id_t prows();
 
+  // the visiable row count to `trxid` transaction. The mvcc should be considered.
+  row_id_t rows(Rapid_load_context *context);
+
   // returns the normalized length, the text type encoded with uint32.
   size_t normalized_pack_length();
 
