@@ -255,8 +255,6 @@ POINT(3,3), POINT(0,0))),
 g);
 EXPLAIN
 -> Filter: mbrcontains(<cache>(polygon(linestring(point(0,0),point(3,0),point(3,3),point(0,0)))),geom.g)  (rows=3)
-    -> Table scan on geom in secondary engine Rapid  (rows=3)
+    -> Index range scan on geom using g over (g unprintable_geometry_value)  (rows=3)
 
-Warnings:
-Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 DROP TABLE geom;

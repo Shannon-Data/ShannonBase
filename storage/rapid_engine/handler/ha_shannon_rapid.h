@@ -56,7 +56,7 @@ struct RapidShare {
   RapidShare &operator=(const RapidShare &) = delete;
 
   // source table.
-  ulonglong m_tableid;
+  ulonglong m_tableid{0};
   const char *m_db_name{nullptr}, *m_table_name{nullptr};
   handler *file{nullptr};
   const TABLE *m_source_table;

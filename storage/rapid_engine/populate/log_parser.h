@@ -48,14 +48,14 @@ namespace Populate {
  */
 class LogParser {
  public:
-  uint parse_redo(byte *ptr, byte *end_ptr);
+  uint parse_redo(Rapid_load_context* context, byte *ptr, byte *end_ptr);
 
  private:
-  ulint parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
-                      space_id_t *space_id, page_no_t *page_no,
-                      byte **body);
+  ulint parse_log_rec(Rapid_load_context* context, mlog_id_t *type, byte *ptr, byte *end_ptr,
+                      space_id_t *space_id, page_no_t *page_no, byte **body);
 
-  byte *parse_or_apply_log_rec_body(mlog_id_t type, byte *ptr,
+  byte *parse_or_apply_log_rec_body(Rapid_load_context* context,
+                                    mlog_id_t type, byte *ptr,
                                     byte *end_ptr, space_id_t space_id,
                                     page_no_t page_no, buf_block_t *block,
                                     mtr_t *mtr, lsn_t start_lsn);
@@ -79,7 +79,8 @@ class LogParser {
                                         trx_id_t trx_id);          /*!< in: new trx id*/
 
   // parses the insert log and apply insertion to rapid.
-  byte *parse_cur_and_apply_insert_rec(bool is_short,       /*!< in: true if short inserts */
+  byte *parse_cur_and_apply_insert_rec(Rapid_load_context* context,
+                                       bool is_short,       /*!< in: true if short inserts */
                                        const byte *ptr,     /*!< in: buffer */
                                        const byte *end_ptr, /*!< in: buffer end */
                                        buf_block_t *block,  /*!< in: block or NULL */
@@ -88,19 +89,22 @@ class LogParser {
                                        dict_index_t *index, /*!< in: record descriptor */
                                        mtr_t *mtr);         /*!< in: mtr or NULL */
 
-  byte *parse_cur_and_apply_delete_rec(byte *ptr,           /*!< in: buffer */
+  byte *parse_cur_and_apply_delete_rec(Rapid_load_context* context,
+                                       byte *ptr,           /*!< in: buffer */
                                        byte *end_ptr,       /*!< in: buffer end */
                                        buf_block_t *block,  /*!< in: page or NULL */
                                        dict_index_t *index, /*!< in: record descriptor */
                                        mtr_t *mtr);         /*!< in: mtr or NULL */
 
-  byte *parse_cur_and_apply_delete_mark_rec(byte *ptr,           /*!< in: buffer */
+  byte *parse_cur_and_apply_delete_mark_rec(Rapid_load_context* context,
+                                            byte *ptr,           /*!< in: buffer */
                                             byte *end_ptr,       /*!< in: buffer end */
                                             buf_block_t *block,  /*!< in: page or NULL */
                                             dict_index_t *index, /*!< in: record descriptor */
                                             mtr_t *mtr);         /*!< in: mtr or NULL */
 
-  byte *parse_cur_update_in_place_and_apply(byte *ptr,                /*!< in: buffer */
+  byte *parse_cur_update_in_place_and_apply(Rapid_load_context* context,
+                                            byte *ptr,                /*!< in: buffer */
                                             byte *end_ptr,            /*!< in: buffer end */
                                             buf_block_t *block,       /*!< in: block or NULL */
                                             page_t* page,             /*!< in: page or NULL */
@@ -109,7 +113,8 @@ class LogParser {
 
   /** Parses a log record of copying a record list end to a new created page.
   @return end of log record or NULL */
-  byte *parse_copy_rec_list_to_created_page(byte *ptr,           /*!< in: buffer */
+  byte *parse_copy_rec_list_to_created_page(Rapid_load_context* context,
+                                            byte *ptr,           /*!< in: buffer */
                                             byte *end_ptr,       /*!< in: buffer end */
                                             buf_block_t *block,  /*!< in: block or NULL */
                                             page_t* page,        /*!< in: page or NULL */
@@ -158,10 +163,10 @@ class LogParser {
                      const dict_index_t *real_index, const ulint *offsets, uchar *pk);
 
   // parse the signle log rec.
-  ulint parse_single_rec(byte *ptr, byte *end_ptr);
+  ulint parse_single_rec(Rapid_load_context* context, byte *ptr, byte *end_ptr);
 
   ////parse the multi log rec. retunr parsed byte size.
-  ulint parse_multi_rec(byte *ptr, byte *end_ptr);
+  ulint parse_multi_rec(Rapid_load_context* context, byte *ptr, byte *end_ptr);
 
   // gets blocks by page no and space id
   inline buf_block_t *get_block(space_id_t, page_no_t);
