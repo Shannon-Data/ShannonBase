@@ -139,7 +139,7 @@ int table_rpd_table_id::make_row(uint index[[maybe_unused]]) {
     return HA_ERR_END_OF_FILE;
   } else {
     std::string schema, table, full_name;
-    ulonglong tableid;
+    ulonglong tableid{0};
     ShannonBase::shannon_loaded_tables->table_infos(index, tableid, schema, table);
     m_row.table_id = tableid;
     full_name = schema + "\\" + table;

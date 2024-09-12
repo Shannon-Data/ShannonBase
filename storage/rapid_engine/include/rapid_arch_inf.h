@@ -19,9 +19,9 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023,2024 Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. To get cache line size.
 */
 
 #ifndef __SHANNON_RAPID_ARCH_INFO_H__
