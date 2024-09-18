@@ -111,6 +111,9 @@ class Cu : public MemoryObject {
   // removed.
   uchar *delete_row_from_log(const Rapid_load_context *context, uchar *data, size_t len);
 
+  // delete all the data from this cu.
+  uchar *delete_row_all(const Rapid_load_context *context);
+
   // update the data located at rowid with new value-'data'.
   uchar *update_row(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
 

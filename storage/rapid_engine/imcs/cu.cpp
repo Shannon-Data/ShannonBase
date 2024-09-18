@@ -282,6 +282,17 @@ uchar *Cu::delete_row_from_log(const Rapid_load_context *context, uchar *data, s
   return data;
 }
 
+uchar *Cu::delete_row_all(const Rapid_load_context *context) {
+  auto rows = m_header->m_prows.load();
+  for (row_id_t rowid = 0; rowid < rows; rowid++) {
+    if (!delete_row(context, rowid))  // errors occur.
+      return nullptr;
+  }
+
+  ut_a(m_chunks.size());
+  return m_chunks[0]->base();
+}
+
 uchar *Cu::read_row(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
 
