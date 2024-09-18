@@ -177,15 +177,18 @@ int Imcs::delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &
   ut_a(context);
   std::ostringstream oss, oss2;
   oss << context->m_schema_name << ":" << context->m_table_name << ":";
+  if (rowids.empty()) {  // delete all rows.
+    for (auto it = m_cus.begin(); it != m_cus.end(); ++it) {
+      if (it->first.substr(0, oss.str().length()) != oss.str()) continue;
+      if (!it->second.get()->delete_row_all(context)) return HA_ERR_GENERIC;
+    }
+    return 0;
+  }
 
   for (auto &rowid : rowids) {
-    for (auto it = m_cus.begin(); it != m_cus.end();) {
-      if (it->first.substr(0, oss.str().length()) == oss.str()) {
-        if (!it->second.get()->delete_row(context, rowid)) {
-          return HA_ERR_GENERIC;
-        }
-      }
-      ++it;
+    for (auto it = m_cus.begin(); it != m_cus.end(); ++it) {
+      if (it->first.substr(0, oss.str().length()) != oss.str()) continue;
+      if (!it->second.get()->delete_row(context, rowid)) return HA_ERR_GENERIC;
     }
   }
   return 0;

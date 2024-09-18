@@ -78,9 +78,9 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
   }
 
 #if !defined(_WIN32)  // here we
-  pthread_setname_np(pthread_self(), "mtr_log_wrkr");
+  pthread_setname_np(pthread_self(), "mtr_log_wkr");
 #else
-  SetThreadDescription(GetCurrentThread(), L"mtr_log_wrkr");
+  SetThreadDescription(GetCurrentThread(), L"mtr_log_wkr");
 #endif
   LogParser parse_log;
 

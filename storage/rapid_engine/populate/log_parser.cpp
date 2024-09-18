@@ -618,17 +618,18 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
   int ret{0};
   switch (type) {
     case MLOG_REC_DELETE: {
+      std::vector<row_id_t> row_ids;
+      if (all) return imcs_instance->delete_rows(context, row_ids);
+
       std::map<std::string, std::unique_ptr<uchar[]>> row_to_del;
       // step 1:to get all field data of deleting row.
       auto key_name = parse_rec_fields(context, rec, index, real_index, offsets, row_to_del);
 
       // step 2: go throug all the data to find the matched rows, and delete them.
-      std::vector<row_id_t> row_ids;
-      std::set<std::string> empty;
-      if (find_matched_rows(context, key_name, false, row_to_del, empty, row_ids)) {
+      std::set<std::string> ignore_field;
+      if (find_matched_rows(context, key_name, false, row_to_del, ignore_field, row_ids)) {
         return HA_ERR_WRONG_IN_RECORD;
       }
-
       return row_ids.size() ? imcs_instance->delete_row(context, row_ids[0]) : 0;
     } break;
     case MLOG_REC_INSERT: {
@@ -761,7 +762,8 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
         mem_heap_free(heap);
       }
     }
-  }
+  } else
+    ut_a(false);
 
   return (ptr);
 }
@@ -1265,6 +1267,11 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
   dict_index_t *index = nullptr;
   page_type_t page_type{FIL_PAGE_TYPE_ALLOCATED};
 
+  /**
+   * Here, the page perhaps reomved when delete all records opers delivered.
+   * a blank page got. we also can get the page from mtr's memo because if we in async mode,
+   * the trx may be committed or rollback, does not existed anymore.
+   */
   block = get_block(space_id, page_no);
   if (block) {  // page_no != 0;
     ut_ad(buf_page_in_file(&block->page));
@@ -1843,6 +1850,12 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
     return 0;
   }
 
+  /**
+   * different with recovery, in recovery, delete[all]/drop opreation, can found the corresponding page
+   * with page_no., but in rapid population stage, delete[all]/drop operations is proceeded sucessfully,
+   * thereby, her we may get a blank page via specific page_no. So we treat the blank page as all flag of
+   * delete/drop operation.
+   */
   new_ptr = parse_or_apply_log_rec_body(context, *type, new_ptr, end_ptr, *space_id, *page_no, nullptr, nullptr, 0);
 
   if (new_ptr == nullptr) {

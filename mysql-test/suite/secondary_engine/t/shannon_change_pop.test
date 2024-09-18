@@ -58,10 +58,41 @@ select * from tt order by id;
 select * from tt order by id;
 explain select * from tt order by id;
 
+create table tt2 (name char(10), gender char(1)) secondary_engine=rapid;
+insert into tt2 values('n1', 'm'), ('n2', null), ('n3', 'm');
+alter table tt2 secondary_load;
+select * from tt2;
+
+--connection connection_2
+--echo [conn2]
+delete from tt2 where gender is null;
+select * from tt2;
+
+--connection connection_1
+--echo [conn1]
+--sleep 18
+select * from tt2;
+
+--connection connection_2
+--echo [conn2]
+delete from tt2;
+select * from tt2;
+
+--connection connection_1
+--echo [conn1]
+--sleep 18
+select * from tt2;
+
+select * from tt;
+
 --connection default
 --enable_warnings
 
 drop table tt;
+drop table tt2;
+
+SELECT * FROM performance_schema.rpd_table_id;
+
 drop database test_query;
 disconnect connection_1;
 disconnect connection_2;

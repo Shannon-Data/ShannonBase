@@ -39,6 +39,8 @@
 #include "storage/rapid_engine/imcs/cu.h"     //CU
 #include "storage/rapid_engine/imcs/imcs.h"   //IMCS
 
+#include "storage/rapid_engine/populate/populate.h"  //sys_pop_buff
+
 namespace ShannonBase {
 namespace Imcs {
 
@@ -82,6 +84,9 @@ void DataTable::scan_init() {
 }
 
 int DataTable::next(uchar *buf) {
+  // In optimization phase. we should not choice rapid to scan, when pop threading
+  // is running to repop the data to rapid.
+  // ut_a(ShannonBase::Populate::sys_pop_buff.size() == 0);
 // make all ptr in m_field_ptrs to move forward one step(one row).
 start_pos:
   if (m_rowid >= m_field_cus[0]->prows()) return HA_ERR_END_OF_FILE;
