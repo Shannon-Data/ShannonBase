@@ -107,13 +107,19 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
       return HA_ERR_GENERIC;
     });
 
-    // the 1, is a ghost column DB_TRX_ID
+    // the extra one, is a ghost column DB_TRX_ID
     for (auto index = 0u; index < source->s->fields + 1; index++) {
       auto fld = *(source->field + index);
       if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
       key << key_part.str() << fld->field_name;
-      if (!m_cus[key.str()].get()->write_row(context, fld->is_null() ? nullptr : fld->field_ptr(),
-                                             fld->is_null() ? UNIV_SQL_NULL : fld->pack_length())) {
+      auto data_ptr = fld->is_null() ? nullptr : fld->field_ptr();
+      auto data_len = fld->is_null() ? UNIV_SQL_NULL : fld->pack_length();
+      if (Utils::Util::is_blob(fld->type())) {
+        data_ptr = const_cast<uchar *>(fld->data_ptr());
+        data_len = fld->data_length(0);
+      }
+
+      if (!m_cus[key.str()].get()->write_row(context, data_ptr, data_len)) {
         my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), source->s->db.str, source->s->table_name.str);
         source->file->ha_rnd_end();
         return HA_ERR_GENERIC;
