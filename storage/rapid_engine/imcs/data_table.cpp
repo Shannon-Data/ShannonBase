@@ -35,9 +35,10 @@
 #include "include/ut0dbg.h"  //ut_a
 #include "sql/table.h"       //TABLE
 
-#include "storage/rapid_engine/imcs/chunk.h"  //CHUNK
-#include "storage/rapid_engine/imcs/cu.h"     //CU
-#include "storage/rapid_engine/imcs/imcs.h"   //IMCS
+#include "storage/rapid_engine/imcs/chunk.h"   //CHUNK
+#include "storage/rapid_engine/imcs/cu.h"      //CU
+#include "storage/rapid_engine/imcs/imcs.h"    //IMCS
+#include "storage/rapid_engine/utils/utils.h"  //Blob.
 
 #include "storage/rapid_engine/populate/populate.h"  //sys_pop_buff
 
@@ -66,6 +67,7 @@ void DataTable::scan_init() {
   key_part << m_data_source->s->db.str << ":" << m_data_source->s->table_name.str << ":";
   for (auto index = 0u; index < m_data_source->s->fields; index++) {
     auto fld = *(m_data_source->field + index);
+    fld->set_field_ptr(nullptr);
     key << key_part.str() << fld->field_name;
     auto key_str = key.str();
 
@@ -100,6 +102,10 @@ start_pos:
       case MYSQL_TYPE_STRING:
       case MYSQL_TYPE_VAR_STRING:
       case MYSQL_TYPE_VARCHAR:
+      case MYSQL_TYPE_TINY_BLOB:
+      case MYSQL_TYPE_MEDIUM_BLOB:
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_LONG_BLOB:
         /**if this is a string type, it will be use local dictionary encoding, therefore,
          * using stringid as field value. */
         is_text_value = true;
@@ -114,6 +120,7 @@ start_pos:
     });
 
     auto source_fld = *(m_data_source->field + idx);
+    source_fld->set_field_ptr(nullptr);
     ut_a(source_fld->field_index() == cu->header()->m_source_fld->field_index());
     auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
     auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
@@ -129,7 +136,10 @@ start_pos:
     auto data_ptr = cu->chunk(current_chunk)->base() + offset_in_chunk * normalized_length;
     if (is_text_value) {
       uint32 str_id = *(uint32 *)data_ptr;
-      source_fld->set_field_ptr(cu->header()->m_local_dict->get(str_id));
+      auto str_ptr = cu->header()->m_local_dict->get(str_id);
+      Utils::Util::is_blob(cu->header()->m_type)
+          ? down_cast<Field_blob *>(source_fld)->set_ptr(strlen((char *)str_ptr), str_ptr)
+          : source_fld->set_field_ptr(str_ptr);
     } else
       source_fld->set_field_ptr(data_ptr);
     if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);

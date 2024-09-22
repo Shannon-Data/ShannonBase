@@ -145,6 +145,7 @@ void Populator::start_change_populate_threads() {
     os_event_reset(log_sys->rapid_events[0]);
     srv_threads.m_change_pop = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
     ShannonBase::Populate::sys_pop_started = true;
+    os_event_set(log_sys->rapid_events[0]);
     srv_threads.m_change_pop.start();
   }
 }

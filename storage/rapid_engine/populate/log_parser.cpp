@@ -40,6 +40,7 @@
 #include "storage/innobase/include/dict0dd.h"
 #include "storage/innobase/include/dict0dict.h"
 #include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
+#include "storage/innobase/include/lob0lob.h"   //ext
 #include "storage/innobase/include/log0log.h"
 #include "storage/innobase/include/log0test.h"
 #include "storage/innobase/include/log0write.h"
@@ -57,25 +58,6 @@
 namespace ShannonBase {
 
 namespace Populate {
-uint LogParser::get_PK(const rec_t *rec, const dict_index_t *index, const dict_index_t *real_index,
-                       const ulint *offsets, uchar *pk) {
-  ut_a(pk);
-  uint off_pos{0};
-
-  for (auto idx = 0; idx < index->n_uniq; idx++) {
-    // the PK field. rapid table must be has at leat one PK.
-    auto idx_col = index->get_col(idx);
-    ut_a(idx_col->mtype != DATA_SYS && idx_col->mtype != DATA_SYS_CHILD);
-
-    ulint len{0};
-    byte *data = rec_get_nth_field(index, rec, offsets, idx, &len);
-    auto real_col = real_index->get_col(idx);
-    store_field_in_mysql_format(index, idx_col, real_col, pk + off_pos, data, len);
-    off_pos += len;
-  }  // for
-
-  return off_pos;
-}
 
 uint LogParser::get_trxid(const rec_t *rec, const dict_index_t *index, const ulint *offsets, uchar *trx_id) {
   uint pk_len{0};
@@ -197,30 +179,32 @@ const dict_index_t *LogParser::find_index(uint64 idx_id) {
     return nullptr;
 }
 
-int LogParser::store_field_in_mysql_format(const dict_index_t *index, const dict_col_t *col, const dict_col_t *real_col,
-                                           const byte *dest, const byte *src, ulint len) {
+int LogParser::store_field_in_mysql_format(const dict_index_t *index, const dict_col_t *col, const byte *dest,
+                                           const byte *src, ulint len) {
   mysql_row_templ_t templ;
   templ.mysql_col_len = len;
-  templ.type = real_col->mtype;
-  templ.mysql_type = real_col->prtype;
+  templ.type = col->mtype;
+  templ.mysql_type = col->prtype;
 
-  templ.is_virtual = templ.is_multi_val = false;
+  templ.is_virtual = col->is_virtual();
+  templ.is_multi_val = col->is_multi_value();
 
   if (col->prtype & DATA_LONG_TRUE_VARCHAR) {
     templ.mysql_length_bytes = (len > 255) ? 2 : 1;
   } else {
-    templ.mysql_length_bytes = 0;
+    templ.mysql_length_bytes = 1;
   }
   templ.charset = dtype_get_charset_coll(col->prtype);
   templ.is_unsigned = col->prtype & DATA_UNSIGNED;
 
-  ulint mbminlen;
-  ulint mbmaxlen;
-  dtype_get_mblen(col->mtype, col->prtype, &mbminlen, &mbmaxlen);
-  templ.mbminlen = (mbminlen == 0) ? 1 : mbminlen;
-  templ.mbmaxlen = (mbmaxlen == 0) ? 1 : mbmaxlen;
-
-  row_sel_field_store_in_mysql_format(const_cast<byte *>(dest), &templ, index, real_col->ind, src, len,
+  // here, we dont care about the mb length.
+  templ.mbminlen = 1;
+  templ.mbmaxlen = 1;
+  /**
+   * Here we dont use col->ind as the index pass into `row_sel_field_store_in_mysql_format`,
+   * due to that seems col->ind dont correct. for exm, index of DB_TRX_ID should be 1, but
+   * it's 6. so sad. * */
+  row_sel_field_store_in_mysql_format(const_cast<byte *>(dest), &templ, index, col->get_col_phy_pos(), src, len,
                                       ULINT_UNDEFINED);
   return 0;
 }
@@ -499,6 +483,17 @@ std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t
      *  MLOG_REC_INSERT logs. And, here, we dont care about DB_ROW_ID, DB_ROLL_PTR, ONLY care
      * about `DB_TRX_ID`.
      */
+    /**index parsed from mlog[name:DUMMY_LOG], is not consitent with real_index.*/
+    dtype_t type;
+    real_index->get_col(idx)->copy_type(&type);
+    dict_col_t *col = (dict_col_t *)index->get_col(idx);
+    col->ind = real_index->get_col(idx)->ind;
+    col->set_phy_pos(real_index->get_col(idx)->get_phy_pos());
+    col->mtype = type.mtype;
+    col->prtype = type.prtype;
+    col->len = type.len;
+    col->mbminmaxlen = type.mbminmaxlen;
+
     auto field_name = real_index->get_field(idx)->name();
     if (!strncmp(field_name, SHANNON_DB_ROW_ID, SHANNON_DB_ROW_ID_LEN) ||
         !strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN))
@@ -507,28 +502,45 @@ std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t
     key_name = Utils::Util::get_key_name(context->m_schema_name, context->m_table_name, field_name);
     std::unique_ptr<uchar[]> field_data{nullptr};
     auto len{0lu};
-    byte *data = rec_get_nth_field(index, rec, offsets, idx, &len);
-    if (len != UNIV_SQL_NULL) {  // Not null
-      auto real_col = real_index->get_col(idx);
-      field_data.reset(new uchar[len]);
-      memset(field_data.get(), 0x0, len);
-      store_field_in_mysql_format(index, index->get_col(idx), real_col, field_data.get(), data, len);
+    byte *data{nullptr};
+    if (rec_offs_nth_extern(index, offsets, idx)) {  // store external.
+      // TODO: deal with page-off scenario.
+    } else {
+      data = rec_get_nth_field(index, rec, offsets, idx, &len);
+      if (len != UNIV_SQL_NULL) {  // Not null
+        field_data.reset(new uchar[len + 1]);
+        memset(field_data.get(), 0x0, len + 1);
+        store_field_in_mysql_format(index, col, field_data.get(), data, len);
 
-      if (real_col->mtype == DATA_MYSQL || real_col->mtype == DATA_VARCHAR || real_col->mtype == DATA_CHAR ||
-          real_col->mtype == DATA_VARMYSQL) {  // text field.
-        auto header = imcs_instance->get_cu(key_name)->header();
-        auto field_length = imcs_instance->get_cu(key_name)->pack_length();
-        std::unique_ptr<uchar[]> packed_str = std::make_unique<uchar[]>(field_length);
-        memset(packed_str.get(), 0x0, field_length);
+        /**
+         * we use real_index mtype because that mtype of index is different to real_index's.
+         * in mlog_parase_index, the original types were changed.
+         * */
+        auto mtype = real_index->get_col(idx)->mtype;
+        switch (mtype) {
+          case DATA_MYSQL:
+          case DATA_VARCHAR:
+          case DATA_CHAR:
+          case DATA_VARMYSQL: {
+            auto header = imcs_instance->get_cu(key_name)->header();
 
-        auto ret_str = ShannonBase::Utils::Util::pack_str(field_data.get(), len, header->m_charset, packed_str.get(),
-                                                          field_length, header->m_charset);
-        field_data.reset(new uchar[sizeof(uint32)]);
-        *reinterpret_cast<uint32 *>(field_data.get()) =
-            header->m_local_dict->store(ret_str, field_length, header->m_encoding_type);
-      }
-    } else  // if value of this field is null, then set field_data to nullptr.
-      field_data.reset(nullptr);
+            auto field_length = imcs_instance->get_cu(key_name)->pack_length();
+            std::unique_ptr<uchar[]> packed_str = std::make_unique<uchar[]>(field_length + 1);
+            memset(packed_str.get(), 0x0, field_length + 1);
+
+            auto ret_str = ShannonBase::Utils::Util::pack_str(field_data.get(), len, header->m_charset,
+                                                              packed_str.get(), field_length, header->m_charset);
+            auto strid = header->m_local_dict->store(ret_str, field_length, header->m_encoding_type);
+            field_data.reset(new uchar[sizeof(uint32)]);
+            *reinterpret_cast<uint32 *>(field_data.get()) = strid;
+          } break;
+          default:
+            break;
+        }
+      } else  // if value of this field is null, then set field_data to nullptr.
+        field_data.reset(nullptr);
+    }
+
     field_values.emplace(key_name, std::move(field_data));
   }
 
@@ -609,7 +621,6 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     context->m_extra_info.m_key_len = 0;
   } else {
     context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(real_index->get_min_size() + 1);
-    context->m_extra_info.m_key_len = get_PK(rec, index, real_index, offsets, context->m_extra_info.m_key_buff.get());
   }
 
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
@@ -753,6 +764,10 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
         context->m_table_name = const_cast<char *>(table_name.c_str());
         context->m_extra_info.m_trxid = trx_id;
 
+        /**
+         * If all rows were deleted from a page, and those were not used by any other transaction.
+         * This page will be purged, otherwise, it's there.
+         */
         auto all = (page[PAGE_HEADER + PAGE_N_HEAP + 1] == PAGE_HEAP_NO_USER_LOW) ? true : false;
         auto offsets = rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
         parse_cur_rec_change_apply_low(context.get(), rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
@@ -762,8 +777,7 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
         mem_heap_free(heap);
       }
     }
-  } else
-    ut_a(false);
+  }
 
   return (ptr);
 }
@@ -1281,6 +1295,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
     page_type = page ? fil_page_get_type(page) : FIL_PAGE_TYPE_ALLOCATED;
 
     page_zip = buf_block_get_page_zip(block);
+    // TODO: make a copy of page and page_zip. after the page and page_zip parsed, free them.
     buf_block_unfix(block);
   } else {
     DBUG_PRINT("ib_log the bloc is nullptr", ("type:%s", get_mlog_string(type)));
