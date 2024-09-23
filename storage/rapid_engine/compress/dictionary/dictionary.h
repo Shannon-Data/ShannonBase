@@ -47,7 +47,7 @@ class Dictionary {
     m_content.emplace("unknown", 0);
     m_id2content.emplace(0, "unknown");
   }
-  Dictionary() = default;
+  Dictionary() = delete;
   virtual ~Dictionary() = default;
   virtual uint32 store(const uchar *, size_t, Encoding_type type = Encoding_type::NONE);
   virtual uint32 get(uint64 strid, String &ret_val);

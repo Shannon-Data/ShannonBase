@@ -503,6 +503,8 @@ std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t
     std::unique_ptr<uchar[]> field_data{nullptr};
     auto len{0lu};
     byte *data{nullptr};
+
+    auto mtype = real_index->get_col(idx)->mtype;
     if (rec_offs_nth_extern(index, offsets, idx)) {  // store external.
       // TODO: deal with page-off scenario.
     } else {
@@ -510,21 +512,22 @@ std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t
       if (len != UNIV_SQL_NULL) {  // Not null
         field_data.reset(new uchar[len + 1]);
         memset(field_data.get(), 0x0, len + 1);
-        store_field_in_mysql_format(index, col, field_data.get(), data, len);
-
+        if (likely(mtype != DATA_BLOB))
+          store_field_in_mysql_format(index, col, field_data.get(), data, len);
+        else
+          memcpy(field_data.get(), data, len);
         /**
          * we use real_index mtype because that mtype of index is different to real_index's.
          * in mlog_parase_index, the original types were changed.
          * */
-        auto mtype = real_index->get_col(idx)->mtype;
         switch (mtype) {
           case DATA_MYSQL:
           case DATA_VARCHAR:
           case DATA_CHAR:
-          case DATA_VARMYSQL: {
+          case DATA_VARMYSQL:
+          case DATA_BLOB: {
             auto header = imcs_instance->get_cu(key_name)->header();
-
-            auto field_length = imcs_instance->get_cu(key_name)->pack_length();
+            auto field_length = (mtype == DATA_BLOB) ? len : imcs_instance->get_cu(key_name)->pack_length();
             std::unique_ptr<uchar[]> packed_str = std::make_unique<uchar[]>(field_length + 1);
             memset(packed_str.get(), 0x0, field_length + 1);
 

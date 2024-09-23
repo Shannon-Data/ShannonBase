@@ -107,13 +107,23 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
       return HA_ERR_GENERIC;
     });
 
-    // the extra one, is a ghost column DB_TRX_ID
+    /**the extra one, is a ghost column DB_TRX_ID
+     * for VARCHAR type Data in field->ptr is stored as: 1 or 2 bytes length-prefix-header  (from
+     * Field_varstring::length_bytes) data. the here we dont use var_xxx to get data, rather getting
+     * directly, due to we dont care what real it is. ref to: field.cc:6703
+     */
+
     for (auto index = 0u; index < source->s->fields + 1; index++) {
       auto fld = *(source->field + index);
       if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
       key << key_part.str() << fld->field_name;
-      auto data_ptr = fld->is_null() ? nullptr : fld->field_ptr();
-      auto data_len = fld->is_null() ? UNIV_SQL_NULL : fld->pack_length();
+      auto extra_offset = Utils::Util::is_varstring(fld->type()) ? (fld->field_length > 256 ? 2 : 1) : 0;
+      auto data_ptr = fld->is_null() ? nullptr : fld->field_ptr() + extra_offset;
+      auto data_len = fld->is_null()
+                          ? UNIV_SQL_NULL
+                          : (Utils::Util::is_varstring(fld->type())
+                                 ? ((extra_offset > 1) ? *(uint16 *)fld->field_ptr() : *(uchar *)fld->field_ptr())
+                                 : fld->pack_length());
       if (Utils::Util::is_blob(fld->type())) {
         data_ptr = const_cast<uchar *>(fld->data_ptr());
         data_len = fld->data_length(0);

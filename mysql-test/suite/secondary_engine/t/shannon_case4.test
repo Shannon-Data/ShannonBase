@@ -1,0 +1,196 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+#test for all types supported in rapid engine.
+create database datatype_db;
+use datatype_db;
+--disable_warnings
+
+# Test for all supported datat type
+CREATE TABLE datatype_test (
+  id int,
+  big_int_col BIGINT,
+  bool_col BOOL,
+  decimal_col DECIMAL(10, 2),
+  double_col DOUBLE,
+  float_col FLOAT,
+  int_col INT,
+  integer_col INTEGER,
+  medium_int_col MEDIUMINT,
+  small_int_col SMALLINT,
+  tiny_int_col TINYINT,
+  date_col DATE,
+  datetime_col DATETIME,
+  time_col TIME,
+  timestamp_col TIMESTAMP,
+  year_col YEAR,
+  char_col CHAR(10),
+  varchar_col VARCHAR(255),
+  text_col TEXT,
+  tinytext_col TINYTEXT,
+  mediumtext_col MEDIUMTEXT,
+  longtext_col LONGTEXT
+);
+alter table datatype_test secondary_engine=rapid;
+
+--echo #connection_1 and cconnection_2
+--connect(connection_1,localhost,root,,datatype_db)
+--connect(connection_2,localhost,root,,datatype_db)
+
+--connection connection_1
+--echo [conn1]
+set use_secondary_engine =forced;
+select @@use_secondary_engine;
+alter table datatype_test secondary_load;
+select
+  id,
+  big_int_col,
+  bool_col,  
+  decimal_col,
+  double_col ,
+  float_col ,
+  int_col ,
+  integer_col ,
+  medium_int_col ,
+  small_int_col ,
+  tiny_int_col ,
+  date_col DATE,
+  datetime_col ,
+  time_col ,
+  timestamp_col,
+  year_col ,
+  char_col ,
+  varchar_col,
+  text_col,
+  tinytext_col
+from datatype_test order by id;
+
+--connection connection_2
+--echo [conn2]
+set use_secondary_engine =off;
+select @@use_secondary_engine;
+# insert test data.
+INSERT INTO datatype_test VALUES 
+(1, 9223372036854775807, TRUE, 12345.67, 1234567.89, 123.45, 2147483647, 2147483647, 8388607, 32767, 127, '2024-01-01', '2024-01-01 12:34:56', '12:34:56', CURRENT_TIMESTAMP(), 2024, 'char_1', 'varchar_1', 'text_1', 'tinytext_1', 'mediumtext_1', 'longtext_1'),
+(2, 9223372036854775806, FALSE, 54321.89, 9876543.21, 543.21, 2147483646, 2147483646, 8388606, 32766, 126, '2023-01-01', '2023-01-01 12:34:56', '11:34:56', CURRENT_TIMESTAMP(), 2023, 'char_2', 'varchar_2', 'text_2', 'tinytext_2', 'mediumtext_2', 'longtext_2'),
+(3, 9223372036854775805, TRUE, 23456.78, 2345678.90, 234.56, 2147483645, 2147483645, 8388605, 32765, 125, '2022-01-01', '2022-01-01 12:34:56', '10:34:56', CURRENT_TIMESTAMP(), 2022, 'char_3', 'varchar_3', 'text_3', 'tinytext_3', 'mediumtext_3', 'longtext_3'),
+(4, 9223372036854775804, FALSE, 65432.10, 8765432.10, 654.32, 2147483644, 2147483644, 8388604, 32764, 124, '2021-01-01', '2021-01-01 12:34:56', '09:34:56', CURRENT_TIMESTAMP(), 2021, 'char_4', 'varchar_4', 'text_4', 'tinytext_4', 'mediumtext_4', 'longtext_4'),
+(5, 9223372036854775803, TRUE, 34567.89, 3456789.01, 345.67, 2147483643, 2147483643, 8388603, 32763, 123, '2020-01-01', '2020-01-01 12:34:56', '08:34:56', CURRENT_TIMESTAMP(), 2020, 'char_5', 'varchar_5', 'text_5', 'tinytext_5', 'mediumtext_5', 'longtext_5'),
+(6, 9223372036854775802, FALSE, 76543.21, 7654321.10, 765.43, 2147483642, 2147483642, 8388602, 32762, 122, '2019-01-01', '2019-01-01 12:34:56', '07:34:56', CURRENT_TIMESTAMP(), 2019, 'char_6', 'varchar_6', 'text_6', 'tinytext_6', 'mediumtext_6', 'longtext_6');
+
+--replace_column 15 IGNORE
+# query data.
+select
+  id,
+  big_int_col,
+  bool_col,  
+  decimal_col,
+  double_col ,
+  float_col ,
+  int_col ,
+  integer_col ,
+  medium_int_col ,
+  small_int_col ,
+  tiny_int_col ,
+  date_col DATE,
+  datetime_col ,
+  time_col ,
+  timestamp_col,
+  year_col ,
+  char_col ,
+  varchar_col,
+  text_col,
+  tinytext_col
+from datatype_test order by id;
+
+--sleep 10
+--connection connection_1
+--echo [after_insertion_conn1]
+--replace_column 15 IGNORE
+select
+  id,
+  big_int_col,
+  bool_col,  
+  decimal_col,
+  double_col ,
+  float_col ,
+  int_col ,
+  integer_col ,
+  medium_int_col ,
+  small_int_col ,
+  tiny_int_col ,
+  date_col DATE,
+  datetime_col ,
+  time_col ,
+  timestamp_col,
+  year_col ,
+  char_col ,
+  varchar_col,
+  text_col,
+  tinytext_col
+from datatype_test order by id;
+
+--connection connection_2
+--echo [conn2]
+DELETE FROM datatype_test WHERE big_int_col IN (9223372036854775807, 9223372036854775804, 9223372036854775803);
+--replace_column 15 IGNORE
+select
+  id,
+  big_int_col,
+  bool_col,  
+  decimal_col,
+  double_col ,
+  float_col ,
+  int_col ,
+  integer_col ,
+  medium_int_col ,
+  small_int_col ,
+  tiny_int_col ,
+  date_col DATE,
+  datetime_col ,
+  time_col ,
+  timestamp_col,
+  year_col ,
+  char_col ,
+  varchar_col,
+  text_col,
+  tinytext_col
+from datatype_test order by id;
+
+
+--sleep 10
+--connection connection_1
+--echo [after_insertion_conn1]
+--replace_column 15 IGNORE
+select
+  id,
+  big_int_col,
+  bool_col,  
+  decimal_col,
+  double_col ,
+  float_col ,
+  int_col ,
+  integer_col ,
+  medium_int_col ,
+  small_int_col ,
+  tiny_int_col ,
+  date_col DATE,
+  datetime_col ,
+  time_col ,
+  timestamp_col,
+  year_col ,
+  char_col ,
+  varchar_col,
+  text_col,
+  tinytext_col
+from datatype_test order by id;
+
+--connection default
+--enable_warnings
+
+#clean up used resource.
+DROP TABLE datatype_test;
+
+DROP DATABASE datatype_db;

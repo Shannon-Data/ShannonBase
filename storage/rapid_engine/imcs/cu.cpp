@@ -145,14 +145,13 @@ uchar *Cu::get_field_value(uchar *&data, size_t &len, bool need_pack) {
       }
     } break;
     case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG: {
-      ut_a(sizeof(int) == len);
-    } break;
+    case MYSQL_TYPE_LONGLONG:
+      break;
     case MYSQL_TYPE_DOUBLE:
+      break;
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL: {
-      ut_a(sizeof(double) == len);
-    }
+    } break;
     default:
       break;
   }
