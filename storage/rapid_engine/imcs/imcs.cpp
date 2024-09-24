@@ -150,16 +150,18 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
   /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
    *  removed*/
   std::ostringstream oss, oss2;
+  auto found{false};
   oss << db_name << ":" << table_name << ":";
   for (auto it = m_cus.begin(); it != m_cus.end();) {
     if (it->first.substr(0, oss.str().length()) == oss.str()) {
       it = m_cus.erase(it);
+      found = true;
     } else {
-      if (error_if_not_loaded) {
-        my_error(ER_NO_SUCH_TABLE, MYF(0), db_name, table_name);
-        return HA_ERR_GENERIC;
-      }
       ++it;
+    }
+    if (error_if_not_loaded && !found) {
+      my_error(ER_NO_SUCH_TABLE, MYF(0), db_name, table_name);
+      return HA_ERR_GENERIC;
     }
   }
 
