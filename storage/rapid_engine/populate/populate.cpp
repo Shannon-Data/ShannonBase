@@ -155,8 +155,8 @@ void Populator::end_change_populate_threads() {
     os_event_reset(log_sys->rapid_events[0]);
     sys_pop_started.store(false, std::memory_order_seq_cst);
     sys_rapid_loop_count = 0;
+    srv_threads.m_change_pop.join();
   }
-  srv_threads.m_change_pop.join();
 }
 
 void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */
