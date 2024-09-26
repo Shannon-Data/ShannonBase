@@ -78,9 +78,9 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
   }
 
 #if !defined(_WIN32)  // here we
-  pthread_setname_np(pthread_self(), "mtr_log_wrkr");
+  pthread_setname_np(pthread_self(), "mtr_log_wkr");
 #else
-  SetThreadDescription(GetCurrentThread(), L"mtr_log_wrkr");
+  SetThreadDescription(GetCurrentThread(), L"mtr_log_wkr");
 #endif
   LogParser parse_log;
 
@@ -145,6 +145,7 @@ void Populator::start_change_populate_threads() {
     os_event_reset(log_sys->rapid_events[0]);
     srv_threads.m_change_pop = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
     ShannonBase::Populate::sys_pop_started = true;
+    os_event_set(log_sys->rapid_events[0]);
     srv_threads.m_change_pop.start();
   }
 }
@@ -154,8 +155,8 @@ void Populator::end_change_populate_threads() {
     os_event_reset(log_sys->rapid_events[0]);
     sys_pop_started.store(false, std::memory_order_seq_cst);
     sys_rapid_loop_count = 0;
+    srv_threads.m_change_pop.join();
   }
-  srv_threads.m_change_pop.join();
 }
 
 void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */

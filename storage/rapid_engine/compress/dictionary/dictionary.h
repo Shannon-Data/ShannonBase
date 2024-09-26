@@ -29,9 +29,8 @@
 #ifndef __SHANNONBASE_COMPRESS_DICTIONARY_H__
 #define __SHANNONBASE_COMPRESS_DICTIONARY_H__
 
-#include <map>
 #include <mutex>
-#include <shared_mutex>
+#include <unordered_map>
 
 #include "include/my_inttypes.h"
 #include "include/mysql/strings/m_ctype.h"  //CHARSET_INFO
@@ -44,31 +43,31 @@ enum class Encoding_type : uint8 { NONE, SORTED, VARLEN };
 // Dictionary, which store all the dictionary data.
 class Dictionary {
  public:
-  Dictionary(Encoding_type type) : m_encoding_type(type) {}
-  Dictionary() = default;
+  Dictionary(Encoding_type type) : m_encoding_type(type) {
+    m_content.emplace("unknown", 0);
+    m_id2content.emplace(0, "unknown");
+  }
+  Dictionary() = delete;
   virtual ~Dictionary() = default;
   virtual uint32 store(const uchar *, size_t, Encoding_type type = Encoding_type::NONE);
-  virtual uint32 get(uint64 strid, String &val);
+  virtual uint32 get(uint64 strid, String &ret_val);
   virtual uchar *get(uint64 strid);
   virtual void set_algo(Encoding_type type) { m_encoding_type = type; }
   virtual inline Encoding_type get_algo() const { return m_encoding_type; }
   virtual inline uint32 content_size() const { return m_content.size(); }
-  virtual int lookup(String &);
-  virtual int lookup(uchar *&);
 
  private:
-  std::shared_mutex m_content_mtx;
-  std::atomic<uint64> m_content_id{0};
+  std::mutex m_content_mtx;
 
   // the encoding type of this dictionary used.
   Encoding_type m_encoding_type{Encoding_type::NONE};
 
   // compressed cotent string mapp, key: compressed string, value: compressed
   // string id in this map.
-  std::map<std::string, uint64> m_content;
+  std::unordered_map<std::string, uint64> m_content;
 
   // string id<--> original string. for access accleration.
-  std::map<uint64, std::string> m_id2content;
+  std::unordered_map<uint64, std::string> m_id2content;
 };
 
 }  // namespace Compress

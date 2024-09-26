@@ -35,9 +35,12 @@
 #include "include/ut0dbg.h"  //ut_a
 #include "sql/table.h"       //TABLE
 
-#include "storage/rapid_engine/imcs/chunk.h"  //CHUNK
-#include "storage/rapid_engine/imcs/cu.h"     //CU
-#include "storage/rapid_engine/imcs/imcs.h"   //IMCS
+#include "storage/rapid_engine/imcs/chunk.h"   //CHUNK
+#include "storage/rapid_engine/imcs/cu.h"      //CU
+#include "storage/rapid_engine/imcs/imcs.h"    //IMCS
+#include "storage/rapid_engine/utils/utils.h"  //Blob.
+
+#include "storage/rapid_engine/populate/populate.h"  //sys_pop_buff
 
 namespace ShannonBase {
 namespace Imcs {
@@ -82,6 +85,9 @@ void DataTable::scan_init() {
 }
 
 int DataTable::next(uchar *buf) {
+  // In optimization phase. we should not choice rapid to scan, when pop threading
+  // is running to repop the data to rapid.
+  // ut_a(ShannonBase::Populate::sys_pop_buff.size() == 0);
 // make all ptr in m_field_ptrs to move forward one step(one row).
 start_pos:
   if (m_rowid >= m_field_cus[0]->prows()) return HA_ERR_END_OF_FILE;
@@ -89,20 +95,8 @@ start_pos:
   for (auto idx = 0u; idx < m_field_cus.size(); idx++) {
     auto cu = m_field_cus[idx];
     auto normalized_length = cu->normalized_pack_length();
-    bool is_text_value{false};
-
-    switch (cu->header()->m_source_fld->type()) {
-      case MYSQL_TYPE_STRING:
-      case MYSQL_TYPE_VAR_STRING:
-      case MYSQL_TYPE_VARCHAR:
-        /**if this is a string type, it will be use local dictionary encoding, therefore,
-         * using stringid as field value. */
-        is_text_value = true;
-        break;
-      default:
-        break;
-    }
-
+    auto is_text_value = Utils::Util::is_string(cu->header()->m_source_fld->type()) ||
+                         Utils::Util::is_blob(cu->header()->m_source_fld->type());
     DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "");
       return HA_ERR_GENERIC;
@@ -112,8 +106,6 @@ start_pos:
     ut_a(source_fld->field_index() == cu->header()->m_source_fld->field_index());
     auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
     auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
-    bool null_flag = cu->chunk(current_chunk)->is_null(offset_in_chunk);
-    null_flag ? source_fld->set_null() : source_fld->set_notnull();
     // TODO: to check version link to check its old value.
     if (cu->chunk(current_chunk)->is_deleted(offset_in_chunk)) {
       m_rowid.fetch_add(1);
@@ -121,12 +113,25 @@ start_pos:
     }
 
     auto old_map = tmp_use_all_columns(m_data_source, m_data_source->write_set);
+    if (cu->chunk(current_chunk)->is_null(offset_in_chunk)) {
+      source_fld->set_null();
+      if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
+      continue;
+    }
+
+    source_fld->set_notnull();
     auto data_ptr = cu->chunk(current_chunk)->base() + offset_in_chunk * normalized_length;
     if (is_text_value) {
       uint32 str_id = *(uint32 *)data_ptr;
-      source_fld->set_field_ptr(cu->header()->m_local_dict->get(str_id));
+      auto str_ptr = cu->header()->m_local_dict->get(str_id);
+      Utils::Util::is_blob(cu->header()->m_type)
+          ? (down_cast<Field_blob *>(source_fld)->set_ptr(strlen((char *)str_ptr), str_ptr), 0)
+          : (Utils::Util::is_varstring(cu->header()->m_source_fld->type())
+                 ? source_fld->store(reinterpret_cast<char *>(str_ptr), strlen((char *)str_ptr), source_fld->charset())
+                 : source_fld->store(reinterpret_cast<char *>(str_ptr), cu->pack_length(), source_fld->charset()));
     } else
-      source_fld->set_field_ptr(data_ptr);
+      source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
+
     if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
   }
 

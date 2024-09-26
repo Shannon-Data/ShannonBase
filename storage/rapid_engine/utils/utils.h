@@ -52,13 +52,10 @@ class Util {
   static bool is_support_type(enum_field_types type);
 
   // get the data value.
-  static double get_value_mysql_type(enum_field_types &, Compress::Dictionary *&, const uchar *, uint);
   static double get_field_value(Field *&, Compress::Dictionary *&);
 
   static double get_field_value(enum_field_types, const uchar *, uint, Compress::Dictionary *, CHARSET_INFO *charset);
 
-  static double store_field_value(TABLE *&table, Field *&, Compress::Dictionary *&, double &);
-  static double store_field_value(TABLE *&table, Field *&, Compress::Dictionary *&, const uchar *, uint);
   static int get_range_value(enum_field_types, Compress::Dictionary *&, key_range *, key_range *, double &, double &);
   static int mem2string(uchar *buff, uint length, std::string &result);
 
@@ -93,6 +90,23 @@ class Util {
     size_t byte_index = n / 8;
     size_t bit_index = n % 8;
     ba->data[byte_index] |= (1 << bit_index);
+  }
+
+  inline static bool is_blob(enum_field_types type) {
+    return (type == MYSQL_TYPE_BLOB || type == MYSQL_TYPE_TINY_BLOB || type == MYSQL_TYPE_MEDIUM_BLOB ||
+            type == MYSQL_TYPE_LONG_BLOB)
+               ? true
+               : false;
+  }
+
+  inline static bool is_varstring(enum_field_types type) {
+    /**if this is a string type, it will be use local dictionary encoding, therefore,
+     * using stringid as field value. */
+    return (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING) ? true : false;
+  }
+
+  inline static bool is_string(enum_field_types type) {
+    return (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING) ? true : false;
   }
 };
 

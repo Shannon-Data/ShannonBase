@@ -125,7 +125,11 @@ uchar *Cu::get_field_value(uchar *&data, size_t &len, bool need_pack) {
   switch (m_header->m_type) {
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_VAR_STRING: {
+    case MYSQL_TYPE_VAR_STRING:
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB: {
       if (need_pack) {
         auto to = std::make_unique<uchar[]>(m_header->m_source_fld->pack_length());
         auto to_ptr = Utils::Util::pack_str(data, len, &my_charset_bin, to.get(), m_header->m_source_fld->pack_length(),
@@ -141,14 +145,13 @@ uchar *Cu::get_field_value(uchar *&data, size_t &len, bool need_pack) {
       }
     } break;
     case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG: {
-      ut_a(sizeof(int) == len);
-    } break;
+    case MYSQL_TYPE_LONGLONG:
+      break;
     case MYSQL_TYPE_DOUBLE:
+      break;
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL: {
-      ut_a(sizeof(double) == len);
-    }
+    } break;
     default:
       break;
   }
@@ -280,6 +283,17 @@ uchar *Cu::delete_row_from_log(const Rapid_load_context *context, uchar *data, s
   ut_a(context);
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
   return data;
+}
+
+uchar *Cu::delete_row_all(const Rapid_load_context *context) {
+  auto rows = m_header->m_prows.load();
+  for (row_id_t rowid = 0; rowid < rows; rowid++) {
+    if (!delete_row(context, rowid))  // errors occur.
+      return nullptr;
+  }
+
+  ut_a(m_chunks.size());
+  return m_chunks[0]->base();
 }
 
 uchar *Cu::read_row(const Rapid_load_context *context, uchar *data, size_t len) {

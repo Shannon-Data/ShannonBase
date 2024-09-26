@@ -58,6 +58,10 @@ Chunk::Chunk(const Field *field) {
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB:
       /**if this is a string type, it will be use local dictionary encoding, therefore,
        * using stringid as field value. */
       normalized_pack_length = sizeof(uint32);

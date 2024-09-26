@@ -39,10 +39,6 @@ std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries
 bool Util::is_support_type(enum_field_types type) {
   switch (type) {
     case MYSQL_TYPE_BIT:
-    case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_TINY_BLOB:
-    case MYSQL_TYPE_MEDIUM_BLOB:
-    case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_GEOMETRY:
     case MYSQL_TYPE_TYPED_ARRAY:
     case MYSQL_TYPE_JSON:
@@ -56,47 +52,6 @@ bool Util::is_support_type(enum_field_types type) {
   return false;
 }
 
-double Util::get_value_mysql_type(enum_field_types &types, Compress::Dictionary *&dictionary, const uchar *key,
-                                  uint key_len) {
-  double val{0};
-  if (!key || !key_len || !dictionary) return val;
-
-  switch (types) {
-    case MYSQL_TYPE_TINY:
-    case MYSQL_TYPE_SHORT:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG: {
-      val = *(int *)key;
-    } break;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-      val = *(double *)key;
-    } break;
-    case MYSQL_TYPE_DATE:
-    case MYSQL_TYPE_TIME:
-    case MYSQL_TYPE_DATETIME:
-    case MYSQL_TYPE_NEWDATE:
-    case MYSQL_TYPE_YEAR:
-    case MYSQL_TYPE_TIMESTAMP:
-    case MYSQL_TYPE_TIME2: {
-      Field_datetimef datetime(const_cast<uchar *>(key), nullptr, 0, 0, "temp_datetime", 6);
-      val = datetime.val_real();
-    } break;
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_VAR_STRING: {
-      uchar *key_ptr = const_cast<uchar *>(key);
-      val = dictionary->lookup(key_ptr);
-    } break;
-    case MYSQL_TYPE_DOUBLE:
-    case MYSQL_TYPE_FLOAT: {
-      val = *(double *)key;
-    } break;
-    default:
-      break;
-  }
-  return val;
-}
 double Util::get_field_value(Field *&field, Compress::Dictionary *&dictionary) {
   ut_ad(field && dictionary);
   double data_val{0};
@@ -181,88 +136,6 @@ double Util::get_field_value(enum_field_types type, const uchar *buf, uint len, 
   return data_val;
 }
 
-double Util::store_field_value(TABLE *&table, Field *&field, Compress::Dictionary *&dictionary, double &value) {
-  ut_a(field && dictionary);
-  my_bitmap_map *old_map = tmp_use_all_columns(table, table->write_set);
-  switch (field->type()) {
-    case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_VARCHAR: {  // if string, stores its stringid, and gets from
-                                // local dictionary.
-      String str;
-      dictionary->get(value, str /*, *const_cast<CHARSET_INFO *>(field->charset())*/);
-      field->store(str.c_ptr(), str.length(), &my_charset_bin);
-    } break;
-    case MYSQL_TYPE_INT24:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG:
-    case MYSQL_TYPE_FLOAT:
-    case MYSQL_TYPE_DOUBLE: {
-      field->store(value);
-    } break;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-      field->store(value);
-    } break;
-    case MYSQL_TYPE_DATE:
-    case MYSQL_TYPE_DATETIME2:
-    case MYSQL_TYPE_DATETIME: {
-      field->store(value);
-    } break;
-    default:
-      field->store(value);
-  }
-  if (old_map) tmp_restore_column_map(table->write_set, old_map);
-  return value;
-}
-
-double Util::store_field_value(TABLE *&table, Field *&field, Compress::Dictionary *&dictionary, const uchar *key,
-                               uint key_len) {
-  double val{0};
-  if (!key || !key_len || !dictionary) return val;
-  my_bitmap_map *old_map = tmp_use_all_columns(table, table->write_set);
-  switch (field->type()) {
-    case MYSQL_TYPE_TINY:
-    case MYSQL_TYPE_SHORT:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG: {
-      val = *(int *)key;
-      field->store(val);
-    } break;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-      val = *(double *)key;
-      field->store(val);
-    } break;
-    case MYSQL_TYPE_DATE:
-    case MYSQL_TYPE_TIME:
-    case MYSQL_TYPE_DATETIME:
-    case MYSQL_TYPE_NEWDATE:
-    case MYSQL_TYPE_YEAR:
-    case MYSQL_TYPE_TIMESTAMP:
-    case MYSQL_TYPE_TIME2: {
-      Field_datetimef datetime(const_cast<uchar *>(key), nullptr, 0, 0, "temp_datetime", 6);
-      val = datetime.val_real();
-      field->store(val);
-    } break;
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_VAR_STRING: {
-      uchar *key_ptr = const_cast<uchar *>(key);
-      val = dictionary->lookup(key_ptr);
-      field->store(val);
-    } break;
-    case MYSQL_TYPE_DOUBLE:
-    case MYSQL_TYPE_FLOAT: {
-      val = *(double *)key;
-      field->store(val);
-    } break;
-    default:
-      break;
-  }
-  if (old_map) tmp_restore_column_map(table->write_set, old_map);
-  return 0;
-}
 int Util::get_range_value(enum_field_types type, Compress::Dictionary *&dictionary, key_range *min_key,
                           key_range *max_key, double &minkey, double &maxkey) {
   switch (type) {

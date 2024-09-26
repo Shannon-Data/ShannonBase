@@ -148,7 +148,6 @@ class LogParser {
 
   // get the field value from innodb format to mysql format. return 0 success.
   int store_field_in_mysql_format(const dict_index_t *index, const dict_col_t* col,
-                                  const dict_col_t* real_col,
                                   const byte *dest, const byte *src, ulint len);
 
   // only user's index be retrieved from dd_table.
@@ -157,10 +156,6 @@ class LogParser {
   // get the trxid in byte fmt and returns the length of PK found.
   inline uint get_trxid(const rec_t *rec, const dict_index_t *index,
                         const ulint *offsets, uchar *trx_id);
-
-  // get pk in byte fmt, and returns the length of PK.
-  inline uint get_PK(const rec_t *rec, const dict_index_t *index,
-                     const dict_index_t *real_index, const ulint *offsets, uchar *pk);
 
   // parse the signle log rec.
   ulint parse_single_rec(Rapid_load_context* context, byte *ptr, byte *end_ptr);

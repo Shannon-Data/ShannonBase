@@ -70,25 +70,27 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
   Compress_algorithm *algr = CompressFactory::get_instance(alg);
   std::string compressed_str(algr->compressString(orgin_str));
   {
-    if (m_content.find(compressed_str) == m_content.end()) {  // insert new one.
-      m_content_id.fetch_add(1, std::memory_order::memory_order_acq_rel);
-      uint64 id = m_content_id.load();
-      // compressed string <---> str id. get a copy of string and store it in map.
-      m_content.emplace(compressed_str, id);
-      // id<---> orginal string
-      m_id2content.emplace(id, std::string((char *)str, len));
+    auto content_pos = m_content.find(compressed_str);
+    // found it, then return it.
+    if (content_pos != m_content.end()) return content_pos->second;
 
-      ut_a((m_content.size() == m_id2content.size()));
-      ut_a(m_content_id == m_content.size());
-      return m_content_id;
-    } else
-      return m_content[compressed_str];
+    // not found, then insert a new one.
+    uint64 id = m_content.size();
+    // compressed string <---> str id. get a copy of string and store it in map.
+    m_content.emplace(compressed_str, id);
+
+    // id<---> orginal string
+    ut_a(m_id2content.find(id) == m_id2content.end());
+    m_id2content.emplace(id, compressed_str);
+
+    ut_a((m_content.size() == m_id2content.size()));
+    return id;
   }
 
   return 0;
 }
 
-uint32 Dictionary::get(uint64 strid, String &val) {
+uint32 Dictionary::get(uint64 strid, String &ret_val) {
   compress_algos alg [[maybe_unused]]{compress_algos::NONE};
   switch (m_encoding_type) {
     case Encoding_type::SORTED:
@@ -106,11 +108,13 @@ uint32 Dictionary::get(uint64 strid, String &val) {
 
   {
     std::scoped_lock lk(m_content_mtx);
-    if (m_id2content.find(strid) != m_id2content.end()) {
-      String strs(m_id2content[strid].c_str(), m_id2content[strid].length(), val.charset());
-      copy_if_not_alloced(&val, &strs, strs.length());
+    auto id_pos = m_id2content.find(strid);
+    if (id_pos != m_id2content.end()) {
+      auto val_str = id_pos->second;
+      String strs(val_str.c_str(), val_str.length(), ret_val.charset());
+      copy_if_not_alloced(&ret_val, &strs, strs.length());
     } else
-      return 1;
+      return 0;
   }
 
   return 0;
@@ -134,74 +138,10 @@ uchar *Dictionary::get(uint64 strid) {
 
   {
     std::scoped_lock lk(m_content_mtx);
-    if (m_id2content.find(strid) != m_id2content.end())
-      return (uchar *)(m_id2content[strid].c_str());
-    else
-      return nullptr;
+    auto id_pos = m_id2content.find(strid);
+    return (id_pos != m_id2content.end()) ? (uchar *)(id_pos->second.c_str()) : nullptr;
   }
   return nullptr;
-}
-
-int Dictionary::lookup(uchar *&str) {
-  DBUG_TRACE;
-  // returns dictionary id. //encoding alg pls ref to: heatwave document.
-  std::string origin_str;
-  origin_str.assign((const char *)str);
-  compress_algos alg{compress_algos::NONE};
-  switch (m_encoding_type) {
-    case Encoding_type::SORTED:
-      alg = compress_algos::ZSTD;
-      break;
-    case Encoding_type::VARLEN:
-      alg = compress_algos::LZ4;
-      break;
-    case Encoding_type::NONE:
-      alg = compress_algos::NONE;
-      break;
-    default:
-      break;
-  }
-
-  std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
-  {
-    std::scoped_lock lk(m_content_mtx);
-    if (m_content.find(compressed_str) == m_content.end()) {  // not found, return -1.
-      return -1;
-    } else
-      return m_content[compressed_str];
-  }
-
-  return -1;
-}
-int Dictionary::lookup(String &str) {
-  DBUG_TRACE;
-  // returns dictionary id. //encoding alg pls ref to: heatwave document.
-  std::string origin_str(str.c_ptr());
-  compress_algos alg{compress_algos::NONE};
-  switch (m_encoding_type) {
-    case Encoding_type::SORTED:
-      alg = compress_algos::ZSTD;
-      break;
-    case Encoding_type::VARLEN:
-      alg = compress_algos::LZ4;
-      break;
-    case Encoding_type::NONE:
-      alg = compress_algos::NONE;
-      break;
-    default:
-      break;
-  }
-
-  std::string compressed_str(CompressFactory::get_instance(alg)->compressString(origin_str));
-  {
-    std::scoped_lock lk(m_content_mtx);
-    if (m_content.find(compressed_str) == m_content.end()) {  // not found, return -1.
-      return -1;
-    } else
-      return m_content[compressed_str];
-  }
-
-  return -1;
 }
 
 }  // namespace Compress

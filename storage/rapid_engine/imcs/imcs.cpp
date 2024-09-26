@@ -107,13 +107,29 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
       return HA_ERR_GENERIC;
     });
 
-    // the 1, is a ghost column DB_TRX_ID
+    /**the extra one, is a ghost column DB_TRX_ID
+     * for VARCHAR type Data in field->ptr is stored as: 1 or 2 bytes length-prefix-header  (from
+     * Field_varstring::length_bytes) data. the here we dont use var_xxx to get data, rather getting
+     * directly, due to we dont care what real it is. ref to: field.cc:6703
+     */
+
     for (auto index = 0u; index < source->s->fields + 1; index++) {
       auto fld = *(source->field + index);
       if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
       key << key_part.str() << fld->field_name;
-      if (!m_cus[key.str()].get()->write_row(context, fld->is_null() ? nullptr : fld->field_ptr(),
-                                             fld->is_null() ? UNIV_SQL_NULL : fld->pack_length())) {
+      auto extra_offset = Utils::Util::is_varstring(fld->type()) ? (fld->field_length > 256 ? 2 : 1) : 0;
+      auto data_ptr = fld->is_null() ? nullptr : fld->field_ptr() + extra_offset;
+      auto data_len = fld->is_null()
+                          ? UNIV_SQL_NULL
+                          : (Utils::Util::is_varstring(fld->type())
+                                 ? ((extra_offset > 1) ? *(uint16 *)fld->field_ptr() : *(uchar *)fld->field_ptr())
+                                 : fld->pack_length());
+      if (Utils::Util::is_blob(fld->type())) {
+        data_ptr = const_cast<uchar *>(fld->data_ptr());
+        data_len = fld->data_length(0);
+      }
+
+      if (!m_cus[key.str()].get()->write_row(context, data_ptr, data_len)) {
         my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), source->s->db.str, source->s->table_name.str);
         source->file->ha_rnd_end();
         return HA_ERR_GENERIC;
@@ -134,16 +150,18 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
   /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
    *  removed*/
   std::ostringstream oss, oss2;
+  auto found{false};
   oss << db_name << ":" << table_name << ":";
   for (auto it = m_cus.begin(); it != m_cus.end();) {
     if (it->first.substr(0, oss.str().length()) == oss.str()) {
       it = m_cus.erase(it);
+      found = true;
     } else {
-      if (error_if_not_loaded) {
-        my_error(ER_NO_SUCH_TABLE, MYF(0), db_name, table_name);
-        return HA_ERR_GENERIC;
-      }
       ++it;
+    }
+    if (error_if_not_loaded && !found) {
+      my_error(ER_NO_SUCH_TABLE, MYF(0), db_name, table_name);
+      return HA_ERR_GENERIC;
     }
   }
 
@@ -177,15 +195,18 @@ int Imcs::delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &
   ut_a(context);
   std::ostringstream oss, oss2;
   oss << context->m_schema_name << ":" << context->m_table_name << ":";
+  if (rowids.empty()) {  // delete all rows.
+    for (auto it = m_cus.begin(); it != m_cus.end(); ++it) {
+      if (it->first.substr(0, oss.str().length()) != oss.str()) continue;
+      if (!it->second.get()->delete_row_all(context)) return HA_ERR_GENERIC;
+    }
+    return 0;
+  }
 
   for (auto &rowid : rowids) {
-    for (auto it = m_cus.begin(); it != m_cus.end();) {
-      if (it->first.substr(0, oss.str().length()) == oss.str()) {
-        if (!it->second.get()->delete_row(context, rowid)) {
-          return HA_ERR_GENERIC;
-        }
-      }
-      ++it;
+    for (auto it = m_cus.begin(); it != m_cus.end(); ++it) {
+      if (it->first.substr(0, oss.str().length()) != oss.str()) continue;
+      if (!it->second.get()->delete_row(context, rowid)) return HA_ERR_GENERIC;
     }
   }
   return 0;

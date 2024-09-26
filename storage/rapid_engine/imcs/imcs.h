@@ -87,7 +87,7 @@ class Imcs : public MemoryObject {
   // delete a row in IMCS by using its rowid.
   int delete_row(const Rapid_load_context *context, row_id_t rowid);
 
-  // delete a row in IMCS by using its rowid.
+  // delete a row in IMCS by using its rowid. if vector is empty that means delete all rows.
   int delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &rowids);
 
   // update a cu in IMCS by using its rowid.
