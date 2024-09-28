@@ -132,6 +132,54 @@ select
   tinytext_col
 from datatype_test order by id;
 
+# update data
+--connection connection_2
+--echo [conn2]
+UPDATE datatype_test SET
+  decimal_col = 88888.88,
+  double_col = 1111111.11,
+  float_col = 222.22,
+  int_col = -2147483640,
+  char_col = 'updated_1',
+  varchar_col = 'updated_varchar_1'
+WHERE big_int_col = 9223372036854775806;
+
+UPDATE datatype_test SET
+  decimal_col = 99999.99,
+  double_col = 2222222.22,
+  float_col = 333.33,
+  int_col = -2147483630,
+  char_col = 'updated_2',
+  varchar_col = 'updated_varchar_2'
+WHERE big_int_col = 9223372036854775805;
+
+--sleep 18
+--connection connection_1
+--echo [after_insertion_conn1]
+--replace_column 15 IGNORE
+select
+  id,
+  big_int_col,
+  bool_col,
+  decimal_col,
+  double_col ,
+  float_col ,
+  int_col ,
+  integer_col ,
+  medium_int_col ,
+  small_int_col ,
+  tiny_int_col ,
+  date_col DATE,
+  datetime_col ,
+  time_col ,
+  timestamp_col,
+  year_col ,
+  char_col ,
+  varchar_col,
+  text_col,
+  tinytext_col
+from datatype_test order by id;
+
 --connection connection_2
 --echo [conn2]
 DELETE FROM datatype_test WHERE big_int_col IN (9223372036854775807, 9223372036854775804, 9223372036854775803);
@@ -160,7 +208,7 @@ select
 from datatype_test order by id;
 
 
---sleep 10
+--sleep 18
 --connection connection_1
 --echo [after_insertion_conn1]
 --replace_column 15 IGNORE
