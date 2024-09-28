@@ -505,14 +505,33 @@ std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t
     byte *data{nullptr};
 
     auto mtype = real_index->get_col(idx)->mtype;
-    if (rec_offs_nth_extern(index, offsets, idx)) {  // store external.
-      // TODO: deal with page-off scenario.
+    data = rec_get_nth_field(index, rec, offsets, idx, &len);
+    if (UNIV_UNLIKELY(rec_offs_nth_extern(index, offsets, idx))) {  // store external.
+      // TODO: deal with off-page scenario. see comment at blob0blob.cc:385.
+      ut_a(len >= BTR_EXTERN_FIELD_REF_SIZE);
+      ut_a(DATA_LARGE_MTYPE(index->get_col(idx)->mtype));
+
+      rec_offs_make_valid(rec, index, const_cast<ulint *>(offsets));
+      ut_ad(rec_offs_validate(rec, index, offsets));
+
+      ulint local_len = len;
+      mem_heap_t *heap = mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE);
+      auto real_offsets = rec_get_offsets(rec, real_index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
+
+      const page_size_t page_size = dict_table_page_size(index->table);
+      auto field_ref = const_cast<byte *>(lob::btr_rec_get_field_ref(real_index, rec, real_offsets, idx));
+      lob::ref_t blobref(field_ref);
+      lob::ref_mem_t mem_obj;
+      blobref.parse(mem_obj);
+
+      data = lob::btr_rec_copy_externally_stored_field_func(nullptr, real_index, rec, real_offsets, page_size, idx,
+                                                            &local_len, nullptr,
+                                                            IF_DEBUG(dict_index_is_sdi(real_index), ) heap, true);
     } else {
-      data = rec_get_nth_field(index, rec, offsets, idx, &len);
-      if (len != UNIV_SQL_NULL) {  // Not null
+      if (UNIV_LIKELY(len != UNIV_SQL_NULL)) {  // Not null
         field_data.reset(new uchar[len + 1]);
         memset(field_data.get(), 0x0, len + 1);
-        if (likely(mtype != DATA_BLOB))
+        if (UNIV_LIKELY(mtype != DATA_BLOB))
           store_field_in_mysql_format(index, col, field_data.get(), data, len);
         else
           memcpy(field_data.get(), data, len);
@@ -527,7 +546,7 @@ std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t
           case DATA_VARMYSQL:
           case DATA_BLOB: {
             auto header = imcs_instance->get_cu(key_name)->header();
-            auto field_length = (mtype == DATA_BLOB) ? len : imcs_instance->get_cu(key_name)->pack_length();
+            auto field_length = (mtype == DATA_MYSQL) ? imcs_instance->get_cu(key_name)->pack_length() : len;
             std::unique_ptr<uchar[]> packed_str = std::make_unique<uchar[]>(field_length + 1);
             memset(packed_str.get(), 0x0, field_length + 1);
 
@@ -573,17 +592,19 @@ int LogParser::find_matched_rows(Rapid_load_context *context, std::string &key_n
       if (ignore_field.size() && ignore_field.find(cu_name) != ignore_field.end()) continue;
 
       // test the sys field.
-      if (!with_sys_col && !strncmp(cu_name.c_str(), SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN)) continue;
+      auto fld_str = cu_name.substr(cu_name.find_last_of(":") + 1);
+      if (!with_sys_col && !strncmp(fld_str.c_str(), SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN)) continue;
 
       auto field_normal_len = imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->normalized_pack_length();
       uchar *pos = imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->base() + offset_in_chunk * field_normal_len;
       ut_a(pos <= imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->tell());
       if (to_find.second.get()) {  // not null
-        matched = memcmp(to_find.second.get(), pos, field_normal_len) ? false : true;
+        matched = (memcmp(to_find.second.get(), pos, field_normal_len)) ? false : true;
       } else {  // is null, then need to check the null bitmap.
         auto ba = imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->get_header()->m_null_mask.get();
         matched = Utils::Util::bit_array_get(ba, offset_in_chunk) ? true : false;
       }
+      if (!matched) break;
     }
 
     if (matched) matched_rows.emplace_back(row_id);
@@ -791,13 +812,58 @@ byte *LogParser::parse_cur_and_apply_delete_rec(Rapid_load_context *context, byt
                                                 dict_index_t *index,                    /*!< in: record descriptor */
                                                 mtr_t *mtr) {                           /*!< in: mtr or NULL */
 
+  ulint offset;
+  page_cur_t cursor;
+
   if (end_ptr < ptr + 2) {
     return (nullptr);
   }
 
   /* Read the cursor rec offset as a 2-byte ulint */
+  offset = mach_read_from_2(ptr);
   ptr += 2;
-  // we delete the in `delete_mark`, therefore, we just advance the ptr.
+
+  ut_a(offset <= UNIV_PAGE_SIZE);
+
+  if (block) {
+    // may the page in this block not used by any one, it could be evicted.???
+    page_t *page = ((buf_frame_t *)block->frame);
+    ut_ad(!page || page_is_comp(page) == dict_table_is_comp(index->table));
+
+    mem_heap_t *heap = nullptr;
+    ulint offsets_[REC_OFFS_NORMAL_SIZE];
+    rec_t *rec = page + offset;
+    rec_offs_init(offsets_);
+    if (page) {
+      auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
+      const dict_index_t *real_tb_index = find_index(index_id);
+
+      std::string db_name, table_name;
+      real_tb_index->table->get_table_name(db_name, table_name);
+      // get field length from rapid
+      auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
+      if (share) {  // was not loaded table and not leaf
+        auto context = std::make_unique<ShannonBase::Rapid_load_context>();
+        context->m_schema_name = const_cast<char *>(db_name.c_str());
+        context->m_table_name = const_cast<char *>(table_name.c_str());
+        // context->m_extra_info.m_trxid = trx_id;
+
+        /**
+         * If all rows were deleted from a page, and those were not used by any other transaction.
+         * This page will be purged, otherwise, it's there.
+         */
+        auto all = (page[PAGE_HEADER + PAGE_N_HEAP + 1] == PAGE_HEAP_NO_USER_LOW) ? true : false;
+        auto offsets = rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
+        parse_cur_rec_change_apply_low(context.get(), rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
+                                       nullptr);
+      }  // share
+    }    // page
+
+    if (UNIV_LIKELY_NULL(heap)) {
+      mem_heap_free(heap);
+    }
+  }
+
   return (ptr);
 }
 
