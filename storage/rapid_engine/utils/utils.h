@@ -64,20 +64,20 @@ class Util {
   static uchar *pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, uchar *to, size_t to_length,
                          const CHARSET_INFO *to_cs);
 
-  inline static std::string get_key_name(Field *field) {
+  static inline std::string get_key_name(Field *field) {
     std::ostringstream ostr;
     ostr << field->table->s->db.str << ":" << *field->table_name << ":" << field->field_name;
     return ostr.str();
   }
 
-  inline static std::string get_key_name(const char *db_name, const char *table_name, const char *field_name) {
+  static inline std::string get_key_name(const char *db_name, const char *table_name, const char *field_name) {
     std::ostringstream ostr;
     ostr << db_name << ":" << table_name << ":" << field_name;
     return ostr.str();
   }
 
   // check Nth is 1 or not.
-  inline static bool bit_array_get(bit_array_t *ba, size_t n) {
+  static inline bool bit_array_get(bit_array_t *ba, size_t n) {
     if (!ba) return false;
 
     size_t byte_index = n / 8;
@@ -86,26 +86,26 @@ class Util {
   }
 
   // set Nth is 1.
-  inline static void bit_array_set(bit_array_t *ba, size_t n) {
+  static inline void bit_array_set(bit_array_t *ba, size_t n) {
     size_t byte_index = n / 8;
     size_t bit_index = n % 8;
     ba->data[byte_index] |= (1 << bit_index);
   }
 
-  inline static bool is_blob(enum_field_types type) {
+  static inline bool is_blob(enum_field_types type) {
     return (type == MYSQL_TYPE_BLOB || type == MYSQL_TYPE_TINY_BLOB || type == MYSQL_TYPE_MEDIUM_BLOB ||
             type == MYSQL_TYPE_LONG_BLOB)
                ? true
                : false;
   }
 
-  inline static bool is_varstring(enum_field_types type) {
+  static inline bool is_varstring(enum_field_types type) {
     /**if this is a string type, it will be use local dictionary encoding, therefore,
      * using stringid as field value. */
     return (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING) ? true : false;
   }
 
-  inline static bool is_string(enum_field_types type) {
+  static inline bool is_string(enum_field_types type) {
     return (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING) ? true : false;
   }
 };

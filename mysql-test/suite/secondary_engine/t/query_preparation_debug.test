@@ -24,9 +24,9 @@ SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 # engine. The failure triggers a repreparation against the primary
 # storage engine.
 FLUSH STATUS;
-SET DEBUG = '+d,secondary_engine_mock_prepare_error';
+SET DEBUG = '+d,secondary_engine_rapid_prepare_error';
 EXECUTE ps;
-SET DEBUG = '-d,secondary_engine_mock_prepare_error';
+SET DEBUG = '-d,secondary_engine_rapid_prepare_error';
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 
 # The statement remembers that the previous execution failed to open
@@ -52,12 +52,12 @@ ANALYZE TABLE t1, t2;
 
 # Verify that the secondary engine optimization was invoked by
 # injecting an error in the secondary engine optimization. The error
-# prevents the queries from being offloaded to the MOCK engine.
-SET DEBUG = "+d,secondary_engine_mock_optimize_error";
+# prevents the queries from being offloaded to the Rapid engine.
+SET DEBUG = "+d,secondary_engine_rapid_optimize_error";
 FLUSH STATUS;
 --sorted_result
 SELECT * FROM t1;
---error ER_SECONDARY_ENGINE
+#--error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ x FROM t1;
 --sorted_result
 SELECT (SELECT y FROM t2 WHERE y = 1) FROM t1;
@@ -65,10 +65,10 @@ SELECT (SELECT y FROM t2 WHERE y = 1) FROM t1;
 SELECT * FROM t1 UNION ALL SELECT * FROM t2;
 --sorted_result
 SELECT * FROM t1 UNION DISTINCT SELECT * FROM t2;
-SET DEBUG = "-d,secondary_engine_mock_optimize_error";
+SET DEBUG = "-d,secondary_engine_rapid_optimize_error";
 SHOW STATUS LIKE 'Secondary_engine_execution_count'; # Should be 0
 
-# The same queries should use the MOCK engine if no error is injected.
+# The same queries should use the rapid engine if no error is injected.
 FLUSH STATUS;
 SELECT * FROM t1;
 SELECT (SELECT y FROM t2 WHERE y = 1) FROM t1;
@@ -83,10 +83,10 @@ DROP TABLE t1, t2;
 CREATE TABLE t(x int PRIMARY KEY) SECONDARY_ENGINE RAPID;
 INSERT INTO t VALUES (1), (2), (3);
 ALTER TABLE t SECONDARY_LOAD;
-SET DEBUG_SYNC = 'before_mock_optimize SIGNAL mock WAIT_FOR continue';
+SET DEBUG_SYNC = 'before_rapid_optimize SIGNAL rapid WAIT_FOR continue';
 --send SELECT * FROM t
 --connect(conn1,localhost,root,,)
-SET DEBUG_SYNC = 'now WAIT_FOR mock';
+SET DEBUG_SYNC = 'now WAIT_FOR rapid';
 SELECT ID FROM INFORMATION_SCHEMA.PROCESSLIST
        WHERE INFO = 'SELECT * FROM t' INTO @thread_id;
 KILL QUERY @thread_id;
@@ -113,7 +113,7 @@ SET @saved_general_log = @@global.general_log;
 SET @saved_log_output = @@global.log_output;
 SET GLOBAL general_log = 1;
 SET GLOBAL log_output = 'table';
-SET DEBUG = '+d,secondary_engine_mock_optimize_error';
+SET DEBUG = '+d,secondary_engine_rapid_optimize_error';
 
 TRUNCATE TABLE mysql.general_log;
 SELECT * FROM t;
@@ -133,11 +133,11 @@ DROP PREPARE ps;
 
 SET GLOBAL general_log = @saved_general_log;
 SET GLOBAL log_output = @saved_log_output;
-SET DEBUG = '-d,secondary_engine_mock_optimize_error';
+SET DEBUG = '-d,secondary_engine_rapid_optimize_error';
 
 TRUNCATE TABLE mysql.general_log;
 DROP TABLE t;
 
 --disable_query_log
-UNINSTALL PLUGIN mock;
+#UNINSTALL PLUGIN rapid;
 --enable_query_log

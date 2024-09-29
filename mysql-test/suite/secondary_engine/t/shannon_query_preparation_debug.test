@@ -139,5 +139,4 @@ TRUNCATE TABLE mysql.general_log;
 DROP TABLE t;
 
 --disable_query_log
-UNINSTALL PLUGIN rapid;
 --enable_query_log
