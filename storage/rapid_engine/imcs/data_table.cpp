@@ -67,13 +67,15 @@ void DataTable::scan_init() {
   key_part << m_data_source->s->db.str << ":" << m_data_source->s->table_name.str << ":";
   for (auto index = 0u; index < m_data_source->s->fields; index++) {
     auto fld = *(m_data_source->field + index);
+    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
     key << key_part.str() << fld->field_name;
     auto key_str = key.str();
 
     m_field_cus.push_back(Imcs::instance()->get_cu(key_str));
     key.str("");
   }
-  ut_a(m_field_cus.size() == m_data_source->s->fields);
+
   m_rowid.store(0);
 
 #ifndef NDEBUG
@@ -102,8 +104,7 @@ start_pos:
       return HA_ERR_GENERIC;
     });
 
-    auto source_fld = *(m_data_source->field + idx);
-    ut_a(source_fld->field_index() == cu->header()->m_source_fld->field_index());
+    auto source_fld = *(m_data_source->field + cu->header()->m_source_fld->field_index());
     auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
     auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
     // TODO: to check version link to check its old value.
