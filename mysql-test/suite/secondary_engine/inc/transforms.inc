@@ -1,12 +1,12 @@
 --source include/elide_costs.inc
 
 --disable_query_log
-eval INSTALL PLUGIN mock SONAME '$MOCK_PLUGIN';
+#eval INSTALL PLUGIN rapid SONAME '$rapid_PLUGIN';
 --enable_query_log
 
 CREATE TABLE t1(a DATETIME NOT NULL);
 INSERT INTO t1 VALUES (TIMESTAMP'2006-06-06 15:55:55');
-ALTER TABLE t1 SECONDARY_ENGINE MOCK;
+ALTER TABLE t1 SECONDARY_ENGINE rapid;
 ALTER TABLE t1 SECONDARY_LOAD;
 EXPLAIN SELECT max(a) from t1;
 
@@ -28,10 +28,10 @@ SET optimizer_switch="subquery_to_derived=off";
 EXECUTE s;
 --echo
 EXECUTE s2;
-# The previous EXECUTE used MOCK and transformed the subquery to a derived
+# The previous EXECUTE used rapid and transformed the subquery to a derived
 # table; the next EXECUTE starts with InnoDB, and chooses InnoDB because
 # the cost is under the threshold; but, as the transformation was specifically
-# done for MOCK (by the previous EXECUTE), and isn't required for InnoDB
+# done for rapid (by the previous EXECUTE), and isn't required for InnoDB
 # (subquery_to_derived is off), we have to reprepare:
 SET secondary_engine_cost_threshold = 10000;
 --error 0, ER_HYPERGRAPH_NOT_SUPPORTED_YET
@@ -127,7 +127,7 @@ SET optimizer_switch="subquery_to_derived=default";
 --echo # conditions when encountering semi join + outer join
 --echo #
 
-CREATE TABLE t (a INT) SECONDARY_ENGINE MOCK;
+CREATE TABLE t (a INT) SECONDARY_ENGINE rapid;
 INSERT INTO t VALUES (), (), ();
 ALTER TABLE t SECONDARY_LOAD;
 ANALYZE TABLE t;
@@ -158,7 +158,7 @@ DROP TABLE t;
 --echo #               of a semijoin when it should not
 --echo #
 
-CREATE TABLE t1(f1 INTEGER, f2 INTEGER) SECONDARY_ENGINE MOCK;
+CREATE TABLE t1(f1 INTEGER, f2 INTEGER) SECONDARY_ENGINE rapid;
 ALTER TABLE t1 SECONDARY_LOAD;
 ANALYZE TABLE t1;
 set optimizer_switch="subquery_to_derived=on";
@@ -180,7 +180,7 @@ set optimizer_switch="subquery_to_derived=off";
 --echo # Bug#34828328: Assertion `right != nullptr' failed in
 --echo #               make_join_hypergraph.cc
 
-CREATE TABLE t1(f1 INTEGER, f2 INTEGER) SECONDARY_ENGINE MOCK;
+CREATE TABLE t1(f1 INTEGER, f2 INTEGER) SECONDARY_ENGINE rapid;
 ALTER TABLE t1 SECONDARY_LOAD;
 ANALYZE TABLE t1;
 
@@ -207,5 +207,5 @@ DROP TABLE t1;
 set optimizer_switch="subquery_to_derived=off";
 
 --disable_query_log
-UNINSTALL PLUGIN mock;
+#UNINSTALL PLUGIN rapid;
 --enable_query_log

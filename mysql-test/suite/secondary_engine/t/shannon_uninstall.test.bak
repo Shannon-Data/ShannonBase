@@ -2,6 +2,8 @@
 # ShannonBase test case for uninstalling.
 # ShannonBase copyright 2023-
 ##############################################################################
+# secondary_engine is a mandatory plugin, just like innodb. we dont allow to
+# unload it. so that we disable this test.
 
 #--echo #
 #--echo # Bug#28624707: MYSQL TRYING TO OFFLOAD QUERIES TO SECONDARY ENGINE
