@@ -32,7 +32,7 @@ DROP TABLE t1;
 --echo # Bug#34854369: Customer query hits assert(m_pq.is_valid()) failure
 --echo #
 
-CREATE TABLE t (x INT) SECONDARY_ENGINE MOCK;
+CREATE TABLE t (x INT) SECONDARY_ENGINE rapid;
 INSERT INTO t VALUES (), (), (), ();
 ALTER TABLE t SECONDARY_LOAD;
 ANALYZE TABLE t;
