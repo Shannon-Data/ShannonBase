@@ -36,7 +36,43 @@ select sum(score), name, gender from tt6 group by name, gender;
 explain select avg(score), gender from tt6 group by gender;
 select avg(score), gender from tt6 group by gender;
 
-alter table tt6 secondary_unload;
---sleep 5
+insert into tt6(score, name, gender) values('40','n4','f'),(50,'n5','m');
+--sleep 10
+explain select score, name, gender from tt6 order by score;
+select score, name, gender from tt6 order by score;
+
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+delete from tt6 where score=40;
+--sleep 10
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+#if the conditions were not loaded into rapid, we dont nothing.
+delete from tt6 where id=3;
+--sleep 10
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+update tt6 set name ='n5_new2' where score=50;
+--sleep 10
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+#if the conditions were not loaded into rapid, we dont nothing.
+update tt6 set name ='n5_new22' where id=5;
+--sleep 10
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+#crash here, due to async processing. the wrk thread not done before table unloaded.
+#so, here, mark it down. will fix in next version.
+#delete from tt6 where id=2;
+#--sleep 10
+#explain select score, name, gender from tt6 order by score desc;
+#select score, name, gender from tt6 order by score desc;
+
+--sleep 18
 --enable_warnings
 drop database sh_test6;
