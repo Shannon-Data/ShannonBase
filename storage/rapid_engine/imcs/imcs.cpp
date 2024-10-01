@@ -38,6 +38,7 @@
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
 
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
 namespace ShannonBase {
@@ -149,6 +150,8 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
                        bool error_if_not_loaded) {
   /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
    *  removed*/
+  // TODO: need to wait all wrk threads finish.
+
   std::ostringstream oss, oss2;
   auto found{false};
   oss << db_name << ":" << table_name << ":";
@@ -156,9 +159,9 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
     if (it->first.substr(0, oss.str().length()) == oss.str()) {
       it = m_cus.erase(it);
       found = true;
-    } else {
+    } else
       ++it;
-    }
+
     if (error_if_not_loaded && !found) {
       my_error(ER_NO_SUCH_TABLE, MYF(0), db_name, table_name);
       return HA_ERR_GENERIC;
@@ -181,7 +184,9 @@ int Imcs::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   std::ostringstream oss, oss2;
   oss << context->m_schema_name << ":" << context->m_table_name << ":";
   for (auto it = m_cus.begin(); it != m_cus.end();) {
-    if (it->first.substr(0, oss.str().length()) == oss.str()) {
+    if (!it->second.get()) continue;
+
+    if (it->first.length() && it->first.substr(0, oss.str().length()) == oss.str()) {
       if (!it->second.get()->delete_row(context, rowid)) {
         return HA_ERR_GENERIC;
       }
@@ -193,6 +198,9 @@ int Imcs::delete_row(const Rapid_load_context *context, row_id_t rowid) {
 
 int Imcs::delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &rowids) {
   ut_a(context);
+
+  if (!m_cus.size()) return 0;
+
   std::ostringstream oss, oss2;
   oss << context->m_schema_name << ":" << context->m_table_name << ":";
   if (rowids.empty()) {  // delete all rows.
@@ -227,6 +235,7 @@ int Imcs::update_row(const Rapid_load_context *context, row_id_t row_id,
   ut_a(context);
 
   for (auto &rec : upd_recs) {
+    if (!m_cus[rec.first]) continue;
     auto pack_length = m_cus[rec.first]->normalized_pack_length();
     if (!rec.second.get())  // null value.
       pack_length = UNIV_SQL_NULL;
