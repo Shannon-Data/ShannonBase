@@ -28,10 +28,13 @@
 
 #include <atomic>
 #include <tuple>
+#include <vector>
 
 #include "field_types.h"  //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"
 #include "sql/field.h"  //Field
+#include "trx0types.h"  //trx_id_t
+
 #include "sql/sql_class.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -58,7 +61,12 @@ class Chunk : public MemoryObject {
  public:
   /**TODO: A Snapshot Metadata Unit (SMU) contains metadata and transactional
    * information for an associated IMCU.*/
-  class Snapshot_meta_unit {};
+  using smu_item_t = std::pair<trx_id_t, uchar *>;
+  class Snapshot_meta_unit {
+   public:
+    // an item of SMU. consist of <trxid, new_data>.
+    std::vector<smu_item_t> m_version_info;
+  };
 
   using Chunk_header = struct alignas(CACHE_LINE_SIZE) Chunk_header_t {
    public:
@@ -86,6 +94,9 @@ class Chunk : public MemoryObject {
 
     // the snapshot meta unit pointer, which contains all trx info.
     std::unique_ptr<Snapshot_meta_unit> m_smu;
+
+    // the min trx id and max trxid of this chunk.
+    trx_id_t m_trx_min, m_trx_max;
 
     // statistics data of this chunk.
     std::atomic<double> m_max{0};
@@ -132,29 +143,29 @@ class Chunk : public MemoryObject {
    * [in] len, read data size.
    * return the read start point.
    */
-  uchar *read(uchar *data, size_t len);
+  uchar *read(const Rapid_load_context *context, uchar *data, size_t len);
 
   /**start to write the data to chunk.
    * [in] data, the data to write in.
    * [in] len, the data len.
    * return the address where the data write to.*/
-  uchar *write(uchar *data, size_t len);
+  uchar *write(const Rapid_load_context *context, uchar *data, size_t len);
 
   /**start to delete the data to chunk. just mark it down.
    * [in] where, where the data to update.
    * [in] new_dat, the data value to update.
    * [in] len, the data len.
    * return the address where the data update start from.*/
-  uchar *update(row_id_t where, uchar *new_data, size_t len);
+  uchar *update(const Rapid_load_context *context, row_id_t where, uchar *new_data, size_t len);
 
   /**start to delete the data to chunk. just mark it down.
    * [in] data, the data to delete.
    * [in] len, the data len.
    * return the address where the data write to.*/
-  uchar *del(uchar *data, size_t len);
+  uchar *del(const Rapid_load_context *context, uchar *data, size_t len);
 
   // delete the data by rowid
-  uchar *del(row_id_t rowid);
+  uchar *del(const Rapid_load_context *context, row_id_t rowid);
 
   // free all the data and reset the meta info.
   void truncate();

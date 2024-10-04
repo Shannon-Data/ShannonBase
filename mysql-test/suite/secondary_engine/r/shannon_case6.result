@@ -160,4 +160,15 @@ score	name	gender
 4	n4	f
 2	n2	f
 1	n1	m
+delete from tt6 where id=2;
+explain select score, name, gender from tt6 order by score desc;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt6	NULL	ALL	NULL	NULL	NULL	NULL	4	100.00	Using filesort; Using secondary engine Rapid
+select score, name, gender from tt6 order by score desc;
+score	name	gender
+50	n5_new2	m
+10	n1	m
+4	n4	f
+1	n1	m
+alter table tt6 secondary_unload;
 drop database sh_test6;

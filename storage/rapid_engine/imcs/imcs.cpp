@@ -184,12 +184,13 @@ int Imcs::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   std::ostringstream oss, oss2;
   oss << context->m_schema_name << ":" << context->m_table_name << ":";
   for (auto it = m_cus.begin(); it != m_cus.end();) {
-    if (!it->second.get()) continue;
+    if (UNIV_UNLIKELY(!it->second.get() || it->first.substr(0, oss.str().length()) != oss.str())) {
+      ++it;
+      continue;
+    }
 
-    if (it->first.length() && it->first.substr(0, oss.str().length()) == oss.str()) {
-      if (!it->second.get()->delete_row(context, rowid)) {
-        return HA_ERR_GENERIC;
-      }
+    if (!it->second.get()->delete_row(context, rowid)) {
+      return HA_ERR_GENERIC;
     }
     ++it;
   }

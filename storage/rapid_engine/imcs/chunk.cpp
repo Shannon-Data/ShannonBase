@@ -206,7 +206,7 @@ int Chunk::is_deleted(row_id_t pos) {
     return Utils::Util::bit_array_get(m_header->m_del_mask.get(), pos);
 }
 
-uchar *Chunk::read(uchar *data, size_t len) {
+uchar *Chunk::read(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
@@ -223,7 +223,7 @@ uchar *Chunk::read(uchar *data, size_t len) {
   return ret;
 }
 
-uchar *Chunk::write(uchar *data, size_t len) {
+uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
@@ -258,7 +258,7 @@ uchar *Chunk::write(uchar *data, size_t len) {
   return ret;
 }
 
-uchar *Chunk::update(row_id_t where, uchar *new_data, size_t len) {
+uchar *Chunk::update(const Rapid_load_context *context, row_id_t where, uchar *new_data, size_t len) {
   ut_a((!new_data && len == UNIV_SQL_NULL) || (new_data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
@@ -279,7 +279,7 @@ uchar *Chunk::update(row_id_t where, uchar *new_data, size_t len) {
   return where_ptr;
 }
 
-uchar *Chunk::del(uchar *data, size_t len) {
+uchar *Chunk::del(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a(data && len == m_header->m_source_fld->pack_length());
 
   if (!m_header->m_del_mask.get()) {
@@ -305,7 +305,7 @@ uchar *Chunk::del(uchar *data, size_t len) {
   return nullptr;
 }
 
-uchar *Chunk::del(row_id_t rowid) {
+uchar *Chunk::del(const Rapid_load_context *context, row_id_t rowid) {
   uchar *del_from{nullptr};
 
   if (rowid >= m_header->m_prows.load()) return del_from;  // out of rowid range.
