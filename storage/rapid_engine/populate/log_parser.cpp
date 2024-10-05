@@ -588,6 +588,7 @@ int LogParser::find_matched_rows(Rapid_load_context *context, std::string &key_n
 
     for (auto &to_find : field_values_to_find) {
       auto cu_name = to_find.first;
+      if (!imcs_instance->get_cu(cu_name)) continue;  // means that was not loaded into.
       // find the one field to ignore, then continue.
       if (ignore_field.size() && ignore_field.find(cu_name) != ignore_field.end()) continue;
 
@@ -675,6 +676,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       // step 2: insert all field data into CUs.
       for (auto &insert_row : rows_to_insert) {
         auto key_name = insert_row.first;
+        if (!imcs_instance->get_cu(key_name)) continue;
         // if data is nullptr, means it's 'NULL'.
         auto len =
             (insert_row.second.get()) ? imcs_instance->get_cu(key_name)->normalized_pack_length() : UNIV_SQL_NULL;

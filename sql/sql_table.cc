@@ -11651,7 +11651,12 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
                          false) ||
         secondary_engine_load_table(thd, *table_list->table))
       return true;
+    //start population thread if table loaded successfully.
+    ShannonBase::Populate::Populator::start_change_populate_threads();
   } else {
+    //at first, stop the main pop monitor thread.
+    ShannonBase::Populate::Populator::end_change_populate_threads();
+
     if (DBUG_EVALUATE_IF("sim_secunload_fail",
                          (my_error(ER_SECONDARY_ENGINE, MYF(0),
                                    "Simulated failure of secondary_unload()"),
@@ -11750,12 +11755,6 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
               (is_load ? "load" : "unload")));
   // Transaction committed successfully, no rollback will be necessary.
   rollback_guard.commit();
-
-  if (is_load){
-     ShannonBase::Populate::Populator::start_change_populate_threads();
-  } else {
-     ShannonBase::Populate::Populator::end_change_populate_threads();
-  }
 
   if (cleanup()) return true;
   my_ok(thd, thd->get_sent_row_count());

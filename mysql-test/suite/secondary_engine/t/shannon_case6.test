@@ -1,0 +1,77 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+#not secondary column
+create database sh_test6;
+use sh_test6;
+--disable_warnings
+
+set use_secondary_engine=forced;
+
+create table tt6 (score int, name char(10), id int not secondary, gender char(1)) secondary_engine=rapid;
+insert into tt6 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
+insert into tt6 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm'), (4,'n4',4,'f');
+alter table tt6 secondary_load;
+
+explain select * from tt6 order by id;
+select * from tt6 order by id;
+
+explain select score, name, gender from tt6 order by score;
+select score, name, gender from tt6 order by score;
+
+explain select score, id from tt6;
+select score, id from tt6;
+
+explain select score, name, gender from tt6 order by id;
+select score, name, gender from tt6 order by id;
+
+explain select id from tt6;
+select id from tt6;
+
+explain select sum(score), name, gender from tt6 group by name, gender;
+select sum(score), name, gender from tt6 group by name, gender;
+
+explain select avg(score), gender from tt6 group by gender;
+select avg(score), gender from tt6 group by gender;
+
+insert into tt6(score, name, gender) values('40','n4','f'),(50,'n5','m');
+--sleep 10
+explain select score, name, gender from tt6 order by score;
+select score, name, gender from tt6 order by score;
+
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+delete from tt6 where score=40;
+--sleep 10
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+#if the conditions were not loaded into rapid, we dont nothing.
+delete from tt6 where id=3;
+--sleep 10
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+update tt6 set name ='n5_new2' where score=50;
+--sleep 10
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+#if the conditions were not loaded into rapid, we dont nothing.
+update tt6 set name ='n5_new22' where id=5;
+--sleep 10
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+delete from tt6 where id=2;
+--sleep 10
+explain select score, name, gender from tt6 order by score desc;
+select score, name, gender from tt6 order by score desc;
+
+--sleep 18
+--enable_warnings
+alter table tt6 secondary_unload;
+drop database sh_test6;
