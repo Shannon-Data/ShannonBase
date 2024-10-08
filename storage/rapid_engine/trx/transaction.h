@@ -24,10 +24,13 @@
    The fundmental code for imcs. for transaction.
 */
 #include "sql/current_thd.h"
+#include "storage/innobase/include/trx0types.h"  //trx_id_t
 #include "storage/rapid_engine/include/rapid_object.h"
 
 class THD;
 class trx_t;
+class ReadView;
+
 namespace ShannonBase {
 
 /**This class is used for an interface of real implementation of trans.
@@ -37,14 +40,28 @@ use any transaction impl to replace innobase's trx used here.
 
 class Transaction : public MemoryObject {
  public:
+  using ID = trx_id_t;
   // same order with trx_t::isolation_level_t::
   enum class ISOLATION_LEVEL : uint8 { READ_UNCOMMITTED, READ_COMMITTED, READ_REPEATABLE, SERIALIZABLE };
   enum class STATUS : uint8 { NOT_START, ACTIVE, PREPARED, COMMITTED_IN_MEMORY };
 
-  Transaction(THD *thd = current_thd);
-  virtual ~Transaction() = default;
+  // gets the existed trx or create a new one if not existed.
+  static Transaction *get_or_create_trx(THD *);
 
-  static Transaction *get_or_create_tx(THD *);
+  // gets the trx from thd.
+  static Transaction *get_trx_from_thd(THD *const thd);
+
+  static ShannonBase::Transaction::ISOLATION_LEVEL get_rpd_isolation_level(THD *thd);
+
+  static void free_trx_from_thd(THD *const thd);
+
+  void set_trx_on_thd(THD *const thd);
+
+  void reset_trx_on_thd(THD *const thd);
+
+  virtual void set_isolation_level(ISOLATION_LEVEL level) { m_iso_level = level; }
+
+  virtual ISOLATION_LEVEL isolation_level() const { return m_iso_level; }
 
   virtual int begin(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
 
@@ -52,19 +69,39 @@ class Transaction : public MemoryObject {
 
   virtual int rollback();
 
-  virtual void set_trx_read_only(bool read_only);
+  virtual int begin_stmt(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
 
-  virtual bool acquire_snapshot(bool create);
+  virtual int rollback_stmt();
 
-  virtual inline bool is_auto_commit();
+  virtual int rollback_to_savepoint(void *const savepoint);
 
-  virtual inline bool is_active();
+  virtual void set_read_only(bool read_only);
+
+  virtual ReadView *acquire_snapshot();
+
+  virtual int release_snapshot();
+
+  virtual bool has_snapshot() const;
+
+  virtual bool is_auto_commit();
+
+  virtual bool is_active();
+
+  virtual bool is_visible(ID trx_id, const char *table_name);
 
  private:
+  Transaction(THD *thd = current_thd);
+  virtual ~Transaction();
+
   THD *m_thd;
+
+  // read only trx.
+  bool m_read_only{false};
+
   /**here, we use innodb's trx as ours. in future, we will impl rpl own
    * transaction. But, now that, we use innodb's.*/
   trx_t *m_trx_impl{nullptr};
+
   ISOLATION_LEVEL m_iso_level{ISOLATION_LEVEL::READ_REPEATABLE};
 };
 

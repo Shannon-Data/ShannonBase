@@ -33,6 +33,8 @@
 
 class TABLE;
 namespace ShannonBase {
+class Rapid_load_context;
+
 namespace Imcs {
 class Imcs;
 class Cu;
@@ -72,6 +74,9 @@ class DataTable : public MemoryObject {
 
   // start from where.
   std::atomic<row_id_t> m_rowid{0};
+
+  // context
+  std::unique_ptr<Rapid_load_context> m_context{nullptr};
 };
 
 }  // namespace Imcs

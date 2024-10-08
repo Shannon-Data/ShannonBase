@@ -61,7 +61,7 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"  //column stats
 #include "storage/rapid_engine/populate/populate.h"
-#include "storage/rapid_engine/trx/transaction.h"
+#include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/utils.h"
 #include "template_utils.h"
 #include "thr_lock.h"
@@ -69,6 +69,8 @@
 namespace dd {
 class Table;
 }
+
+static void rapid_register_tx(handlerton *const hton, THD *const thd, ShannonBase::Transaction *const trx);
 
 namespace ShannonBase {
 
@@ -277,6 +279,28 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   }
 }
 
+/**
+  @note
+  A quote from handler::start_stmt():
+  <quote>
+  MySQL calls this function at the start of each SQL statement inside LOCK
+  TABLES. Inside LOCK TABLES the ::external_lock method does not work to
+  mark SQL statement borders.
+  </quote>
+
+  @return
+    HA_EXIT_SUCCESS  OK
+*/
+
+int ha_rapid::start_stmt(THD *const thd, thr_lock_type lock_type) {
+  assert(thd != nullptr);
+
+  auto trx = ShannonBase::Transaction::get_or_create_trx(thd);
+  rapid_register_tx(ShannonBase::shannon_rapid_hton_ptr, thd, trx);
+
+  return 0;
+}
+
 /** Initialize a table scan.
 @param[in]      scan    whether this is a second call to rnd_init()
                         without rnd_end() in between
@@ -287,14 +311,6 @@ int ha_rapid::rnd_init(bool scan) {
     return HA_ERR_GENERIC;
   }
 
-  trx_t *trx = check_trx_exists(m_thd);
-  if (trx) {
-    trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
-    if (trx->isolation_level > TRX_ISO_READ_UNCOMMITTED) {
-      trx_assign_read_view(trx);
-    }
-  }
-
   m_start_of_scan = true;
   return 0;
 }
@@ -303,13 +319,7 @@ int ha_rapid::rnd_init(bool scan) {
  @return 0 or error number */
 
 int ha_rapid::rnd_end(void) {
-  trx_t *trx = thd_to_trx(m_thd);
-  if (trx && trx_is_started(trx)) {
-    const dberr_t error [[maybe_unused]] = trx_commit_for_mysql(trx);
-    ut_ad(DB_SUCCESS == error);
-  }
-  trx->will_lock = 0;
-
+  m_start_of_scan = false;
   return m_data_table->end();
 }
 
@@ -341,13 +351,13 @@ static bool rpd_thd_trx_is_auto_commit(THD *thd) { /*!< in: thread handle, can b
   return thd != nullptr && !thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN) && thd_is_query_block(thd);
 }
 
-static inline void rapid_register_tx(handlerton *const hton, THD *const thd, ShannonBase::Transaction *const trx) {
+static void rapid_register_tx(handlerton *const hton, THD *const thd, ShannonBase::Transaction *const trx) {
   assert(trx != nullptr);
 
   trans_register_ha(thd, false, ShannonBase::shannon_rapid_hton_ptr, nullptr);
 
   if (!rpd_thd_trx_is_auto_commit(thd)) {
-    trx->begin();  // tx->stat_stmt()
+    trx->begin_stmt(ShannonBase::Transaction::get_rpd_isolation_level(thd));  // tx->stat_stmt()
     trans_register_ha(thd, true, ShannonBase::shannon_rapid_hton_ptr, nullptr);
   }
 }
@@ -363,9 +373,31 @@ static int rapid_commit(handlerton *hton,  /*!< in: handlerton */
                         bool commit_trx) { /*!< in: true - commit transaction
                                             false - the current SQL statement
                                             ended */
+  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
 
-  // here, we do not do anything in rapid engine, all the logics were done in
-  // innodb.
+  if (trx != nullptr) {
+    if (commit_trx || trx->is_auto_commit()) {
+      /*
+        We get here
+         - For a COMMIT statement that finishes a multi-statement transaction
+         - For a statement that has its own transaction
+      */
+      if (trx->commit()) {
+        return HA_ERR_ERRORS;
+      }
+    } else {
+      /*
+        We get here when committing a statement within a transaction.
+      */
+    }
+
+    if (trx->isolation_level() <= ShannonBase::Transaction::ISOLATION_LEVEL::READ_COMMITTED) {
+      // For READ_COMMITTED, we release any existing snapshot so that we will
+      // see any changes that occurred since the last statement.
+      trx->release_snapshot();
+    }
+  }
+
   return 0;
 }
 
@@ -378,8 +410,35 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
                           bool rollback_trx) { /*!< in: true - rollback entire
                                               transaction false - rollback the
                                               current statement only */
-  // here, we do not do anything in rapid engine, all the logics were done in
-  // innodb.
+
+  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
+  if (trx != nullptr) {
+    if (rollback_trx) {
+      /*
+        We get here, when
+        - ROLLBACK statement is issued.
+
+        Discard the changes made by the transaction
+      */
+      trx->rollback();
+    } else {
+      /*
+        We get here when
+        - a statement with AUTOCOMMIT=1 is being rolled back (because of some
+          error)
+        - a statement inside a transaction is rolled back
+      */
+
+      trx->rollback_stmt();
+    }
+
+    if (trx->isolation_level() <= ShannonBase::Transaction::ISOLATION_LEVEL::READ_COMMITTED) {
+      // For READ_COMMITTED, we release any existing snapshot so that we will
+      // see any changes that occurred since the last statement.
+      trx->release_snapshot();
+    }
+  }
+
   return 0;
 }
 
@@ -392,9 +451,9 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
                                                 THD *thd) {       /* in: MySQL thread handle of the user for whom the
                                                                      transaction should be committed */
 
-  assert(hton == ShannonBase::shannon_rapid_hton_ptr);
+  ut_a(hton == ShannonBase::shannon_rapid_hton_ptr);
 
-  trx_t *&trx = thd_to_trx(thd);
+  ShannonBase::Transaction *trx = ShannonBase::Transaction::get_or_create_trx(thd);
   if (!trx) {
     push_warning_printf(thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
                         "Rapid: Can not get transaction from innodb. "
@@ -402,27 +461,47 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
     return HA_ERR_ERRORS;
   }
 
+  trx->set_read_only(true);
   // here, the trx should be regiestered in innodb.
-  assert(trx_is_registered_for_2pc(trx));
+  rapid_register_tx(hton, thd, trx);
 
-  if (!trx_is_started(trx)) {  // maybe the some error in primary engine. it
-                               // should be started. here,in case.
-    trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
-    if (trx->isolation_level == TRX_ISO_REPEATABLE_READ) trx_assign_read_view(trx);
+  if (!trx->is_active()) {  // maybe the some error in primary engine. it should be started. here,in case.
+    trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(thd));
+    if (trx->isolation_level() == ShannonBase::Transaction::ISOLATION_LEVEL::READ_REPEATABLE)
+      trx->acquire_snapshot();
+    else
+      push_warning_printf(thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
+                          "Only REPEATABLE READ isolation level is "
+                          "supported for START TRANSACTION WITH CONSISTENT "
+                          "SNAPSHOT in Rapid Storage Engine. Snapshot has not "
+                          "been taken.");
   }
 
   return 0;
 }
 
+/* Dummy SAVEPOINT support. This is needed for long running transactions
+ * like mysqldump (https://bugs.mysql.com/bug.php?id=71017).
+ * Current SAVEPOINT does not correctly handle ROLLBACK and does not return
+ * errors. This needs to be addressed in future versions (Issue#96).
+ */
+static int rapid_savepoint(handlerton *const hton, THD *const thd, void *const savepoint) { return 0; }
+
+static int rapid_rollback_to_savepoint(handlerton *const hton, THD *const thd, void *const savepoint) {
+  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
+  return trx->rollback_to_savepoint(savepoint);
+}
+
+static bool rapid_rollback_to_savepoint_can_release_mdl(handlerton *const hton, THD *const thd) { return true; }
+
 /** Frees a possible trx object associated with the current THD.
  @return 0 or error number */
 static int rapid_close_connection(handlerton *hton, /*!< in: handlerton */
-                                  THD *thd)         /*!< in: handle to the MySQL thread of the user
-                                                    whose resources should be free'd */
-{
+                                  THD *thd) {       /*!< in: handle to the MySQL thread of the user
+                                                   whose resources should be free'd */
   DBUG_TRACE;
   assert(hton == ShannonBase::shannon_rapid_hton_ptr);
-  assert(false);
+  ShannonBase::Transaction::free_trx_from_thd(thd);
   return 0;
 }
 
@@ -431,7 +510,7 @@ static void rapid_kill_connection(handlerton *hton, /*!< in:  innobase handlerto
                                   THD *thd) {       /*!< in: handle to the MySQL thread being
                                                    killed */
   DBUG_TRACE;
-  assert(hton == ShannonBase::shannon_rapid_hton_ptr);
+  ut_a(hton == ShannonBase::shannon_rapid_hton_ptr);
   trx_t *trx = thd_to_trx(thd);
 
   if (trx != nullptr) {
@@ -659,6 +738,9 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;
   shannon_rapid_hton->start_consistent_snapshot = rapid_start_trx_and_assign_read_view;
+  shannon_rapid_hton->savepoint_set = rapid_savepoint;
+  shannon_rapid_hton->savepoint_rollback = rapid_rollback_to_savepoint;
+  shannon_rapid_hton->savepoint_rollback_can_release_mdl = rapid_rollback_to_savepoint_can_release_mdl;
   shannon_rapid_hton->close_connection = rapid_close_connection;
   shannon_rapid_hton->kill_connection = rapid_kill_connection;
 
@@ -696,6 +778,6 @@ mysql_declare_plugin(shannon_rapid){
     ShannonBase::SHANNON_RPD_VERSION,
     rapid_status_variables_export, /* status variables */
     rapid_system_variables,        /* system variables */
-    nullptr,                       /* reserved */
+    nullptr,                       /* config options */
     0,
 } mysql_declare_plugin_end;

@@ -2509,7 +2509,6 @@ void row_sel_field_store_in_mysql_format_func(
 
   ulint prtype {DATA_ROW_ID};
   prtype = (templ->type != DATA_SYS && field) ? field->col->prtype : DATA_TRX_ID;
-  ib_id_t id;
 
   bool clust_templ_for_sec [[maybe_unused]] = (sec_field != ULINT_UNDEFINED);
 //#endif /* UNIV_DEBUG */
@@ -2670,8 +2669,7 @@ void row_sel_field_store_in_mysql_format_func(
          we will retrieve trx id to MySQL. */
       switch (prtype & DATA_SYS_PRTYPE_MASK) {
          case DATA_TRX_ID:
-             id = mach_read_from_6(data);
-             memcpy(dest, &id, DATA_TRX_ID_LEN);
+             memcpy(dest, data, DATA_TRX_ID_LEN);
              break;
          case DATA_ROW_ID:
          case DATA_ROLL_PTR:

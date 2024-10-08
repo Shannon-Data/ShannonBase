@@ -22,23 +22,94 @@
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs. for transaction.
+   Now that, we use innodb trx as rapid's. But, in future, we will impl
+   our own trx implementation, because we use innodb trx id in rapid
+   for our visibility check.
 */
 #include "storage/rapid_engine/trx/transaction.h"
 
-#include "sql/sql_class.h"                     // THD
-#include "storage/innobase/include/trx0trx.h"  // trx_t
+#include "sql/sql_class.h"                        // THD
+#include "storage/innobase/include/read0types.h"  //ReadView
+#include "storage/innobase/include/trx0roll.h"    // rollback
+#include "storage/innobase/include/trx0trx.h"     // trx_t
+#include "storage/rapid_engine/include/rapid_context.h"
 
 namespace ShannonBase {
 
-Transaction::Transaction(THD *thd) {
-  m_thd = thd;
-  m_trx_impl = check_trx_exists(current_thd);
+// defined in ha_shannon_rapid.cc
+extern handlerton *shannon_rapid_hton_ptr;
+
+static ShannonBase::Rapid_ha_data *&get_ha_data_or_null(THD *const thd) {
+  ShannonBase::Rapid_ha_data **ha_data =
+      reinterpret_cast<ShannonBase::Rapid_ha_data **>(thd_ha_data(thd, ShannonBase::shannon_rapid_hton_ptr));
+  return *ha_data;
 }
 
-Transaction *Transaction::get_or_create_tx(THD *thd) {
-  auto trx = new (thd->mem_root) Transaction(thd);
+static ShannonBase::Rapid_ha_data *&get_ha_data(THD *const thd) {
+  auto *&ha_data = get_ha_data_or_null(thd);
+  if (ha_data == nullptr) {
+    ha_data = new ShannonBase::Rapid_ha_data();
+  }
+  return ha_data;
+}
+
+static void destroy_ha_data(THD *const thd) {
+  ShannonBase::Rapid_ha_data *&ha_data = get_ha_data(thd);
+  delete ha_data;
+  ha_data = nullptr;
+}
+
+ShannonBase::Transaction::ISOLATION_LEVEL Transaction::get_rpd_isolation_level(THD *thd) {
+  ulong const tx_isolation = thd_tx_isolation(thd);
+
+  if (tx_isolation == ISO_READ_UNCOMMITTED) {
+    return ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED;
+  } else if (tx_isolation == ISO_READ_COMMITTED) {
+    return ShannonBase::Transaction::ISOLATION_LEVEL::READ_COMMITTED;
+  } else if (tx_isolation == ISO_REPEATABLE_READ) {
+    return ShannonBase::Transaction::ISOLATION_LEVEL::READ_REPEATABLE;
+  } else
+    return ShannonBase::Transaction::ISOLATION_LEVEL::SERIALIZABLE;
+}
+
+Transaction::Transaction(THD *thd) {
+  m_thd = thd;
+  m_trx_impl = trx_allocate_for_mysql();  // check_trx_exists(thd);
+  m_read_only = false;
+}
+
+Transaction::~Transaction() {
+  release_snapshot();
+  rollback();
+  trx_free_for_mysql(m_trx_impl);
+}
+
+Transaction *Transaction::get_trx_from_thd(THD *const thd) { return get_ha_data(thd)->get_trx(); }
+
+void Transaction::set_trx_on_thd(THD *const thd) { return get_ha_data(thd)->set_trx(this); }
+
+void Transaction::reset_trx_on_thd(THD *const thd) {
+  get_ha_data(thd)->set_trx(nullptr);
+  return destroy_ha_data(thd);
+}
+
+Transaction *Transaction::get_or_create_trx(THD *thd) {
+  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
+  if (trx == nullptr) {
+    trx = new ShannonBase::Transaction(thd);
+    trx->set_trx_on_thd(thd);
+  }
 
   return trx;
+}
+
+void Transaction::free_trx_from_thd(THD *const thd) {
+  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
+  if (trx) {
+    trx->reset_trx_on_thd(thd);
+    delete trx;
+    trx = nullptr;
+  }
 }
 
 int Transaction::begin(ISOLATION_LEVEL iso_level) {
@@ -62,33 +133,70 @@ int Transaction::begin(ISOLATION_LEVEL iso_level) {
       break;
   }
 
+  ut_a(m_trx_impl);
+  ut_a(m_trx_impl->state.load() == TRX_STATE_NOT_STARTED);
   m_trx_impl->isolation_level = is;
-  trx_start_if_not_started(m_trx_impl, false, UT_LOCATION_HERE);
-  if (m_trx_impl->isolation_level > TRX_ISO_READ_UNCOMMITTED) {
-    trx_assign_read_view(m_trx_impl);
-  }
 
   m_trx_impl->auto_commit =
       m_thd != nullptr && !thd_test_options(m_thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN) && thd_is_query_block(m_thd);
+
+  trx_start_if_not_started(m_trx_impl, (m_read_only ? false : true), UT_LOCATION_HERE);
   return 0;
 }
+
+int Transaction::begin_stmt(ISOLATION_LEVEL iso_level) { return 0; }
 
 int Transaction::commit() {
   dberr_t error{DB_SUCCESS};
   if (trx_is_started(m_trx_impl)) {
     error = trx_commit_for_mysql(m_trx_impl);
   }
-  return (error == DB_SUCCESS);
+  return (error != DB_SUCCESS) ? HA_ERR_GENERIC : 0;
 }
 
-int Transaction::rollback() { return 0; }
+int Transaction::rollback() {
+  dberr_t error{DB_SUCCESS};
+  if (trx_is_started(m_trx_impl)) {
+    error = trx_rollback_for_mysql(m_trx_impl);
+  }
+  return (error != DB_SUCCESS) ? HA_ERR_GENERIC : 0;
+}
 
-void Transaction::set_trx_read_only(bool read_only) { m_trx_impl->read_only = read_only; }
+int Transaction::rollback_stmt() { return 0; }
 
-bool Transaction::acquire_snapshot(bool create) { return true; }
+int Transaction::rollback_to_savepoint(void *const savepoint) { return 0; }
+
+void Transaction::set_read_only(bool read_only) { m_read_only = read_only; }
+
+ReadView *Transaction::acquire_snapshot() {
+  if (m_trx_impl->isolation_level > TRX_ISO_READ_UNCOMMITTED) {
+    trx_assign_read_view(m_trx_impl);
+  }
+  return m_trx_impl->read_view;
+}
+
+int Transaction::release_snapshot() {
+  if (m_trx_impl->read_view && MVCC::is_view_active(m_trx_impl->read_view)) {
+    trx_sys->mvcc->view_close(m_trx_impl->read_view, false);
+  }
+
+  return 0;
+}
+
+bool Transaction::has_snapshot() const { return MVCC::is_view_active(m_trx_impl->read_view); }
 
 bool Transaction::is_auto_commit() { return m_trx_impl->auto_commit; }
 
 bool Transaction::is_active() { return trx_is_started(m_trx_impl); }
+
+bool Transaction::is_visible(ID trx_id, const char *table_name) {
+  if (MVCC::is_view_active(m_trx_impl->read_view)) {
+    table_name_t name;
+    name.m_name = const_cast<char *>(table_name);
+    return m_trx_impl->read_view->changes_visible(trx_id, name);
+  }
+
+  return false;
+}
 
 }  // namespace ShannonBase
