@@ -35,12 +35,16 @@
 #include "include/ut0dbg.h"  //ut_a
 #include "sql/table.h"       //TABLE
 
+#include "storage/innobase/include/mach0data.h"
+
 #include "storage/rapid_engine/imcs/chunk.h"   //CHUNK
 #include "storage/rapid_engine/imcs/cu.h"      //CU
 #include "storage/rapid_engine/imcs/imcs.h"    //IMCS
-#include "storage/rapid_engine/utils/utils.h"  //Blob.
+#include "storage/rapid_engine/utils/utils.h"  //Blob
 
+#include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/populate.h"  //sys_pop_buff
+#include "storage/rapid_engine/trx/transaction.h"    //Transaction
 
 namespace ShannonBase {
 namespace Imcs {
@@ -75,8 +79,24 @@ void DataTable::scan_init() {
     m_field_cus.push_back(Imcs::instance()->get_cu(key_str));
     key.str("");
   }
+  key.str("");
 
   m_rowid.store(0);
+
+  m_context = std::make_unique<Rapid_load_context>();
+  key << key_part.str() << SHANNON_DB_TRX_ID;
+  m_context->m_trx_id_cu = ShannonBase::Imcs::Imcs::instance()->get_cu(key.str().c_str());
+  m_context->m_thd = current_thd;
+
+  m_context->m_trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
+  m_context->m_trx->set_read_only(true);
+  if (!m_context->m_trx->is_active())
+    m_context->m_trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(current_thd));
+
+  if (!m_context->m_trx->has_snapshot()) m_context->m_trx->acquire_snapshot();
+
+  m_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
+  m_context->m_table_name = const_cast<char *>(m_data_source->s->table_name.str);
 
 #ifndef NDEBUG
   auto first_num = m_field_cus[0]->prows();
@@ -94,6 +114,12 @@ int DataTable::next(uchar *buf) {
 start_pos:
   if (m_rowid >= m_field_cus[0]->prows()) return HA_ERR_END_OF_FILE;
 
+  auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
+  auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
+  ut_a(m_context->m_trx_id_cu);
+  auto trx_id_ptr = m_context->m_trx_id_cu->chunk(current_chunk)->seek(offset_in_chunk);
+  Transaction::ID trx_id = mach_read_from_6(trx_id_ptr);
+
   for (auto idx = 0u; idx < m_field_cus.size(); idx++) {
     auto cu = m_field_cus[idx];
     auto normalized_length = cu->normalized_pack_length();
@@ -104,17 +130,24 @@ start_pos:
       return HA_ERR_GENERIC;
     });
 
+    // visibility check. if it's not visibile and does not have old version, go to next.
+    if (!m_context->m_trx->is_visible(trx_id, m_context->m_table_name) &&
+        !cu->chunk(current_chunk)->get_header()->m_smu) {
+      m_rowid.fetch_add(1);
+      goto start_pos;
+    } else {  // travers the version link.
+    }
+
     auto source_fld = *(m_data_source->field + cu->header()->m_source_fld->field_index());
-    auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
-    auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
-    // TODO: to check version link to check its old value.
-    if (cu->chunk(current_chunk)->is_deleted(offset_in_chunk)) {
+
+    // TODO: to check version link to check its old value. in fact here always the latest version.
+    if (cu->chunk(current_chunk)->is_deleted(m_context.get(), offset_in_chunk)) {
       m_rowid.fetch_add(1);
       goto start_pos;
     }
 
     auto old_map = tmp_use_all_columns(m_data_source, m_data_source->write_set);
-    if (cu->chunk(current_chunk)->is_null(offset_in_chunk)) {
+    if (cu->chunk(current_chunk)->is_null(m_context.get(), offset_in_chunk)) {
       source_fld->set_null();
       if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
       continue;
@@ -141,6 +174,9 @@ start_pos:
 }
 
 int DataTable::end() {
+  m_context->m_trx->release_snapshot();
+  m_context->m_trx->commit();
+
   m_rowid.store(0);
   return 0;
 }

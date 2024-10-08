@@ -77,7 +77,7 @@ Cu *Imcs::get_cu(std::string &key) {
   return m_cus[key].get();
 }
 
-Cu *Imcs::get_cu(const char *&key) {
+Cu *Imcs::get_cu(const char *key) {
   std::string key_str(key);
 
   if (m_cus.find(key_str) == m_cus.end()) return nullptr;

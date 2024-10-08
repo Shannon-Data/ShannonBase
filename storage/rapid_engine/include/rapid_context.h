@@ -38,7 +38,10 @@ class JOIN;
 class THD;
 
 namespace ShannonBase {
-
+class Transaction;
+namespace Imcs {
+class Cu;
+}
 /**
   Execution context class for the RAPID engine. It allocates some data
   on the heap when it is constructed, and frees it when it is
@@ -94,7 +97,7 @@ class Rapid_load_context : public Secondary_engine_execution_context {
   char *m_schema_name{nullptr}, *m_table_name{nullptr};
 
   // current transaction.
-  trx_t *m_trx{nullptr};
+  Transaction *m_trx{nullptr};
 
   // the primary key of this table.
   TABLE *m_table{nullptr};
@@ -106,6 +109,23 @@ class Rapid_load_context : public Secondary_engine_execution_context {
   THD *m_thd{nullptr};
 
   extra_info_t m_extra_info;
+
+  // trx_id col key str
+  Imcs::Cu *m_trx_id_cu;
+};
+
+class Rapid_ha_data {
+ public:
+  Rapid_ha_data() : m_trx(nullptr) {}
+
+  ~Rapid_ha_data() {}
+
+  ShannonBase::Transaction *get_trx() const { return m_trx; }
+
+  void set_trx(ShannonBase::Transaction *t) { m_trx = t; }
+
+ private:
+  ShannonBase::Transaction *m_trx;
 };
 
 }  // namespace ShannonBase
