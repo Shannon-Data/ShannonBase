@@ -190,7 +190,7 @@ void Chunk::check_data_type(size_t type_size) {
   }
 }
 
-int Chunk::is_null(row_id_t pos) {
+int Chunk::is_null(const Rapid_load_context *context, row_id_t pos) {
   std::scoped_lock lk(m_header_mutex);
   if (!m_header->m_null_mask.get())
     return 0;
@@ -198,7 +198,7 @@ int Chunk::is_null(row_id_t pos) {
     return Utils::Util::bit_array_get(m_header->m_null_mask.get(), pos);
 }
 
-int Chunk::is_deleted(row_id_t pos) {
+int Chunk::is_deleted(const Rapid_load_context *context, row_id_t pos) {
   std::scoped_lock lk(m_header_mutex);
   if (!m_header->m_del_mask.get())
     return 0;
@@ -335,6 +335,16 @@ void Chunk::truncate() {
   }
 
   reset_meta_info();
+}
+
+uchar *Chunk::seek(row_id_t rowid) {
+  ut_a(!((m_data - m_base) % m_header->m_normailzed_pack_length));
+  auto real_row = (m_data - m_base) / m_header->m_normailzed_pack_length;
+
+  if (rowid >= real_row)
+    return m_data;
+  else
+    return m_base + rowid * m_header->m_normailzed_pack_length;
 }
 
 }  // namespace Imcs
