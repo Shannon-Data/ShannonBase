@@ -38,6 +38,7 @@ class Table;
 }
 
 namespace ShannonBase {
+class Transaction;
 namespace Imcs {
 class DataTable;
 }
@@ -114,6 +115,8 @@ class ha_rapid : public handler {
   int load_table(const TABLE &table) override;
 
   int unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) override;
+
+  int start_stmt(THD *const thd, thr_lock_type lock_type) override MY_ATTRIBUTE((__warn_unused_result__));
 
   THR_LOCK_DATA m_lock;
 

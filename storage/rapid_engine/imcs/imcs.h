@@ -68,7 +68,7 @@ class Imcs : public MemoryObject {
 
   // get cu pointer by its key.
   Cu *get_cu(std::string &key);
-  Cu *get_cu(const char *&key);
+  Cu *get_cu(const char *key);
 
   /**create all cus needed by source table, and ready to write the data into.*/
   int create_table_mem(const Rapid_load_context *context, const TABLE *source);

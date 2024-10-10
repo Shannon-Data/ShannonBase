@@ -61,8 +61,11 @@ constexpr char SHANNON_BLANK_PLACEHOLDER[] = "BLANK_CONTENT";
 
 constexpr char SHANNON_DB_ROW_ID[] = "DB_ROW_ID";
 constexpr size_t SHANNON_DB_ROW_ID_LEN = 9;
+
 constexpr char SHANNON_DB_TRX_ID[] = "DB_TRX_ID";
 constexpr size_t SHANNON_DB_TRX_ID_LEN = 9;
+constexpr size_t SHANNON_DATA_DB_TRX_ID_LEN = 6;
+
 constexpr char SHANNON_DB_ROLL_PTR[] = "DB_ROLL_PTR";
 constexpr size_t SHANNON_DB_ROLL_PTR_LEN = 11;
 
