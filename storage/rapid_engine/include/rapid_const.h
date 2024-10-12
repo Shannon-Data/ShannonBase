@@ -30,6 +30,16 @@
 #include "my_inttypes.h"
 #include "rapid_arch_inf.h"
 
+#if defined(__arm__) || defined(__aarch64__)
+#define SHANNON_ARM_PLATFORM
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
+#define SHANNON_X86_PLATFORM
+#elif defined(__APPLE__) && defined(__arm64__)
+#define SHANNON_APPLE_PLATFORM
+#endif
+
+#define SHANNON_ALIGNAS alignas(CACHE_LINE_SIZE)
+
 namespace ShannonBase {
 using row_id_t = size_t;
 /** Handler name for rapid */

@@ -52,7 +52,7 @@ namespace Imcs {
  * whether data is null or valid in this position. and all text data are
  * encoding with dictionarycompression algorithm. */
 template <typename T>
-struct chunk_deleter_helper {
+struct SHANNON_ALIGNAS chunk_deleter_helper {
   void operator()(T *ptr) {
     if (ptr) my_free(ptr);
   }
