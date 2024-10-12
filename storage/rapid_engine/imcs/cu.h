@@ -50,7 +50,7 @@ class Chunk;
 class Cu : public MemoryObject {
  public:
   using cu_fd_t = uint64;
-  using Cu_header = struct alignas(CACHE_LINE_SIZE) Cu_header_t {
+  using Cu_header = struct SHANNON_ALIGNAS Cu_header_t {
    public:
     // physical row count. If you want to get logical rows, you should consider
     // MVCC to decide that whether this phyical row is visiable or not to this

@@ -71,6 +71,10 @@ partial_revokes
 password_require_current
 password_require_current
 pseudo_slave_mode
+rapid_rapid_memory_size_max
+rapid_rapid_memory_size_max
+rapid_rapid_pop_buffer_size_max
+rapid_rapid_pop_buffer_size_max
 regexp_stack_limit
 regexp_stack_limit
 regexp_time_limit

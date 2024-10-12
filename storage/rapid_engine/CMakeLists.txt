@@ -44,18 +44,75 @@ INCLUDE_DIRECTORIES(
 # STRING(REPLACE "-flto" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
 # STRING(REPLACE "-flto" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
-SET(CACHE_LINE_DEFAULT_VALUE "64")
-ADD_EXECUTABLE(get_cache_line_size  utils/cache_line.cpp)
-EXECUTE_PROCESS(
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/get_cache_line_size
+
+# detect cpu type.
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    execute_process(
+        COMMAND wmic cpu get manufacturer
+        OUTPUT_VARIABLE CPU_MANUFACTURER
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+else()
+    execute_process(
+        COMMAND lscpu
+        COMMAND grep "Vendor ID"
+        OUTPUT_VARIABLE CPU_MANUFACTURER
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+endif()
+
+string(TOLOWER "${CPU_MANUFACTURER}" CPU_MANUFACTURER_LOWER)
+
+if(CPU_MANUFACTURER_LOWER MATCHES "intel")
+    set(CPU_TYPE "intel")
+    set(CACHE_SIZE_DETECTOR_SOURCE "utils/cpu_cache_size_intel.cpp")
+    set(CACHE_LINE_SIZE_DETECTOR_SOURCE "utils/cache_line_size_intel.cpp")
+elseif(CPU_MANUFACTURER_LOWER MATCHES "amd")
+    set(CPU_TYPE "amd")
+    set(CACHE_SIZE_DETECTOR_SOURCE "utils/cpu_cache_size_amd.cpp")
+    set(CACHE_LINE_SIZE_DETECTOR_SOURCE "utils/cache_line_size_amd.cpp")
+else()
+    message(FATAL_ERROR "Unsupported CPU manufacturer: ${CPU_MANUFACTURER}")
+endif()
+
+message(STATUS "Detected CPU type: ${CPU_TYPE}")
+
+#get cache line size.
+ADD_EXECUTABLE(get_cache_line_size ${CACHE_LINE_SIZE_DETECTOR_SOURCE})
+execute_process(
+    COMMAND ${CMAKE_BINARY_DIR}/storage/rapid_engine/get_cache_line_size
     OUTPUT_VARIABLE CACHE_LINE_SIZE
+    ERROR_VARIABLE CACHE_ERROR
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
+IF (NOT CACHE_LINE_SIZE OR CACHE_LINE_SIZE STREQUAL "")
+    SET(CACHE_LINE_SIZE "64")
+ENDIF()
 MESSAGE(STATUS "L1 Cache Line Size: ${CACHE_LINE_SIZE} bytes")
-IF (DEFINED CACHE_LINE_SIZE AND  "${CACHE_LINE_SIZE}" STREQUAL "")
-  SET(CACHE_LINE_SIZE ${CACHE_LINE_DEFAULT_VALUE})
-  MESSAGE(STATUS "L1 Cache Line Size reset to: ${CACHE_LINE_SIZE} bytes")
-endif()
+
+#gets cache size
+ADD_EXECUTABLE(get_cache_size ${CACHE_SIZE_DETECTOR_SOURCE})
+execute_process(
+    COMMAND ${CMAKE_BINARY_DIR}/storage/rapid_engine/get_cache_size
+    OUTPUT_VARIABLE CACHE_OUTPUT
+    ERROR_VARIABLE CACHE_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+MESSAGE(STATUS "cache size msg:")
+MESSAGE(STATUS "${CACHE_OUTPUT}")
+
+STRING(REGEX MATCHALL "CACHE_L[1-3]=[0-9]+" CACHE_MATCHES "${CACHE_OUTPUT}")
+FOREACH(MATCH ${CACHE_MATCHES})
+    string(REGEX REPLACE "CACHE_L([1-3])=([0-9]+)" "\\1;\\2" CACHE_PAIR "${MATCH}")
+    list(GET CACHE_PAIR 0 CACHE_LEVEL)
+    list(GET CACHE_PAIR 1 CACHE_SIZE)
+    set(CACHE_L${CACHE_LEVEL}_SIZE ${CACHE_SIZE})
+ENDFOREACH()
+IF (NOT CACHE_L3 OR CACHE_L3 STREQUAL "")
+    SET(CACHE_L3 "8388608")
+ENDIF()
+MESSAGE(STATUS "L3 Cache Size: ${CACHE_L3} bytes")
 
 CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/storage/rapid_engine/include/rapid_arch_inf.h.in ${CMAKE_SOURCE_DIR}/storage/rapid_engine/include/rapid_arch_inf.h)
 
