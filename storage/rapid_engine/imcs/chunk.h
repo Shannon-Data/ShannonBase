@@ -27,6 +27,7 @@
 #define __SHANNONBASE_CHUNK_H__
 
 #include <atomic>
+#include <chrono>
 #include <tuple>
 #include <vector>
 
@@ -51,21 +52,38 @@ namespace Imcs {
  * whether data is null or valid in this position. and all text data are
  * encoding with dictionarycompression algorithm. */
 template <typename T>
-struct chunk_deleter_helper {
+struct SHANNON_ALIGNAS chunk_deleter_helper {
   void operator()(T *ptr) {
     if (ptr) my_free(ptr);
   }
 };
 
+// in chunk, the latest veresion data always is in. the old version of data moves to
+// SMU. So if a trx can see the latest version data, it should travers the version
+// link to check whether there's some visible data or not. if yes, return the old ver
+// data or otherwise, go to check the next item.
+struct smu_item_t {
+  // trxid of old version value.
+  trx_id_t trxid;
+
+  // timestamp of the modification.
+  std::chrono::time_point<std::chrono::high_resolution_clock> tm_stamp;
+
+  // the old version of data.
+  uchar *data;
+};
+
+using smu_item = struct smu_item_t;
+
 class Chunk : public MemoryObject {
  public:
   /**TODO: A Snapshot Metadata Unit (SMU) contains metadata and transactional
    * information for an associated IMCU.*/
-  using smu_item_t = std::pair<trx_id_t, uchar *>;
+
   class Snapshot_meta_unit {
    public:
     // an item of SMU. consist of <trxid, new_data>.
-    std::vector<smu_item_t> m_version_info;
+    std::vector<smu_item> m_version_info;
   };
 
   using Chunk_header = struct alignas(CACHE_LINE_SIZE) Chunk_header_t {
@@ -126,8 +144,8 @@ class Chunk : public MemoryObject {
   inline uchar *base() const { return m_base; }
   inline uchar *end() const { return m_end; }
 
-  // write the data to chunk.
-  inline uchar *where(uchar *to, size_t len) {
+  // the data write to where in this chunk.
+  inline uchar *where() {
     assert(m_data < m_end);
     return m_data;
   }
@@ -185,16 +203,18 @@ class Chunk : public MemoryObject {
   inline bool full() { return ((m_end.load() - m_data.load()) == 0); }
 
   // gets null bit flag.
-  int is_null(row_id_t pos);
+  int is_null(const Rapid_load_context *context, row_id_t pos);
 
   // gets the delete flag.
-  int is_deleted(row_id_t pos);
+  int is_deleted(const Rapid_load_context *context, row_id_t pos);
 
   // get the normalized pack length
   inline size_t normalized_pack_length() { return m_header->m_normailzed_pack_length; }
 
   // get the real pack legnth, m_source_fld->pack_length
   inline size_t pack_length() { return m_header->m_source_fld->pack_length(); }
+
+  uchar *seek(row_id_t rowid);
 
  private:
   std::mutex m_header_mutex;

@@ -19,18 +19,16 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023,2024 Shannon Data AI and/or its affiliates.
+   The fundmental code for imcs.
 
-   The fundmental code for imcs. To get cache line size.
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
-#ifndef __SHANNON_RAPID_ARCH_INFO_H__
-#define __SHANNON_RAPID_ARCH_INFO_H__
-// cache line size
-#define CACHE_LINE_SIZE @CACHE_LINE_SIZE@
-
-#define CACHE_L1_SIZE @CACHE_L1_SIZE@
-#define CACHE_L2_SIZE @CACHE_L2_SIZE@
-#define CACHE_L3_SIZE @CACHE_L3_SIZE@
-
-#endif  //__SHANNON_RAPID_ARCH_INFO_H__
+#include <stdio.h>
+int main() {
+  unsigned int eax, ebx, ecx, edx;
+  eax = 0x80000005;  // CPUID instruction for L1 data cache parameters
+  asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(eax));
+  printf("%u \n", (ecx & 0xFF));
+  return 0;
+}

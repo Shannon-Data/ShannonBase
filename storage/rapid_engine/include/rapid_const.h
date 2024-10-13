@@ -30,6 +30,16 @@
 #include "my_inttypes.h"
 #include "rapid_arch_inf.h"
 
+#if defined(__arm__) || defined(__aarch64__)
+#define SHANNON_ARM_PLATFORM
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
+#define SHANNON_X86_PLATFORM
+#elif defined(__APPLE__) && defined(__arm64__)
+#define SHANNON_APPLE_PLATFORM
+#endif
+
+#define SHANNON_ALIGNAS alignas(CACHE_LINE_SIZE)
+
 namespace ShannonBase {
 using row_id_t = size_t;
 /** Handler name for rapid */
@@ -61,8 +71,11 @@ constexpr char SHANNON_BLANK_PLACEHOLDER[] = "BLANK_CONTENT";
 
 constexpr char SHANNON_DB_ROW_ID[] = "DB_ROW_ID";
 constexpr size_t SHANNON_DB_ROW_ID_LEN = 9;
+
 constexpr char SHANNON_DB_TRX_ID[] = "DB_TRX_ID";
 constexpr size_t SHANNON_DB_TRX_ID_LEN = 9;
+constexpr size_t SHANNON_DATA_DB_TRX_ID_LEN = 6;
+
 constexpr char SHANNON_DB_ROLL_PTR[] = "DB_ROLL_PTR";
 constexpr size_t SHANNON_DB_ROLL_PTR_LEN = 11;
 

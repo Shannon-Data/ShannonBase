@@ -26,7 +26,11 @@
 
 #ifndef __SHANNON_RAPID_ARCH_INFO_H__
 #define __SHANNON_RAPID_ARCH_INFO_H__
-// cache L1 line size
+// cache line size
 #define CACHE_LINE_SIZE 64
+
+#define CACHE_L1_SIZE 32768
+#define CACHE_L2_SIZE 524288
+#define CACHE_L3_SIZE 8388608
 
 #endif  //__SHANNON_RAPID_ARCH_INFO_H__
