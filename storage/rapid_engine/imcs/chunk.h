@@ -147,7 +147,7 @@ class Chunk : public MemoryObject {
   // the data write to where in this chunk.
   inline uchar *where() {
     assert(m_data < m_end);
-    return m_data;
+    return m_data.load();
   }
 
   // return the real time chunk size.
