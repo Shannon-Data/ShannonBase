@@ -189,7 +189,7 @@ bool Transaction::is_auto_commit() { return m_trx_impl->auto_commit; }
 
 bool Transaction::is_active() { return trx_is_started(m_trx_impl); }
 
-bool Transaction::is_visible(ID trx_id, const char *table_name) {
+bool Transaction::is_visible(Transaction::ID trx_id, const char *table_name) {
   if (MVCC::is_view_active(m_trx_impl->read_view)) {
     table_name_t name;
     name.m_name = const_cast<char *>(table_name);
@@ -198,5 +198,7 @@ bool Transaction::is_visible(ID trx_id, const char *table_name) {
 
   return false;
 }
+
+Transaction::ID Transaction::get_id() { return m_trx_impl->id; }
 
 }  // namespace ShannonBase

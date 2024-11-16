@@ -23,6 +23,9 @@
 
    The fundmental code for imcs. for transaction.
 */
+#ifndef __SHANNONBASE_TRANSACTION_H__
+#define __SHANNONBASE_TRANSACTION_H__
+
 #include "sql/current_thd.h"
 #include "storage/innobase/include/trx0types.h"  //trx_id_t
 #include "storage/rapid_engine/include/rapid_object.h"
@@ -87,7 +90,9 @@ class Transaction : public MemoryObject {
 
   virtual bool is_active();
 
-  virtual bool is_visible(ID trx_id, const char *table_name);
+  virtual bool is_visible(Transaction::ID trx_id, const char *table_name);
+
+  virtual Transaction::ID get_id();
 
  private:
   Transaction(THD *thd = current_thd);
@@ -106,3 +111,5 @@ class Transaction : public MemoryObject {
 };
 
 }  // namespace ShannonBase
+
+#endif  //__SHANNONBASE_TRANSACTION_H__

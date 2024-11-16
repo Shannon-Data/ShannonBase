@@ -206,11 +206,28 @@ int Chunk::is_deleted(const Rapid_load_context *context, row_id_t pos) {
     return Utils::Util::bit_array_get(m_header->m_del_mask.get(), pos);
 }
 
+void Chunk::build_version(row_id_t rowid, Transaction::ID id, const uchar *data, size_t len) {
+  smu_item_t si(m_header->m_normailzed_pack_length);
+  if (len == UNIV_SQL_NULL) {
+    si.data = nullptr;
+  } else
+    std::memcpy(si.data.get(), data, len);
+  si.trxid = id;
+  if (m_header->m_smu->m_version_info.find(rowid) != m_header->m_smu->m_version_info.end()) {
+    m_header->m_smu->m_version_info[rowid].emplace_back(std::move(si));
+  } else {
+    smu_item_vec iv;
+    iv.emplace_back(std::move(si));
+    m_header->m_smu->m_version_info.emplace(rowid, std::move(iv));
+  }
+
+  return;
+}
+
 uchar *Chunk::read(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
-  std::scoped_lock lk(m_data_mutex);
   if (unlikely(m_rdata.load() + len > m_end.load())) {
     m_rdata.store(m_base.load());
     return nullptr;
@@ -248,7 +265,8 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
     m_data.store(m_base.load());
     return nullptr;
   }
-  auto ret = reinterpret_cast<uchar *>(std::memcpy(m_data, data, len));
+  std::scoped_lock data_guard(m_data_mutex);
+  auto ret = reinterpret_cast<uchar *>(std::memcpy(m_data.load(), data, len));
   m_data.fetch_add(len);
 
   update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, data);
@@ -264,7 +282,10 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t where, uchar *n
 
   ut_a(where < m_header->m_prows);
 
+  std::scoped_lock data_guard(m_data_mutex);
   auto where_ptr = m_base + where * m_header->m_normailzed_pack_length;
+
+  build_version(where, context->m_extra_info.m_trxid, where_ptr, len);
   if (len == UNIV_SQL_NULL) {
     Utils::Util::bit_array_set(m_header->m_null_mask.get(), where);
     len = m_header->m_normailzed_pack_length;
@@ -290,12 +311,17 @@ uchar *Chunk::del(const Rapid_load_context *context, uchar *data, size_t len) {
   if (m_data <= m_base) return m_base;
   std::atomic<uchar *> start_pos{m_base.load()};
   size_t row_index{0};
+
+  std::scoped_lock data_guard(m_data_mutex);
   while (start_pos < m_data.load()) {
     if (!memcmp(start_pos, data, len)) {  // same
       Utils::Util::bit_array_set(m_header->m_del_mask.get(), row_index);
       // to set the mem to blank holder.
-      update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, start_pos);
+      auto is_null = Utils::Util::bit_array_get(m_header->m_null_mask.get(), row_index);
+      build_version(row_index, context->m_extra_info.m_trxid, data, is_null ? UNIV_SQL_NULL : len);
+
       memcpy(start_pos, reinterpret_cast<void *>((uchar *)SHANNON_BLANK_PLACEHOLDER), len);
+      update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, start_pos);
     }
 
     start_pos += m_header->m_source_fld->pack_length();
@@ -317,17 +343,23 @@ uchar *Chunk::del(const Rapid_load_context *context, row_id_t rowid) {
 
   Utils::Util::bit_array_set(m_header->m_del_mask.get(), rowid);
 
+  std::scoped_lock data_guard(m_data_mutex);
   del_from = m_base + rowid * m_header->m_normailzed_pack_length;
   ut_a(del_from <= m_data);
-  // TODO: add to smu ptr. but, now we just replace with SHANNON_PLACEHOLDER
-  if (del_from) update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, del_from);
+
+  // get the old data and insert smu ptr link. should check whether data is null.
+  auto is_null = Utils::Util::bit_array_get(m_header->m_null_mask.get(), rowid);
+  auto data_len = is_null ? UNIV_SQL_NULL : m_header->m_normailzed_pack_length;
+  build_version(rowid, context->m_extra_info.m_trxid, del_from, data_len);
 
   del_from = (uchar *)memcpy(del_from, SHANNON_BLANK_PLACEHOLDER, m_header->m_normailzed_pack_length);
+
+  if (del_from) update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, del_from);
   return del_from;
 }
 
 void Chunk::truncate() {
-  std::scoped_lock lk(m_header_mutex);
+  std::scoped_lock lk(m_data_mutex);
   if (m_base) {
     ut::aligned_free(m_base);
     m_base = m_data = nullptr;
@@ -345,6 +377,14 @@ uchar *Chunk::seek(row_id_t rowid) {
     return m_data;
   else
     return m_base + rowid * m_header->m_normailzed_pack_length;
+}
+
+row_id_t Chunk::prows() { return m_header->m_prows; }
+
+row_id_t Chunk::rows(Rapid_load_context *context) {
+  ut_a(false);
+  return m_header->m_prows;
+  ;
 }
 
 }  // namespace Imcs

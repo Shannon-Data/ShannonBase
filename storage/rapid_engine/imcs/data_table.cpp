@@ -120,7 +120,8 @@ start_pos:
   auto trx_id_ptr = m_context->m_trx_id_cu->chunk(current_chunk)->seek(offset_in_chunk);
   // more info for __builtin_prefetch: https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html
   if ((trx_id_ptr + CACHE_LINE_SIZE) < m_context->m_trx_id_cu->chunk(current_chunk)->where())
-    __builtin_prefetch(trx_id_ptr + CACHE_LINE_SIZE, SHANNON_PREFETCH_FOR_READ, SHANNON_PREFETCH_L3_LOCALITY);
+    SHANNON_PREFETCH_R(trx_id_ptr + CACHE_LINE_SIZE);
+
   Transaction::ID trx_id = mach_read_from_6(trx_id_ptr);
 
   for (auto idx = 0u; idx < m_field_cus.size(); idx++) {
@@ -135,8 +136,7 @@ start_pos:
 
     // prefetch data for cpu to reduce the data cache miss.
     if (cu->chunk(current_chunk)->seek(offset_in_chunk) + CACHE_LINE_SIZE < cu->chunk(current_chunk)->where())
-      __builtin_prefetch(cu->chunk(current_chunk)->seek(offset_in_chunk) + CACHE_LINE_SIZE, SHANNON_PREFETCH_FOR_READ,
-                         SHANNON_PREFETCH_L3_LOCALITY);
+      SHANNON_PREFETCH_R(cu->chunk(current_chunk)->seek(offset_in_chunk) + CACHE_LINE_SIZE);
 
     // visibility check. if it's not visibile and does not have old version, go to next.
     if (!m_context->m_trx->is_visible(trx_id, m_context->m_table_name) &&
