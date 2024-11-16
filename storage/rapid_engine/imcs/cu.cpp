@@ -107,7 +107,15 @@ row_id_t Cu::prows() {
   return m_header->m_prows.load(std::memory_order_seq_cst);
 }
 
-row_id_t Cu::rows(Rapid_load_context *context) { return 0; }
+row_id_t Cu::rows(Rapid_load_context *context) {
+  // now, we return the prows, in future, we will return mvcc-versioned row num.
+  ut_a(context->m_trx);
+  size_t rows{0u};
+  for (auto idx = 0u; idx < m_chunks.size(); idx++) {
+    rows += m_chunks[idx]->rows(context);
+  }
+  return m_header->m_prows.load(std::memory_order_seq_cst);
+}
 
 size_t Cu::normalized_pack_length() {
   ut_a(m_chunks.size());
