@@ -91,32 +91,9 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
 }
 
 uint32 Dictionary::get(uint64 strid, String &ret_val) {
-  compress_algos alg [[maybe_unused]]{compress_algos::NONE};
-  switch (m_encoding_type) {
-    case Encoding_type::SORTED:
-      alg = compress_algos::ZSTD;
-      break;
-    case Encoding_type::VARLEN:
-      alg = compress_algos::LZ4;
-      break;
-    case Encoding_type::NONE:
-      alg = compress_algos::NONE;
-      break;
-    default:
-      break;
-  }
-
-  {
-    std::scoped_lock lk(m_content_mtx);
-    auto id_pos = m_id2content.find(strid);
-    if (id_pos != m_id2content.end()) {
-      auto val_str = id_pos->second;
-      String strs(val_str.c_str(), val_str.length(), ret_val.charset());
-      copy_if_not_alloced(&ret_val, &strs, strs.length());
-    } else
-      return 0;
-  }
-
+  auto compressed_str = reinterpret_cast<char *>(get(strid));
+  String strs(compressed_str, strlen(compressed_str), ret_val.charset());
+  copy_if_not_alloced(&ret_val, &strs, strs.length());
   return 0;
 }
 
@@ -139,8 +116,13 @@ uchar *Dictionary::get(uint64 strid) {
   {
     std::scoped_lock lk(m_content_mtx);
     auto id_pos = m_id2content.find(strid);
-    return (id_pos != m_id2content.end()) ? (uchar *)(id_pos->second.c_str()) : nullptr;
+    if (id_pos != m_id2content.end()) {
+      auto compressed_str = id_pos->second;
+      auto ret_strp = CompressFactory::get_instance(alg)->decompressString(compressed_str).c_str();
+      return reinterpret_cast<uchar *>(const_cast<char *>(ret_strp));
+    }
   }
+
   return nullptr;
 }
 
