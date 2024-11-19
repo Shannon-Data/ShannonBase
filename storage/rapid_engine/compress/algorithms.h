@@ -37,7 +37,7 @@
 namespace ShannonBase {
 namespace Compress {
 
-enum compress_algos { NONE = 0, ZLIB, ZSTD, LZ4 };
+enum compress_algos { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
 
 class Compress_algorithm {
  public:

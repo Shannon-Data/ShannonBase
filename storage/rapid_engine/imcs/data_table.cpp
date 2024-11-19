@@ -164,12 +164,12 @@ start_pos:
     source_fld->set_notnull();
     auto data_ptr = cu->chunk(current_chunk)->base() + offset_in_chunk * normalized_length;
     if (is_text_value) {
-      uint32 str_id = *(uint32 *)data_ptr;
-      auto str_ptr = cu->header()->m_local_dict->get(str_id);
+      uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
+      auto str_ptr = reinterpret_cast<char *>(cu->header()->m_local_dict->get(str_id));
       Utils::Util::is_blob(cu->header()->m_type)
-          ? (down_cast<Field_blob *>(source_fld)->set_ptr(strlen((char *)str_ptr), str_ptr), 0)
+          ? down_cast<Field_blob *>(source_fld)->store(str_ptr, strlen(str_ptr), source_fld->charset())
           : (Utils::Util::is_varstring(cu->header()->m_source_fld->type())
-                 ? source_fld->store(reinterpret_cast<char *>(str_ptr), strlen((char *)str_ptr), source_fld->charset())
+                 ? source_fld->store(reinterpret_cast<char *>(str_ptr), strlen(str_ptr), source_fld->charset())
                  : source_fld->store(reinterpret_cast<char *>(str_ptr), cu->pack_length(), source_fld->charset()));
     } else
       source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);

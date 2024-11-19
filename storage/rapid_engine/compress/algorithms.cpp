@@ -153,6 +153,7 @@ std::string &lz4_compress::decompressString(std::string &compressed_str) {
 void CompressFactory::make_elements() {
   // important: the inserted index should same as its algo type value.
   m_factory.emplace_back(std::make_unique<default_compress>());
+  m_factory.emplace_back(std::make_unique<default_compress>());
   m_factory.emplace_back(std::make_unique<zlib_compress>());
   m_factory.emplace_back(std::make_unique<zstd_compress>());
   m_factory.emplace_back(std::make_unique<lz4_compress>());
