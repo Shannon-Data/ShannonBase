@@ -43,13 +43,13 @@ class Compress_algorithm {
  public:
   Compress_algorithm() = default;
   virtual ~Compress_algorithm() = default;
-  virtual std::string &compressString(std::string &orginal) = 0;
+  virtual std::string &compressString(std::string &original) = 0;
   virtual std::string &decompressString(std::string &compressed_str) = 0;
   static constexpr uint MAX_BUFF_LEN = 65535;
 };
 class default_compress : public Compress_algorithm {
  public:
-  virtual std::string &compressString(std::string &orginal) final;
+  virtual std::string &compressString(std::string &original) final;
   virtual std::string &decompressString(std::string &compressed_str) final;
 
  private:
@@ -61,7 +61,7 @@ class zstd_compress : public Compress_algorithm {
  public:
   zstd_compress();
   virtual ~zstd_compress() = default;
-  virtual std::string &compressString(std::string &orginal) final;
+  virtual std::string &compressString(std::string &original) final;
   virtual std::string &decompressString(std::string &compressed_str) final;
 
  private:
@@ -73,7 +73,7 @@ class zlib_compress : public Compress_algorithm {
  public:
   zlib_compress();
   virtual ~zlib_compress() = default;
-  virtual std::string &compressString(std::string &orginal) final;
+  virtual std::string &compressString(std::string &original) final;
   virtual std::string &decompressString(std::string &compressed_str) final;
 
  private:
@@ -85,7 +85,7 @@ class lz4_compress : public Compress_algorithm {
  public:
   lz4_compress();
   virtual ~lz4_compress() = default;
-  virtual std::string &compressString(std::string &orginal) final;
+  virtual std::string &compressString(std::string &original) final;
   virtual std::string &decompressString(std::string &compressed_str) final;
 
  private:
