@@ -29,17 +29,18 @@
 #include <atomic>
 #include <chrono>
 #include <tuple>
-#include <vector>
+#include <unordered_map>
 
 #include "field_types.h"  //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"
 #include "sql/field.h"  //Field
-#include "trx0types.h"  //trx_id_t
+//#include "trx0types.h"  //trx_id_t
 
 #include "sql/sql_class.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/trx/transaction.h"  //Transaction
 
 namespace ShannonBase {
 class Rapid_load_context;
@@ -62,18 +63,37 @@ struct SHANNON_ALIGNAS chunk_deleter_helper {
 // SMU. So if a trx can see the latest version data, it should travers the version
 // link to check whether there's some visible data or not. if yes, return the old ver
 // data or otherwise, go to check the next item.
-struct smu_item_t {
+struct SHANNON_ALIGNAS smu_item_t {
   // trxid of old version value.
-  trx_id_t trxid;
+  Transaction::ID trxid;
 
   // timestamp of the modification.
   std::chrono::time_point<std::chrono::high_resolution_clock> tm_stamp;
 
-  // the old version of data.
-  uchar *data;
+  // the old version of data. all var data types were encoded.
+  std::unique_ptr<uchar[]> data;
+
+  smu_item_t(size_t size) : data(new uchar[size]) { tm_stamp = std::chrono::high_resolution_clock::now(); }
+  smu_item_t() = delete;
+  // Disable copying
+  smu_item_t(const smu_item_t &) = delete;
+  smu_item_t &operator=(const smu_item_t &) = delete;
+
+  // Define a move constructor
+  smu_item_t(smu_item_t &&other) noexcept : trxid(other.trxid), tm_stamp(other.tm_stamp), data(std::move(other.data)) {}
+
+  // Define a move assignment operator
+  smu_item_t &operator=(smu_item_t &&other) noexcept {
+    if (this != &other) {
+      trxid = other.trxid;
+      tm_stamp = other.tm_stamp;
+      data = std::move(other.data);
+    }
+    return *this;
+  }
 };
 
-using smu_item = struct smu_item_t;
+using smu_item_vec = std::vector<smu_item_t>;
 
 class Chunk : public MemoryObject {
  public:
@@ -82,11 +102,19 @@ class Chunk : public MemoryObject {
 
   class Snapshot_meta_unit {
    public:
-    // an item of SMU. consist of <trxid, new_data>.
-    std::vector<smu_item> m_version_info;
+    /** an item of SMU. consist of <trxid, new_data>. pair of row_id_t and sum_item indicates
+     * that each row data has a version link. If this row data not been modified, it does not
+     * have any old version.
+     *   |__|
+     *   |__|<----->rowidN: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
+     *   |__|       rowidM: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
+     *   |__|<-----/|\
+     *   |__|
+     */
+    std::unordered_map<row_id_t, smu_item_vec> m_version_info;
   };
 
-  using Chunk_header = struct alignas(CACHE_LINE_SIZE) Chunk_header_t {
+  using Chunk_header = struct SHANNON_ALIGNAS Chunk_header_t {
    public:
     // a copy of source field info, only use its meta info. do NOT use it
     // directly.
@@ -216,6 +244,12 @@ class Chunk : public MemoryObject {
 
   uchar *seek(row_id_t rowid);
 
+  // gets the physical row count.
+  row_id_t prows();
+
+  // gets
+  row_id_t rows(Rapid_load_context *context);
+
  private:
   std::mutex m_header_mutex;
   std::unique_ptr<Chunk_header> m_header{nullptr};
@@ -250,6 +284,9 @@ class Chunk : public MemoryObject {
 
   // check the data type is leagal or not.
   void check_data_type(size_t type_size);
+
+  // build up an old version.
+  inline void build_version(row_id_t rowid, Transaction::ID id, const uchar *data, size_t len);
 };
 
 }  // namespace Imcs

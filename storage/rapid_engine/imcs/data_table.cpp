@@ -120,7 +120,8 @@ start_pos:
   auto trx_id_ptr = m_context->m_trx_id_cu->chunk(current_chunk)->seek(offset_in_chunk);
   // more info for __builtin_prefetch: https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html
   if ((trx_id_ptr + CACHE_LINE_SIZE) < m_context->m_trx_id_cu->chunk(current_chunk)->where())
-    __builtin_prefetch(trx_id_ptr + CACHE_LINE_SIZE, SHANNON_PREFETCH_FOR_READ, SHANNON_PREFETCH_L3_LOCALITY);
+    SHANNON_PREFETCH_R(trx_id_ptr + CACHE_LINE_SIZE);
+
   Transaction::ID trx_id = mach_read_from_6(trx_id_ptr);
 
   for (auto idx = 0u; idx < m_field_cus.size(); idx++) {
@@ -135,8 +136,7 @@ start_pos:
 
     // prefetch data for cpu to reduce the data cache miss.
     if (cu->chunk(current_chunk)->seek(offset_in_chunk) + CACHE_LINE_SIZE < cu->chunk(current_chunk)->where())
-      __builtin_prefetch(cu->chunk(current_chunk)->seek(offset_in_chunk) + CACHE_LINE_SIZE, SHANNON_PREFETCH_FOR_READ,
-                         SHANNON_PREFETCH_L3_LOCALITY);
+      SHANNON_PREFETCH_R(cu->chunk(current_chunk)->seek(offset_in_chunk) + CACHE_LINE_SIZE);
 
     // visibility check. if it's not visibile and does not have old version, go to next.
     if (!m_context->m_trx->is_visible(trx_id, m_context->m_table_name) &&
@@ -164,13 +164,13 @@ start_pos:
     source_fld->set_notnull();
     auto data_ptr = cu->chunk(current_chunk)->base() + offset_in_chunk * normalized_length;
     if (is_text_value) {
-      uint32 str_id = *(uint32 *)data_ptr;
-      auto str_ptr = cu->header()->m_local_dict->get(str_id);
-      Utils::Util::is_blob(cu->header()->m_type)
-          ? (down_cast<Field_blob *>(source_fld)->set_ptr(strlen((char *)str_ptr), str_ptr), 0)
-          : (Utils::Util::is_varstring(cu->header()->m_source_fld->type())
-                 ? source_fld->store(reinterpret_cast<char *>(str_ptr), strlen((char *)str_ptr), source_fld->charset())
-                 : source_fld->store(reinterpret_cast<char *>(str_ptr), cu->pack_length(), source_fld->charset()));
+      uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
+      auto str_ptr = reinterpret_cast<char *>(cu->header()->m_local_dict->get(str_id));
+      auto len =
+          (Utils::Util::is_blob(cu->header()->m_type) || Utils::Util::is_varstring(cu->header()->m_source_fld->type()))
+              ? strlen(str_ptr)
+              : cu->pack_length();
+      source_fld->store(str_ptr, len, source_fld->charset());
     } else
       source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
 
