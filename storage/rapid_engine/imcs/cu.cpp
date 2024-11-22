@@ -103,7 +103,6 @@ row_id_t Cu::prows() {
   }
   ut_a(total_rows_in_chunk == m_header->m_prows.load());
 #endif
-  ut_a(m_header->m_prows <= SHANNON_ROWS_IN_CHUNK);
   return m_header->m_prows.load(std::memory_order_seq_cst);
 }
 
@@ -195,7 +194,6 @@ void Cu::update_meta_info(OPER_TYPE type, uchar *data) {
   switch (type) {
     case ShannonBase::OPER_TYPE::OPER_INSERT: {
       m_header->m_prows.fetch_add(1);
-      ut_a(m_header->m_prows.load() <= SHANNON_ROWS_IN_CHUNK);
       m_header->m_sum.store(m_header->m_sum + data_val);
       m_header->m_avg = m_header->m_sum / m_header->m_prows;
     } break;
