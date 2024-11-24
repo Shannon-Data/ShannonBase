@@ -244,6 +244,16 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
+  if (unlikely((m_data.load() + ((len == UNIV_SQL_NULL) ? m_header->m_normailzed_pack_length : len)) >
+               m_end.load())) {  // full
+    auto diff = m_data.load() - m_base.load();
+    ut_a(diff % m_header->m_normailzed_pack_length == 0);
+    ut_a(diff / m_header->m_normailzed_pack_length == SHANNON_ROWS_IN_CHUNK);
+
+    m_data.store(m_base.load());
+    return nullptr;
+  }
+
   if (len == UNIV_SQL_NULL) {
     if (!m_header->m_null_mask)
       m_header->m_null_mask = std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
@@ -257,14 +267,6 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
     data = (uchar *)SHANNON_NULL_PLACEHOLDER;
   }
 
-  if (unlikely(m_data.load() + len > m_end.load())) {  // full
-    auto diff = m_data.load() - m_base.load();
-    ut_a(diff % m_header->m_normailzed_pack_length == 0);
-    ut_a(diff / m_header->m_normailzed_pack_length == SHANNON_ROWS_IN_CHUNK);
-
-    m_data.store(m_base.load());
-    return nullptr;
-  }
   std::scoped_lock data_guard(m_data_mutex);
   auto ret = reinterpret_cast<uchar *>(std::memcpy(m_data.load(), data, len));
   m_data.fetch_add(len);
