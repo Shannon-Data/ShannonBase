@@ -70,6 +70,9 @@ class Imcs : public MemoryObject {
   Cu *get_cu(std::string &key);
   Cu *get_cu(const char *key);
 
+  // get cu pointer by its index.
+  Cu *get_cu(uint index);
+
   /**create all cus needed by source table, and ready to write the data into.*/
   int create_table_mem(const Rapid_load_context *context, const TABLE *source);
 

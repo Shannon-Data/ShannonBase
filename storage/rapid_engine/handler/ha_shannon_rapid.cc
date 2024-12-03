@@ -55,6 +55,7 @@
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
 #include "storage/innobase/handler/ha_innodb.h"        //thd_to_trx
+#include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/imcs/data_table.h"      //DataTable
 #include "storage/rapid_engine/imcs/imcs.h"            // IMCS
 #include "storage/rapid_engine/include/rapid_const.h"  //const
@@ -156,13 +157,11 @@ int ha_rapid::close() {
 }
 
 int ha_rapid::info(unsigned int flags) {
-  // Get the cardinality statistics from the primary storage engine.
-  handler *primary = ha_get_primary_handler();
-  int ret = primary->info(flags);
-  if (ret == 0) {
-    stats.records = primary->stats.records;
-  }
-  return ret;
+  ut_a(flags == (HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK));
+  Rapid_load_context context;
+  context.m_trx = Transaction::get_or_create_trx(m_thd);
+  stats.records = Imcs::Imcs::instance()->get_cu((uint)0)->rows(&context);
+  return 0;
 }
 
 /** Returns the operations supported for indexes.
@@ -176,7 +175,7 @@ handler::Table_flags ha_rapid::table_flags() const {
 
   // TODO:[remove when index supported] Secondary engines do not support index
   // access. Indexes are only used for cost estimates.
-  return HA_NO_INDEX_ACCESS;
+  return HA_NO_INDEX_ACCESS | HA_STATS_RECORDS_IS_EXACT | HA_COUNT_ROWS_INSTANT;
 }
 
 /** Returns the table type (storage engine name).
@@ -213,9 +212,23 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
           primary_flags);
 }
 
+int ha_rapid::records(ha_rows *num_rows) {
+  Rapid_load_context context;
+  context.m_trx = Transaction::get_or_create_trx(m_thd);
+  *num_rows = Imcs::Imcs::instance()->get_cu((uint)0)->rows(&context);
+  return 0;
+}
+
 ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key, key_range *max_key) {
   // Get the number of records in the range from the primary storage engine.
   return ha_get_primary_handler()->records_in_range(index, min_key, max_key);
+}
+
+double ha_rapid::scan_time() {
+  DBUG_TRACE;
+
+  const double t = (stats.records + stats.deleted) * Optimizer::Rapid_SE_cost_constants::MEMORY_BLOCK_READ_COST;
+  return t;
 }
 
 THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to, thr_lock_type lock_type) {
@@ -530,7 +543,7 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   lex->set_secondary_engine_execution_context(context);
 
   // Disable use of constant tables and evaluation of subqueries during
-  // optimization.
+  // optimization. But, it is not to producce an optima count query plan.
   lex->add_statement_options(OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION);
 
   return false;

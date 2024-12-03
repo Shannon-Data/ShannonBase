@@ -264,16 +264,16 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
     Utils::Util::bit_array_set(m_header->m_null_mask.get(), m_header->m_prows);
 
     len = m_header->m_normailzed_pack_length;
-    data = (uchar *)SHANNON_NULL_PLACEHOLDER;
+    data = const_cast<uchar *>(SHANNON_NULL_PLACEHOLDER);
   }
 
   std::scoped_lock data_guard(m_data_mutex);
-  auto ret = reinterpret_cast<uchar *>(std::memcpy(m_data.load(), data, len));
+  auto ret = static_cast<uchar *>(std::memcpy(m_data.load(), data, len));
   m_data.fetch_add(len);
 
   update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, data);
 
-  uint64 data_rows = (ptrdiff_t)(m_data.load() - m_base.load()) / len;
+  uint64 data_rows = static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load() - m_base.load()) / len);
   ut_a(data_rows == m_header->m_prows.load());
   return ret;
 }
@@ -291,7 +291,7 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t where, uchar *n
   if (len == UNIV_SQL_NULL) {
     Utils::Util::bit_array_set(m_header->m_null_mask.get(), where);
     len = m_header->m_normailzed_pack_length;
-    std::memcpy(where_ptr, reinterpret_cast<void *>((uchar *)SHANNON_BLANK_PLACEHOLDER), len);
+    std::memcpy(where_ptr, static_cast<void *>(const_cast<uchar *>(SHANNON_BLANK_PLACEHOLDER)), len);
   } else {
     len = m_header->m_normailzed_pack_length;
     std::memcpy(where_ptr, new_data, len);
@@ -316,13 +316,13 @@ uchar *Chunk::del(const Rapid_load_context *context, uchar *data, size_t len) {
 
   std::scoped_lock data_guard(m_data_mutex);
   while (start_pos < m_data.load()) {
-    if (!memcmp(start_pos, data, len)) {  // same
+    if (!std::memcmp(start_pos, data, len)) {  // same
       Utils::Util::bit_array_set(m_header->m_del_mask.get(), row_index);
       // to set the mem to blank holder.
       auto is_null = Utils::Util::bit_array_get(m_header->m_null_mask.get(), row_index);
       build_version(row_index, context->m_extra_info.m_trxid, data, is_null ? UNIV_SQL_NULL : len);
 
-      memcpy(start_pos, reinterpret_cast<void *>((uchar *)SHANNON_BLANK_PLACEHOLDER), len);
+      std::memcpy(start_pos, reinterpret_cast<void *>(const_cast<uchar *>(SHANNON_BLANK_PLACEHOLDER)), len);
       update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, start_pos);
     }
 
@@ -354,7 +354,7 @@ uchar *Chunk::del(const Rapid_load_context *context, row_id_t rowid) {
   auto data_len = is_null ? UNIV_SQL_NULL : m_header->m_normailzed_pack_length;
   build_version(rowid, context->m_extra_info.m_trxid, del_from, data_len);
 
-  del_from = (uchar *)memcpy(del_from, SHANNON_BLANK_PLACEHOLDER, m_header->m_normailzed_pack_length);
+  del_from = static_cast<uchar *>(std::memcpy(del_from, SHANNON_BLANK_PLACEHOLDER, m_header->m_normailzed_pack_length));
 
   if (del_from) update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, del_from);
   return del_from;
@@ -384,9 +384,8 @@ uchar *Chunk::seek(row_id_t rowid) {
 row_id_t Chunk::prows() { return m_header->m_prows; }
 
 row_id_t Chunk::rows(Rapid_load_context *context) {
-  ut_a(false);
+  // in furture, we get the rows with visibility check. Now, just return the prows.
   return m_header->m_prows;
-  ;
 }
 
 }  // namespace Imcs
