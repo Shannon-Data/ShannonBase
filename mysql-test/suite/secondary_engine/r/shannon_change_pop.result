@@ -12,7 +12,7 @@ select * from tt order by id;
 score	name	id	gender
 explain select * from tt order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	1	100.00	Using filesort; Using secondary engine Rapid
+1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	0	0.00	Using filesort; Using secondary engine Rapid
 [conn2]
 set use_secondary_engine=off;
 show variables  like '%use_secondary_engine%' ;

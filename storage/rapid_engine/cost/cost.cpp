@@ -25,10 +25,20 @@
 */
 #include "storage/rapid_engine/cost/cost.h"
 
+#include <assert.h>
+#include <sys/types.h>
+
+#include "lex_string.h"
+#include "m_string.h"
+
+class THD;
+struct TABLE;
+
 namespace ShannonBase {
 namespace Optimizer {
 
-CostEstimator::CostEstimator() {}
+const double Rapid_SE_cost_constants::MEMORY_BLOCK_READ_COST = 0.25;
+const double Rapid_SE_cost_constants::IO_BLOCK_READ_COST = 1.0;
 
 }  // namespace Optimizer
 }  // namespace ShannonBase

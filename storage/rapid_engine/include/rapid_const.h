@@ -66,9 +66,6 @@ constexpr uint64 SHANNON_MAX_POPULATION_BUFFER_SIZE = 64 * SHANNON_MB;
 
 constexpr uint SHANNON_BATCH_NUM = 8;
 
-constexpr char SHANNON_NULL_PLACEHOLDER[] = "NULL_SHANNON_PLACEHOLDER";
-constexpr char SHANNON_BLANK_PLACEHOLDER[] = "BLANK_CONTENT";
-
 constexpr char SHANNON_DB_ROW_ID[] = "DB_ROW_ID";
 constexpr size_t SHANNON_DB_ROW_ID_LEN = 9;
 
@@ -79,6 +76,8 @@ constexpr size_t SHANNON_DATA_DB_TRX_ID_LEN = 6;
 constexpr char SHANNON_DB_ROLL_PTR[] = "DB_ROLL_PTR";
 constexpr size_t SHANNON_DB_ROLL_PTR_LEN = 11;
 
+constexpr uchar SHANNON_NULL_PLACEHOLDER[] = "NULL";
+constexpr uchar SHANNON_BLANK_PLACEHOLDER[] = "BLNK";
 // The lowest value, here, which means it's a invalid value. to describe its
 // validity.
 constexpr double SHANNON_LOWEST_DOUBLE = std::numeric_limits<double>::lowest();

@@ -2385,7 +2385,7 @@ class Field_longlong : public Field_num {
                                const CHARSET_INFO *charset) final;
   type_conversion_status store(double nr) final;
   type_conversion_status store(longlong nr, bool unsigned_val) override;
-  double val_real() const override;
+  double val_real() const final;
   longlong val_int() const override;
   String *val_str(String *, String *) const final;
   bool send_to_protocol(Protocol *protocol) const final;

@@ -42,7 +42,7 @@ name	gender
 [conn1]
 explain select * from tt2;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	tt2	NULL	ALL	NULL	NULL	NULL	NULL	1	100.00	Using secondary engine Rapid
+1	SIMPLE	tt2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using secondary engine Rapid
 select * from tt2;
 name	gender
 [conn2]
@@ -218,7 +218,7 @@ set use_secondary_engine = forced;
 alter table tt secondary_load;
 explain select *, length(name) from tt;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using secondary engine Rapid
+1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	4	100.00	Using secondary engine Rapid
 select *, length(name) from tt;
 score	name	id	gender	length(name)
 1	n1	1	m	2

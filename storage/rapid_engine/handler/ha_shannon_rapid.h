@@ -102,6 +102,10 @@ class ha_rapid : public handler {
 
   void position(const unsigned char *) override {}
 
+  int records(ha_rows *num_rows) override;
+
+  double scan_time() override;
+
   unsigned long index_flags(unsigned int, unsigned int, bool) const override;
 
   auto is_push_down() { return (pushed_idx_cond) ? true : false; }
