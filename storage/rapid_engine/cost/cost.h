@@ -27,13 +27,67 @@
 #define __SHANNONBASE_COST_H__
 #include "storage/rapid_engine/include/rapid_object.h"
 
+#include "sql/handler.h"  //Cost_estimator
+#include "sql/opt_costconstants.h"
+#include "sql/opt_costmodel.h"
+
 namespace ShannonBase {
 namespace Optimizer {
-// cost estimation strategies.
-class CostEstimator : public MemoryObject {
+
+class Rapid_SE_cost_constants : public SE_cost_constants {
  public:
-  CostEstimator();
-  virtual ~CostEstimator() = default;
+  cost_constant_error rapid_update_func(const LEX_CSTRING &name, const double value) { return update(name, value); }
+
+  cost_constant_error rapid_update_default_func(const LEX_CSTRING &name, const double value) {
+    return update_default(name, value);
+  }
+
+  /// Default cost for reading a random block from an in-memory buffer
+  static const double MEMORY_BLOCK_READ_COST;
+
+  /// Default cost for reading a random disk block
+  static const double IO_BLOCK_READ_COST;
+};
+
+class Rapid_Cost_estimate : public Cost_estimate {};
+
+class Rapid_Cost_model_server : public Cost_model_server {
+ public:
+  Rapid_Cost_model_server() {
+    // Create default values for server cost constants
+    m_server_cost_constants = new Server_cost_constants();
+#if !defined(NDEBUG)
+    m_initialized = true;
+#endif
+  }
+
+  ~Rapid_Cost_model_server() override {
+    delete m_server_cost_constants;
+    m_server_cost_constants = nullptr;
+  }
+};
+
+class Rapid_Cost_model_table : public Cost_model_table {
+ public:
+  Rapid_Cost_model_table() {
+    // Create a rapid cost model server object that will provide
+    // cost constants for server operations
+    m_cost_model_server = new Rapid_Cost_model_server();
+
+    // Allocate cost constants for operations on tables
+    m_se_cost_constants = new Rapid_SE_cost_constants();
+
+#if !defined(NDEBUG)
+    m_initialized = true;
+#endif
+  }
+
+  ~Rapid_Cost_model_table() {
+    delete m_cost_model_server;
+    m_cost_model_server = nullptr;
+    delete m_se_cost_constants;
+    m_se_cost_constants = nullptr;
+  }
 };
 
 }  // namespace Optimizer
