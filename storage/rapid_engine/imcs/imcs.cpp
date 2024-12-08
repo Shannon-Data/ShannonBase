@@ -62,7 +62,7 @@ int Imcs::create_table_mem(const Rapid_load_context *context, const TABLE *sourc
   std::ostringstream oss, oss2;
   oss << source->s->db.str << ":" << source->s->table_name.str << ":";
   // 1 is an extra ghost column, here, DB_TRX_ID.
-  for (auto index = 0u; index < source->s->fields + 1; index++) {
+  for (int index = source->s->fields; index >= 0; index--) {
     auto fld = *(source->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     oss2 << oss.str() << fld->field_name;

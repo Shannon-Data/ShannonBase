@@ -37,32 +37,32 @@ EXPLAIN
       "operation": "Table scan on t1 in secondary engine Rapid",
       "table_name": "t1",
       "access_type": "table",
-      "estimated_rows": 1.0,
+      "estimated_rows": 0.0,
       "secondary_engine": "Rapid",
-      "estimated_total_cost": 0.5,
-      "estimated_first_row_cost": 0.5
+      "estimated_total_cost": 0.0,
+      "estimated_first_row_cost": 0.0
     },
     {
       "heading": "Hash",
       "operation": "Table scan on t2 in secondary engine Rapid",
       "table_name": "t2",
       "access_type": "table",
-      "estimated_rows": 1.0,
+      "estimated_rows": 0.0,
       "secondary_engine": "Rapid",
-      "estimated_total_cost": 0.5,
-      "estimated_first_row_cost": 0.5
+      "estimated_total_cost": 0.0,
+      "estimated_first_row_cost": 0.0
     }
   ],
   "join_type": "inner join",
   "operation": "Inner hash join (t1.a = t2.a)",
   "access_type": "join",
-  "estimated_rows": 0.10000000149011612,
+  "estimated_rows": 0.0,
   "hash_condition": [
     "(t1.a = t2.a)"
   ],
   "join_algorithm": "hash",
-  "estimated_total_cost": 1.2070000001043084,
-  "estimated_first_row_cost": 1.2070000001043084
+  "estimated_total_cost": 0.0,
+  "estimated_first_row_cost": 0.0
 }
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
