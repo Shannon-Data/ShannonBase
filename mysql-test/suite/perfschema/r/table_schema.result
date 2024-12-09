@@ -1179,6 +1179,41 @@ def	performance_schema	replication_group_member_stats	COUNT_TRANSACTIONS_REMOTE_
 def	performance_schema	replication_group_member_stats	COUNT_TRANSACTIONS_REMOTE_APPLIED	11	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	replication_group_member_stats	COUNT_TRANSACTIONS_LOCAL_PROPOSED	12	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	replication_group_member_stats	COUNT_TRANSACTIONS_LOCAL_ROLLBACK	13	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_columns	TABLE_ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_columns	COLUMN_ID	2	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_columns	NDV	3	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_columns	ENCODING	4	NULL	NO	char	32	128	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(32)			select,insert,update,references			NULL
+def	performance_schema	rpd_columns	DATA_PLACEMENT_INDEX	5	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_columns	DICT_SIZE_BTYES	6	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_column_id	ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_column_id	TABLE_ID	2	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_column_id	COLUMN_NAME	3	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
+def	performance_schema	rpd_preload_stats	TABLE_SCHEMA	1	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
+def	performance_schema	rpd_preload_stats	TABLE_NAME	2	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
+def	performance_schema	rpd_preload_stats	COLUMN_NAME	3	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
+def	performance_schema	rpd_preload_stats	AVG_BYTE_WIDTH_INC_NULL	4	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	SNAPSHOT_SCN	2	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	PERSISTED_SCN	3	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	POOL_TYPE	4	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	DATA_PLACEMENT_TYPE	5	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	T_NROWS	6	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOAD_STATUS	7	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOAD_PROGRESS	8	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	SIZE_BYTES	9	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	TRANSFORMATION_BYTES	10	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	E_NROWS	11	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	QUERY_COUNT	12	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LAST_QUERIED	13	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOAD_START_TIMESTAMP	14	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOAD_END_TIMESTAMP	15	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	RECOVERY_SOURCE	16	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	RECOVERY_START_TIMESTAMP	17	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	RECOVERY_END_TIMESTAMP	18	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_table_id	ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_table_id	NAME	2	NULL	NO	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(64)			select,insert,update,references			NULL
+def	performance_schema	rpd_table_id	SCHEMA_NAME	3	NULL	NO	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(64)			select,insert,update,references			NULL
+def	performance_schema	rpd_table_id	TABLE_NAME	4	NULL	NO	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(64)			select,insert,update,references			NULL
 def	performance_schema	rwlock_instances	NAME	1	NULL	NO	varchar	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	varchar(128)	MUL		select,insert,update,references			NULL
 def	performance_schema	rwlock_instances	OBJECT_INSTANCE_BEGIN	2	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned	PRI		select,insert,update,references			NULL
 def	performance_schema	rwlock_instances	WRITE_LOCKED_BY_THREAD_ID	3	NULL	YES	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned	MUL		select,insert,update,references			NULL

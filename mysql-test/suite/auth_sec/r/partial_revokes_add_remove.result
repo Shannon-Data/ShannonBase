@@ -513,6 +513,8 @@ CREATE TEMPORARY TABLE mysql.db_copy AS SELECT * FROM mysql.db;
 DELETE FROM mysql.db WHERE host='%';
 FLUSH PRIVILEGES;
 CREATE USER ''@'%', ''@'';
+Warnings:
+Warning	4005	User ''@'' is referenced as a definer account in a stored routine.
 GRANT SELECT ON *.* TO ''@'%' WITH GRANT OPTION;
 REVOKE SELECT ON pr_db.* FROM ''@'%';
 [connection anonymous_con_1]
@@ -531,6 +533,8 @@ Grants for @
 GRANT SELECT ON *.* TO ``@``
 REVOKE SELECT ON `pr_db`.* FROM ``@``
 DROP USER ''@'%',''@'';
+Warnings:
+Warning	4005	User ''@'' is referenced as a definer account in a stored routine.
 #
 # 11.2 Grantee is anonymous user
 #
