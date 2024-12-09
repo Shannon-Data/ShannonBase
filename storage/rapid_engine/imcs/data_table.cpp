@@ -119,7 +119,8 @@ start_pos:
   ut_a(m_context->m_trx_id_cu);
   auto trx_id_ptr = m_context->m_trx_id_cu->chunk(current_chunk)->seek(offset_in_chunk);
   // more info for __builtin_prefetch: https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html
-  if ((trx_id_ptr + CACHE_LINE_SIZE) < m_context->m_trx_id_cu->chunk(current_chunk)->where())
+  if (trx_id_ptr < m_context->m_trx_id_cu->chunk(current_chunk)->where() &&
+      (trx_id_ptr - m_context->m_trx_id_cu->chunk(current_chunk)->base()) % CACHE_LINE_SIZE == 0)
     SHANNON_PREFETCH_R(trx_id_ptr + CACHE_LINE_SIZE);
 
   Transaction::ID trx_id = mach_read_from_6(trx_id_ptr);
@@ -135,7 +136,8 @@ start_pos:
     });
 
     // prefetch data for cpu to reduce the data cache miss.
-    if (cu->chunk(current_chunk)->seek(offset_in_chunk) + CACHE_LINE_SIZE < cu->chunk(current_chunk)->where())
+    if (trx_id_ptr < m_context->m_trx_id_cu->chunk(current_chunk)->where() &&
+        (trx_id_ptr - m_context->m_trx_id_cu->chunk(current_chunk)->base()) % CACHE_LINE_SIZE == 0)
       SHANNON_PREFETCH_R(cu->chunk(current_chunk)->seek(offset_in_chunk) + CACHE_LINE_SIZE);
 
     // visibility check. if it's not visibile and does not have old version, go to next.
