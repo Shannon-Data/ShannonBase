@@ -6755,7 +6755,7 @@ static bool open_secondary_engine_tables(THD *thd, uint flags) {
   // future executions of the statement, since these properties will
   // not change between executions.
   const LEX_CSTRING *secondary_engine =
-      sql_cmd->eligible_secondary_storage_engine();
+      sql_cmd->eligible_secondary_storage_engine(thd);
   const plugin_ref secondary_engine_plugin =
       secondary_engine == nullptr
           ? nullptr

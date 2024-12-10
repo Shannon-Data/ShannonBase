@@ -932,6 +932,23 @@ using Event_tracking_data =
 using Event_tracking_data_stack = std::stack<Event_tracking_data>;
 
 /**
+  Base class for secondary engine statement context objects. Secondary
+  storage engines may create classes derived from this one which
+  contain state they need to preserve in lifecycle of this query.
+*/
+class Secondary_engine_statement_context {
+ public:
+  /**
+    Destructs the secondary engine statement context object. It is
+    called after the query execution has completed. Secondary engines
+    may override the destructor in subclasses and add code that
+    performs cleanup tasks that are needed after query execution.
+  */
+  virtual ~Secondary_engine_statement_context() = default;
+  virtual bool is_primary_engine_optimal() const { return true; }
+};
+
+/**
   @class THD
   For each client connection we create a separate thread with THD serving as
   a thread/connection descriptor
@@ -1056,6 +1073,12 @@ class THD : public MDL_context_owner,
   */
   String m_rewritten_query;
 
+  /**
+    Current query's secondary engine statement context.
+  */
+  std::unique_ptr<Secondary_engine_statement_context>
+      m_secondary_engine_statement_context;
+
  public:
   /* Used to execute base64 coded binlog events in MySQL server */
   Relay_log_info *rli_fake;
@@ -1080,6 +1103,17 @@ class THD : public MDL_context_owner,
     ha_data associated with it and memorizes the fact of that.
   */
   void rpl_detach_engine_ha_data();
+
+/*
+   Set secondary_engine_statement_context to new context.
+   This function assumes existing m_secondary_engine_statement_context is empty,
+   such that there's only context throughout the query's lifecycle.
+  */
+  void set_secondary_engine_statement_context(
+      std::unique_ptr<Secondary_engine_statement_context> context);
+  Secondary_engine_statement_context *secondary_engine_statement_context() {
+    return m_secondary_engine_statement_context.get();
+  }
 
   /**
     When the thread is a binlog or slave applier it reattaches the engine

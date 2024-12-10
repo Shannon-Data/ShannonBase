@@ -49,6 +49,7 @@
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/walk_access_paths.h"
+#include "sql/opt_trace.h"
 #include "sql/sql_class.h"
 #include "sql/sql_const.h"
 #include "sql/sql_lex.h"
@@ -81,6 +82,11 @@ handlerton *shannon_rapid_hton_ptr{nullptr};
 LoadedTables *shannon_loaded_tables = nullptr;
 uint64 rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
 rpd_columns_container rpd_columns_info;
+
+/**
+  Statement context class for the Shannon Rapid engine.
+*/
+class Shannon_statement_context : public Secondary_engine_statement_context {};
 
 bool Rapid_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
   if (&join != m_current_join) {
@@ -553,6 +559,29 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   return false;
 }
 
+bool SecondaryEnginePrePrepareHook(THD *thd) {
+  if (thd->m_current_query_cost <= static_cast<double>(thd->variables.secondary_engine_cost_threshold)) {
+    Opt_trace_context *const trace = &thd->opt_trace;
+    if (trace->is_started()) {
+      const Opt_trace_object wrapper(trace);
+      Opt_trace_object oto(trace, "secondary_engine_not_used");
+      oto.add_alnum("reason",
+                    "The estimated query cost does not exceed "
+                    "secondary_engine_cost_threshold.");
+      oto.add("cost", thd->m_current_query_cost);
+      oto.add("threshold", thd->variables.secondary_engine_cost_threshold);
+    }
+    return false;
+  }
+  if (thd->secondary_engine_statement_context() == nullptr) {
+    /* Prepare this query's specific statment context */
+    std::unique_ptr<Secondary_engine_statement_context> ctx =
+        std::make_unique<ShannonBase::Shannon_statement_context>();
+    thd->set_secondary_engine_statement_context(std::move(ctx));
+  }
+  return true;
+}
+
 static void AssertSupportedPath(const AccessPath *path) {
   switch (path->type) {
     // The only supported join type is hash join. Other join types are disabled
@@ -747,6 +776,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->flags = HTON_IS_SECONDARY_ENGINE;
   shannon_rapid_hton->db_type = DB_TYPE_RAPID;
   shannon_rapid_hton->prepare_secondary_engine = PrepareSecondaryEngine;
+  shannon_rapid_hton->secondary_engine_pre_prepare_hook = SecondaryEnginePrePrepareHook;
   shannon_rapid_hton->optimize_secondary_engine = OptimizeSecondaryEngine;
   shannon_rapid_hton->compare_secondary_engine_cost = CompareJoinCost;
   shannon_rapid_hton->secondary_engine_flags = MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN);
