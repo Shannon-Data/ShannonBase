@@ -84,7 +84,8 @@ class Sql_cmd_select : public Sql_cmd_dml {
 
   bool accept(THD *thd, Select_lex_visitor *visitor) override;
 
-  const MYSQL_LEX_CSTRING *eligible_secondary_storage_engine() const override;
+  const MYSQL_LEX_CSTRING *eligible_secondary_storage_engine(
+      THD *thd) const override;
 
  protected:
   bool may_use_cursor() const override { return true; }
@@ -1074,6 +1075,14 @@ bool has_external_table(Table_ref *query_tables);
   @param reason the reason of failure
 */
 void set_external_engine_fail_reason(const LEX *lex, const char *reason);
+
+/**
+  Notify plugins about an executed SELECT statement.
+
+  @param thd the current session
+  @param cmd command to be notified about
+*/
+void notify_plugins_after_select(THD *thd, const Sql_cmd *cmd);
 
 store_key *get_store_key(THD *thd, Item *val, table_map used_tables,
                          table_map const_tables, const KEY_PART_INFO *key_part,
