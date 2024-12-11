@@ -136,7 +136,10 @@ class Sql_cmd {
 
     param thd  Current THD.
   */
-  virtual void cleanup(THD *) { m_secondary_engine = nullptr; }
+  virtual void cleanup(THD *) {
+    m_secondary_engine = nullptr;
+    m_secondary_engine_enabled = true;
+  }
 
   /// Set the owning prepared statement
   void set_owner(Prepared_statement *stmt) {
