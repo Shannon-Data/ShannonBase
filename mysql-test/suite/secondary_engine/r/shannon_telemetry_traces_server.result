@@ -1,0 +1,19 @@
+INSTALL COMPONENT 'file://component_query_attributes';
+INSTALL COMPONENT 'file://component_test_server_telemetry_traces';
+#
+# Ensure statement using secondary engine is traced
+#
+CREATE TABLE t1 (a INT PRIMARY KEY) SECONDARY_ENGINE RAPID;
+ALTER TABLE t1 SECONDARY_LOAD;
+SELECT * FROM t1;
+a
+ALTER TABLE t1 SECONDARY_UNLOAD;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci SECONDARY_ENGINE=RAPID
+DROP TABLE t1;
+UNINSTALL COMPONENT 'file://component_test_server_telemetry_traces';
+UNINSTALL COMPONENT 'file://component_query_attributes';
