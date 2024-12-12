@@ -57,7 +57,7 @@ EXPLAIN
         "read_cost": "1.66",
         "eval_cost": "0.40",
         "prefix_cost": "2.06",
-        "data_read_per_join": "352"
+        "data_read_per_join": "360"
       },
       "used_columns": [
         "a",

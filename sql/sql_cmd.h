@@ -136,7 +136,10 @@ class Sql_cmd {
 
     param thd  Current THD.
   */
-  virtual void cleanup(THD *) { m_secondary_engine = nullptr; }
+  virtual void cleanup(THD *) {
+    m_secondary_engine = nullptr;
+    m_secondary_engine_enabled = true;
+  }
 
   /// Set the owning prepared statement
   void set_owner(Prepared_statement *stmt) {
@@ -181,10 +184,10 @@ class Sql_cmd {
     the statement is not eligible for execution in a secondary storage
     engine
   */
-  virtual const MYSQL_LEX_CSTRING *eligible_secondary_storage_engine() const {
+  virtual const MYSQL_LEX_CSTRING *eligible_secondary_storage_engine(
+      THD *) const {
     return nullptr;
   }
-
   /**
     Disable use of secondary storage engines in this statement. After
     a call to this function, the statement will not try to use a

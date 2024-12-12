@@ -602,9 +602,9 @@ bool Sql_cmd_select::accept(THD *thd, Select_lex_visitor *visitor) {
   return thd->lex->unit->accept(visitor);
 }
 
-const MYSQL_LEX_CSTRING *Sql_cmd_select::eligible_secondary_storage_engine()
-    const {
-  return get_eligible_secondary_engine();
+const MYSQL_LEX_CSTRING *Sql_cmd_select::eligible_secondary_storage_engine(
+    THD *thd) const {
+  return get_eligible_secondary_engine(thd);
 }
 
 /**
@@ -902,6 +902,32 @@ void accumulate_statement_cost(const LEX *lex) {
   lex->thd->m_current_query_cost = total_cost;
 }
 
+namespace {
+/**
+   Gets the secondary storage engine pre prepare hook function, if any. If no
+   hook is found, this function returns false. If hook function is found, it
+   returns the return value of the hook. Please refer to
+   secondary_engine_pre_prepare_hook_t definition for description of its return
+   value.
+ */
+bool SecondaryEngineCallPrePrepareHook(THD *thd,
+                                       const LEX_CSTRING &secondary_engine) {
+  handlerton *hton = nullptr;
+  plugin_ref ref = ha_resolve_by_name(thd, &secondary_engine, false);
+  if (ref != nullptr) {
+    hton = plugin_data<handlerton *>(ref);
+  }
+  if (hton != nullptr) {
+    secondary_engine_pre_prepare_hook_t secondary_engine_pre_prepare_hook =
+        hton->secondary_engine_pre_prepare_hook;
+    if (secondary_engine_pre_prepare_hook != nullptr) {
+      return secondary_engine_pre_prepare_hook(thd);
+    }
+  }
+  return false;
+}
+}  // namespace
+
 /**
   Checks if a query should be retried using a secondary storage engine.
 
@@ -922,7 +948,9 @@ static bool retry_with_secondary_engine(THD *thd) {
 
   // Don't retry if there is a property of the statement that prevents use of
   // secondary engines.
-  if (sql_cmd->eligible_secondary_storage_engine() == nullptr) {
+  const LEX_CSTRING *secondary_engine =
+      thd->lex->m_sql_cmd->eligible_secondary_storage_engine(thd);
+  if (secondary_engine == nullptr) {
     sql_cmd->disable_secondary_storage_engine();
     return false;
   }
@@ -939,31 +967,17 @@ static bool retry_with_secondary_engine(THD *thd) {
     return false;
   }
 
-  // Only attempt to use the secondary engine if the estimated cost of the query
-  // is higher than the specified cost threshold.
-  // We allow any query to be executed in the secondary_engine when it involves
-  // external tables.
-  if (!has_external_table(thd->lex->query_tables) &&
-      (thd->m_current_query_cost <=
-       thd->variables.secondary_engine_cost_threshold)) {
-    Opt_trace_context *const trace = &thd->opt_trace;
-    if (trace->is_started()) {
-      const Opt_trace_object wrapper(trace);
-      Opt_trace_object oto(trace, "secondary_engine_not_used");
-      oto.add_alnum("reason",
-                    "The estimated query cost does not exceed "
-                    "secondary_engine_cost_threshold.");
-      oto.add("cost", thd->m_current_query_cost);
-      oto.add("threshold", thd->variables.secondary_engine_cost_threshold);
-    }
-    return false;
-  }
-
-  return true;
+  return SecondaryEngineCallPrePrepareHook(thd, *secondary_engine);
 }
 
 bool optimize_secondary_engine(THD *thd) {
   if (retry_with_secondary_engine(thd)) {
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-do-while)
+    DBUG_EXECUTE_IF("emulate_user_query_kill", {
+      thd->get_stmt_da()->set_error_status(thd, ER_QUERY_INTERRUPTED);
+      return true;
+    });
+
     thd->get_stmt_da()->reset_diagnostics_area();
     thd->get_stmt_da()->set_error_status(thd, ER_PREPARE_FOR_SECONDARY_ENGINE);
     return true;
@@ -991,6 +1005,38 @@ bool optimize_secondary_engine(THD *thd) {
   return secondary_engine != nullptr &&
          secondary_engine->optimize_secondary_engine != nullptr &&
          secondary_engine->optimize_secondary_engine(thd, thd->lex);
+}
+
+void notify_plugins_after_select(THD *thd, const Sql_cmd *cmd) {
+  /* Return if one of the 2 conditions is true:
+   * 1. when secondary engine statement context is not present, query cost is
+   * lower than the secondary than the engine threshold.
+   * 2. When secondary engine statement context is present, primary engine
+   * is the better execution engine for this query.
+   * This prevents calling plugin_foreach for short queries, reducing the
+   * overhead. */
+  if (((thd->secondary_engine_statement_context() == nullptr) &&
+       thd->m_current_query_cost <=
+           thd->variables.secondary_engine_cost_threshold) ||
+      ((thd->secondary_engine_statement_context() != nullptr) &&
+       thd->secondary_engine_statement_context()
+           ->is_primary_engine_optimal())) {
+    return;
+  }
+  auto executed_in = (cmd != nullptr && cmd->using_secondary_storage_engine())
+                         ? SelectExecutedIn::kSecondaryEngine
+                         : SelectExecutedIn::kPrimaryEngine;
+
+  plugin_foreach(
+      thd,
+      [](THD *t, plugin_ref plugin, void *arg) -> bool {
+        handlerton *hton = plugin_data<handlerton *>(plugin);
+        if (hton->notify_after_select != nullptr) {
+          hton->notify_after_select(t, *(static_cast<SelectExecutedIn *>(arg)));
+        }
+        return false;
+      },
+      MYSQL_STORAGE_ENGINE_PLUGIN, &executed_in);
 }
 
 /**
@@ -1021,6 +1067,8 @@ bool Sql_cmd_dml::execute_inner(THD *thd) {
     if (explain_query(thd, thd, unit)) return true; /* purecov: inspected */
   } else {
     if (unit->execute(thd)) return true;
+
+    notify_plugins_after_select(thd, lex->m_sql_cmd);
   }
 
   return false;
@@ -1205,8 +1253,9 @@ bool Sql_cmd_dml::check_all_table_privileges(THD *thd) {
   return false;
 }
 
-const MYSQL_LEX_CSTRING *Sql_cmd_dml::get_eligible_secondary_engine() const {
-  return get_eligible_secondary_engine_from(lex);
+const MYSQL_LEX_CSTRING *Sql_cmd_dml::get_eligible_secondary_engine(
+    THD *thd) const {
+  return get_eligible_secondary_engine_from(thd->lex);
 }
 
 /*****************************************************************************

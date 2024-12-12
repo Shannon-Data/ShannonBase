@@ -208,6 +208,11 @@ enum enum_alter_inplace_result {
   HA_ALTER_INPLACE_INSTANT
 };
 
+/**
+ * Used to identify which engine executed a SELECT query.
+ */
+enum class SelectExecutedIn : bool { kPrimaryEngine, kSecondaryEngine };
+
 /* Bits in table_flags() to show what database can do */
 
 #define HA_NO_TRANSACTIONS (1 << 0)     /* Doesn't support transactions */
@@ -2546,6 +2551,35 @@ typedef void (*se_after_commit_t)(void *arg);
 // before_rollback hook. Remove after WL#11320 has been completed.
 typedef void (*se_before_rollback_t)(void *arg);
 
+/**
+  Notify plugins when a SELECT query was executed. The plugins will be notified
+  only if the query is not considered secondary engine relevant, i.e.:
+  1. for a query with missing secondary_engine_statement_ctx, its estimated cost
+   is greater than the currently configured 'secondary_engine_cost_threshold'
+  2. for queries with secondary_engine_statement_ctx, wherever
+   secondary_engine_statement_ctx::is_primary_engine_optimal() returns False
+   indicating secondary engine relevance.
+ */
+using notify_after_select_t = void (*)(THD *thd, SelectExecutedIn executed_in);
+
+/**
+ * Notify plugins when a table is created.
+ */
+using notify_create_table_t = void (*)(struct HA_CREATE_INFO *create_info,
+                                       const char *db, const char *table_name);
+
+/**
+  Secondary engine hook called after PRIMARY_TENTATIVELY optimization is
+  complete, and decides if secondary engine optimization will be performed, and
+  comparison of primary engine cost and secondary engine cost will determine
+  which engine to use for execution.
+ @param[in]     thd     current thd.
+ @return :
+  @retval true When secondary_engine's prepare hook is to be further called
+  @retval false When secondary_engine's prepare hook is NOT to be further called
+
+ */
+using secondary_engine_pre_prepare_hook_t = bool (*)(THD *thd);
 /*
   Page Tracking : interfaces to handlerton functions which starts/stops page
   tracking, and purges/fetches page tracking information.
@@ -2901,9 +2935,16 @@ struct handlerton {
   secondary_engine_check_optimizer_request_t
       secondary_engine_check_optimizer_request;
 
+  /* Pointer to a function that is called at the end of the PRIMARY_TENTATIVELY
+   * optimization stage, which also decides that the statement should be
+   * attempted offloaded to a secondary storage engine. */
+  secondary_engine_pre_prepare_hook_t secondary_engine_pre_prepare_hook;
+
   se_before_commit_t se_before_commit;
   se_after_commit_t se_after_commit;
   se_before_rollback_t se_before_rollback;
+
+  notify_after_select_t notify_after_select;
 
   /** Page tracking interface */
   Page_track_t page_track;
@@ -4867,12 +4908,15 @@ class handler {
                                       if we exhaust the max cap of number of
                                       parallel read threads that can be
                                       spawned at a time
+    @param[in]  max_desired_threads   Maximum number of desired scan threads;
+                                      passing 0 has no effect, it is ignored.                                     
     @return error code
     @retval 0 on success
   */
   virtual int parallel_scan_init(void *&scan_ctx [[maybe_unused]],
                                  size_t *num_threads [[maybe_unused]],
-                                 bool use_reserved_threads [[maybe_unused]]) {
+                                 bool use_reserved_threads [[maybe_unused]],
+                                 size_t max_desired_threads [[maybe_unused]]) {
     return 0;
   }
 
