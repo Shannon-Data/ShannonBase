@@ -79,8 +79,8 @@ typedef struct mtr_log_rec_t {
   ~mtr_log_rec_t() {}
 } mtr_log_rec;
 
-// pop change buffer size
-extern ulonglong sys_pop_buffer_sz;
+// pop change buffer size.
+extern std::atomic<ulonglong> sys_pop_data_sz;
 // flag of pop change thread. true is running, set to false to stop
 extern std::atomic<bool> sys_pop_started;
 /** a buffer to store redo log records, then parses these records. if we

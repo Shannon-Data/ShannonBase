@@ -362,6 +362,7 @@ FLUSH STATUS;
 SET @@use_secondary_engine = OFF;
 SELECT * FROM t1;
 INSERT INTO t1 SELECT * FROM t2;
+SELECT * FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 --echo # The rapid storage engine does not return any rows.
 SET @@use_secondary_engine = FORCED;
@@ -688,7 +689,7 @@ SET @@sql_auto_is_null = 1;
 CREATE TABLE t(a INT PRIMARY KEY AUTO_INCREMENT) SECONDARY_ENGINE RAPID;
 ALTER TABLE t SECONDARY_LOAD;
 INSERT INTO t VALUES ();
---sleep 3
+--sleep 5
 ANALYZE TABLE t;
 # Verify that a IS NULL is rewritten to a = last_insert_id().
 # Filter out differences between the old optimizer and the hypergraph optimizer.

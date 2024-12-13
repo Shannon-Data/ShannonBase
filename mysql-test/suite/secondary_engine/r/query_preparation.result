@@ -615,6 +615,10 @@ SELECT * FROM t1;
 a
 1
 INSERT INTO t1 SELECT * FROM t2;
+SELECT * FROM t1;
+a
+1
+1
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
 Secondary_engine_execution_count	0
@@ -622,6 +626,7 @@ Secondary_engine_execution_count	0
 SET @@use_secondary_engine = FORCED;
 SELECT * FROM t1;
 a
+1
 1
 INSERT INTO t1 SELECT * FROM t2;
 ERROR HY000: Secondary engine operation failed. No secondary engine defined for at least one of the query tables.
@@ -631,6 +636,7 @@ Secondary_engine_execution_count	1
 SET @@use_secondary_engine = ON;
 SELECT * FROM t1;
 a
+1
 1
 INSERT INTO t1 SELECT * FROM t2;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
