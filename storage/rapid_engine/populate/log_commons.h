@@ -44,9 +44,10 @@
 
 namespace ShannonBase {
 namespace Populate {
-constexpr int m_pop_buff_size = ALIGN_WORD(SHANNON_MAX_POPULATION_BUFFER_SIZE, 512);
-constexpr uint MAX_LOG_POP_SPIN_COUNT = 100000;
 
+// one spin time is 1 ms.
+constexpr uint MAX_LOG_POP_SPIN_COUNT = 20000;
+constexpr uint MAX_TIMEOUT_SPIN = 200;
 /// jnk0le/Ring-Buffer
 /*!
  * \brief Lock free, with no wasted slots ringbuffer implementation
@@ -59,7 +60,7 @@ constexpr uint MAX_LOG_POP_SPIN_COUNT = 100000;
  * in between indexes and buffer \tparam index_t Type of array indexing type.
  * Serves also as placeholder for future implementations.
  */
-template <typename T, size_t buffer_size = m_pop_buff_size, bool fake_tso = false,
+template <typename T, size_t buffer_size = ALIGN_WORD(SHANNON_MAX_POPULATION_BUFFER_SIZE, 512), bool fake_tso = false,
           size_t cacheline_size = CACHE_LINE_SIZE, typename index_t = size_t>
 class Ringbuffer {
  public:

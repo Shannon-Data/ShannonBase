@@ -44,7 +44,7 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	4	100.00	Using filesort; Using secondary engine Rapid
 drop table tt;
 create table tt (score int, name char(10), id int, gender char(1)) secondary_engine=rapid;
-insert into tt values (2,'n2',2,'b'),(3,'n3',3,'c'),(4,'n4',4,'d'), (5,'n5', 5, 'e'), (51,'n52', 5, 'e');
+insert into tt values (2,'n2',2,'b'),(3,'n3',3,'c'),(4,'n4',4,'d'), (5,'n5', 5, 'e'), (51,'n52', 5, 'f');
 alter table tt secondary_load;
 select * from tt order by id;
 score	name	id	gender
@@ -52,7 +52,7 @@ score	name	id	gender
 3	n3	3	c
 4	n4	4	d
 5	n5	5	e
-51	n52	5	e
+51	n52	5	f
 [conn2]
 update tt set score = 2 * score, name ='n55测试' where id =5;
 select * from tt order by id;
@@ -61,7 +61,7 @@ score	name	id	gender
 3	n3	3	c
 4	n4	4	d
 10	n55测试	5	e
-102	n55测试	5	e
+102	n55测试	5	f
 [conn1]
 select * from tt order by id;
 score	name	id	gender
@@ -69,7 +69,7 @@ score	name	id	gender
 3	n3	3	c
 4	n4	4	d
 10	n55测试	5	e
-10	n55测试	5	e
+102	n55测试	5	f
 explain select * from tt order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using filesort; Using secondary engine Rapid
@@ -105,7 +105,7 @@ score	name	id	gender
 3	n3	3	c
 4	n4	4	d
 10	n55测试	5	e
-10	n55测试	5	e
+102	n55测试	5	f
 drop table tt;
 drop table tt2;
 SELECT * FROM performance_schema.rpd_table_id;

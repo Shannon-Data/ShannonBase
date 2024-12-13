@@ -55,13 +55,11 @@ namespace Populate {
 // should be pay more attention to syc relation between this thread
 // and log_buffer write. if we stop changes poping, should stop writing
 // firstly, then stop this thread.
-std::atomic<bool> sys_pop_started{false};
-
-ulonglong sys_pop_buffer_sz = m_pop_buff_size;
-
 std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
 
-static ulint sys_rapid_loop_count;
+std::atomic<bool> sys_pop_started{false};
+std::atomic<ulonglong> sys_pop_data_sz{0};
+static ulint sys_rapid_loop_count{0};
 
 /**
  * return lsn_t, key of processing mtr_log_rec_t.
@@ -78,9 +76,9 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
   }
 
 #if !defined(_WIN32)  // here we
-  pthread_setname_np(pthread_self(), "mtr_log_wkr");
+  pthread_setname_np(pthread_self(), "rapid_log_wkr");
 #else
-  SetThreadDescription(GetCurrentThread(), L"mtr_log_wkr");
+  SetThreadDescription(GetCurrentThread(), L"rapid_log_wkr");
 #endif
   LogParser parse_log;
 
@@ -102,24 +100,30 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
  * is coming, then it starts a new worker to dealing with this mtr_log_rec_t.
  */
 static void parse_log_func_main(log_t *log_ptr) {
-  // here we have a notifiyer, when checkpoint_lsn/flushed_lsn > rapid_lsn to
-  // start pop
-  while (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE && sys_pop_started.load(std::memory_order_seq_cst)) {
+  // here we have a notifiyer, start pop. ref: https://dev.mysql.com/doc/heatwave/en/mys-hw-change-propagation.html
+  while (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE && sys_pop_started.load()) {
     auto stop_condition = [&](bool wait) {
-      if (sys_pop_buff.size() || sys_pop_started.load() == false) {
+      if (sys_pop_data_sz >= SHANNON_POPULATION_HRESHOLD_SIZE || sys_pop_started.load() == false) {
+        return true;
+      }
+
+      if (wait) {
+        os_event_set(log_sys->rapid_events[0]);
         return true;
       }
       return false;
     };
 
     // waiting until the new data coming in.
-    os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT, std::chrono::microseconds{1}, stop_condition);
-
-    sys_rapid_loop_count++;
+    os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPIN_COUNT, std::chrono::microseconds{MAX_TIMEOUT_SPIN},
+                      stop_condition);
 
     if (!sys_pop_started) break;
 
+    if (sys_pop_buff.empty()) continue;
+
     mutex_enter(&(log_sys->rapid_populator_mutex));
+    sys_rapid_loop_count++;
     auto size = sys_pop_buff.begin()->second.size;
     byte *from_ptr = sys_pop_buff.begin()->second.data.get();
     mutex_exit(&(log_sys->rapid_populator_mutex));
@@ -133,6 +137,9 @@ static void parse_log_func_main(log_t *log_ptr) {
     ut_a(sys_pop_buff.find(ret_lsn) != sys_pop_buff.end());
     sys_pop_buff.erase(ret_lsn);
     mutex_exit(&(log_sys->rapid_populator_mutex));
+    // to reduce the pop data size.
+    sys_pop_data_sz.fetch_sub(size);
+    os_event_reset(log_sys->rapid_events[0]);
   }  // wile(pop_started)
 
   sys_pop_started.store(false, std::memory_order_seq_cst);
