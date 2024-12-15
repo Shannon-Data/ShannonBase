@@ -328,6 +328,7 @@ SELECT f1();
 SELECT f2();
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 --sorted_result
+--sleep 5
 SELECT * FROM tf;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 DROP FUNCTION f1;
@@ -366,11 +367,13 @@ SELECT * FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 --echo # The rapid storage engine does not return any rows.
 SET @@use_secondary_engine = FORCED;
+--sleep 5
 SELECT * FROM t1;
 -- error ER_SECONDARY_ENGINE
 INSERT INTO t1 SELECT * FROM t2;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 SET @@use_secondary_engine = ON;
+--sleep 5
 SELECT * FROM t1;
 INSERT INTO t1 SELECT * FROM t2;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
