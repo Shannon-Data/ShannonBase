@@ -582,6 +582,7 @@ Secondary_engine_execution_count	0
 SELECT * FROM tf;
 x
 123
+234
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
 Secondary_engine_execution_count	1
