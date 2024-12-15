@@ -81,6 +81,7 @@ handlerton *shannon_rapid_hton_ptr{nullptr};
 
 LoadedTables *shannon_loaded_tables = nullptr;
 uint64 rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
+ulonglong rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
 rpd_columns_container rpd_columns_info;
 
 /**
@@ -688,7 +689,7 @@ static handler *Create(handlerton *hton, TABLE_SHARE *table_share, bool, MEM_ROO
 static SHOW_VAR rapid_status_variables[] = {
     {"rapid_memory_size_max", (char *)&ShannonBase::rpd_mem_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
-    {"rapid_pop_buffer_size_max", (char *)&ShannonBase::Populate::sys_pop_buffer_sz, SHOW_LONG, SHOW_SCOPE_GLOBAL},
+    {"rapid_pop_buffer_size_max", (char *)&ShannonBase::rpd_pop_buff_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
 
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
@@ -748,7 +749,7 @@ static MYSQL_SYSVAR_ULONG(rapid_memory_size_max, ShannonBase::rpd_mem_sz_max, PL
                           rpd_mem_size_max_validate, rpd_mem_size_max_update, ShannonBase::SHANNON_MAX_MEMRORY_SIZE, 0,
                           ShannonBase::SHANNON_MAX_MEMRORY_SIZE, 0);
 
-static MYSQL_SYSVAR_ULONGLONG(rapid_pop_buffer_size_max, ShannonBase::Populate::sys_pop_buffer_sz,
+static MYSQL_SYSVAR_ULONGLONG(rapid_pop_buffer_size_max, ShannonBase::rpd_pop_buff_sz_max,
                               PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                               "Number of memory used for populating the changes "
                               "in innodb to rapid engine..",

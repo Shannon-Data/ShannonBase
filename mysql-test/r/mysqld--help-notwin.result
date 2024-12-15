@@ -1960,7 +1960,7 @@ query-prealloc-size 8192
 range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
 rapid-rapid-memory-size-max 8589934592
-rapid-rapid-pop-buffer-size-max 67108864
+rapid-rapid-pop-buffer-size-max 134217728
 read-buffer-size 131072
 read-only FALSE
 read-rnd-buffer-size 262144

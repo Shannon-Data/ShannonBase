@@ -933,6 +933,7 @@ lsn_t mtr_t::Command::cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len)
   }
 
   ShannonBase::Populate::sys_pop_buff.emplace(start_lsn, std::move(log_rec));
+  ShannonBase::Populate::sys_pop_data_sz.fetch_add(str_len);
   ut_a(ptr >= log.buf);
   ut_a(ptr <= buf_end);
   ut_a(buf_end == log.buf + log.buf_size);
