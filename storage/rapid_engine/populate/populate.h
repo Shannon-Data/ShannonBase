@@ -102,9 +102,15 @@ extern std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
 
 class Populator {
  public:
+  // whether the log pop main thread is active or not. true is alive, false dead.
   static bool log_pop_thread_is_active();
+  // to return whether there're('s) log pop worker(s) activelly.
+  static bool log_pop_worker_is_active();
+  // to launch log pop main thread.
   static void start_change_populate_threads();
+  // to stop lop pop main thread.
   static void end_change_populate_threads();
+  // to print thread infos.
   static void rapid_print_thread_info(FILE *file);
 };
 

@@ -147,6 +147,8 @@ static void parse_log_func_main(log_t *log_ptr) {
 
 bool Populator::log_pop_thread_is_active() { return thread_is_active(srv_threads.m_change_pop); }
 
+bool Populator::log_pop_worker_is_active() { return true; }
+
 void Populator::start_change_populate_threads() {
   if (!Populator::log_pop_thread_is_active() && shannon_loaded_tables->size()) {
     os_event_reset(log_sys->rapid_events[0]);

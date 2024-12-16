@@ -7218,6 +7218,21 @@ static Sys_var_enum Sys_use_secondary_engine(
     use_secondary_engine_values, DEFAULT(SECONDARY_ENGINE_ON), NO_MUTEX_GUARD,
     NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
 
+static const char *rapid_use_dynamic_offloads [] = {"OFF", "ON", nullptr};
+static Sys_var_enum Sys_rapid_use_dynamic_offload(
+    "rapid_use_dynamic_offload",
+    "When system variable rapid_use_dynamic_offload is 0/false , then we "
+    "fall back to normal cost threshold classifier, which also implies that "
+    "when use secondary engine is set to forced, eligible queries will go to "
+    "secondary engine, regardless of cost threshold or this classifier. "
+    "When rapid_use_dynamic_offload is 1/true, then we proceed with looking "
+    "for optimal execution engine for this queries, if secondary engine is "
+    "found more optimal, then query is offloaded, otherwise it is sent back "
+    "to mysql.",
+    HINT_UPDATEABLE SESSION_ONLY(rapid_use_dynamic_offload), NO_CMD_LINE,
+    rapid_use_dynamic_offloads, DEFAULT(DYNAMIC_OFFLOAD_ON), NO_MUTEX_GUARD,
+    NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
+
 static Sys_var_session_special Sys_statement_id(
     "statement_id",
     "statement_id: represents the id of the query "
