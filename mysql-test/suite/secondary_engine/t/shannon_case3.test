@@ -10,6 +10,7 @@ set use_secondary_engine=forced;
 
 create table tt1 (score int, name varchar(1024), id int, content varchar(1024), primary key(id, score)) secondary_engine=rapid;
 insert into tt1 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm'), (4,'n4',4,'f');
+--error 3889
 select * from tt1 order by id;
 alter table tt1 secondary_load;
 

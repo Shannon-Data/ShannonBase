@@ -538,6 +538,71 @@ static void rapid_kill_connection(handlerton *hton, /*!< in:  innobase handlerto
   }
 }
 
+void SetSecondaryEngineOffloadFailedReason(THD *thd, const char *msg) {
+  assert(thd);
+  thd->lex->m_secondary_engine_offload_or_exec_failed_reason.clear();
+  thd->lex->m_secondary_engine_offload_or_exec_failed_reason.append(msg);
+  my_error(ER_SECONDARY_ENGINE, MYF(0), msg);
+}
+
+const char *GetSecondaryEngineOffloadorExecFailedReason(THD *thd) {
+  assert(thd);
+
+  return thd->lex->m_secondary_engine_offload_or_exec_failed_reason.c_str();
+}
+
+SecondaryEngineGraphSimplificationRequestParameters SecondaryEngineCheckOptimizerRequest(
+    THD *thd, const JoinHypergraph &hypergraph, const AccessPath *access_path, int current_subgraph_pairs,
+    int current_subgraph_pairs_limit, bool is_root_access_path, std::string *trace) {
+  SecondaryEngineGraphSimplificationRequestParameters params;
+  params.secondary_engine_optimizer_request = SecondaryEngineGraphSimplificationRequest::kContinue;
+  params.subgraph_pair_limit = 0;
+  return params;
+}
+
+// In this function, Dynamic offload combines mysql plan features
+// retrieved from rapid_statement_context
+// and RAPID info such as rapid base table cardinality,
+// dict encoding projection, varlen projection size, rapid queue
+// size in to decide if query should be offloaded to RAPID.
+// returns true, goes to innodb for execution.
+// returns false, goes to next phase for secondary engine execution.
+static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
+    SetSecondaryEngineOffloadFailedReason(thd, "use_secondary_engine set to off.");
+    return true;
+  }
+
+  else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
+    return false;
+
+  // gets the shannon statement context from thd, which stores in SecondaryEnginePrePrepareHook.
+  if (!thd->variables.rapid_use_dynamic_offload) {
+    return false;
+  }
+
+  auto shannon_statement_context = thd->secondary_engine_statement_context();
+  auto primary_plan_info = shannon_statement_context->get_cached_primary_plan_info();
+
+  // 1: to check whether the sys_pop_data_sz has too many data to populate.
+  uint64 too_much_pop_threshold = static_cast<uint64_t>(0.8 * ShannonBase::rpd_pop_buff_sz_max);
+  if (ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
+    SetSecondaryEngineOffloadFailedReason(thd, "too much changes need to populate.");
+    return true;
+  }
+
+  // 2: to check whether there're changes in sys_pop_buff, which will be used for query.
+  // if there're still do populating, then goes to innodb. and gets cardinality of tables.
+  for (uint i = primary_plan_info->tables; i < primary_plan_info->tables; i++) {
+    std::string db_tb;
+    if (ShannonBase::Populate::Populator::check_populating_status(db_tb)) return true;
+  }
+
+  // 3: checks dict encoding projection, and varlen project size, etc.
+
+  return false;
+}
+
 static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   DBUG_EXECUTE_IF("secondary_engine_rapid_prepare_error", {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "");
@@ -552,10 +617,12 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   // optimization. But, it is not to producce an optima count query plan.
   lex->add_statement_options(OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION);
 
-  return false;
+  return RapidPrepareEstimateQueryCosts(thd, lex);
 }
 
-// caches primary info.
+// caches primary info. Here, we have done optimization with primary engine, and it
+// will retry with secondary engine, and therefore, be here. JOIN are available here,
+// and, we can get all optimzation information, then caches all these info.
 static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
   assert(thd->secondary_engine_optimization() == Secondary_engine_optimization::PRIMARY_TENTATIVELY);
   if (thd->secondary_engine_statement_context() == nullptr) {
@@ -565,11 +632,24 @@ static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
   }
 
   auto shannon_statement_context = thd->secondary_engine_statement_context();
-  shannon_statement_context->cache_primary_plan_info(thd->lex->query_block->join);
+  Query_expression *const unit = thd->lex->unit;
+  shannon_statement_context->cache_primary_plan_info(thd, unit->first_query_block()->join);
   return false;
 }
 
+// If dynamic offload is enabled and query is not "very fast":
+// This caches features from mysql plan in rapid_statement_context
+// to be used for dynamic offload.
+// If dynamic offload is disabled or the query is "very fast":
+// This function invokes standary mysql cost threshold classifier,
+// which decides if query needs further RAPID optimisation.
+// returns true, goes to secondary engine.
+// returns false, goes to innodb engine.
 bool SecondaryEnginePrePrepareHook(THD *thd) {
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)
+    return false;
+  else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
+    return true;
   /**
    * If dynamic offload is enabled and query is not "very fast":
      This caches features from mysql plan in rapid_statement_context
@@ -627,6 +707,19 @@ static void AssertSupportedPath(const AccessPath *path) {
   assert(path->secondary_engine_data == nullptr);
 }
 
+//  In this function, Dynamic offload retrieves info from
+//  rapid_statement_context and additionally looks at Change
+//  propagation lag to decide if query should be offloaded to rapid
+//  returns true, goes to innodb engine.
+//  return false, goes to secondary engine.
+static bool RapidOptimize(THD *thd [[maybe_unused]], LEX *lex) {
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)
+    return true;
+  else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
+    return false;
+
+  return false;
+}
 static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
   // The context should have been set by PrepareSecondaryEngine.
   assert(lex->secondary_engine_execution_context() != nullptr);
@@ -646,7 +739,7 @@ static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
                     });
   }
 
-  return false;
+  return RapidOptimize(thd, lex);
 }
 
 static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, bool *use_best_so_far, bool *cheaper,
@@ -795,6 +888,9 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->compare_secondary_engine_cost = CompareJoinCost;
   shannon_rapid_hton->secondary_engine_flags = MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN);
   shannon_rapid_hton->secondary_engine_modify_access_path_cost = ModifyAccessPathCost;
+  shannon_rapid_hton->get_secondary_engine_offload_or_exec_fail_reason = GetSecondaryEngineOffloadorExecFailedReason;
+  shannon_rapid_hton->set_secondary_engine_offload_fail_reason = SetSecondaryEngineOffloadFailedReason;
+  shannon_rapid_hton->secondary_engine_check_optimizer_request = SecondaryEngineCheckOptimizerRequest;
 
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;

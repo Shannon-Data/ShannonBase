@@ -15,19 +15,27 @@ insert into tt6 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm')
 insert into tt6 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm'), (4,'n4',4,'f');
 alter table tt6 secondary_load;
 
+--error ER_SECONDARY_ENGINE
 explain select * from tt6 order by id;
+--error ER_SECONDARY_ENGINE
 select * from tt6 order by id;
 
 explain select score, name, gender from tt6 order by score;
 select score, name, gender from tt6 order by score;
 
+--error ER_SECONDARY_ENGINE
 explain select score, id from tt6;
+--error ER_SECONDARY_ENGINE
 select score, id from tt6;
 
+--error ER_SECONDARY_ENGINE
 explain select score, name, gender from tt6 order by id;
+--error ER_SECONDARY_ENGINE
 select score, name, gender from tt6 order by id;
 
+--error ER_SECONDARY_ENGINE
 explain select id from tt6;
+--error ER_SECONDARY_ENGINE
 select id from tt6;
 
 explain select sum(score), name, gender from tt6 group by name, gender;

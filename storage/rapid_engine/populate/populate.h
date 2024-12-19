@@ -112,6 +112,8 @@ class Populator {
   static void end_change_populate_threads();
   // to print thread infos.
   static void rapid_print_thread_info(FILE *file);
+  // to check whether the specific table are still do populating.
+  static bool check_populating_status(std::string &table_name);
 };
 
 }  // namespace Populate
