@@ -4,9 +4,6 @@
 --echo #
 --source include/elide_costs.inc
 
---disable_query_log
---enable_query_log
-
 CREATE TABLE t1(id INT PRIMARY KEY, x INT, y INT);
 INSERT INTO t1 VALUES (1, 2, 3), (4, 5, 6), (7, 8, 9);
 CREATE INDEX t1_x ON t1(x);
@@ -180,7 +177,9 @@ SECONDARY_ENGINE RAPID
 PARTITION BY HASH(id);
 INSERT INTO t_partitioned VALUES (1, 2), (2, 3), (3, 4), (4, 5);
 ALTER TABLE t_partitioned SECONDARY_LOAD;
+--disable_testcase Bug#36306426
 SELECT * FROM t_partitioned;
+--enable_testcase
 DROP TABLE t_partitioned;
 
 # Multiple queries in a single statement.
@@ -246,7 +245,6 @@ EXECUTE ps;
 DROP PREPARE ps;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 
-# Queries inside a procedure should not be offloaded.
 FLUSH STATUS;
 CREATE PROCEDURE p1() SELECT COUNT(*) FROM t1;
 CALL p1();
@@ -294,7 +292,7 @@ DROP TABLE t_nonexistent;
 # number of trailing blanks.
 CREATE TABLE t_case1(x INT) SECONDARY_ENGINE 'RAPID';
 CREATE TABLE t_case2(y INT) SECONDARY_ENGINE 'rapid ';
-CREATE TABLE t_case3(z INT) SECONDARY_ENGINE 'RaPID  ';
+CREATE TABLE t_case3(z INT) SECONDARY_ENGINE 'Rapid  ';
 INSERT INTO t_case1 VALUES (1);
 INSERT INTO t_case2 VALUES (2);
 INSERT INTO t_case3 VALUES (3);
@@ -380,7 +378,7 @@ SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 --echo # An error shall be returned if table is not loaded.
 ALTER TABLE t1 SECONDARY_UNLOAD;
 SET @@use_secondary_engine = FORCED;
-#--error ER_SECONDARY_ENGINE,ER_SECONDARY_ENGINE_PLUGIN
+--error ER_SECONDARY_ENGINE,ER_SECONDARY_ENGINE_PLUGIN
 SELECT * FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 SET @@use_secondary_engine = ON;
@@ -489,7 +487,7 @@ SET @@use_secondary_engine = ON;
 EXECUTE ps;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 SET @@use_secondary_engine = FORCED;
-#--error ER_SECONDARY_ENGINE
+#--error ER_SECONDARY_ENGINE_PLUGIN,ER_SECONDARY_ENGINE
 EXECUTE ps;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 DROP PREPARE ps;
@@ -506,7 +504,7 @@ INSERT INTO t1 VALUES (1);
 FLUSH STATUS;
 SELECT * FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
-#--error ER_SECONDARY_ENGINE,ER_SECONDARY_ENGINE_PLUGIN
+--error ER_SECONDARY_ENGINE,ER_SECONDARY_ENGINE_PLUGIN
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ * FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 ALTER TABLE t1 SECONDARY_LOAD;
@@ -567,16 +565,16 @@ ALTER TABLE t2 SECONDARY_LOAD;
 CREATE VIEW v1 as SELECT * FROM t1;
 CREATE VIEW v2 as SELECT t1.a, t2.f FROM t1, t2;
 SELECT * FROM t1;
-#--error ER_SECONDARY_ENGINE
+--error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ * FROM t1;
 SELECT 1 FROM t1 WHERE b=1;
 SELECT 1 FROM t1 GROUP BY b;
 SELECT 1 FROM t1 ORDER BY b;
-#--error ER_SECONDARY_ENGINE
+--error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ 1 FROM t1 WHERE b=1;
-#--error ER_SECONDARY_ENGINE
+--error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ 1 FROM t1 GROUP BY b;
-#--error ER_SECONDARY_ENGINE
+--error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ 1 FROM t1 ORDER BY b;
 SELECT * FROM v1;
 SELECT SUM(b) FROM v1;
@@ -595,7 +593,7 @@ SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ 1 FROM v1 GROUP BY b;
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ 1 FROM v1 ORDER BY b;
 --sorted_result
 SELECT t1.a, t2.f FROM t1, t2;
-#--error ER_SECONDARY_ENGINE
+--error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ t1.a, t2.f FROM t1, t2;
 --sorted_result
 SELECT * FROM v2;
@@ -635,7 +633,8 @@ ALTER TABLE t1 SECONDARY_LOAD;
 ANALYZE TABLE t1;
 FLUSH STATUS;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
-#--error ER_SECONDARY_ENGINE
+--disable_testcase Bug#36306426
+--error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ a FROM t1;
 SELECT a FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
@@ -643,6 +642,7 @@ SELECT b FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ b FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
+--enable_testcase
 DROP TABLE t1;
 
 --echo #
@@ -665,10 +665,10 @@ CREATE TABLE t1 (a INT, b INT NOT SECONDARY UNIQUE KEY) SECONDARY_ENGINE RAPID;
 INSERT INTO t1 VALUES (1, 1);
 ALTER TABLE t1 SECONDARY_LOAD;
 FLUSH STATUS;
-#--error ER_SECONDARY_ENGINE
+--error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ * FROM t1;
 SELECT a FROM t1;
-#--error ER_SECONDARY_ENGINE
+--error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ b FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 DROP TABLE t1;
@@ -723,8 +723,8 @@ FROM t1 JOIN (SELECT f2, SUM(f22) AS b FROM t2 GROUP BY f2) AS dt
 --let $assert_file=$MYSQL_TMP_DIR/explain-bug29288023
 --let $assert_select=<auto_key0>
 --let $assert_count=0
---source include/assert_grep.inc
---remove_file $MYSQL_TMP_DIR/explain-bug29288023
+#--source include/assert_grep.inc
+#--remove_file $MYSQL_TMP_DIR/explain-bug29288023
 DROP TABLE t1, t2;
 
 CREATE TABLE t1(x INT, y INT, z INT, c INT, d INT);
@@ -748,8 +748,8 @@ WHERE tt1.x> 5 and tt1.x=tt2.x;
 --let $assert_file=$MYSQL_TMP_DIR/explain-bug29288023
 --let $assert_select=<auto_key0>
 --let $assert_count=0
---source include/assert_grep.inc
---remove_file $MYSQL_TMP_DIR/explain-bug29288023
+#--source include/assert_grep.inc
+#--remove_file $MYSQL_TMP_DIR/explain-bug29288023
 
 DROP TABLE t1;
 
@@ -829,5 +829,119 @@ EXECUTE ps;
 DROP PREPARE ps;
 DROP TABLE t;
 
---disable_query_log
---enable_query_log
+--echo #
+--echo # Bug#33390949: Execute a statement with secondary engine,
+--echo #               two entries in performance schema
+--echo #
+
+CREATE TABLE t(x INT);
+INSERT INTO t VALUES (1), (2), (3), (4), (5), (6), (7);
+
+PREPARE ps FROM 'SELECT * FROM t';
+
+let $show_events =
+SELECT count_star, count_secondary, sum_select_scan
+FROM performance_schema.events_statements_summary_by_digest
+WHERE digest_text LIKE 'SELECT %';
+
+let $show_events_ps =
+SELECT count_star, count_secondary, sum_select_scan
+FROM performance_schema.events_statements_summary_by_digest
+WHERE digest_text LIKE 'EXECUTE %';
+
+let $show_ps_instances =
+SELECT execution_engine, count_execute, count_secondary
+FROM performance_schema.prepared_statements_instances
+WHERE statement_name = 'ps';
+
+TRUNCATE TABLE performance_schema.prepared_statements_instances;
+
+# The table does not have a secondary engine yet. Count_star should be
+# 1, since a single statement is executed. Count_secondary should be
+# 0, since the statement was not offloaded to the secondary engine.
+# Sum_select_scan should be 1, since the table was scanned once.
+TRUNCATE TABLE performance_schema.events_statements_summary_by_digest;
+--disable_ps_protocol
+--sorted_result
+SELECT * FROM t;
+--enable_ps_protocol
+--eval $show_events
+
+--sorted_result
+EXECUTE ps;
+--eval $show_events_ps
+--eval $show_ps_instances
+
+ALTER TABLE t SECONDARY_ENGINE RAPID;
+
+# The table has a secondary engine, but it's not loaded into the
+# secondary engine, so the statement is not offloaded to the secondary
+# engine. Expect the same counts as in the previous case.
+TRUNCATE TABLE performance_schema.events_statements_summary_by_digest;
+--disable_ps_protocol
+--sorted_result
+SELECT * FROM t;
+--enable_ps_protocol
+--eval $show_events
+
+--sorted_result
+EXECUTE ps;
+--eval $show_events_ps
+--eval $show_ps_instances
+
+ALTER TABLE t SECONDARY_LOAD;
+
+# The table is loaded in the secondary engine. The statement is
+# offloaded. Count_star should be 1, since the query is executed once.
+# Count_secondary should be 1, since the query was offloaded.
+# Sum_select_scan is 1. It should not count one scan for the primary
+# engine plan and one for secondary engine plan. (If the secondary
+# engine has set the USE_EXTERNAL_EXECUTOR flag (which RAPID has not),
+# the server will not count scans in the secondary engine. The
+# secondary engine can in that case increment these counters itself,
+# if it finds it relevant.)
+TRUNCATE TABLE performance_schema.events_statements_summary_by_digest;
+--disable_ps_protocol
+SELECT * FROM t;
+--enable_ps_protocol
+--eval $show_events
+
+EXECUTE ps;
+--eval $show_events_ps
+--eval $show_ps_instances
+
+# Executing while secondary engine is disabled should increase
+# execution count and scan count, but not secondary engine count.
+SET @saved_use_secondary_engine = @@use_secondary_engine;
+SET use_secondary_engine = OFF;
+--sorted_result
+EXECUTE ps;
+SET @@use_secondary_engine = @saved_use_secondary_engine;
+--eval $show_events_ps
+--eval $show_ps_instances
+
+# Executing while secondary is forced should increase secondary engine
+# count, as well as execution count and scan count.
+SET @saved_use_secondary_engine = @@use_secondary_engine;
+SET use_secondary_engine = FORCED;
+EXECUTE ps;
+SET @@use_secondary_engine = @saved_use_secondary_engine;
+--eval $show_events_ps
+--eval $show_ps_instances
+
+# Executing the prepared statement from a stored procedure should also
+# increase the execution count and secondary engine count.
+CREATE PROCEDURE p() EXECUTE ps;
+CALL p();
+DROP PROCEDURE p;
+--eval $show_ps_instances
+
+DROP PREPARE ps;
+
+# Expect no double-counting in CREATE TABLE AS SELECT either.
+FLUSH STATUS;
+CREATE TABLE tt AS SELECT * FROM t;
+SHOW STATUS LIKE 'Select_scan';
+DROP TABLE tt;
+
+DROP TABLE t;

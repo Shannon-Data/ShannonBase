@@ -123,6 +123,14 @@ alter table ORDERS secondary_engine RAPID;
 alter table CUSTOMER secondary_engine RAPID;
 alter table PART secondary_engine RAPID;
 alter table PARTSUPP secondary_engine RAPID;
+alter table NATION secondary_load;
+alter table REGION secondary_load;
+alter table LINEITEM secondary_load;
+alter table SUPPLIER secondary_load;
+alter table ORDERS secondary_load;
+alter table CUSTOMER secondary_load;
+alter table PART secondary_load;
+alter table PARTSUPP secondary_load;
 set use_secondary_engine=forced;
 SELECT  
 PS_PARTKEY, SUM(PS_SUPPLYCOST * PS_AVAILQTY) AS VALUE
