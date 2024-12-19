@@ -27,7 +27,8 @@
 #define __SHANNONBASE_CONTEXT_H__
 
 #include "include/trx0types.h"  //trx_id_t
-#include "sql/sql_lex.h"        //Secondary_engine_execution_context
+#include "sql/sql_class.h"
+#include "sql/sql_lex.h"  //Secondary_engine_execution_context
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
@@ -42,6 +43,16 @@ class Transaction;
 namespace Imcs {
 class Cu;
 }
+
+/**
+  Statement context class for the Shannon Rapid engine.
+*/
+class Rapid_statement_context : public Secondary_engine_statement_context {
+ public:
+  Rapid_statement_context() = default;
+  virtual ~Rapid_statement_context() {}
+};
+
 /**
   Execution context class for the RAPID engine. It allocates some data
   on the heap when it is constructed, and frees it when it is

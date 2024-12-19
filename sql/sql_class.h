@@ -946,6 +946,11 @@ class Secondary_engine_statement_context {
   */
   virtual ~Secondary_engine_statement_context() = default;
   virtual bool is_primary_engine_optimal() const { return true; }
+  virtual void cache_primary_plan_info(JOIN* join) {
+    m_primary_plan = join;
+  }
+ private:
+  JOIN* m_primary_plan {nullptr};
 };
 
 /**
