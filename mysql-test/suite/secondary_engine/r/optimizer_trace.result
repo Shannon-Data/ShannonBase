@@ -22,7 +22,7 @@ FROM INFORMATION_SCHEMA.OPTIMIZER_TRACE;
 trace
 [
   {
-    "reason": "The estimated query cost does not exceed secondary_engine_cost_threshold.",
+    "reason": "The estimated query cost does not exceed secondary_engine_cost_threshold, goes to primary engine.",
     "threshold": 100000
   }
 ]

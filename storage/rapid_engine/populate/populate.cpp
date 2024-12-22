@@ -58,6 +58,7 @@ namespace Populate {
 std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
 
 std::atomic<bool> sys_pop_started{false};
+// how many data was in sys_pop_buff?
 std::atomic<ulonglong> sys_pop_data_sz{0};
 static ulint sys_rapid_loop_count{0};
 
@@ -147,6 +148,8 @@ static void parse_log_func_main(log_t *log_ptr) {
 
 bool Populator::log_pop_thread_is_active() { return thread_is_active(srv_threads.m_change_pop); }
 
+bool Populator::log_pop_worker_is_active() { return true; }
+
 void Populator::start_change_populate_threads() {
   if (!Populator::log_pop_thread_is_active() && shannon_loaded_tables->size()) {
     os_event_reset(log_sys->rapid_events[0]);
@@ -172,6 +175,8 @@ void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */
           "rapid log pop thread loops: " ULINTPF "\n",
           ShannonBase::Populate::sys_pop_started ? "running" : "stopped", ShannonBase::Populate::sys_rapid_loop_count);
 }
+
+bool Populator::check_populating_status(std::string &table_name) { return false; }
 
 }  // namespace Populate
 }  // namespace ShannonBase

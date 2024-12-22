@@ -133,6 +133,7 @@ class ha_rapid : public handler {
   bool m_start_of_scan{false};
 
   std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;
+  std::string m_failed_reason;
 };
 
 }  // namespace ShannonBase

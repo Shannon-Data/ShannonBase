@@ -626,6 +626,12 @@ void Open_tables_state::reset_open_tables_state() {
   reset_reprepare_observers();
 }
 
+//To cache all info need by secondary engine at RapidPrepareEstimateQueryCosts stage.
+void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN* join) {
+  m_primary_cost = thd->m_current_query_cost;
+  m_primary_plan = join;
+}
+
 THD::THD(bool enable_plugins)
     : Query_arena(&main_mem_root, STMT_REGULAR_EXECUTION),
       mark_used_columns(MARK_COLUMNS_READ),

@@ -4437,6 +4437,11 @@ struct LEX : public Query_tables_list {
 
  public:
   /**
+    the offload or exec failed reason on secondary engine.
+   */
+  std::string m_secondary_engine_offload_or_exec_failed_reason;
+
+  /**
     Gets the secondary engine execution context for this statement.
   */
   Secondary_engine_execution_context *secondary_engine_execution_context()

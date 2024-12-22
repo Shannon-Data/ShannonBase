@@ -52,6 +52,19 @@ SELECT @@use_secondary_engine;
 @@use_secondary_engine
 OFF
 SET @@use_secondary_engine = @my_use_secondary_engine;
+SET @@rapid_use_dynamic_offload=1;
+SELECT @@rapid_use_dynamic_offload;
+@@rapid_use_dynamic_offload
+ON
+SET @@rapid_use_dynamic_offload=0;
+SELECT @@rapid_use_dynamic_offload;
+@@rapid_use_dynamic_offload
+OFF
+SET @@rapid_use_dynamic_offload=2;
+ERROR 42000: Variable 'rapid_use_dynamic_offload' can't be set to the value of '2'
+SELECT @@rapid_use_dynamic_offload;
+@@rapid_use_dynamic_offload
+OFF
 #
 # Bug#28319475: MAKE USE_SECONDARY_ENGINE SESSION-ONLY AND NONPERSISTENT
 #
