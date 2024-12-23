@@ -2067,6 +2067,8 @@ Warning	1231	'pseudo_replica_mode' change was ineffective.
 SET SESSION pseudo_thread_id = @@session.pseudo_thread_id;
 SET SESSION rand_seed1 = @@session.rand_seed1;
 SET SESSION rand_seed2 = @@session.rand_seed2;
+SET SESSION rapid_self_load_enabled = @@session.rapid_self_load_enabled;
+SET SESSION rapid_self_load_skip_quiet_check = @@session.rapid_self_load_skip_quiet_check;
 SET SESSION rapid_use_dynamic_offload = @@session.rapid_use_dynamic_offload;
 SET SESSION require_row_format = @@session.require_row_format;
 SET SESSION resultset_metadata = @@session.resultset_metadata;

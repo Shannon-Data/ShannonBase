@@ -116,8 +116,24 @@ class ha_rapid : public handler {
 
   const char *table_type() const override;
 
-  int load_table(const TABLE &table) override;
-
+  /**
+   * Load table into the secondary engine.
+   *
+   * @param[in] table - table to be loaded
+   * @param[out] skip_metadata_update - should the DD metadata be updated for
+   * the load of this table
+   * @return 0 if success
+   */
+  int load_table(const TABLE &table, bool *skip_metadata_update) override;
+  /**
+   * Unload the table from secondary engine
+   *
+   * @param[in] db_name
+   * @param[in] table_name
+   * @param[in] error_if_not_loaded - whether to report an error if the table is
+   * already not present in the secondary engine.
+   * @return 0 if success
+   */
   int unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) override;
 
   int start_stmt(THD *const thd, thr_lock_type lock_type) override MY_ATTRIBUTE((__warn_unused_result__));
