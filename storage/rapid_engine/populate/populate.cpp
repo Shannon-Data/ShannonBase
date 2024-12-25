@@ -176,7 +176,7 @@ void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */
           ShannonBase::Populate::sys_pop_started ? "running" : "stopped", ShannonBase::Populate::sys_rapid_loop_count);
 }
 
-bool Populator::check_populating_status(std::string &table_name) { return false; }
+bool Populator::check_population_status(std::string &table_name) { return false; }
 
 }  // namespace Populate
 }  // namespace ShannonBase

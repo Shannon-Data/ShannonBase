@@ -945,14 +945,30 @@ class Secondary_engine_statement_context {
     performs cleanup tasks that are needed after query execution.
   */
   virtual ~Secondary_engine_statement_context() = default;
-  virtual bool is_primary_engine_optimal() const { return true; }
+  virtual bool is_primary_engine_optimal() const;
   virtual void cache_primary_plan_info(THD* thd, JOIN* join);
   virtual JOIN* get_cached_primary_plan_info() const {
     return m_primary_plan;
   }
+  enum class QUERY_TYPE : int8 {
+    OLTP,
+    OLAP
+  };
  private:
+  // query type: OLTP or OLAP.
+  QUERY_TYPE m_query_type {QUERY_TYPE::OLTP};
+  // cost on primary engine.
   double m_primary_cost {0};
+  // query plan on primary engine.
   JOIN* m_primary_plan {nullptr};
+  // complex query(multi-table join) or not.
+  bool m_complex_query {false};
+  // point selection or not. true, point select, otherwise, range query.
+  bool m_point_query {false};
+  // the data of table are loaded in, not in change pop queue or applying.
+  bool m_data_ready {false};
+  // large table or not. 
+  bool m_large_table {false};
 };
 
 /**

@@ -595,7 +595,7 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   // if there're still do populating, then goes to innodb. and gets cardinality of tables.
   for (uint i = primary_plan_info->tables; i < primary_plan_info->tables; i++) {
     std::string db_tb;
-    if (ShannonBase::Populate::Populator::check_populating_status(db_tb)) return true;
+    if (ShannonBase::Populate::Populator::check_population_status(db_tb)) return true;
   }
 
   // 3: checks dict encoding projection, and varlen project size, etc.
@@ -654,9 +654,10 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
    * If dynamic offload is enabled and query is not "very fast":
      This caches features from mysql plan in rapid_statement_context
      to be used for dynamic offload. */
+  RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
+
   if (thd->variables.rapid_use_dynamic_offload &&
       thd->m_current_query_cost > static_cast<double>(thd->variables.secondary_engine_cost_threshold)) {
-    RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
   } else {  // dynamic offload is disabled or the query is "very fast":
     Opt_trace_context *const trace = &thd->opt_trace;
     if (trace->is_started()) {
