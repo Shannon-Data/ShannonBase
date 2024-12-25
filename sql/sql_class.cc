@@ -78,6 +78,7 @@
 #include "sql/lock.h"             // mysql_lock_abort_for_thread
 #include "sql/locking_service.h"  // release_all_locking_service_locks
 #include "sql/log_event.h"
+#include "sql/sql_optimizer.h"    // JOIN
 #include "sql/mdl_context_backup.h"  // MDL context backup for XA
 #include "sql/mysqld.h"              // global_system_variables ...
 #include "sql/mysqld_thd_manager.h"  // Global_THD_manager
@@ -115,6 +116,7 @@
 #include "sql/xa/transaction_cache.h"            // xa::Transaction_cache
 #include "storage/perfschema/pfs_instr_class.h"  // PFS_CLASS_STAGE
 #include "storage/perfschema/terminology_use_previous.h"
+#include "storage/rapid_engine/populate/populate.h"
 #include "string_with_len.h"
 #include "template_utils.h"
 #include "thr_mutex.h"
@@ -630,6 +632,48 @@ void Open_tables_state::reset_open_tables_state() {
 void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN* join) {
   m_primary_cost = thd->m_current_query_cost;
   m_primary_plan = join;
+
+  //if it's a select query and involves more than 3 tables, menans complex query, otherwise not.
+  m_complex_query = 
+    (thd->lex->sql_command == SQLCOM_SELECT &&
+     thd->lex->unit->first_query_block()->leaf_table_count >= 3) ? true : false;
+  double total_data_size{0};
+  bool all_tables_loaded {true}, still_populating {false};
+
+  if(thd->lex->using_hypergraph_optimizer) {
+
+  } else {
+    for (size_t i = join->const_tables; i < join->tables; ++i) {
+      Table_ref* tab_ref = join->qep_tab[i].table_ref;
+      if (!tab_ref) continue;
+
+      if (!tab_ref->table->s->secondary_load) {
+        all_tables_loaded &= false;
+      }
+
+      std::ostringstream db_tbl;
+      db_tbl << tab_ref->db << ":" << tab_ref->table_name;
+      std::string db_tbl_str = db_tbl.str();
+      if (ShannonBase::Populate::Populator::check_population_status(db_tbl_str)) {
+        still_populating |= true;
+      }
+
+      total_data_size =
+        (const_cast<Table_ref*>(tab_ref)->fetch_number_of_rows() * tab_ref->table->s->reclength) / 1024;
+    }
+  }
+
+  m_data_ready = all_tables_loaded && !still_populating;
+  //if table size is large than 1GB, means it's a large table.
+  m_large_table = (int)(total_data_size / (1024 * 1024)) > 1 ? true : false;
+  m_query_type =
+    (thd->lex->unit->first_query_block()->olap == ROLLUP_TYPE) ? QUERY_TYPE::OLAP : QUERY_TYPE::OLTP;
+
+  //join->row_limit == 1;
+}
+
+bool Secondary_engine_statement_context::is_primary_engine_optimal() const {
+  return true;
 }
 
 THD::THD(bool enable_plugins)

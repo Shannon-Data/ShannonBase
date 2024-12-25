@@ -165,6 +165,16 @@ alter table CUSTOMER secondary_load;
 alter table PART secondary_load;
 alter table PARTSUPP secondary_load;
 
+select * from NATION;
+select * from REGION;
+select * from LINEITEM;
+select * from SUPPLIER;
+select * from ORDERS;
+select * from CUSTOMER;
+select * from PART;
+select * from PARTSUPP;
+
+
 set use_secondary_engine=forced;
 #---use rapid
 SELECT  
@@ -214,6 +224,17 @@ HAVING SUM(PS_SUPPLYCOST * PS_AVAILQTY) > (SELECT
         AND S_NATIONKEY = N_NATIONKEY
         AND N_NAME = 'GERMANY')
 ORDER BY VALUE DESC;
+
+
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+set use_secondary_engine=1;
+set secondary_engine_cost_threshold =1.5;
+set rapid_use_dynamic_offload=1;
+
+SET optimizer_trace = 'enabled=on';
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+
+SELECT * FROM   NATION, REGION  WHERE  n_regionkey = r_regionkey;
 
 #to wait pop thread to process all mlogs
 --sleep 10
