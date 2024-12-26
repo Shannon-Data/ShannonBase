@@ -5,6 +5,8 @@
 --disable_query_log
 --enable_query_log
 
+set rapid_use_dynamic_offload=0;
+
 CREATE TABLE t1(id INT PRIMARY KEY, x INT, y INT, KEY (x))
 SECONDARY_ENGINE RAPID;
 INSERT INTO t1 VALUES

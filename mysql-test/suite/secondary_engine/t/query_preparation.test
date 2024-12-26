@@ -4,6 +4,8 @@
 --echo #
 --source include/elide_costs.inc
 
+set rapid_use_dynamic_offload=0;
+
 CREATE TABLE t1(id INT PRIMARY KEY, x INT, y INT);
 INSERT INTO t1 VALUES (1, 2, 3), (4, 5, 6), (7, 8, 9);
 CREATE INDEX t1_x ON t1(x);

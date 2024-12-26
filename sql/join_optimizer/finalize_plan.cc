@@ -761,3 +761,16 @@ bool FinalizePlanForQueryBlock(THD *thd, Query_block *query_block) {
   thd->lex->set_current_query_block(old_query_block);
   return error;
 }
+
+bool is_point_select(THD *thd [[maybe_unused]], Query_block *query_block) {
+  AccessPath *const root_path = query_block->join->root_access_path();
+  assert(root_path != nullptr);
+  if (root_path->type == AccessPath::EQ_REF ||
+      root_path->type == AccessPath::FAKE_SINGLE_ROW) {
+    // None of the finalization below is relevant to point selects, so just
+    // return immediately.
+    return true;
+  }
+
+  return false;
+}

@@ -1,2 +1,4 @@
 --source include/not_hypergraph.inc
+
+set rapid_use_dynamic_offload=0;
 --source suite/secondary_engine/inc/histogram.inc
