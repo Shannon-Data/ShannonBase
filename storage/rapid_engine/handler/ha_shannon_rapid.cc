@@ -47,6 +47,7 @@
 #include "sql/debug_sync.h"
 #include "sql/handler.h"
 #include "sql/join_optimizer/access_path.h"
+#include "sql/join_optimizer/finalize_plan.h"
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/opt_trace.h"
@@ -620,6 +621,14 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   return RapidPrepareEstimateQueryCosts(thd, lex);
 }
 
+/* For very fast queries, defined here by having cost < 10 and of the form point select */
+static inline bool is_very_fast_query(THD *thd) {
+  return (thd->m_current_query_cost < rapid_very_fast_query_threshold &&
+          is_point_select(thd, thd->lex->unit->first_query_block()))
+             ? true
+             : false;
+}
+
 // caches primary info. Here, we have done optimization with primary engine, and it
 // will retry with secondary engine, and therefore, be here. JOIN are available here,
 // and, we can get all optimzation information, then caches all these info.
@@ -643,22 +652,27 @@ static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
 // If dynamic offload is disabled or the query is "very fast":
 // This function invokes standary mysql cost threshold classifier,
 // which decides if query needs further RAPID optimisation.
-// returns true, goes to secondary engine.
-// returns false, goes to innodb engine.
+//
+// returns true, goes to secondary engine, otherwise, goes to innodb.
 bool SecondaryEnginePrePrepareHook(THD *thd) {
-  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)
-    return false;
-  else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
-    return true;
+  RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
+
   /**
    * If dynamic offload is enabled and query is not "very fast":
      This caches features from mysql plan in rapid_statement_context
      to be used for dynamic offload. */
-  RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
-
-  if (thd->variables.rapid_use_dynamic_offload &&
-      thd->m_current_query_cost > static_cast<double>(thd->variables.secondary_engine_cost_threshold)) {
-  } else {  // dynamic offload is disabled or the query is "very fast":
+  if (thd->variables.rapid_use_dynamic_offload && !is_very_fast_query(thd)) {
+    // 1: static sceanrio.
+    if (!ShannonBase::Populate::Populator::log_pop_thread_is_active() ||
+        (ShannonBase::Populate::Populator::log_pop_thread_is_active() && ShannonBase::Populate::sys_pop_buff.empty())) {
+      return ShannonBase::Utils::Util::decision_classifier();
+    } else {
+      // 2: dynamic scenario.
+    }
+  } else if (!thd->variables.rapid_use_dynamic_offload || is_very_fast_query(thd)) {
+    // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
+    return ShannonBase::Utils::Util::cost_threshold_classifier(thd->secondary_engine_statement_context());
+  } else {
     Opt_trace_context *const trace = &thd->opt_trace;
     if (trace->is_started()) {
       const Opt_trace_object wrapper(trace);
@@ -673,8 +687,8 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
     return false;
   }
 
-  // go to secondary optimisation phase.
-  return true;
+  // go to innodb for execution.
+  return false;
 }
 
 static void AssertSupportedPath(const AccessPath *path) {

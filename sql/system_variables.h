@@ -120,6 +120,8 @@ enum rapid_self_load_skip_quiet_check {
   SKIP_QUIET_CHECK_TRUE = 1
 };
 
+constexpr double rapid_very_fast_query_threshold = 10.0;
+
 /**
   Values for explain_format sysvar.
 

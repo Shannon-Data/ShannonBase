@@ -40,6 +40,7 @@ class TABLE;
 class Field;
 class key_range;
 class CHARSET_INFO;
+class Secondary_engine_statement_context;
 namespace ShannonBase {
 namespace Compress {
 class Dictionary;
@@ -108,6 +109,12 @@ class Util {
   static inline bool is_string(enum_field_types type) {
     return (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING || type == MYSQL_TYPE_STRING) ? true : false;
   }
+
+  // use cost info to determine which engine should be used.
+  static bool cost_threshold_classifier(const Secondary_engine_statement_context *);
+
+  // use decision tree to determine which engine should be used.
+  static bool decision_classifier();
 };
 
 }  // namespace Utils

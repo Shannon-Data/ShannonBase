@@ -20,10 +20,5 @@ SELECT JSON_PRETTY(JSON_REMOVE(TRACE->'$**.secondary_engine_not_used',
 '$[0].cost')) AS trace
 FROM INFORMATION_SCHEMA.OPTIMIZER_TRACE;
 trace
-[
-  {
-    "reason": "The estimated query cost does not exceed secondary_engine_cost_threshold, goes to primary engine.",
-    "threshold": 100000
-  }
-]
+NULL
 DROP TABLE t;

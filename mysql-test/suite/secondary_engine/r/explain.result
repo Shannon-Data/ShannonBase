@@ -1,3 +1,4 @@
+set rapid_use_dynamic_offload=0;
 #
 # Bug#28556942: ADD USING SECONDARY ENGINE TO EXPLAIN
 #

@@ -631,6 +631,8 @@ void Open_tables_state::reset_open_tables_state() {
 //To cache all info need by secondary engine at RapidPrepareEstimateQueryCosts stage.
 void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN* join) {
   m_primary_cost = thd->m_current_query_cost;
+  m_secondary_cost_threshold = thd->variables.secondary_engine_cost_threshold;
+
   m_primary_plan = join;
 
   //if it's a select query and involves more than 3 tables, menans complex query, otherwise not.
@@ -670,10 +672,6 @@ void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN*
     (thd->lex->unit->first_query_block()->olap == ROLLUP_TYPE) ? QUERY_TYPE::OLAP : QUERY_TYPE::OLTP;
 
   //join->row_limit == 1;
-}
-
-bool Secondary_engine_statement_context::is_primary_engine_optimal() const {
-  return true;
 }
 
 THD::THD(bool enable_plugins)

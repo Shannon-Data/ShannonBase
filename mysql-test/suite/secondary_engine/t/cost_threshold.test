@@ -2,6 +2,8 @@
 --echo # Test cases for the secondary_engine_cost_threshold variable.
 --echo #
 
+set rapid_use_dynamic_offload=0;
+
 # Remember the original threshold and restore it at the end of the test.
 SELECT @@secondary_engine_cost_threshold,
        @@global.secondary_engine_cost_threshold;

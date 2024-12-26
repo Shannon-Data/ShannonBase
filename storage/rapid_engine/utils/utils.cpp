@@ -26,6 +26,7 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "sql/my_decimal.h"                   //my_decimal
+#include "sql/sql_class.h"                    //Secondary_engine_statement_context
 #include "sql/table.h"                        //TABLE
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
@@ -216,6 +217,23 @@ uchar *Util::pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, u
     to_cs->cset->fill(to_cs, (char *)to + copy_length, to_length - copy_length, to_cs->pad_char);
 
   return to;
+}
+
+// cost threshold classifier for determining which engine should to go.
+bool Util::cost_threshold_classifier(const Secondary_engine_statement_context *stmt_context) {
+  assert(stmt_context);
+
+  if (current_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return true;
+
+  if (stmt_context->get_primary_cost() > stmt_context->get_secondary_cost_threshold())
+    return true;  // secondary
+  else
+    return false;  // innodb.
+}
+
+bool Util::decision_classifier() {
+  // here to use trained decision tree to classify the query.
+  return false;
 }
 
 }  // namespace Utils
