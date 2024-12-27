@@ -25,13 +25,18 @@
 */
 #include "storage/rapid_engine/utils/utils.h"
 
-#include "sql/my_decimal.h"                   //my_decimal
-#include "sql/sql_class.h"                    //Secondary_engine_statement_context
-#include "sql/table.h"                        //TABLE
+#include "sql/join_optimizer/finalize_plan.h"
+#include "sql/my_decimal.h"  //my_decimal
+#include "sql/sql_class.h"   //Secondary_engine_statement_context
+#include "sql/sql_lex.h"
+#include "sql/table.h"  //TABLE
+
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/ml/ml.h"
+#include "storage/rapid_engine/populate/populate.h"
 
 namespace ShannonBase {
 namespace Utils {
@@ -220,19 +225,41 @@ uchar *Util::pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, u
 }
 
 // cost threshold classifier for determining which engine should to go.
-bool Util::cost_threshold_classifier(const Secondary_engine_statement_context *stmt_context) {
-  assert(stmt_context);
-
+bool Util::cost_threshold_classifier(THD *thd) {
   if (current_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return true;
 
+  auto stmt_context = thd->secondary_engine_statement_context();
+  assert(stmt_context);
   if (stmt_context->get_primary_cost() > stmt_context->get_secondary_cost_threshold())
     return true;  // secondary
   else
     return false;  // innodb.
 }
 
-bool Util::decision_classifier() {
+// returns true goes to secondary engine, otherwise, false go to innodb.
+bool Util::decision_tree_classifier(THD *thd) {
   // here to use trained decision tree to classify the query.
+  if (is_very_fast_query(thd)) return false;
+
+#ifdef USE_MLv  // use mlv to predict. when ml is ready to remove this.
+  ShannonBase::ML::Query_arbitrator qa;
+  qa.load_model();
+  auto where = qa.predict(thd->lex->unit->first_query_block()->join);
+  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_RAPID) ? true : false;
+#endif
+  return false;
+}
+
+// returns true goes to secondary engine, otherwise, false go to innodb.
+bool Util::dynamic_feature_normalization(THD *thd) {
+  auto stmt_context = thd->secondary_engine_statement_context();
+  assert(stmt_context);
+
+  // to checkts whether query involves tables are still in pop queue. if yes, go innodb.
+  for (auto &table_name : stmt_context->get_query_tables()) {
+    if (ShannonBase::Populate::Populator::check_population_status(table_name)) return false;
+  }
+
   return false;
 }
 

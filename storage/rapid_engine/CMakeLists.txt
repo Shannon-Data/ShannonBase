@@ -35,7 +35,7 @@ INCLUDE_DIRECTORIES(
 )
 
 #FOR AUTO-ML MODELS
-#INCLUDE_DIRECTORIES( ${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/include/)
+INCLUDE_DIRECTORIES( ${CMAKE_SOURCE_DIR}/extra/lightgbm/LightGBM/include)
 #LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/lib/)
 
 # Conflicting YYSTYPE, because we have multiple Bison grammars.
@@ -151,12 +151,16 @@ set (SHANNON_OPTIMIZE
     cost/cost.cpp
     statistics/statistics.cpp
 )
+set (SHANNON_ML
+    ml/ml.cpp
+)
 SET(SHANNON_RAPID_SOURCES
     handler/ha_shannon_rapid.cc
     ${SHANNON_IMCS_SOURCES}
     ${SHANNON_TRX_SOURCES}
     ${SHANNON_ITERATOR_SOURCES}
     ${SHANNON_POPULATE_SOURCES}
+    ${SHANNON_ML}
     ${SHANNON_OPTIMIZE}
 )
 

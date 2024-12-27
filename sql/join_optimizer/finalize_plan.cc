@@ -774,3 +774,11 @@ bool is_point_select(THD *thd [[maybe_unused]], Query_block *query_block) {
 
   return false;
 }
+
+/* For very fast queries, defined here by having cost < 10 and of the form point select */
+bool is_very_fast_query(THD *thd) {
+  return (thd->m_current_query_cost < rapid_very_fast_query_threshold &&
+          is_point_select(thd, thd->lex->unit->first_query_block()))
+             ? true
+             : false;
+}

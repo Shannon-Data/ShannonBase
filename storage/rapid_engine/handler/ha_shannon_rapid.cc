@@ -47,7 +47,6 @@
 #include "sql/debug_sync.h"
 #include "sql/handler.h"
 #include "sql/join_optimizer/access_path.h"
-#include "sql/join_optimizer/finalize_plan.h"
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/opt_trace.h"
@@ -621,14 +620,6 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   return RapidPrepareEstimateQueryCosts(thd, lex);
 }
 
-/* For very fast queries, defined here by having cost < 10 and of the form point select */
-static inline bool is_very_fast_query(THD *thd) {
-  return (thd->m_current_query_cost < rapid_very_fast_query_threshold &&
-          is_point_select(thd, thd->lex->unit->first_query_block()))
-             ? true
-             : false;
-}
-
 // caches primary info. Here, we have done optimization with primary engine, and it
 // will retry with secondary engine, and therefore, be here. JOIN are available here,
 // and, we can get all optimzation information, then caches all these info.
@@ -657,21 +648,18 @@ static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
 bool SecondaryEnginePrePrepareHook(THD *thd) {
   RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
 
-  /**
-   * If dynamic offload is enabled and query is not "very fast":
-     This caches features from mysql plan in rapid_statement_context
-     to be used for dynamic offload. */
-  if (thd->variables.rapid_use_dynamic_offload && !is_very_fast_query(thd)) {
+  if (unlikely(!thd->variables.rapid_use_dynamic_offload)) {
+    // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
+    return ShannonBase::Utils::Util::cost_threshold_classifier(thd);
+  } else if (likely(thd->variables.rapid_use_dynamic_offload)) {
     // 1: static sceanrio.
     if (!ShannonBase::Populate::Populator::log_pop_thread_is_active() ||
         (ShannonBase::Populate::Populator::log_pop_thread_is_active() && ShannonBase::Populate::sys_pop_buff.empty())) {
-      return ShannonBase::Utils::Util::decision_classifier();
+      return ShannonBase::Utils::Util::decision_tree_classifier(thd);
     } else {
       // 2: dynamic scenario.
+      return ShannonBase::Utils::Util::dynamic_feature_normalization(thd);
     }
-  } else if (!thd->variables.rapid_use_dynamic_offload || is_very_fast_query(thd)) {
-    // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
-    return ShannonBase::Utils::Util::cost_threshold_classifier(thd->secondary_engine_statement_context());
   } else {
     Opt_trace_context *const trace = &thd->opt_trace;
     if (trace->is_started()) {
