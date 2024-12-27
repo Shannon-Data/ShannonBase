@@ -49,4 +49,7 @@ void ReplaceOrderItemsWithTempTableFields(THD *thd, ORDER *order,
 // returns true if a point select, otherwise, returns false.
 bool is_point_select (THD *thd [[maybe_unused]], Query_block *query_block);
 
+// the query is fast query or not.
+bool is_very_fast_query(THD *thd);
+
 #endif  // SQL_JOIN_OPTIMIZER_FINALIZE_PLAN_H_

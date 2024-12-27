@@ -655,11 +655,7 @@ void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN*
 
       std::ostringstream db_tbl;
       db_tbl << tab_ref->db << ":" << tab_ref->table_name;
-      std::string db_tbl_str = db_tbl.str();
-      if (ShannonBase::Populate::Populator::check_population_status(db_tbl_str)) {
-        still_populating |= true;
-      }
-
+      m_tables.emplace_back(db_tbl.str());
       total_data_size =
         (const_cast<Table_ref*>(tab_ref)->fetch_number_of_rows() * tab_ref->table->s->reclength) / 1024;
     }

@@ -32,7 +32,7 @@
   are dependent on this header and thus require recompilation if it changes.
   Historically this file contained "Classes in mysql".
 */
-
+#include <vector>
 #include "my_config.h"
 
 #include <limits.h>
@@ -948,13 +948,13 @@ class Secondary_engine_statement_context {
   virtual bool is_primary_engine_optimal() const { return true; }
 
   virtual void cache_primary_plan_info(THD* thd, JOIN* join);
+
   virtual JOIN* get_cached_primary_plan_info() const {
     return m_primary_plan;
   }
-
   double get_primary_cost() const { return m_primary_cost; }
   double get_secondary_cost_threshold() const { return m_secondary_cost_threshold; }
-
+  std::vector<std::string>& get_query_tables() { return m_tables; }
   enum class QUERY_TYPE : int8 {
     OLTP,
     OLAP
@@ -974,6 +974,8 @@ class Secondary_engine_statement_context {
   bool m_data_ready {false};
   // large table or not. 
   bool m_large_table {false};
+  //all tables used in query.
+  std::vector<std::string> m_tables;
 };
 
 /**
