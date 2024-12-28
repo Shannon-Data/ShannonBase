@@ -88,5 +88,5 @@ jobs:
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
         ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
-        information_schema,sys_vars,opt_trace \
+        information_schema,sys_vars,opt_trace,clone \
         --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
