@@ -111,7 +111,7 @@ class Util {
   }
 
   // use cost info to determine which engine should be used.
-  static bool cost_threshold_classifier(THD *thd);
+  static bool standard_cost_threshold_classifier(THD *thd);
 
   // use decision tree to determine which engine should be used.
   static bool decision_tree_classifier(THD *thd);

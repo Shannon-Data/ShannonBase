@@ -20,5 +20,9 @@ SELECT JSON_PRETTY(JSON_REMOVE(TRACE->'$**.secondary_engine_not_used',
 '$[0].cost')) AS trace
 FROM INFORMATION_SCHEMA.OPTIMIZER_TRACE;
 trace
-NULL
+[
+  {
+    "reason": "The Query_arbitrator do the prediction, goes to primary engine."
+  }
+]
 DROP TABLE t;
