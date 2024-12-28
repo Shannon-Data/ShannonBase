@@ -165,14 +165,14 @@ alter table CUSTOMER secondary_load;
 alter table PART secondary_load;
 alter table PARTSUPP secondary_load;
 
-select * from NATION;
-select * from REGION;
-select * from LINEITEM;
-select * from SUPPLIER;
-select * from ORDERS;
-select * from CUSTOMER;
-select * from PART;
-select * from PARTSUPP;
+select * from NATION LIMIT 100;
+select * from REGION LIMIT 100;
+select * from LINEITEM LIMIT 100;
+select * from SUPPLIER LIMIT 100;
+select * from ORDERS LIMIT 100;
+select * from CUSTOMER LIMIT 100;
+select * from PART LIMIT 100;
+select * from PARTSUPP LIMIT 100;
 
 
 set use_secondary_engine=forced;
@@ -234,7 +234,7 @@ set rapid_use_dynamic_offload=1;
 SET optimizer_trace = 'enabled=on';
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 
-SELECT * FROM   NATION, REGION  WHERE  n_regionkey = r_regionkey;
+SELECT * FROM   NATION, REGION  WHERE  n_regionkey = r_regionkey ORDER BY N_NATIONKEY;
 
 #to wait pop thread to process all mlogs
 --sleep 10

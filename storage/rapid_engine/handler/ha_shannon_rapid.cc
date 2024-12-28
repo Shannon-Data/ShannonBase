@@ -650,7 +650,7 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
 
   if (unlikely(!thd->variables.rapid_use_dynamic_offload)) {
     // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
-    return ShannonBase::Utils::Util::cost_threshold_classifier(thd);
+    return ShannonBase::Utils::Util::standard_cost_threshold_classifier(thd);
   } else if (likely(thd->variables.rapid_use_dynamic_offload)) {
     // 1: static sceanrio.
     if (!ShannonBase::Populate::Populator::log_pop_thread_is_active() ||
@@ -660,20 +660,8 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
       // 2: dynamic scenario.
       return ShannonBase::Utils::Util::dynamic_feature_normalization(thd);
     }
-  } else {
-    Opt_trace_context *const trace = &thd->opt_trace;
-    if (trace->is_started()) {
-      const Opt_trace_object wrapper(trace);
-      Opt_trace_object oto(trace, "secondary_engine_not_used");
-      oto.add_alnum("reason",
-                    "The estimated query cost does not exceed "
-                    "secondary_engine_cost_threshold, goes to primary engine.");
-      oto.add("cost", thd->m_current_query_cost);
-      oto.add("threshold", thd->variables.secondary_engine_cost_threshold);
-    }
-    // then query proceeds to Innodb for execution
-    return false;
-  }
+  } else
+    assert(false);
 
   // go to innodb for execution.
   return false;

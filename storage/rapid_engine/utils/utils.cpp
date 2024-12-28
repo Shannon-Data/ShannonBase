@@ -27,7 +27,8 @@
 
 #include "sql/join_optimizer/finalize_plan.h"
 #include "sql/my_decimal.h"  //my_decimal
-#include "sql/sql_class.h"   //Secondary_engine_statement_context
+#include "sql/opt_trace.h"
+#include "sql/sql_class.h"  //Secondary_engine_statement_context
 #include "sql/sql_lex.h"
 #include "sql/table.h"  //TABLE
 
@@ -224,36 +225,83 @@ uchar *Util::pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, u
   return to;
 }
 
+static inline void write_trace_reason(THD *thd, const char *text, const char *reason) {
+  Opt_trace_context *const trace = &thd->opt_trace;
+  if (unlikely(trace->is_started())) {
+    const Opt_trace_object wrapper(trace);
+    Opt_trace_object oto(trace, text);
+    oto.add_alnum("reason", reason);
+  }
+}
+
 // cost threshold classifier for determining which engine should to go.
-bool Util::cost_threshold_classifier(THD *thd) {
+// returns true goes to secondary engine, otherwise, false go to innodb.
+bool Util::standard_cost_threshold_classifier(THD *thd) {
   if (current_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return true;
 
   auto stmt_context = thd->secondary_engine_statement_context();
   assert(stmt_context);
-  if (stmt_context->get_primary_cost() > stmt_context->get_secondary_cost_threshold())
-    return true;  // secondary
-  else
-    return false;  // innodb.
+
+  ShannonBase::ML::Query_arbitrator::WHERE2GO where{ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_INNODB};
+  std::ostringstream oss;
+  std::string text;
+  if (stmt_context->get_primary_cost() > stmt_context->get_secondary_cost_threshold()) {
+    oss << "The estimated query cost does exceed secondary_engine_cost_threshold, goes to secondary engine.";
+    oss << "cost: " << thd->m_current_query_cost << ", threshold: " << thd->variables.secondary_engine_cost_threshold;
+    text = "secondary_engine_used";
+    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_RAPID;
+  } else {
+    oss << "The estimated query cost does not exceed secondary_engine_cost_threshold, goes to primary engine.";
+    oss << "cost: " << thd->m_current_query_cost << ", threshold: " << thd->variables.secondary_engine_cost_threshold;
+    text = "secondary_engine_not_used";
+    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_INNODB;
+  }
+
+  write_trace_reason(thd, text.c_str(), oss.str().c_str());
+
+  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_RAPID) ? true : false;
 }
 
+//  decision tree classifier for determining which engine should to go.
 // returns true goes to secondary engine, otherwise, false go to innodb.
 bool Util::decision_tree_classifier(THD *thd) {
+  std::ostringstream oss;
+  std::string text;
   // here to use trained decision tree to classify the query.
-  if (is_very_fast_query(thd)) return false;
+  if (is_very_fast_query(thd)) {
+    text = "secondary_engine_not_used";
+    oss << "The estimated query is a very fast query, goes to primar engine.";
+    write_trace_reason(thd, text.c_str(), oss.str().c_str());
+    return false;
+  }
 
-#ifdef USE_MLv  // use mlv to predict. when ml is ready to remove this.
   ShannonBase::ML::Query_arbitrator qa;
   qa.load_model();
   auto where = qa.predict(thd->lex->unit->first_query_block()->join);
+  if (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_RAPID) {
+    text = "secondary_engine_used";
+    oss << "The Query_arbitrator do the prediction, goes to secondary engine.";
+  } else {
+    text = "secondary_engine_not_used";
+    oss << "The Query_arbitrator do the prediction, goes to primary engine.";
+  }
+  write_trace_reason(thd, text.c_str(), oss.str().c_str());
+
   return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_RAPID) ? true : false;
-#endif
-  return false;
 }
 
+// dynamic feature normalization for determining which engine should to go.
 // returns true goes to secondary engine, otherwise, false go to innodb.
 bool Util::dynamic_feature_normalization(THD *thd) {
   auto stmt_context = thd->secondary_engine_statement_context();
   assert(stmt_context);
+
+  // If queue is too long or CP is too long, this mechanism wants to progressively start
+  // shifting queries to mysql, moving gradually towards the heavier queries
+  if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+      ShannonBase::Populate::sys_pop_buff.size() * 0.8 > ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
+    return false;
+  }
 
   // to checkts whether query involves tables are still in pop queue. if yes, go innodb.
   for (auto &table_name : stmt_context->get_query_tables()) {
