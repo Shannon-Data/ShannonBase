@@ -28,13 +28,17 @@
 #include "sql/join_optimizer/finalize_plan.h"
 #include "sql/my_decimal.h"  //my_decimal
 #include "sql/opt_trace.h"
-#include "sql/sql_class.h"  //Secondary_engine_statement_context
+#include "sql/sql_class.h"     //Secondary_engine_statement_context
+#include "sql/sql_executor.h"  //QEP_TBA
 #include "sql/sql_lex.h"
-#include "sql/table.h"  //TABLE
+#include "sql/sql_optimizer.h"  //JOIN
+#include "sql/table.h"          //TABLE
 
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
+#include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/ml/ml.h"
 #include "storage/rapid_engine/populate/populate.h"
@@ -245,7 +249,7 @@ bool Util::standard_cost_threshold_classifier(THD *thd) {
   ShannonBase::ML::Query_arbitrator::WHERE2GO where{ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_INNODB};
   std::ostringstream oss;
   std::string text;
-  if (stmt_context->get_primary_cost() > stmt_context->get_secondary_cost_threshold()) {
+  if (stmt_context->get_primary_cost() > thd->variables.secondary_engine_cost_threshold) {
     oss << "The estimated query cost does exceed secondary_engine_cost_threshold, goes to secondary engine.";
     oss << "cost: " << thd->m_current_query_cost << ", threshold: " << thd->variables.secondary_engine_cost_threshold;
     text = "secondary_engine_used";
@@ -270,7 +274,7 @@ bool Util::decision_tree_classifier(THD *thd) {
   // here to use trained decision tree to classify the query.
   if (is_very_fast_query(thd)) {
     text = "secondary_engine_not_used";
-    oss << "The estimated query is a very fast query, goes to primar engine.";
+    oss << "The estimated query is a very fast query, goes to primary engine.";
     write_trace_reason(thd, text.c_str(), oss.str().c_str());
     return false;
   }
@@ -299,13 +303,47 @@ bool Util::dynamic_feature_normalization(THD *thd) {
   // If queue is too long or CP is too long, this mechanism wants to progressively start
   // shifting queries to mysql, moving gradually towards the heavier queries
   if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-      ShannonBase::Populate::sys_pop_buff.size() * 0.8 > ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
+      ShannonBase::Populate::sys_pop_buff.size() * ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO >
+          ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
     return false;
   }
 
   // to checkts whether query involves tables are still in pop queue. if yes, go innodb.
-  for (auto &table_name : stmt_context->get_query_tables()) {
+  for (auto &table_ref : stmt_context->get_query_tables()) {
+    std::string table_name(table_ref->db);
+    table_name += ":";
+    table_name += table_ref->table_name;
     if (ShannonBase::Populate::Populator::check_population_status(table_name)) return false;
+  }
+
+  return false;
+}
+
+// check whether the dictionary encoding projection is supported or not.
+// returns true if supported to innodb, otherwise, false to secondary engine.
+bool Util::check_dict_encoding_projection(THD *thd) {
+  auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
+  if (!imcs_instance) return true;
+
+  std::string key_part;
+  auto table_ref = thd->lex->unit->first_query_block()->leaf_tables;
+  for (; table_ref; table_ref = table_ref->next_leaf) {
+    if (table_ref->is_view_or_derived()) continue;
+
+    key_part += table_ref->db;
+    key_part += ":";
+    key_part += table_ref->table_name;
+    key_part += ":";
+
+    for (auto j = 0u; j < table_ref->table->s->fields; j++) {
+      auto field_ptr = *(table_ref->table->field + j);
+      if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+      std::string key = key_part + field_ptr->field_name;
+      auto cu_header = imcs_instance->get_cus()[key].get()->header();
+      assert(cu_header);
+      // to test all cu infos.
+    }
   }
 
   return false;

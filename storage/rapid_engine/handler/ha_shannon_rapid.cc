@@ -538,16 +538,14 @@ static void rapid_kill_connection(handlerton *hton, /*!< in:  innobase handlerto
   }
 }
 
-void SetSecondaryEngineOffloadFailedReason(THD *thd, const char *msg) {
+static inline void SetSecondaryEngineOffloadFailedReason(THD *thd, const char *msg) {
   assert(thd);
-  thd->lex->m_secondary_engine_offload_or_exec_failed_reason.clear();
-  thd->lex->m_secondary_engine_offload_or_exec_failed_reason.append(msg);
+  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = msg;
   my_error(ER_SECONDARY_ENGINE, MYF(0), msg);
 }
 
 const char *GetSecondaryEngineOffloadorExecFailedReason(THD *thd) {
   assert(thd);
-
   return thd->lex->m_secondary_engine_offload_or_exec_failed_reason.c_str();
 }
 
@@ -571,21 +569,15 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
     SetSecondaryEngineOffloadFailedReason(thd, "use_secondary_engine set to off.");
     return true;
-  }
-
-  else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
+  } else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
     return false;
-
-  // gets the shannon statement context from thd, which stores in SecondaryEnginePrePrepareHook.
-  if (!thd->variables.rapid_use_dynamic_offload) {
-    return false;
-  }
 
   auto shannon_statement_context = thd->secondary_engine_statement_context();
   auto primary_plan_info = shannon_statement_context->get_cached_primary_plan_info();
 
   // 1: to check whether the sys_pop_data_sz has too many data to populate.
-  uint64 too_much_pop_threshold = static_cast<uint64_t>(0.8 * ShannonBase::rpd_pop_buff_sz_max);
+  uint64 too_much_pop_threshold =
+      static_cast<uint64_t>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
   if (ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
     SetSecondaryEngineOffloadFailedReason(thd, "too much changes need to populate.");
     return true;
@@ -595,11 +587,17 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   // if there're still do populating, then goes to innodb. and gets cardinality of tables.
   for (uint i = primary_plan_info->tables; i < primary_plan_info->tables; i++) {
     std::string db_tb;
-    if (ShannonBase::Populate::Populator::check_population_status(db_tb)) return true;
+    if (ShannonBase::Populate::Populator::check_population_status(db_tb)) {
+      SetSecondaryEngineOffloadFailedReason(thd, "table queried is populating.");
+      return true;
+    }
   }
 
   // 3: checks dict encoding projection, and varlen project size, etc.
-
+  if (ShannonBase::Utils::Util::check_dict_encoding_projection(thd)) {
+    SetSecondaryEngineOffloadFailedReason(thd, "dict encoding is not supported.");
+    return true;
+  }
   return false;
 }
 
@@ -701,16 +699,27 @@ static void AssertSupportedPath(const AccessPath *path) {
 //  In this function, Dynamic offload retrieves info from
 //  rapid_statement_context and additionally looks at Change
 //  propagation lag to decide if query should be offloaded to rapid
-//  returns true, goes to innodb engine.
-//  return false, goes to secondary engine.
+//  returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
 static bool RapidOptimize(THD *thd [[maybe_unused]], LEX *lex) {
-  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
+    SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, set use_secondary_engine to false.");
     return true;
-  else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
+  } else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
     return false;
+
+  // auto statement_context = thd->secondary_engine_statement_context();
+  // to much changes to populate, then goes to primary engine.
+  ulonglong too_much_pop_threshold =
+      static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
+  if (ShannonBase::Populate::sys_pop_buff.size() > 1000 ||
+      ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
+    SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, the CP lag is too much.");
+    return true;
+  }
 
   return false;
 }
+
 static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
   // The context should have been set by PrepareSecondaryEngine.
   assert(lex->secondary_engine_execution_context() != nullptr);

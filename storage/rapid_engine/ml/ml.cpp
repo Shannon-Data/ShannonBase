@@ -25,14 +25,28 @@
 */
 
 #include "ml.h"
+
 #include "LightGBM/c_api.h"  //lightgbm
+#include "sql/sql_class.h"
+#include "sql/sql_optimizer.h"
 
 namespace ShannonBase {
 namespace ML {
 
 void Query_arbitrator::load_model() {}
 
+/**
+ * Here, the features of model, can be:
+ * (1) f_mysql_total_ts_nrows,
+ * (2) f_MySQLCost,
+ * (3) f_count_all_base_tables
+ * (4) f_count_ref_index_ts
+ * (5) f_BaseTableSumNrows
+ * (6) f_are_all_ts_index_ref
+ *
+ */
 Query_arbitrator::WHERE2GO Query_arbitrator::predict(JOIN *join) {
+  // to the all query plan info then use these features to do classification.
   BoosterHandle booster;
   int out_num_iterations;
   int status = LGBM_BoosterCreateFromModelfile(m_model_path.c_str(), &out_num_iterations, &booster);

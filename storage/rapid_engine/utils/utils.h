@@ -117,6 +117,8 @@ class Util {
   static bool decision_tree_classifier(THD *thd);
 
   static bool dynamic_feature_normalization(THD *thd);
+
+  static bool check_dict_encoding_projection(THD *thd);
 };
 
 }  // namespace Utils
