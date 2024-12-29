@@ -66,6 +66,7 @@ class Imcs : public MemoryObject {
     return m_instance;
   }
 
+  inline std::unordered_map<std::string, std::unique_ptr<Cu>> &get_cus() { return m_cus; }
   // get cu pointer by its key.
   Cu *get_cu(std::string &key);
   Cu *get_cu(const char *key);

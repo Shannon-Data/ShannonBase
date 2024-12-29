@@ -944,6 +944,11 @@ class Secondary_engine_statement_context {
     may override the destructor in subclasses and add code that
     performs cleanup tasks that are needed after query execution.
   */
+  enum class QUERY_TYPE : int8 {
+    OLTP,
+    OLAP
+  };
+
   virtual ~Secondary_engine_statement_context() = default;
   virtual bool is_primary_engine_optimal() const { return true; }
 
@@ -952,30 +957,33 @@ class Secondary_engine_statement_context {
   virtual JOIN* get_cached_primary_plan_info() const {
     return m_primary_plan;
   }
+
   double get_primary_cost() const { return m_primary_cost; }
-  double get_secondary_cost_threshold() const { return m_secondary_cost_threshold; }
-  std::vector<std::string>& get_query_tables() { return m_tables; }
-  enum class QUERY_TYPE : int8 {
-    OLTP,
-    OLAP
-  };
+
+  uint get_count_base_table() const { return m_count_all_base_tables; }
+
+  QUERY_TYPE get_query_type() const { return m_query_type; }
+
+  std::vector<Table_ref*>& get_query_tables() { return m_tables; }
  private:
-  // query type: OLTP or OLAP.
-  QUERY_TYPE m_query_type {QUERY_TYPE::OLTP};
-  // cost on primary engine.
-  double m_primary_cost {0};
-  //cost threshold to deterimine whether goes to secondary or not.
-  double m_secondary_cost_threshold {0};
   // query plan on primary engine.
   JOIN* m_primary_plan {nullptr};
-  // complex query(multi-table join) or not.
+  // query type: OLTP or OLAP.
+  QUERY_TYPE m_query_type {QUERY_TYPE::OLTP};
+  //all tables used in query, gets from qep_tab.
+  std::vector<Table_ref*> m_tables;
+  //the # of base table used in statement.
+  uint m_count_all_base_tables{0};
+  // cost on primary engine.
+  double m_primary_cost {0};
+  //# of refereing to index table scan.
+  uint m_count_ref_index_ts{0};
+  //the # of rows of all base tables.
+  uint m_base_table_rows {0};
+  //whether all tables use index table scan.
+  bool are_all_ts_index_ref {false};
+  //is a complex query or not.
   bool m_complex_query {false};
-  // the data of table are loaded in, not in change pop queue or applying.
-  bool m_data_ready {false};
-  // large table or not. 
-  bool m_large_table {false};
-  //all tables used in query.
-  std::vector<std::string> m_tables;
 };
 
 /**
