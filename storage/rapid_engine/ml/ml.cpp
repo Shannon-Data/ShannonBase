@@ -51,7 +51,7 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict(JOIN *join) {
   int out_num_iterations;
   int status = LGBM_BoosterCreateFromModelfile(m_model_path.c_str(), &out_num_iterations, &booster);
   if (status != 0) {
-    return Query_arbitrator::WHERE2GO::TO_INNODB;
+    return Query_arbitrator::WHERE2GO::TO_PRIMARY;
   }
 
   std::vector<double> features;
@@ -66,12 +66,12 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict(JOIN *join) {
 
   if (status != 0) {
     LGBM_BoosterFree(booster);
-    return Query_arbitrator::WHERE2GO::TO_INNODB;
+    return Query_arbitrator::WHERE2GO::TO_PRIMARY;
   }
 
   // std::cout << "Prediction result: " << out_result[0] << std::endl;
   LGBM_BoosterFree(booster);
-  return Query_arbitrator::WHERE2GO::TO_RAPID;
+  return Query_arbitrator::WHERE2GO::TO_SECONDARY;
 }
 
 }  // namespace ML

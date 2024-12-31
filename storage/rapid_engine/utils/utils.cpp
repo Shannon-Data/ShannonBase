@@ -246,24 +246,24 @@ bool Util::standard_cost_threshold_classifier(THD *thd) {
   auto stmt_context = thd->secondary_engine_statement_context();
   assert(stmt_context);
 
-  ShannonBase::ML::Query_arbitrator::WHERE2GO where{ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_INNODB};
+  ShannonBase::ML::Query_arbitrator::WHERE2GO where{ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_PRIMARY};
   std::ostringstream oss;
   std::string text;
   if (stmt_context->get_primary_cost() > thd->variables.secondary_engine_cost_threshold) {
     oss << "The estimated query cost does exceed secondary_engine_cost_threshold, goes to secondary engine.";
     oss << "cost: " << thd->m_current_query_cost << ", threshold: " << thd->variables.secondary_engine_cost_threshold;
     text = "secondary_engine_used";
-    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_RAPID;
+    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY;
   } else {
     oss << "The estimated query cost does not exceed secondary_engine_cost_threshold, goes to primary engine.";
     oss << "cost: " << thd->m_current_query_cost << ", threshold: " << thd->variables.secondary_engine_cost_threshold;
     text = "secondary_engine_not_used";
-    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_INNODB;
+    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_PRIMARY;
   }
 
   write_trace_reason(thd, text.c_str(), oss.str().c_str());
 
-  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_RAPID) ? true : false;
+  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) ? true : false;
 }
 
 //  decision tree classifier for determining which engine should to go.
@@ -282,7 +282,7 @@ bool Util::decision_tree_classifier(THD *thd) {
   ShannonBase::ML::Query_arbitrator qa;
   qa.load_model();
   auto where = qa.predict(thd->lex->unit->first_query_block()->join);
-  if (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_RAPID) {
+  if (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) {
     text = "secondary_engine_used";
     oss << "The Query_arbitrator do the prediction, goes to secondary engine.";
   } else {
@@ -291,7 +291,7 @@ bool Util::decision_tree_classifier(THD *thd) {
   }
   write_trace_reason(thd, text.c_str(), oss.str().c_str());
 
-  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_RAPID) ? true : false;
+  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) ? true : false;
 }
 
 // dynamic feature normalization for determining which engine should to go.

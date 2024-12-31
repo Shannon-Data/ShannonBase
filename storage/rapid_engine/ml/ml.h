@@ -37,7 +37,7 @@ namespace ML {
 
 class Query_arbitrator {
  public:
-  enum class WHERE2GO { TO_INNODB, TO_RAPID };
+  enum class WHERE2GO { TO_PRIMARY, TO_SECONDARY };
 
   Query_arbitrator() = default;
   ~Query_arbitrator() = default;
