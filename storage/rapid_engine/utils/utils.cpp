@@ -25,13 +25,23 @@
 */
 #include "storage/rapid_engine/utils/utils.h"
 
-#include "sql/my_decimal.h"                   //my_decimal
-#include "sql/sql_class.h"                    //Secondary_engine_statement_context
-#include "sql/table.h"                        //TABLE
+#include "sql/join_optimizer/finalize_plan.h"
+#include "sql/my_decimal.h"  //my_decimal
+#include "sql/opt_trace.h"
+#include "sql/sql_class.h"     //Secondary_engine_statement_context
+#include "sql/sql_executor.h"  //QEP_TBA
+#include "sql/sql_lex.h"
+#include "sql/sql_optimizer.h"  //JOIN
+#include "sql/table.h"          //TABLE
+
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
+#include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/ml/ml.h"
+#include "storage/rapid_engine/populate/populate.h"
 
 namespace ShannonBase {
 namespace Utils {
@@ -219,20 +229,123 @@ uchar *Util::pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, u
   return to;
 }
 
-// cost threshold classifier for determining which engine should to go.
-bool Util::cost_threshold_classifier(const Secondary_engine_statement_context *stmt_context) {
-  assert(stmt_context);
-
-  if (current_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return true;
-
-  if (stmt_context->get_primary_cost() > stmt_context->get_secondary_cost_threshold())
-    return true;  // secondary
-  else
-    return false;  // innodb.
+static inline void write_trace_reason(THD *thd, const char *text, const char *reason) {
+  Opt_trace_context *const trace = &thd->opt_trace;
+  if (unlikely(trace->is_started())) {
+    const Opt_trace_object wrapper(trace);
+    Opt_trace_object oto(trace, text);
+    oto.add_alnum("reason", reason);
+  }
 }
 
-bool Util::decision_classifier() {
+// cost threshold classifier for determining which engine should to go.
+// returns true goes to secondary engine, otherwise, false go to innodb.
+bool Util::standard_cost_threshold_classifier(THD *thd) {
+  if (current_thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED) return true;
+
+  auto stmt_context = thd->secondary_engine_statement_context();
+  assert(stmt_context);
+
+  ShannonBase::ML::Query_arbitrator::WHERE2GO where{ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_PRIMARY};
+  std::ostringstream oss;
+  std::string text;
+  if (stmt_context->get_primary_cost() > thd->variables.secondary_engine_cost_threshold) {
+    oss << "The estimated query cost does exceed secondary_engine_cost_threshold, goes to secondary engine.";
+    oss << "cost: " << thd->m_current_query_cost << ", threshold: " << thd->variables.secondary_engine_cost_threshold;
+    text = "secondary_engine_used";
+    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY;
+  } else {
+    oss << "The estimated query cost does not exceed secondary_engine_cost_threshold, goes to primary engine.";
+    oss << "cost: " << thd->m_current_query_cost << ", threshold: " << thd->variables.secondary_engine_cost_threshold;
+    text = "secondary_engine_not_used";
+    where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_PRIMARY;
+  }
+
+  write_trace_reason(thd, text.c_str(), oss.str().c_str());
+
+  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) ? true : false;
+}
+
+//  decision tree classifier for determining which engine should to go.
+// returns true goes to secondary engine, otherwise, false go to innodb.
+bool Util::decision_tree_classifier(THD *thd) {
+  std::ostringstream oss;
+  std::string text;
   // here to use trained decision tree to classify the query.
+  if (is_very_fast_query(thd)) {
+    text = "secondary_engine_not_used";
+    oss << "The estimated query is a very fast query, goes to primary engine.";
+    write_trace_reason(thd, text.c_str(), oss.str().c_str());
+    return false;
+  }
+
+  ShannonBase::ML::Query_arbitrator qa;
+  qa.load_model();
+  auto where = qa.predict(thd->lex->unit->first_query_block()->join);
+  if (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) {
+    text = "secondary_engine_used";
+    oss << "The Query_arbitrator do the prediction, goes to secondary engine.";
+  } else {
+    text = "secondary_engine_not_used";
+    oss << "The Query_arbitrator do the prediction, goes to primary engine.";
+  }
+  write_trace_reason(thd, text.c_str(), oss.str().c_str());
+
+  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) ? true : false;
+}
+
+// dynamic feature normalization for determining which engine should to go.
+// returns true goes to secondary engine, otherwise, false go to innodb.
+bool Util::dynamic_feature_normalization(THD *thd) {
+  auto stmt_context = thd->secondary_engine_statement_context();
+  assert(stmt_context);
+
+  // If queue is too long or CP is too long, this mechanism wants to progressively start
+  // shifting queries to mysql, moving gradually towards the heavier queries
+  if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+      ShannonBase::Populate::sys_pop_buff.size() * ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO >
+          ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
+    return false;
+  }
+
+  // to checkts whether query involves tables are still in pop queue. if yes, go innodb.
+  for (auto &table_ref : stmt_context->get_query_tables()) {
+    std::string table_name(table_ref->db);
+    table_name += ":";
+    table_name += table_ref->table_name;
+    if (ShannonBase::Populate::Populator::check_population_status(table_name)) return false;
+  }
+
+  return false;
+}
+
+// check whether the dictionary encoding projection is supported or not.
+// returns true if supported to innodb, otherwise, false to secondary engine.
+bool Util::check_dict_encoding_projection(THD *thd) {
+  auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
+  if (!imcs_instance) return true;
+
+  std::string key_part;
+  auto table_ref = thd->lex->unit->first_query_block()->leaf_tables;
+  for (; table_ref; table_ref = table_ref->next_leaf) {
+    if (table_ref->is_view_or_derived()) continue;
+
+    key_part += table_ref->db;
+    key_part += ":";
+    key_part += table_ref->table_name;
+    key_part += ":";
+
+    for (auto j = 0u; j < table_ref->table->s->fields; j++) {
+      auto field_ptr = *(table_ref->table->field + j);
+      if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+      std::string key = key_part + field_ptr->field_name;
+      auto cu_header = imcs_instance->get_cus()[key].get()->header();
+      assert(cu_header);
+      // to test all cu infos.
+    }
+  }
+
   return false;
 }
 

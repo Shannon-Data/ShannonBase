@@ -47,7 +47,6 @@
 #include "sql/debug_sync.h"
 #include "sql/handler.h"
 #include "sql/join_optimizer/access_path.h"
-#include "sql/join_optimizer/finalize_plan.h"
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/opt_trace.h"
@@ -539,16 +538,14 @@ static void rapid_kill_connection(handlerton *hton, /*!< in:  innobase handlerto
   }
 }
 
-void SetSecondaryEngineOffloadFailedReason(THD *thd, const char *msg) {
+static inline void SetSecondaryEngineOffloadFailedReason(THD *thd, const char *msg) {
   assert(thd);
-  thd->lex->m_secondary_engine_offload_or_exec_failed_reason.clear();
-  thd->lex->m_secondary_engine_offload_or_exec_failed_reason.append(msg);
+  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = msg;
   my_error(ER_SECONDARY_ENGINE, MYF(0), msg);
 }
 
 const char *GetSecondaryEngineOffloadorExecFailedReason(THD *thd) {
   assert(thd);
-
   return thd->lex->m_secondary_engine_offload_or_exec_failed_reason.c_str();
 }
 
@@ -572,21 +569,15 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
     SetSecondaryEngineOffloadFailedReason(thd, "use_secondary_engine set to off.");
     return true;
-  }
-
-  else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
+  } else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
     return false;
-
-  // gets the shannon statement context from thd, which stores in SecondaryEnginePrePrepareHook.
-  if (!thd->variables.rapid_use_dynamic_offload) {
-    return false;
-  }
 
   auto shannon_statement_context = thd->secondary_engine_statement_context();
   auto primary_plan_info = shannon_statement_context->get_cached_primary_plan_info();
 
   // 1: to check whether the sys_pop_data_sz has too many data to populate.
-  uint64 too_much_pop_threshold = static_cast<uint64_t>(0.8 * ShannonBase::rpd_pop_buff_sz_max);
+  uint64 too_much_pop_threshold =
+      static_cast<uint64_t>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
   if (ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
     SetSecondaryEngineOffloadFailedReason(thd, "too much changes need to populate.");
     return true;
@@ -596,11 +587,17 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   // if there're still do populating, then goes to innodb. and gets cardinality of tables.
   for (uint i = primary_plan_info->tables; i < primary_plan_info->tables; i++) {
     std::string db_tb;
-    if (ShannonBase::Populate::Populator::check_population_status(db_tb)) return true;
+    if (ShannonBase::Populate::Populator::check_population_status(db_tb)) {
+      SetSecondaryEngineOffloadFailedReason(thd, "table queried is populating.");
+      return true;
+    }
   }
 
   // 3: checks dict encoding projection, and varlen project size, etc.
-
+  if (ShannonBase::Utils::Util::check_dict_encoding_projection(thd)) {
+    SetSecondaryEngineOffloadFailedReason(thd, "dict encoding is not supported.");
+    return true;
+  }
   return false;
 }
 
@@ -619,14 +616,6 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   lex->add_statement_options(OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION);
 
   return RapidPrepareEstimateQueryCosts(thd, lex);
-}
-
-/* For very fast queries, defined here by having cost < 10 and of the form point select */
-static inline bool is_very_fast_query(THD *thd) {
-  return (thd->m_current_query_cost < rapid_very_fast_query_threshold &&
-          is_point_select(thd, thd->lex->unit->first_query_block()))
-             ? true
-             : false;
 }
 
 // caches primary info. Here, we have done optimization with primary engine, and it
@@ -657,35 +646,20 @@ static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
 bool SecondaryEnginePrePrepareHook(THD *thd) {
   RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
 
-  /**
-   * If dynamic offload is enabled and query is not "very fast":
-     This caches features from mysql plan in rapid_statement_context
-     to be used for dynamic offload. */
-  if (thd->variables.rapid_use_dynamic_offload && !is_very_fast_query(thd)) {
+  if (unlikely(!thd->variables.rapid_use_dynamic_offload)) {
+    // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
+    return ShannonBase::Utils::Util::standard_cost_threshold_classifier(thd);
+  } else if (likely(thd->variables.rapid_use_dynamic_offload)) {
     // 1: static sceanrio.
     if (!ShannonBase::Populate::Populator::log_pop_thread_is_active() ||
         (ShannonBase::Populate::Populator::log_pop_thread_is_active() && ShannonBase::Populate::sys_pop_buff.empty())) {
-      return ShannonBase::Utils::Util::decision_classifier();
+      return ShannonBase::Utils::Util::decision_tree_classifier(thd);
     } else {
       // 2: dynamic scenario.
+      return ShannonBase::Utils::Util::dynamic_feature_normalization(thd);
     }
-  } else if (!thd->variables.rapid_use_dynamic_offload || is_very_fast_query(thd)) {
-    // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
-    return ShannonBase::Utils::Util::cost_threshold_classifier(thd->secondary_engine_statement_context());
-  } else {
-    Opt_trace_context *const trace = &thd->opt_trace;
-    if (trace->is_started()) {
-      const Opt_trace_object wrapper(trace);
-      Opt_trace_object oto(trace, "secondary_engine_not_used");
-      oto.add_alnum("reason",
-                    "The estimated query cost does not exceed "
-                    "secondary_engine_cost_threshold, goes to primary engine.");
-      oto.add("cost", thd->m_current_query_cost);
-      oto.add("threshold", thd->variables.secondary_engine_cost_threshold);
-    }
-    // then query proceeds to Innodb for execution
-    return false;
-  }
+  } else
+    assert(false);
 
   // go to innodb for execution.
   return false;
@@ -725,16 +699,27 @@ static void AssertSupportedPath(const AccessPath *path) {
 //  In this function, Dynamic offload retrieves info from
 //  rapid_statement_context and additionally looks at Change
 //  propagation lag to decide if query should be offloaded to rapid
-//  returns true, goes to innodb engine.
-//  return false, goes to secondary engine.
+//  returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
 static bool RapidOptimize(THD *thd [[maybe_unused]], LEX *lex) {
-  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)
+  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
+    SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, set use_secondary_engine to false.");
     return true;
-  else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
+  } else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
     return false;
+
+  // auto statement_context = thd->secondary_engine_statement_context();
+  // to much changes to populate, then goes to primary engine.
+  ulonglong too_much_pop_threshold =
+      static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
+  if (ShannonBase::Populate::sys_pop_buff.size() > 1000 ||
+      ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
+    SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, the CP lag is too much.");
+    return true;
+  }
 
   return false;
 }
+
 static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
   // The context should have been set by PrepareSecondaryEngine.
   assert(lex->secondary_engine_execution_context() != nullptr);

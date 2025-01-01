@@ -36,11 +36,11 @@
 #include "sql/field.h"                                  //Field
 #include "storage/rapid_engine/include/rapid_object.h"  // bit_array_t
 
+class THD;
 class TABLE;
 class Field;
 class key_range;
 class CHARSET_INFO;
-class Secondary_engine_statement_context;
 namespace ShannonBase {
 namespace Compress {
 class Dictionary;
@@ -111,10 +111,14 @@ class Util {
   }
 
   // use cost info to determine which engine should be used.
-  static bool cost_threshold_classifier(const Secondary_engine_statement_context *);
+  static bool standard_cost_threshold_classifier(THD *thd);
 
   // use decision tree to determine which engine should be used.
-  static bool decision_classifier();
+  static bool decision_tree_classifier(THD *thd);
+
+  static bool dynamic_feature_normalization(THD *thd);
+
+  static bool check_dict_encoding_projection(THD *thd);
 };
 
 }  // namespace Utils

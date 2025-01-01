@@ -49,7 +49,7 @@ jobs:
         cmake zlib1g-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev libtirpc-dev -y
     - name: install_boost
       run: |
-        cd /tmp && wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
+        cd /tmp && wget https://archives.boost.io/release/1.77.0/source/boost_1_77_0.tar.gz && \
         tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && sudo ./b2 install && \
         sudo rm /tmp/boost_1_77_0 -rf && sudo rm /tmp/boost_1_77_0.tar.gz
       #sed -i '61s/^/#/' cmake_install.cmake to disable can not find openssl_executeable error. removes it when it fixed.
