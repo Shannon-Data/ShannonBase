@@ -62,6 +62,7 @@
 #include "sql/sql_update.h"
 #include "sql/table.h"
 
+#include "storage/rapid_engine/iterators/iterator.h"
 using pack_rows::TableCollection;
 using std::all_of;
 using std::vector;
@@ -476,8 +477,12 @@ unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(
     switch (path->type) {
       case AccessPath::TABLE_SCAN: {
         const auto &param = path->table_scan();
-        iterator = NewIterator<TableScanIterator>(
-            thd, mem_root, param.table, path->num_output_rows(), examined_rows);
+        if (path->using_batch_instr)
+          iterator = NewIterator<ShannonBase::Executor::BatchTableScanIterator>(
+              thd, mem_root, param.table, path->num_output_rows(), examined_rows);
+        else
+          iterator = NewIterator<TableScanIterator>(
+              thd, mem_root, param.table, path->num_output_rows(), examined_rows);
         break;
       }
       case AccessPath::INDEX_SCAN: {

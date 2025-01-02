@@ -21,58 +21,19 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs optimizer.
+   The fundmental code for imcs.
 */
-#ifndef __SHANNONBASE_OPTIMIZER_H__
-#define __SHANNONBASE_OPTIMIZER_H__
+/** The basic iterator class for IMCS. All specific iterators are all inherited
+ * from this.
+ */
+#ifndef __SHANNONBASE_HASH_JOIN_ITERATOR_H__
+#define __SHANNONBASE_HASH_JOIN_ITERATOR_H__
 
-#include <chrono>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <vector>
+#include "sql/iterators/basic_row_iterators.h"
 
-#include "storage/rapid_engine/include/rapid_object.h"
-class THD;
-class Query_expression;
-class JOIN;
-class AccessPath;
+#include "storage/rapid_engine/iterators/iterator.h"
 
 namespace ShannonBase {
-class OptimizeContext;
-namespace Optimizer {
-
-class Rule;
-class CostEstimator;
-class CardinalityEstimator;
-
-// here, to optimize the secondary engine with its own optimizer.
-void OptimzieAccessPath(AccessPath *path, JOIN *join);
-
-class Optimizer : public MemoryObject {
- public:
-  explicit Optimizer(std::shared_ptr<Query_expression> &, const std::shared_ptr<CostEstimator> &);
-};
-
-class RuleMetrics {
- public:
-  explicit RuleMetrics(const std::string &rule_name, const std::chrono::nanoseconds duration)
-      : m_rule_name{rule_name}, m_duration{duration} {}
-
- private:
-  std::string m_rule_name;
-  std::chrono::nanoseconds m_duration;
-};
-class Timer final {
- public:
-  Timer();
-  std::chrono::nanoseconds lap();
-  std::string lap_formatted();
-
- private:
-  std::chrono::steady_clock::time_point m_begin;
-};
-
-}  // namespace Optimizer
+namespace Executor {}  // namespace Executor
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_OPTIMIZER_H__
+#endif  // __SHANNONBASE_HASH_JOIN_ITERATOR_H__

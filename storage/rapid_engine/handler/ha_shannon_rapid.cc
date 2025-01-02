@@ -62,9 +62,11 @@
 #include "storage/rapid_engine/include/rapid_const.h"  //const
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"  //column stats
+#include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/utils.h"
+
 #include "template_utils.h"
 #include "thr_lock.h"
 
@@ -700,23 +702,36 @@ static void AssertSupportedPath(const AccessPath *path) {
 //  rapid_statement_context and additionally looks at Change
 //  propagation lag to decide if query should be offloaded to rapid
 //  returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
-static bool RapidOptimize(THD *thd [[maybe_unused]], LEX *lex) {
+static bool RapidOptimize(THD *thd, LEX *lex) {
   if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
     SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, set use_secondary_engine to false.");
     return true;
-  } else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
-    return false;
+  }
 
   // auto statement_context = thd->secondary_engine_statement_context();
   // to much changes to populate, then goes to primary engine.
   ulonglong too_much_pop_threshold =
       static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
-  if (ShannonBase::Populate::sys_pop_buff.size() > 1000 ||
+  if (ShannonBase::Populate::sys_pop_buff.size() > 10000 ||
       ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
     SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, the CP lag is too much.");
     return true;
   }
 
+  JOIN *join = lex->unit->first_query_block()->join;
+  WalkAccessPaths(lex->unit->root_access_path(), join, WalkAccessPathPolicy::ENTIRE_TREE,
+                  [&](AccessPath *path, const JOIN *join) {
+                    ShannonBase::Optimizer::OptimzieAccessPath(path, const_cast<JOIN *>(join));
+                    return false;
+                  });
+  // Here, because we cannot get the parent node of corresponding iterator, we reset the type of access
+  // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`
+  // AP workload. But, we will replace the itertor when we traverse iterator tree from root to leaves.
+  lex->unit->release_root_iterator().reset();
+  auto new_root_iter =
+      CreateIteratorFromAccessPath(thd, lex->unit->root_access_path(), join, /*eligible_for_batch_mode=*/true);
+
+  lex->unit->set_root_iterator(new_root_iter);
   return false;
 }
 

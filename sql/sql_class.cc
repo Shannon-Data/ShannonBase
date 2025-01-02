@@ -120,6 +120,7 @@
 #include "string_with_len.h"
 #include "template_utils.h"
 #include "thr_mutex.h"
+#include "join_optimizer/access_path.h"
 
 class Parse_tree_root;
 
@@ -646,6 +647,11 @@ void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN*
       if (!tab_ref) continue;
       m_tables.emplace_back(tab_ref);
       m_base_table_rows += (const_cast<Table_ref*>(tab_ref)->fetch_number_of_rows());
+
+      auto accesspath = join->qep_tab[i].access_path();
+      if (accesspath->type == AccessPath::EQ_REF || accesspath->type == AccessPath::INDEX_SCAN
+          || accesspath->type == AccessPath::INDEX_RANGE_SCAN)
+        m_count_ref_index_ts ++;
     }
   }
 
@@ -654,7 +660,7 @@ void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN*
 
   auto root_access_path = thd->lex->unit->root_access_path();
   assert (root_access_path);
-  //join->row_limit == 1;
+  m_are_all_ts_index_ref = (m_count_ref_index_ts == m_count_all_base_tables) ? true : false;
 }
 
 THD::THD(bool enable_plugins)

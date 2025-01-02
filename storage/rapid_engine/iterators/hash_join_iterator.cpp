@@ -25,31 +25,10 @@
 */
 /** The basic iterator class for IMCS. All specific iterators are all inherited
  * from this.
+ * vectorized/parallelized hash join iterator impl for rapid engine. In
  */
-#ifndef __SHANNONBASE_ITERATOR_H__
-#define __SHANNONBASE_ITERATOR_H__
-
-#include "sql/iterators/basic_row_iterators.h"
+#include "storage/rapid_engine/iterators/hash_join_iterator.h"
 
 namespace ShannonBase {
-namespace Executor {
-
-class Iterator {
- public:
-  Iterator();
-  virtual ~Iterator() = 0;
-  virtual bool init() = 0;
-  virtual bool read() = 0;
-  virtual bool next() = 0;
-};
-
-class BatchTableScanIterator final : public TableScanIterator {
- public:
-  BatchTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
-  // bool Init() override;
-  int Read() override;
-};
-
-}  // namespace Executor
+namespace Executor {}  // namespace Executor
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_ITERATOR_H__

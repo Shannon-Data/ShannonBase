@@ -57,7 +57,7 @@ class QEP_TAB;
   This is the most basic access method of a table using rnd_init,
   ha_rnd_next and rnd_end. No indexes are used.
 */
-class TableScanIterator final : public TableRowIterator {
+class TableScanIterator : public TableRowIterator {
  public:
   /**
     @param thd     session context
@@ -75,13 +75,13 @@ class TableScanIterator final : public TableRowIterator {
                     ha_rows *examined_rows);
   ~TableScanIterator() override;
 
-  bool Init() override;
-  int Read() override;
+  virtual bool Init() override;
+  virtual int Read() override;
 
- private:
   uchar *const m_record;
   const double m_expected_rows;
   ha_rows *const m_examined_rows;
+
   /// Used to keep track of how many more duplicates of the last read row that
   /// remains to be written to the next stage: used for EXCEPT and INTERSECT
   /// computation: we only ever materialize one row even if there are

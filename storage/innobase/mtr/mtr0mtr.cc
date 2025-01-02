@@ -827,6 +827,7 @@ lsn_t mtr_t::Command::cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len)
   ut_a(log.buf_size % OS_FILE_LOG_BLOCK_SIZE == 0);
 
   ShannonBase::Populate::mtr_log_rec log_rec(str_len);
+  ShannonBase::Populate::sys_pop_data_sz.fetch_add(str_len);
 
   size_t pos {0};
   /* That's only used in the assertion at the very end. */
@@ -933,7 +934,6 @@ lsn_t mtr_t::Command::cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len)
   }
 
   ShannonBase::Populate::sys_pop_buff.emplace(start_lsn, std::move(log_rec));
-  ShannonBase::Populate::sys_pop_data_sz.fetch_add(str_len);
   ut_a(ptr >= log.buf);
   ut_a(ptr <= buf_end);
   ut_a(buf_end == log.buf + log.buf_size);

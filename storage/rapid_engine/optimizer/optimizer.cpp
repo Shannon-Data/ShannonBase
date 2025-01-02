@@ -25,11 +25,17 @@
 */
 #include "storage/rapid_engine/optimizer/optimizer.h"
 
+#include "sql/iterators/basic_row_iterators.h"
+#include "sql/iterators/hash_join_iterator.h"  //HashJoinIterator
+#include "sql/iterators/timing_iterator.h"
+#include "sql/join_optimizer/access_path.h"  //AccessPath
+#include "sql/sql_class.h"                   //THD
 #include "sql/sql_lex.h"                      //Query_expression
 #include "sql/sql_optimizer.h"                //JOIN
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
 #include "storage/rapid_engine/cost/cost.h"
+#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/optimizer/rules/const_fold_rule.h"
 
@@ -50,6 +56,47 @@ std::string Timer::lap_formatted() {
 
 // ctor
 Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr, const std::shared_ptr<CostEstimator> &cost_estimator) {}
+
+void OptimzieAccessPath(AccessPath *path, JOIN *join) {
+  switch (path->type) {
+    // The only supported join type is hash join. Other join types are disabled
+    // in handlerton::secondary_engine_flags.
+    case AccessPath::TABLE_SCAN: {
+      auto table = path->table_scan().table;
+      if (table->s->is_secondary_engine() && table->file->stats.records >= SHANNON_VECTOR_WIDTH) {
+        path->using_batch_instr = true;
+      }
+    } break;
+    case AccessPath::HASH_JOIN: {
+      auto hash_iter = reinterpret_cast<HashJoinIterator *>(path->iterator);
+      assert(hash_iter);
+    } break;
+    case AccessPath::NESTED_LOOP_JOIN: /* purecov: deadcode */
+    case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
+    case AccessPath::BKA_JOIN:
+    // Index access is disabled in ha_rapid::table_flags(), so we should see
+    // none of these access types.
+    case AccessPath::INDEX_SCAN:
+    case AccessPath::REF:
+    case AccessPath::REF_OR_NULL:
+    case AccessPath::EQ_REF:
+    case AccessPath::PUSHED_JOIN_REF:
+    case AccessPath::INDEX_RANGE_SCAN:
+    case AccessPath::INDEX_SKIP_SCAN:
+    case AccessPath::GROUP_INDEX_SKIP_SCAN:
+    case AccessPath::ROWID_INTERSECTION:
+    case AccessPath::ROWID_UNION:
+    case AccessPath::DYNAMIC_INDEX_RANGE_SCAN:
+      assert(false); /* purecov: deadcode */
+      break;
+    default:
+      break;
+  }
+
+  // This secondary storage engine does not yet store anything in the auxiliary
+  // data member of AccessPath.
+  assert(path->secondary_engine_data == nullptr);
+}
 
 }  // namespace Optimizer
 }  // namespace ShannonBase
