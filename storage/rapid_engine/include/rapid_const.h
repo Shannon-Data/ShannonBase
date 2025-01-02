@@ -40,6 +40,19 @@
 
 #define SHANNON_ALIGNAS alignas(CACHE_LINE_SIZE)
 
+#if defined(__SSE__) || defined(__SSE2__)
+#define SHANNON_SSE_VECT_SUPPORTED
+#include <emmintrin.h>
+#elif defined(__AVX__) || defined(__AVX2__)
+#include <immintrin.h>
+#define SHANNON_AVX_VECT_SUPPORTED
+#endif
+
+#if defined(SHANNON_SSE_VECT_SUPPORTED) || defined(SHANNON_AVX_VECT_SUPPORTED)
+#define SHANNON_VECTORIZE_SUPPORT
+#define SHANNON_VECTOR_WIDTH 8
+#endif
+
 namespace ShannonBase {
 using row_id_t = size_t;
 /** Handler name for rapid */
@@ -61,7 +74,7 @@ constexpr uint64 SHANNON_DEFAULT_MEMRORY_SIZE = 8 * SHANNON_GB;
 constexpr uint64 SHANNON_MAX_MEMRORY_SIZE = SHANNON_DEFAULT_MEMRORY_SIZE;
 constexpr uint64 SHANNON_POPULATION_HRESHOLD_SIZE = 64 * SHANNON_MB;
 constexpr uint64 SHANNON_MAX_POPULATION_BUFFER_SIZE = 128 * SHANNON_MB;
-constexpr double SHANNON_TO_MUCH_POP_THRESHOLD_RATIO = 0.8;
+constexpr double SHANNON_TO_MUCH_POP_THRESHOLD_RATIO = 0.85;
 
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
 

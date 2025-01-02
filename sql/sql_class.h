@@ -981,7 +981,7 @@ class Secondary_engine_statement_context {
   //the # of rows of all base tables.
   uint m_base_table_rows {0};
   //whether all tables use index table scan.
-  bool are_all_ts_index_ref {false};
+  bool m_are_all_ts_index_ref {false};
   //is a complex query or not.
   bool m_complex_query {false};
 };
