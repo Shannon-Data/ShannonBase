@@ -32,10 +32,7 @@
 #include <regex>
 
 #include "sql/field.h"  //Field
-#include "storage/innobase/include/univ.i"
-#include "storage/innobase/include/ut0new.h"
 
-#include "storage/rapid_engine/imcs/chunk.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -80,21 +77,6 @@ Cu::Cu(const Field *field) {
 
 Cu::~Cu() { m_chunks.clear(); }
 
-uchar *Cu::base() {
-  if (!m_chunks.size()) return nullptr;
-  return m_chunks[0].get()->base();
-}
-
-uchar *Cu::last() {
-  if (!m_chunks.size()) return nullptr;
-  return m_chunks[m_chunks.size() - 1]->tell();
-}
-
-Chunk *Cu::chunk(uint id) {
-  if (id >= m_chunks.size()) return nullptr;
-  return m_chunks[id].get();
-}
-
 row_id_t Cu::prows() {
 #ifndef NDEBUG
   auto total_rows_in_chunk{0u};
@@ -110,16 +92,6 @@ row_id_t Cu::rows(Rapid_load_context *context) {
   // now, we return the prows, in future, we will return mvcc-versioned row num. using m_chunks[]
   // to get the versioned-rows.
   return m_header ? m_header->m_prows.load() : 0;
-}
-
-size_t Cu::normalized_pack_length() {
-  ut_a(m_chunks.size());
-  return m_chunks[0]->normalized_pack_length();
-}
-
-size_t Cu::pack_length() {
-  ut_a(m_chunks.size());
-  return m_chunks[0]->pack_length();
 }
 
 uchar *Cu::get_field_value(uchar *&data, size_t &len, bool need_pack) {
