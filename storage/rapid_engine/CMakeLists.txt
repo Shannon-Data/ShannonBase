@@ -143,6 +143,7 @@ SET (SHANNON_READER_SOURCES
 )
 SET (SHANNON_ITERATOR_SOURCES
     iterators/iterator.cpp
+    iterators/hash_join_iterator.cpp
     ${SHANNON_READER_SOURCES}
 )
 set (SHANNON_OPTIMIZE

@@ -27,7 +27,6 @@
 #define __SHANNONBASE_TRANSACTION_H__
 
 #include "sql/current_thd.h"
-#include "storage/innobase/include/trx0types.h"  //trx_id_t
 #include "storage/rapid_engine/include/rapid_object.h"
 
 class THD;
@@ -43,7 +42,8 @@ use any transaction impl to replace innobase's trx used here.
 
 class Transaction : public MemoryObject {
  public:
-  using ID = trx_id_t;
+  // here, we use innodb's trx_id_t as ours. the defined in innodb is: typedef ib_id_t trx_id_t;
+  using ID = uint64_t;
   // same order with trx_t::isolation_level_t::
   enum class ISOLATION_LEVEL : uint8 { READ_UNCOMMITTED, READ_COMMITTED, READ_REPEATABLE, SERIALIZABLE };
   enum class STATUS : uint8 { NOT_START, ACTIVE, PREPARED, COMMITTED_IN_MEMORY };

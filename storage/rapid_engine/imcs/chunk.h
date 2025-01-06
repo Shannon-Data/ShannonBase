@@ -32,15 +32,12 @@
 #include <unordered_map>
 
 #include "field_types.h"  //for MYSQL_TYPE_XXX
-#include "my_inttypes.h"
-#include "sql/field.h"  //Field
-//#include "trx0types.h"  //trx_id_t
-
+#include "sql/field.h"    //Field
 #include "sql/sql_class.h"
+
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
-#include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/trx/transaction.h"  //Transaction
+#include "storage/rapid_engine/include/rapid_object.h"    // SHANNON_ALIGNAS
+#include "storage/rapid_engine/trx/transaction.h"         //Transaction
 
 namespace ShannonBase {
 class Rapid_load_context;
@@ -142,7 +139,7 @@ class Chunk : public MemoryObject {
     std::unique_ptr<Snapshot_meta_unit> m_smu;
 
     // the min trx id and max trxid of this chunk.
-    trx_id_t m_trx_min, m_trx_max;
+    Transaction::ID m_trx_min, m_trx_max;
 
     // statistics data of this chunk.
     std::atomic<double> m_max{0};

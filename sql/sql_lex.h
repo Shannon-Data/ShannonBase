@@ -716,6 +716,7 @@ class Query_expression {
     return down_cast<Query_term_set_op *>(m_query_term)->m_last_distinct > 0;
   }
 
+  void set_root_iterator(unique_ptr_destroy_only<RowIterator>& it) { m_root_iterator = std::move(it); }
  private:
   /**
     Marker for subqueries in WHERE, HAVING, ORDER BY, GROUP BY and
