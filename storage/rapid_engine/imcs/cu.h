@@ -32,12 +32,14 @@
 
 #include "field_types.h"  //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"  //uintxxx
+#include "storage/innobase/include/ut0dbg.h"
+
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
-#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 
+#include "storage/rapid_engine/imcs/chunk.h"
 class Field;
 namespace ShannonBase {
 class ShannonBaseContext;
@@ -118,19 +120,28 @@ class Cu : public MemoryObject {
   uchar *update_row(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
 
   // gets the base address of CU.
-  uchar *base();
+  inline uchar *base() {
+    if (!m_chunks.size()) return nullptr;
+    return m_chunks[0].get()->base();
+  }
 
   // gets to the last address of CU.
-  uchar *last();
+  inline uchar *last() {
+    if (!m_chunks.size()) return nullptr;
+    return m_chunks[m_chunks.size() - 1]->tell();
+  }
 
   // get the chunk header.
-  Cu_header *header() {
+  inline Cu_header *header() {
     std::scoped_lock lk(m_header_mutex);
     return m_header.get();
   }
 
   // get the pointer of chunk with its id.
-  Chunk *chunk(uint id);
+  inline Chunk *chunk(uint id) {
+    if (id >= m_chunks.size()) return nullptr;
+    return m_chunks[id].get();
+  }
 
   // get how many chunks in this CU.
   inline uint32 chunks() const {
@@ -146,10 +157,16 @@ class Cu : public MemoryObject {
   row_id_t rows(Rapid_load_context *context);
 
   // returns the normalized length, the text type encoded with uint32.
-  size_t normalized_pack_length();
+  inline size_t normalized_pack_length() {
+    ut_a(m_chunks.size());
+    return m_chunks[0]->normalized_pack_length();
+  }
 
   // return the real pack length: field->pack_length.
-  size_t pack_length();
+  inline size_t pack_length() {
+    ut_a(m_chunks.size());
+    return m_chunks[0]->pack_length();
+  }
 
  private:
   // get the field value. if field is string/text then return its stringid.

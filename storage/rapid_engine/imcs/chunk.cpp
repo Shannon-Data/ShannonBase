@@ -29,10 +29,8 @@
 #include <memory>
 #include <typeinfo>
 
-#include "storage/innobase/include/read0types.h"  //readview
-#include "storage/innobase/include/trx0trx.h"
-#include "storage/innobase/include/univ.i"    //new_withkey
-#include "storage/innobase/include/ut0new.h"  //new_withkey
+#include "storage/innobase/include/univ.i"
+#include "storage/innobase/include/ut0new.h"
 
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_context.h"
