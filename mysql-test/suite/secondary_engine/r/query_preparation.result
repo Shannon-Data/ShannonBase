@@ -580,7 +580,7 @@ x
 234
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	0
+Secondary_engine_execution_count	1
 DROP FUNCTION f1;
 DROP FUNCTION f2;
 DROP TABLE tf;
@@ -637,7 +637,7 @@ a
 INSERT INTO t1 SELECT * FROM t2;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	1
+Secondary_engine_execution_count	2
 # An error shall be returned if table is not loaded.
 ALTER TABLE t1 SECONDARY_UNLOAD;
 SET @@use_secondary_engine = FORCED;
@@ -645,7 +645,7 @@ SELECT * FROM t1;
 Got one of the listed errors
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	1
+Secondary_engine_execution_count	2
 SET @@use_secondary_engine = ON;
 SELECT * FROM t1;
 a
@@ -654,7 +654,7 @@ a
 1
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	1
+Secondary_engine_execution_count	2
 DROP TABLE t1;
 DROP TABLE t2;
 SET @@use_secondary_engine = @my_use_secondary_engine;
@@ -774,13 +774,13 @@ EXECUTE ps;
 a
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	0
+Secondary_engine_execution_count	1
 SET @@use_secondary_engine = FORCED;
 EXECUTE ps;
 a
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	1
+Secondary_engine_execution_count	2
 # Unload table from secondary engine.
 ALTER TABLE t1 SECONDARY_UNLOAD;
 SET @@use_secondary_engine = ON;
@@ -788,13 +788,13 @@ EXECUTE ps;
 a
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	1
+Secondary_engine_execution_count	2
 SET @@use_secondary_engine = FORCED;
 EXECUTE ps;
 a
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	1
+Secondary_engine_execution_count	2
 DROP PREPARE ps;
 DROP TABLE t1;
 SET @@use_secondary_engine = @my_use_secondary_engine;
@@ -830,13 +830,13 @@ a
 SET @@use_secondary_engine = @my_use_secondary_engine;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	1
+Secondary_engine_execution_count	2
 SELECT /*+ SET_VAR(use_secondary_engine = OFF) */ * FROM t1;
 a
 1
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	1
+Secondary_engine_execution_count	2
 DROP TABLE t1;
 SET @@use_secondary_engine = @my_use_secondary_engine;
 #
@@ -848,9 +848,9 @@ ALTER TABLE t SECONDARY_LOAD;
 SELECT * FROM t;
 x
 FLUSH STATUS;
-SELECT 0;
-0
-0
+SELECT 1;
+1
+1
 DROP TABLE t;
 #
 # Load only a subset of columns into secondary engine.
@@ -1046,7 +1046,7 @@ a	b
 1	1
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	0
+Secondary_engine_execution_count	2
 DROP TABLE t1;
 #
 # Use NOT SECONDARY with other constraint on column.
@@ -1064,7 +1064,7 @@ SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ b FROM t1;
 ERROR HY000: Secondary engine operation failed. One or more read columns are marked as NOT SECONDARY.
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
-Secondary_engine_execution_count	0
+Secondary_engine_execution_count	1
 DROP TABLE t1;
 # Add NON SECONDARY and do not use SECONDARY_ENGINE AT CREATE
 CREATE TABLE t1 (a INT NOT SECONDARY, b INT);
@@ -1092,8 +1092,11 @@ Table	Op	Msg_type	Msg_text
 test.t	analyze	status	OK
 EXPLAIN FORMAT=TREE SELECT * FROM t WHERE a IS NULL;
 EXPLAIN
--> Rows fetched before execution  (rows=1)
+-> Filter: (t.a = <cache>(last_insert_id()))  (rows=1)
+    -> Table scan on t in secondary engine Rapid  (rows=1)
 
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 DROP TABLE t;
 SET @@sql_auto_is_null = @saved_sql_auto_is_null;
 # Bug#29288023: Join condition is substituted with REF access
@@ -1292,7 +1295,7 @@ SELECT count_star, count_secondary, sum_select_scan
 FROM performance_schema.events_statements_summary_by_digest
 WHERE digest_text LIKE 'SELECT %';
 count_star	count_secondary	sum_select_scan
-3	1	2
+2	1	2
 EXECUTE ps;
 x
 1
@@ -1311,7 +1314,7 @@ SELECT execution_engine, count_execute, count_secondary
 FROM performance_schema.prepared_statements_instances
 WHERE statement_name = 'ps';
 execution_engine	count_execute	count_secondary
-PRIMARY	3	0
+SECONDARY	3	1
 SET @saved_use_secondary_engine = @@use_secondary_engine;
 SET use_secondary_engine = OFF;
 EXECUTE ps;
@@ -1333,7 +1336,7 @@ SELECT execution_engine, count_execute, count_secondary
 FROM performance_schema.prepared_statements_instances
 WHERE statement_name = 'ps';
 execution_engine	count_execute	count_secondary
-PRIMARY	4	0
+SECONDARY	4	2
 SET @saved_use_secondary_engine = @@use_secondary_engine;
 SET use_secondary_engine = FORCED;
 EXECUTE ps;
@@ -1355,7 +1358,7 @@ SELECT execution_engine, count_execute, count_secondary
 FROM performance_schema.prepared_statements_instances
 WHERE statement_name = 'ps';
 execution_engine	count_execute	count_secondary
-PRIMARY	5	0
+SECONDARY	5	3
 CREATE PROCEDURE p() EXECUTE ps;
 CALL p();
 x
@@ -1371,7 +1374,7 @@ SELECT execution_engine, count_execute, count_secondary
 FROM performance_schema.prepared_statements_instances
 WHERE statement_name = 'ps';
 execution_engine	count_execute	count_secondary
-PRIMARY	6	0
+SECONDARY	6	4
 DROP PREPARE ps;
 FLUSH STATUS;
 CREATE TABLE tt AS SELECT * FROM t;
