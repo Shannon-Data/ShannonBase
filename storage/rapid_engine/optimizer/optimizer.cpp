@@ -28,8 +28,8 @@
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/hash_join_iterator.h"  //HashJoinIterator
 #include "sql/iterators/timing_iterator.h"
-#include "sql/join_optimizer/access_path.h"  //AccessPath
-#include "sql/sql_class.h"                   //THD
+#include "sql/join_optimizer/access_path.h"
+#include "sql/sql_class.h"
 #include "sql/sql_lex.h"                      //Query_expression
 #include "sql/sql_optimizer.h"                //JOIN
 #include "storage/innobase/include/ut0dbg.h"  //ut_a

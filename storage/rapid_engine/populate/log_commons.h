@@ -45,9 +45,13 @@
 namespace ShannonBase {
 namespace Populate {
 
-// one spin time is 1 ms.
-constexpr uint MAX_LOG_POP_SPIN_COUNT = 20000;
-constexpr uint MAX_TIMEOUT_SPIN = 200;
+/** Default value of spin delay (in spin rounds)
+ * 1000 spin round takes 4us,  25000 takes 1ms for busy waiting. therefore, 200ms means
+ * 5000000 spin rounds. for the more detail infor ref to : comment of
+ * `innodb_log_writer_spin_delay`.
+ */
+constexpr uint64 MAX_LOG_POP_SPINS = 5000000;
+constexpr uint64 MAX_WAIT_TIMEOUT = 200;
 /// jnk0le/Ring-Buffer
 /*!
  * \brief Lock free, with no wasted slots ringbuffer implementation
