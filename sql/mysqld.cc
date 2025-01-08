@@ -983,6 +983,7 @@ MySQL clients support the protocol:
 #include "sql/server_component/mysql_thd_store_imp.h"
 #include "sql/server_component/persistent_dynamic_loader_imp.h"
 #include "sql/srv_session.h"
+#include "storage/rapid_engine/populate/populate.h"
 
 using std::max;
 using std::min;
@@ -9720,6 +9721,15 @@ static int show_telemetry_traces_support(THD * /*unused*/, SHOW_VAR *var,
   return 0;
 }
 
+static int show_rapid_change_propagation(THD * /*unused*/, SHOW_VAR *var,
+                                         char *buff) {
+  var->type = SHOW_BOOL;
+  var->value = buff;
+  *(pointer_cast<bool *>(buff)) =
+      ShannonBase::Populate::Populator::log_pop_thread_is_active();
+  return 0;
+}
+
 SHOW_VAR status_vars[] = {
     {"Aborted_clients", (char *)&aborted_threads, SHOW_LONG, SHOW_SCOPE_GLOBAL},
     {"Aborted_connects", (char *)&show_aborted_connects, SHOW_FUNC,
@@ -10082,6 +10092,8 @@ SHOW_VAR status_vars[] = {
      SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"Tls_sni_server_name", (char *)&show_ssl_get_tls_sni_servername, SHOW_FUNC,
      SHOW_SCOPE_SESSION},
+    {"rapid_change_propagation_status", (char *)&show_rapid_change_propagation, SHOW_FUNC,
+     SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_ALL}};
 
 void add_terminator(vector<my_option> *options) {
