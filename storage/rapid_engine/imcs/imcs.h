@@ -36,6 +36,7 @@
 #include "my_inttypes.h"
 #include "sql/field.h"
 #include "sql/handler.h"
+
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_const.h"
