@@ -114,6 +114,8 @@ class Populator {
   static void rapid_print_thread_info(FILE *file);
   // to check whether the specific table are still do populating.
   static bool check_population_status(std::string &table_name);
+  // to send notify to populator main thread to start do propagation.
+  static void send_propagation_notify();
 };
 
 }  // namespace Populate
