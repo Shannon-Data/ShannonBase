@@ -35,6 +35,7 @@
 #include <chrono>
 #include <future>
 #include <mutex>
+#include <sstream>
 #include <thread>
 
 #include "current_thd.h"
@@ -116,30 +117,52 @@ static void parse_log_func_main(log_t *log_ptr) {
       return false;
     };
 
-    // waiting until the 200ms reached and the incomming data in buffer more than 64MB.
+    // waiting until the 200ms reached or the incomming data in buffer more than 64MB.
     os_event_wait_for(log_ptr->rapid_events[0], MAX_LOG_POP_SPINS, std::chrono::microseconds{MAX_WAIT_TIMEOUT},
                       stop_condition);
     os_event_reset(log_sys->rapid_events[0]);
+
+    // thread stopped.
     if (unlikely(!sys_pop_started.load(std::memory_order_acquire))) break;
+
+    // pop buffer is empty, then re-check the condtion.
     if (likely(sys_pop_buff.empty())) continue;
 
-    mutex_enter(&(log_sys->rapid_populator_mutex));
-    sys_rapid_loop_count++;
-    uint64 size = sys_pop_buff.begin()->second.size;
-    byte *from_ptr = sys_pop_buff.begin()->second.data.get();
-    mutex_exit(&(log_sys->rapid_populator_mutex));
+    // we only use a half of threads to do propagation.
+    std::vector<std::future<uint64_t>> results;
+    size_t thread_num = std::thread::hardware_concurrency() / 2;
+    thread_num = (thread_num > sys_pop_buff.size()) ? sys_pop_buff.size() : thread_num;
+    auto curr_iter = sys_pop_buff.begin();
+    for (size_t counter = 0; counter < thread_num; counter++) {
+      mutex_enter(&log_sys->rapid_populator_mutex);
+      byte *from_ptr = curr_iter->second.data.get();
+      auto size = curr_iter->second.size;
 
-    // using std thread, not IB_thread, ib_thread has not interface to thread func ret.
-    std::future<uint64_t> result = std::async(std::launch::async, parse_mtr_log_worker, sys_pop_buff.begin()->first,
-                                              from_ptr, from_ptr + size, size);
-    // gets the result from worker thread.
-    auto ret_lsn = result.get();
-    mutex_enter(&(log_sys->rapid_populator_mutex));
-    ut_a(sys_pop_buff.find(ret_lsn) != sys_pop_buff.end());
-    sys_pop_buff.erase(ret_lsn);
-    mutex_exit(&(log_sys->rapid_populator_mutex));
-    // to reduce the pop data size.
-    sys_pop_data_sz.fetch_sub(size);
+      // using std thread, not IB_thread, ib_thread has not interface to thread func ret.
+      results.emplace_back(
+          std::async(std::launch::async, parse_mtr_log_worker, curr_iter->first, from_ptr, from_ptr + size, size));
+      curr_iter++;
+      mutex_exit(&log_sys->rapid_populator_mutex);
+    }
+
+    for (auto &res : results) {  // gets the result from worker thread.
+      auto ret_lsn = res.get();
+      if (!ret_lsn) {  // propagation failure occure.
+        std::stringstream error_message;
+        error_message << "Propagation thread occur errors, it makes loaded data to be stale"
+                      << ". Please unload loaded tables, and then load tables again manually.";
+        push_warning(current_thd, Sql_condition::SL_WARNING, errno, error_message.str().c_str());
+      }
+
+      mutex_enter(&log_sys->rapid_populator_mutex);
+      auto iter = sys_pop_buff.find(ret_lsn);
+      ut_a(iter != sys_pop_buff.end());
+      sys_pop_data_sz.fetch_sub(iter->second.size);
+      sys_pop_buff.erase(ret_lsn);
+      mutex_exit(&log_sys->rapid_populator_mutex);
+    }
+
+    sys_rapid_loop_count++;
   }
 
   sys_pop_started.store(false, std::memory_order_seq_cst);
@@ -149,20 +172,25 @@ bool Populator::log_pop_thread_is_active() { return thread_is_active(srv_threads
 
 bool Populator::log_pop_worker_is_active() { return true; }
 
+void Populator::send_propagation_notify() { os_event_set(log_sys->rapid_events[0]); }
+
 void Populator::start_change_populate_threads() {
   if (!Populator::log_pop_thread_is_active() && shannon_loaded_tables->size()) {
     srv_threads.m_change_pop = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
     ShannonBase::Populate::sys_pop_started = true;
     srv_threads.m_change_pop.start();
+    assert(log_pop_thread_is_active());
   }
 }
 
 void Populator::end_change_populate_threads() {
-  if (Populator::log_pop_thread_is_active() && !shannon_loaded_tables->size()) {
-    // os_event_reset(log_sys->rapid_events[0]);
+  if (Populator::log_pop_thread_is_active() && shannon_loaded_tables->size()) {
     sys_pop_started.store(false, std::memory_order_seq_cst);
-    sys_rapid_loop_count = 0;
+    os_event_set(log_sys->rapid_events[0]);
     srv_threads.m_change_pop.join();
+    sys_rapid_loop_count = 0;
+    ShannonBase::Populate::sys_pop_started = false;
+    assert(log_pop_thread_is_active() == false);
   }
 }
 

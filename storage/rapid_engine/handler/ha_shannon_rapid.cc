@@ -625,7 +625,7 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
 // and, we can get all optimzation information, then caches all these info.
 static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
   assert(thd->secondary_engine_optimization() == Secondary_engine_optimization::PRIMARY_TENTATIVELY);
-  if (thd->secondary_engine_statement_context() == nullptr) {
+  if (unlikely(thd->secondary_engine_statement_context() == nullptr)) {
     /* Prepare this query's specific statment context */
     std::unique_ptr<Secondary_engine_statement_context> ctx = std::make_unique<ShannonBase::Rapid_statement_context>();
     thd->set_secondary_engine_statement_context(std::move(ctx));
@@ -653,8 +653,9 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
     return ShannonBase::Utils::Util::standard_cost_threshold_classifier(thd);
   } else if (likely(thd->variables.rapid_use_dynamic_offload)) {
     // 1: static sceanrio.
-    if (!ShannonBase::Populate::Populator::log_pop_thread_is_active() ||
-        (ShannonBase::Populate::Populator::log_pop_thread_is_active() && ShannonBase::Populate::sys_pop_buff.empty())) {
+    if (likely(!ShannonBase::Populate::Populator::log_pop_thread_is_active() ||
+               (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+                ShannonBase::Populate::sys_pop_buff.empty()))) {
       return ShannonBase::Utils::Util::decision_tree_classifier(thd);
     } else {
       // 2: dynamic scenario.
@@ -703,7 +704,7 @@ static void AssertSupportedPath(const AccessPath *path) {
 //  propagation lag to decide if query should be offloaded to rapid
 //  returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
 static bool RapidOptimize(THD *thd, LEX *lex) {
-  if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
+  if (likely(thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)) {
     SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, set use_secondary_engine to false.");
     return true;
   }
@@ -712,8 +713,8 @@ static bool RapidOptimize(THD *thd, LEX *lex) {
   // to much changes to populate, then goes to primary engine.
   ulonglong too_much_pop_threshold =
       static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
-  if (ShannonBase::Populate::sys_pop_buff.size() > 10000 ||
-      ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
+  if (unlikely(ShannonBase::Populate::sys_pop_buff.size() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
+               ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold)) {
     SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, the CP lag is too much.");
     return true;
   }
