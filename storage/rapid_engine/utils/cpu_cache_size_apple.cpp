@@ -19,28 +19,35 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. to get all level cache size of a cpu.
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
+// gets intel cpu size of all cache level.
 #include <stdio.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
 
-void get_cache_lines_size() {
-  unsigned int eax, ebx, ecx, edx;
-  eax = 4;  // CPUID leaf 4 for cache information
-  ecx = 0;  // Query L1 cache (level 1 cache)
+void get_intel_cache_size() {
+  size_t l1icache = 0, l1dcache = 0, l2cache = 0, l3cache = 0;
+  size_t len = sizeof(l1icache);
 
-  asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(eax), "c"(ecx));
+  // l1-instr
+  sysctlbyname("hw.l1icachesize", &l1icache, &len, NULL, 0);
+  // l2-data
+  sysctlbyname("hw.l1dcachesize", &l1dcache, &len, NULL, 0);
+  // l2 size
+  sysctlbyname("hw.l2cachesize", &l2cache, &len, NULL, 0);
+  // l3 size
+  sysctlbyname("hw.l3cachesize", &l3cache, &len, NULL, 0);
 
-  // Cache line size is in EBX[11:0], add 1 because it's zero-indexed
-  unsigned int cache_line_size = (ebx & 0xFFF) + 1;
-
-  // L1 Cache Line Size:
-  printf("%u \n", cache_line_size);
+  printf("CACHE_L1=%zu\n", l1dcache / 1024);
+  printf("CACHE_L2=%zu\n", l2cache / 1024);
+  printf("CACHE_L3=%zu\n", l3cache / 1024);
 }
 
 int main() {
-  get_cache_lines_size();
+  get_intel_cache_size();
   return 0;
 }

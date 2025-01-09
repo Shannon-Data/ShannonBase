@@ -24,19 +24,16 @@
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
-#include <stdio.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#include <iostream>
 
 void get_cache_lines_size() {
-  unsigned int eax, ebx, ecx, edx;
-  eax = 4;  // CPUID leaf 4 for cache information
-  ecx = 0;  // Query L1 cache (level 1 cache)
+  size_t cacheline_size = 0;
+  size_t len = sizeof(cacheline_size);
 
-  asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(eax), "c"(ecx));
-
-  // Cache line size is in EBX[11:0], add 1 because it's zero-indexed
-  unsigned int cache_line_size = (ebx & 0xFFF) + 1;
-
-  // L1 Cache Line Size:
+  // cache line size
+  sysctlbyname("hw.cachelinesize", &cacheline_size, &len, nullptr, 0);
   printf("%u \n", cache_line_size);
 }
 
