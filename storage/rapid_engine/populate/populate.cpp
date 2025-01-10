@@ -197,8 +197,13 @@ void Populator::end_change_populate_threads() {
 void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */
   fprintf(file,
           "rapid log pop thread : %s \n"
-          "rapid log pop thread loops: " ULINTPF "\n",
-          ShannonBase::Populate::sys_pop_started ? "running" : "stopped", ShannonBase::Populate::sys_rapid_loop_count);
+          "rapid log pop thread loops: " ULINTPF
+          "\n"
+          "rapid log data remaining size: " ULINTPF
+          " KB\n"
+          "rapid log data remaining line: " ULINTPF "\n",
+          ShannonBase::Populate::sys_pop_started ? "running" : "stopped", ShannonBase::Populate::sys_rapid_loop_count,
+          ShannonBase::Populate::sys_pop_data_sz / 1024, ShannonBase::Populate::sys_pop_buff.size());
 }
 
 bool Populator::check_population_status(std::string &table_name) { return false; }

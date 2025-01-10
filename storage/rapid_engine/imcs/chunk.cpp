@@ -384,7 +384,6 @@ row_id_t Chunk::prows() { return m_header->m_prows; }
 row_id_t Chunk::rows(Rapid_load_context *context) {
   // in furture, we get the rows with visibility check. Now, just return the prows.
   return m_header->m_prows;
-  ;
 }
 
 }  // namespace Imcs
