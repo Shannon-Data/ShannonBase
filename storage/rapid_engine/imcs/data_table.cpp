@@ -53,16 +53,20 @@ DataTable::DataTable(TABLE *source_table) : m_data_source(source_table) { ut_a(m
 
 DataTable::~DataTable() {}
 
-int DataTable::open() { return 0; }
+int DataTable::open() {
+  m_rowid.store(0);
+  return 0;
+}
 
-int DataTable::close() { return 0; }
+int DataTable::close() {
+  m_rowid.store(0);
+  return 0;
+}
 
 int DataTable::init() {
-  if (!m_initialized.load()) {
-    m_initialized.store(true);
-    scan_init();
-  }
-
+  assert(!m_initialized.load());
+  m_initialized.store(true);
+  scan_init();
   return 0;
 }
 

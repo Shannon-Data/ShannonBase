@@ -149,7 +149,7 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
   }
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
 
-  assert(!m_data_table);
+  assert(!m_data_table.get());
   m_data_table.reset(new ShannonBase::Imcs::DataTable(table));
   m_data_table->open();
   return 0;
