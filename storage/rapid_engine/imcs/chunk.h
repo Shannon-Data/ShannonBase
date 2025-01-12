@@ -124,7 +124,7 @@ class Chunk : public MemoryObject {
     size_t m_pack_length;
 
     // normalized pack length.
-    size_t m_normailzed_pack_length{0};
+    size_t m_normalized_pack_length{0};
 
     // can be null or not.
     bool m_nullable{false};
@@ -221,8 +221,8 @@ class Chunk : public MemoryObject {
 
   // gets the current pos offset.
   inline row_id_t pos() {
-    assert(((m_data.load() - m_base.load()) % m_header->m_normailzed_pack_length) == 0);
-    return (m_data.load() - m_base.load()) / m_header->m_normailzed_pack_length;
+    assert(((m_data.load() - m_base.load()) % m_header->m_normalized_pack_length) == 0);
+    return (m_data.load() - m_base.load()) / m_header->m_normalized_pack_length;
   }
 
   inline bool full() { return ((m_end.load() - m_data.load()) == 0); }
@@ -234,7 +234,7 @@ class Chunk : public MemoryObject {
   int is_deleted(const Rapid_load_context *context, row_id_t pos);
 
   // get the normalized pack length
-  inline size_t normalized_pack_length() { return m_header->m_normailzed_pack_length; }
+  inline size_t normalized_pack_length() { return m_header->m_normalized_pack_length; }
 
   // get the real pack legnth, m_source_fld->pack_length
   inline size_t pack_length() { return m_header->m_source_fld->pack_length(); }

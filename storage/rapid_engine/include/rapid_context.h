@@ -31,6 +31,7 @@
 #include "sql/sql_lex.h"  //Secondary_engine_execution_context
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/trx/transaction.h"
 
 class trx_t;
 class ReadView;
@@ -86,7 +87,7 @@ class Rapid_load_context : public Secondary_engine_execution_context {
     extra_info_t() {}
     ~extra_info_t() {}
     // trxid of this innodb rows.
-    trx_id_t m_trxid{0};
+    Transaction::ID m_trxid{0};
     Compress::Encoding_type m_algo{Compress::Encoding_type::SORTED};
 
     // index scan info
@@ -123,6 +124,18 @@ class Rapid_load_context : public Secondary_engine_execution_context {
 
   // trx_id col key str
   Imcs::Cu *m_trx_id_cu;
+};
+
+class Rapid_pop_context : public Secondary_engine_execution_context {
+ public:
+  uint64_t m_start_lsn;
+  // current schema name and table name.
+  char *m_schema_name{nullptr}, *m_table_name{nullptr};
+  // trx id.
+  Transaction::ID m_trxid{0};
+
+  uint8 m_key_len{0};
+  std::unique_ptr<uchar[]> m_key_buff{nullptr};
 };
 
 class Rapid_ha_data {

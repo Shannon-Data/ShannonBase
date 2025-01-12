@@ -67,9 +67,7 @@ Chunk::Chunk(const Field *field) {
     default:
       break;
   }
-  m_header->m_normailzed_pack_length = normalized_pack_length;
-  m_header->m_source_fld = field->clone(&rapid_mem_root);
-  m_header->m_type = field->type();
+  m_header->m_normalized_pack_length = normalized_pack_length;
 
   /** there's null values in, therefore, alloc the null bitmap, and del bit map will
    * lazy allocated.*/
@@ -80,7 +78,7 @@ Chunk::Chunk(const Field *field) {
   // the SMU ptr. just like rollback ptr.
   m_header->m_smu = std::make_unique<Snapshot_meta_unit>();
 
-  auto chunk_size = SHANNON_ROWS_IN_CHUNK * m_header->m_normailzed_pack_length;
+  auto chunk_size = SHANNON_ROWS_IN_CHUNK * m_header->m_normalized_pack_length;
   ut_ad(field && chunk_size < ShannonBase::rpd_mem_sz_max);
 
   /**m_data_base，here, we use the same psi key with buffer pool which used in
@@ -91,7 +89,6 @@ Chunk::Chunk(const Field *field) {
    * ha_innodb.cc: ut_new_boot(); */
   if (likely(rapid_allocated_mem_size + chunk_size <= ShannonBase::rpd_mem_sz_max)) {
     m_base = static_cast<uchar *>(ut::aligned_alloc(chunk_size, CACHE_LINE_SIZE));
-
     if (unlikely(!m_base)) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
       return;
@@ -104,13 +101,16 @@ Chunk::Chunk(const Field *field) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
     return;
   }
+
+  m_header->m_source_fld = field->clone(&rapid_mem_root);
+  m_header->m_type = field->type();
 }
 
 Chunk::~Chunk() {
   if (m_base) {
     ut::aligned_free(m_base);
     m_base = m_data = nullptr;
-    rapid_allocated_mem_size -= (m_header->m_normailzed_pack_length * SHANNON_ROWS_IN_CHUNK);
+    rapid_allocated_mem_size -= (m_header->m_normalized_pack_length * SHANNON_ROWS_IN_CHUNK);
   }
 }
 
@@ -142,7 +142,7 @@ void Chunk::update_meta_info(OPER_TYPE type, uchar *data) {
       m_header->m_prows.fetch_add(1);
       ut_a(m_header->m_prows.load() <= SHANNON_ROWS_IN_CHUNK);
       m_header->m_sum.store(m_header->m_sum + data_val);
-      m_header->m_avg = m_header->m_sum / m_header->m_prows;
+      m_header->m_avg.store(m_header->m_sum / m_header->m_prows);
     } break;
     case ShannonBase::OPER_TYPE::OPER_DELETE: {
     } break;
@@ -205,7 +205,7 @@ int Chunk::is_deleted(const Rapid_load_context *context, row_id_t pos) {
 }
 
 void Chunk::build_version(row_id_t rowid, Transaction::ID id, const uchar *data, size_t len) {
-  smu_item_t si(m_header->m_normailzed_pack_length);
+  smu_item_t si(m_header->m_normalized_pack_length);
   if (len == UNIV_SQL_NULL) {
     si.data = nullptr;
   } else
@@ -231,7 +231,7 @@ uchar *Chunk::read(const Rapid_load_context *context, uchar *data, size_t len) {
     return nullptr;
   }
 
-  ut_a(len == m_header->m_normailzed_pack_length);
+  ut_a(len == m_header->m_normalized_pack_length);
   auto ret = reinterpret_cast<uchar *>(std::memcpy(data, m_rdata, len));
   m_rdata.fetch_add(len);
 
@@ -242,11 +242,11 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
-  if (unlikely((m_data.load() + ((len == UNIV_SQL_NULL) ? m_header->m_normailzed_pack_length : len)) >
+  if (unlikely((m_data.load() + ((len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len)) >
                m_end.load())) {  // full
     auto diff = m_data.load() - m_base.load();
-    ut_a(diff % m_header->m_normailzed_pack_length == 0);
-    ut_a(diff / m_header->m_normailzed_pack_length == SHANNON_ROWS_IN_CHUNK);
+    ut_a(diff % m_header->m_normalized_pack_length == 0);
+    ut_a(diff / m_header->m_normalized_pack_length == SHANNON_ROWS_IN_CHUNK);
 
     m_data.store(m_base.load());
     return nullptr;
@@ -261,12 +261,13 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
      * was written down.*/
     Utils::Util::bit_array_set(m_header->m_null_mask.get(), m_header->m_prows);
 
-    len = m_header->m_normailzed_pack_length;
+    len = m_header->m_normalized_pack_length;
     data = const_cast<uchar *>(SHANNON_NULL_PLACEHOLDER);
   }
 
-  std::scoped_lock data_guard(m_data_mutex);
+  m_data_mutex.lock();
   auto ret = static_cast<uchar *>(std::memcpy(m_data.load(), data, len));
+  m_data_mutex.unlock();
   m_data.fetch_add(len);
 
   update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, data);
@@ -282,18 +283,19 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t where, uchar *n
 
   ut_a(where < m_header->m_prows);
 
-  std::scoped_lock data_guard(m_data_mutex);
-  auto where_ptr = m_base + where * m_header->m_normailzed_pack_length;
+  m_data_mutex.lock();
+  auto where_ptr = m_base + where * m_header->m_normalized_pack_length;
 
   build_version(where, context->m_extra_info.m_trxid, where_ptr, len);
   if (len == UNIV_SQL_NULL) {
     Utils::Util::bit_array_set(m_header->m_null_mask.get(), where);
-    len = m_header->m_normailzed_pack_length;
+    len = m_header->m_normalized_pack_length;
     std::memcpy(where_ptr, static_cast<void *>(const_cast<uchar *>(SHANNON_BLANK_PLACEHOLDER)), len);
   } else {
-    len = m_header->m_normailzed_pack_length;
+    len = m_header->m_normalized_pack_length;
     std::memcpy(where_ptr, new_data, len);
   }
+  m_data_mutex.unlock();
 
   update_meta_info(ShannonBase::OPER_TYPE::OPER_UPDATE, new_data);
 
@@ -344,15 +346,15 @@ uchar *Chunk::del(const Rapid_load_context *context, row_id_t rowid) {
   Utils::Util::bit_array_set(m_header->m_del_mask.get(), rowid);
 
   std::scoped_lock data_guard(m_data_mutex);
-  del_from = m_base + rowid * m_header->m_normailzed_pack_length;
+  del_from = m_base + rowid * m_header->m_normalized_pack_length;
   ut_a(del_from <= m_data);
 
   // get the old data and insert smu ptr link. should check whether data is null.
   auto is_null = Utils::Util::bit_array_get(m_header->m_null_mask.get(), rowid);
-  auto data_len = is_null ? UNIV_SQL_NULL : m_header->m_normailzed_pack_length;
+  auto data_len = is_null ? UNIV_SQL_NULL : m_header->m_normalized_pack_length;
   build_version(rowid, context->m_extra_info.m_trxid, del_from, data_len);
 
-  del_from = static_cast<uchar *>(std::memcpy(del_from, SHANNON_BLANK_PLACEHOLDER, m_header->m_normailzed_pack_length));
+  del_from = static_cast<uchar *>(std::memcpy(del_from, SHANNON_BLANK_PLACEHOLDER, m_header->m_normalized_pack_length));
 
   if (del_from) update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, del_from);
   return del_from;
@@ -363,20 +365,20 @@ void Chunk::truncate() {
   if (m_base) {
     ut::aligned_free(m_base);
     m_base = m_data = nullptr;
-    rapid_allocated_mem_size -= (SHANNON_ROWS_IN_CHUNK * m_header->m_normailzed_pack_length);
+    rapid_allocated_mem_size -= (SHANNON_ROWS_IN_CHUNK * m_header->m_normalized_pack_length);
   }
 
   reset_meta_info();
 }
 
 uchar *Chunk::seek(row_id_t rowid) {
-  ut_a(!((m_data - m_base) % m_header->m_normailzed_pack_length));
-  auto real_row = (m_data - m_base) / m_header->m_normailzed_pack_length;
+  ut_a(!((m_data - m_base) % m_header->m_normalized_pack_length));
+  auto real_row = (m_data - m_base) / m_header->m_normalized_pack_length;
 
   if (rowid >= real_row)
     return m_data;
   else
-    return m_base + rowid * m_header->m_normailzed_pack_length;
+    return m_base + rowid * m_header->m_normalized_pack_length;
 }
 
 row_id_t Chunk::prows() { return m_header->m_prows; }

@@ -49,9 +49,14 @@
 namespace ShannonBase {
 namespace Imcs {
 
-DataTable::DataTable(TABLE *source_table) : m_data_source(source_table) { ut_a(m_data_source); }
+DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(source_table) { ut_a(m_data_source); }
 
-DataTable::~DataTable() {}
+DataTable::~DataTable() {
+  if (m_context) {
+    m_context->m_trx->release_snapshot();
+    m_context->m_trx->commit();
+  }
+}
 
 int DataTable::open() {
   m_rowid.store(0);
@@ -114,7 +119,8 @@ int DataTable::next(uchar *buf) {
   // In optimization phase. we should not choice rapid to scan, when pop threading
   // is running to repop the data to rapid.
   // ut_a(ShannonBase::Populate::sys_pop_buff.size() == 0);
-// make all ptr in m_field_ptrs to move forward one step(one row).
+  // make all ptr in m_field_ptrs to move forward one step(one row).
+  assert(m_initialized.load());
 start_pos:
   if (m_rowid >= m_field_cus[0]->prows()) return HA_ERR_END_OF_FILE;
 
@@ -192,6 +198,7 @@ int DataTable::end() {
   m_context->m_trx->commit();
 
   m_rowid.store(0);
+  m_initialized.store(false);
   return 0;
 }
 
