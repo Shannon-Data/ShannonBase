@@ -163,7 +163,7 @@ void Cu::update_meta_info(OPER_TYPE type, uchar *data) {
     case ShannonBase::OPER_TYPE::OPER_INSERT: {
       m_header->m_prows.fetch_add(1);
       m_header->m_sum.store(m_header->m_sum + data_val);
-      m_header->m_avg = m_header->m_sum / m_header->m_prows;
+      m_header->m_avg.store(m_header->m_sum / m_header->m_prows);
     } break;
     case ShannonBase::OPER_TYPE::OPER_DELETE: {
     } break;

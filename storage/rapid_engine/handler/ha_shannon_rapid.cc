@@ -588,6 +588,8 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   // 2: to check whether there're changes in sys_pop_buff, which will be used for query.
   // if there're still do populating, then goes to innodb. and gets cardinality of tables.
   for (uint i = primary_plan_info->tables; i < primary_plan_info->tables; i++) {
+    // primary_plan_info->query_expression()->first_query_block()->leaf_tables;
+    // for (Table_ref *tr = leaf_tables; tr != nullptr; tr = tr->next_leaf)
     std::string db_tb;
     if (ShannonBase::Populate::Populator::check_population_status(db_tb)) {
       SetSecondaryEngineOffloadFailedReason(thd, "table queried is populating.");
