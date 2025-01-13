@@ -21,63 +21,10 @@
 
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs. for readview.
+   Now that, we use innodb trx as rapid's. But, in future, we will impl
+   our own trx implementation, because we use innodb trx id in rapid
+   for our visibility check.
 */
-#ifndef __SHANNONBASE_DATA_TABLE_H__
-#define __SHANNONBASE_DATA_TABLE_H__
-
-#include <atomic>
-#include <vector>
-
-#include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/trx/readview.h"
-
-class TABLE;
-namespace ShannonBase {
-class Rapid_load_context;
-
-namespace Imcs {
-class Imcs;
-class Cu;
-class DataTable : public MemoryObject {
- public:
-  DataTable(TABLE *source_table);
-  virtual ~DataTable();
-
-  // open a cursor on db_table to read/write.
-  int open();
-
-  // close a cursor.
-  int close();
-
-  // intitialize this data table object.
-  int init();
-
-  // to the next rows.
-  int next(uchar *buf);
-
-  // end of scan.
-  int end();
-
-  // get the data pos.
-  row_id_t find(uchar *buf);
-
- private:
-  std::atomic<bool> m_initialized{false};
-
-  // the data source, an IMCS.
-  TABLE *m_data_source{nullptr};
-
-  // all Cu ptr of all feilds.
-  std::vector<Cu *> m_field_cus;
-
-  // start from where.
-  std::atomic<row_id_t> m_rowid{0};
-
-  // context
-  std::unique_ptr<Rapid_load_context> m_context{nullptr};
-};
-
-}  // namespace Imcs
-}  // namespace ShannonBase
-#endif  //__SHANNONBASE_DATA_TABLE_H__
+namespace ShannonBase {}  // namespace ShannonBase

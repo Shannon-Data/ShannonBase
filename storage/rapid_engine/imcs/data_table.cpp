@@ -49,7 +49,24 @@
 namespace ShannonBase {
 namespace Imcs {
 
-DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(source_table) { ut_a(m_data_source); }
+DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(source_table) {
+  ut_a(m_data_source);
+
+  std::ostringstream key_part, key;
+  key_part << m_data_source->s->db.str << ":" << m_data_source->s->table_name.str << ":";
+  for (auto index = 0u; index < m_data_source->s->fields; index++) {
+    auto fld = *(m_data_source->field + index);
+    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    key << key_part.str() << fld->field_name;
+    auto key_str = key.str();
+
+    m_field_cus.push_back(Imcs::instance()->get_cu(key_str.c_str()));
+    key.str("");
+  }
+  key.str("");
+  m_rowid.store(0);
+}
 
 DataTable::~DataTable() {
   if (m_context) {
@@ -70,49 +87,31 @@ int DataTable::close() {
 
 int DataTable::init() {
   assert(!m_initialized.load());
-  m_initialized.store(true);
-  scan_init();
-  return 0;
-}
+  if (!m_initialized.load()) {
+    m_initialized.store(true);
+    m_rowid.store(0);
 
-void DataTable::scan_init() {
-  std::ostringstream key_part, key;
-  key_part << m_data_source->s->db.str << ":" << m_data_source->s->table_name.str << ":";
-  for (auto index = 0u; index < m_data_source->s->fields; index++) {
-    auto fld = *(m_data_source->field + index);
-    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    m_context = std::make_unique<Rapid_load_context>();
+    m_context->m_thd = current_thd;
 
-    key << key_part.str() << fld->field_name;
-    auto key_str = key.str();
+    m_context->m_trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
+    m_context->m_trx->set_read_only(true);
+    if (!m_context->m_trx->is_active())
+      m_context->m_trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(current_thd));
 
-    m_field_cus.push_back(Imcs::instance()->get_cu(key_str));
-    key.str("");
-  }
-  key.str("");
+    if (!m_context->m_trx->has_snapshot()) m_context->m_trx->acquire_snapshot();
 
-  m_rowid.store(0);
-
-  m_context = std::make_unique<Rapid_load_context>();
-  key << key_part.str() << SHANNON_DB_TRX_ID;
-  m_context->m_trx_id_cu = ShannonBase::Imcs::Imcs::instance()->get_cu(key.str().c_str());
-  m_context->m_thd = current_thd;
-
-  m_context->m_trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
-  m_context->m_trx->set_read_only(true);
-  if (!m_context->m_trx->is_active())
-    m_context->m_trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(current_thd));
-
-  if (!m_context->m_trx->has_snapshot()) m_context->m_trx->acquire_snapshot();
-
-  m_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
-  m_context->m_table_name = const_cast<char *>(m_data_source->s->table_name.str);
+    m_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
+    m_context->m_table_name = const_cast<char *>(m_data_source->s->table_name.str);
 
 #ifndef NDEBUG
-  auto first_num = m_field_cus[0]->prows();
-  for (auto &item : m_field_cus) {
-    ut_a(first_num == item->prows());
-  }
+    auto first_num = m_field_cus[0]->prows();
+    for (auto &item : m_field_cus) {
+      ut_a(first_num == item->prows());
+    }
 #endif
+  }
+  return 0;
 }
 
 int DataTable::next(uchar *buf) {
@@ -120,20 +119,13 @@ int DataTable::next(uchar *buf) {
   // is running to repop the data to rapid.
   // ut_a(ShannonBase::Populate::sys_pop_buff.size() == 0);
   // make all ptr in m_field_ptrs to move forward one step(one row).
+start:
   assert(m_initialized.load());
-start_pos:
+
   if (m_rowid >= m_field_cus[0]->prows()) return HA_ERR_END_OF_FILE;
 
   auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
   auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
-  ut_a(m_context->m_trx_id_cu);
-  auto trx_id_ptr = m_context->m_trx_id_cu->chunk(current_chunk)->seek(offset_in_chunk);
-  // more info for __builtin_prefetch: https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html
-  if (trx_id_ptr < m_context->m_trx_id_cu->chunk(current_chunk)->where() &&
-      (trx_id_ptr - m_context->m_trx_id_cu->chunk(current_chunk)->base()) % CACHE_LINE_SIZE == 0)
-    SHANNON_PREFETCH_R(trx_id_ptr + CACHE_LINE_SIZE);
-
-  Transaction::ID trx_id = mach_read_from_6(trx_id_ptr);
 
   for (auto idx = 0u; idx < m_field_cus.size(); idx++) {
     auto cu = m_field_cus[idx];
@@ -145,36 +137,32 @@ start_pos:
       return HA_ERR_GENERIC;
     });
 
-    // prefetch data for cpu to reduce the data cache miss.
-    if (trx_id_ptr < m_context->m_trx_id_cu->chunk(current_chunk)->where() &&
-        (trx_id_ptr - m_context->m_trx_id_cu->chunk(current_chunk)->base()) % CACHE_LINE_SIZE == 0)
-      SHANNON_PREFETCH_R(cu->chunk(current_chunk)->seek(offset_in_chunk) + CACHE_LINE_SIZE);
-
-    // visibility check. if it's not visibile and does not have old version, go to next.
-    if (!m_context->m_trx->is_visible(trx_id, m_context->m_table_name) &&
-        !cu->chunk(current_chunk)->get_header()->m_smu) {
-      m_rowid.fetch_add(1);
-      goto start_pos;
-    } else {  // travers the version link.
+    // to check version link to check its old value.
+    uchar *data_ptr{nullptr};
+    auto is_deleted = cu->chunk(current_chunk)->is_deleted(m_context.get(), offset_in_chunk);
+    auto is_null = cu->chunk(current_chunk)->is_null(m_context.get(), offset_in_chunk);
+    if (is_deleted) {
+      auto smu = cu->chunk(current_chunk)->get_header()->m_smu.get();
+      data_ptr = smu->build_prev_vers(m_context.get(), offset_in_chunk);
+      if (!data_ptr && !is_null) {
+        m_rowid.fetch_add(1);
+        goto start;
+      }
+    } else {
+      data_ptr = cu->chunk(current_chunk)->base() + offset_in_chunk * normalized_length;
+      if ((data_ptr - cu->chunk(current_chunk)->base()) % CACHE_LINE_SIZE == 0)
+        SHANNON_PREFETCH_R(data_ptr + CACHE_LINE_SIZE);
     }
 
     auto source_fld = *(m_data_source->field + cu->header()->m_source_fld->field_index());
-
-    // TODO: to check version link to check its old value. in fact here always the latest version.
-    if (cu->chunk(current_chunk)->is_deleted(m_context.get(), offset_in_chunk)) {
-      m_rowid.fetch_add(1);
-      goto start_pos;
-    }
-
     auto old_map = tmp_use_all_columns(m_data_source, m_data_source->write_set);
-    if (cu->chunk(current_chunk)->is_null(m_context.get(), offset_in_chunk)) {
+    if (is_null) {
       source_fld->set_null();
       if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
       continue;
     }
-
     source_fld->set_notnull();
-    auto data_ptr = cu->chunk(current_chunk)->base() + offset_in_chunk * normalized_length;
+
     if (is_text_value) {
       uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
       auto str_ptr = reinterpret_cast<char *>(cu->header()->m_local_dict->get(str_id));

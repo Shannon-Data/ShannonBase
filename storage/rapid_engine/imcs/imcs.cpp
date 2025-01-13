@@ -61,20 +61,15 @@ int Imcs::create_table_mem(const Rapid_load_context *context, const TABLE *sourc
   ut_a(source);
   std::ostringstream oss, oss2;
   oss << source->s->db.str << ":" << source->s->table_name.str << ":";
-  // 1 is an extra ghost column, here, DB_TRX_ID.
-  for (int index = source->s->fields; index >= 0; index--) {
+  for (auto index = 0u; index < source->s->fields; index++) {
     auto fld = *(source->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
     oss2 << oss.str() << fld->field_name;
     m_cus.emplace(oss2.str(), std::make_unique<Cu>(fld));
     oss2.str("");
   }
   return 0;
-}
-
-Cu *Imcs::get_cu(std::string &key) {
-  if (m_cus.find(key) == m_cus.end()) return nullptr;
-  return m_cus[key].get();
 }
 
 Cu *Imcs::get_cu(const char *key) {
@@ -113,10 +108,10 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
      * Field_varstring::length_bytes) data. the here we dont use var_xxx to get data, rather getting
      * directly, due to we dont care what real it is. ref to: field.cc:6703
      */
-
-    for (auto index = 0u; index < source->s->fields + 1; index++) {
+    for (auto index = 0u; index < source->s->fields; index++) {
       auto fld = *(source->field + index);
       if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
       key << key_part.str() << fld->field_name;
       auto extra_offset = Utils::Util::is_varstring(fld->type()) ? (fld->field_length > 256 ? 2 : 1) : 0;
       auto data_ptr = fld->is_null() ? nullptr : fld->field_ptr() + extra_offset;
@@ -130,7 +125,7 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
         data_len = fld->data_length(0);
       }
 
-      if (!m_cus[key.str()].get()->write_row(context, data_ptr, data_len)) {
+      if (!m_cus[key.str()]->write_row(context, data_ptr, data_len)) {
         my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), source->s->db.str, source->s->table_name.str);
         source->file->ha_rnd_end();
         return HA_ERR_GENERIC;
@@ -156,7 +151,7 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
   auto found{false};
   oss << db_name << ":" << table_name << ":";
   for (auto it = m_cus.begin(); it != m_cus.end();) {
-    if (it->first.substr(0, oss.str().length()) == oss.str()) {
+    if (it->first.find(oss.str()) != std::string::npos) {
       it = m_cus.erase(it);
       found = true;
     } else
@@ -184,12 +179,12 @@ int Imcs::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   std::ostringstream oss, oss2;
   oss << context->m_schema_name << ":" << context->m_table_name << ":";
   for (auto it = m_cus.begin(); it != m_cus.end();) {
-    if (UNIV_UNLIKELY(!it->second.get() || it->first.substr(0, oss.str().length()) != oss.str())) {
+    if (UNIV_UNLIKELY(!it->second || it->first.find(oss.str()) == std::string::npos)) {
       ++it;
       continue;
     }
 
-    if (!it->second.get()->delete_row(context, rowid)) {
+    if (!it->second->delete_row(context, rowid)) {
       return HA_ERR_GENERIC;
     }
     ++it;
@@ -202,20 +197,21 @@ int Imcs::delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &
 
   if (!m_cus.size()) return 0;
 
-  std::ostringstream oss, oss2;
+  std::ostringstream oss;
   oss << context->m_schema_name << ":" << context->m_table_name << ":";
   if (rowids.empty()) {  // delete all rows.
     for (auto it = m_cus.begin(); it != m_cus.end(); ++it) {
-      if (it->first.substr(0, oss.str().length()) != oss.str()) continue;
-      if (!it->second.get()->delete_row_all(context)) return HA_ERR_GENERIC;
+      if (it->first.find(oss.str()) == std::string::npos || !it->second) continue;
+
+      if (!it->second->delete_row_all(context)) return HA_ERR_GENERIC;
     }
     return 0;
   }
 
   for (auto &rowid : rowids) {
     for (auto it = m_cus.begin(); it != m_cus.end(); ++it) {
-      if (it->first.substr(0, oss.str().length()) != oss.str()) continue;
-      if (!it->second.get()->delete_row(context, rowid)) return HA_ERR_GENERIC;
+      if (it->first.find(oss.str()) == std::string::npos || !it->second) continue;
+      if (!it->second->delete_row(context, rowid)) return HA_ERR_GENERIC;
     }
   }
   return 0;
@@ -225,8 +221,8 @@ int Imcs::update_row(const Rapid_load_context *context, row_id_t rowid, std::str
                      const uchar *new_field_data, size_t nlen) {
   ut_a(context);
 
-  ut_a(m_cus[field_key].get());
-  auto ret = m_cus[field_key].get()->update_row(context, rowid, const_cast<uchar *>(new_field_data), nlen);
+  ut_a(m_cus[field_key]);
+  auto ret = m_cus[field_key]->update_row(context, rowid, const_cast<uchar *>(new_field_data), nlen);
   if (!ret) return HA_ERR_GENERIC;
   return 0;
 }
@@ -236,9 +232,10 @@ int Imcs::update_row(const Rapid_load_context *context, row_id_t row_id,
   ut_a(context);
 
   for (auto &rec : upd_recs) {
-    if (!m_cus[rec.first]) continue;
+    if (m_cus.find(rec.first) == m_cus.end()) continue;
+
     auto pack_length = m_cus[rec.first]->normalized_pack_length();
-    if (!rec.second.get())  // null value.
+    if (!rec.second)  // null value.
       pack_length = UNIV_SQL_NULL;
     if (!m_cus[rec.first]->update_row(context, row_id, rec.second.get(), pack_length)) return HA_ERR_GENERIC;
   }

@@ -340,7 +340,7 @@ bool Util::check_dict_encoding_projection(THD *thd) {
       if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
       std::string key = key_part + field_ptr->field_name;
-      auto cu_header = imcs_instance->get_cus()[key].get()->header();
+      auto cu_header = imcs_instance->get_cus()[key]->header();
       assert(cu_header);
       // to test all cu infos.
     }

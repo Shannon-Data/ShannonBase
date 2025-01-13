@@ -27,7 +27,6 @@
 #define __SHANNONBASE_CHUNK_H__
 
 #include <atomic>
-#include <chrono>
 #include <tuple>
 #include <unordered_map>
 
@@ -37,7 +36,8 @@
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_object.h"    // SHANNON_ALIGNAS
-#include "storage/rapid_engine/trx/transaction.h"         //Transaction
+#include "storage/rapid_engine/trx/readview.h"
+#include "storage/rapid_engine/trx/transaction.h"  //Transaction
 
 namespace ShannonBase {
 class Rapid_load_context;
@@ -56,42 +56,6 @@ struct SHANNON_ALIGNAS chunk_deleter_helper {
   }
 };
 
-// in chunk, the latest veresion data always is in. the old version of data moves to
-// SMU. So if a trx can see the latest version data, it should travers the version
-// link to check whether there's some visible data or not. if yes, return the old ver
-// data or otherwise, go to check the next item.
-struct SHANNON_ALIGNAS smu_item_t {
-  // trxid of old version value.
-  Transaction::ID trxid;
-
-  // timestamp of the modification.
-  std::chrono::time_point<std::chrono::high_resolution_clock> tm_stamp;
-
-  // the old version of data. all var data types were encoded.
-  std::unique_ptr<uchar[]> data;
-
-  smu_item_t(size_t size) : data(new uchar[size]) { tm_stamp = std::chrono::high_resolution_clock::now(); }
-  smu_item_t() = delete;
-  // Disable copying
-  smu_item_t(const smu_item_t &) = delete;
-  smu_item_t &operator=(const smu_item_t &) = delete;
-
-  // Define a move constructor
-  smu_item_t(smu_item_t &&other) noexcept : trxid(other.trxid), tm_stamp(other.tm_stamp), data(std::move(other.data)) {}
-
-  // Define a move assignment operator
-  smu_item_t &operator=(smu_item_t &&other) noexcept {
-    if (this != &other) {
-      trxid = other.trxid;
-      tm_stamp = other.tm_stamp;
-      data = std::move(other.data);
-    }
-    return *this;
-  }
-};
-
-using smu_item_vec = std::vector<smu_item_t>;
-
 class Chunk : public MemoryObject {
  public:
   /**TODO: A Snapshot Metadata Unit (SMU) contains metadata and transactional
@@ -109,19 +73,20 @@ class Chunk : public MemoryObject {
      *   |__|
      */
     std::unordered_map<row_id_t, smu_item_vec> m_version_info;
+    uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid);
   };
 
   using Chunk_header = struct SHANNON_ALIGNAS Chunk_header_t {
    public:
     // a copy of source field info, only use its meta info. do NOT use it
     // directly.
-    Field *m_source_fld;
+    Field *m_source_fld{nullptr};
 
     // data type in mysql.
     enum_field_types m_type{MYSQL_TYPE_NULL};
 
     // original pack length
-    size_t m_pack_length;
+    size_t m_pack_length{0};
 
     // normalized pack length.
     size_t m_normalized_pack_length{0};
@@ -139,7 +104,8 @@ class Chunk : public MemoryObject {
     std::unique_ptr<Snapshot_meta_unit> m_smu;
 
     // the min trx id and max trxid of this chunk.
-    Transaction::ID m_trx_min, m_trx_max;
+    Transaction::ID m_trx_min;
+    Transaction::ID m_trx_max;
 
     // statistics data of this chunk.
     std::atomic<double> m_max{0};
@@ -283,7 +249,7 @@ class Chunk : public MemoryObject {
   void check_data_type(size_t type_size);
 
   // build up an old version.
-  inline void build_version(row_id_t rowid, Transaction::ID id, const uchar *data, size_t len);
+  inline bool build_version(row_id_t rowid, Transaction::ID trxid, const uchar *data, size_t len);
 };
 
 }  // namespace Imcs
