@@ -1563,7 +1563,7 @@ bool srv_printf_innodb_monitor(FILE *file, bool nowait, ulint *trx_start_pos,
       "RAPID\n"
       "-----\n",
       file);
-  ShannonBase::Populate::Populator::rapid_print_thread_info(file);
+  ShannonBase::Populate::Populator::print_info(file);
 
   fputs(
       "----------------------------\n"

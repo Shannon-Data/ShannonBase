@@ -171,10 +171,10 @@ class Chunk : public MemoryObject {
    * [in] data, the data to delete.
    * [in] len, the data len.
    * return the address where the data write to.*/
-  uchar *del(const Rapid_load_context *context, uchar *data, size_t len);
+  uchar *remove(const Rapid_load_context *context, uchar *data, size_t len);
 
   // delete the data by rowid
-  uchar *del(const Rapid_load_context *context, row_id_t rowid);
+  uchar *remove(const Rapid_load_context *context, row_id_t rowid);
 
   // free all the data and reset the meta info.
   void truncate();

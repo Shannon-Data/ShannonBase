@@ -126,6 +126,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0new.h"
 
 #include "storage/rapid_engine/populate/populate.h"
+#include "storage/rapid_engine/populate/purge.h"
+
 /** fil_space_t::flags for hard-coded tablespaces */
 extern uint32_t predefined_flags;
 
@@ -2598,12 +2600,14 @@ bool srv_shutdown_waits_for_rollback_of_recovered_transactions() {
 }
 
 static void srv_shutdown_pop_stop() {
-  while (ShannonBase::Populate::Populator::log_pop_thread_is_active()) {
+  while (ShannonBase::Populate::Populator::active()) {
     ShannonBase::Populate::sys_pop_started.store(false);
     os_event_set(log_sys->rapid_events[0]);
     std::this_thread::sleep_for(
         std::chrono::microseconds(SHUTDOWN_SLEEP_TIME_US));
   }
+
+  ShannonBase::Purge::sys_purge_started.store(false);
 }
 
 /** Shut down all InnoDB background tasks that may look up objects in

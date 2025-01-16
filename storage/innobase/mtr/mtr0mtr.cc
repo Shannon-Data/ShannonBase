@@ -989,7 +989,7 @@ void mtr_t::Command::execute() {
     ut_ad(write_log.m_lsn == handle.end_lsn);
 
     if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
-      ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+      ShannonBase::Populate::Populator::active() &&
       !recv_recovery_is_on() &&
       m_impl->m_log_mode == MTR_LOG_ALL_WITH_POP) {
        //after each of block copied to log.buf without holes, then cpy to pop.

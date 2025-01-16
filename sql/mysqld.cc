@@ -9726,7 +9726,7 @@ static int show_rapid_change_propagation(THD * /*unused*/, SHOW_VAR *var,
   var->type = SHOW_BOOL;
   var->value = buff;
   *(pointer_cast<bool *>(buff)) =
-      ShannonBase::Populate::Populator::log_pop_thread_is_active();
+      ShannonBase::Populate::Populator::active();
   return 0;
 }
 
