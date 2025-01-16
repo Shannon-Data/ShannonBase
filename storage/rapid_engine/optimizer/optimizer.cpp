@@ -69,7 +69,7 @@ void OptimzieAccessPath(AccessPath *path, JOIN *join) {
         path->using_batch_instr = true;
         // this table is used by query and the table has been loaded into rapid engine. then start
         // a propagation.
-        ShannonBase::Populate::Populator::send_propagation_notify();
+        ShannonBase::Populate::Populator::send_notify();
       }
     } break;
     case AccessPath::HASH_JOIN: {

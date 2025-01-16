@@ -302,7 +302,7 @@ bool Util::dynamic_feature_normalization(THD *thd) {
 
   // If queue is too long or CP is too long, this mechanism wants to progressively start
   // shifting queries to mysql, moving gradually towards the heavier queries
-  if (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
+  if (ShannonBase::Populate::Populator::active() &&
       ShannonBase::Populate::sys_pop_buff.size() * ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO >
           ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
     return false;
@@ -313,7 +313,7 @@ bool Util::dynamic_feature_normalization(THD *thd) {
     std::string table_name(table_ref->db);
     table_name += ":";
     table_name += table_ref->table_name;
-    if (ShannonBase::Populate::Populator::check_population_status(table_name)) return false;
+    if (ShannonBase::Populate::Populator::check_status(table_name)) return false;
   }
 
   return false;

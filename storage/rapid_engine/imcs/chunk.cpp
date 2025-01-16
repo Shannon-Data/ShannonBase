@@ -324,7 +324,7 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t where, uchar *n
   return where_ptr;
 }
 
-uchar *Chunk::del(const Rapid_load_context *context, uchar *data, size_t len) {
+uchar *Chunk::remove(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a(data && len == m_header->m_source_fld->pack_length());
 
   if (!m_header->m_del_mask.get()) {
@@ -354,7 +354,7 @@ uchar *Chunk::del(const Rapid_load_context *context, uchar *data, size_t len) {
   return nullptr;
 }
 
-uchar *Chunk::del(const Rapid_load_context *context, row_id_t rowid) {
+uchar *Chunk::remove(const Rapid_load_context *context, row_id_t rowid) {
   uchar *del_from{nullptr};
 
   if (rowid >= m_header->m_prows.load()) return del_from;  // out of rowid range.

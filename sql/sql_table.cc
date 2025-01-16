@@ -11682,10 +11682,10 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
                                     &skip_metadata_update))
       return true;
     //start population thread if table loaded successfully.
-    ShannonBase::Populate::Populator::start_change_populate_threads();
+    ShannonBase::Populate::Populator::start();
   } else {
     //at first, stop the main pop monitor thread.
-    ShannonBase::Populate::Populator::end_change_populate_threads();
+    ShannonBase::Populate::Populator::end();
 
     if (DBUG_EVALUATE_IF("sim_secunload_fail",
                          (my_error(ER_SECONDARY_ENGINE, MYF(0),

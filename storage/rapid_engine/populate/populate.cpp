@@ -168,33 +168,31 @@ static void parse_log_func_main(log_t *log_ptr) {
   sys_pop_started.store(false, std::memory_order_seq_cst);
 }
 
-bool Populator::log_pop_thread_is_active() { return thread_is_active(srv_threads.m_change_pop); }
+bool Populator::active() { return thread_is_active(srv_threads.m_change_pop_cordinator); }
 
-bool Populator::log_pop_worker_is_active() { return true; }
+void Populator::send_notify() { os_event_set(log_sys->rapid_events[0]); }
 
-void Populator::send_propagation_notify() { os_event_set(log_sys->rapid_events[0]); }
-
-void Populator::start_change_populate_threads() {
-  if (!Populator::log_pop_thread_is_active() && shannon_loaded_tables->size()) {
-    srv_threads.m_change_pop = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
-    ShannonBase::Populate::sys_pop_started = true;
-    srv_threads.m_change_pop.start();
-    assert(log_pop_thread_is_active());
+void Populator::start() {
+  if (!Populator::active() && shannon_loaded_tables->size()) {
+    srv_threads.m_change_pop_cordinator = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
+    ShannonBase::Populate::sys_pop_started.store(true, std::memory_order_seq_cst);
+    srv_threads.m_change_pop_cordinator.start();
+    assert(Populator::active());
   }
 }
 
-void Populator::end_change_populate_threads() {
-  if (Populator::log_pop_thread_is_active() && shannon_loaded_tables->size()) {
+void Populator::end() {
+  if (Populator::active() && shannon_loaded_tables->size()) {
     sys_pop_started.store(false, std::memory_order_seq_cst);
     os_event_set(log_sys->rapid_events[0]);
-    srv_threads.m_change_pop.join();
+    srv_threads.m_change_pop_cordinator.join();
     sys_rapid_loop_count = 0;
-    ShannonBase::Populate::sys_pop_started = false;
-    assert(log_pop_thread_is_active() == false);
+
+    assert(Populator::active() == false);
   }
 }
 
-void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */
+void Populator::print_info(FILE *file) { /* in: output stream */
   fprintf(file,
           "rapid log pop thread : %s \n"
           "rapid log pop thread loops: " ULINTPF
@@ -206,7 +204,7 @@ void Populator::rapid_print_thread_info(FILE *file) { /* in: output stream */
           ShannonBase::Populate::sys_pop_data_sz / 1024, ShannonBase::Populate::sys_pop_buff.size());
 }
 
-bool Populator::check_population_status(std::string &table_name) { return false; }
+bool Populator::check_status(std::string &table_name) { return false; }
 
 }  // namespace Populate
 }  // namespace ShannonBase
