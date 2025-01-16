@@ -65,6 +65,7 @@ SET(SHANNON_POPULATE_SOURCES
 )
 SET (SHANNON_TRX_SOURCES
     trx/transaction.cpp
+    trx/readview.cpp
 )
 SET (SHANNON_READER_SOURCES
     reader/parquet_reader.cpp

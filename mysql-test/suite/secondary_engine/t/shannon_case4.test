@@ -140,8 +140,8 @@ UPDATE datatype_test SET
   double_col = 1111111.11,
   float_col = 222.22,
   int_col = -2147483640,
-  char_col = 'updated_1',
-  varchar_col = 'updated_varchar_1'
+  char_col = 'updated_2',
+  varchar_col = 'updated_varchar_2'
 WHERE big_int_col = 9223372036854775806;
 
 UPDATE datatype_test SET
@@ -149,13 +149,37 @@ UPDATE datatype_test SET
   double_col = 2222222.22,
   float_col = 333.33,
   int_col = -2147483630,
-  char_col = 'updated_2',
-  varchar_col = 'updated_varchar_2'
+  char_col = 'updated_3',
+  varchar_col = 'updated_varchar_3'
 WHERE big_int_col = 9223372036854775805;
+
+--replace_column 15 IGNORE
+select
+  id,
+  big_int_col,
+  bool_col,  
+  decimal_col,
+  double_col ,
+  float_col ,
+  int_col ,
+  integer_col ,
+  medium_int_col ,
+  small_int_col ,
+  tiny_int_col ,
+  date_col DATE,
+  datetime_col ,
+  time_col ,
+  timestamp_col,
+  year_col ,
+  char_col ,
+  varchar_col,
+  text_col,
+  tinytext_col
+from datatype_test order by id;
 
 --sleep 18
 --connection connection_1
---echo [after_insertion_conn1]
+--echo [after_update_conn1]
 --replace_column 15 IGNORE
 select
   id,
@@ -206,7 +230,6 @@ select
   text_col,
   tinytext_col
 from datatype_test order by id;
-
 
 --sleep 18
 --connection connection_1

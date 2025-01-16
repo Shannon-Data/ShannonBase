@@ -66,7 +66,7 @@ using rpd_columns_container = std::vector<rpd_column_info_t>;
 
 // Map from (db_name, table_name) to the RapidShare with table state.
 class LoadedTables {
-  std::map<std::pair<std::string, std::string>, RapidShare *> m_tables;
+  std::map<std::string, RapidShare *> m_tables;
   std::mutex m_mutex;
 
  public:

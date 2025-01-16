@@ -90,7 +90,7 @@ class Transaction : public MemoryObject {
 
   virtual bool is_active();
 
-  virtual bool is_visible(Transaction::ID trx_id, const char *table_name);
+  virtual bool changes_visible(Transaction::ID trx_id, const char *table_name);
 
   virtual Transaction::ID get_id();
 

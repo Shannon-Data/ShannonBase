@@ -131,7 +131,7 @@ static void parse_log_func_main(log_t *log_ptr) {
     // we only use a half of threads to do propagation.
     std::vector<std::future<uint64_t>> results;
     size_t thread_num = std::thread::hardware_concurrency() / 2;
-    thread_num = (thread_num > sys_pop_buff.size()) ? sys_pop_buff.size() : thread_num;
+    thread_num = (thread_num >= sys_pop_buff.size()) ? sys_pop_buff.size() : thread_num;
     auto curr_iter = sys_pop_buff.begin();
     for (size_t counter = 0; counter < thread_num; counter++) {
       mutex_enter(&log_sys->rapid_populator_mutex);
@@ -157,8 +157,8 @@ static void parse_log_func_main(log_t *log_ptr) {
       mutex_enter(&log_sys->rapid_populator_mutex);
       auto iter = sys_pop_buff.find(ret_lsn);
       ut_a(iter != sys_pop_buff.end());
-      sys_pop_data_sz.fetch_sub(iter->second.size);
       sys_pop_buff.erase(ret_lsn);
+      sys_pop_data_sz.fetch_sub(iter->second.size);
       mutex_exit(&log_sys->rapid_populator_mutex);
     }
 

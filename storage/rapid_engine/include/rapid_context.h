@@ -121,9 +121,6 @@ class Rapid_load_context : public Secondary_engine_execution_context {
   THD *m_thd{nullptr};
 
   extra_info_t m_extra_info;
-
-  // trx_id col key str
-  Imcs::Cu *m_trx_id_cu;
 };
 
 class Rapid_pop_context : public Secondary_engine_execution_context {

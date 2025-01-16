@@ -545,8 +545,8 @@ std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t
           case DATA_CHAR:
           case DATA_VARMYSQL:
           case DATA_BLOB: {
-            auto header = imcs_instance->get_cu(key_name)->header();
-            auto field_length = (mtype == DATA_MYSQL) ? imcs_instance->get_cu(key_name)->pack_length() : len;
+            auto header = imcs_instance->get_cu(key_name.c_str())->header();
+            auto field_length = (mtype == DATA_MYSQL) ? imcs_instance->get_cu(key_name.c_str())->pack_length() : len;
             std::unique_ptr<uchar[]> packed_str = std::make_unique<uchar[]>(field_length + 1);
             memset(packed_str.get(), 0x0, field_length + 1);
 
@@ -575,34 +575,35 @@ int LogParser::find_matched_rows(Rapid_load_context *context, std::string &key_n
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
 
-  row_id_t rows_num = imcs_instance->get_cu(key_name)->prows();
+  row_id_t rows_num = imcs_instance->get_cu(key_name.c_str())->prows();
   for (row_id_t row_id = 0; row_id < rows_num; row_id++) {
     auto current_chunk_id = (row_id / SHANNON_ROWS_IN_CHUNK);
     auto offset_in_chunk = (row_id % SHANNON_ROWS_IN_CHUNK);
     auto matched{true};
-    // TODO: MVCC
-    auto cn = field_values_to_find.begin()->first;
-    auto ba = imcs_instance->get_cu(cn)->chunk(current_chunk_id)->get_header()->m_del_mask.get();
-    if (ba && Utils::Util::bit_array_get(ba, offset_in_chunk))  // deleted row, go to next.
-      continue;
 
     for (auto &to_find : field_values_to_find) {
       auto cu_name = to_find.first;
-      if (!imcs_instance->get_cu(cu_name)) continue;  // means that was not loaded into.
+      if (!imcs_instance->get_cu(cu_name.c_str())) continue;  // means that was not loaded into.
+
+      auto ba = imcs_instance->get_cu(cu_name.c_str())->chunk(current_chunk_id)->get_header()->m_del_mask.get();
+      if (ba && Utils::Util::bit_array_get(ba, offset_in_chunk))  // deleted row, TODO:traverse all versions.
+        continue;
+
       // find the one field to ignore, then continue.
-      if (ignore_field.size() && ignore_field.find(cu_name) != ignore_field.end()) continue;
+      if (ignore_field.size() && ignore_field.find(cu_name.c_str()) != ignore_field.end()) continue;
 
       // test the sys field.
       auto fld_str = cu_name.substr(cu_name.find_last_of(":") + 1);
       if (!with_sys_col && !strncmp(fld_str.c_str(), SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN)) continue;
 
-      auto field_normal_len = imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->normalized_pack_length();
-      uchar *pos = imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->base() + offset_in_chunk * field_normal_len;
-      ut_a(pos <= imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->tell());
+      auto field_normal_len = imcs_instance->get_cu(cu_name.c_str())->chunk(current_chunk_id)->normalized_pack_length();
+      uchar *pos =
+          imcs_instance->get_cu(cu_name.c_str())->chunk(current_chunk_id)->base() + offset_in_chunk * field_normal_len;
+      ut_a(pos <= imcs_instance->get_cu(cu_name.c_str())->chunk(current_chunk_id)->tell());
       if (to_find.second.get()) {  // not null
         matched = (memcmp(to_find.second.get(), pos, field_normal_len)) ? false : true;
       } else {  // is null, then need to check the null bitmap.
-        auto ba = imcs_instance->get_cu(cu_name)->chunk(current_chunk_id)->get_header()->m_null_mask.get();
+        auto ba = imcs_instance->get_cu(cu_name.c_str())->chunk(current_chunk_id)->get_header()->m_null_mask.get();
         matched = Utils::Util::bit_array_get(ba, offset_in_chunk) ? true : false;
       }
       if (!matched) break;
@@ -660,27 +661,33 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       std::map<std::string, std::unique_ptr<uchar[]>> row_to_del;
       // step 1:to get all field data of deleting row.
       auto key_name = parse_rec_fields(context, rec, index, real_index, offsets, row_to_del);
+      std::ostringstream oss;
+      oss << context->m_schema_name << ":" << context->m_table_name << ":" << SHANNON_DB_TRX_ID;
+      context->m_extra_info.m_trxid = mach_read_from_6(row_to_del[oss.str()].get());
 
       // step 2: go throug all the data to find the matched rows, and delete them.
       std::set<std::string> ignore_field;
       if (find_matched_rows(context, key_name, false, row_to_del, ignore_field, row_ids)) {
         return HA_ERR_WRONG_IN_RECORD;
       }
-      return row_ids.size() ? imcs_instance->delete_row(context, row_ids[0]) : 0;
+      return row_ids.size() ? imcs_instance->delete_rows(context, row_ids) : 0;
     } break;
     case MLOG_REC_INSERT: {
       std::map<std::string, std::unique_ptr<uchar[]>> rows_to_insert;
       // step 1:to get all field data of inserting row.
       auto key_name = parse_rec_fields(context, rec, index, real_index, offsets, rows_to_insert);
+      std::ostringstream oss;
+      oss << context->m_schema_name << ":" << context->m_table_name << ":" << SHANNON_DB_TRX_ID;
+      context->m_extra_info.m_trxid = mach_read_from_6(rows_to_insert[oss.str()].get());
 
       // step 2: insert all field data into CUs.
       for (auto &insert_row : rows_to_insert) {
         auto key_name = insert_row.first;
-        if (!imcs_instance->get_cu(key_name)) continue;
+        if (!imcs_instance->get_cu(key_name.c_str())) continue;
         // if data is nullptr, means it's 'NULL'.
-        auto len =
-            (insert_row.second.get()) ? imcs_instance->get_cu(key_name)->normalized_pack_length() : UNIV_SQL_NULL;
-        if (!imcs_instance->get_cu(key_name)->write_row_from_log(context, insert_row.second.get(), len))
+        auto len = (insert_row.second.get()) ? imcs_instance->get_cu(key_name.c_str())->normalized_pack_length()
+                                             : UNIV_SQL_NULL;
+        if (!imcs_instance->get_cu(key_name.c_str())->write_row_from_log(context, insert_row.second.get(), len))
           ret = HA_ERR_WRONG_IN_RECORD;
         if (ret) return ret;
       }
@@ -691,6 +698,9 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       std::map<std::string, std::unique_ptr<uchar[]>> row_fields;
       // step 1:to get all field data of updating row[here, now, it's updated rows in innodb. but in rapid it's not].
       auto key_name = parse_rec_fields(context, rec, index, real_index, offsets, row_fields);
+      std::ostringstream oss;
+      oss << context->m_schema_name << ":" << context->m_table_name << ":" << SHANNON_DB_TRX_ID;
+      context->m_extra_info.m_trxid = mach_read_from_6(row_fields[oss.str()].get());
 
       // step 2: get all update fields data in mysql format.
       std::set<std::string> ignore_field_names;
