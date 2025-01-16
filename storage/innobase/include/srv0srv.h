@@ -245,7 +245,10 @@ struct Srv_threads {
   IB_thread m_gtid_persister;
 
   /** Thread for changes poping */
-  IB_thread m_change_pop;
+  IB_thread m_change_pop_cordinator;
+
+  /** Thread for rapid IMCS*/
+  IB_thread m_rapid_purg_cordinator;
 #ifdef UNIV_DEBUG
   /** Used in test scenario to delay threads' cleanup until the pre_dd_shutdown
   is ended and final plugin's shutdown is started (when plugin is DELETED).
@@ -826,6 +829,7 @@ extern mysql_pfs_key_t srv_ts_alter_encrypt_thread_key;
 extern mysql_pfs_key_t parallel_read_thread_key;
 extern mysql_pfs_key_t parallel_rseg_init_thread_key;
 extern mysql_pfs_key_t rapid_populate_thread_key;
+extern mysql_pfs_key_t rapid_purge_thread_key;
 #endif /* UNIV_PFS_THREAD */
 #endif /* !UNIV_HOTBACKUP */
 

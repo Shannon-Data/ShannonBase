@@ -609,7 +609,7 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
     // primary_plan_info->query_expression()->first_query_block()->leaf_tables;
     // for (Table_ref *tr = leaf_tables; tr != nullptr; tr = tr->next_leaf)
     std::string db_tb;
-    if (ShannonBase::Populate::Populator::check_population_status(db_tb)) {
+    if (ShannonBase::Populate::Populator::check_status(db_tb)) {
       SetSecondaryEngineOffloadFailedReason(thd, "table queried is populating.");
       return true;
     }
@@ -673,9 +673,8 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
     return ShannonBase::Utils::Util::standard_cost_threshold_classifier(thd);
   } else if (likely(thd->variables.rapid_use_dynamic_offload)) {
     // 1: static sceanrio.
-    if (likely(!ShannonBase::Populate::Populator::log_pop_thread_is_active() ||
-               (ShannonBase::Populate::Populator::log_pop_thread_is_active() &&
-                ShannonBase::Populate::sys_pop_buff.empty()))) {
+    if (likely(!ShannonBase::Populate::Populator::active() ||
+               (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::sys_pop_buff.empty()))) {
       return ShannonBase::Utils::Util::decision_tree_classifier(thd);
     } else {
       // 2: dynamic scenario.

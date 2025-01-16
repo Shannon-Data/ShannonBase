@@ -246,7 +246,7 @@ uchar *Cu::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   if (chunk_id > m_chunks.size()) return del_from;  // out of chunk rnage.
 
   auto offset_in_chunk = rowid % SHANNON_ROWS_IN_CHUNK;
-  if (!(del_from = m_chunks[chunk_id]->del(context, offset_in_chunk))) {  // ret to deleted row addr.
+  if (!(del_from = m_chunks[chunk_id]->remove(context, offset_in_chunk))) {  // ret to deleted row addr.
     return del_from;
   }
   if (del_from) update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, del_from);
