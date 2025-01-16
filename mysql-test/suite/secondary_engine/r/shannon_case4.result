@@ -132,18 +132,47 @@ decimal_col = 88888.88,
 double_col = 1111111.11,
 float_col = 222.22,
 int_col = -2147483640,
-char_col = 'updated_1',
-varchar_col = 'updated_varchar_1'
+char_col = 'updated_2',
+varchar_col = 'updated_varchar_2'
 WHERE big_int_col = 9223372036854775806;
 UPDATE datatype_test SET
 decimal_col = 99999.99,
 double_col = 2222222.22,
 float_col = 333.33,
 int_col = -2147483630,
-char_col = 'updated_2',
-varchar_col = 'updated_varchar_2'
+char_col = 'updated_3',
+varchar_col = 'updated_varchar_3'
 WHERE big_int_col = 9223372036854775805;
-[after_insertion_conn1]
+select
+id,
+big_int_col,
+bool_col,  
+decimal_col,
+double_col ,
+float_col ,
+int_col ,
+integer_col ,
+medium_int_col ,
+small_int_col ,
+tiny_int_col ,
+date_col DATE,
+datetime_col ,
+time_col ,
+timestamp_col,
+year_col ,
+char_col ,
+varchar_col,
+text_col,
+tinytext_col
+from datatype_test order by id;
+id	big_int_col	bool_col	decimal_col	double_col	float_col	int_col	integer_col	medium_int_col	small_int_col	tiny_int_col	DATE	datetime_col	time_col	timestamp_col	year_col	char_col	varchar_col	text_col	tinytext_col
+1	9223372036854775807	1	12345.67	1234567.89	123.45	2147483647	2147483647	8388607	32767	127	2024-01-01	2024-01-01 12:34:56	12:34:56	IGNORE	2024	char_1	varchar_1	text_1	tinytext_1
+2	9223372036854775806	0	88888.88	1111111.11	222.22	-2147483640	2147483646	8388606	32766	126	2023-01-01	2023-01-01 12:34:56	11:34:56	IGNORE	2023	updated_2	updated_varchar_2	text_2	tinytext_2
+3	9223372036854775805	1	99999.99	2222222.22	333.33	-2147483630	2147483645	8388605	32765	125	2022-01-01	2022-01-01 12:34:56	10:34:56	IGNORE	2022	updated_3	updated_varchar_3	text_3	tinytext_3
+4	9223372036854775804	0	65432.10	8765432.1	654.32	2147483644	2147483644	8388604	32764	124	2021-01-01	2021-01-01 12:34:56	09:34:56	IGNORE	2021	char_4	varchar_4	text_4	tinytext_4
+5	9223372036854775803	1	34567.89	3456789.01	345.67	2147483643	2147483643	8388603	32763	123	2020-01-01	2020-01-01 12:34:56	08:34:56	IGNORE	2020	char_5	varchar_5	text_5	tinytext_5
+6	9223372036854775802	0	76543.21	7654321.1	765.43	2147483642	2147483642	8388602	32762	122	2019-01-01	2019-01-01 12:34:56	07:34:56	IGNORE	2019	char_6	varchar_6	text_6	tinytext_6
+[after_update_conn1]
 select
 id,
 big_int_col,
@@ -168,8 +197,8 @@ tinytext_col
 from datatype_test order by id;
 id	big_int_col	bool_col	decimal_col	double_col	float_col	int_col	integer_col	medium_int_col	small_int_col	tiny_int_col	DATE	datetime_col	time_col	timestamp_col	year_col	char_col	varchar_col	text_col	tinytext_col
 1	9223372036854775807	1	12345.67	1234567.89	123.45	2147483647	2147483647	8388607	32767	127	2024-01-01	2024-01-01 12:34:56	12:34:56	IGNORE	2024	char_1	varchar_1	text_1	tinytext_1
-2	9223372036854775806	0	88888.88	1111111.11	222.22	-2147483640	2147483646	8388606	32766	126	2023-01-01	2023-01-01 12:34:56	11:34:56	IGNORE	2023	updated_1	updated_varchar_1	text_2	tinytext_2
-3	9223372036854775805	1	99999.99	2222222.22	333.33	-2147483630	2147483645	8388605	32765	125	2022-01-01	2022-01-01 12:34:56	10:34:56	IGNORE	2022	updated_2	updated_varchar_2	text_3	tinytext_3
+2	9223372036854775806	0	88888.88	1111111.11	222.22	-2147483640	2147483646	8388606	32766	126	2023-01-01	2023-01-01 12:34:56	11:34:56	IGNORE	2023	updated_2	updated_varchar_2	text_2	tinytext_2
+3	9223372036854775805	1	99999.99	2222222.22	333.33	-2147483630	2147483645	8388605	32765	125	2022-01-01	2022-01-01 12:34:56	10:34:56	IGNORE	2022	updated_3	updated_varchar_3	text_3	tinytext_3
 4	9223372036854775804	0	65432.10	8765432.1	654.32	2147483644	2147483644	8388604	32764	124	2021-01-01	2021-01-01 12:34:56	09:34:56	IGNORE	2021	char_4	varchar_4	text_4	tinytext_4
 5	9223372036854775803	1	34567.89	3456789.01	345.67	2147483643	2147483643	8388603	32763	123	2020-01-01	2020-01-01 12:34:56	08:34:56	IGNORE	2020	char_5	varchar_5	text_5	tinytext_5
 6	9223372036854775802	0	76543.21	7654321.1	765.43	2147483642	2147483642	8388602	32762	122	2019-01-01	2019-01-01 12:34:56	07:34:56	IGNORE	2019	char_6	varchar_6	text_6	tinytext_6
@@ -198,8 +227,8 @@ text_col,
 tinytext_col
 from datatype_test order by id;
 id	big_int_col	bool_col	decimal_col	double_col	float_col	int_col	integer_col	medium_int_col	small_int_col	tiny_int_col	DATE	datetime_col	time_col	timestamp_col	year_col	char_col	varchar_col	text_col	tinytext_col
-2	9223372036854775806	0	88888.88	1111111.11	222.22	-2147483640	2147483646	8388606	32766	126	2023-01-01	2023-01-01 12:34:56	11:34:56	IGNORE	2023	updated_1	updated_varchar_1	text_2	tinytext_2
-3	9223372036854775805	1	99999.99	2222222.22	333.33	-2147483630	2147483645	8388605	32765	125	2022-01-01	2022-01-01 12:34:56	10:34:56	IGNORE	2022	updated_2	updated_varchar_2	text_3	tinytext_3
+2	9223372036854775806	0	88888.88	1111111.11	222.22	-2147483640	2147483646	8388606	32766	126	2023-01-01	2023-01-01 12:34:56	11:34:56	IGNORE	2023	updated_2	updated_varchar_2	text_2	tinytext_2
+3	9223372036854775805	1	99999.99	2222222.22	333.33	-2147483630	2147483645	8388605	32765	125	2022-01-01	2022-01-01 12:34:56	10:34:56	IGNORE	2022	updated_3	updated_varchar_3	text_3	tinytext_3
 6	9223372036854775802	0	76543.21	7654321.1	765.43	2147483642	2147483642	8388602	32762	122	2019-01-01	2019-01-01 12:34:56	07:34:56	IGNORE	2019	char_6	varchar_6	text_6	tinytext_6
 [after_insertion_conn1]
 select
@@ -225,8 +254,8 @@ text_col,
 tinytext_col
 from datatype_test order by id;
 id	big_int_col	bool_col	decimal_col	double_col	float_col	int_col	integer_col	medium_int_col	small_int_col	tiny_int_col	DATE	datetime_col	time_col	timestamp_col	year_col	char_col	varchar_col	text_col	tinytext_col
-2	9223372036854775806	0	88888.88	1111111.11	222.22	-2147483640	2147483646	8388606	32766	126	2023-01-01	2023-01-01 12:34:56	11:34:56	IGNORE	2023	updated_1	updated_varchar_1	text_2	tinytext_2
-3	9223372036854775805	1	99999.99	2222222.22	333.33	-2147483630	2147483645	8388605	32765	125	2022-01-01	2022-01-01 12:34:56	10:34:56	IGNORE	2022	updated_2	updated_varchar_2	text_3	tinytext_3
+2	9223372036854775806	0	88888.88	1111111.11	222.22	-2147483640	2147483646	8388606	32766	126	2023-01-01	2023-01-01 12:34:56	11:34:56	IGNORE	2023	updated_2	updated_varchar_2	text_2	tinytext_2
+3	9223372036854775805	1	99999.99	2222222.22	333.33	-2147483630	2147483645	8388605	32765	125	2022-01-01	2022-01-01 12:34:56	10:34:56	IGNORE	2022	updated_3	updated_varchar_3	text_3	tinytext_3
 6	9223372036854775802	0	76543.21	7654321.1	765.43	2147483642	2147483642	8388602	32762	122	2019-01-01	2019-01-01 12:34:56	07:34:56	IGNORE	2019	char_6	varchar_6	text_6	tinytext_6
 DROP TABLE datatype_test;
 DROP DATABASE datatype_db;

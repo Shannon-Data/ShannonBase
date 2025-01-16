@@ -26,6 +26,7 @@
 #include "storage/rapid_engine/imcs/chunk.h"
 
 #include <stddef.h>
+#include <chrono>
 #include <memory>
 #include <typeinfo>
 
@@ -39,6 +40,16 @@
 
 namespace ShannonBase {
 namespace Imcs {
+
+uchar *Chunk::Snapshot_meta_unit::build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid) {
+  for (auto it = m_version_info[rowid].rbegin(); it < m_version_info[rowid].rend(); it++) {
+    if (!context->m_trx->changes_visible(it->trxid, context->m_table_name)) {
+      return it->data.get();
+    }
+  }
+  return nullptr;
+}
+
 /**
  * every chunks has a fixed num of rows: SHANNON_ROWS_IN_CHUNK. we can calcuate
  * the row offset easily by using 'm_data / m_source_fld->pack_length' to get
@@ -91,7 +102,6 @@ Chunk::Chunk(const Field *field) {
     m_base = static_cast<uchar *>(ut::aligned_alloc(chunk_size, CACHE_LINE_SIZE));
     if (unlikely(!m_base)) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
-      return;
     }
     m_data.store(m_base);
     m_rdata.store(m_base);
@@ -99,10 +109,10 @@ Chunk::Chunk(const Field *field) {
     rapid_allocated_mem_size += chunk_size;
   } else {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
-    return;
   }
 
   m_header->m_source_fld = field->clone(&rapid_mem_root);
+  assert(m_header->m_source_fld);
   m_header->m_type = field->type();
 }
 
@@ -204,13 +214,17 @@ int Chunk::is_deleted(const Rapid_load_context *context, row_id_t pos) {
     return Utils::Util::bit_array_get(m_header->m_del_mask.get(), pos);
 }
 
-void Chunk::build_version(row_id_t rowid, Transaction::ID id, const uchar *data, size_t len) {
+bool Chunk::build_version(row_id_t rowid, Transaction::ID trxid, const uchar *data, size_t len) {
+  assert(trxid);
   smu_item_t si(m_header->m_normalized_pack_length);
   if (len == UNIV_SQL_NULL) {
     si.data = nullptr;
   } else
     std::memcpy(si.data.get(), data, len);
-  si.trxid = id;
+
+  si.trxid = trxid;
+  si.tm_stamp = std::chrono::high_resolution_clock::now();
+
   if (m_header->m_smu->m_version_info.find(rowid) != m_header->m_smu->m_version_info.end()) {
     m_header->m_smu->m_version_info[rowid].emplace_back(std::move(si));
   } else {
@@ -219,7 +233,14 @@ void Chunk::build_version(row_id_t rowid, Transaction::ID id, const uchar *data,
     m_header->m_smu->m_version_info.emplace(rowid, std::move(iv));
   }
 
-  return;
+  if (trxid < m_header->m_trx_min) {
+    m_header->m_trx_min = trxid;
+  }
+
+  if (trxid > m_header->m_trx_max) {
+    m_header->m_trx_max = trxid;
+  }
+  return false;
 }
 
 uchar *Chunk::read(const Rapid_load_context *context, uchar *data, size_t len) {
@@ -265,9 +286,8 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
     data = const_cast<uchar *>(SHANNON_NULL_PLACEHOLDER);
   }
 
-  m_data_mutex.lock();
+  std::scoped_lock data_guard(m_data_mutex);
   auto ret = static_cast<uchar *>(std::memcpy(m_data.load(), data, len));
-  m_data_mutex.unlock();
   m_data.fetch_add(len);
 
   update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, data);
@@ -283,10 +303,13 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t where, uchar *n
 
   ut_a(where < m_header->m_prows);
 
-  m_data_mutex.lock();
+  std::scoped_lock data_guard(m_data_mutex);
   auto where_ptr = m_base + where * m_header->m_normalized_pack_length;
 
-  build_version(where, context->m_extra_info.m_trxid, where_ptr, len);
+  if (build_version(where, context->m_extra_info.m_trxid, where_ptr, len)) {
+    return where_ptr;
+  }
+
   if (len == UNIV_SQL_NULL) {
     Utils::Util::bit_array_set(m_header->m_null_mask.get(), where);
     len = m_header->m_normalized_pack_length;
@@ -295,7 +318,6 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t where, uchar *n
     len = m_header->m_normalized_pack_length;
     std::memcpy(where_ptr, new_data, len);
   }
-  m_data_mutex.unlock();
 
   update_meta_info(ShannonBase::OPER_TYPE::OPER_UPDATE, new_data);
 
@@ -316,15 +338,14 @@ uchar *Chunk::del(const Rapid_load_context *context, uchar *data, size_t len) {
 
   std::scoped_lock data_guard(m_data_mutex);
   while (start_pos < m_data.load()) {
-    if (!std::memcmp(start_pos, data, len)) {  // same
-      Utils::Util::bit_array_set(m_header->m_del_mask.get(), row_index);
-      // to set the mem to blank holder.
-      auto is_null = Utils::Util::bit_array_get(m_header->m_null_mask.get(), row_index);
-      build_version(row_index, context->m_extra_info.m_trxid, data, is_null ? UNIV_SQL_NULL : len);
+    assert(!std::memcmp(start_pos, data, len));  // the data we want to del.
 
-      std::memcpy(start_pos, reinterpret_cast<void *>(const_cast<uchar *>(SHANNON_BLANK_PLACEHOLDER)), len);
-      update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, start_pos);
-    }
+    Utils::Util::bit_array_set(m_header->m_del_mask.get(), row_index);
+
+    auto is_null = Utils::Util::bit_array_get(m_header->m_null_mask.get(), row_index);
+    if (build_version(row_index, context->m_extra_info.m_trxid, data, is_null ? UNIV_SQL_NULL : len)) return nullptr;
+
+    if (start_pos) update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, start_pos);
 
     start_pos += m_header->m_source_fld->pack_length();
     row_index++;
@@ -352,9 +373,7 @@ uchar *Chunk::del(const Rapid_load_context *context, row_id_t rowid) {
   // get the old data and insert smu ptr link. should check whether data is null.
   auto is_null = Utils::Util::bit_array_get(m_header->m_null_mask.get(), rowid);
   auto data_len = is_null ? UNIV_SQL_NULL : m_header->m_normalized_pack_length;
-  build_version(rowid, context->m_extra_info.m_trxid, del_from, data_len);
-
-  del_from = static_cast<uchar *>(std::memcpy(del_from, SHANNON_BLANK_PLACEHOLDER, m_header->m_normalized_pack_length));
+  if (build_version(rowid, context->m_extra_info.m_trxid, del_from, data_len)) return nullptr;
 
   if (del_from) update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, del_from);
   return del_from;

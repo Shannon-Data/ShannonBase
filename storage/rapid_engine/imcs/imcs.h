@@ -69,7 +69,6 @@ class Imcs : public MemoryObject {
 
   inline std::unordered_map<std::string, std::unique_ptr<Cu>> &get_cus() { return m_cus; }
   // get cu pointer by its key.
-  Cu *get_cu(std::string &key);
   Cu *get_cu(const char *key);
 
   /**create all cus needed by source table, and ready to write the data into.*/

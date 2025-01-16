@@ -103,34 +103,42 @@ bool Rapid_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
 // Map from (db_name, table_name) to the RapidShare with table state.
 void LoadedTables::add(const std::string &db, const std::string &table, RapidShare *rs) {
   std::lock_guard<std::mutex> guard(m_mutex);
-  m_tables.emplace(std::make_pair(db, table), rs);
+  std::string keystr = db + ":" + table;
+  m_tables.emplace(keystr, rs);
 }
 
 RapidShare *LoadedTables::get(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
-  auto it = m_tables.find(std::make_pair(db, table));
+  std::string keystr = db + ":" + table;
+  auto it = m_tables.find(keystr);
   return it == m_tables.end() ? nullptr : it->second;
 }
 
 void LoadedTables::erase(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
-  RapidShare *sh{nullptr};
-  if (m_tables.find(std::make_pair(db, table)) != m_tables.end()) sh = m_tables[std::make_pair(db, table)];
+  std::string keystr = db + ":" + table;
+  if (m_tables.find(keystr) == m_tables.end()) return;
 
-  m_tables.erase(std::make_pair(db, table));
+  auto sh = m_tables[keystr];
   if (sh) {
     delete sh;
     sh = nullptr;
   }
+  m_tables.erase(keystr);
 }
 
 void LoadedTables::table_infos(uint index, ulonglong &tid, std::string &schema, std::string &table) {
   if (index > m_tables.size()) return;
+
   uint count = 0;
   for (auto &item : m_tables) {
     if (count == index) {
-      schema = (item.first).first;
-      table = (item.first).second;
+      std::string keystr = item.first;
+      size_t colon_pos = keystr.find(':');
+      if (colon_pos == std::string::npos) continue;
+
+      schema = keystr.substr(0, colon_pos);
+      table = keystr.substr(colon_pos + 1);
       tid = (item.second)->m_tableid;
     }
     count++;
@@ -162,13 +170,21 @@ int ha_rapid::close() {
 
 int ha_rapid::info(unsigned int flags) {
   ut_a(flags == (HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK));
+
   std::ostringstream oss;
-  oss << table_share->db.str << ":" << table_share->table_name.str << ":"
-      << "DB_TRX_ID";
+  oss << table_share->db.str << ":" << table_share->table_name.str << ":";
 
   Rapid_load_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
-  stats.records = Imcs::Imcs::instance()->get_cu(oss.str().c_str())->rows(&context);
+  for (auto it = Imcs::Imcs::instance()->get_cus().begin(); it != Imcs::Imcs::instance()->get_cus().end(); it++) {
+    if (it->first.find(oss.str()) == std::string::npos || !it->second)
+      continue;
+    else {
+      stats.records = it->second->rows(&context);
+      break;
+    }
+  }
+
   return 0;
 }
 
@@ -256,6 +272,8 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
   for (auto idx = 0u; idx < table_arg.s->fields; idx++) {
     auto fld = *(table_arg.field + idx);
+    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
     if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
       std::ostringstream err;
       err << fld->field_name << " type not allowed";
