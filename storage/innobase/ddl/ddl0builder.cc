@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -178,14 +179,14 @@ struct File_cursor : public Load_cursor {
   @param[in] builder            The index build driver.
   @param[in] file               File to read from.
   @param[in] buffer_size        IO buffer size to use for reads.
-  @param[in] size               Size of the file in bytes.
+  @param[in] range              Offsets of the chunk to read from the file
   @param[in,out] stage          PFS observability. */
   File_cursor(Builder *builder, const Unique_os_file_descriptor &file,
-              size_t buffer_size, os_offset_t size,
+              size_t buffer_size, const Range &range,
               Alter_stage *stage) noexcept;
 
   /** Destructor. */
-  ~File_cursor() override = default;
+  ~File_cursor() override;
 
   /** Open the cursor.
   @return DB_SUCCESS or error code. */
@@ -224,6 +225,9 @@ struct File_cursor : public Load_cursor {
   /** PFS monitoring. */
   Alter_stage *m_stage{};
 
+  /** Number of rows that were fetched but not yet reported to the PFS. */
+  uint64_t m_processed_rows_to_report{};
+
   friend struct Merge_cursor;
 };
 
@@ -233,9 +237,11 @@ bool Load_cursor::duplicates_detected() const noexcept {
 
 dberr_t File_reader::get_tuple(Builder *builder, mem_heap_t *heap,
                                dtuple_t *&dtuple) noexcept {
-  dtuple = row_rec_to_index_entry_low(m_mrec, m_index, &m_offsets[0], heap);
+  dtuple =
+      row_rec_to_index_entry_low(m_mrec, m_index, &m_field_offsets[0], heap);
   if (!builder->is_fts_index()) {
-    return builder->dtuple_copy_blobs(dtuple, &m_offsets[0], m_mrec, heap);
+    return builder->dtuple_copy_blobs(dtuple, &m_field_offsets[0], m_mrec,
+                                      heap);
   } else {
     return DB_SUCCESS;
   }
@@ -243,12 +249,18 @@ dberr_t File_reader::get_tuple(Builder *builder, mem_heap_t *heap,
 
 File_cursor::File_cursor(Builder *builder,
                          const Unique_os_file_descriptor &file,
-                         size_t buffer_size, os_offset_t size,
+                         size_t buffer_size, const Range &range,
                          Alter_stage *stage) noexcept
     : Load_cursor(builder, nullptr),
-      m_reader(file, builder->index(), buffer_size, size),
+      m_reader(file, builder->index(), buffer_size, range),
       m_stage(stage) {
   ut_a(m_reader.m_file.is_open());
+}
+
+File_cursor::~File_cursor() {
+  if (m_processed_rows_to_report > 0) {
+    m_stage->inc_progress_if_needed(m_processed_rows_to_report, true);
+  }
 }
 
 dberr_t File_cursor::open() noexcept {
@@ -261,7 +273,8 @@ dberr_t File_cursor::fetch() noexcept {
   m_tuple_heap.clear();
 
   if (m_stage != nullptr) {
-    m_stage->inc(1);
+    m_processed_rows_to_report++;
+    m_stage->inc_progress_if_needed(m_processed_rows_to_report);
   }
 
   return m_builder->get_error();
@@ -289,7 +302,7 @@ dberr_t File_cursor::fetch(const mrec_t *&mrec, ulint *&offsets) noexcept {
   }
 
   mrec = m_reader.m_mrec;
-  offsets = &m_reader.m_offsets[0];
+  offsets = &m_reader.m_field_offsets[0];
 
   return DB_SUCCESS;
 }
@@ -297,7 +310,7 @@ dberr_t File_cursor::fetch(const mrec_t *&mrec, ulint *&offsets) noexcept {
 dberr_t File_cursor::next() noexcept {
   auto err = m_reader.next();
 
-  if (unlikely(err != DB_END_OF_INDEX)) {
+  if (likely(err != DB_END_OF_INDEX)) {
     m_err = err;
   }
 
@@ -335,25 +348,28 @@ bool Merge_cursor::Compare::operator()(const File_cursor *lhs,
 
   ut_a(l.m_index == r.m_index);
 
-  auto cmp = cmp_rec_rec_simple(r.m_mrec, l.m_mrec, &r.m_offsets[0],
-                                &l.m_offsets[0], r.m_index,
+  auto cmp = cmp_rec_rec_simple(r.m_mrec, l.m_mrec, &r.m_field_offsets[0],
+                                &l.m_field_offsets[0], r.m_index,
                                 m_dup != nullptr ? m_dup->m_table : nullptr);
 
   /* Check for duplicates. */
   if (unlikely(cmp == 0 && m_dup != nullptr)) {
-    m_dup->report(l.m_mrec, &l.m_offsets[0]);
+    m_dup->report(l.m_mrec, &l.m_field_offsets[0]);
   }
 
   return cmp < 0;
 }
 
-dberr_t Merge_cursor::add_file(const ddl::file_t &file,
-                               size_t buffer_size) noexcept {
+dberr_t Merge_cursor::add_file(const ddl::file_t &file, size_t buffer_size,
+                               const Range &range) noexcept {
   ut_a(file.m_file.is_open());
-
+  /* Keep the buffer size as much required to avoid the overlapping reads from
+  the subsequent ranges. In this iteration, buffer size would remain same for
+  subsequent reads */
+  buffer_size = std::min(size_t(range.second - range.first), buffer_size);
   auto cursor = ut::new_withkey<File_cursor>(
       ut::make_psi_memory_key(mem_key_ddl), m_builder, file.m_file, buffer_size,
-      file.m_size, m_stage);
+      range, m_stage);
 
   if (cursor == nullptr) {
     m_err = DB_OUT_OF_MEMORY;
@@ -365,16 +381,9 @@ dberr_t Merge_cursor::add_file(const ddl::file_t &file,
   return DB_SUCCESS;
 }
 
-dberr_t Merge_cursor::add_file(const ddl::file_t &file, size_t buffer_size,
-                               os_offset_t offset) noexcept {
-  auto err = add_file(file, buffer_size);
-
-  if (err != DB_SUCCESS) {
-    return err;
-  } else {
-    m_cursors.back()->m_reader.set_offset(offset);
-    return DB_SUCCESS;
-  }
+dberr_t Merge_cursor::add_file(const ddl::file_t &file,
+                               size_t buffer_size) noexcept {
+  return add_file(file, buffer_size, Range{0, file.m_size});
 }
 
 void Merge_cursor::clear_eof() noexcept {
@@ -386,7 +395,7 @@ void Merge_cursor::clear_eof() noexcept {
 
   for (auto cursor : m_cursors) {
     ut_a(cursor->m_err == DB_END_OF_INDEX);
-    if (!cursor->m_reader.eof()) {
+    if (!cursor->m_reader.end_of_range()) {
       cursor->m_err = DB_SUCCESS;
       m_pq.push(cursor);
     }
@@ -591,8 +600,9 @@ Builder::Builder(ddl::Context &ctx, Loader &loader, size_t i) noexcept
 
   m_sort_index = is_fts_index() ? m_ctx.m_fts.m_ptr->sort_index() : m_index;
 
-  if (dict_table_is_comp(m_ctx.m_old_table) &&
-      !dict_table_is_comp(m_ctx.m_new_table)) {
+  DBUG_EXECUTE_IF("ddl_convert_charset_without_heap_fail", { return; });
+  if (!dict_table_is_comp(m_ctx.m_new_table)) {
+    /* Converting to redundant format requires heap allocation */
     m_conv_heap.create(sizeof(mrec_buf_t), UT_LOCATION_HERE);
   }
 }
@@ -932,10 +942,14 @@ dberr_t Builder::copy_columns(Copy_ctx &ctx, size_t &mv_rows_added,
                   page_size,
                   IF_DEBUG(dict_table_is_sdi(m_ctx.m_old_table->id), )
                       m_conv_heap.get());
-        } else {
-          /* Field length mismatch should not happen when rebuilding
-          redundant row format table. */
-          ut_a(dict_table_is_comp(m_index->table));
+        } else if (!dict_table_is_comp(m_index->table)) {
+          /* Heap is created when new table is not compact. */
+          ib::info(ER_IB_DDL_CONVERT_HEAP_NOT_FOUND);
+
+          DBUG_EXECUTE_IF("ddl_convert_charset_without_heap_fail",
+                          { return DB_ERROR; });
+          ut_ad(false);
+          return DB_ERROR;
         }
       }
     } else {
@@ -1212,6 +1226,23 @@ dberr_t Builder::key_buffer_sort(size_t thread_id) noexcept {
   return DB_SUCCESS;
 }
 
+dberr_t Builder::online_build_handle_error(dberr_t err) noexcept {
+  set_error(err);
+
+  if (m_btr_load != nullptr) {
+    /* page_loaders[0] has increased buf_fix_count through release(). This is
+    decremented by calling latch(). Similar release() calls for page_loaders at
+    non-zero levels are handled in finish() */
+    m_btr_load->latch();
+    err = m_btr_load->finish(err);
+
+    ut::delete_(m_btr_load);
+    m_btr_load = nullptr;
+  }
+
+  return get_error();
+}
+
 dberr_t Builder::insert_direct(Cursor &cursor, size_t thread_id) noexcept {
   ut_a(m_id == 0);
   ut_ad(is_skip_file_sort());
@@ -1224,13 +1255,30 @@ dberr_t Builder::insert_direct(Cursor &cursor, size_t thread_id) noexcept {
   {
     auto err = m_ctx.check_state_of_online_build_log();
 
+    DBUG_EXECUTE_IF("builder_insert_direct_trigger_error", {
+      static int count = 0;
+      ++count;
+      if (count > 1) {
+        err = DB_ONLINE_LOG_TOO_BIG;
+        m_ctx.m_trx->error_key_num = SERVER_CLUSTER_INDEX_ID;
+      }
+    });
+
     if (err != DB_SUCCESS) {
-      set_error(err);
-      err = m_btr_load->finish(err);
-      ut::delete_(m_btr_load);
-      m_btr_load = nullptr;
-      return get_error();
+      return online_build_handle_error(err);
     }
+  }
+
+  DBUG_EXECUTE_IF("builder_insert_direct_no_builder",
+                  { static_cast<void>(online_build_handle_error(DB_ERROR)); });
+
+  if (m_btr_load == nullptr) {
+    auto ind = index();
+    ib::error(ER_IB_MSG_DDL_FAIL_NO_BUILDER, static_cast<unsigned>(get_state()),
+              static_cast<unsigned>(get_error()), id(), ind->name(),
+              ind->space_id(), static_cast<unsigned>(ind->page),
+              ctx().old_table()->name.m_name, ctx().new_table()->name.m_name);
+    return DB_ERROR;
   }
 
   m_btr_load->latch();
@@ -1488,18 +1536,14 @@ dberr_t Builder::bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
     IF_ENABLED("ddl_write_failure", set_error(DB_TEMP_FILE_WRITE_FAIL);
                return get_error();)
 
-    auto persistor = [&](IO_buffer io_buffer, os_offset_t &n) -> dberr_t {
+    auto persistor = [&](IO_buffer io_buffer) -> dberr_t {
       auto &file = thread_ctx->m_file;
 
       ut_a(!(file.m_size % IO_BLOCK_SIZE));
 
-      if (n == 0) {
-        n = ut_uint64_align_down(io_buffer.second, IO_BLOCK_SIZE);
-      } else {
-        ut_a(n == io_buffer.second);
-        n = ut_uint64_align_up(io_buffer.second, IO_BLOCK_SIZE);
-      }
-      ut_a(n >= IO_BLOCK_SIZE);
+      os_offset_t n = io_buffer.second;
+      ut_a(n != 0);
+      ut_a(n % IO_BLOCK_SIZE == 0);
 
       auto err =
           ddl::pwrite(file.m_file.get(), io_buffer.first, n, file.m_size);
@@ -1539,8 +1583,13 @@ dberr_t Builder::add_row(Cursor &cursor, Row &row, size_t thread_id,
                          Latch_release &&latch_release) noexcept {
   auto err = m_ctx.check_state_of_online_build_log();
 
+  DBUG_EXECUTE_IF("builder_add_row_trigger_error", {
+    err = DB_ONLINE_LOG_TOO_BIG;
+    m_ctx.m_trx->error_key_num = SERVER_CLUSTER_INDEX_ID;
+  });
+
   if (err != DB_SUCCESS) {
-    set_error(err);
+    err = online_build_handle_error(err);
   } else if (is_spatial_index()) {
     if (!cursor.eof()) {
       err = batch_add_row(row, thread_id);
@@ -1710,7 +1759,7 @@ dberr_t Builder::check_duplicates(Thread_ctxs &dupcheck, Dup *dup) noexcept {
 dberr_t Builder::btree_build() noexcept {
   ut_a(!is_skip_file_sort());
 
-  DEBUG_SYNC_C_IF_THD(m_ctx.thd(), "ddl_btree_build_interrupt");
+  DEBUG_SYNC(m_ctx.thd(), "ddl_btree_build_interrupt");
   if (m_local_stage != nullptr) {
     m_local_stage->begin_phase_insert();
   }

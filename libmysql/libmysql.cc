@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -48,6 +49,7 @@
 #include <time.h>
 
 #include <algorithm>
+#include <vector>
 
 #include "errmsg.h"
 #include "m_string.h"
@@ -101,11 +103,6 @@
 #include "mysql_trace.h"
 #include "sql_common.h"
 
-/*
-  Temporary replacement for COM_SHUTDOWN. This will be removed once
-  mysql_shutdown C API is removed.
-*/
-#define COM_SHUTDOWN_DEPRECATED 8
 static void append_wild(char *to, char *end, const char *wild);
 
 static bool mysql_client_init = false;
@@ -113,6 +110,18 @@ static bool org_my_init_done = false;
 
 struct MYSQL_STMT_EXT {
   MEM_ROOT fields_mem_root;
+  struct {
+    /**
+     * Stores the size of array of names for statement bind parameters.
+     * The size should match the total sum of the unnamed and named bind params
+     * for this statement, with name entries for the unnamed parameters being
+     * set to nullptr. This differs from stmt->param_count that only
+     * counts unnamed parameters calculated by counting parameter placeholders
+     * during the statement prepare.
+     **/
+    uint n_params;
+    char **names;
+  } bind_names_info;
 };
 
 /*
@@ -260,7 +269,7 @@ void STDCALL mysql_debug(const char *debug [[maybe_unused]]) {
       char buff[80];
       buff[sizeof(buff) - 1] = 0;
       strxnmov(buff, sizeof(buff) - 1, "libmysql: ", env, NullS);
-      MessageBox((HWND)0, "Debugging variable MYSQL_DEBUG used", buff, MB_OK);
+      MessageBox(nullptr, "Debugging variable MYSQL_DEBUG used", buff, MB_OK);
     }
 #endif
   }
@@ -728,14 +737,11 @@ MYSQL_RES *STDCALL mysql_list_tables(MYSQL *mysql, const char *wild) {
 MYSQL_FIELD *cli_list_fields(MYSQL *mysql) {
   MYSQL_DATA *query;
   MYSQL_FIELD *result;
-
   MYSQL_TRACE_STAGE(mysql, WAIT_FOR_FIELD_DEF);
   query =
       cli_read_rows(mysql, (MYSQL_FIELD *)nullptr, protocol_41(mysql) ? 8 : 6);
   MYSQL_TRACE_STAGE(mysql, READY_FOR_COMMAND);
-
   if (!query) return nullptr;
-
   mysql->field_count = (uint)query->rows;
   result = unpack_fields(mysql, query->data, mysql->field_alloc,
                          mysql->field_count, true, mysql->server_capabilities);
@@ -743,81 +749,10 @@ MYSQL_FIELD *cli_list_fields(MYSQL *mysql) {
   return result;
 }
 
-/**************************************************************************
-  List all fields in a table
-  If wild is given then only the fields matching wild is returned
-  Instead of this use query:
-  show fields in 'table' like "wild"
-**************************************************************************/
-
-MYSQL_RES *STDCALL mysql_list_fields(MYSQL *mysql, const char *table,
-                                     const char *wild) {
-  MYSQL_RES *result;
-  MYSQL_FIELD *fields;
-  MEM_ROOT *new_root;
-  char buff[258], *end;
-  DBUG_TRACE;
-  DBUG_PRINT("enter", ("table: '%s'  wild: '%s'", table, wild ? wild : ""));
-
-  end = strmake(strmake(buff, table, 128) + 1, wild ? wild : "", 128);
-  free_old_query(mysql);
-  if (simple_command(mysql, COM_FIELD_LIST, (uchar *)buff, (ulong)(end - buff),
-                     1) ||
-      !(fields = (*mysql->methods->list_fields)(mysql)))
-    return nullptr;
-
-  if (!(new_root = (MEM_ROOT *)my_malloc(PSI_NOT_INSTRUMENTED, sizeof(MEM_ROOT),
-                                         MYF(MY_WME | MY_ZEROFILL))))
-    return nullptr;
-  if (!(result = (MYSQL_RES *)my_malloc(PSI_NOT_INSTRUMENTED, sizeof(MYSQL_RES),
-                                        MYF(MY_WME | MY_ZEROFILL)))) {
-    my_free(new_root);
-    return nullptr;
-  }
-
-  result->methods = mysql->methods;
-  result->field_alloc = mysql->field_alloc;
-  mysql->fields = nullptr;
-  mysql->field_alloc = new_root;
-  result->field_count = mysql->field_count;
-  result->fields = fields;
-  result->eof = true;
-  return result;
-}
-
-/* List all running processes (threads) in server */
-
-MYSQL_RES *STDCALL mysql_list_processes(MYSQL *mysql) {
-  uint field_count;
-  uchar *pos;
-  DBUG_TRACE;
-
-  if (simple_command(mysql, COM_PROCESS_INFO, nullptr, 0, 0)) return nullptr;
-  free_old_query(mysql);
-  pos = (uchar *)mysql->net.read_pos;
-  field_count = (uint)net_field_length(&pos);
-  if (!(mysql->fields =
-            cli_read_metadata(mysql, field_count, protocol_41(mysql) ? 7 : 5)))
-    return nullptr;
-  mysql->status = MYSQL_STATUS_GET_RESULT;
-  mysql->field_count = field_count;
-  return mysql_store_result(mysql);
-}
-
 int STDCALL mysql_shutdown(MYSQL *mysql,
                            enum mysql_enum_shutdown_level shutdown_level
                            [[maybe_unused]]) {
-  if (mysql_get_server_version(mysql) < 50709)
-    return simple_command(mysql, COM_DEPRECATED_1, nullptr, 0, 0);
-  else
-    return mysql_real_query(mysql, STRING_WITH_LEN("shutdown"));
-}
-
-int STDCALL mysql_refresh(MYSQL *mysql, uint options) {
-  uchar bits[1];
-  DBUG_TRACE;
-  bits[0] = (uchar)options;
-  return simple_command(mysql, COM_REFRESH, bits, 1, 0);
+  return mysql_real_query(mysql, STRING_WITH_LEN("shutdown"));
 }
 
 int STDCALL mysql_kill(MYSQL *mysql, ulong pid) {
@@ -833,7 +768,82 @@ int STDCALL mysql_kill(MYSQL *mysql, ulong pid) {
   */
   if (pid & (~0xfffffffful)) return CR_INVALID_CONN_HANDLE;
   int4store(buff, pid);
-  return simple_command(mysql, COM_PROCESS_KILL, buff, sizeof(buff), 0);
+  std::string kill_stmt = "KILL " + std::to_string(pid);
+  return mysql_real_query(mysql, kill_stmt.c_str(), kill_stmt.length());
+}
+
+MYSQL_RES *STDCALL mysql_list_processes(MYSQL *mysql) {
+  if (mysql_real_query(mysql, STRING_WITH_LEN("SHOW PROCESSLIST")))
+    return nullptr;
+  return mysql_store_result(mysql);
+}
+
+MYSQL_RES *STDCALL mysql_list_fields(MYSQL *mysql, const char *table,
+                                     const char *wild) {
+  MYSQL_RES *result;
+  MYSQL_FIELD *fields;
+  MEM_ROOT *new_root;
+  char buff[258], *end;
+  DBUG_TRACE;
+  DBUG_PRINT("enter", ("table: '%s'  wild: '%s'", table, wild ? wild : ""));
+  end = strmake(strmake(buff, table, 128) + 1, wild ? wild : "", 128);
+  free_old_query(mysql);
+  if (simple_command(mysql, COM_FIELD_LIST, (uchar *)buff, (ulong)(end - buff),
+                     1) ||
+      !(fields = (*mysql->methods->list_fields)(mysql)))
+    return nullptr;
+  if (!(new_root = (MEM_ROOT *)my_malloc(PSI_NOT_INSTRUMENTED, sizeof(MEM_ROOT),
+                                         MYF(MY_WME | MY_ZEROFILL))))
+    return nullptr;
+  if (!(result = (MYSQL_RES *)my_malloc(PSI_NOT_INSTRUMENTED, sizeof(MYSQL_RES),
+                                        MYF(MY_WME | MY_ZEROFILL)))) {
+    my_free(new_root);
+    return nullptr;
+  }
+  result->methods = mysql->methods;
+  result->field_alloc = mysql->field_alloc;
+  mysql->fields = nullptr;
+  mysql->field_alloc = new_root;
+  result->field_count = mysql->field_count;
+  result->fields = fields;
+  result->eof = true;
+  return result;
+}
+
+int STDCALL mysql_refresh(MYSQL *mysql, uint options) {
+  int error = 0;
+  std::vector<std::string> commands;
+
+  if (options & REFRESH_GRANT) commands.push_back("PRIVILEGES");
+  if (options & REFRESH_LOG) commands.push_back("LOGS");
+  if (options & REFRESH_STATUS) commands.push_back("STATUS");
+
+  if (!commands.empty()) {
+    std::string flush_command = "FLUSH ";
+    for (int i = 0; i < (int)commands.size(); i++) {
+      if (i == 0)
+        flush_command += commands[i];
+      else
+        flush_command += "," + commands[i];
+    }
+
+    error |=
+        mysql_real_query(mysql, flush_command.c_str(), flush_command.length());
+    commands.clear();
+    flush_command.clear();
+  }
+
+  if (options & REFRESH_SOURCE)
+    error |=
+        mysql_real_query(mysql, STRING_WITH_LEN("RESET BINARY LOGS AND GTIDS"));
+
+  if (options & REFRESH_REPLICA)
+    error |= mysql_real_query(mysql, STRING_WITH_LEN("RESET REPLICA"));
+
+  if (options & REFRESH_TABLES)
+    error |= mysql_real_query(mysql, STRING_WITH_LEN("FLUSH TABLES"));
+
+  return error;
 }
 
 int STDCALL mysql_set_server_option(MYSQL *mysql,
@@ -919,8 +929,6 @@ uint STDCALL mysql_warning_count(MYSQL *mysql) { return mysql->warning_count; }
 ulong STDCALL mysql_thread_id(MYSQL *mysql) {
   /*
     ulong may be 64-bit, but we currently only transmit 32-bit.
-    mysql_thread_id() is usually used in conjunction with mysql_kill()
-    which is similarly limited (and obsolete).
     SELECTION CONNECTION_ID() / KILL CONNECTION avoid this issue.
   */
   return (mysql)->thread_id;
@@ -1314,6 +1322,16 @@ bool cli_read_prepare_result(MYSQL *mysql, MYSQL_STMT *stmt) {
   return false;
 }
 
+void mysql_stmt_extension_bind_free(MYSQL_STMT_EXT *ext) {
+  DBUG_TRACE;
+  if (ext->bind_names_info.n_params) {
+    for (uint idx = 0; idx < ext->bind_names_info.n_params; idx++) {
+      my_free(ext->bind_names_info.names[idx]);
+    }
+  }
+  memset(&ext->bind_names_info, 0, sizeof(ext->bind_names_info));
+}
+
 /*
   Allocate memory and init prepared statement structure.
 
@@ -1400,7 +1418,7 @@ MYSQL_STMT *STDCALL mysql_stmt_init(MYSQL *mysql) {
       calling mysql_stmt_field_count(), and get result set metadata
       with mysql_stmt_result_metadata(),
     - if query contains placeholders, bind input parameters to placeholders
-      using mysql_stmt_bind_param(),
+      using mysql_stmt_bind_named_param(),
     - otherwise proceed directly to mysql_stmt_execute().
 
   IMPLEMENTATION NOTES
@@ -1446,6 +1464,7 @@ int STDCALL mysql_stmt_prepare(MYSQL_STMT *stmt, const char *query,
     stmt->bind_param_done = false;
     stmt->bind_result_done = false;
     stmt->param_count = stmt->field_count = 0;
+    mysql_stmt_extension_bind_free(stmt->extension);
     stmt->mem_root->ClearForReuse();
     stmt->extension->fields_mem_root.Clear();
 
@@ -1476,18 +1495,8 @@ int STDCALL mysql_stmt_prepare(MYSQL_STMT *stmt, const char *query,
     return 1;
   }
 
-  /*
-    alloc_root will return valid address even in case when param_count
-    and field_count are zero. Thus we should never rely on stmt->bind
-    or stmt->params when checking for existence of placeholders or
-    result set.
-  */
-  if (!(stmt->params = (MYSQL_BIND *)stmt->mem_root->Alloc(
-            sizeof(MYSQL_BIND) * (stmt->param_count + stmt->field_count)))) {
-    set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate);
-    return 1;
-  }
-  stmt->bind = stmt->params + stmt->param_count;
+  stmt->params = nullptr;
+  stmt->bind = nullptr;
   stmt->state = MYSQL_STMT_PREPARE_DONE;
   DBUG_PRINT("info", ("Parameter count: %u", stmt->param_count));
   return 0;
@@ -1865,10 +1874,13 @@ int cli_stmt_execute(MYSQL_STMT *stmt) {
       return 1;
     }
 
-    if (mysql_int_serialize_param_data(
-            &mysql->net, stmt->param_count, stmt->params, nullptr, 1,
-            &param_data, &param_length, stmt->send_types_to_server,
-            send_named_params, false, can_deal_with_flags)) {
+    MYSQL_STMT_EXT *ext = stmt->extension;
+
+    result = mysql_int_serialize_param_data(
+        &mysql->net, ext->bind_names_info.n_params, stmt->params,
+        const_cast<const char **>(ext->bind_names_info.names), 1, &param_data,
+        &param_length, 1, send_named_params, false, can_deal_with_flags);
+    if (result != 0) {
       set_stmt_errmsg(stmt, &mysql->net);
       return 1;
     }
@@ -2165,7 +2177,7 @@ static void prepare_to_fetch_result(MYSQL_STMT *stmt) {
           with mysql_stmt_init() and prepared with
           mysql_stmt_prepare(). If there are placeholders
           in the statement they must be bound to local
-          variables with mysql_stmt_bind_param().
+          variables with mysql_stmt_bind_named_param().
 
   DESCRIPTION
     This function will automatically flush pending result
@@ -2267,10 +2279,8 @@ unsigned int STDCALL mysql_stmt_field_count(MYSQL_STMT *stmt) {
 uint64_t STDCALL mysql_stmt_insert_id(MYSQL_STMT *stmt) {
   return stmt->insert_id;
 }
-
 /*
   Set up input data buffers for a statement.
-
   SYNOPSIS
     mysql_stmt_bind_param()
     stmt    statement handle
@@ -2278,10 +2288,13 @@ uint64_t STDCALL mysql_stmt_insert_id(MYSQL_STMT *stmt) {
     my_bind Array of mysql_stmt_param_count() bind parameters.
             This function doesn't check that size of this argument
             is >= mysql_stmt_field_count(): it's user's responsibility.
-
   DESCRIPTION
+    @deprecated This function is deprecated and will be removed in a future
+                version. Use mysq_stmt_bind_named_param() instead.
+
     Use this call after mysql_stmt_prepare() to bind user variables to
     placeholders.
+
     Each element of bind array stands for a placeholder. Placeholders
     are counted from 0.  For example statement
     'INSERT INTO t (a, b) VALUES (?, ?)'
@@ -2431,62 +2444,26 @@ uint64_t STDCALL mysql_stmt_insert_id(MYSQL_STMT *stmt) {
     members of MYSQL_BIND array.
     This is a pure local call. Data types of client buffers are sent
     along with buffers' data at first execution of the statement.
-
   RETURN
     0  success
     1  error, can be retrieved with mysql_stmt_error.
 */
 
 bool STDCALL mysql_stmt_bind_param(MYSQL_STMT *stmt, MYSQL_BIND *my_bind) {
-  uint count = 0;
-  MYSQL_BIND *param, *end;
-  DBUG_TRACE;
-
-  if (!stmt->param_count) {
-    if ((int)stmt->state < (int)MYSQL_STMT_PREPARE_DONE) {
-      set_stmt_error(stmt, CR_NO_PREPARE_STMT, unknown_sqlstate);
-      return true;
-    }
-    return false;
-  }
-
-  /* Allocated on prepare */
-  memcpy((char *)stmt->params, (char *)my_bind,
-         sizeof(MYSQL_BIND) * stmt->param_count);
-
-  for (param = stmt->params, end = param + stmt->param_count; param < end;
-       param++) {
-    if (fix_param_bind(param, count++)) {
-      my_stpcpy(stmt->sqlstate, unknown_sqlstate);
-      sprintf(stmt->last_error,
-              ER_CLIENT(stmt->last_errno = CR_UNSUPPORTED_PARAM_TYPE),
-              param->buffer_type, count);
-      return true;
-    }
-  }
-  /* We have to send/resend type information to MySQL */
-  stmt->send_types_to_server = true;
-  stmt->bind_param_done = true;
-  return false;
+  return mysql_stmt_bind_named_param(stmt, my_bind, stmt->param_count, nullptr);
 }
-
 bool STDCALL mysql_bind_param(MYSQL *mysql, unsigned n_params,
                               MYSQL_BIND *binds, const char **names) {
   MYSQL_EXTENSION *ext = MYSQL_EXTENSION_PTR(mysql);
-
   mysql_extension_bind_free(ext);
-
   /* if any of the above is empty our work here is done */
   if (!n_params || !binds || !names) return false;
-
   ext->bind_info.n_params = n_params;
   ext->bind_info.bind = (MYSQL_BIND *)my_malloc(
       PSI_NOT_INSTRUMENTED, sizeof(MYSQL_BIND) * n_params, MYF(0));
   ext->bind_info.names = (char **)my_malloc(PSI_NOT_INSTRUMENTED,
                                             sizeof(char *) * n_params, MYF(0));
-
   memcpy(ext->bind_info.bind, binds, sizeof(MYSQL_BIND) * n_params);
-
   MYSQL_BIND *param = ext->bind_info.bind;
   for (uint idx = 0; idx < n_params; idx++, param++) {
     ext->bind_info.names[idx] =
@@ -2505,6 +2482,149 @@ bool STDCALL mysql_bind_param(MYSQL *mysql, unsigned n_params,
       return true;
     }
   }
+  return false;
+}
+
+/*
+  Set up unnamed and named (query attributes) bind parameters for a statement.
+
+  SYNOPSIS
+    mysql_stmt_bind_named_param()
+    stmt    statement handle
+            The statement must be prepared with mysql_stmt_prepare().
+    binds   Array of named bind parameters.
+    n_params Number of items within arrays.
+    names   Array of bind parameter names.
+
+  DESCRIPTION
+    Use this call after mysql_stmt_prepare() to store both named and
+    unnamed bind user variables (query attributes).
+
+    After variables were bound, you can repeatedly set/change their
+    values and mysql_stmt_execute() the statement.
+
+    Note that calling both mysql_stmt_bind_param() and
+  mysql_stmt_bind_named_param() is not additive, each call overwrites the
+  settings set by the previous call.
+
+    See also: mysql_stmt_send_long_data() for sending long text/blob
+    data in pieces, examples in tests/mysql_client_test.c.
+    Next steps you might want to make:
+    - execute statement with mysql_stmt_execute(),
+    - reset statement using mysql_stmt_reset() or reprepare it with
+      another query using mysql_stmt_prepare()
+    - close statement with mysql_stmt_close().
+
+    The following example demonstrates binding one unnamed and one
+    named parameter, notice the unnamed parameter having NULL in a matching
+    names array slot:
+
+      MYSQL_STMT *stmt;
+      stmt = mysql_simple_prepare(mysql, "SELECT POW(?,2) AS square");
+
+      int int_data = 4;  // unnamed input parameter
+      int int_parentid = 1329494394;  // named input parameter ("traceparent")
+      MYSQL_BIND all_params[2];
+      memset(all_params, 0, sizeof(all_params));
+
+      all_params[0].buffer_type = MYSQL_TYPE_LONG;
+      all_params[0].buffer = (char *)&int_data;
+      all_params[0].length = nullptr;
+      all_params[0].is_null = nullptr;
+
+      all_params[1].buffer_type = MYSQL_TYPE_LONG;
+      all_params[1].buffer = (char *)&int_parentid;
+      all_params[1].length = nullptr;
+      all_params[1].is_null = nullptr;
+
+      const char *names[2] = {nullptr, "traceparent"};
+      int rc = mysql_stmt_bind_named_param(stmt, all_params,
+  std::size(all_params), names);
+      // after executing, binding result and fetching data, result should be 16,
+  i.e. 4 squared
+
+    In case you don't have any named parameters, you can pass NULL for the names
+    array parameter.
+
+    As a corner case, when passing NULL for binds array or 0 for its size, the
+  API will return success (nothing to be bound).
+
+  IMPLEMENTATION
+    The function copies given bind array to internal storage of the
+    statement, and sets up typecode-specific handlers to perform
+    serialization of bound data. This means that although you don't need
+    to call this routine after each assignment to bind buffers, you
+    need to call it each time you change parameter typecodes, or other
+    members of MYSQL_BIND array.
+    This is a pure local call. Data types of client buffers are sent
+    along with buffers' data at first execution of the statement.
+
+  RETURN
+    0  success
+    1  error, can be retrieved with mysql_stmt_error.
+*/
+
+bool STDCALL mysql_stmt_bind_named_param(MYSQL_STMT *stmt, MYSQL_BIND *binds,
+                                         unsigned n_params,
+                                         const char **names) {
+  DBUG_TRACE;
+
+  MYSQL_STMT_EXT *ext = stmt->extension;
+
+  mysql_stmt_extension_bind_free(ext);
+
+  if (!stmt->param_count) {
+    if ((int)stmt->state < (int)MYSQL_STMT_PREPARE_DONE) {
+      set_stmt_error(stmt, CR_NO_PREPARE_STMT, unknown_sqlstate);
+      return true;
+    }
+  }
+
+  /* if any of the below is empty our work here is done */
+  if (!n_params || !binds) return false;
+
+  /*
+    alloc_root will return valid address even in case when param_count
+    and field_count are zero. Thus we should never rely on stmt->bind
+    or stmt->params when checking for existence of placeholders or
+    result set.
+  */
+  int n_items = n_params;
+  // bind result parameters may have already been allocated separately
+  if (stmt->bind == nullptr) n_items += stmt->field_count;
+
+  if (!(stmt->params = (MYSQL_BIND *)stmt->mem_root->Alloc(sizeof(MYSQL_BIND) *
+                                                           n_items))) {
+    set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate);
+    return true;
+  }
+  if (stmt->bind == nullptr) stmt->bind = stmt->params + n_params;
+
+  // copy binds array
+  memcpy((char *)stmt->params, (char *)binds, sizeof(MYSQL_BIND) * n_params);
+
+  // copy names array
+  ext->bind_names_info.n_params = n_params;
+  ext->bind_names_info.names =
+      (char **)stmt->mem_root->Alloc(sizeof(char *) * n_params);
+
+  MYSQL_BIND *param = stmt->params;
+  for (uint idx = 0; idx < n_params; idx++, param++) {
+    ext->bind_names_info.names[idx] =
+        (names && names[idx]) ? my_strdup(key_memory_MYSQL, names[idx], MYF(0))
+                              : nullptr;
+    if (fix_param_bind(param, idx)) {
+      set_stmt_error(stmt, CR_UNSUPPORTED_PARAM_TYPE, unknown_sqlstate);
+      for (uint idx2 = 0; idx2 <= idx; idx2++)
+        my_free(ext->bind_names_info.names[idx2]);
+      memset(&ext->bind_names_info, 0, sizeof(ext->bind_names_info));
+      return true;
+    }
+  }
+
+  /* We have to send/resend type information to MySQL */
+  stmt->send_types_to_server = true;
+  stmt->bind_param_done = true;
   return false;
 }
 
@@ -2795,7 +2915,6 @@ static void fetch_string_with_conversion(MYSQL_BIND *param, char *value,
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL:
     default: {
@@ -3405,10 +3524,10 @@ static bool is_binary_compatible(enum enum_field_types type1,
       range2[] = {MYSQL_TYPE_INT24, MYSQL_TYPE_LONG, MYSQL_TYPE_NULL},
       range3[] = {MYSQL_TYPE_DATETIME, MYSQL_TYPE_TIMESTAMP, MYSQL_TYPE_NULL},
       range4[] = {
-          MYSQL_TYPE_ENUM,        MYSQL_TYPE_SET,        MYSQL_TYPE_TINY_BLOB,
-          MYSQL_TYPE_MEDIUM_BLOB, MYSQL_TYPE_LONG_BLOB,  MYSQL_TYPE_BLOB,
-          MYSQL_TYPE_VECTOR,      MYSQL_TYPE_VAR_STRING, MYSQL_TYPE_STRING,
-          MYSQL_TYPE_GEOMETRY,    MYSQL_TYPE_DECIMAL,    MYSQL_TYPE_NULL};
+          MYSQL_TYPE_ENUM,        MYSQL_TYPE_SET,       MYSQL_TYPE_TINY_BLOB,
+          MYSQL_TYPE_MEDIUM_BLOB, MYSQL_TYPE_LONG_BLOB, MYSQL_TYPE_BLOB,
+          MYSQL_TYPE_VAR_STRING,  MYSQL_TYPE_STRING,    MYSQL_TYPE_GEOMETRY,
+          MYSQL_TYPE_DECIMAL,     MYSQL_TYPE_NULL};
   static const enum enum_field_types *range_list[] = {range1, range2, range3,
                                                       range4},
                                      **range_list_end =
@@ -3509,7 +3628,6 @@ static bool setup_one_fetch_function(MYSQL_BIND *param, MYSQL_FIELD *field) {
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_BIT:
       assert(param->buffer_length != 0);
       param->fetch_result = fetch_result_bin;
@@ -3625,11 +3743,26 @@ bool STDCALL mysql_stmt_bind_result(MYSQL_STMT *stmt, MYSQL_BIND *my_bind) {
 
   /*
     We only need to check that stmt->field_count - if it is not null
-    stmt->bind was initialized in mysql_stmt_prepare
-    stmt->bind overlaps with bind if mysql_stmt_bind_param
+    stmt->bind was initialized in mysql_stmt_bind_named_param()
+    stmt->bind overlaps with bind if mysql_stmt_bind_named_param
     is called from mysql_stmt_store_result.
     BEWARE of buffer overwrite ...
   */
+
+  if (stmt->bind == nullptr) {
+    /*
+      alloc_root will return valid address even in case when param_count
+      and field_count are zero. Thus we should never rely on stmt->bind
+      or stmt->params when checking for existence of placeholders or
+      result set.
+     */
+    MEM_ROOT *fields_mem_root = &stmt->extension->fields_mem_root;
+    if (!(stmt->bind = (MYSQL_BIND *)fields_mem_root->Alloc(
+              sizeof(MYSQL_BIND) * stmt->field_count))) {
+      set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate);
+      return true;
+    }
+  }
 
   if (stmt->bind != my_bind)
     memcpy((char *)stmt->bind, (char *)my_bind,
@@ -3687,6 +3820,7 @@ static int stmt_fetch_row(MYSQL_STMT *stmt, uchar *row) {
     /* If output parameters were not bound we should just return success */
     return 0;
   }
+  assert(stmt->bind != nullptr);
 
   null_ptr = row;
   row += (stmt->field_count + 9) / 8; /* skip null bits */
@@ -3998,12 +4132,24 @@ int STDCALL mysql_stmt_store_result(MYSQL_STMT *stmt) {
       max_length
     */
     MYSQL_BIND *my_bind, *end;
-    MYSQL_FIELD *field;
+    if (stmt->bind == nullptr) {
+      /*
+        alloc_root will return valid address even in case when param_count
+        and field_count are zero. Thus we should never rely on stmt->bind
+        or stmt->params when checking for existence of placeholders or
+        result set.
+       */
+      MEM_ROOT *fields_mem_root = &stmt->extension->fields_mem_root;
+      if (!(stmt->bind = (MYSQL_BIND *)fields_mem_root->Alloc(
+                sizeof(MYSQL_BIND) * stmt->field_count))) {
+        set_stmt_error(stmt, CR_OUT_OF_MEMORY, unknown_sqlstate);
+        return 1;
+      }
+    }
     memset(stmt->bind, 0, sizeof(*stmt->bind) * stmt->field_count);
 
-    for (my_bind = stmt->bind, end = my_bind + stmt->field_count,
-        field = stmt->fields;
-         my_bind < end; my_bind++, field++) {
+    for (my_bind = stmt->bind, end = my_bind + stmt->field_count; my_bind < end;
+         my_bind++) {
       my_bind->buffer_type = MYSQL_TYPE_NULL;
       my_bind->buffer_length = 1;
     }
@@ -4113,9 +4259,12 @@ static bool reset_stmt_handle(MYSQL_STMT *stmt, uint flags) {
       stmt->data_cursor = nullptr;
     }
     if (flags & RESET_LONG_DATA) {
-      MYSQL_BIND *param = stmt->params, *param_end = param + stmt->param_count;
-      /* Clear long_data_used flags */
-      for (; param < param_end; param++) param->long_data_used = false;
+      if (stmt->params) {
+        MYSQL_BIND *param = stmt->params,
+                   *param_end = param + stmt->param_count;
+        /* Clear long_data_used flags */
+        for (; param < param_end; param++) param->long_data_used = false;
+      }
     }
     stmt->read_row_func = stmt_read_row_no_result_set;
     if (mysql) {
@@ -4181,6 +4330,7 @@ bool STDCALL mysql_stmt_close(MYSQL_STMT *stmt) {
   int rc = 0;
   DBUG_TRACE;
 
+  mysql_stmt_extension_bind_free(stmt->extension);
   stmt->result.alloc->Clear();
   stmt->mem_root->Clear();
   stmt->extension->fields_mem_root.Clear();

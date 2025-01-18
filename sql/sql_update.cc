@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.*/
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 // Handle UPDATE queries (both single- and multi-table).
 
@@ -28,6 +27,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -39,7 +39,6 @@
 #include "mem_root_deque.h"  // mem_root_deque
 #include "my_alloc.h"
 #include "my_base.h"
-#include "my_bit.h"  // my_count_bits
 #include "my_bitmap.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
@@ -102,7 +101,7 @@
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
 #include "sql/sql_opt_exec_shared.h"
-#include "sql/sql_optimizer.h"  // build_equal_items, substitute_gc
+#include "sql/sql_optimizer.h"  // substitute_gc
 #include "sql/sql_partition.h"  // partition_key_modified
 #include "sql/sql_resolver.h"   // setup_order
 #include "sql/sql_select.h"
@@ -264,8 +263,6 @@ bool compare_records(const TABLE *table) {
     */
     for (Field **ptr = table->field; *ptr != nullptr; ptr++) {
       Field *field = *ptr;
-      //skip ghost column.
-      if(field && field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
       if (bitmap_is_set(table->write_set, field->field_index())) {
         if (field->is_nullable()) {
           uchar null_byte_index = field->null_offset();
@@ -294,8 +291,6 @@ bool compare_records(const TABLE *table) {
     return true;  // Diff in NULL value
   /* Compare updated fields */
   for (Field **ptr = table->field; *ptr; ptr++) {
-    //skip ghost column.
-    if ((*ptr) && (*ptr)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(table->write_set, (*ptr)->field_index()) &&
         (*ptr)->cmp_binary_offset(table->s->rec_buff_length))
       return true;
@@ -507,7 +502,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
   join_type type = JT_UNKNOWN;
 
   auto cleanup = create_scope_guard([&range_scan, table] {
-    destroy(range_scan);
+    if (range_scan != nullptr) ::destroy_at(range_scan);
     table->set_keyread(false);
     table->file->ha_index_or_rnd_end();
     free_io_cache(table);
@@ -691,8 +686,10 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
           Filesort has already found and selected the rows we want to update,
           so we don't need the where clause
         */
-        destroy(range_scan);
-        range_scan = nullptr;
+        if (range_scan != nullptr) {
+          ::destroy_at(range_scan);
+          range_scan = nullptr;
+        }
         conds = nullptr;
       } else {
         /*
@@ -798,7 +795,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         if (thd->killed && !error)  // Aborted
           error = 1;                /* purecov: inspected */
         limit = tmp_limit;
-        end_semi_consistent_read.rollback();
+        end_semi_consistent_read.reset();
         if (used_index < MAX_KEY && covering_keys_for_cond.is_set(used_index))
           table->set_keyread(false);
         table->file->ha_index_or_rnd_end();
@@ -820,8 +817,10 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
             /*examined_rows=*/nullptr);
         if (iterator->Init()) return true;
 
-        destroy(range_scan);
-        range_scan = nullptr;
+        if (range_scan != nullptr) {
+          ::destroy_at(range_scan);
+          range_scan = nullptr;
+        }
         conds = nullptr;
       }
     } else {
@@ -1073,7 +1072,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         break;
       }
     }
-    end_semi_consistent_read.rollback();
+    end_semi_consistent_read.reset();
 
     dup_key_found = 0;
     /*
@@ -1206,7 +1205,7 @@ static TABLE *GetOutermostTable(const JOIN *join) {
   // The old optimizer can usually find it in the access path too, except if the
   // outermost table is a const table, since const tables may not be visible in
   // the access path tree.
-  if (!join->thd->lex->using_hypergraph_optimizer) {
+  if (!join->thd->lex->using_hypergraph_optimizer()) {
     assert(join->qep_tab != nullptr);
     return join->qep_tab[0].table();
   }
@@ -1552,7 +1551,7 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
   // enables it to perform optimizations like sort avoidance and semi-join
   // flattening even if features specific to single-table UPDATE (that is, ORDER
   // BY and LIMIT) are used.
-  if (lex->using_hypergraph_optimizer) {
+  if (lex->using_hypergraph_optimizer()) {
     multitable = true;
   }
 
@@ -1612,7 +1611,7 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
   */
   thd->table_map_for_update = tables_for_update = get_table_map(select->fields);
 
-  uint update_table_count_local = my_count_bits(tables_for_update);
+  const int update_table_count_local = std::popcount(tables_for_update);
 
   assert(update_table_count_local > 0);
 
@@ -2566,7 +2565,7 @@ bool UpdateRowsIterator::DoImmediateUpdatesAndBufferRowIds(
       }
 
       // check if a record exists with the same hash value
-      if (!check_unique_constraint(tmp_table))
+      if (!check_unique_fields(tmp_table))
         return false;  // skip adding duplicate record to the temp table
 
       /* Write row, ignoring duplicated updates to a row */
@@ -3005,7 +3004,7 @@ table_map GetImmediateUpdateTable(const JOIN *join, bool single_target) {
 
   // The hypergraph optimizer determines the immediate update tables during
   // planning, not after planning.
-  assert(!join->thd->lex->using_hypergraph_optimizer);
+  assert(!join->thd->lex->using_hypergraph_optimizer());
 
   // In some cases, rows may be updated immediately as they are read from the
   // outermost table in the join.
@@ -3078,7 +3077,7 @@ unique_ptr_destroy_only<RowIterator> Query_result_update::create_iterator(
       update_tables, tmp_tables, copy_field, unupdated_check_opt_tables,
       update_operations, fields_for_table, values_for_table,
       // The old optimizer does not use hash join in UPDATE statements.
-      thd->lex->using_hypergraph_optimizer
+      thd->lex->using_hypergraph_optimizer()
           ? GetHashJoinTables(unit->root_access_path())
           : 0);
 }

@@ -706,7 +706,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "1.00",
             "prefix_cost": "1.25",
-            "data_read_per_join": "100"
+            "data_read_per_join": "80"
           },
           "used_columns": [
             "a"
@@ -725,7 +725,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "5.00",
             "prefix_cost": "6.50",
-            "data_read_per_join": "500"
+            "data_read_per_join": "400"
           },
           "used_columns": [
             "a"

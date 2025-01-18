@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2024, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -73,13 +74,13 @@ void free_object(T *ptr) {
 
 // set of instrumented object allocators for different parameters number
 template <typename T, typename... Args>
-T *allocate_object(Args &&... args) {
+T *allocate_object(Args &&...args) {
   return new (my_malloc(IS_PSI_AVAILABLE(KEY_memory_x_objects, 0), sizeof(T),
                         MYF(MY_WME))) T(std::forward<Args>(args)...);
 }
 
 template <typename T, typename... Args>
-std::shared_ptr<T> allocate_shared(Args &&... args) {
+std::shared_ptr<T> allocate_shared(Args &&...args) {
   return std::allocate_shared<T>(detail::PFS_allocator<T>(),
                                  std::forward<Args>(args)...);
 }

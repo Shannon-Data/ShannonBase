@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2003, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,7 +30,6 @@
 
 #define JAM_FILE_ID 44
 
-
 class AddFragReq {
   /**
    * Sender(s)
@@ -40,21 +40,19 @@ class AddFragReq {
    * Receiver(s)
    */
   friend class Dbdict;
-  
+
   friend bool printADD_FRAG_REQ(FILE *, const Uint32 *, Uint32, Uint16);
 
-public:
+ public:
   static constexpr Uint32 SignalLength = 14;
-  
-  enum RequestInfo {
-    CreateInRunning = 0x8000000,
-    TemporaryTable  = 0x00000010
-  };
-private:
+
+  enum RequestInfo { CreateInRunning = 0x8000000, TemporaryTable = 0x00000010 };
+
+ private:
   Uint32 dihPtr;
-  Uint32 senderData; // The same data as sent in DIADDTABREQ
+  Uint32 senderData;  // The same data as sent in DIADDTABREQ
   Uint32 fragmentId;
-  Uint32 requestInfo; 
+  Uint32 requestInfo;
   Uint32 tableId;
   Uint32 nextLCP;
   Uint32 nodeId;
@@ -79,10 +77,11 @@ class AddFragRef {
   friend class Dbdih;
 
   friend bool printADD_FRAG_REF(FILE *, const Uint32 *, Uint32, Uint16);
-public:
+
+ public:
   static constexpr Uint32 SignalLength = 2;
-  
-private:
+
+ private:
   Uint32 dihPtr;
   Uint32 fragId;
 };
@@ -99,10 +98,11 @@ class AddFragConf {
   friend class Dbdih;
 
   friend bool printADD_FRAG_CONF(FILE *, const Uint32 *, Uint32, Uint16);
-public:
+
+ public:
   static constexpr Uint32 SignalLength = 2;
-  
-private:
+
+ private:
   Uint32 dihPtr;
   Uint32 fragId;
 };
@@ -118,20 +118,17 @@ class LqhFragReq {
    */
   friend class Dblqh;
   friend class DblqhProxy;
-  
+
   friend bool printLQH_FRAG_REQ(FILE *, const Uint32 *, Uint32, Uint16);
 
-public:
+ public:
   static constexpr Uint32 SignalLength = 24;
   static constexpr Uint32 OldSignalLength = 23;
   static constexpr Uint32 OldestSignalLength = 22;
-  
-  enum RequestInfo {
-    CreateInRunning = 0x8000000,
-    TemporaryTable = 0x00000010
-  };
 
-private:
+  enum RequestInfo { CreateInRunning = 0x8000000, TemporaryTable = 0x00000010 };
+
+ private:
   Uint32 senderData;
   Uint32 senderRef;
   Uint32 tableId;
@@ -143,7 +140,7 @@ private:
     Uint32 fragmentId;
     Uint32 fragId;
   };
-  Uint32 requestInfo; 
+  Uint32 requestInfo;
 
   Uint32 localKeyLength;
   Uint32 lh3DistrBits;
@@ -154,7 +151,7 @@ private:
   Uint32 kValue;
 
   Uint32 logPartId;
-  Uint32 tablespace_id;       // RNIL for MM table
+  Uint32 tablespace_id;  // RNIL for MM table
   Uint32 maxRowsLow;
   Uint32 maxRowsHigh;
   Uint32 minRowsLow;
@@ -177,10 +174,11 @@ class LqhFragConf {
   friend class Dbdict;
 
   friend bool printLQH_FRAG_CONF(FILE *, const Uint32 *, Uint32, Uint16);
-public:
+
+ public:
   static constexpr Uint32 SignalLength = 5;
 
-private:
+ private:
   Uint32 senderData;
   Uint32 lqhFragPtr;
   Uint32 tableId;
@@ -201,10 +199,11 @@ class LqhFragRef {
   friend class Dbdict;
 
   friend bool printLQH_FRAG_REF(FILE *, const Uint32 *, Uint32, Uint16);
-public:
+
+ public:
   static constexpr Uint32 SignalLength = 6;
 
-private:
+ private:
   Uint32 senderData;
   Uint32 errorCode;
   Uint32 tableId;
@@ -226,17 +225,19 @@ class LqhAddAttrReq {
   friend class DblqhProxy;
 
   friend bool printLQH_ADD_ATTR_REQ(FILE *, const Uint32 *, Uint32, Uint16);
-public:
+
+ public:
   static constexpr Uint32 HeaderLength = 4;
   static constexpr Uint32 EntryLength = 3;
   static constexpr Uint32 MAX_ATTRIBUTES = 6;
   static constexpr Uint32 DEFAULT_VALUE_SECTION_NUM = 0;
   struct Entry {
-    Uint32 attrId;              // for index, includes primary attr id << 16
-    Uint32 attrDescriptor;      // 2 words type info
+    Uint32 attrId;          // for index, includes primary attr id << 16
+    Uint32 attrDescriptor;  // 2 words type info
     Uint32 extTypeInfo;
   };
-private:
+
+ private:
   Uint32 lqhFragPtr;
   Uint32 noOfAttributes;
   Uint32 senderData;
@@ -250,17 +251,18 @@ class LqhAddAttrRef {
    */
   friend class Dblqh;
   friend class DblqhProxy;
-  
+
   /**
    * Receiver(s)
    */
   friend class Dbdict;
 
   friend bool printLQH_ADD_ATTR_REF(FILE *, const Uint32 *, Uint32, Uint16);
-public:
+
+ public:
   static constexpr Uint32 SignalLength = 2;
 
-private:
+ private:
   Uint32 senderData;
   Uint32 errorCode;
 };
@@ -271,28 +273,25 @@ class LqhAddAttrConf {
    */
   friend class Dblqh;
   friend class DblqhProxy;
-  
+
   /**
    * Receiver(s)
    */
   friend class Dbdict;
 
   friend bool printLQH_ADD_ATTR_CONF(FILE *, const Uint32 *, Uint32, Uint16);
-public:
+
+ public:
   static constexpr Uint32 SignalLength = 2;
 
-private:
+ private:
   Uint32 senderData;
   Uint32 senderAttrPtr;
 };
 
-struct DropFragReq
-{
+struct DropFragReq {
   static constexpr Uint32 SignalLength = 5;
-  enum RequestInfo
-  {
-    AlterTableAbort = 0x1
-  };
+  enum RequestInfo { AlterTableAbort = 0x1 };
   Uint32 senderRef;
   Uint32 senderData;
   Uint32 tableId;
@@ -300,8 +299,7 @@ struct DropFragReq
   Uint32 requestInfo;
 };
 
-struct DropFragRef
-{
+struct DropFragRef {
   static constexpr Uint32 SignalLength = 5;
   Uint32 senderRef;
   Uint32 senderData;
@@ -310,15 +308,13 @@ struct DropFragRef
   Uint32 errCode;
 };
 
-struct DropFragConf
-{
+struct DropFragConf {
   static constexpr Uint32 SignalLength = 4;
   Uint32 senderRef;
   Uint32 senderData;
   Uint32 tableId;
   Uint32 fragId;
 };
-
 
 #undef JAM_FILE_ID
 

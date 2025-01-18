@@ -1,15 +1,16 @@
-/* Copyright (c) 2004, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2004, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -257,7 +258,7 @@
     gdb ./mysqld
 
     Then, withn the (gdb) prompt:
-    (gdb) run --gdb --port=5554 --socket=/tmp/mysqld.5554 --skip-innodb --debug
+    (gdb) run --gdb --port=5554 --socket=/tmp/mysqld.5554 --debug
 
     Next, I open several windows for each:
 
@@ -928,7 +929,6 @@ uint ha_federated::convert_row_to_internal_format(uchar *record, MYSQL_ROW row,
       index variable to move us through the row at the
       same iterative step as the field
     */
-    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     ptrdiff_t old_ptr;
     old_ptr = (ptrdiff_t)(record - table->record[0]);
     (*field)->move_field_offset(old_ptr);
@@ -1476,7 +1476,6 @@ static FEDERATED_SHARE *get_share(const char *table_name, TABLE *table) {
       query.set_charset(system_charset_info);
       query.append(STRING_WITH_LEN("SELECT "));
       for (field = table->field; *field; field++) {
-        if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
         append_ident(&query, (*field)->field_name, strlen((*field)->field_name),
                      ident_quote_char);
         query.append(STRING_WITH_LEN(", "));
@@ -1667,7 +1666,6 @@ bool ha_federated::append_stmt_insert(String *query) {
     list and the fields list that match the current query id
   */
   for (field = table->field; *field; field++) {
-    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(table->write_set, (*field)->field_index())) {
       /* append the field name */
       append_ident(&insert_string, (*field)->field_name,
@@ -1755,7 +1753,6 @@ int ha_federated::write_row(uchar *) {
     list and the fields list that is part of the write set
   */
   for (field = table->field; *field; field++) {
-    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(table->write_set, (*field)->field_index())) {
       if ((*field)->is_null())
         values_string.append(STRING_WITH_LEN(" NULL "));
@@ -2037,7 +2034,6 @@ int ha_federated::update_row(const uchar *old_data, uchar *) {
   */
 
   for (Field **field = table->field; *field; field++) {
-    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (bitmap_is_set(table->write_set, (*field)->field_index())) {
       const size_t field_name_length = strlen((*field)->field_name);
       append_ident(&update_string, (*field)->field_name, field_name_length,
@@ -2146,7 +2142,6 @@ int ha_federated::delete_row(const uchar *) {
   delete_string.append(STRING_WITH_LEN(" WHERE "));
 
   for (Field **field = table->field; *field; field++) {
-    if ((*field)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     Field *cur_field = *field;
     found++;
     if (bitmap_is_set(table->read_set, cur_field->field_index())) {
@@ -2987,13 +2982,6 @@ int ha_federated::real_connect() {
   /* Just throw away the result, no rows anyways but need to keep in sync */
   mysql_free_result(mysql_store_result(mysql));
 
-  /*
-    Since we do not support transactions at this version, we can let the client
-    API silently reconnect. For future versions, we will need more logic to
-    deal with transactions
-  */
-
-  mysql->reconnect = true;
   return 0;
 }
 

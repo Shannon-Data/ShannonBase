@@ -6035,11 +6035,11 @@ NULL
 {"user": "616263"}
 Warnings:
 Warning	1235	This version of MySQL doesn't yet support 'sorting of non-scalar JSON values'
-update t set j=json_set(j, '$.user', md5('bingle'))  where id=8;
+update t set j=json_set(j, '$.user', sha2('bingle',0))  where id=8;
 select j from t order by j;
 j
 NULL
-{"user": "f7bffef41562255b44fe01aadecb5c8d"}
+{"user": "75f95daa72e02aeff5e4387ec2ab63a223ba46aed29a8d5f375b3fc02ce7bc78"}
 Warnings:
 Warning	1235	This version of MySQL doesn't yet support 'sorting of non-scalar JSON values'
 update t set j=json_set(j, '$.user', database())  where id=8;
@@ -10456,7 +10456,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.20",
             "prefix_cost": "0.45",
-            "data_read_per_join": "52"
+            "data_read_per_join": "48"
           },
           "used_columns": "filtered due to bug#22472365",
           "partial_update_columns": [
@@ -10486,7 +10486,7 @@ EXPLAIN
             "read_cost": "0.50",
             "eval_cost": "0.20",
             "prefix_cost": "1.15",
-            "data_read_per_join": "52"
+            "data_read_per_join": "48"
           },
           "used_columns": "filtered due to bug#22472365"
         }
@@ -10542,7 +10542,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.20",
             "prefix_cost": "0.45",
-            "data_read_per_join": "52"
+            "data_read_per_join": "48"
           },
           "used_columns": [
             "id",
@@ -10577,7 +10577,7 @@ EXPLAIN
             "read_cost": "0.50",
             "eval_cost": "0.20",
             "prefix_cost": "1.15",
-            "data_read_per_join": "52"
+            "data_read_per_join": "48"
           },
           "used_columns": [
             "id",
@@ -10632,7 +10632,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.20",
             "prefix_cost": "0.45",
-            "data_read_per_join": "52"
+            "data_read_per_join": "48"
           },
           "used_columns": "filtered due to bug#22472365"
         }
@@ -10649,7 +10649,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.60",
             "prefix_cost": "1.30",
-            "data_read_per_join": "156"
+            "data_read_per_join": "144"
           },
           "used_columns": "filtered due to bug#22472365"
         }

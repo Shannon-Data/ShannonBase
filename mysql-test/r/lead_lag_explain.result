@@ -22,7 +22,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -44,10 +44,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -66,7 +66,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -88,10 +88,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -110,7 +110,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -132,10 +132,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -155,7 +155,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -177,10 +177,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -199,7 +199,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -221,10 +221,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -243,7 +243,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -265,10 +265,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -288,7 +288,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -308,7 +308,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -317,10 +317,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -340,7 +340,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -360,7 +360,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -369,10 +369,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -392,7 +392,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -412,7 +412,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -421,10 +421,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -444,7 +444,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -464,7 +464,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -473,10 +473,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -513,7 +513,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "0.75"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -535,10 +535,10 @@ EXPLAIN
         "rows_produced_per_join": 5,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.50",
-          "prefix_cost": "0.75",
-          "data_read_per_join": "330"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "320"
         },
         "used_columns": [
           "c1",
@@ -556,7 +556,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "0.75"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -578,10 +578,10 @@ EXPLAIN
         "rows_produced_per_join": 5,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.50",
-          "prefix_cost": "0.75",
-          "data_read_per_join": "330"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "320"
         },
         "used_columns": [
           "c1",
@@ -599,7 +599,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "0.75"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -621,10 +621,10 @@ EXPLAIN
         "rows_produced_per_join": 5,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.50",
-          "prefix_cost": "0.75",
-          "data_read_per_join": "330"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "320"
         },
         "used_columns": [
           "c1",
@@ -694,7 +694,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -716,10 +716,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -737,7 +737,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -759,10 +759,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -780,7 +780,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -802,10 +802,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -823,7 +823,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -845,10 +845,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -866,7 +866,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -888,10 +888,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -909,7 +909,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -931,10 +931,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -952,7 +952,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -974,10 +974,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -995,7 +995,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1017,10 +1017,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -1038,7 +1038,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1060,10 +1060,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -1081,7 +1081,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1103,10 +1103,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -1124,7 +1124,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1146,10 +1146,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -1167,7 +1167,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1189,10 +1189,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -1210,7 +1210,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1232,10 +1232,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -1253,7 +1253,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1275,10 +1275,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -1296,7 +1296,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1318,10 +1318,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -1339,7 +1339,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1361,10 +1361,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -1382,7 +1382,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1404,10 +1404,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -1425,7 +1425,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1447,10 +1447,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -1468,7 +1468,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1490,10 +1490,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -1511,7 +1511,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1533,10 +1533,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -1554,7 +1554,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1576,10 +1576,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -1597,7 +1597,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1619,10 +1619,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -1640,7 +1640,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1662,10 +1662,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -1683,7 +1683,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1705,10 +1705,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -1726,7 +1726,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1748,10 +1748,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "i1",
@@ -1769,7 +1769,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1791,10 +1791,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "i1",
@@ -1812,7 +1812,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1834,10 +1834,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "i1",
@@ -1855,7 +1855,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1877,10 +1877,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "i1",
@@ -1898,7 +1898,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1920,10 +1920,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -1941,7 +1941,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -1963,10 +1963,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -1984,7 +1984,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2006,10 +2006,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -2027,7 +2027,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2049,10 +2049,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "i1",
@@ -2070,7 +2070,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2092,10 +2092,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "b1",
@@ -2113,7 +2113,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2135,10 +2135,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "b1",
@@ -2156,7 +2156,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2178,10 +2178,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "b1",
@@ -2199,7 +2199,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2221,10 +2221,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -2242,7 +2242,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2264,10 +2264,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -2285,7 +2285,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2307,10 +2307,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -2328,7 +2328,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2350,10 +2350,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "i1",
@@ -2371,7 +2371,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2393,10 +2393,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "b1",
@@ -2414,7 +2414,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2436,10 +2436,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "d1",
@@ -2457,7 +2457,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2479,10 +2479,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "d1",
@@ -2500,7 +2500,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2522,10 +2522,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -2543,7 +2543,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2565,10 +2565,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -2586,7 +2586,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2608,10 +2608,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -2629,7 +2629,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2651,10 +2651,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "i1",
@@ -2672,7 +2672,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2694,10 +2694,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "b1",
@@ -2715,7 +2715,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2737,10 +2737,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "d1",
@@ -2758,7 +2758,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2780,10 +2780,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "e1",
@@ -2801,7 +2801,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2823,10 +2823,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "c1",
@@ -2844,7 +2844,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2866,10 +2866,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "j1",
@@ -2887,7 +2887,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2909,10 +2909,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "g1",
@@ -2930,7 +2930,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2952,10 +2952,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "i1",
@@ -2973,7 +2973,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -2995,10 +2995,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "b1",
@@ -3016,7 +3016,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3038,10 +3038,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "d1",
@@ -3059,7 +3059,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "1.05"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3081,10 +3081,10 @@ EXPLAIN
         "rows_produced_per_join": 8,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.80",
-          "prefix_cost": "1.05",
-          "data_read_per_join": "784"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "768"
         },
         "used_columns": [
           "e1",
@@ -3109,7 +3109,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3134,7 +3134,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3143,10 +3143,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -3170,7 +3170,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3195,7 +3195,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3204,10 +3204,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -3231,7 +3231,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3256,7 +3256,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3265,10 +3265,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -3293,7 +3293,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3318,7 +3318,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3327,10 +3327,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -3356,7 +3356,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3380,7 +3380,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3389,10 +3389,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -3418,7 +3418,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3440,7 +3440,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3449,10 +3449,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3476,7 +3476,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3498,7 +3498,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3507,10 +3507,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3534,7 +3534,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3556,7 +3556,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3565,10 +3565,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3591,7 +3591,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3613,7 +3613,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3622,10 +3622,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3648,7 +3648,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3670,7 +3670,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3679,10 +3679,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3705,7 +3705,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3727,7 +3727,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3736,10 +3736,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3762,7 +3762,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3784,7 +3784,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3793,10 +3793,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3819,7 +3819,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3841,7 +3841,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3850,10 +3850,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3877,7 +3877,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3900,7 +3900,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3909,10 +3909,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3936,7 +3936,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -3959,7 +3959,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -3968,10 +3968,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -3995,7 +3995,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4017,7 +4017,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4026,10 +4026,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -4053,7 +4053,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4075,7 +4075,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4084,10 +4084,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -4111,7 +4111,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4133,7 +4133,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4142,10 +4142,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -4169,7 +4169,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4191,7 +4191,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4200,10 +4200,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -4227,7 +4227,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4249,7 +4249,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4258,10 +4258,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -4285,7 +4285,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4307,7 +4307,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4316,10 +4316,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -4343,7 +4343,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4366,7 +4366,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4375,10 +4375,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4402,7 +4402,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4425,7 +4425,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4434,10 +4434,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4461,7 +4461,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4484,7 +4484,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4493,10 +4493,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4520,7 +4520,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4543,7 +4543,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4552,10 +4552,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4578,7 +4578,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4601,7 +4601,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4610,10 +4610,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4636,7 +4636,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4659,7 +4659,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4668,10 +4668,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4694,7 +4694,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4717,7 +4717,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4726,10 +4726,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4752,7 +4752,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4775,7 +4775,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4784,10 +4784,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4810,7 +4810,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4833,7 +4833,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4842,10 +4842,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4869,7 +4869,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4893,7 +4893,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4902,10 +4902,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4929,7 +4929,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -4953,7 +4953,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -4962,10 +4962,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -4989,7 +4989,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5012,7 +5012,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -5021,10 +5021,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -5048,7 +5048,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5071,7 +5071,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -5080,10 +5080,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -5107,7 +5107,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5130,7 +5130,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -5139,10 +5139,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -5166,7 +5166,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5189,7 +5189,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -5198,10 +5198,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -5225,7 +5225,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5248,7 +5248,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -5257,10 +5257,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -5284,7 +5284,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5307,7 +5307,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -5316,10 +5316,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "id",
@@ -5347,7 +5347,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5372,7 +5372,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -5381,10 +5381,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -5413,7 +5413,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "10.15"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5438,7 +5438,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "9.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t1",
@@ -5447,10 +5447,10 @@ EXPLAIN
         "rows_produced_per_join": 9,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "0.90",
-          "prefix_cost": "1.15",
-          "data_read_per_join": "234"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "216"
         },
         "used_columns": [
           "d",
@@ -5481,7 +5481,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "14.55"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5501,7 +5501,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "13.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t",
@@ -5510,10 +5510,10 @@ EXPLAIN
         "rows_produced_per_join": 13,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "1.30",
-          "prefix_cost": "1.55",
-          "data_read_per_join": "130"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "104"
         },
         "used_columns": [
           "i"
@@ -5531,7 +5531,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "14.55"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5551,7 +5551,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "13.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t",
@@ -5560,10 +5560,10 @@ EXPLAIN
         "rows_produced_per_join": 13,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "1.30",
-          "prefix_cost": "1.55",
-          "data_read_per_join": "130"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "104"
         },
         "used_columns": [
           "i"
@@ -5582,7 +5582,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "14.55"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5605,7 +5605,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "13.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t",
@@ -5614,10 +5614,10 @@ EXPLAIN
         "rows_produced_per_join": 13,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "1.30",
-          "prefix_cost": "1.55",
-          "data_read_per_join": "130"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "104"
         },
         "used_columns": [
           "i"
@@ -5639,7 +5639,7 @@ EXPLAIN
   "query_block": {
     "select_id": 1,
     "cost_info": {
-      "query_cost": "14.55"
+      "query_cost": "elided"
     },
     "windowing": {
       "windows": [
@@ -5664,7 +5664,7 @@ EXPLAIN
         }
       ],
       "cost_info": {
-        "sort_cost": "13.00"
+        "sort_cost": "elided"
       },
       "table": {
         "table_name": "t",
@@ -5673,10 +5673,10 @@ EXPLAIN
         "rows_produced_per_join": 13,
         "filtered": "100.00",
         "cost_info": {
-          "read_cost": "0.25",
-          "eval_cost": "1.30",
-          "prefix_cost": "1.55",
-          "data_read_per_join": "130"
+          "read_cost": "elided",
+          "eval_cost": "elided",
+          "prefix_cost": "elided",
+          "data_read_per_join": "104"
         },
         "used_columns": [
           "i"

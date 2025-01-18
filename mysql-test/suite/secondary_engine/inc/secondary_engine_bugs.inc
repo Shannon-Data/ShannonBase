@@ -1,3 +1,9 @@
+--source include/elide_costs.inc
+
+--disable_query_log
+eval INSTALL PLUGIN mock SONAME '$MOCK_PLUGIN';
+--enable_query_log
+
 --echo #
 --echo # Bug#33546083 - mysqld crash in Field::field_index
 --echo #
@@ -7,12 +13,10 @@ CREATE TABLE t1 (
   col_varchar_255_key varchar(255),
   PRIMARY KEY (pk),
   KEY col_varchar_255_key (col_varchar_255_key)
-) ENGINE=InnoDB SECONDARY_ENGINE=rapid;
+) ENGINE=InnoDB SECONDARY_ENGINE=mock;
 
 ALTER TABLE t1 SECONDARY_LOAD;
 ANALYZE TABLE t1;
-
-set use_secondary_engine=forced;
 
 let $query=
 SELECT (SELECT MAX(col_varchar_255_key ) FROM t1) AS field1
@@ -29,7 +33,7 @@ DROP TABLE t1;
 --echo # Bug#34854369: Customer query hits assert(m_pq.is_valid()) failure
 --echo #
 
-CREATE TABLE t (x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t (x INT) SECONDARY_ENGINE MOCK;
 INSERT INTO t VALUES (), (), (), ();
 ALTER TABLE t SECONDARY_LOAD;
 ANALYZE TABLE t;
@@ -55,7 +59,7 @@ DROP TABLE t;
 --echo #               at overflow_bitset.h
 --echo #
 
-CREATE TABLE t (x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t (x INT) SECONDARY_ENGINE MOCK;
 ALTER TABLE t SECONDARY_LOAD;
 SELECT 1 FROM t AS t1 LEFT OUTER JOIN t AS t2 LEFT JOIN t AS t3 ON TRUE
 ON t3.x <=> 1 AND t2.x <> 1 AND t2.x <> 2 AND t2.x <> 3 AND t2.x <> 4 AND
@@ -72,3 +76,7 @@ t2.x <> 50 AND t2.x <> 51 AND t2.x <> 52 AND t2.x <> 53 AND t2.x <> 54 AND
 t2.x <> 55 AND t2.x <> 56 AND t2.x <> 57 AND t2.x <> 58 AND t2.x <> 59 AND
 t2.x <> 60 AND t2.x <> 61 AND t2.x <> 62 AND t2.x <> 63 AND t2.x <> 64;
 DROP TABLE t;
+
+--disable_query_log
+UNINSTALL PLUGIN mock;
+--enable_query_log

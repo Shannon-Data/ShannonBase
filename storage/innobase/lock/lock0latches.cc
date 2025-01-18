@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -38,15 +39,14 @@ size_t Latches::Page_shards::get_shard(const page_id_t &page_id) {
   make more sense to use hash_calc_cell_id with proper hash table size. The
   current implementation works, because the size of all three hashmaps is always
   the same. This allows an interface with less arguments. */
-  ut_ad(lock_sys->rec_hash->get_n_cells() ==
-        lock_sys->prdt_hash->get_n_cells());
-  ut_ad(lock_sys->rec_hash->get_n_cells() ==
-        lock_sys->prdt_page_hash->get_n_cells());
+  ut_ad(lock_sys->rec_hash.get_n_cells() == lock_sys->prdt_hash.get_n_cells());
+  ut_ad(lock_sys->rec_hash.get_n_cells() ==
+        lock_sys->prdt_page_hash.get_n_cells());
   /* We need a property that if two pages are mapped to the same bucket of the
   hash table, and thus their lock queues are merged, then these two lock queues
   are protected by the same shard. This is why to compute the shard we use the
   cell_id as the input and not the original lock_rec_hash_value's result. */
-  return hash_calc_cell_id(lock_rec_hash_value(page_id), lock_sys->rec_hash) %
+  return lock_sys->rec_hash.get_cell_id(lock_rec_hash_value(page_id)) %
          SHARDS_COUNT;
 }
 
@@ -60,6 +60,10 @@ Lock_mutex &Latches::Page_shards::get_mutex(const page_id_t &page_id) {
   this pattern, which avoids code duplication by reusing const version. */
   return const_cast<Lock_mutex &>(
       const_cast<const Latches::Page_shards *>(this)->get_mutex(page_id));
+}
+
+Lock_mutex &Latches::Page_shards::get_mutex(const uint64_t cell_id) {
+  return mutexes[cell_id % SHARDS_COUNT];
 }
 
 size_t Latches::Table_shards::get_shard(const table_id_t table_id) {

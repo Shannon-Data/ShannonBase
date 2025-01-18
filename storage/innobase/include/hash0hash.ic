@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -49,14 +50,14 @@ static inline void hash_table_clear(
   memset(table->cells.get(), 0x0, table->get_n_cells() * sizeof(hash_cell_t));
 }
 
-static inline size_t hash_get_n_cells(hash_table_t *table) {
+static inline size_t hash_get_n_cells(hash_table_t const *table) {
   ut_ad(table);
   ut_ad(table->magic_n == hash_table_t::HASH_TABLE_MAGIC_N);
   return table->get_n_cells();
 }
 
 static inline uint64_t hash_calc_cell_id(uint64_t hash_value,
-                                         hash_table_t *table) {
+                                         hash_table_t const *table) {
   ut_ad(table);
   ut_ad(table->magic_n == hash_table_t::HASH_TABLE_MAGIC_N);
   return hash_value % table->get_n_cells_fast_modulo();

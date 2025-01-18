@@ -4235,7 +4235,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.80",
                   "prefix_cost": "1.05",
-                  "data_read_per_join": "144"
+                  "data_read_per_join": "128"
                 },
                 "used_columns": [
                   "a"
@@ -4267,7 +4267,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.10",
             "prefix_cost": "6.45",
-            "data_read_per_join": "18"
+            "data_read_per_join": "16"
           },
           "used_columns": [
             "a",
@@ -4368,7 +4368,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "1.10",
             "prefix_cost": "1.35",
-            "data_read_per_join": "110"
+            "data_read_per_join": "88"
           },
           "used_columns": [
             "a"
@@ -4399,7 +4399,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "2.00",
                   "prefix_cost": "2.25",
-                  "data_read_per_join": "200"
+                  "data_read_per_join": "160"
                 },
                 "used_columns": [
                   "a"
@@ -4691,7 +4691,7 @@ EXPLAIN
             "read_cost": "1.15",
             "eval_cost": "0.10",
             "prefix_cost": "1.25",
-            "data_read_per_join": "10"
+            "data_read_per_join": "8"
           },
           "used_columns": [
             "a"
@@ -4717,7 +4717,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "1.00",
                   "prefix_cost": "1.25",
-                  "data_read_per_join": "100"
+                  "data_read_per_join": "80"
                 },
                 "used_columns": [
                   "a"
@@ -4846,16 +4846,16 @@ Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b` from `test`.`t1` semi join (`test`.`t2`) where ((`<subquery2>`.`b` = `test`.`t1`.`b`) and (`<subquery2>`.`a` = `test`.`t1`.`a`))
 drop table t0, t1, t2;
 #
-# Bug#19695490: CRASH IN CREATE_REF_FOR_KEY ON SELECT + JOIN + UTF8 COLUMN
+# Bug#19695490: CRASH IN CREATE_REF_FOR_KEY ON SELECT + JOIN + utf8mb3 COLUMN
 #                + DATETIME INDEX.
 #
 CREATE TABLE t1 (
-field1 varchar(255) CHARACTER SET utf8,
-field2 varchar(255) CHARACTER SET utf8
+field1 varchar(255) CHARACTER SET utf8mb3,
+field2 varchar(255) CHARACTER SET utf8mb3
 );
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 INSERT INTO t1 VALUES
 ('time','time'),
 ('lpjdzvkp','lpjdzvkp'),
@@ -4863,14 +4863,14 @@ INSERT INTO t1 VALUES
 CREATE TABLE t2 ( col_varchar varchar(10));
 CREATE TABLE t3 (
 pk int(11) NOT NULL,
-col_varchar_255_utf8_key varchar(255) CHARACTER SET utf8,
-col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8,
+col_varchar_255_utf8_key varchar(255) CHARACTER SET utf8mb3,
+col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8mb3,
 PRIMARY KEY (pk)
 );
 Warnings:
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 INSERT INTO t3 VALUES (22,'come','h'),
 (23,'time','aaa'),
 (24,'lpjdzvkp','ababa'),
@@ -7977,7 +7977,7 @@ WHERE 1 IN(SELECT 1
 FROM t3));
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	2	100.00	NULL
-1	SIMPLE	<subquery2>	NULL	const	<auto_distinct_key>	<auto_distinct_key>	4	const	1	100.00	NULL
+1	SIMPLE	<subquery2>	NULL	const	<auto_distinct_key>	<auto_distinct_key>	8	const	1	100.00	NULL
 2	MATERIALIZED	t2	NULL	ALL	NULL	NULL	NULL	NULL	2	100.00	NULL
 2	MATERIALIZED	t3	NULL	ALL	NULL	NULL	NULL	NULL	2	100.00	NULL
 Warnings:
@@ -8016,7 +8016,7 @@ WHERE 1 IN(SELECT 1
 FROM t4)));
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	9	100.00	NULL
-1	SIMPLE	<subquery2>	NULL	const	<auto_distinct_key>	<auto_distinct_key>	4	const	1	100.00	NULL
+1	SIMPLE	<subquery2>	NULL	const	<auto_distinct_key>	<auto_distinct_key>	8	const	1	100.00	NULL
 2	MATERIALIZED	t2	NULL	ALL	NULL	NULL	NULL	NULL	9	100.00	NULL
 2	MATERIALIZED	t3	NULL	ALL	NULL	NULL	NULL	NULL	9	100.00	NULL
 2	MATERIALIZED	t4	NULL	ALL	NULL	NULL	NULL	NULL	9	100.00	NULL
@@ -8237,7 +8237,7 @@ EXPLAIN
                   "read_cost": "0.61",
                   "eval_cost": "0.10",
                   "prefix_cost": "0.71",
-                  "data_read_per_join": "170"
+                  "data_read_per_join": "168"
                 },
                 "used_columns": [
                   "Country",
@@ -8272,7 +8272,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.08",
             "prefix_cost": "2.26",
-            "data_read_per_join": "181"
+            "data_read_per_join": "180"
           },
           "used_columns": [
             "Code",
@@ -8307,7 +8307,7 @@ EXPLAIN
             "read_cost": "0.19",
             "eval_cost": "0.07",
             "prefix_cost": "2.52",
-            "data_read_per_join": "104"
+            "data_read_per_join": "103"
           },
           "used_columns": [
             "Country",
@@ -8595,6 +8595,13 @@ insert into t3 select @a:=@a+1, t2.a from t2, t0;
 Warnings:
 Warning	1287	Setting user variables within expressions is deprecated and will be removed in a future release. Consider alternatives: 'SET variable=expression, ...', or 'SELECT expression(s) INTO variables(s)'.
 alter table t3 add primary key(id), add key(a);
+SET GLOBAL innodb_stats_persistent_sample_pages = 60;
+ANALYZE TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	analyze	status	OK
+ANALYZE TABLE t3;
+Table	Op	Msg_type	Msg_text
+test.t3	analyze	status	OK
 The following must use loose index scan over t3, key a:
 explain select count(a) from t2 where a in ( SELECT  a FROM t3);
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
@@ -8607,6 +8614,7 @@ select count(a) from t2 where a in ( SELECT  a FROM t3);
 count(a)
 1000
 drop table t0,t1,t2,t3;
+SET GLOBAL innodb_stats_persistent_sample_pages = DEFAULT;
 #
 # Bug#33062: subquery in stored routine cause crash
 #
@@ -9382,12 +9390,12 @@ f2 varchar(1024)
 );
 INSERT INTO t1 VALUES ('v'),('we');
 CREATE TABLE t2 (
-col_varchar_1024_utf8 varchar(1024) CHARACTER SET utf8 DEFAULT NULL,
+col_varchar_1024_utf8 varchar(1024) CHARACTER SET utf8mb3 DEFAULT NULL,
 col_int_key int,
 col_int int
 );
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 INSERT INTO t2 VALUES ('we',4,NULL),('v',1305673728,6);
 CREATE TABLE t3 (
 col_int_key int,
@@ -9461,14 +9469,14 @@ DROP TABLE t1,t2;
 #
 CREATE TABLE t1 (
 pk int NOT NULL,
-col_varchar_1024_utf8_key varchar(1024) CHARACTER SET utf8 DEFAULT NULL,
+col_varchar_1024_utf8_key varchar(1024) CHARACTER SET utf8mb3 DEFAULT NULL,
 col_varchar_10_latin1_key varchar(10) DEFAULT NULL,
 PRIMARY KEY (pk),
 KEY col_varchar_1024_utf8_key(col_varchar_1024_utf8_key(333)),
 KEY col_varchar_10_latin1_key(col_varchar_10_latin1_key)
 ) charset utf8mb4;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 INSERT INTO t1 VALUES
 (1, 'a', 'a'),
 (2, 'ab', 'ab'),
@@ -10248,7 +10256,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.10",
             "prefix_cost": "0.35",
-            "data_read_per_join": "10"
+            "data_read_per_join": "8"
           },
           "used_columns": [
             "g1"
@@ -10285,7 +10293,7 @@ EXPLAIN
                       "read_cost": "0.25",
                       "eval_cost": "1.10",
                       "prefix_cost": "1.35",
-                      "data_read_per_join": "198"
+                      "data_read_per_join": "176"
                     },
                     "used_columns": [
                       "col_int_nokey",
@@ -10317,7 +10325,7 @@ EXPLAIN
                       "read_cost": "2.75",
                       "eval_cost": "1.10",
                       "prefix_cost": "5.20",
-                      "data_read_per_join": "198"
+                      "data_read_per_join": "176"
                     },
                     "used_columns": [
                       "col_int_key"
@@ -10346,7 +10354,7 @@ EXPLAIN
                       "read_cost": "5.04",
                       "eval_cost": "2.02",
                       "prefix_cost": "12.26",
-                      "data_read_per_join": "363"
+                      "data_read_per_join": "322"
                     },
                     "used_columns": [
                       "col_int_nokey",
@@ -12178,7 +12186,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.60",
             "prefix_cost": "0.85",
-            "data_read_per_join": "108"
+            "data_read_per_join": "96"
           },
           "used_columns": [
             "ik",
@@ -12210,7 +12218,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.60",
                   "prefix_cost": "0.85",
-                  "data_read_per_join": "108"
+                  "data_read_per_join": "96"
                 },
                 "used_columns": [
                   "vc"
@@ -12231,7 +12239,7 @@ EXPLAIN
             "read_cost": "1.50",
             "eval_cost": "1.20",
             "prefix_cost": "6.60",
-            "data_read_per_join": "216"
+            "data_read_per_join": "192"
           },
           "used_columns": [
             "ik",
@@ -12365,7 +12373,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.70",
                   "prefix_cost": "0.95",
-                  "data_read_per_join": "126"
+                  "data_read_per_join": "112"
                 },
                 "used_columns": [
                   "col_varchar_key",
@@ -12424,7 +12432,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.70",
                   "prefix_cost": "0.95",
-                  "data_read_per_join": "126"
+                  "data_read_per_join": "112"
                 },
                 "used_columns": [
                   "col_varchar_key",
@@ -12446,7 +12454,7 @@ EXPLAIN
             "read_cost": "0.50",
             "eval_cost": "4.00",
             "prefix_cost": "12.75",
-            "data_read_per_join": "400"
+            "data_read_per_join": "320"
           },
           "used_columns": [
             "col_varchar_nokey"
@@ -12526,7 +12534,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "2.00",
             "prefix_cost": "2.25",
-            "data_read_per_join": "360"
+            "data_read_per_join": "320"
           },
           "used_columns": [
             "col_int_nokey",
@@ -12561,7 +12569,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "2.00",
                   "prefix_cost": "2.25",
-                  "data_read_per_join": "360"
+                  "data_read_per_join": "320"
                 },
                 "used_columns": [
                   "col_int_nokey",
@@ -12584,7 +12592,7 @@ EXPLAIN
             "read_cost": "5.00",
             "eval_cost": "40.00",
             "prefix_cost": "54.50",
-            "data_read_per_join": "7K"
+            "data_read_per_join": "6K"
           },
           "used_columns": [
             "col_int_nokey"
@@ -12763,7 +12771,7 @@ EXPLAIN
                       "read_cost": "0.25",
                       "eval_cost": "2.00",
                       "prefix_cost": "2.25",
-                      "data_read_per_join": "680"
+                      "data_read_per_join": "640"
                     },
                     "used_columns": [
                       "col_varchar_nokey"
@@ -12795,7 +12803,7 @@ EXPLAIN
                       "read_cost": "5.00",
                       "eval_cost": "0.57",
                       "prefix_cost": "10.11",
-                      "data_read_per_join": "194"
+                      "data_read_per_join": "182"
                     },
                     "used_columns": [
                       "col_int_key",
@@ -12832,7 +12840,7 @@ EXPLAIN
             "read_cost": "1.79",
             "eval_cost": "0.12",
             "prefix_cost": "14.75",
-            "data_read_per_join": "42"
+            "data_read_per_join": "40"
           },
           "used_columns": [
             "pk",
@@ -12863,7 +12871,7 @@ EXPLAIN
             "read_cost": "0.63",
             "eval_cost": "0.12",
             "prefix_cost": "15.50",
-            "data_read_per_join": "42"
+            "data_read_per_join": "40"
           },
           "used_columns": [
             "pk",
@@ -12888,7 +12896,7 @@ EXPLAIN
             "read_cost": "0.31",
             "eval_cost": "2.50",
             "prefix_cost": "18.32",
-            "data_read_per_join": "850"
+            "data_read_per_join": "800"
           },
           "used_columns": [
             "col_datetime_key"
@@ -13009,7 +13017,7 @@ CREATE TABLE t1 (
 ID int(11) NOT NULL AUTO_INCREMENT,
 id2 int(11) DEFAULT NULL,
 id3 int(11) DEFAULT NULL,
-id4 varchar(150) COLLATE utf8_spanish_ci NOT NULL,
+id4 varchar(150) COLLATE utf8mb3_spanish_ci NOT NULL,
 id5 int(11) DEFAULT NULL,
 PRIMARY KEY (ID),
 KEY id2 (id2),
@@ -13185,8 +13193,7 @@ test.t1	analyze	status	OK
 EXPLAIN SELECT 1 FROM t1 WHERE EXISTS(SELECT 1) IN (SELECT 1 FROM t1);
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	PRIMARY	t1	NULL	ALL	NULL	NULL	NULL	NULL	1	100.00	NULL
-1	PRIMARY	<subquery3>	NULL	const	<auto_distinct_key>	<auto_distinct_key>	4	const	1	100.00	NULL
-3	MATERIALIZED	t1	NULL	ALL	NULL	NULL	NULL	NULL	1	100.00	NULL
+1	PRIMARY	t1	NULL	ALL	NULL	NULL	NULL	NULL	1	100.00	Start temporary; End temporary
 2	SUBQUERY	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	No tables used
 Warnings:
 Note	1003	/* select#1 */ select 1 AS `1` from `test`.`t1` semi join (`test`.`t1`) where true
@@ -13510,14 +13517,14 @@ DROP TABLE t1, t2, t3, t4;
 CREATE TABLE t1 (
 pk INTEGER,
 var_10_latin1 VARCHAR(10) CHARACTER SET latin1,
-var_255_utf8 VARCHAR(255) CHARACTER SET utf8,
+var_255_utf8 VARCHAR(255) CHARACTER SET utf8mb3,
 var_255_latin1 VARCHAR(255) CHARACTER SET latin1,
-var_10_utf8 VARCHAR(10) CHARACTER SET utf8,
+var_10_utf8 VARCHAR(10) CHARACTER SET utf8mb3,
 PRIMARY KEY (pk)
 );
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 CREATE VIEW v1 AS SELECT * FROM t1;
 INSERT INTO t1 VALUES
 (1,'FROCJ','korrhrspki','UAYVL','BPZIS'),

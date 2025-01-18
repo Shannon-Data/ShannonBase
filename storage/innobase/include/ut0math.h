@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+Copyright (c) 2021, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -39,6 +40,25 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0seq_lock.h"
 
 namespace ut {
+/** Computes the result of division rounded towards positive infinity.
+@param[in] numerator     The number you want to be divided
+@param[in] denominator   The number you want to divide by
+@return ceil(numerator/denominator). */
+template <typename T>
+constexpr T div_ceil(T numerator, T denominator) {
+  static_assert(std::is_integral_v<T>, "div_ceil<T> needs integral T");
+  /* see https://gist.github.com/Eisenwave/2a7d7a4e74e99bbb513984107a6c63ef
+  for list of common pitfalls, and this beautiful solution which compiles to
+  - branchless code with one division operation for unsigned ints,
+  - branchless (but longer) code with one division operation for signed ints,
+  - branchless code with just shifts and adds for constant d=constexpr 2^k,
+  - branchless code with multiplication instead of division for constexpr d
+  All that correctly handling negative numerators, denominators, and values
+  close to or equal to the max() or min(). */
+  const bool quotient_not_negative{(numerator < 0) == (denominator < 0)};
+  return numerator / denominator +
+         (quotient_not_negative && numerator % denominator != 0);
+}
 
 /** Calculates the 128bit result of multiplication of the two specified 64bit
 integers. May use CPU native instructions for speed of standard uint64_t
@@ -241,7 +261,7 @@ class mt_fast_modulo_t : private Non_copyable {
   /* This class can be made copyable, but this requires additional constructors.
    */
 
-  fast_modulo_t load() {
+  fast_modulo_t load() const {
     return m_data.read([](const data_t &stored_data) {
       return fast_modulo_t{stored_data.m_mod.load(std::memory_order_relaxed),
                            stored_data.m_inv.load(std::memory_order_relaxed)};

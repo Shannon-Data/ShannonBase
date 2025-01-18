@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2002, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,8 +21,7 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+*/
 
 #include "sql/sp.h"
 
@@ -111,8 +111,7 @@ static bool create_string(
     const char *name, size_t namelen, const char *params, size_t paramslen,
     const char *returns, size_t returnslen, const char *body, size_t bodylen,
     st_sp_chistics *chistics, const LEX_CSTRING &definer_user,
-    const LEX_CSTRING &definer_host, sql_mode_t sql_mode, bool if_not_exists,
-    bool with_body = true);
+    const LEX_CSTRING &definer_host, sql_mode_t sql_mode, bool if_not_exists);
 
 /**************************************************************************
   Fetch stored routines and events creation_ctx for upgrade.
@@ -158,19 +157,6 @@ bool load_collation(MEM_ROOT *mem_root, Field *field,
   return false;
 }
 
-/**
-    @returns true if this is an JAVASCRIPT routine, and
-             false if it is an external routine
-*/
-static enum_sp_language is_language_of(const char* lang) {
-  if (!lang) return enum_sp_language::SQL;
- 
-  if (native_strcasecmp(lang, "SQL") == 0)
-    return enum_sp_language::SQL;
-  else if (native_strcasecmp(lang, "JAVASCRIPT") == 0)
-    return enum_sp_language::JAVASCRIPT;
-  else return enum_sp_language::SQL;
-}
 /**************************************************************************
   Stored_routine_creation_ctx implementation.
 **************************************************************************/
@@ -266,7 +252,7 @@ Object_creation_ctx *Stored_routine_creation_ctx::create_backup_ctx(
   return new (thd->mem_root) Stored_routine_creation_ctx(thd);
 }
 
-void Stored_routine_creation_ctx::delete_backup_ctx() { destroy(this); }
+void Stored_routine_creation_ctx::delete_backup_ctx() { ::destroy_at(this); }
 
 /**
   Acquire Shared MDL lock on the routine object.
@@ -489,18 +475,6 @@ static sp_head *sp_compile(THD *thd, String *defstr, sql_mode_t sql_mode,
   return sp;
 }
 
-/**
-  The function parses input strings and returns SP structure.
-
-  @param[in]      thd               Thread handler
-  @param[in]      defstr            CREATE... string
-  @param[in]      sql_mode          SQL mode
-  @param[in]      creation_ctx      Creation context of stored routines
-
-  @retval         Pointer on sp_head struct   Success
-  @retval         NULL                        error
-*/
-
 class Bad_db_error_handler : public Internal_error_handler {
  public:
   Bad_db_error_handler() : m_error_caught(false) {}
@@ -523,7 +497,7 @@ class Bad_db_error_handler : public Internal_error_handler {
 
 enum_sp_return_code db_load_routine(
     THD *thd, enum_sp_type type, const char *sp_db, size_t sp_db_len,
-    const char *ssp_name, size_t ssp_name_len, sp_head **sphp,
+    const char *sp_name, size_t sp_name_len, sp_head **sphp,
     sql_mode_t sql_mode, const char *params, const char *returns,
     const char *body, st_sp_chistics *sp_chistics, const char *definer_user,
     const char *definer_host, longlong created, longlong modified,
@@ -540,37 +514,17 @@ enum_sp_return_code db_load_routine(
   newlex.thd = thd;
   newlex.set_current_query_block(nullptr);
 
-  String defstr, declare_str;
+  String defstr;
   defstr.set_charset(creation_ctx->get_client_cs());
-  declare_str.set_charset(creation_ctx->get_client_cs());
 
   const LEX_CSTRING user = {definer_user, strlen(definer_user)};
   const LEX_CSTRING host = {definer_host, strlen(definer_host)};
 
-  switch (is_language_of(sp_chistics->language.str)) {
-    case enum_sp_language::SQL: {
-      if (!create_string(thd, &defstr, type, nullptr, 0, ssp_name, ssp_name_len,
-                        params, strlen(params), returns, strlen(returns), body,
-                        strlen(body), sp_chistics, user, host, sql_mode, false)) {
-        ret = SP_INTERNAL_ERROR;
-        goto end;
-      }
-    } break;
-    case enum_sp_language::JAVASCRIPT: {
-      /**Here, we just only need a declaration of a sp, the body we dont care. Because
-       * we need the params and its values,the return value field,etc, therefore, we
-       * remove the sp body. If it's with sp body, it will failed in sp_compile().*/
-      if (!create_string(thd, &declare_str, type, nullptr, 0, ssp_name, ssp_name_len,
-                        params, strlen(params), returns, strlen(returns), body,
-                        strlen(body), sp_chistics, user, host, sql_mode, false,
-                        false)) {
-        ret = SP_INTERNAL_ERROR;
-        goto end;
-      }
-    } break;
-    default: 
-      assert(false);
-    break;
+  if (!create_string(thd, &defstr, type, nullptr, 0, sp_name, sp_name_len,
+                     params, strlen(params), returns, strlen(returns), body,
+                     strlen(body), sp_chistics, user, host, sql_mode, false)) {
+    ret = SP_INTERNAL_ERROR;
+    goto end;
   }
 
   thd->push_internal_handler(&db_not_exists_handler);
@@ -594,19 +548,7 @@ enum_sp_return_code db_load_routine(
   }
 
   {
-    switch (is_language_of(sp_chistics->language.str)) {
-      case enum_sp_language::SQL:
-        *sphp = sp_compile(thd, &defstr, sql_mode, creation_ctx);
-        break;
-      case enum_sp_language::JAVASCRIPT: {
-        *sphp = sp_compile(thd, &declare_str, sql_mode, creation_ctx);
-        //reset the code body.
-        (*sphp)->code = {body, strlen(body)};
-        (*sphp)->m_body_utf8 = {body, strlen(body)};
-        (*sphp)->m_body = {body, strlen(body)};
-      }break;
-      default: assert(false);
-    }
+    *sphp = sp_compile(thd, &defstr, sql_mode, creation_ctx);
     /*
       Force switching back to the saved current database (if changed),
       because it may be NULL. In this case, mysql_change_db() would
@@ -2191,8 +2133,7 @@ static bool create_string(
     const char *name, size_t namelen, const char *params, size_t paramslen,
     const char *returns, size_t returnslen, const char *body, size_t bodylen,
     st_sp_chistics *chistics, const LEX_CSTRING &definer_user,
-    const LEX_CSTRING &definer_host, sql_mode_t sql_mode, bool if_not_exists,
-    bool with_body) {
+    const LEX_CSTRING &definer_host, sql_mode_t sql_mode, bool if_not_exists) {
   const sql_mode_t old_sql_mode = thd->variables.sql_mode;
   const bool is_sql = chistics->language.length == 0 ||
                       native_strcasecmp(chistics->language.str, "SQL") == 0;
@@ -2269,8 +2210,7 @@ static bool create_string(
     buf->append("AS ");
     buf->append(dollar_quote, dollar_quote_len);
   }
-  with_body? buf->append(body, bodylen) : buf->append(" ", strlen(" "));
-
+  buf->append(body, bodylen);
   if (dollar_quote_len > 0) {
     buf->append(dollar_quote, dollar_quote_len);
   }
@@ -2340,50 +2280,6 @@ void sp_finish_parsing(THD *thd) {
   sp->m_parser_data.finish_parsing_sp_body(thd);
 }
 
-/// @return Item_result code corresponding to the RETURN-field type code.
-Item_result sp_map_result_type(enum enum_field_types type) {
-  switch (type) {
-    case MYSQL_TYPE_BIT:
-    case MYSQL_TYPE_BOOL:
-    case MYSQL_TYPE_TINY:
-    case MYSQL_TYPE_SHORT:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG:
-    case MYSQL_TYPE_INT24:
-      return INT_RESULT;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL:
-      return DECIMAL_RESULT;
-    case MYSQL_TYPE_FLOAT:
-    case MYSQL_TYPE_DOUBLE:
-      return REAL_RESULT;
-    default:
-      return STRING_RESULT;
-  }
-}
-
-/// @return Item::Type code corresponding to the RETURN-field type code.
-Item::Type sp_map_item_type(enum enum_field_types type) {
-  switch (type) {
-    case MYSQL_TYPE_BIT:
-    case MYSQL_TYPE_BOOL:
-    case MYSQL_TYPE_TINY:
-    case MYSQL_TYPE_SHORT:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG:
-    case MYSQL_TYPE_INT24:
-      return Item::INT_ITEM;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL:
-      return Item::DECIMAL_ITEM;
-    case MYSQL_TYPE_FLOAT:
-    case MYSQL_TYPE_DOUBLE:
-      return Item::REAL_ITEM;
-    default:
-      return Item::STRING_ITEM;
-  }
-}
-
 /**
   @param lex LEX-object, representing an SQL-statement inside SP.
 
@@ -2431,13 +2327,13 @@ uint sp_get_flags_for_command(LEX *lex) {
     case SQLCOM_SHOW_ENGINE_MUTEX:
     case SQLCOM_SHOW_EVENTS:
     case SQLCOM_SHOW_KEYS:
-    case SQLCOM_SHOW_MASTER_STAT:
+    case SQLCOM_SHOW_BINLOG_STATUS:
     case SQLCOM_SHOW_OPEN_TABLES:
     case SQLCOM_SHOW_PRIVILEGES:
     case SQLCOM_SHOW_PROCESSLIST:
     case SQLCOM_SHOW_PROC_CODE:
-    case SQLCOM_SHOW_SLAVE_HOSTS:
-    case SQLCOM_SHOW_SLAVE_STAT:
+    case SQLCOM_SHOW_REPLICAS:
+    case SQLCOM_SHOW_REPLICA_STATUS:
     case SQLCOM_SHOW_STATUS:
     case SQLCOM_SHOW_STATUS_FUNC:
     case SQLCOM_SHOW_STATUS_PROC:
@@ -2520,10 +2416,10 @@ uint sp_get_flags_for_command(LEX *lex) {
     case SQLCOM_CREATE_SERVER:
     case SQLCOM_ALTER_SERVER:
     case SQLCOM_DROP_SERVER:
-    case SQLCOM_CHANGE_MASTER:
+    case SQLCOM_CHANGE_REPLICATION_SOURCE:
     case SQLCOM_CHANGE_REPLICATION_FILTER:
-    case SQLCOM_SLAVE_START:
-    case SQLCOM_SLAVE_STOP:
+    case SQLCOM_REPLICA_START:
+    case SQLCOM_REPLICA_STOP:
     case SQLCOM_ALTER_INSTANCE:
     case SQLCOM_CREATE_ROLE:
     case SQLCOM_DROP_ROLE:
@@ -2574,19 +2470,28 @@ bool sp_check_name(LEX_STRING *ident) {
 /**
   Prepare an Item for evaluation (call of fix_fields).
 
-  @param thd       thread handler
-  @param it_addr   pointer on item reference
+  @param thd        thread handler
+  @param standalone if true, thd->lex is directly associated with item.
+                    Preparation and execution state will be changed and
+                    preparation data will be saved for later executions.
+                    If false, item is part of a larger query expression and
+                    no such state transitions should take place.
+                    It also means that such items cannot save preparation data.
+  @param it_addr    pointer to item reference
 
-  @retval
-    NULL      error
-  @retval
-    non-NULL  prepared item
+  @returns pointer to prepared Item on success, NULL on error.
 */
-Item *sp_prepare_func_item(THD *thd, Item **it_addr) {
+Item *sp_prepare_func_item(THD *thd, bool standalone, Item **it_addr) {
+  LEX *const lex = standalone ? thd->lex : nullptr;
+
+  // If item is part of larger query expression, it must be in executing state:
+  assert(lex != nullptr ||
+         (thd->lex->unit->is_prepared() && thd->lex->is_exec_started()));
+
   it_addr = (*it_addr)->this_item_addr(thd, it_addr);
 
   if ((*it_addr)->fixed) {
-    thd->lex->set_exec_started();
+    if (lex != nullptr) lex->set_exec_started();
     return *it_addr;
   }
 
@@ -2597,27 +2502,29 @@ Item *sp_prepare_func_item(THD *thd, Item **it_addr) {
     DBUG_PRINT("info", ("fix_fields() failed"));
     return nullptr;
   }
-  thd->lex->unit->set_prepared();
-  thd->lex->save_cmd_properties(thd);
-  thd->lex->set_exec_started();
-
+  // If item is a separate query expression, set it's state to executing
+  if (lex != nullptr) {
+    lex->unit->set_prepared();
+    lex->save_cmd_properties(thd);
+    lex->set_exec_started();
+  }
   return *it_addr;
 }
 
 /**
   Evaluate an expression and store the result in the field.
 
-  @param thd                    current thread object
-  @param result_field           the field to store the result
-  @param expr_item_ptr          the root item of the expression
+  @param thd            current thread object
+  @param standalone     if true, thd->lex contains preparation and execution
+                        state of item, otherwise item is part of
+                        a query expression that is already in executing state.
+  @param result_field   the field to store the result
+  @param expr_item_ptr  the root item of the expression
 
-  @retval
-    false  on success
-  @retval
-    true   on error
+  @returns false on success, true on error
 */
-bool sp_eval_expr(THD *thd, Field *result_field, Item **expr_item_ptr) {
-  Item *expr_item;
+bool sp_eval_expr(THD *thd, bool standalone, Field *result_field,
+                  Item **expr_item_ptr) {
   Strict_error_handler strict_handler(
       Strict_error_handler::ENABLE_SET_SELECT_STRICT_ERROR_HANDLER);
   const enum_check_fields save_check_for_truncated_fields =
@@ -2625,9 +2532,10 @@ bool sp_eval_expr(THD *thd, Field *result_field, Item **expr_item_ptr) {
   const unsigned int stmt_unsafe_rollback_flags =
       thd->get_transaction()->get_unsafe_rollback_flags(Transaction_ctx::STMT);
 
-  if (!*expr_item_ptr) goto error;
+  assert(*expr_item_ptr != nullptr);
 
-  if (!(expr_item = sp_prepare_func_item(thd, expr_item_ptr))) goto error;
+  Item *expr_item = sp_prepare_func_item(thd, standalone, expr_item_ptr);
+  if (expr_item == nullptr) goto error;
 
   /*
     Set THD flags to emit warnings/errors in case of overflow/type errors

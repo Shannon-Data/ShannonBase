@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -43,8 +44,8 @@ Parallel_reader_adapter::Parallel_reader_adapter(size_t max_threads,
 
 dberr_t Parallel_reader_adapter::add_scan(trx_t *trx,
                                           const Parallel_reader::Config &config,
-                                          Parallel_reader::F &&f, bool split) {
-  return m_parallel_reader.add_scan(trx, config, std::move(f), split);
+                                          Parallel_reader::F &&f) {
+  return m_parallel_reader.add_scan(trx, config, std::move(f));
 }
 
 Parallel_reader_adapter::Thread_ctx::Thread_ctx() {
@@ -76,7 +77,7 @@ void Parallel_reader_adapter::set(row_prebuilt_t *prebuilt) {
   m_mysql_row.m_max_len = static_cast<ulong>(prebuilt->mysql_row_len);
 
   m_parallel_reader.set_start_callback(
-      [=](Parallel_reader::Thread_ctx *reader_thread_ctx) {
+      [this, prebuilt](Parallel_reader::Thread_ctx *reader_thread_ctx) {
         if (reader_thread_ctx->get_state() == Parallel_reader::State::THREAD) {
           return init(reader_thread_ctx, prebuilt);
         } else {
@@ -85,7 +86,7 @@ void Parallel_reader_adapter::set(row_prebuilt_t *prebuilt) {
       });
 
   m_parallel_reader.set_finish_callback(
-      [=](Parallel_reader::Thread_ctx *reader_thread_ctx) {
+      [this](Parallel_reader::Thread_ctx *reader_thread_ctx) {
         if (reader_thread_ctx->get_state() == Parallel_reader::State::THREAD) {
           return end(reader_thread_ctx);
         } else {

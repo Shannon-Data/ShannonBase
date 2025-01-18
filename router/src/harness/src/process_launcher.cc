@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>    // fprintf()
+#include <cstring>   // memset
 #include <iterator>  // std::distance
 #include <stdexcept>
 #include <string>
@@ -38,7 +40,6 @@
 #else
 #include <csignal>
 #include <cstdlib>
-#include <cstring>
 
 #include <fcntl.h>
 #include <sys/select.h>
@@ -201,7 +202,7 @@ void ProcessLauncher::start() {
 
   saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
   saAttr.bInheritHandle = TRUE;
-  saAttr.lpSecurityDescriptor = NULL;
+  saAttr.lpSecurityDescriptor = nullptr;
 
   if (!CreatePipe(&child_out_rd, &child_out_wr, &saAttr, 0)) {
     throw std::system_error(last_error_code(), "Failed to create child_out_rd");
@@ -212,7 +213,7 @@ void ProcessLauncher::start() {
 
   // force non blocking IO in Windows
   // DWORD mode = PIPE_NOWAIT;
-  // BOOL res = SetNamedPipeHandleState(child_out_rd, &mode, NULL, NULL);
+  // BOOL res = SetNamedPipeHandleState(child_out_rd, &mode, nullptr, nullptr);
 
   if (!CreatePipe(&child_in_rd, &child_in_wr, &saAttr, 0))
     throw std::system_error(last_error_code(), "Failed to create child_in_rd");
@@ -225,15 +226,54 @@ void ProcessLauncher::start() {
   // as CreateProcess may/will modify the arguments (split filename and args
   // with a \0) keep a copy of it for error-reporting.
   std::string create_process_arguments = arguments;
-  for (const auto &env_var : env_vars) {
-    SetEnvironmentVariable(env_var.first.c_str(), env_var.second.c_str());
+
+  DWORD dwCreationFlags = 0;
+
+  std::vector<TCHAR> env_block;
+
+  if (auto parent_env = GetEnvironmentStrings()) {
+    // copy the whole parent-env-block to the current env.
+    //
+    // ... but first the length of the env-block must be calculated.
+    size_t parent_env_len = 0;
+    auto cur_env = parent_env;
+
+    // env-block is terminated by an empty-string (\0)
+    for (auto cur_len = strlen(cur_env); cur_len != 0;
+         cur_len = strlen(cur_env)) {
+      cur_len += 1;  // env-var terminator (\0)
+
+      parent_env_len += cur_len;
+
+      // skip the current variable.
+      cur_env += cur_len;
+    }
+
+    // copy the parent-env-block to the child-env, without the terminating \0
+    std::copy(parent_env, parent_env + parent_env_len,
+              std::back_insert_iterator(env_block));
+
+    FreeEnvironmentStrings(parent_env);
   }
+
+#ifdef UNICODE
+  dwCreationFlags |= CREATE_UNICODE_ENVIRONMENT;
+#endif
+
+  for (const auto &[key, val] : env_vars) {
+    std::copy(key.begin(), key.end(), std::back_insert_iterator(env_block));
+    env_block.push_back('=');
+    std::copy(val.begin(), val.end(), std::back_insert_iterator(env_block));
+
+    env_block.push_back(0);  // terminate env-var
+  }
+  env_block.push_back(0);  // terminate env-block
 
   // The code below makes sure the process we are launching only inherits the
   // in/out pipes FDs
   SIZE_T size = 0;
   // figure out the size needed for a 1-elem list
-  if (InitializeProcThreadAttributeList(NULL, 1, 0, &size) == FALSE &&
+  if (InitializeProcThreadAttributeList(nullptr, 1, 0, &size) == FALSE &&
       GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
     throw std::system_error(last_error_code(),
                             "Failed to InitializeProcThreadAttributeList() "
@@ -264,7 +304,7 @@ void ProcessLauncher::start() {
   if (UpdateProcThreadAttribute(attribute_list, 0,
                                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
                                 handles_to_inherit, sizeof(handles_to_inherit),
-                                NULL, NULL) == FALSE) {
+                                nullptr, nullptr) == FALSE) {
     throw std::system_error(
         last_error_code(),
         "Failed to UpdateProcThreadAttribute() when launching a process " +
@@ -283,19 +323,21 @@ void ProcessLauncher::start() {
   si_ex.StartupInfo.cb = sizeof(si_ex);
   si_ex.lpAttributeList = attribute_list;
 
+  dwCreationFlags |= EXTENDED_STARTUPINFO_PRESENT;
+  dwCreationFlags |= CREATE_NEW_PROCESS_GROUP;
+
   // launch the process
   BOOL bSuccess =
-      CreateProcess(NULL,                               // lpApplicationName
+      CreateProcess(nullptr,                            // lpApplicationName
                     &create_process_arguments.front(),  // lpCommandLine
-                    NULL,                               // lpProcessAttributes
-                    NULL,                               // lpThreadAttributes
+                    nullptr,                            // lpProcessAttributes
+                    nullptr,                            // lpThreadAttributes
                     TRUE,                               // bInheritHandles
-                    CREATE_NEW_PROCESS_GROUP |
-                        EXTENDED_STARTUPINFO_PRESENT,  // dwCreationFlags
-                    NULL,                              // lpEnvironment
-                    NULL,                              // lpCurrentDirectory
-                    &si_ex.StartupInfo,                // lpStartupInfo
-                    &pi);                              // lpProcessInformation
+                    dwCreationFlags,                    //
+                    env_block.data(),                   // lpEnvironment
+                    nullptr,                            // lpCurrentDirectory
+                    &si_ex.StartupInfo,                 // lpStartupInfo
+                    &pi);                               // lpProcessInformation
 
   if (!bSuccess) {
     throw std::system_error(last_error_code(),
@@ -326,12 +368,15 @@ ProcessLauncher::exit_code() {
 
   const BOOL ret = GetExitCodeProcess(pi.hProcess, &dwExit);
   if (ret == 0) {
-    return stdx::make_unexpected(last_error_code());
+    return stdx::unexpected(last_error_code());
   } else if (dwExit == STILL_ACTIVE) {
-    return stdx::make_unexpected(std::make_error_code(std::errc::timed_out));
+    return stdx::unexpected(std::make_error_code(std::errc::timed_out));
   }
 
-  return {std::in_place, exit_status_type::native_t{}, dwExit};
+  using ret_type =
+      stdx::expected<ProcessLauncher::exit_status_type, std::error_code>;
+
+  return ret_type{std::in_place, exit_status_type::native_t{}, dwExit};
 }
 
 ProcessLauncher::exit_status_type ProcessLauncher::native_wait(
@@ -425,8 +470,8 @@ int ProcessLauncher::read(char *buf, size_t count,
 
   do {
     // check if there is data in the pipe before issuing a blocking read
-    BOOL bSuccess =
-        PeekNamedPipe(child_out_rd, NULL, 0, NULL, &dwBytesAvail, NULL);
+    BOOL bSuccess = PeekNamedPipe(child_out_rd, nullptr, 0, nullptr,
+                                  &dwBytesAvail, nullptr);
 
     if (!bSuccess) {
       auto ec = last_error_code();
@@ -456,7 +501,7 @@ int ProcessLauncher::read(char *buf, size_t count,
     timeout -= interval;
   } while (true);
 
-  BOOL bSuccess = ReadFile(child_out_rd, buf, count, &dwBytesRead, NULL);
+  BOOL bSuccess = ReadFile(child_out_rd, buf, count, &dwBytesRead, nullptr);
 
   if (bSuccess == FALSE) {
     auto ec = last_error_code();
@@ -474,7 +519,7 @@ int ProcessLauncher::read(char *buf, size_t count,
 int ProcessLauncher::write(const char *buf, size_t count) {
   DWORD dwBytesWritten;
 
-  BOOL bSuccess = WriteFile(child_in_wr, buf, count, &dwBytesWritten, NULL);
+  BOOL bSuccess = WriteFile(child_in_wr, buf, count, &dwBytesWritten, nullptr);
   if (!bSuccess) {
     auto ec = last_error_code();
     if (ec !=
@@ -755,12 +800,15 @@ ProcessLauncher::exit_code() {
 
   const pid_t ret = ::waitpid(childpid, &status, WNOHANG);
   if (ret == 0) {
-    return stdx::make_unexpected(std::make_error_code(std::errc::timed_out));
+    return stdx::unexpected(std::make_error_code(std::errc::timed_out));
   } else if (ret == -1) {
-    return stdx::make_unexpected(last_error_code());
+    return stdx::unexpected(last_error_code());
   }
 
-  return {std::in_place, exit_status_type::native_t{}, status};
+  using ret_type =
+      stdx::expected<ProcessLauncher::exit_status_type, std::error_code>;
+
+  return ret_type{std::in_place, exit_status_type::native_t{}, status};
 }
 
 ProcessLauncher::exit_status_type ProcessLauncher::native_wait(

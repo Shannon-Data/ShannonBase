@@ -304,7 +304,7 @@ TRACE
                 "range_analysis": {
                   "table_scan": {
                     "rows": 2,
-                    "cost": 2.8011
+                    "cost": 2.80085
                   } /* table_scan */,
                   "potential_range_indexes": [
                     {
@@ -322,10 +322,10 @@ TRACE
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_range": {
+                  "group_index_skip_scan": {
                     "chosen": false,
                     "cause": "not_group_by_or_distinct"
-                  } /* group_index_range */,
+                  } /* group_index_skip_scan */,
                   "skip_scan_range": {
                     "potential_skip_scan_indexes": [
                       {
@@ -374,14 +374,14 @@ TRACE
                       "rows_to_scan": 2,
                       "access_type": "scan",
                       "resulting_rows": 2,
-                      "cost": 0.701099,
+                      "cost": 0.700854,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 2,
-                "cost_for_plan": 0.701099,
+                "cost_for_plan": 0.700854,
                 "chosen": true
               }
             ] /* considered_execution_plans */
@@ -538,21 +538,21 @@ TRACE
                 "table": "`t1`",
                 "table_scan": {
                   "rows": 4,
-                  "cost": 0.503174
+                  "cost": 0.501709
                 } /* table_scan */
               },
               {
                 "table": "`t2`",
                 "table_scan": {
                   "rows": 4,
-                  "cost": 0.503174
+                  "cost": 0.501709
                 } /* table_scan */
               },
               {
                 "table": "`t3`",
                 "table_scan": {
                   "rows": 4,
-                  "cost": 0.503174
+                  "cost": 0.501709
                 } /* table_scan */
               }
             ] /* rows_estimation */
@@ -569,14 +569,14 @@ TRACE
                       "rows_to_scan": 4,
                       "access_type": "scan",
                       "resulting_rows": 4,
-                      "cost": 0.903174,
+                      "cost": 0.901709,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 4,
-                "cost_for_plan": 0.903174,
+                "cost_for_plan": 0.901709,
                 "rest_of_plan": [
                   {
                     "plan_prefix": [
@@ -591,14 +591,14 @@ TRACE
                           "using_join_cache": true,
                           "buffers_needed": 1,
                           "resulting_rows": 4,
-                          "cost": 2.1032,
+                          "cost": 2.10174,
                           "chosen": true
                         }
                       ] /* considered_access_paths */
                     } /* best_access_path */,
                     "condition_filtering_pct": 100,
                     "rows_for_plan": 16,
-                    "cost_for_plan": 3.00638,
+                    "cost_for_plan": 3.00345,
                     "rest_of_plan": [
                       {
                         "plan_prefix": [
@@ -617,14 +617,14 @@ TRACE
                               "using_join_cache": true,
                               "buffers_needed": 1,
                               "resulting_rows": 1,
-                              "cost": 2.40362,
+                              "cost": 2.40215,
                               "chosen": true
                             }
                           ] /* considered_access_paths */
                         } /* best_access_path */,
                         "condition_filtering_pct": 100,
                         "rows_for_plan": 16,
-                        "cost_for_plan": 5.40999,
+                        "cost_for_plan": 5.4056,
                         "chosen": true
                       }
                     ] /* rest_of_plan */
@@ -1274,7 +1274,7 @@ TRACE
                       "table": "`t1`",
                       "table_scan": {
                         "rows": 3,
-                        "cost": 0.503113
+                        "cost": 0.501648
                       } /* table_scan */
                     }
                   ] /* rows_estimation */
@@ -1291,7 +1291,7 @@ TRACE
                             "rows_to_scan": 3,
                             "access_type": "scan",
                             "resulting_rows": 3,
-                            "cost": 0.803113,
+                            "cost": 0.801648,
                             "chosen": true,
                             "use_tmp_table": true
                           }
@@ -1299,9 +1299,9 @@ TRACE
                       } /* best_access_path */,
                       "condition_filtering_pct": 100,
                       "rows_for_plan": 3,
-                      "cost_for_plan": 0.803113,
+                      "cost_for_plan": 0.801648,
                       "sort_cost": 3,
-                      "new_cost_for_plan": 3.80311,
+                      "new_cost_for_plan": 3.80165,
                       "chosen": true
                     }
                   ] /* considered_execution_plans */
@@ -1460,26 +1460,32 @@ TRACE
               "select#": 2,
               "steps": [
                 {
-                  "temp_table_aggregate": {
-                    "select#": 2,
+                  "no de-duplication": {
                     "steps": [
                       {
-                        "creating_tmp_table": {
-                          "tmp_table_info": {
-                            "table": "<temporary>",
-                            "in_plan_at_position": 1,
-                            "columns": 2,
-                            "row_length": 22,
-                            "key_length": 5,
-                            "unique_constraint": false,
-                            "makes_grouped_rows": true,
-                            "cannot_insert_duplicates": false,
-                            "location": "TempTable"
-                          } /* tmp_table_info */
-                        } /* creating_tmp_table */
+                        "temp_table_aggregate": {
+                          "select#": 2,
+                          "steps": [
+                            {
+                              "creating_tmp_table": {
+                                "tmp_table_info": {
+                                  "table": "<temporary>",
+                                  "in_plan_at_position": 1,
+                                  "columns": 2,
+                                  "row_length": 22,
+                                  "key_length": 5,
+                                  "unique_constraint": false,
+                                  "makes_grouped_rows": true,
+                                  "cannot_insert_duplicates": false,
+                                  "location": "TempTable"
+                                } /* tmp_table_info */
+                              } /* creating_tmp_table */
+                            }
+                          ] /* steps */
+                        } /* temp_table_aggregate */
                       }
                     ] /* steps */
-                  } /* temp_table_aggregate */
+                  } /* no de-duplication */
                 }
               ] /* steps */
             } /* materialize */
@@ -1777,7 +1783,7 @@ SET @a=(select count(a) from t1 where a>0)	{
                       "table": "`t1`",
                       "table_scan": {
                         "rows": 3,
-                        "cost": 0.50238
+                        "cost": 0.501282
                       } /* table_scan */
                     }
                   ] /* rows_estimation */
@@ -1797,14 +1803,14 @@ SET @a=(select count(a) from t1 where a>0)	{
                             "final_filtering_effect": 0.333333,
                             "access_type": "scan",
                             "resulting_rows": 1,
-                            "cost": 0.80238,
+                            "cost": 0.801282,
                             "chosen": true
                           }
                         ] /* considered_access_paths */
                       } /* best_access_path */,
                       "condition_filtering_pct": 100,
                       "rows_for_plan": 1,
-                      "cost_for_plan": 0.80238,
+                      "cost_for_plan": 0.801282,
                       "chosen": true
                     }
                   ] /* considered_execution_plans */
@@ -1926,7 +1932,7 @@ set_case_expr (15) 0 (select count(`a`) from `test`.`t1` where (`a` > 1))	{
                       "table": "`t1`",
                       "table_scan": {
                         "rows": 3,
-                        "cost": 0.50238
+                        "cost": 0.501282
                       } /* table_scan */
                     }
                   ] /* rows_estimation */
@@ -1946,14 +1952,14 @@ set_case_expr (15) 0 (select count(`a`) from `test`.`t1` where (`a` > 1))	{
                             "final_filtering_effect": 0.333333,
                             "access_type": "scan",
                             "resulting_rows": 1,
-                            "cost": 0.80238,
+                            "cost": 0.801282,
                             "chosen": true
                           }
                         ] /* considered_access_paths */
                       } /* best_access_path */,
                       "condition_filtering_pct": 100,
                       "rows_for_plan": 1,
-                      "cost_for_plan": 0.80238,
+                      "cost_for_plan": 0.801282,
                       "chosen": true
                     }
                   ] /* considered_execution_plans */
@@ -2125,7 +2131,7 @@ call p1((select a from t1 limit 1))	{
                       "table": "`t1`",
                       "table_scan": {
                         "rows": 2,
-                        "cost": 0.501587
+                        "cost": 0.500854
                       } /* table_scan */
                     }
                   ] /* rows_estimation */
@@ -2142,14 +2148,14 @@ call p1((select a from t1 limit 1))	{
                             "rows_to_scan": 2,
                             "access_type": "scan",
                             "resulting_rows": 2,
-                            "cost": 0.701587,
+                            "cost": 0.700854,
                             "chosen": true
                           }
                         ] /* considered_access_paths */
                       } /* best_access_path */,
                       "condition_filtering_pct": 100,
                       "rows_for_plan": 2,
-                      "cost_for_plan": 0.701587,
+                      "cost_for_plan": 0.700854,
                       "chosen": true
                     }
                   ] /* considered_execution_plans */
@@ -2537,7 +2543,7 @@ table3.col_varchar_10_utf8_key	{
                 "table": "`t3` `table1`",
                 "table_scan": {
                   "rows": 2,
-                  "cost": 0.503174
+                  "cost": 0.502686
                 } /* table_scan */
               },
               {
@@ -2552,7 +2558,7 @@ table3.col_varchar_10_utf8_key	{
                 "range_analysis": {
                   "table_scan": {
                     "rows": 1,
-                    "cost": 2.70171
+                    "cost": 2.70122
                   } /* table_scan */,
                   "potential_range_indexes": [
                     {
@@ -2601,14 +2607,14 @@ table3.col_varchar_10_utf8_key	{
                       "rows_to_scan": 2,
                       "access_type": "scan",
                       "resulting_rows": 2,
-                      "cost": 0.703174,
+                      "cost": 0.702686,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 2,
-                "cost_for_plan": 0.703174,
+                "cost_for_plan": 0.702686,
                 "chosen": true
               }
             ] /* considered_execution_plans */
@@ -2777,7 +2783,7 @@ from t0 where a in
                 "table": "`t0`",
                 "table_scan": {
                   "rows": 10,
-                  "cost": 0.507935
+                  "cost": 0.504272
                 } /* table_scan */
               }
             ] /* rows_estimation */
@@ -2797,14 +2803,14 @@ from t0 where a in
                       "final_filtering_effect": 1,
                       "access_type": "scan",
                       "resulting_rows": 10,
-                      "cost": 1.50793,
+                      "cost": 1.50427,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 10,
-                "cost_for_plan": 1.50793,
+                "cost_for_plan": 1.50427,
                 "chosen": true
               }
             ] /* considered_execution_plans */
@@ -2940,21 +2946,21 @@ from t0 where a in
                 "table": "`t1`",
                 "table_scan": {
                   "rows": 10,
-                  "cost": 0.510376
+                  "cost": 0.505493
                 } /* table_scan */
               },
               {
                 "table": "`t2`",
                 "table_scan": {
                   "rows": 10,
-                  "cost": 0.510376
+                  "cost": 0.505493
                 } /* table_scan */
               },
               {
                 "table": "`t3`",
                 "table_scan": {
                   "rows": 10,
-                  "cost": 0.510376
+                  "cost": 0.505493
                 } /* table_scan */
               }
             ] /* rows_estimation */
@@ -2980,14 +2986,14 @@ from t0 where a in
                       "final_filtering_effect": 1,
                       "access_type": "scan",
                       "resulting_rows": 10,
-                      "cost": 1.51038,
+                      "cost": 1.50549,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 10,
-                "cost_for_plan": 1.51038,
+                "cost_for_plan": 1.50549,
                 "rest_of_plan": [
                   {
                     "plan_prefix": [
@@ -3012,14 +3018,14 @@ from t0 where a in
                           "using_join_cache": true,
                           "buffers_needed": 1,
                           "resulting_rows": 10,
-                          "cost": 10.5105,
+                          "cost": 10.5056,
                           "chosen": false
                         }
                       ] /* considered_access_paths */
                     } /* best_access_path */,
                     "condition_filtering_pct": 100,
                     "rows_for_plan": 10,
-                    "cost_for_plan": 5.01038,
+                    "cost_for_plan": 5.00549,
                     "rest_of_plan": [
                       {
                         "plan_prefix": [
@@ -3045,7 +3051,7 @@ from t0 where a in
                               "using_join_cache": true,
                               "buffers_needed": 1,
                               "resulting_rows": 10,
-                              "cost": 10.5106,
+                              "cost": 10.5057,
                               "chosen": false
                             }
                           ] /* considered_access_paths */
@@ -3053,7 +3059,7 @@ from t0 where a in
                         "added_to_eq_ref_extension": true,
                         "condition_filtering_pct": 100,
                         "rows_for_plan": 10,
-                        "cost_for_plan": 8.51038,
+                        "cost_for_plan": 8.50549,
                         "chosen": true
                       }
                     ] /* rest_of_plan */
@@ -3079,14 +3085,14 @@ from t0 where a in
                       "final_filtering_effect": 1,
                       "access_type": "scan",
                       "resulting_rows": 10,
-                      "cost": 1.51038,
+                      "cost": 1.50549,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 10,
-                "cost_for_plan": 1.51038,
+                "cost_for_plan": 1.50549,
                 "rest_of_plan": [
                   {
                     "plan_prefix": [
@@ -3111,14 +3117,14 @@ from t0 where a in
                           "using_join_cache": true,
                           "buffers_needed": 1,
                           "resulting_rows": 10,
-                          "cost": 10.5105,
+                          "cost": 10.5056,
                           "chosen": false
                         }
                       ] /* considered_access_paths */
                     } /* best_access_path */,
                     "condition_filtering_pct": 100,
                     "rows_for_plan": 10,
-                    "cost_for_plan": 5.01038,
+                    "cost_for_plan": 5.00549,
                     "rest_of_plan": [
                       {
                         "plan_prefix": [
@@ -3144,7 +3150,7 @@ from t0 where a in
                               "using_join_cache": true,
                               "buffers_needed": 1,
                               "resulting_rows": 10,
-                              "cost": 10.5106,
+                              "cost": 10.5057,
                               "chosen": false
                             }
                           ] /* considered_access_paths */
@@ -3152,7 +3158,7 @@ from t0 where a in
                         "added_to_eq_ref_extension": true,
                         "condition_filtering_pct": 100,
                         "rows_for_plan": 10,
-                        "cost_for_plan": 8.51038,
+                        "cost_for_plan": 8.50549,
                         "pruned_by_cost": true
                       },
                       {
@@ -3179,14 +3185,14 @@ from t0 where a in
                               "using_join_cache": true,
                               "buffers_needed": 1,
                               "resulting_rows": 10,
-                              "cost": 10.5106,
+                              "cost": 10.5057,
                               "chosen": false
                             }
                           ] /* considered_access_paths */
                         } /* best_access_path */,
                         "condition_filtering_pct": 100,
                         "rows_for_plan": 10,
-                        "cost_for_plan": 8.51038,
+                        "cost_for_plan": 8.50549,
                         "pruned_by_cost": true
                       }
                     ] /* rest_of_plan */
@@ -3214,14 +3220,14 @@ from t0 where a in
                           "using_join_cache": true,
                           "buffers_needed": 1,
                           "resulting_rows": 10,
-                          "cost": 10.5105,
+                          "cost": 10.5056,
                           "chosen": false
                         }
                       ] /* considered_access_paths */
                     } /* best_access_path */,
                     "condition_filtering_pct": 100,
                     "rows_for_plan": 10,
-                    "cost_for_plan": 5.01038,
+                    "cost_for_plan": 5.00549,
                     "pruned_by_heuristic": true
                   }
                 ] /* rest_of_plan */
@@ -3245,14 +3251,14 @@ from t0 where a in
                       "final_filtering_effect": 1,
                       "access_type": "scan",
                       "resulting_rows": 10,
-                      "cost": 1.51038,
+                      "cost": 1.50549,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 10,
-                "cost_for_plan": 1.51038,
+                "cost_for_plan": 1.50549,
                 "rest_of_plan": [
                   {
                     "plan_prefix": [
@@ -3277,14 +3283,14 @@ from t0 where a in
                           "using_join_cache": true,
                           "buffers_needed": 1,
                           "resulting_rows": 10,
-                          "cost": 10.5105,
+                          "cost": 10.5056,
                           "chosen": false
                         }
                       ] /* considered_access_paths */
                     } /* best_access_path */,
                     "condition_filtering_pct": 100,
                     "rows_for_plan": 10,
-                    "cost_for_plan": 5.01038,
+                    "cost_for_plan": 5.00549,
                     "rest_of_plan": [
                       {
                         "plan_prefix": [
@@ -3310,7 +3316,7 @@ from t0 where a in
                               "using_join_cache": true,
                               "buffers_needed": 1,
                               "resulting_rows": 10,
-                              "cost": 10.5106,
+                              "cost": 10.5057,
                               "chosen": false
                             }
                           ] /* considered_access_paths */
@@ -3318,7 +3324,7 @@ from t0 where a in
                         "added_to_eq_ref_extension": true,
                         "condition_filtering_pct": 100,
                         "rows_for_plan": 10,
-                        "cost_for_plan": 8.51038,
+                        "cost_for_plan": 8.50549,
                         "pruned_by_cost": true
                       },
                       {
@@ -3345,14 +3351,14 @@ from t0 where a in
                               "using_join_cache": true,
                               "buffers_needed": 1,
                               "resulting_rows": 10,
-                              "cost": 10.5106,
+                              "cost": 10.5057,
                               "chosen": false
                             }
                           ] /* considered_access_paths */
                         } /* best_access_path */,
                         "condition_filtering_pct": 100,
                         "rows_for_plan": 10,
-                        "cost_for_plan": 8.51038,
+                        "cost_for_plan": 8.50549,
                         "pruned_by_cost": true
                       }
                     ] /* rest_of_plan */
@@ -3380,14 +3386,14 @@ from t0 where a in
                           "using_join_cache": true,
                           "buffers_needed": 1,
                           "resulting_rows": 10,
-                          "cost": 10.5105,
+                          "cost": 10.5056,
                           "chosen": false
                         }
                       ] /* considered_access_paths */
                     } /* best_access_path */,
                     "condition_filtering_pct": 100,
                     "rows_for_plan": 10,
-                    "cost_for_plan": 5.01038,
+                    "cost_for_plan": 5.00549,
                     "pruned_by_heuristic": true
                   }
                 ] /* rest_of_plan */
@@ -3423,10 +3429,10 @@ from t0 where a in
                       } /* best_covering_index_scan */,
                       "setup_range_conditions": [
                       ] /* setup_range_conditions */,
-                      "group_index_range": {
+                      "group_index_skip_scan": {
                         "chosen": false,
                         "cause": "not_single_table"
-                      } /* group_index_range */,
+                      } /* group_index_skip_scan */,
                       "skip_scan_range": {
                         "chosen": false,
                         "cause": "not_single_table"
@@ -3690,7 +3696,7 @@ select 497, tmp.ID, NULL from (select 497 as ID, MAX(t3.DATA) as DATA      from 
                       "range_analysis": {
                         "table_scan": {
                           "rows": 9,
-                          "cost": 3.50934
+                          "cost": 3.50494
                         } /* table_scan */,
                         "potential_range_indexes": [
                           {
@@ -3708,10 +3714,10 @@ select 497, tmp.ID, NULL from (select 497 as ID, MAX(t3.DATA) as DATA      from 
                         ] /* potential_range_indexes */,
                         "setup_range_conditions": [
                         ] /* setup_range_conditions */,
-                        "group_index_range": {
+                        "group_index_skip_scan": {
                           "chosen": false,
                           "cause": "not_single_table"
-                        } /* group_index_range */,
+                        } /* group_index_skip_scan */,
                         "skip_scan_range": {
                           "chosen": false,
                           "cause": "not_single_table"
@@ -3722,7 +3728,7 @@ select 497, tmp.ID, NULL from (select 497 as ID, MAX(t3.DATA) as DATA      from 
                       "table": "`t3`",
                       "table_scan": {
                         "rows": 8,
-                        "cost": 0.508789
+                        "cost": 0.504883
                       } /* table_scan */
                     }
                   ] /* rows_estimation */
@@ -3745,7 +3751,7 @@ select 497, tmp.ID, NULL from (select 497 as ID, MAX(t3.DATA) as DATA      from 
                           },
                           {
                             "access_type": "scan",
-                            "cost": 1.30879,
+                            "cost": 1.30488,
                             "rows": 8,
                             "chosen": false,
                             "cause": "cost"
@@ -3773,7 +3779,7 @@ select 497, tmp.ID, NULL from (select 497 as ID, MAX(t3.DATA) as DATA      from 
                               },
                               {
                                 "access_type": "scan",
-                                "cost": 1.40934,
+                                "cost": 1.40494,
                                 "rows": 9,
                                 "chosen": false,
                                 "cause": "cost"
@@ -3892,6 +3898,12 @@ select 497, tmp.ID, NULL from (select 497 as ID, MAX(t3.DATA) as DATA      from 
             "materialize": {
               "select#": 2,
               "steps": [
+                {
+                  "no de-duplication": {
+                    "steps": [
+                    ] /* steps */
+                  } /* no de-duplication */
+                }
               ] /* steps */
             } /* materialize */
           }
@@ -4272,7 +4284,7 @@ link_alias_148._field_156	{
                 "range_analysis": {
                   "table_scan": {
                     "rows": 2,
-                    "cost": 2.80305
+                    "cost": 2.80208
                   } /* table_scan */,
                   "potential_range_indexes": [
                     {
@@ -4291,10 +4303,10 @@ link_alias_148._field_156	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_range": {
+                  "group_index_skip_scan": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_range */,
+                  } /* group_index_skip_scan */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"
@@ -4340,7 +4352,7 @@ link_alias_148._field_156	{
                 "table": "`t7` `link_alias_142`",
                 "table_scan": {
                   "rows": 3,
-                  "cost": 0.505371
+                  "cost": 0.503906
                 } /* table_scan */
               },
               {
@@ -4348,7 +4360,7 @@ link_alias_148._field_156	{
                 "range_analysis": {
                   "table_scan": {
                     "rows": 3,
-                    "cost": 2.90458
+                    "cost": 2.90311
                   } /* table_scan */,
                   "potential_range_indexes": [
                     {
@@ -4367,10 +4379,10 @@ link_alias_148._field_156	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_range": {
+                  "group_index_skip_scan": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_range */,
+                  } /* group_index_skip_scan */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"
@@ -4416,7 +4428,7 @@ link_alias_148._field_156	{
                 "table": "`t1` `link_alias_133`",
                 "table_scan": {
                   "rows": 3,
-                  "cost": 0.511719
+                  "cost": 0.510254
                 } /* table_scan */
               },
               {
@@ -4424,7 +4436,7 @@ link_alias_148._field_156	{
                 "range_analysis": {
                   "table_scan": {
                     "rows": 3,
-                    "cost": 2.90458
+                    "cost": 2.90311
                   } /* table_scan */,
                   "potential_range_indexes": [
                     {
@@ -4443,10 +4455,10 @@ link_alias_148._field_156	{
                   } /* best_covering_index_scan */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_range": {
+                  "group_index_skip_scan": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_range */,
+                  } /* group_index_skip_scan */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"
@@ -4492,7 +4504,7 @@ link_alias_148._field_156	{
                 "table": "`t5` `link_alias_148`",
                 "table_scan": {
                   "rows": 2,
-                  "cost": 0.504395
+                  "cost": 0.503418
                 } /* table_scan */
               }
             ] /* rows_estimation */
@@ -4544,7 +4556,7 @@ link_alias_148._field_156	{
                         },
                         {
                           "access_type": "scan",
-                          "cost": 0.805371,
+                          "cost": 0.803906,
                           "rows": 3,
                           "chosen": false,
                           "cause": "cost"
@@ -4606,7 +4618,7 @@ link_alias_148._field_156	{
                                 },
                                 {
                                   "access_type": "scan",
-                                  "cost": 0.811719,
+                                  "cost": 0.810254,
                                   "rows": 3,
                                   "chosen": false,
                                   "cause": "cost"
@@ -4672,7 +4684,7 @@ link_alias_148._field_156	{
                                         },
                                         {
                                           "access_type": "scan",
-                                          "cost": 0.704395,
+                                          "cost": 0.703418,
                                           "rows": 2,
                                           "chosen": false,
                                           "cause": "cost"
@@ -4991,7 +5003,7 @@ GROUP BY field2 ORDER BY alias1.col_int_key,alias2.pk	{
                 "table": "`t1` `alias1`",
                 "table_scan": {
                   "rows": 20,
-                  "cost": 0.533691
+                  "cost": 0.524414
                 } /* table_scan */
               },
               {
@@ -5005,7 +5017,7 @@ GROUP BY field2 ORDER BY alias1.col_int_key,alias2.pk	{
                 "range_analysis": {
                   "table_scan": {
                     "rows": 100,
-                    "cost": 12.7692
+                    "cost": 12.7221
                   } /* table_scan */,
                   "potential_range_indexes": [
                     {
@@ -5018,10 +5030,10 @@ GROUP BY field2 ORDER BY alias1.col_int_key,alias2.pk	{
                   ] /* potential_range_indexes */,
                   "setup_range_conditions": [
                   ] /* setup_range_conditions */,
-                  "group_index_range": {
+                  "group_index_skip_scan": {
                     "chosen": false,
                     "cause": "not_single_table"
-                  } /* group_index_range */,
+                  } /* group_index_skip_scan */,
                   "skip_scan_range": {
                     "chosen": false,
                     "cause": "not_single_table"
@@ -5045,14 +5057,14 @@ GROUP BY field2 ORDER BY alias1.col_int_key,alias2.pk	{
                       "final_filtering_effect": 0.9,
                       "access_type": "scan",
                       "resulting_rows": 18,
-                      "cost": 2.53369,
+                      "cost": 2.52441,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 18,
-                "cost_for_plan": 2.53369,
+                "cost_for_plan": 2.52441,
                 "rest_of_plan": [
                   {
                     "plan_prefix": [
@@ -5077,14 +5089,14 @@ GROUP BY field2 ORDER BY alias1.col_int_key,alias2.pk	{
                           "using_join_cache": true,
                           "buffers_needed": 1,
                           "resulting_rows": 100,
-                          "cost": 180.67,
+                          "cost": 180.622,
                           "chosen": false
                         }
                       ] /* considered_access_paths */
                     } /* best_access_path */,
                     "condition_filtering_pct": 100,
                     "rows_for_plan": 18,
-                    "cost_for_plan": 8.83369,
+                    "cost_for_plan": 8.82441,
                     "chosen": true
                   }
                 ] /* rest_of_plan */
@@ -5413,14 +5425,14 @@ select * from t1,mysqltest2.t2	{
                 "table": "`t1`",
                 "table_scan": {
                   "rows": 3,
-                  "cost": 0.50238
+                  "cost": 0.501282
                 } /* table_scan */
               },
               {
                 "table": "`mysqltest2`.`t2`",
                 "table_scan": {
                   "rows": 2,
-                  "cost": 0.501587
+                  "cost": 0.500854
                 } /* table_scan */
               }
             ] /* rows_estimation */
@@ -5437,14 +5449,14 @@ select * from t1,mysqltest2.t2	{
                       "rows_to_scan": 2,
                       "access_type": "scan",
                       "resulting_rows": 2,
-                      "cost": 0.701587,
+                      "cost": 0.700854,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 2,
-                "cost_for_plan": 0.701587,
+                "cost_for_plan": 0.700854,
                 "rest_of_plan": [
                   {
                     "plan_prefix": [
@@ -5459,14 +5471,14 @@ select * from t1,mysqltest2.t2	{
                           "using_join_cache": true,
                           "buffers_needed": 1,
                           "resulting_rows": 3,
-                          "cost": 1.1024,
+                          "cost": 1.1013,
                           "chosen": true
                         }
                       ] /* considered_access_paths */
                     } /* best_access_path */,
                     "condition_filtering_pct": 100,
                     "rows_for_plan": 6,
-                    "cost_for_plan": 1.80399,
+                    "cost_for_plan": 1.80216,
                     "chosen": true
                   }
                 ] /* rest_of_plan */
@@ -5481,14 +5493,14 @@ select * from t1,mysqltest2.t2	{
                       "rows_to_scan": 3,
                       "access_type": "scan",
                       "resulting_rows": 3,
-                      "cost": 0.80238,
+                      "cost": 0.801282,
                       "chosen": true
                     }
                   ] /* considered_access_paths */
                 } /* best_access_path */,
                 "condition_filtering_pct": 100,
                 "rows_for_plan": 3,
-                "cost_for_plan": 0.80238,
+                "cost_for_plan": 0.801282,
                 "pruned_by_heuristic": true
               }
             ] /* considered_execution_plans */

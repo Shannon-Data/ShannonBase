@@ -105,7 +105,7 @@ Replaces: mysql-@DEB_PRODUCTNAME@-server (<< 8.0.1),
  mysql-server-core-5.7,
  mysql-server-core-8.0
 Provides: virtual-mysql-server-core
-Description: MySQL Server Core Binaires
+Description: MySQL Server Core Binaries
  The MySQL(TM) software delivers a very fast, multi-threaded, multi-user,
  and robust SQL (Structured Query Language) database server. MySQL Server
  is intended for mission-critical, heavy-load production systems as well
@@ -221,7 +221,7 @@ Description: MySQL Client Core Binaries
  Oracle. This package contains the MySQL client binaries.
 
 
-Package: libmysqlclient22
+Package: libmysqlclient24
 Architecture: any
 Section: libs
 Pre-Depends: ${misc:Pre-Depends}
@@ -266,7 +266,7 @@ Description: Common files shared between packages
 Package: libmysqlclient-dev
 Architecture: any
 Section: libdevel
-Depends: libmysqlclient22 (= ${binary:Version}),
+Depends: libmysqlclient24 (= ${binary:Version}),
  ${shlibs:Depends}, ${misc:Depends}
 Breaks: libmysqld-dev
 Replaces: mysql-client-5.6, mysql-client-core-5.6,

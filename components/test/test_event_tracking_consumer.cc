@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -591,7 +592,7 @@ static mysql_service_status_t init() {
   g_event_tracking_counters = new (std::nothrow) Event_tracking_counters();
   if (!g_event_tracking_counters) return 1;
 
-  cleanup.commit();
+  cleanup.release();
   return 0;
 }
 
@@ -767,7 +768,7 @@ long long configure_event_tracking_filter(UDF_INIT *, UDF_ARGS *args,
       return 0;
   };
 
-  cleanup.commit();
+  cleanup.release();
   return 1;
 }
 
@@ -822,7 +823,7 @@ char *display_session_data(UDF_INIT *initid, UDF_ARGS *, char *,
   strncpy(initid->ptr, last_trace.c_str(), last_trace.length());
   *length = last_trace.length();
 
-  cleanup.commit();
+  cleanup.release();
   return initid->ptr;
 }
 
@@ -876,7 +877,7 @@ long long reset_event_tracking_counter(UDF_INIT *, UDF_ARGS *args,
     g_event_tracking_counters->reset_event_tracking_counter(
         static_cast<Event_types>(index));
   }
-  cleanup.commit();
+  cleanup.release();
   return 1;
 }
 

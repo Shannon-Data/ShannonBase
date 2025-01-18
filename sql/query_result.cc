@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/query_result.h"
 
@@ -57,9 +56,7 @@
 #include "sql/sql_exchange.h"
 #include "sql/system_variables.h"
 #include "sql/visible_fields.h"
-#include "sql_optimizer.h"
 #include "sql_string.h"
-#include "sql_tmp_table.h"
 #include "strmake.h"
 #include "strxnmov.h"
 #include "template_utils.h"  // pointer_cast
@@ -723,7 +720,8 @@ bool Query_dumpvar::send_data(THD *thd, const mem_root_deque<Item *> &items) {
   while ((mv = var_li++) && it != VisibleFields(items).end()) {
     Item *item = *it++;
     if (mv->is_local()) {
-      if (thd->sp_runtime_ctx->set_variable(thd, mv->get_offset(), &item))
+      if (thd->sp_runtime_ctx->set_variable(thd, false, mv->get_offset(),
+                                            &item))
         return true;
     } else {
       Item_func_set_user_var *suv = new Item_func_set_user_var(mv->name, item);

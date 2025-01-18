@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 
 using std::chrono::duration;
 using std::chrono::nanoseconds;
@@ -54,33 +56,45 @@ void StopBenchmarkTiming() {
 void SetBytesProcessed(size_t bytes) { bytes_processed = bytes; }
 
 void internal_do_microbenchmark(const char *name, void (*func)(size_t)) {
+  // There's no point in timing in debug mode, so just run 10 times
+  // so that we don't waste build time (this should give us enough runs
+  // to verify that we don't crash).
+  // Similarly for Running in pushbuild or Jenkins: results are irrelevant.
+  bool skip_benchmarking = false;
 #if !defined(NDEBUG)
   printf(
       "WARNING: Running microbenchmark in debug mode. "
       "Timings will be misleading.\n");
+  skip_benchmarking = true;
+#endif
+  char *env_pb2workdir = std::getenv("PB2WORKDIR");
+  char *env_jenkins_url = std::getenv("JENKINS_URL");
+  if (env_pb2workdir != nullptr) {
+    printf("WARNING: running in PB2, skipping benchmarking.\n");
+    skip_benchmarking = true;
+  }
+  if (env_jenkins_url != nullptr) {
+    printf("WARNING: running in Jenkins, skipping benchmarking.\n");
+    skip_benchmarking = true;
+  }
 
-  // There's no point in timing in debug mode, so just run 10 times
-  // so that we don't waste build time (this should give us enough runs
-  // to verify that we don't crash).
-  seconds_used = 0.0;
-  size_t num_iterations = 10;
-  StartBenchmarkTiming();
-  func(num_iterations);
-  StopBenchmarkTiming();
-#else
   // Do 100 iterations as rough calibration. (Often, this will over- or
   // undershoot by as much as 50%, but that's fine.)
   static constexpr size_t calibration_iterations = 100;
+  static constexpr size_t num_skip_iterations = 10;
   seconds_used = 0.0;
   StartBenchmarkTiming();
-  func(calibration_iterations);
+  if (skip_benchmarking)
+    func(num_skip_iterations);
+  else
+    func(calibration_iterations);
   StopBenchmarkTiming();
   double seconds_used_per_iteration = seconds_used / calibration_iterations;
 
   size_t num_iterations;
 
   // Do the actual run, unless we already took more than one second.
-  if (seconds_used < 1.0) {
+  if (!skip_benchmarking && seconds_used < 1.0) {
     // Scale so that we end up around one second per benchmark
     // (but never less than 100).
     num_iterations =
@@ -91,10 +105,11 @@ void internal_do_microbenchmark(const char *name, void (*func)(size_t)) {
     StopBenchmarkTiming();
   } else {
     // The calibration already took too long, so just reuse its results.
-    num_iterations = calibration_iterations;
+    if (skip_benchmarking)
+      num_iterations = num_skip_iterations;
+    else
+      num_iterations = calibration_iterations;
   }
-#endif
-
   printf("%-40s %10ld iterations %10.0f ns/iter", name,
          static_cast<long>(num_iterations),
          1e9 * seconds_used / double(num_iterations));

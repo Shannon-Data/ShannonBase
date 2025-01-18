@@ -4,7 +4,9 @@
 --echo #
 --source include/elide_costs.inc
 
-set rapid_use_dynamic_offload=0;
+--disable_query_log
+eval INSTALL PLUGIN mock SONAME '$MOCK_PLUGIN';
+--enable_query_log
 
 CREATE TABLE t1(id INT PRIMARY KEY, x INT, y INT);
 INSERT INTO t1 VALUES (1, 2, 3), (4, 5, 6), (7, 8, 9);
@@ -21,8 +23,8 @@ SELECT * FROM v1;
 CREATE TABLE t_primary_only(id INT PRIMARY KEY, x INT);
 INSERT INTO t_primary_only VALUES (1, 1), (2, 2);
 
-ALTER TABLE t1 SECONDARY_ENGINE RAPID;
-ALTER TABLE t2 SECONDARY_ENGINE RAPID;
+ALTER TABLE t1 SECONDARY_ENGINE MOCK;
+ALTER TABLE t2 SECONDARY_ENGINE MOCK;
 
 # t1 has not been loaded into the secondary engine yet.
 FLUSH STATUS;
@@ -48,7 +50,7 @@ DROP PREPARE ps;
 ALTER TABLE t1 SECONDARY_LOAD;
 ALTER TABLE t2 SECONDARY_LOAD;
 
-# The queries should now use the rapid engine, which always returns an
+# The queries should now use the mock engine, which always returns an
 # empty result.
 FLUSH STATUS;
 SELECT * FROM t1;
@@ -166,7 +168,7 @@ SHOW STATUS LIKE 'Secondary_engine_execution_count';
 # It should be possible to have tables with an auto-increment column
 # in a secondary engine.
 CREATE TABLE t_with_autoinc(id INT PRIMARY KEY AUTO_INCREMENT, x INT)
-SECONDARY_ENGINE RAPID;
+SECONDARY_ENGINE MOCK;
 INSERT INTO t_with_autoinc(x) VALUES (4), (5), (6);
 ALTER TABLE t_with_autoinc SECONDARY_LOAD;
 SELECT * FROM t_with_autoinc;
@@ -175,13 +177,11 @@ DROP TABLE t_with_autoinc;
 # Tables that are partitioned in the primary engine can also have
 # secondary tables.
 CREATE TABLE t_partitioned(id INT PRIMARY KEY, x INT)
-SECONDARY_ENGINE RAPID
+SECONDARY_ENGINE MOCK
 PARTITION BY HASH(id);
 INSERT INTO t_partitioned VALUES (1, 2), (2, 3), (3, 4), (4, 5);
 ALTER TABLE t_partitioned SECONDARY_LOAD;
---disable_testcase Bug#36306426
 SELECT * FROM t_partitioned;
---enable_testcase
 DROP TABLE t_partitioned;
 
 # Multiple queries in a single statement.
@@ -220,7 +220,7 @@ EXECUTE ps USING @a;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 DROP PREPARE ps;
 
-# Test a query that returns multiple rows, even with the rapid engine.
+# Test a query that returns multiple rows, even with the mock engine.
 FLUSH STATUS;
 --sorted_result
 SELECT JSON_EXTRACT(j, '$') FROM
@@ -292,9 +292,9 @@ DROP TABLE t_nonexistent;
 
 # Same secondary engine specified with different case and differing
 # number of trailing blanks.
-CREATE TABLE t_case1(x INT) SECONDARY_ENGINE 'RAPID';
-CREATE TABLE t_case2(y INT) SECONDARY_ENGINE 'rapid ';
-CREATE TABLE t_case3(z INT) SECONDARY_ENGINE 'Rapid  ';
+CREATE TABLE t_case1(x INT) SECONDARY_ENGINE 'MOCK';
+CREATE TABLE t_case2(y INT) SECONDARY_ENGINE 'mock ';
+CREATE TABLE t_case3(z INT) SECONDARY_ENGINE 'MoCk  ';
 INSERT INTO t_case1 VALUES (1);
 INSERT INTO t_case2 VALUES (2);
 INSERT INTO t_case3 VALUES (3);
@@ -307,7 +307,7 @@ SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 DROP TABLE t_case1, t_case2, t_case3;
 
 # Queries that invoke stored routines should not be offloaded.
-CREATE TABLE tf(x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE tf(x INT) SECONDARY_ENGINE MOCK;
 INSERT INTO tf VALUES (123);
 ALTER TABLE tf SECONDARY_LOAD;
 DELIMITER |;
@@ -328,7 +328,6 @@ SELECT f1();
 SELECT f2();
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 --sorted_result
---sleep 5
 SELECT * FROM tf;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 DROP FUNCTION f1;
@@ -336,7 +335,7 @@ DROP FUNCTION f2;
 DROP TABLE tf;
 
 # Drop a table between two executions.
-CREATE TABLE t_dropped (x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t_dropped (x INT) SECONDARY_ENGINE MOCK;
 ALTER TABLE t_dropped SECONDARY_LOAD;
 PREPARE ps FROM 'SELECT * FROM t_dropped';
 EXECUTE ps;
@@ -353,7 +352,7 @@ DROP TABLE t1, t2, t_primary_only;
 --echo # Rudimentary tests for use_secondary_engine system variable.
 --echo #
 SET @my_use_secondary_engine = @@use_secondary_engine;
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT) SECONDARY_ENGINE MOCK;
 INSERT INTO t1 VALUES (1);
 ALTER TABLE t1 SECONDARY_LOAD;
 CREATE TABLE t2 (a INT);
@@ -363,17 +362,14 @@ FLUSH STATUS;
 SET @@use_secondary_engine = OFF;
 SELECT * FROM t1;
 INSERT INTO t1 SELECT * FROM t2;
-SELECT * FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
---echo # The rapid storage engine does not return any rows.
+--echo # The mock storage engine does not return any rows.
 SET @@use_secondary_engine = FORCED;
---sleep 5
 SELECT * FROM t1;
 -- error ER_SECONDARY_ENGINE
 INSERT INTO t1 SELECT * FROM t2;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 SET @@use_secondary_engine = ON;
---sleep 5
 SELECT * FROM t1;
 INSERT INTO t1 SELECT * FROM t2;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
@@ -427,7 +423,7 @@ SET @@use_secondary_engine = @my_use_secondary_engine;
 --echo #
 SET @my_use_secondary_engine = @@use_secondary_engine;
 SET @@use_secondary_engine = FORCED;
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT) SECONDARY_ENGINE MOCK;
 CREATE TABLE t2 (a INT);
 INSERT INTO t1 VALUES (1);
 INSERT INTO t2 VALUES (2);
@@ -466,7 +462,7 @@ SET @@use_secondary_engine = @my_use_secondary_engine;
 --echo #
 SET @my_use_secondary_engine = @@use_secondary_engine;
 SET @@use_secondary_engine = FORCED;
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT) SECONDARY_ENGINE MOCK;
 FLUSH STATUS;
 --error ER_SECONDARY_ENGINE_PLUGIN
 PREPARE ps FROM "SELECT * FROM t1";
@@ -489,7 +485,7 @@ SET @@use_secondary_engine = ON;
 EXECUTE ps;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 SET @@use_secondary_engine = FORCED;
-#--error ER_SECONDARY_ENGINE_PLUGIN,ER_SECONDARY_ENGINE
+--error ER_SECONDARY_ENGINE_PLUGIN
 EXECUTE ps;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 DROP PREPARE ps;
@@ -501,7 +497,7 @@ SET @@use_secondary_engine = @my_use_secondary_engine;
 --echo #
 SET @my_use_secondary_engine = @@use_secondary_engine;
 SET @@use_secondary_engine = OFF;
-CREATE TABLE t1 (a INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT) SECONDARY_ENGINE MOCK;
 INSERT INTO t1 VALUES (1);
 FLUSH STATUS;
 SELECT * FROM t1;
@@ -524,7 +520,7 @@ SET @@use_secondary_engine = @my_use_secondary_engine;
 --echo # Bug#28311801: THE GLOBAL VALUE OF SECONDARY_ENGINE_EXECUTION_COUNT
 --echo #               IS ALWAYS ZERO
 --echo #
-CREATE TABLE t (x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t (x INT) SECONDARY_ENGINE MOCK;
 ALTER TABLE t SECONDARY_LOAD;
 let $count_before = query_get_value(
   SHOW GLOBAL STATUS LIKE 'Secondary_engine_execution_count', Value, 1);
@@ -546,7 +542,7 @@ CREATE TABLE t1 (
   b INT NOT SECONDARY,
   c INT,
   d INT NOT SECONDARY
-) SECONDARY_ENGINE RAPID;
+) SECONDARY_ENGINE MOCK;
 
 CREATE TABLE t2 (
   pk INT PRIMARY KEY AUTO_INCREMENT,
@@ -554,7 +550,7 @@ CREATE TABLE t2 (
   f INT NOT SECONDARY,
   g INT,
   h INT NOT SECONDARY
-) SECONDARY_ENGINE RAPID;
+) SECONDARY_ENGINE MOCK;
 
 INSERT INTO t1 (a, b, c, d) VALUES (1,1,1,1), (1,1,1,1), (2,2,2,2);
 INSERT INTO t2 (e, f, g, h) VALUES (2,2,2,2), (2,2,2,2), (3,3,3,3);
@@ -630,12 +626,11 @@ PARTITION p4 VALUES LESS THAN (5),
 PARTITION p5 VALUES LESS THAN (6),
 PARTITION max VALUES LESS THAN MAXVALUE);
 INSERT INTO t1(a) VALUES (-1),(0),(1),(2),(3),(4),(5),(6),(7),(8);
-ALTER TABLE t1 SECONDARY_ENGINE=RAPID;
+ALTER TABLE t1 SECONDARY_ENGINE=MOCK;
 ALTER TABLE t1 SECONDARY_LOAD;
 ANALYZE TABLE t1;
 FLUSH STATUS;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
---disable_testcase Bug#36306426
 --error ER_SECONDARY_ENGINE
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ a FROM t1;
 SELECT a FROM t1;
@@ -644,13 +639,12 @@ SELECT b FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ b FROM t1;
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
---enable_testcase
 DROP TABLE t1;
 
 --echo #
 --echo # Use NOT SECONDARY as comment.
 --echo #
-CREATE TABLE t1 (a INT /* NOT SECONDARY */, b INT ) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT /* NOT SECONDARY */, b INT ) SECONDARY_ENGINE MOCK;
 INSERT INTO t1 VALUES (1,1);
 ALTER TABLE t1 SECONDARY_LOAD;
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ a FROM t1;
@@ -663,7 +657,7 @@ DROP TABLE t1;
 --echo #
 --echo # Use NOT SECONDARY with other constraint on column.
 --echo #
-CREATE TABLE t1 (a INT, b INT NOT SECONDARY UNIQUE KEY) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1 (a INT, b INT NOT SECONDARY UNIQUE KEY) SECONDARY_ENGINE MOCK;
 INSERT INTO t1 VALUES (1, 1);
 ALTER TABLE t1 SECONDARY_LOAD;
 FLUSH STATUS;
@@ -691,10 +685,9 @@ DROP TABLE t1;
 # Enable special handling of IS NULL for this test case.
 SET @saved_sql_auto_is_null = @@sql_auto_is_null;
 SET @@sql_auto_is_null = 1;
-CREATE TABLE t(a INT PRIMARY KEY AUTO_INCREMENT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t(a INT PRIMARY KEY AUTO_INCREMENT) SECONDARY_ENGINE MOCK;
 ALTER TABLE t SECONDARY_LOAD;
 INSERT INTO t VALUES ();
---sleep 5
 ANALYZE TABLE t;
 # Verify that a IS NULL is rewritten to a = last_insert_id().
 # Filter out differences between the old optimizer and the hypergraph optimizer.
@@ -711,9 +704,9 @@ CREATE TABLE t2(f2 int, f22 int);
 INSERT INTO t1 VALUES(1,1),(2,2),(3,3),(5,5),(9,9),(7,7);
 INSERT INTO t2 VALUES(1,1),(3,3),(2,2),(4,4),(8,8),(6,6);
 ANALYZE TABLE t1, t2;
-ALTER TABLE t1 SECONDARY_ENGINE=RAPID;
+ALTER TABLE t1 SECONDARY_ENGINE=MOCK;
 ALTER TABLE t1 SECONDARY_LOAD;
-ALTER TABLE t2 SECONDARY_ENGINE=RAPID;
+ALTER TABLE t2 SECONDARY_ENGINE=MOCK;
 ALTER TABLE t2 SECONDARY_LOAD;
 ANALYZE TABLE t1, t2;
 --output $MYSQL_TMP_DIR/explain-bug29288023
@@ -725,8 +718,8 @@ FROM t1 JOIN (SELECT f2, SUM(f22) AS b FROM t2 GROUP BY f2) AS dt
 --let $assert_file=$MYSQL_TMP_DIR/explain-bug29288023
 --let $assert_select=<auto_key0>
 --let $assert_count=0
-#--source include/assert_grep.inc
-#--remove_file $MYSQL_TMP_DIR/explain-bug29288023
+--source include/assert_grep.inc
+--remove_file $MYSQL_TMP_DIR/explain-bug29288023
 DROP TABLE t1, t2;
 
 CREATE TABLE t1(x INT, y INT, z INT, c INT, d INT);
@@ -737,7 +730,7 @@ INSERT INTO t1 VALUES
  (14, 7, 5, 2, 3), (15, 8, 5, 2, 3), (16, 4, 5, 2, 3), (17, 7, 5, 2, 3),
  (18, 7, 5, 2, 3), (19, 17, 5, 2, 3), (20, 17, 5, 2, 3), (21, 5, -1, 2, 3),
  (22, 5, 5, 2, 3);
-ALTER TABLE t1 SECONDARY_ENGINE=RAPID;
+ALTER TABLE t1 SECONDARY_ENGINE=MOCK;
 ALTER TABLE t1 SECONDARY_LOAD;
 ANALYZE TABLE t1;
 --output $MYSQL_TMP_DIR/explain-bug29288023
@@ -750,8 +743,8 @@ WHERE tt1.x> 5 and tt1.x=tt2.x;
 --let $assert_file=$MYSQL_TMP_DIR/explain-bug29288023
 --let $assert_select=<auto_key0>
 --let $assert_count=0
-#--source include/assert_grep.inc
-#--remove_file $MYSQL_TMP_DIR/explain-bug29288023
+--source include/assert_grep.inc
+--remove_file $MYSQL_TMP_DIR/explain-bug29288023
 
 DROP TABLE t1;
 
@@ -759,7 +752,7 @@ DROP TABLE t1;
 --echo # Bug#29994087: SIG11 AT MATERIALIZEITERATOR::INIT() IN
 --echo #               SQL/COMPOSITE_ITERATORS.CC
 --echo #
-CREATE TABLE t (a INT, b INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t (a INT, b INT) SECONDARY_ENGINE MOCK;
 ALTER TABLE t SECONDARY_LOAD;
 SELECT 1 FROM t
 WHERE (1, 2) IN (SELECT 3, 4 UNION SELECT 5, 6) OR b <= 10;
@@ -770,7 +763,7 @@ DROP TABLE t;
 --echo #               WRITTEN TWICE TO THE MYSQLD GENERAL LOG
 --echo #
 
-CREATE TABLE t(x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t(x INT) SECONDARY_ENGINE MOCK;
 ALTER TABLE t SECONDARY_LOAD;
 
 SET @saved_general_log = @@global.general_log;
@@ -822,7 +815,7 @@ DROP TABLE t;
 --echo # Bug#30391501: ASSERTION FAILURE WHEN RUNNING RAPID.AGG_PROJ_ANY
 --echo #               WITH --PS-PROTOCOL
 --echo #
-CREATE TABLE t(x INT) SECONDARY_ENGINE RAPID;
+CREATE TABLE t(x INT) SECONDARY_ENGINE MOCK;
 INSERT INTO t VALUES (1), (2), (3);
 ALTER TABLE t SECONDARY_LOAD;
 SELECT (SELECT 9 FROM DUAL) AS y FROM t GROUP BY y;
@@ -831,119 +824,6 @@ EXECUTE ps;
 DROP PREPARE ps;
 DROP TABLE t;
 
---echo #
---echo # Bug#33390949: Execute a statement with secondary engine,
---echo #               two entries in performance schema
---echo #
-
-CREATE TABLE t(x INT);
-INSERT INTO t VALUES (1), (2), (3), (4), (5), (6), (7);
-
-PREPARE ps FROM 'SELECT * FROM t';
-
-let $show_events =
-SELECT count_star, count_secondary, sum_select_scan
-FROM performance_schema.events_statements_summary_by_digest
-WHERE digest_text LIKE 'SELECT %';
-
-let $show_events_ps =
-SELECT count_star, count_secondary, sum_select_scan
-FROM performance_schema.events_statements_summary_by_digest
-WHERE digest_text LIKE 'EXECUTE %';
-
-let $show_ps_instances =
-SELECT execution_engine, count_execute, count_secondary
-FROM performance_schema.prepared_statements_instances
-WHERE statement_name = 'ps';
-
-TRUNCATE TABLE performance_schema.prepared_statements_instances;
-
-# The table does not have a secondary engine yet. Count_star should be
-# 1, since a single statement is executed. Count_secondary should be
-# 0, since the statement was not offloaded to the secondary engine.
-# Sum_select_scan should be 1, since the table was scanned once.
-TRUNCATE TABLE performance_schema.events_statements_summary_by_digest;
---disable_ps_protocol
---sorted_result
-SELECT * FROM t;
---enable_ps_protocol
---eval $show_events
-
---sorted_result
-EXECUTE ps;
---eval $show_events_ps
---eval $show_ps_instances
-
-ALTER TABLE t SECONDARY_ENGINE RAPID;
-
-# The table has a secondary engine, but it's not loaded into the
-# secondary engine, so the statement is not offloaded to the secondary
-# engine. Expect the same counts as in the previous case.
-TRUNCATE TABLE performance_schema.events_statements_summary_by_digest;
---disable_ps_protocol
---sorted_result
-SELECT * FROM t;
---enable_ps_protocol
---eval $show_events
-
---sorted_result
-EXECUTE ps;
---eval $show_events_ps
---eval $show_ps_instances
-
-ALTER TABLE t SECONDARY_LOAD;
-
-# The table is loaded in the secondary engine. The statement is
-# offloaded. Count_star should be 1, since the query is executed once.
-# Count_secondary should be 1, since the query was offloaded.
-# Sum_select_scan is 1. It should not count one scan for the primary
-# engine plan and one for secondary engine plan. (If the secondary
-# engine has set the USE_EXTERNAL_EXECUTOR flag (which RAPID has not),
-# the server will not count scans in the secondary engine. The
-# secondary engine can in that case increment these counters itself,
-# if it finds it relevant.)
-TRUNCATE TABLE performance_schema.events_statements_summary_by_digest;
---disable_ps_protocol
-SELECT * FROM t;
---enable_ps_protocol
---eval $show_events
-
-EXECUTE ps;
---eval $show_events_ps
---eval $show_ps_instances
-
-# Executing while secondary engine is disabled should increase
-# execution count and scan count, but not secondary engine count.
-SET @saved_use_secondary_engine = @@use_secondary_engine;
-SET use_secondary_engine = OFF;
---sorted_result
-EXECUTE ps;
-SET @@use_secondary_engine = @saved_use_secondary_engine;
---eval $show_events_ps
---eval $show_ps_instances
-
-# Executing while secondary is forced should increase secondary engine
-# count, as well as execution count and scan count.
-SET @saved_use_secondary_engine = @@use_secondary_engine;
-SET use_secondary_engine = FORCED;
-EXECUTE ps;
-SET @@use_secondary_engine = @saved_use_secondary_engine;
---eval $show_events_ps
---eval $show_ps_instances
-
-# Executing the prepared statement from a stored procedure should also
-# increase the execution count and secondary engine count.
-CREATE PROCEDURE p() EXECUTE ps;
-CALL p();
-DROP PROCEDURE p;
---eval $show_ps_instances
-
-DROP PREPARE ps;
-
-# Expect no double-counting in CREATE TABLE AS SELECT either.
-FLUSH STATUS;
-CREATE TABLE tt AS SELECT * FROM t;
-SHOW STATUS LIKE 'Select_scan';
-DROP TABLE IF EXISTS tt;
-
-DROP TABLE IF EXISTS t;
+--disable_query_log
+UNINSTALL PLUGIN mock;
+--enable_query_log

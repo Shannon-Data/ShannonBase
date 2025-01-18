@@ -3,12 +3,11 @@
 --source include/elide_costs.inc
 
 --disable_query_log
+eval INSTALL PLUGIN mock SONAME '$MOCK_PLUGIN';
 --enable_query_log
 
-set rapid_use_dynamic_offload=0;
-
 CREATE TABLE t1(id INT PRIMARY KEY, x INT, y INT, KEY (x))
-SECONDARY_ENGINE RAPID;
+SECONDARY_ENGINE MOCK;
 INSERT INTO t1 VALUES
        (1, 1, 1),
        (2, 1, 1),
@@ -113,9 +112,9 @@ DROP TABLE t1;
 
 --echo # Getting range statistics from spatial indexes is not supported,
 --echo # since spatial indexes are not ordered.
-CREATE TABLE geom(g GEOMETRY NOT NULL SRID 0, SPATIAL INDEX(g)) SECONDARY_ENGINE RAPID;
+CREATE TABLE geom(g GEOMETRY NOT NULL SRID 0, SPATIAL INDEX(g))
+       SECONDARY_ENGINE MOCK;
 INSERT INTO geom VALUES (POINT(1, 1)), (POINT(2, 2)), (POINT(3, 3));
---error 1888 #Secondary engine load the table failed. type not allowed
 ALTER TABLE geom SECONDARY_LOAD;
 ANALYZE TABLE geom;
 --replace_regex $elide_costs
@@ -126,4 +125,5 @@ EXPLAIN FORMAT=TREE SELECT ST_AsText(g) FROM geom
 DROP TABLE geom;
 
 --disable_query_log
+UNINSTALL PLUGIN mock;
 --enable_query_log

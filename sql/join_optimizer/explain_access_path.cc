@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,43 +23,74 @@
 
 #include "sql/join_optimizer/explain_access_path.h"
 
-#include <functional>
+#include <algorithm>
+#include <cassert>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <new>
 #include <regex>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <openssl/sha.h>
 
+#include "lex_string.h"
+#include "mem_root_deque.h"
 #include "my_base.h"
+#include "my_dbug.h"
+#include "my_sqlcommand.h"
 #include "mysql/strings/dtoa.h"
 #include "sha2.h"
 #include "sql-common/json_dom.h"
-#include "sql/filesort.h"
+#include "sql/current_thd.h"
+#include "sql/field.h"
+#include "sql/handler.h"
+#include "sql/item.h"
 #include "sql/item_cmpfunc.h"
+#include "sql/item_subselect.h"
 #include "sql/item_sum.h"
-#include "sql/iterators/basic_row_iterators.h"
-#include "sql/iterators/bka_iterator.h"
-#include "sql/iterators/composite_iterators.h"
-#include "sql/iterators/hash_join_iterator.h"
-#include "sql/iterators/ref_row_iterators.h"
-#include "sql/iterators/sorting_iterator.h"
-#include "sql/iterators/timing_iterator.h"
+#include "sql/iterators/row_iterator.h"
 #include "sql/join_optimizer/access_path.h"
+#include "sql/join_optimizer/bit_utils.h"
 #include "sql/join_optimizer/cost_model.h"
+#include "sql/join_optimizer/materialize_path_parameters.h"
 #include "sql/join_optimizer/print_utils.h"
 #include "sql/join_optimizer/relational_expression.h"
+#include "sql/join_type.h"
+#include "sql/key.h"
+#include "sql/key_spec.h"
+#include "sql/mem_root_array.h"
+#include "sql/olap.h"
 #include "sql/opt_explain.h"
+#include "sql/opt_explain_format.h"
 #include "sql/opt_explain_traditional.h"
-#include "sql/query_result.h"
 #include "sql/range_optimizer/group_index_skip_scan_plan.h"
 #include "sql/range_optimizer/index_skip_scan_plan.h"
 #include "sql/range_optimizer/internal.h"
 #include "sql/range_optimizer/range_optimizer.h"
+#include "sql/sql_array.h"
+#include "sql/sql_class.h"
+#include "sql/sql_cmd.h"
+#include "sql/sql_const.h"
+#include "sql/sql_executor.h"
+#include "sql/sql_lex.h"
+#include "sql/sql_list.h"
+#include "sql/sql_opt_exec_shared.h"
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
+#include "sql/temp_table_param.h"
+#include "sql/window.h"
+#include "sql_string.h"
 #include "template_utils.h"
 
 using std::string;
+using std::unique_ptr;
 using std::vector;
 
 /// This structure encapsulates the information needed to create a Json object
@@ -77,34 +109,36 @@ struct ExplainChild {
 
   // If it's convenient to assign json fields for this child while creating this
   // structure, then a json object can be allocated and set here.
-  Json_object *obj = nullptr;
+  unique_ptr<Json_object> obj{nullptr};
 };
 
 /// Convenience function to add a json field.
-template <class T, class... Args>
-static bool AddMemberToObject(Json_object *obj, const char *alias,
-                              Args &&... ctor_args) {
+template <class T, class JsonObjectPtr, class... Args>
+static bool AddMemberToObject(const JsonObjectPtr &obj, const char *alias,
+                              Args &&...ctor_args) {
   return obj->add_alias(
       alias, create_dom_ptr<T, Args...>(std::forward<Args>(ctor_args)...));
 }
 
 template <class T, class... Args>
-static bool AddElementToArray(const std::unique_ptr<Json_array> &array,
-                              Args &&... ctor_args) {
+static bool AddElementToArray(const unique_ptr<Json_array> &array,
+                              Args &&...ctor_args) {
   return array->append_alias(
       create_dom_ptr<T, Args...>(std::forward<Args>(ctor_args)...));
 }
 
 static bool PrintRanges(const QUICK_RANGE *const *ranges, unsigned num_ranges,
                         const KEY_PART_INFO *key_part, bool single_part_only,
-                        const std::unique_ptr<Json_array> &range_array,
+                        const unique_ptr<Json_array> &range_array,
                         string *ranges_out);
-static std::unique_ptr<Json_object> ExplainAccessPath(
+static unique_ptr<Json_object> ExplainAccessPath(
     const AccessPath *path, const AccessPath *materialized_path, JOIN *join,
-    bool is_root_of_join, Json_object *input_obj = nullptr);
-static std::unique_ptr<Json_object> AssignParentPath(
+    bool is_root_of_join, unique_ptr<Json_object> root_obj);
+static unique_ptr<Json_object> ExplainNoAccessPath(
+    const THD::Query_plan *query_plan);
+static unique_ptr<Json_object> AssignParentPath(
     AccessPath *parent_path, const AccessPath *materialized_path,
-    std::unique_ptr<Json_object> obj, JOIN *join);
+    unique_ptr<Json_object> obj, JOIN *join);
 inline static double GetJSONDouble(const Json_object *obj, const char *key) {
   return down_cast<const Json_double *>(obj->get(key))->value();
 }
@@ -113,6 +147,54 @@ inline static double GetJSONDouble(const Json_object *obj, const char *key) {
 // referenced in "table".
 static bool IsCoveringIndexScan(const KEY &key, const TABLE &table) {
   return !table.no_keyread && table.covering_keys.is_set(&key - table.key_info);
+}
+
+/**
+ * Add table name, schema name, and list of used columns for the specified table
+ * to the JSON object.
+ * Add the table's alias if an alias was used.
+ *
+ * @param obj The JSON object to be updated.
+ * @param table The table to fetch information from.
+ *
+ * @retval true if either parameter is nullptr, or adding fields to the JSON
+ * object failed.
+ * @retval false if all table information was added successfully.
+ */
+static bool AddTableInfoToObject(Json_object *obj, const TABLE *table) {
+  bool error = false;
+  if (obj == nullptr || table == nullptr) return true;
+  if (table->alias_name_used &&
+      table->s->get_table_ref_type() == TABLE_REF_BASE_TABLE) {
+    error |= AddMemberToObject<Json_string>(obj, "table_name",
+                                            table->s->table_name.str);
+    error |= AddMemberToObject<Json_string>(obj, "alias", table->alias);
+  } else {
+    error |= AddMemberToObject<Json_string>(obj, "table_name", table->alias);
+  }
+  if (table->s->db.length > 0) {
+    error |=
+        AddMemberToObject<Json_string>(obj, "schema_name", table->s->db.str);
+  }
+
+  if (table->pos_in_table_list != nullptr &&
+      !(bitmap_is_clear_all(table->read_set) &&
+        bitmap_is_clear_all(table->write_set))) {
+    unique_ptr<Json_array> used_fields_list(new (std::nothrow) Json_array());
+    if (used_fields_list == nullptr) return true;
+    for (Field **fld = table->field; *fld != nullptr; fld++) {
+      if (!bitmap_is_set(table->read_set, (*fld)->field_index()) &&
+          !bitmap_is_set(table->write_set, (*fld)->field_index()))
+        continue;
+
+      const char *field_description =
+          get_field_name_or_expression(table->in_use, *fld);
+      if (AddElementToArray<Json_string>(used_fields_list, field_description))
+        return true;
+    }
+    error |= obj->add_alias("used_columns", std::move(used_fields_list));
+  }
+  return error;
 }
 
 /*
@@ -133,12 +215,14 @@ static bool IsCoveringIndexScan(const KEY &key, const TABLE &table) {
   NULL in case of failure, we need to return something non-NULL to indicate
   success.
 */
-static bool SetIndexInfoInObject(
-    string *str, const char *json_index_access_type, const char *prefix,
-    const TABLE &table, const KEY &key, const char *index_access_type,
-    const string lookup_condition, const string *ranges_text,
-    std::unique_ptr<Json_array> range_arr, bool reverse, Item *pushed_idx_cond,
-    Json_object *obj) {
+static bool SetIndexInfoInObject(string *str,
+                                 const char *json_index_access_type,
+                                 const char *prefix, const TABLE &table,
+                                 const KEY &key, const char *index_access_type,
+                                 const string lookup_condition,
+                                 const string *ranges_text,
+                                 unique_ptr<Json_array> range_arr, bool reverse,
+                                 Item *pushed_idx_cond, Json_object *obj) {
   string idx_cond_str = pushed_idx_cond ? ItemToString(pushed_idx_cond) : "";
   string covering_index =
       string(IsCoveringIndexScan(key, table) ? "Covering index " : "Index ");
@@ -160,7 +244,7 @@ static bool SetIndexInfoInObject(
                                           json_index_access_type);
   error |= AddMemberToObject<Json_boolean>(obj, "covering",
                                            IsCoveringIndexScan(key, table));
-  error |= AddMemberToObject<Json_string>(obj, "table_name", table.alias);
+  error |= AddTableInfoToObject(obj, &table);
   error |= AddMemberToObject<Json_string>(obj, "index_name", key.name);
   if (!lookup_condition.empty())
     error |= AddMemberToObject<Json_string>(obj, "lookup_condition",
@@ -219,58 +303,74 @@ string HashJoinTypeToString(RelationalExpression::Type join_type,
   }
 }
 
-static bool GetAccessPathsFromItem(Item *item_arg, const char *source_text,
-                                   vector<ExplainChild> *children) {
-  return WalkItem(
-      item_arg, enum_walk::POSTFIX, [children, source_text](Item *item) {
-        if (item->type() != Item::SUBSELECT_ITEM) {
-          return false;
-        }
+/**
+   For each Item_subselect descendant of 'item_arg', add the corresponding
+   root AccessPath object to 'children'.
+   @param[in] item_arg The root of the Item tree to examine.
+   @param[in] source_text A context description for the objects we add to
+              'children'.
+   @param[in,out] children TBD
+   @returns 'true' if there was an error.
+ */
+static bool AddSubqueryPaths(const Item *item_arg, const char *source_text,
+                             vector<ExplainChild> *children) {
+  const auto add_subqueries = [children, source_text](const Item *item) {
+    if (item->type() != Item::SUBQUERY_ITEM) {
+      return false;
+    }
 
-        Item_subselect *subquery = down_cast<Item_subselect *>(item);
-        Query_expression *qe = subquery->query_expr();
-        Query_block *query_block = qe->first_query_block();
-        char description[256];
-        if (query_block->is_dependent()) {
-          snprintf(description, sizeof(description),
-                   "Select #%d (subquery in %s; dependent)",
-                   query_block->select_number, source_text);
-        } else if (!query_block->is_cacheable()) {
-          snprintf(description, sizeof(description),
-                   "Select #%d (subquery in %s; uncacheable)",
-                   query_block->select_number, source_text);
-        } else {
-          snprintf(description, sizeof(description),
-                   "Select #%d (subquery in %s; run only once)",
-                   query_block->select_number, source_text);
-        }
-        if (query_block->join->needs_finalize) {
-          qe->finalize(current_thd);
-        }
-        AccessPath *path;
-        if (qe->root_access_path() != nullptr) {
-          path = qe->root_access_path();
-        } else {
-          path = qe->item->root_access_path();
-        }
-        Json_object *child_obj = new (std::nothrow) Json_object();
-        if (child_obj == nullptr) return true;
-        // Populate the subquery-specific json fields.
-        bool error = false;
-        error |= AddMemberToObject<Json_boolean>(child_obj, "subquery", true);
-        error |= AddMemberToObject<Json_string>(child_obj, "subquery_location",
-                                                source_text);
-        if (query_block->is_dependent())
-          error |=
-              AddMemberToObject<Json_boolean>(child_obj, "dependent", true);
-        if (query_block->is_cacheable())
-          error |=
-              AddMemberToObject<Json_boolean>(child_obj, "cacheable", true);
+    const Item_subselect *subquery = down_cast<const Item_subselect *>(item);
+    Query_expression *qe = subquery->query_expr();
+    qe->finalize(current_thd);
+    Query_block *query_block = qe->first_query_block();
+    AccessPath *path;
 
-        children->push_back({path, description, query_block->join, child_obj});
+    if (qe->root_access_path() != nullptr) {
+      path = qe->root_access_path();
+    } else {
+      path = qe->item->root_access_path();
+    }
 
-        return error != 0;
-      });
+    bool error = false;
+
+    // Add 'path' if not present in 'children' already.
+    if (std::none_of(children->cbegin(), children->cend(),
+                     [path](const ExplainChild &existing) {
+                       return existing.path == path;
+                     })) {
+      char description[256];
+      if (query_block->is_dependent()) {
+        snprintf(description, sizeof(description),
+                 "Select #%d (subquery in %s; dependent)",
+                 query_block->select_number, source_text);
+      } else if (!query_block->is_cacheable()) {
+        snprintf(description, sizeof(description),
+                 "Select #%d (subquery in %s; uncacheable)",
+                 query_block->select_number, source_text);
+      } else {
+        snprintf(description, sizeof(description),
+                 "Select #%d (subquery in %s; run only once)",
+                 query_block->select_number, source_text);
+      }
+      unique_ptr<Json_object> child_obj{new (std::nothrow) Json_object()};
+      if (child_obj == nullptr) return true;
+      // Populate the subquery-specific json fields.
+      error |= AddMemberToObject<Json_boolean>(child_obj, "subquery", true);
+      error |= AddMemberToObject<Json_string>(child_obj, "subquery_location",
+                                              source_text);
+      if (query_block->is_dependent())
+        error |= AddMemberToObject<Json_boolean>(child_obj, "dependent", true);
+      if (query_block->is_cacheable())
+        error |= AddMemberToObject<Json_boolean>(child_obj, "cacheable", true);
+
+      children->push_back(
+          {path, description, query_block->join, std::move(child_obj)});
+    }
+
+    return error;
+  };
+
+  return WalkItem(item_arg, enum_walk::POSTFIX, add_subqueries);
 }
 
 static bool GetAccessPathsFromSelectList(JOIN *join,
@@ -279,27 +379,25 @@ static bool GetAccessPathsFromSelectList(JOIN *join,
     return false;
   }
 
-  // Look for any Items in the projection list itself.
-  for (Item *item : *join->get_current_fields()) {
-    if (GetAccessPathsFromItem(item, "projection", children)) return true;
+  // SELECT lists are present only in SELECT statements and subqueries.
+  Query_block *query_block = join->query_block;
+  if (join->thd->lex->sql_command != SQLCOM_SELECT &&
+      query_block->outer_query_block() == nullptr) {
+    return false;
   }
 
-  // Look for any Items that were materialized into fields during execution.
-  for (uint table_idx = join->primary_tables; table_idx < join->tables;
-       ++table_idx) {
-    QEP_TAB *qep_tab = &join->qep_tab[table_idx];
-    if (qep_tab != nullptr && qep_tab->tmp_table_param != nullptr) {
-      for (Func_ptr &func : *qep_tab->tmp_table_param->items_to_copy) {
-        if (GetAccessPathsFromItem(func.func(), "projection", children))
-          return true;
-      }
-    }
+  // Look for any subqueries in the projection list. Use the base items, so that
+  // we see the subqueries even if they have been materialized and replaced by
+  // temporary table columns in join->fields.
+  for (Item *item : query_block->base_ref_items.prefix(join->fields->size())) {
+    if (AddSubqueryPaths(item, "projection", children)) return true;
   }
+
   return false;
 }
 
-static std::unique_ptr<Json_object> ExplainMaterializeAccessPath(
-    const AccessPath *path, JOIN *join, std::unique_ptr<Json_object> ret_obj,
+static unique_ptr<Json_object> ExplainMaterializeAccessPath(
+    const AccessPath *path, JOIN *join, unique_ptr<Json_object> ret_obj,
     vector<ExplainChild> *children, bool explain_analyze) {
   Json_object *obj = ret_obj.get();
   bool error = false;
@@ -334,7 +432,7 @@ static std::unique_ptr<Json_object> ExplainMaterializeAccessPath(
     }
   }();
 
-  const bool is_set_operation = param->query_blocks.size() > 1;
+  const bool is_set_operation = param->m_operands.size() > 1;
   string str;
   const bool doing_dedup = MaterializeIsDoingDeduplication(param->table);
   if (param->cte != nullptr) {
@@ -396,8 +494,7 @@ static std::unique_ptr<Json_object> ExplainMaterializeAccessPath(
   }  // else: do not print deduplication for intersect, except
 
   if (param->invalidators != nullptr) {
-    std::unique_ptr<Json_array> cache_invalidators(new (std::nothrow)
-                                                       Json_array());
+    unique_ptr<Json_array> cache_invalidators(new (std::nothrow) Json_array());
     if (cache_invalidators == nullptr) return nullptr;
     bool first = true;
     str += " (invalidate on row from ";
@@ -452,11 +549,10 @@ static std::unique_ptr<Json_object> ExplainMaterializeAccessPath(
   // We don't list the table iterator as an explicit child; we mark it in
   // our description instead. (Anything else would look confusingly much
   // like a join.)
-  for (const MaterializePathParameters::QueryBlock &query_block :
-       param->query_blocks) {
+  for (const MaterializePathParameters::Operand &operand : param->m_operands) {
     string this_heading = heading;
 
-    if (query_block.disable_deduplication_by_hash_field) {
+    if (operand.disable_deduplication_by_hash_field) {
       if (this_heading.empty()) {
         this_heading = "Disable deduplication";
       } else {
@@ -465,8 +561,8 @@ static std::unique_ptr<Json_object> ExplainMaterializeAccessPath(
     }
     if (!param->table->is_union_or_table() &&
         (param->table->is_except() && param->table->is_distinct()) &&
-        query_block.m_operand_idx > 0 &&
-        (query_block.m_operand_idx < query_block.m_first_distinct)) {
+        operand.m_operand_idx > 0 &&
+        (operand.m_operand_idx < operand.m_first_distinct)) {
       if (this_heading.empty()) {
         this_heading = "Disable deduplication";
       } else {
@@ -474,7 +570,7 @@ static std::unique_ptr<Json_object> ExplainMaterializeAccessPath(
       }
     }
 
-    if (query_block.is_recursive_reference) {
+    if (operand.is_recursive_reference) {
       if (this_heading.empty()) {
         this_heading = "Repeat until convergence";
       } else {
@@ -482,8 +578,7 @@ static std::unique_ptr<Json_object> ExplainMaterializeAccessPath(
       }
     }
 
-    children->push_back(
-        {query_block.subquery_path, this_heading, query_block.join});
+    children->push_back({operand.subquery_path, this_heading, operand.join});
   }
 
   return (error ? nullptr : std::move(ret_obj));
@@ -516,13 +611,14 @@ static std::unique_ptr<Json_object> ExplainMaterializeAccessPath(
     @param join the JOIN to which 'table_path' belongs.
     @returns the JSON object describing table_path.
 */
-static std::unique_ptr<Json_object> AssignParentPath(
+static unique_ptr<Json_object> AssignParentPath(
     AccessPath *table_path, const AccessPath *materialized_path,
-    std::unique_ptr<Json_object> materialized_obj, JOIN *join) {
+    unique_ptr<Json_object> materialized_obj, JOIN *join) {
   // We don't want to include the SELECT subquery list in the parent path;
   // Let them get printed in the actual root node. So is_root_of_join=false.
-  std::unique_ptr<Json_object> table_obj = ExplainAccessPath(
-      table_path, materialized_path, join, /*is_root_of_join=*/false);
+  unique_ptr<Json_object> table_obj =
+      ExplainAccessPath(table_path, materialized_path, join,
+                        /*is_root_of_join=*/false, /*root_obj=*/nullptr);
   if (table_obj == nullptr) return nullptr;
 
   /* Get the bottommost object from the new object tree. */
@@ -535,7 +631,7 @@ static std::unique_ptr<Json_object> AssignParentPath(
   }
 
   /* Place the input object as a child of the bottom-most object */
-  std::unique_ptr<Json_array> children(new (std::nothrow) Json_array());
+  unique_ptr<Json_array> children(new (std::nothrow) Json_array());
   if (children == nullptr ||
       children->append_alias(std::move(materialized_obj)))
     return nullptr;
@@ -555,7 +651,7 @@ static bool ExplainIndexSkipScanAccessPath(Json_object *obj,
 
   // Print out any equality ranges.
   bool first = true;
-  std::unique_ptr<Json_array> range_arr(new (std::nothrow) Json_array());
+  unique_ptr<Json_array> range_arr(new (std::nothrow) Json_array());
   if (range_arr == nullptr) return true;
   for (unsigned key_part_idx = 0; key_part_idx < param->eq_prefix_key_parts;
        ++key_part_idx) {
@@ -624,7 +720,7 @@ static bool ExplainGroupIndexSkipScanAccessPath(Json_object *obj,
   GroupIndexSkipScanParameters *param = path->group_index_skip_scan().param;
   string ranges;
   bool error = false;
-  std::unique_ptr<Json_array> range_arr(new (std::nothrow) Json_array());
+  unique_ptr<Json_array> range_arr(new (std::nothrow) Json_array());
   if (range_arr == nullptr) return true;
 
   // Print out prefix ranges, if any.
@@ -672,7 +768,7 @@ static bool AddChildrenFromPushedCondition(const TABLE &table,
   Item *pushed_cond = const_cast<Item *>(table.file->pushed_cond);
 
   if (pushed_cond != nullptr) {
-    if (GetAccessPathsFromItem(pushed_cond, "pushed condition", children))
+    if (AddSubqueryPaths(pushed_cond, "pushed condition", children))
       return true;
   }
   return false;
@@ -687,7 +783,7 @@ static bool AddChildrenFromPushedCondition(const TABLE &table,
 */
 static bool PrintRanges(const QUICK_RANGE *const *ranges, unsigned num_ranges,
                         const KEY_PART_INFO *key_part, bool single_part_only,
-                        const std::unique_ptr<Json_array> &range_array,
+                        const unique_ptr<Json_array> &range_array,
                         string *ranges_out) {
   string range, shortened_range;
   for (unsigned range_idx = 0; range_idx < num_ranges; ++range_idx) {
@@ -717,25 +813,25 @@ static bool PrintRanges(const QUICK_RANGE *const *ranges, unsigned num_ranges,
   return false;
 }
 
-static bool AddChildrenToObject(Json_object *obj,
-                                const vector<ExplainChild> &children,
+static bool AddChildrenToObject(Json_object *obj, vector<ExplainChild> children,
                                 JOIN *parent_join, bool parent_is_root_of_join,
                                 string alias) {
   if (children.empty()) return false;
 
-  std::unique_ptr<Json_array> children_json(new (std::nothrow) Json_array());
+  unique_ptr<Json_array> children_json(new (std::nothrow) Json_array());
   if (children_json == nullptr) return true;
 
-  for (const ExplainChild &child : children) {
+  for (ExplainChild &child : children) {
     JOIN *subjoin = child.join != nullptr ? child.join : parent_join;
     bool child_is_root_of_join =
         subjoin != parent_join || parent_is_root_of_join;
 
-    std::unique_ptr<Json_object> child_obj = ExplainAccessPath(
-        child.path, nullptr, subjoin, child_is_root_of_join, child.obj);
+    unique_ptr<Json_object> child_obj =
+        ExplainAccessPath(child.path, nullptr, subjoin, child_is_root_of_join,
+                          std::move(child.obj));
     if (child_obj == nullptr) return true;
     if (!child.description.empty()) {
-      if (AddMemberToObject<Json_string>(child_obj.get(), "heading",
+      if (AddMemberToObject<Json_string>(child_obj, "heading",
                                          child.description))
         return true;
     }
@@ -745,50 +841,85 @@ static bool AddChildrenToObject(Json_object *obj,
   return obj->add_alias(alias, std::move(children_json));
 }
 
-static std::unique_ptr<Json_object> ExplainQueryPlan(
+static unique_ptr<Json_object> ExplainQueryPlan(
     const AccessPath *path, THD::Query_plan const *query_plan, JOIN *join,
     bool is_root_of_join) {
   string dml_desc;
-  std::unique_ptr<Json_object> obj = nullptr;
+  string access_type;
+  string query_type;
+  unique_ptr<Json_object> obj = nullptr;
 
   /* Create a Json object for the SELECT path */
   if (path != nullptr) {
-    obj = ExplainAccessPath(path, nullptr, join, is_root_of_join);
-    if (obj == nullptr) return nullptr;
+    obj = ExplainAccessPath(path, /*materialized_path=*/nullptr, join,
+                            is_root_of_join, /*root_obj=*/nullptr);
+  } else {
+    obj = ExplainNoAccessPath(query_plan);
   }
+  if (obj == nullptr) return nullptr;
+
   if (query_plan != nullptr) {
     switch (query_plan->get_command()) {
-      case SQLCOM_INSERT_SELECT:
       case SQLCOM_INSERT:
+        access_type = "insert_values";
+        [[fallthrough]];
+      case SQLCOM_INSERT_SELECT:
+        query_type = "insert";
         dml_desc = string("Insert into ") +
                    query_plan->get_lex()->insert_table_leaf->table->alias;
         break;
-      case SQLCOM_REPLACE_SELECT:
       case SQLCOM_REPLACE:
+        access_type = "replace_values";
+        [[fallthrough]];
+      case SQLCOM_REPLACE_SELECT:
+        query_type = "replace";
         dml_desc = string("Replace into ") +
                    query_plan->get_lex()->insert_table_leaf->table->alias;
         break;
+      case SQLCOM_SELECT:
+        query_type = "select";
+        break;
+      case SQLCOM_UPDATE:
+      case SQLCOM_UPDATE_MULTI:
+        query_type = "update";
+        break;
+      case SQLCOM_DELETE:
+      case SQLCOM_DELETE_MULTI:
+        query_type = "delete";
+        break;
       default:
-        // SELECTs have no top-level node.
+        assert(false);
         break;
     }
   }
 
   /* If there is a DML node, add it on top of the SELECT plan */
   if (!dml_desc.empty()) {
-    std::unique_ptr<Json_object> dml_obj(new (std::nothrow) Json_object());
+    unique_ptr<Json_object> dml_obj(new (std::nothrow) Json_object());
     if (dml_obj == nullptr) return nullptr;
-    if (AddMemberToObject<Json_string>(dml_obj.get(), "operation", dml_desc))
+    if (AddMemberToObject<Json_string>(dml_obj, "operation", dml_desc))
       return nullptr;
 
-    /* There might not be a select plan. E.g. INSERT ... VALUES() */
-    if (obj != nullptr) {
-      std::unique_ptr<Json_array> children(new (std::nothrow) Json_array());
-      if (children == nullptr || children->append_alias(std::move(obj)))
-        return nullptr;
-      if (dml_obj->add_alias("inputs", std::move(children))) return nullptr;
+    unique_ptr<Json_array> children(new (std::nothrow) Json_array());
+    if (children == nullptr || children->append_alias(std::move(obj)))
+      return nullptr;
+
+    if (dml_obj->add_alias("inputs", std::move(children))) return nullptr;
+
+    if (AddTableInfoToObject(dml_obj.get(),
+                             query_plan->get_lex()->query_tables[0].table)) {
+      return nullptr;
+    }
+
+    if (!access_type.empty() &&
+        AddMemberToObject<Json_string>(dml_obj, "access_type", access_type)) {
+      return nullptr;
     }
     obj = std::move(dml_obj);
+  }
+
+  if (!query_type.empty()) {
+    AddMemberToObject<Json_string>(obj, "query_type", query_type);
   }
 
   return obj;
@@ -845,15 +976,15 @@ static bool AddPathCosts(const AccessPath *path,
   */
   if (materialized_path == nullptr) {
     if (table_path == nullptr) {
-      cost = std::max(0.0, path->cost);
+      cost = std::max(0.0, path->cost());
     } else {
       assert(path->materialize().subquery_cost >= 0.0);
       cost = path->materialize().subquery_cost +
              kMaterializeOneRowCost * path->num_output_rows();
     }
   } else {
-    assert(materialized_path->cost >= 0.0);
-    cost = materialized_path->cost;
+    assert(materialized_path->cost() >= 0.0);
+    cost = materialized_path->cost();
   }
 
   bool error = false;
@@ -863,12 +994,12 @@ static bool AddPathCosts(const AccessPath *path,
     double init_cost;
     if (materialized_path == nullptr) {
       if (table_path == nullptr) {
-        init_cost = path->init_cost;
+        init_cost = path->init_cost();
       } else {
         init_cost = cost;
       }
     } else {
-      init_cost = materialized_path->init_cost;
+      init_cost = materialized_path->init_cost();
     }
 
     if (init_cost >= 0.0) {
@@ -940,8 +1071,8 @@ static bool AddPathCosts(const AccessPath *path,
           returned JSON object represents (i.e. the next paths to be explained).
    @returns either ret_obj or a new JSON object with ret_obj as a descendant.
 */
-static std::unique_ptr<Json_object> SetObjectMembers(
-    std::unique_ptr<Json_object> ret_obj, const AccessPath *path,
+static unique_ptr<Json_object> SetObjectMembers(
+    unique_ptr<Json_object> ret_obj, const AccessPath *path,
     const AccessPath *materialized_path, JOIN *join,
     vector<ExplainChild> *children) {
   bool error = false;
@@ -965,12 +1096,36 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       }
       description += table.file->explain_extra();
 
-      error |= AddMemberToObject<Json_string>(obj, "table_name", table.alias);
+      error |= AddTableInfoToObject(obj, &table);
       error |= AddMemberToObject<Json_string>(obj, "access_type", "table");
       if (!table.file->explain_extra().empty())
         error |= AddMemberToObject<Json_string>(obj, "message",
                                                 table.file->explain_extra());
       error |= AddChildrenFromPushedCondition(table, children);
+      break;
+    }
+    case AccessPath::SAMPLE_SCAN: {
+      const TABLE &table = *path->sample_scan().table;
+      description += string("Sample scan on ") + table.alias;
+      if (table.s->is_secondary_engine()) {
+        error |= AddMemberToObject<Json_string>(obj, "secondary_engine",
+                                                table.file->table_type());
+        description +=
+            string(" in secondary engine ") + table.file->table_type();
+      }
+      description += table.file->explain_extra();
+
+      error |= AddMemberToObject<Json_string>(obj, "table_name", table.alias);
+      error |= AddMemberToObject<Json_string>(obj, "access_type", "table");
+      error |= AddChildrenFromPushedCondition(table, children);
+
+      error |= AddMemberToObject<Json_string>(
+          obj, "sampling_type",
+          SamplingTypeToString(table.pos_in_table_list->get_sampling_type()));
+      error |= AddMemberToObject<Json_double>(
+          obj, "percentage",
+          table.pos_in_table_list->get_sampling_percentage());
+
       break;
     }
     case AccessPath::INDEX_SCAN: {
@@ -982,6 +1137,19 @@ static std::unique_ptr<Json_object> SetObjectMembers(
                                     key, "scan",
                                     /*lookup condition*/ "", /*range*/ nullptr,
                                     nullptr, path->index_scan().reverse,
+                                    /*push_condition*/ nullptr, obj);
+      error |= AddChildrenFromPushedCondition(table, children);
+      break;
+    }
+    case AccessPath::INDEX_DISTANCE_SCAN: {
+      const TABLE &table = *path->index_distance_scan().table;
+      assert(table.file->pushed_idx_cond == nullptr);
+
+      const KEY &key = table.key_info[path->index_distance_scan().idx];
+      error |= SetIndexInfoInObject(&description, "index_distance_scan",
+                                    nullptr, table, key, "distance scan",
+                                    /*lookup condition*/ "", /*range*/ nullptr,
+                                    nullptr, false,
                                     /*push_condition*/ nullptr, obj);
       error |= AddChildrenFromPushedCondition(table, children);
       break;
@@ -1050,7 +1218,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       description = string("Constant row from ") + table.alias;
       error |=
           AddMemberToObject<Json_string>(obj, "access_type", "constant_row");
-      error |= AddMemberToObject<Json_string>(obj, "table_name", table.alias);
+      error |= AddTableInfoToObject(obj, &table);
       break;
     }
     case AccessPath::MRR: {
@@ -1068,8 +1236,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
           string("Scan new records on ") + path->follow_tail().table->alias;
       error |= AddMemberToObject<Json_string>(obj, "access_type",
                                               "scan_new_records");
-      error |= AddMemberToObject<Json_string>(obj, "table_name",
-                                              path->follow_tail().table->alias);
+      error |= AddTableInfoToObject(obj, path->follow_tail().table);
       error |=
           AddChildrenFromPushedCondition(*path->follow_tail().table, children);
       break;
@@ -1078,7 +1245,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       const TABLE &table = *param.used_key_part[0].field->table;
       const KEY &key_info = table.key_info[param.index];
 
-      std::unique_ptr<Json_array> range_arr(new (std::nothrow) Json_array());
+      unique_ptr<Json_array> range_arr(new (std::nothrow) Json_array());
       if (range_arr == nullptr) return nullptr;
       string ranges;
       error |= PrintRanges(param.ranges, param.num_ranges, key_info.key_part,
@@ -1147,7 +1314,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       error |= AddMemberToObject<Json_string>(obj, "access_type", "index");
       error |= AddMemberToObject<Json_string>(obj, "index_access_type",
                                               "dynamic_index_range_scan");
-      error |= AddMemberToObject<Json_string>(obj, "table_name", table.alias);
+      error |= AddTableInfoToObject(obj, &table);
       if (table.file->pushed_idx_cond != nullptr) {
         error |= AddMemberToObject<Json_string>(
             obj, "pushed_index_condition",
@@ -1189,8 +1356,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       break;
     case AccessPath::UNQUALIFIED_COUNT:
       error |= AddMemberToObject<Json_string>(obj, "access_type", "count_rows");
-      error |= AddMemberToObject<Json_string>(obj, "table_name",
-                                              join->qep_tab->table()->alias);
+      error |= AddTableInfoToObject(obj, join->qep_tab->table());
       description = "Count rows in " + string(join->qep_tab->table()->alias);
       break;
     case AccessPath::NESTED_LOOP_JOIN: {
@@ -1235,8 +1401,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       string json_join_type;
       description = HashJoinTypeToString(type, &json_join_type);
 
-      std::unique_ptr<Json_array> hash_condition(new (std::nothrow)
-                                                     Json_array());
+      unique_ptr<Json_array> hash_condition(new (std::nothrow) Json_array());
       if (hash_condition == nullptr) return nullptr;
 
       vector<HashJoinCondition> equijoin_conditions;
@@ -1270,12 +1435,11 @@ static std::unique_ptr<Json_object> SetObjectMembers(
 
       const Mem_root_array<Item *> *extra_join_conditions =
           GetExtraHashJoinConditions(
-              thd->mem_root, thd->lex->using_hypergraph_optimizer,
+              thd->mem_root, thd->lex->using_hypergraph_optimizer(),
               equijoin_conditions, predicate->expr->join_conditions);
       if (extra_join_conditions == nullptr) return nullptr;
 
-      std::unique_ptr<Json_array> extra_condition(new (std::nothrow)
-                                                      Json_array());
+      unique_ptr<Json_array> extra_condition(new (std::nothrow) Json_array());
       if (extra_condition == nullptr) return nullptr;
       bool first = true;
       for (Item *cond : *extra_join_conditions) {
@@ -1297,6 +1461,16 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       error |= AddMemberToObject<Json_string>(obj, "join_algorithm", "hash");
       children->push_back({path->hash_join().outer});
       children->push_back({path->hash_join().inner, "Hash"});
+
+      const RelationalExpression *join_predicate =
+          path->hash_join().join_predicate->expr;
+      for (Item_eq_base *cond : join_predicate->equijoin_conditions) {
+        AddSubqueryPaths(cond, "condition", children);
+      }
+      for (Item *cond : join_predicate->join_conditions) {
+        AddSubqueryPaths(cond, "extra conditions", children);
+      }
+
       break;
     }
     case AccessPath::FILTER: {
@@ -1305,7 +1479,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       error |= AddMemberToObject<Json_string>(obj, "condition", filter);
       description = "Filter: " + filter;
       children->push_back({path->filter().child});
-      GetAccessPathsFromItem(path->filter().condition, "condition", children);
+      AddSubqueryPaths(path->filter().condition, "condition", children);
       break;
     }
     case AccessPath::SORT: {
@@ -1324,7 +1498,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
         description += ": ";
       }
 
-      std::unique_ptr<Json_array> sort_fields(new (std::nothrow) Json_array());
+      unique_ptr<Json_array> sort_fields(new (std::nothrow) Json_array());
       if (sort_fields == nullptr) return nullptr;
       for (ORDER *order = path->sort().order; order != nullptr;
            order = order->next) {
@@ -1368,9 +1542,12 @@ static std::unique_ptr<Json_object> SetObjectMembers(
         error |= AddMemberToObject<Json_boolean>(obj, "group_by", true);
         if (*join->sum_funcs == nullptr) {
           description = "Group (no aggregates)";
-        } else if (path->aggregate().rollup) {
+        } else if (path->aggregate().olap == ROLLUP_TYPE) {
           error |= AddMemberToObject<Json_boolean>(obj, "rollup", true);
           description = "Group aggregate with rollup: ";
+        } else if (path->aggregate().olap == CUBE_TYPE) {
+          error |= AddMemberToObject<Json_boolean>(obj, "cube", true);
+          description = "Group aggregate with cube: ";
         } else {
           description = "Group aggregate: ";
         }
@@ -1378,7 +1555,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
         description = "Aggregate: ";
       }
 
-      std::unique_ptr<Json_array> funcs(new (std::nothrow) Json_array());
+      unique_ptr<Json_array> funcs(new (std::nothrow) Json_array());
       if (funcs == nullptr) return nullptr;
       bool first = true;
       for (Item_sum **item = join->sum_funcs; *item != nullptr; ++item) {
@@ -1387,9 +1564,9 @@ static std::unique_ptr<Json_object> SetObjectMembers(
         } else {
           description += ", ";
         }
-        string func =
-            (path->aggregate().rollup ? ItemToString((*item)->unwrap_sum())
-                                      : ItemToString(*item));
+        string func = (path->aggregate().olap == ROLLUP_TYPE
+                           ? ItemToString((*item)->unwrap_sum())
+                           : ItemToString(*item));
         description += func;
         error |= AddElementToArray<Json_string>(funcs, func);
       }
@@ -1457,12 +1634,12 @@ static std::unique_ptr<Json_object> SetObjectMembers(
           path->materialize_information_schema_table().table_path, nullptr,
           std::move(ret_obj), join);
       if (ret_obj == nullptr) return nullptr;
-      const char *table =
-          path->materialize_information_schema_table().table_list->table->alias;
-      error |= AddMemberToObject<Json_string>(obj, "table_name", table);
+      const TABLE *table =
+          path->materialize_information_schema_table().table_list->table;
+      error |= AddTableInfoToObject(obj, table);
       error |= AddMemberToObject<Json_string>(obj, "access_type",
                                               "materialize_information_schema");
-      description = "Fill information schema table " + string(table);
+      description = "Fill information schema table " + string(table->alias);
       break;
     }
     case AccessPath::APPEND:
@@ -1488,7 +1665,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
         description = "Window aggregate: ";
       }
 
-      std::unique_ptr<Json_array> funcs(new (std::nothrow) Json_array());
+      unique_ptr<Json_array> funcs(new (std::nothrow) Json_array());
       if (funcs == nullptr) return nullptr;
       bool first = true;
       for (const Item_sum &func : window->functions()) {
@@ -1503,11 +1680,20 @@ static std::unique_ptr<Json_object> SetObjectMembers(
       error |= obj->add_alias("functions", std::move(funcs));
       error |= AddMemberToObject<Json_string>(obj, "access_type", "window");
       children->push_back({path->window().child});
+      // temp_table_param may be nullptr for secondary engine,
+      // see ExplainWindowForExternalExecutor in hypergraph_optimizer-t.cc.
+      if (path->window().temp_table_param != nullptr) {
+        for (const Func_ptr &func :
+             *path->window().temp_table_param->items_to_copy) {
+          AddSubqueryPaths(func.func(), "projection", children);
+        }
+      }
+
       break;
     }
     case AccessPath::WEEDOUT: {
       SJ_TMP_TABLE *sj = path->weedout().weedout_table;
-      std::unique_ptr<Json_array> tables(new (std::nothrow) Json_array());
+      unique_ptr<Json_array> tables(new (std::nothrow) Json_array());
       if (tables == nullptr) return nullptr;
 
       description = "Remove duplicate ";
@@ -1535,7 +1721,7 @@ static std::unique_ptr<Json_object> SetObjectMembers(
     }
     case AccessPath::REMOVE_DUPLICATES: {
       description = "Remove duplicates from input grouped on ";
-      std::unique_ptr<Json_array> group_items(new (std::nothrow) Json_array());
+      unique_ptr<Json_array> group_items(new (std::nothrow) Json_array());
       if (group_items == nullptr) return nullptr;
       for (int i = 0; i < path->remove_duplicates().group_items_size; ++i) {
         string group_item =
@@ -1677,37 +1863,37 @@ static std::unique_ptr<Json_object> SetObjectMembers(
    @param join the JOIN to which 'path' belongs.
    @param is_root_of_join 'true' if 'path' is the root path of a
           Query_expression that is not a union.
-   @param input_obj The JSON object describing 'path', or nullptr if a new
+   @param root_obj The JSON object describing 'path', or nullptr if a new
           object should be allocated..
    @returns the root of the tree of JSON objects generated from 'path'.
           (In most cases a single object.)
 */
-static std::unique_ptr<Json_object> ExplainAccessPath(
+static unique_ptr<Json_object> ExplainAccessPath(
     const AccessPath *path, const AccessPath *materialized_path, JOIN *join,
-    bool is_root_of_join, Json_object *input_obj) {
+    bool is_root_of_join, unique_ptr<Json_object> root_obj) {
   bool error = false;
   vector<ExplainChild> children;
-  Json_object *obj;
-  std::unique_ptr<Json_object> ret_obj(input_obj);
 
-  if (ret_obj == nullptr) {
-    ret_obj = create_dom_ptr<Json_object>();
+  if (root_obj == nullptr) {
+    root_obj = create_dom_ptr<Json_object>();
+    if (root_obj == nullptr) return nullptr;
   }
+
   // Keep a handle to the original object.
-  obj = ret_obj.get();
+  Json_object *original_object = root_obj.get();
 
   // This should not happen, but some unit tests have shown to cause null child
   // paths to be present in the AccessPath tree.
   if (path == nullptr) {
-    if (AddMemberToObject<Json_string>(obj, "operation",
+    if (AddMemberToObject<Json_string>(root_obj, "operation",
                                        "<not executable by iterator executor>"))
       return nullptr;
-    return ret_obj;
+    return root_obj;
   }
 
-  if ((ret_obj = SetObjectMembers(std::move(ret_obj), path, materialized_path,
-                                  join, &children)) == nullptr)
-    return nullptr;
+  root_obj = SetObjectMembers(std::move(root_obj), path, materialized_path,
+                              join, &children);
+  if (root_obj == nullptr) return nullptr;
 
   // If we are crossing into a different query block, but there's a streaming
   // or materialization node in the way, don't count it as the root; we want
@@ -1721,9 +1907,6 @@ static std::unique_ptr<Json_object> ExplainAccessPath(
     is_root_of_join = false;
   }
 
-  if (AddChildrenToObject(obj, children, join, delayed_root_of_join, "inputs"))
-    return nullptr;
-
   // If we know that the join will return zero rows, we don't bother
   // optimizing any subqueries in the SELECT list, but end optimization
   // early (see Query_block::optimize()). If so, don't attempt to print
@@ -1732,16 +1915,65 @@ static std::unique_ptr<Json_object> ExplainAccessPath(
     vector<ExplainChild> children_from_select;
     if (GetAccessPathsFromSelectList(join, &children_from_select))
       return nullptr;
-    if (AddChildrenToObject(obj, children_from_select, join,
-                            /*is_root_of_join*/ true,
-                            "inputs_from_select_list"))
+
+    // Return 'true' if 'children' contains an object with the same 'path'
+    // as 'sel_child'.
+    const auto in_children = [&children](const ExplainChild &sel_child) {
+      return std::any_of(children.cbegin(), children.cend(),
+                         [&sel_child](const ExplainChild &child) {
+                           return sel_child.path == child.path;
+                         });
+    };
+
+    // Remove objects from children_from_select where 'children' has
+    // an object with the same 'path', so that we do not print the same path
+    // twice.
+    children_from_select.erase(
+        std::remove_if(children_from_select.begin(), children_from_select.end(),
+                       in_children),
+        children_from_select.end());
+
+    if (AddChildrenToObject(
+            original_object, std::move(children_from_select), join,
+            /*is_root_of_join*/ true, "inputs_from_select_list"))
       return nullptr;
   }
 
+  if (AddChildrenToObject(original_object, std::move(children), join,
+                          delayed_root_of_join, "inputs")) {
+    return nullptr;
+  }
+
   if (error == 0)
-    return ret_obj;
+    return root_obj;
   else
     return nullptr;
+}
+
+unique_ptr<Json_object> ExplainNoAccessPath(const THD::Query_plan *query_plan) {
+  bool error = false;
+  unique_ptr<Json_object> ret_obj = create_dom_ptr<Json_object>();
+  LEX *lex = query_plan->get_lex();
+
+  switch (lex->m_sql_cmd->sql_command_code()) {
+    case SQLCOM_INSERT:
+    case SQLCOM_REPLACE:
+      error |= AddMemberToObject<Json_string>(ret_obj, "operation",
+                                              "Rows fetched before execution");
+      error |= AddMemberToObject<Json_string>(ret_obj, "access_type",
+                                              "rows_fetched_before_execution");
+      break;
+    case SQLCOM_UPDATE:
+    case SQLCOM_DELETE:
+    default:
+      error |= AddMemberToObject<Json_string>(
+          ret_obj.get(), "operation", "<not executable by iterator executor>");
+      break;
+  }
+
+  if (error) return nullptr;
+
+  return ret_obj;
 }
 
 std::string PrintQueryPlan(THD *ethd, const THD *query_thd,
@@ -1750,15 +1982,13 @@ std::string PrintQueryPlan(THD *ethd, const THD *query_thd,
   bool is_root_of_join = (unit != nullptr ? !unit->is_union() : false);
   AccessPath *path = (unit != nullptr ? unit->root_access_path() : nullptr);
 
-  if (path == nullptr) return "<not executable by iterator executor>\n";
-
   // "join" should be set to the JOIN that "path" is part of (or nullptr
   // if it is not, e.g. if it's a part of executing a UNION).
   if (unit != nullptr && !unit->is_union())
     join = unit->first_query_block()->join;
 
   /* Create a Json object for the plan */
-  std::unique_ptr<Json_object> obj =
+  unique_ptr<Json_object> obj =
       ExplainQueryPlan(path, &query_thd->query_plan, join, is_root_of_join);
   if (obj == nullptr) return "";
 
@@ -1768,8 +1998,7 @@ std::string PrintQueryPlan(THD *ethd, const THD *query_thd,
     StringBuffer<1024> str;
     print_query_for_explain(query_thd, unit, &str);
     if (!str.is_empty()) {
-      if (AddMemberToObject<Json_string>(obj.get(), "query", str.ptr(),
-                                         str.length()))
+      if (AddMemberToObject<Json_string>(obj, "query", str.ptr(), str.length()))
         return "";
     }
   }
@@ -1795,8 +2024,9 @@ std::string PrintQueryPlan(int level, AccessPath *path, JOIN *join,
   }
 
   /* Create a Json object for the plan */
-  std::unique_ptr<Json_object> json =
-      ExplainAccessPath(path, nullptr, join, is_root_of_join);
+  unique_ptr<Json_object> json =
+      ExplainAccessPath(path, /*materialized_path=*/nullptr, join,
+                        is_root_of_join, /*root_obj=*/nullptr);
   if (json == nullptr) return "";
 
   /* Output in tree format.*/
@@ -1835,8 +2065,9 @@ string GetForceSubplanToken(AccessPath *path, JOIN *join) {
   vector<string> tokens_for_force_subplan;
 
   /* Create a Json object for the plan */
-  std::unique_ptr<Json_object> json =
-      ExplainAccessPath(path, nullptr, join, /*is_root_of_join=*/true);
+  unique_ptr<Json_object> json =
+      ExplainAccessPath(path, /*materialized_path=*/nullptr, join,
+                        /*is_root_of_join=*/true, /*root_obj=*/nullptr);
   if (json == nullptr) return "";
 
   format.ExplainPrintTreeNode(json.get(), 0, &explain,
@@ -1910,123 +2141,6 @@ void Explain_format_tree::ExplainPrintTreeNode(const Json_dom *json, int level,
   *explain += children_explain;
 }
 
-namespace {
-
-/// The maximal number of digits we use in decimal numbers (e.g. "123456" or
-/// "0.00123").
-constexpr int kPlainNumberLength = 6;
-
-/// The maximal number of digits in engineering format mantissas, e.g.
-/// "12.3e+6".
-constexpr int kMantissaLength = 3;
-
-/// The  smallest number (absolute value) that we do not format as "0".
-constexpr double kMinNonZeroNumber = 1.0e-12;
-
-/// For decimal numbers, include enough decimals to ensure that any rounding
-/// error is less than `<number>*10^kLogPrecision` (i.e. less than 1%).
-constexpr int kLogPrecision = -2;
-
-/// The smallest number (absolute value) that we format as decimal (rather than
-/// engineering format).
-const double kMinPlainFormatNumber =
-    std::pow(10, 1 - kPlainNumberLength - kLogPrecision);
-
-/// Find the number of integer digits (i.e. those before the decimal point) in
-/// 'd' when represented as a decimal number.
-int IntegerDigits(double d) {
-  return d == 0.0 ? 1
-                  : std::max(1, 1 + static_cast<int>(
-                                        std::floor(std::log10(std::abs(d)))));
-}
-
-/**
-   Format 'd' as a decimal number with enough decimals to get a rounding error
-   less than d*10^log_precision, without any trailing fractional zeros.
-*/
-std::string DecimalFormat(double d, int log_precision) {
-  assert(d != 0.0);
-  constexpr int max_digits = 18;
-  assert(IntegerDigits(d + 0.5) <= max_digits);
-
-  // The position of the first nonzero digit, relative to the decimal point.
-  const int first_nonzero_digit_pos =
-      static_cast<int>(std::floor(std::log10(std::abs(d))));
-
-  // The number of decimals needed for the required precision.
-  const int decimals = std::max(0, -log_precision - first_nonzero_digit_pos);
-
-  // Add space for sign, decimal point and zero termination.
-  char buff[max_digits + 3];
-  // NOTE: We cannot use %f, since MSVC and GCC round 0.5 in different
-  // directions, so tests would not be reproducible between platforms.
-  // Format/round using my_fcvt() instead.
-  my_fcvt(d, decimals, buff, nullptr);
-  if (strchr(buff, '.') == nullptr) {
-    return buff;
-  } else {
-    // Remove trailing fractional zeros.
-    return std::regex_replace(buff, std::regex("[.]?0+$"), "");
-  }
-}
-
-/**
-   Format 'd' in engineering format, i.e. `<mantissa>e<sign><exponent>`
-   where 1.0<=mantissa<1000.0 and exponent is a multiple of 3.
-*/
-std::string EngineeringFormat(double d) {
-  assert(d != 0.0);
-  int exp = std::floor(std::log10(std::abs(d)) / 3.0) * 3;
-  double mantissa = d / std::pow(10.0, exp);
-  std::ostringstream stream;
-
-  if (mantissa + 0.5 * std::pow(10, 3 - kMantissaLength) < 1000.0) {
-    stream << DecimalFormat(mantissa, 1 - kMantissaLength) << "e"
-           << std::showpos << exp;
-  } else {
-    // Cover the case where the mantissa will be rounded up to give an extra
-    // digit. For example, if d=999500000 and kMantissaLength=3, we want it to
-    // be formatted as "1e+9" rather than "1000e+6".
-    stream << DecimalFormat(mantissa / 1000.0, 1 - kMantissaLength) << "e"
-           << std::showpos << exp + 3;
-  }
-  return stream.str();
-}
-
-/// Format 'd' for "EXPLAIN FORMAT=TREE" output.
-std::string NumFormat(double d) {
-  if (std::abs(d) < kMinNonZeroNumber) {
-    return "0";
-  } else if (std::abs(d) < kMinPlainFormatNumber ||
-             IntegerDigits(d + 0.5) > kPlainNumberLength) {
-    return EngineeringFormat(d);
-  } else {
-    return DecimalFormat(d, kLogPrecision);
-  }
-}
-
-/// Integer exponentiation.
-uint64_t constexpr Power(uint64_t base, int power) {
-  assert(power >= 0);
-  uint64_t result = 1;
-  for (int i = 0; i < power; i++) {
-    result *= base;
-  }
-  return result;
-}
-
-/// Format 'l' for "EXPLAIN FORM=TREE" output.
-std::string NumFormat(uint64_t l) {
-  constexpr uint64_t limit = Power(10, kPlainNumberLength);
-  if (l >= limit) {
-    return EngineeringFormat(l);
-  } else {
-    return std::to_string(l);
-  }
-}
-
-}  // Anonymous namespace.
-
 void Explain_format_tree::ExplainPrintCosts(const Json_object *obj,
                                             string *explain) {
   bool has_first_cost = obj->get("estimated_first_row_cost") != nullptr;
@@ -2040,11 +2154,12 @@ void Explain_format_tree::ExplainPrintCosts(const Json_object *obj,
 
     if (has_first_cost) {
       double first_row_cost = GetJSONDouble(obj, "estimated_first_row_cost");
-      stream << "  (cost=" << NumFormat(first_row_cost) << ".."
-             << NumFormat(last_cost) << " rows=" << NumFormat(rows) << ")";
+      stream << "  (cost=" << FormatNumberReadably(first_row_cost) << ".."
+             << FormatNumberReadably(last_cost)
+             << " rows=" << FormatNumberReadably(rows) << ")";
     } else {
-      stream << "  (cost=" << NumFormat(last_cost)
-             << " rows=" << NumFormat(rows) << ")";
+      stream << "  (cost=" << FormatNumberReadably(last_cost)
+             << " rows=" << FormatNumberReadably(rows) << ")";
     }
 
     *explain += stream.str();
@@ -2068,10 +2183,10 @@ void Explain_format_tree::ExplainPrintCosts(const Json_object *obj,
           down_cast<Json_int *>(obj->get("actual_loops"))->value();
 
       std::ostringstream stream;
-      stream << "(actual time=" << NumFormat(actual_first_row_ms) << ".."
-             << NumFormat(actual_last_row_ms)
-             << " rows=" << NumFormat(actual_rows)
-             << " loops=" << NumFormat(actual_loops) << ")";
+      stream << "(actual time=" << FormatNumberReadably(actual_first_row_ms)
+             << ".." << FormatNumberReadably(actual_last_row_ms)
+             << " rows=" << FormatNumberReadably(actual_rows)
+             << " loops=" << FormatNumberReadably(actual_loops) << ")";
 
       *explain += stream.str();
     }

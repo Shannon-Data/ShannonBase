@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -36,6 +37,7 @@
 
 #include "my_compiler.h"  // MY_ATTRIBUTE
 #include "mysql/harness/net_ts/io_context.h"
+#include "mysqlrouter/datatypes.h"
 #include "mysqlrouter/destination.h"
 #include "mysqlrouter/destination_status_types.h"
 #include "mysqlrouter/routing.h"
@@ -63,7 +65,7 @@ using AllowedNodesChangeCallbacksListIterator =
     AllowedNodesChangeCallbacksList::iterator;
 // Starting a socket acceptor returns a value indicating if the start succeeded.
 using StartSocketAcceptorCallback =
-    std::function<stdx::expected<void, std::error_code>()>;
+    std::function<stdx::expected<void, std::string>()>;
 using StopSocketAcceptorCallback = std::function<void()>;
 // First callback argument informs if the instances returned from the metadata
 // has changed. Second argument is a list of new instances available after
@@ -290,6 +292,10 @@ class RouteDestination : public DestinationNodesStateNotifier {
    * destinations are in order of preference.
    */
   virtual Destinations destinations() = 0;
+
+  virtual mysqlrouter::ServerMode purpose() const {
+    return mysqlrouter::ServerMode::Unavailable;
+  }
 
   /**
    * refresh destinations.

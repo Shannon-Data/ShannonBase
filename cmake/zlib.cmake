@@ -1,15 +1,16 @@
-# Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2009, 2024, Oracle and/or its affiliates.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,7 +26,7 @@
 #
 # Default is "bundled".
 # The default should be "system" on non-windows platforms,
-# but we need at least version 1.2.11, and that's not available on
+# but we need at least version 1.2.13, and that's not available on
 # all the platforms we need to support.
 
 # Security bug fixes required from:
@@ -51,6 +52,7 @@ FUNCTION(FIND_ZLIB_VERSION ZLIB_INCLUDE_DIR)
 ENDFUNCTION(FIND_ZLIB_VERSION)
 
 FUNCTION(FIND_SYSTEM_ZLIB)
+  # Will set ZLIB_INCLUDE_DIRS ZLIB_LIBRARIES ZLIB_FOUND
   FIND_PACKAGE(ZLIB)
   IF(ZLIB_FOUND)
     SET(ZLIB_FOUND 1 CACHE INTERNAL "")
@@ -62,6 +64,10 @@ FUNCTION(FIND_SYSTEM_ZLIB)
         ${ZLIB_INCLUDE_DIR})
     ENDIF()
     FIND_ZLIB_VERSION(${ZLIB_INCLUDE_DIR})
+    SET(ZLIB_FOUND ${ZLIB_FOUND} PARENT_SCOPE)
+    SET(ZLIB_VERSION ${ZLIB_VERSION} PARENT_SCOPE)
+    # For EXTRACT_LINK_LIBRARIES
+    SET(zlib_SYSTEM_LINK_FLAGS "-lz" CACHE STRING "Link flag for zlib")
   ENDIF()
 ENDFUNCTION(FIND_SYSTEM_ZLIB)
 
@@ -82,7 +88,7 @@ MACRO (RESET_ZLIB_VARIABLES)
   UNSET(FIND_PACKAGE_MESSAGE_DETAILS_ZLIB CACHE)
 ENDMACRO()
 
-SET(ZLIB_VERSION_DIR "zlib-1.2.13")
+SET(ZLIB_VERSION_DIR "zlib-1.3.1")
 SET(BUNDLED_ZLIB_PATH ${CMAKE_SOURCE_DIR}/extra/zlib/${ZLIB_VERSION_DIR})
 
 FUNCTION(MYSQL_USE_BUNDLED_ZLIB)
@@ -97,7 +103,7 @@ FUNCTION(MYSQL_USE_BUNDLED_ZLIB)
 
   FIND_ZLIB_VERSION(${BUNDLED_ZLIB_PATH})
 
-  ADD_SUBDIRECTORY(extra/zlib/${ZLIB_VERSION_DIR})
+  ADD_SUBDIRECTORY(extra/zlib)
 
   # Add support for bundled curl.
   ADD_LIBRARY(ZLIB::ZLIB ALIAS zlib_interface)
@@ -114,6 +120,7 @@ MACRO (MYSQL_CHECK_ZLIB)
   
   IF(WITH_ZLIB STREQUAL "bundled")
     MYSQL_USE_BUNDLED_ZLIB()
+    SET(ZLIB_FOUND ON)
   ELSEIF(WITH_ZLIB STREQUAL "system")
     FIND_SYSTEM_ZLIB()
     IF(NOT ZLIB_FOUND)

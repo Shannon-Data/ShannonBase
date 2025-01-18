@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -91,6 +92,27 @@ struct io_vec {
   size_t iov_len; /**< Number of bytes to transfer */
 };
 
+/** Local state for multipacket processing */
+struct mp_state {
+  net_async_status mp_status;
+  size_t mp_start_of_packet;
+  size_t mp_first_packet_offset;
+  size_t mp_buf_length;
+  uint mp_multi_byte_packet;
+  ulong mp_save_pos;
+  ulong mp_total_length;
+
+  void reset() {
+    mp_status = NET_ASYNC_COMPLETE;
+    mp_start_of_packet = 0;
+    mp_first_packet_offset = 0;
+    mp_buf_length = 0;
+    mp_multi_byte_packet = 0;
+    mp_save_pos = 0;
+    mp_total_length = 0;
+  }
+};
+
 typedef struct NET_ASYNC {
   /**
     The position in buff we continue reads from when data is next
@@ -170,6 +192,8 @@ typedef struct NET_ASYNC {
   unsigned char **compressed_write_buffers;
   /** Size of the compressed buffer */
   size_t compressed_buffers_size;
+  struct mp_state mp_state;
+
 } NET_ASYNC;
 
 struct NET_EXTENSION {

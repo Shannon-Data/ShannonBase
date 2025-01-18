@@ -1,4 +1,5 @@
 --disable_query_log
+eval INSTALL PLUGIN mock SONAME '$MOCK_PLUGIN';
 --enable_query_log
 
 --echo #
@@ -6,7 +7,7 @@
 --echo #               RESPONSE WHEN OFFLOAD FAILS
 --echo #
 
-CREATE TABLE t(x INT PRIMARY KEY) SECONDARY_ENGINE = RAPID;
+CREATE TABLE t(x INT) SECONDARY_ENGINE = MOCK;
 INSERT INTO t VALUES (1), (2), (3);
 ALTER TABLE t SECONDARY_LOAD;
 ANALYZE TABLE t;
@@ -20,4 +21,5 @@ SELECT JSON_PRETTY(JSON_REMOVE(TRACE->'$**.secondary_engine_not_used',
 DROP TABLE t;
 
 --disable_query_log
+UNINSTALL PLUGIN mock;
 --enable_query_log

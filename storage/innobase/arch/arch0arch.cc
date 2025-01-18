@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -395,9 +396,8 @@ dberr_t Arch_File_Ctx::open(bool read_only, lsn_t start_lsn, uint file_index,
     option = exists ? OS_FILE_OPEN : OS_FILE_CREATE_PATH;
   }
 
-  m_file =
-      os_file_create(innodb_arch_file_key, m_name_buf, option, OS_FILE_NORMAL,
-                     OS_CLONE_LOG_FILE, read_only, &success);
+  m_file = os_file_create(innodb_arch_file_key, m_name_buf, option,
+                          OS_CLONE_LOG_FILE, read_only, &success);
 
   if (!success) {
     return (DB_CANNOT_OPEN_FILE);

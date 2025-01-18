@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -931,7 +932,7 @@ bool net_write_command(NET *net, uchar command, const uchar *header,
   @retval
     0	ok
   @retval
-    1
+    1   error
 */
 
 static bool net_write_buff(NET *net, const uchar *packet, size_t len) {
@@ -1055,6 +1056,9 @@ static bool net_write_raw_loop(NET *net, const uchar *buf, size_t count) {
     - Server finishes the @ref page_protocol_connection_phase with an
       @ref page_protocol_basic_ok_packet.
 
+   If both ::CLIENT_COMPRESS and ::CLIENT_ZSTD_COMPRESSION_ALGORITHM are set
+   then zlib is used.
+
    @subpage page_protocol_basic_compression_packet
 */
 
@@ -1079,6 +1083,9 @@ static bool net_write_raw_loop(NET *net, const uchar *buf, size_t count) {
   <td>compressed sequence id</td>
   <td>Sequence ID of the compressed packets, reset in the same way as the
      @ref sect_protocol_basic_packets_packet, but incremented independently</td></tr>
+  <tr><td>@ref a_protocol_type_int3 "int&lt;3&gt;"</td>
+  <td>length of uncompressed payload</td>
+  <td>Length of payload before compression</td></tr>
   </table>
 
   @section sect_protocol_basic_compression_packet_compressed_payload Compressed Payload
@@ -1087,10 +1094,11 @@ static bool net_write_raw_loop(NET *net, const uchar *buf, size_t count) {
   @ref sect_protocol_basic_compression_packet_header is followed by the
   compressed payload.
 
-  It uses the *deflate* algorithm as described in
+  Depending on which capability flags are set it uses the *deflate* algorithm as described in
   [RFC 1951](http://tools.ietf.org/html/rfc1951.html) and implemented in
-  [zlib](http://zlib.org/). The header of the compressed packet has the
-  parameters of the `uncompress()` function in mind:
+  [zlib](http://zlib.org/) or [Zstandard](https://facebook.github.io/zstd/).
+
+  When using zlib, the header of the compressed packet has the parameters of the `uncompress()` function in mind:
 
   ~~~~~~~~~~~~~
   ZEXTERN int ZEXPORT uncompress OF((Bytef *dest,   uLongf *destLen,
@@ -1397,14 +1405,27 @@ static bool net_read_raw_loop(NET *net, size_t count) {
     /* First packet always wait for net_wait_timeout */
     if (net->pkt_nr == 0 && (vio_was_timeout(net->vio) || is_packet_timeout)) {
       net->last_errno = ER_CLIENT_INTERACTION_TIMEOUT;
+
       /* Socket should be closed after trying to write/send error. */
       THD *thd = current_thd;
       if (thd) {
+        auto now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::microseconds(my_micro_time()));
+        auto start = std::chrono::seconds(thd->start_time.tv_sec);
+
+        auto dur = now - start;
+        auto wtout = std::chrono::seconds(thd_get_net_wait_timeout(thd));
+
         Security_context *sctx = thd->security_context();
-        std::string timeout{std::to_string(thd_get_net_wait_timeout(thd))};
         Auth_id auth_id(sctx->priv_user(), sctx->priv_host());
-        LogErr(INFORMATION_LEVEL, ER_NET_WAIT_ERROR2, timeout.c_str(),
-               auth_id.auth_str().c_str());
+
+        LogErr(INFORMATION_LEVEL, ER_LOG_CLIENT_INTERACTION_TIMEOUT,
+               auth_id.auth_str().c_str(), vio_was_timeout(net->vio),
+               is_packet_timeout, dur.count(), wtout.count());
+        if (dur < wtout) {
+          LogErr(ERROR_LEVEL, ER_CONDITIONAL_DEBUG,
+                 "IO-layer timeout before wait_timeout was reached.");
+        }
       } else {
         LogErr(INFORMATION_LEVEL, ER_NET_WAIT_ERROR);
       }
@@ -1971,51 +1992,50 @@ static ulong net_read_update_offsets(NET *net, size_t start_of_packet,
 static net_async_status net_read_compressed_nonblocking(NET *net,
                                                         ulong *len_ptr) {
   DBUG_TRACE;
+  NET_ASYNC *net_async = NET_ASYNC_DATA(net);
   assert(net->compress);
   ulong &len = *len_ptr;
-
-  /* Maintain the local states to read the multipacket asynchronously */
-  static size_t start_of_packet;
-  static size_t first_packet_offset;
-  static size_t buf_length;
-  static uint multi_byte_packet = 0;
-  static net_async_status status = NET_ASYNC_COMPLETE;
-
-  if (status != NET_ASYNC_NOT_READY)
-    net_read_init_offsets(net, start_of_packet, first_packet_offset,
-                          multi_byte_packet, buf_length);
+  if (net_async->mp_state.mp_status != NET_ASYNC_NOT_READY)
+    net_read_init_offsets(net, net_async->mp_state.mp_start_of_packet,
+                          net_async->mp_state.mp_first_packet_offset,
+                          net_async->mp_state.mp_multi_byte_packet,
+                          net_async->mp_state.mp_buf_length);
 
   for (;;) {
     /*  Read the current packet in net->buff */
-    if (net_read_process_buffer(net, start_of_packet, buf_length,
-                                multi_byte_packet, first_packet_offset))
+    if (net_read_process_buffer(net, net_async->mp_state.mp_start_of_packet,
+                                net_async->mp_state.mp_buf_length,
+                                net_async->mp_state.mp_multi_byte_packet,
+                                net_async->mp_state.mp_first_packet_offset))
       break;
 
     /*
       Read the mysql packet from vio, uncompress it and make it accessible
       through net->buff.
     */
-    status = net_read_packet_nonblocking(net, &len);
-    if (status == NET_ASYNC_NOT_READY) {
-      net->save_char = net->buff[first_packet_offset];
-      net->buf_length = buf_length;
-      return status;
+    net_async->mp_state.mp_status = net_read_packet_nonblocking(net, &len);
+    if (net_async->mp_state.mp_status == NET_ASYNC_NOT_READY) {
+      net->save_char = net->buff[net_async->mp_state.mp_first_packet_offset];
+      net->buf_length = net_async->mp_state.mp_buf_length;
+      return net_async->mp_state.mp_status;
     }
 
     if (len == packet_error) {
-      status = NET_ASYNC_COMPLETE;
-      return status;
+      net_async->mp_state.mp_status = NET_ASYNC_COMPLETE;
+      return net_async->mp_state.mp_status;
     }
-    buf_length += len;
+    net_async->mp_state.mp_buf_length += len;
   }
   /*
     Once the packets are read in the net->buff, adjust the tracking offsets to
     the appropriate values.
   */
-  len = net_read_update_offsets(net, start_of_packet, first_packet_offset,
-                                buf_length, multi_byte_packet);
-  status = NET_ASYNC_COMPLETE;
-  return status;
+  len = net_read_update_offsets(net, net_async->mp_state.mp_start_of_packet,
+                                net_async->mp_state.mp_first_packet_offset,
+                                net_async->mp_state.mp_buf_length,
+                                net_async->mp_state.mp_multi_byte_packet);
+  net_async->mp_state.mp_status = NET_ASYNC_COMPLETE;
+  return net_async->mp_state.mp_status;
 }
 
 /**
@@ -2029,33 +2049,31 @@ static net_async_status net_read_compressed_nonblocking(NET *net,
 static net_async_status net_read_uncompressed_nonblocking(NET *net,
                                                           ulong *len_ptr) {
   DBUG_TRACE;
+  NET_ASYNC *net_async = NET_ASYNC_DATA(net);
   assert(!net->compress);
   ulong &len = *len_ptr;
 
-  // Maintain the local states
-  static net_async_status status = NET_ASYNC_COMPLETE;
-  static ulong save_pos;
-  static ulong total_length;
-
   // Initialize the states
-  if (status == NET_ASYNC_COMPLETE) {
-    save_pos = net->where_b;
-    total_length = 0;
+  if (net_async->mp_state.mp_status == NET_ASYNC_COMPLETE) {
+    net_async->mp_state.mp_save_pos = net->where_b;
+    net_async->mp_state.mp_total_length = 0;
   }
 
-  status = net_read_packet_nonblocking(net, &len);
-  total_length += len;
+  net_async->mp_state.mp_status = net_read_packet_nonblocking(net, &len);
+  net_async->mp_state.mp_total_length += len;
   net->where_b += len;
 
-  if (len == MAX_PACKET_LENGTH) status = NET_ASYNC_NOT_READY;
-  if (status == NET_ASYNC_NOT_READY) return status;
+  if (len == MAX_PACKET_LENGTH)
+    net_async->mp_state.mp_status = NET_ASYNC_NOT_READY;
+  if (net_async->mp_state.mp_status == NET_ASYNC_NOT_READY)
+    return net_async->mp_state.mp_status;
 
   // Update the offsets
-  net->where_b = save_pos;
-  len = total_length;
+  net->where_b = net_async->mp_state.mp_save_pos;
+  len = net_async->mp_state.mp_total_length;
   net->read_pos = net->buff + net->where_b;
-  status = NET_ASYNC_COMPLETE;
-  return status;
+  net_async->mp_state.mp_status = NET_ASYNC_COMPLETE;
+  return net_async->mp_state.mp_status;
 }
 
 /**

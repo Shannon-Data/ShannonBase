@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,6 +24,7 @@
 /* See http://code.google.com/p/googletest/wiki/Primer */
 
 #include <gtest/gtest.h>
+#include <cstdint>
 #include "unittest/gunit/benchmark.h"
 
 #include "storage/innobase/include/ut0rnd.h"
@@ -30,6 +32,15 @@
 namespace innodb_ut0math_unittest {
 
 /* Correctness test for math functions. */
+TEST(ut0math, div_ceil) {
+  ASSERT_EQ(ut::div_ceil(7, 3), 3);
+  ASSERT_EQ(ut::div_ceil(7, -3), -2);
+  ASSERT_EQ(ut::div_ceil(-7, 3), -2);
+  ASSERT_EQ(ut::div_ceil(-7, -3), 3);
+  ASSERT_EQ(ut::div_ceil(uint8_t{247}, uint8_t{10}), uint8_t{25});
+  ASSERT_EQ(ut::div_ceil(uint8_t{255}, uint8_t{1}), uint8_t{255});
+  ASSERT_EQ(ut::div_ceil(int8_t{-128}, int8_t{1}), int8_t{-128});
+}
 
 void test_multiply_uint64(uint64_t x, uint64_t y) {
   const auto xy = x * y;

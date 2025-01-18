@@ -1,9 +1,8 @@
-set rapid_use_dynamic_offload=0;
 #
 # Test that histograms are used for optimizing queries that are
 # offloaded to a secondary storage engine.
 #
-CREATE TABLE t1(id INT PRIMARY KEY, x INT NOT NULL) SECONDARY_ENGINE RAPID;
+CREATE TABLE t1(id INT PRIMARY KEY, x INT NOT NULL) SECONDARY_ENGINE MOCK;
 INSERT INTO t1 VALUES
 (1, 1), (2, 1), (3, 1), (4, 1), (5, 1),
 (6, 1), (7, 1), (8, 1), (9, 2), (10, 2);
@@ -14,21 +13,21 @@ test.t1	analyze	status	OK
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 1;
 EXPLAIN
 -> Filter: (t1.x = 1)  (rows=1)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 2;
 EXPLAIN
 -> Filter: (t1.x = 2)  (rows=1)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 3;
 EXPLAIN
 -> Filter: (t1.x = 3)  (rows=1)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -41,38 +40,28 @@ test.t1	analyze	status	OK
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 1;
 EXPLAIN
 -> Filter: (t1.x = 1)  (rows=8)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 2;
 EXPLAIN
 -> Filter: (t1.x = 2)  (rows=2)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 3;
 EXPLAIN
 -> Filter: (t1.x = 3)  (rows=1)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 SELECT * FROM t1 WHERE x = 1;
 id	x
-1	1
-2	1
-3	1
-4	1
-5	1
-6	1
-7	1
-8	1
 SELECT * FROM t1 WHERE x = 2;
 id	x
-9	2
-10	2
 SELECT * FROM t1 WHERE x = 3;
 id	x
 ANALYZE TABLE t1 DROP HISTOGRAM ON x;
@@ -84,21 +73,21 @@ test.t1	analyze	status	OK
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 1;
 EXPLAIN
 -> Filter: (t1.x = 1)  (rows=1)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 2;
 EXPLAIN
 -> Filter: (t1.x = 2)  (rows=1)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 3;
 EXPLAIN
 -> Filter: (t1.x = 3)  (rows=1)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -111,21 +100,21 @@ test.t1	analyze	status	OK
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 1;
 EXPLAIN
 -> Filter: (t1.x = 1)  (rows=8)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 2;
 EXPLAIN
 -> Filter: (t1.x = 2)  (rows=2)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 EXPLAIN FORMAT=TREE SELECT * FROM t1 WHERE x = 3;
 EXPLAIN
 -> Filter: (t1.x = 3)  (rows=1)
-    -> Table scan on t1 in secondary engine Rapid  (rows=10)
+    -> Table scan on t1 in secondary engine MOCK  (rows=10)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

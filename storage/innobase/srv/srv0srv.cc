@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 Copyright (c) 2008, 2009 Google Inc.
 Copyright (c) 2009, Percona Inc.
 
@@ -21,12 +21,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -77,9 +78,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "pars0pars.h"
 #include "que0que.h"
 #include "row0mysql.h"
+#include "sql/sql_class.h"
 #include "sql_thd_internal_api.h"
 #include "srv0mon.h"
-#include "storage/rapid_engine/populate/populate.h"
 
 #include "my_dbug.h"
 #include "my_psi_config.h"
@@ -108,6 +109,7 @@ Srv_cpu_usage srv_cpu_usage;
 
 #ifdef INNODB_DD_TABLE
 /* true when upgrading. */
+/* TODO To be removed in WL#16210 */
 bool srv_is_upgrade_mode = false;
 bool srv_downgrade_logs = false;
 bool srv_upgrade_old_undo_found = false;
@@ -651,12 +653,6 @@ static ulint srv_main_shutdown_loops = 0;
 static ulint srv_log_writes_and_flush = 0;
 
 #endif /* !UNIV_HOTBACKUP */
-
-/** Number of times secondary index lookup triggered cluster lookup */
-std::atomic<ulint> srv_sec_rec_cluster_reads(0);
-
-/** Number of times prefix optimization avoided triggering cluster lookup */
-std::atomic<ulint> srv_sec_rec_cluster_reads_avoided(0);
 
 /* Interval in seconds at which various tasks are performed by the
 master thread when server is active. In order to balance the workload,
@@ -1559,13 +1555,6 @@ bool srv_printf_innodb_monitor(FILE *file, bool nowait, ulint *trx_start_pos,
   srv_n_system_rows_read_old = srv_stats.n_system_rows_read;
 
   fputs(
-      "-----\n"
-      "RAPID\n"
-      "-----\n",
-      file);
-  ShannonBase::Populate::Populator::print_info(file);
-
-  fputs(
       "----------------------------\n"
       "END OF INNODB MONITOR OUTPUT\n"
       "============================\n",
@@ -1690,8 +1679,9 @@ void srv_export_innodb_status(void) {
   export_vars.innodb_row_lock_time = srv_stats.n_lock_wait_time / 1000;
 
   if (srv_stats.n_lock_wait_count > 0) {
-    export_vars.innodb_row_lock_time_avg = (ulint)(
-        srv_stats.n_lock_wait_time / 1000 / srv_stats.n_lock_wait_count);
+    export_vars.innodb_row_lock_time_avg =
+        (ulint)(srv_stats.n_lock_wait_time / 1000 /
+                srv_stats.n_lock_wait_count);
 
   } else {
     export_vars.innodb_row_lock_time_avg = 0;
@@ -3095,6 +3085,9 @@ void srv_purge_coordinator_thread() {
   srv_slot_t *slot;
 
   THD *thd = create_internal_thd();
+
+  // Allow purge in read only mode as well.
+  thd->set_skip_readonly_check();
 
   purge_sys->is_this_a_purge_thread = true;
 

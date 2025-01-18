@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -463,7 +464,8 @@ INTDEF(xdr_opaque)
  * *cpp is a pointer to the bytes, *sizep is the count.
  * If *cpp is NULL maxsize bytes are allocated
  */
-bool_t xdr_bytes(xdrs, cpp, sizep, maxsize) XDR *xdrs;
+bool_t xdr_bytes(xdrs, cpp, sizep, maxsize)
+XDR *xdrs;
 char **cpp;
 u_int *sizep;
 u_int maxsize;
@@ -516,7 +518,8 @@ INTDEF(xdr_bytes)
 /*
  * Implemented here due to commonality of the object.
  */
-bool_t xdr_netobj(xdrs, np) XDR *xdrs;
+bool_t xdr_netobj(xdrs, np)
+XDR *xdrs;
 struct netobj *np;
 {
   return INTUSE(xdr_bytes)(xdrs, &np->n_bytes, &np->n_len, MAX_NETOBJ_SZ);
@@ -534,7 +537,8 @@ INTDEF(xdr_netobj)
  * routine may be called.
  * If there is no specific or default routine an error is returned.
  */
-bool_t xdr_union(xdrs, dscmp, unp, choices, dfault) XDR *xdrs;
+bool_t xdr_union(xdrs, dscmp, unp, choices, dfault)
+XDR *xdrs;
 enum_t *dscmp;                     /* enum to decide which arm to work on */
 char *unp;                         /* the union itself */
 const struct xdr_discrim *choices; /* [value, xdr proc] for each arm */
@@ -580,7 +584,8 @@ INTDEF(xdr_union)
  * storage is allocated.  The last parameter is the max allowed length
  * of the string as specified by a protocol.
  */
-bool_t xdr_string(xdrs, cpp, maxsize) XDR *xdrs;
+bool_t xdr_string(xdrs, cpp, maxsize)
+XDR *xdrs;
 char **cpp;
 u_int maxsize;
 {
@@ -647,7 +652,8 @@ INTDEF(xdr_string)
  * Wrapper for xdr_string that can be called directly from
  * routines like clnt_call
  */
-bool_t xdr_wrapstring(xdrs, cpp) XDR *xdrs;
+bool_t xdr_wrapstring(xdrs, cpp)
+XDR *xdrs;
 char **cpp;
 {
   if (INTUSE(xdr_string)(xdrs, cpp, LASTUNSIGNED)) {

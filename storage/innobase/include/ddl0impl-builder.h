@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -395,6 +396,16 @@ struct Builder {
   [[nodiscard]] dberr_t check_duplicates(Thread_ctxs &dupcheck,
                                          Dup *dup) noexcept;
 
+  /** Cleanup DDL after error in online build
+  Note: To be called if DDL must cleanup due to error in online build. Pages
+  which are buffer-fixed (in Page_load::release) until the next iteration, must
+  be unfixed (with Page_load::latch) before returning the error.
+  @note: Assumes that either m_btr_load->release is called before or
+  m_n_recs is 0 (no records are inserted yet).
+  @param[in]  err    Error hit in online build
+  @return the cursor error status. */
+  [[nodiscard]] dberr_t online_build_handle_error(dberr_t err) noexcept;
+
  private:
   /** Buffer ID. */
   size_t m_id{};
@@ -495,10 +506,10 @@ struct Merge_cursor : public Load_cursor {
   /** Add the cursor to use for merge load.
   @param[in] file               File file to read.
   @param[in] buffer_size        IO buffer size to use for reading.
-  @param[in] offset             Page to read from.
+  @param[in] range              Range to read from
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t add_file(const ddl::file_t &file, size_t buffer_size,
-                                 os_offset_t offset) noexcept;
+                                 const Range &range) noexcept;
 
   /** Open the cursor.
   @return DB_SUCCESS or error code. */

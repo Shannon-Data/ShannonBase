@@ -25,16 +25,6 @@ ROUTINE_NAME
 create_synonym_db
 diagnostics
 execute_prepared_stmt
-ml_explain
-ml_explain_row
-ml_explain_table
-ml_model_import
-ml_model_load
-ml_model_unload
-ml_predict_row
-ml_predict_table
-ml_score
-ml_train
 ps_setup_disable_background_threads
 ps_setup_disable_consumer
 ps_setup_disable_instrument

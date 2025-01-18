@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,9 +33,9 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <time.h>
+#include <bit>
 
 #include "m_string.h"
-#include "my_bit.h"
 #include "my_byteorder.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
@@ -796,7 +797,7 @@ static void get_options(int *argc, char ***argv, MEM_ROOT *alloc) {
     if (!(set_collation = get_charset_by_name(set_collation_name, MYF(MY_WME))))
       exit(1);
 
-  myisam_block_size = (uint)1 << my_bit_log2(opt_myisam_block_size);
+  myisam_block_size = std::bit_floor<unsigned>(opt_myisam_block_size);
   return;
 } /* get options */
 
@@ -819,11 +820,11 @@ static int myisamchk(MI_CHECK *param, char *filename) {
   if (!(info = mi_open(
             filename,
             (param->testflag & (T_DESCRIPT | T_READONLY)) ? O_RDONLY : O_RDWR,
-            HA_OPEN_FOR_REPAIR | ((param->testflag & T_WAIT_FOREVER)
-                                      ? HA_OPEN_WAIT_IF_LOCKED
-                                      : (param->testflag & T_DESCRIPT)
-                                            ? HA_OPEN_IGNORE_IF_LOCKED
-                                            : HA_OPEN_ABORT_IF_LOCKED)))) {
+            HA_OPEN_FOR_REPAIR |
+                ((param->testflag & T_WAIT_FOREVER) ? HA_OPEN_WAIT_IF_LOCKED
+                 : (param->testflag & T_DESCRIPT)
+                     ? HA_OPEN_IGNORE_IF_LOCKED
+                     : HA_OPEN_ABORT_IF_LOCKED)))) {
     /* Avoid twice printing of isam file name */
     param->error_printed = 1;
     switch (my_errno()) {

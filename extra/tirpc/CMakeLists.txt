@@ -4,12 +4,13 @@
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,7 +34,7 @@
 
 INCLUDE(ExternalProject)
 
-SET(TIRPC_SOURCE_DIR "${CMAKE_SOURCE_DIR}/extra/tirpc/libtirpc-1.3.3")
+SET(TIRPC_SOURCE_DIR "${CMAKE_SOURCE_DIR}/extra/tirpc/libtirpc-1.3.5")
 
 # Set correct search path for executables, libraries, and data files.
 IF(ALTERNATIVE_GCC)
@@ -44,14 +45,33 @@ FIND_PROGRAM(MAKE_EXECUTABLE make)
 
 SET(TIRPC_CONFIGURE_PREFIX "${CMAKE_BINARY_DIR}/tirpc")
 SET(TIRPC_C_FLAGS "${CMAKE_C_COMPILER_ARG1} ${TIRPC_C_B_OPTION}")
-STRING_APPEND(TIRPC_C_FLAGS " -fPIC")
 STRING_APPEND(TIRPC_C_FLAGS " ${CMAKE_C_FLAGS}")
 STRING_APPEND(TIRPC_C_FLAGS " ${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}")
+
+# clang has this, but clang++ does not.
+MY_CHECK_C_COMPILER_FLAG("-Wdeprecated-non-prototype"
+  HAS_DEPRECATED_NON_PROTOTYPE)
+IF(HAS_DEPRECATED_NON_PROTOTYPE)
+  STRING_APPEND(TIRPC_C_FLAGS " -Wno-deprecated-non-prototype")
+ENDIF()
+MY_CHECK_C_COMPILER_FLAG("-Wincompatible-pointer-types-discards-qualifiers"
+  HAS_INCOMPATIBLE_POINTER_TYPES_DISCARDS_QUALIFIERS)
+IF(HAS_INCOMPATIBLE_POINTER_TYPES_DISCARDS_QUALIFIERS)
+  STRING_APPEND(TIRPC_C_FLAGS
+    " -Wno-incompatible-pointer-types-discards-qualifiers")
+ENDIF()
+MY_CHECK_C_COMPILER_FLAG("-Wgnu-variable-sized-type-not-at-end"
+  HAS_GNU_VARIABLE_SIZED_TYPE_NOT_AT_END)
+IF(HAS_GNU_VARIABLE_SIZED_TYPE_NOT_AT_END)
+  STRING_APPEND(TIRPC_C_FLAGS
+    " -Wno-gnu-variable-sized-type-not-at-end")
+ENDIF()
 
 SET(TIRPC_CONFIGURE_ARGS
   "AR=${CMAKE_AR}"
   "RANLIB=${CMAKE_RANLIB}"
   "CC=${CMAKE_C_COMPILER}"
+  "--with-pic"
   "--disable-shared"
   "--disable-gssapi"
   "--prefix=${TIRPC_CONFIGURE_PREFIX}"
@@ -73,3 +93,15 @@ EXTERNALPROJECT_ADD(tirpc_ext
   BUILD_BYPRODUCTS "${TIRPC_CONFIGURE_PREFIX}/lib/libtirpc.a"
   BINARY_DIR "${CMAKE_BINARY_DIR}/extra/build_tirpc"
   )
+
+# The include directory must exist before we set INTERFACE_INCLUDE_DIRECTORIES
+FILE(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tirpc/include/tirpc")
+
+ADD_LIBRARY(ext::rpc STATIC IMPORTED GLOBAL)
+SET_TARGET_PROPERTIES(ext::rpc PROPERTIES
+  IMPORTED_LOCATION "${TIRPC_CONFIGURE_PREFIX}/lib/libtirpc.a"
+  )
+TARGET_INCLUDE_DIRECTORIES(ext::rpc
+  SYSTEM BEFORE INTERFACE "${CMAKE_BINARY_DIR}/tirpc/include/tirpc"
+  )
+ADD_DEPENDENCIES(ext::rpc tirpc_ext)

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2010, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,6 +25,7 @@
 
 package testsuite.clusterj;
 
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -42,7 +44,6 @@ import testsuite.clusterj.model.Customer;
 import testsuite.clusterj.model.Order;
 import testsuite.clusterj.model.OrderLine;
 
-@org.junit.Ignore("Bug#28550140 : disable test until diagnosis of failure")
 public class ReconnectTest extends AbstractClusterJModelTest {
 
     @Override
@@ -201,10 +202,10 @@ public class ReconnectTest extends AbstractClusterJModelTest {
             }
         }
         // summarize for the record
-        if (retryCount < 5) error ("Retry count too low: " + retryCount);
+        if (retryCount.get() < 5) error ("Retry count too low: " + retryCount.get());
         if (getDebug()) {
-            System.out.println("Retry count: " + retryCount);
-            System.out.println("Number of threads: " + numberOfThreads + 
+            System.out.println("Retry count: " + retryCount.get());
+            System.out.println("Number of threads: " + numberOfThreads +
                 "; number of new customers per thread: " + numberOfNewCustomersPerThread +
                 "; number of orders per new customer: " + numberOfNewOrdersPerNewCustomer);
             System.out.println("Created " + nextCustomerId + " customers; " +
@@ -256,12 +257,8 @@ public class ReconnectTest extends AbstractClusterJModelTest {
         failOnError();
     }
 
-    private int retryCount = 0;
-    private void incrementRetryCount() {
-        synchronized(this) {
-            ++retryCount;
-        }
-    }
+    private AtomicInteger retryCount = new AtomicInteger();
+
     class Misbehaving implements Runnable {
         @Override
         public void run() {
@@ -343,7 +340,7 @@ public class ReconnectTest extends AbstractClusterJModelTest {
                 } catch (ClusterJUserException cjue) {
                     if (getDebug()) { System.out.println("StuffToDo: create customer caught " + cjue.getMessage()); }
                     if (cjue.getMessage().contains("SessionFactory is not open")) {
-                        incrementRetryCount();
+                        retryCount.getAndIncrement();
                         sleep(300);
                     }
                 }
@@ -362,7 +359,7 @@ public class ReconnectTest extends AbstractClusterJModelTest {
                 } catch (ClusterJUserException cjue) {
                     if (getDebug()) { System.out.println("StuffToDo: update orders caught " + cjue.getMessage()); }
                     if (cjue.getMessage().contains("SessionFactory is not open")) {
-                        incrementRetryCount();
+                        retryCount.getAndIncrement();
                         sleep(300);
                     }
                 }
@@ -379,7 +376,7 @@ public class ReconnectTest extends AbstractClusterJModelTest {
                 } catch (ClusterJUserException cjue) {
                     if (getDebug()) { System.out.println("StuffToDo: delete order caught " + cjue.getMessage()); }
                     if (cjue.getMessage().contains("SessionFactory is not open")) {
-                        incrementRetryCount();
+                        retryCount.getAndIncrement();
                         sleep(300);
                     }
                 }

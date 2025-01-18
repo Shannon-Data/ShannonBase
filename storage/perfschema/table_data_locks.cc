@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -102,9 +103,8 @@ ha_rows table_data_locks::get_row_count() {
 table_data_locks::table_data_locks()
     : PFS_engine_table(&m_share, &m_pk_pos),
       m_row(nullptr),
-      m_pos(),
-      m_next_pos(),
-      m_pk_pos() {
+      m_opened_pk(nullptr),
+      m_opened_index(nullptr) {
   for (unsigned int i = 0; i < COUNT_DATA_LOCK_ENGINES; i++) {
     m_iterator[i] = nullptr;
   }
@@ -171,29 +171,21 @@ int table_data_locks::rnd_next() {
       */
 
       /*
-        PSI_engine_data_lock_iterator::scan() can return an unbounded number
-        of rows during a scan, depending on the application payload, as some
-        user sessions may have an unbounded number or records locked.
-        This can cause severe memory spike, which in turn can take the server
-        down if not handled properly. Here a select on the table
-        performance_schema.data_locks will fail with an error, instead of
-        taking the server down, if out of memory conditions occur.
+        The implementation of PSI_engine_data_lock_iterator::scan(),
+        inside a storage engine, is expected to:
+        - (1) not report all the data at once,
+        - (2) implement re-startable scans internally,
+        - (3) report a bounded number of rows per scan (1).
 
-        This is a fail safe only, the implementation of
-        PSI_engine_data_lock_iterator::scan() in each storage engine
-        should be constrained to return fewer rows at a time if necessary,
-        by making more calls to scan(), to handle the load gracefully.
+        This is to allow allocating only a bounded amount of memory
+        in the data container, to cap the peak memory consumption
+        of the container.
+
+        TODO: Innodb_data_lock_iterator::scan()
+        does not satisfy (3) currently.
       */
 
-      try {
-        DBUG_EXECUTE_IF("simulate_bad_alloc_exception_1",
-                        throw std::bad_alloc(););
-        iterator_done = it->scan(&m_container, true);
-      } catch (const std::bad_alloc &) {
-        my_error(ER_STD_BAD_ALLOC_ERROR, MYF(0),
-                 "while scanning data_locks table", "rnd_next");
-        return ER_STD_BAD_ALLOC_ERROR;
-      }
+      iterator_done = it->scan(&m_container, true);
     }
   }
 
@@ -229,11 +221,11 @@ int table_data_locks::rnd_pos(const void *pos) {
   PSI_engine_data_lock_iterator *it = m_iterator[index];
 
   m_container.clear();
+
   /*
     TODO: avoid requesting column LOCK_DATA if not used.
   */
-  it->fetch(&m_container, m_pk_pos.m_engine_lock_id,
-            m_pk_pos.m_engine_lock_id_length, true);
+  it->fetch(&m_container, m_pk_pos.str(), m_pk_pos.length(), true);
   data = m_container.get_row(0);
   if (data != nullptr) {
     m_row = data;
@@ -244,34 +236,83 @@ int table_data_locks::rnd_pos(const void *pos) {
 }
 
 int table_data_locks::index_init(uint idx, bool) {
-  PFS_index_data_locks *result = nullptr;
+  PFS_pk_data_locks *pk = nullptr;
+  PFS_index_data_locks *index = nullptr;
 
   switch (idx) {
     case 0:
-      result = PFS_NEW(PFS_index_data_locks_by_lock_id);
+      pk = PFS_NEW(PFS_pk_data_locks);
+      index = pk;
       break;
     case 1:
-      result = PFS_NEW(PFS_index_data_locks_by_transaction_id);
+      index = PFS_NEW(PFS_index_data_locks_by_transaction_id);
       break;
     case 2:
-      result = PFS_NEW(PFS_index_data_locks_by_thread_id);
+      index = PFS_NEW(PFS_index_data_locks_by_thread_id);
       break;
     case 3:
-      result = PFS_NEW(PFS_index_data_locks_by_object);
+      index = PFS_NEW(PFS_index_data_locks_by_object);
       break;
     default:
       assert(false);
       break;
   }
 
-  m_opened_index = result;
-  m_index = result;
+  m_opened_pk = pk;
+  m_opened_index = index;
+  m_index = index;
 
   m_container.set_filter(m_opened_index);
   return 0;
 }
 
-int table_data_locks::index_next() { return rnd_next(); }
+int table_data_locks::index_next() {
+  int status;
+
+  if (m_opened_pk != nullptr) {
+    pk_pos_data_lock *position = m_opened_pk->get_pk();
+    /*
+     * In the ideal case when:
+     * - the opened index is the PRIMARY KEY
+     * - the keypart field ENGINE_LOCK_ID is provided
+     * - the index fetch is an exact match HA_READ_KEY_EXACT
+     * then we can inspect the ENGINE_LOCK_ID value,
+     * and perform a PSI_engine_data_lock_iterator::fetch()
+     * in the underlying storage engine.
+     *
+     * Evaluating the condition in the second part
+     * of the primary key, ENGINE, will be done as
+     * an index condition pushdown when adding rows
+     * to the container, filtered by
+     * PFS_pk_data_locks::match_engine().
+     */
+    if (position != nullptr) {
+      if (m_opened_pk->m_key_fetch_count == 0) {
+        status = rnd_pos(position);
+        if (status != 0) {
+          status = HA_ERR_KEY_NOT_FOUND;
+        }
+      } else {
+        status = HA_ERR_KEY_NOT_FOUND;
+      }
+
+      m_opened_pk->m_key_fetch_count++;
+      return status;
+    }
+  }
+
+  /*
+   * For every other cases:
+   * - index is the PRIMARY KEY, but ENGINE_LOCK_ID is not available
+   *   (not possible in practice, the HASH index will not be used then)
+   * - index is not the PRIMARY KEY
+   * we execute a scan, with filtering done as an index condition pushdown,
+   * attached to the data container.
+   */
+  status = rnd_next();
+
+  return status;
+}
 
 int table_data_locks::read_row_values(TABLE *table, unsigned char *buf,
                                       Field **fields, bool read_all) {
@@ -293,8 +334,8 @@ int table_data_locks::read_row_values(TABLE *table, unsigned char *buf,
           set_field_varchar_utf8mb4(f, m_row->m_engine);
           break;
         case 1: /* ENGINE_LOCK_ID */
-          set_field_varchar_utf8mb4(f, m_row->m_hidden_pk.m_engine_lock_id,
-                                    m_row->m_hidden_pk.m_engine_lock_id_length);
+          set_field_varchar_utf8mb4(f, m_row->m_hidden_pk.str(),
+                                    m_row->m_hidden_pk.length());
           break;
         case 2: /* ENGINE_TRANSACTION_ID */
           if (m_row->m_transaction_id != 0) {

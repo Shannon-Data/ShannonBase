@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -93,6 +94,15 @@ typedef struct PSI_data_lock_bootstrap PSI_data_lock_bootstrap;
 
 #ifdef HAVE_PSI_DATA_LOCK_1
 
+enum PSI_identifier {
+  PSI_IDENTIFIER_NONE = 0,
+  PSI_IDENTIFIER_SCHEMA = 1,
+  PSI_IDENTIFIER_TABLE = 2,
+  PSI_IDENTIFIER_INDEX = 3,
+  PSI_IDENTIFIER_PARTITION = 4,
+  PSI_IDENTIFIER_SUBPARTITION = 5
+};
+
 /**
   Server interface, row lock container.
   This is the interface exposed
@@ -124,6 +134,23 @@ class PSI_server_data_lock_container {
     @sa cache_string
   */
   virtual const char *cache_data(const char *ptr, size_t length) = 0;
+
+  /**
+    Add an identifier in the container cache.
+    Depending on the identifier kind, the string given may be
+    normalized, to comply with lower_case_table_names,
+    before adding the string into the cache.
+    Beware that the normalized string length may differ
+    from the input string length.
+    @param[in] kind Identifier kind, used for string normalization
+    @param[in] str Identifier input string
+    @param[in] length Identifier input string length
+    @param[out] cached_ptr Cached, possibly normalized, identifier string
+    @param[out] cached_length Cached identifier string length
+  */
+  virtual void cache_identifier(PSI_identifier kind, const char *str,
+                                size_t length, const char **cached_ptr,
+                                size_t *cached_length) = 0;
 
   /**
     Check if the container accepts data for a particular engine.
@@ -307,9 +334,8 @@ class PSI_engine_data_lock_iterator {
     @param engine_lock_id The lock id to search
     @param engine_lock_id_length Lock id length
     @param with_lock_data True if column LOCK_DATA is required.
-    @return true if the iterator is done
   */
-  virtual bool fetch(PSI_server_data_lock_container *container,
+  virtual void fetch(PSI_server_data_lock_container *container,
                      const char *engine_lock_id, size_t engine_lock_id_length,
                      bool with_lock_data) = 0;
 };
@@ -333,9 +359,8 @@ class PSI_engine_data_lock_wait_iterator {
     @param requesting_engine_lock_id_length The requesting lock id length
     @param blocking_engine_lock_id The blocking lock id to search
     @param blocking_engine_lock_id_length The blocking lock id length
-    @return true if the iterator is done
   */
-  virtual bool fetch(PSI_server_data_lock_wait_container *container,
+  virtual void fetch(PSI_server_data_lock_wait_container *container,
                      const char *requesting_engine_lock_id,
                      size_t requesting_engine_lock_id_length,
                      const char *blocking_engine_lock_id,

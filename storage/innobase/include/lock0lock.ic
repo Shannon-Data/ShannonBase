@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -65,13 +66,13 @@ static inline ulint lock_get_min_heap_no(
 }
 
 /** Get the lock hash table */
-static inline hash_table_t *lock_hash_get(ulint mode) /*!< in: lock mode */
+static inline Locks_hashtable &lock_hash_get(ulint mode) /*!< in: lock mode */
 {
   if (mode & LOCK_PREDICATE) {
-    return (lock_sys->prdt_hash);
+    return lock_sys->prdt_hash;
   } else if (mode & LOCK_PRDT_PAGE) {
-    return (lock_sys->prdt_page_hash);
+    return lock_sys->prdt_page_hash;
   } else {
-    return (lock_sys->rec_hash);
+    return lock_sys->rec_hash;
   }
 }
