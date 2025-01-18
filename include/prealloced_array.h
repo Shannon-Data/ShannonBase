@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -310,6 +311,15 @@ class Prealloced_array {
   }
 
   /**
+    Claim memory ownership.
+
+    @param  claim take ownership of memory
+  */
+  void claim_memory_ownership(bool claim) {
+    if (!using_inline_buffer()) my_claim(m_ext.m_array_ptr, claim);
+  }
+
+  /**
     Copies an element into the back of the array.
     Complexity: Constant (amortized time, reallocation may happen).
     @return true if out-of-memory, false otherwise
@@ -331,7 +341,7 @@ class Prealloced_array {
     @return true if out-of-memory, false otherwise
   */
   template <typename... Args>
-  bool emplace_back(Args &&... args) {
+  bool emplace_back(Args &&...args) {
     const size_t expansion_factor = 2;
     if (size() == capacity() && reserve(capacity() * expansion_factor))
       return true;
@@ -396,7 +406,7 @@ class Prealloced_array {
     @return an iterator pointing to the inserted value
   */
   template <typename... Args>
-  iterator emplace(const_iterator position, Args &&... args) {
+  iterator emplace(const_iterator position, Args &&...args) {
     const difference_type n = position - begin();
     emplace_back(std::forward<Args>(args)...);
     std::rotate(begin() + n, end() - 1, end());

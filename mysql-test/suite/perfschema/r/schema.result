@@ -90,11 +90,6 @@ replication_connection_configuration
 replication_connection_status
 replication_group_member_stats
 replication_group_members
-rpd_column_id
-rpd_columns
-rpd_preload_stats
-rpd_table_id
-rpd_tables
 rwlock_instances
 session_account_connect_attrs
 session_connect_attrs
@@ -103,6 +98,8 @@ session_variables
 setup_actors
 setup_consumers
 setup_instruments
+setup_meters
+setup_metrics
 setup_objects
 setup_threads
 socket_instances
@@ -632,7 +629,7 @@ events_transactions_current	CREATE TABLE `events_transactions_current` (
   `EVENT_NAME` varchar(128) NOT NULL,
   `STATE` enum('ACTIVE','COMMITTED','ROLLED BACK') DEFAULT NULL,
   `TRX_ID` bigint unsigned DEFAULT NULL,
-  `GTID` varchar(64) DEFAULT NULL,
+  `GTID` varchar(90) DEFAULT NULL,
   `XID_FORMAT_ID` int DEFAULT NULL,
   `XID_GTRID` varchar(130) DEFAULT NULL,
   `XID_BQUAL` varchar(130) DEFAULT NULL,
@@ -661,7 +658,7 @@ events_transactions_history	CREATE TABLE `events_transactions_history` (
   `EVENT_NAME` varchar(128) NOT NULL,
   `STATE` enum('ACTIVE','COMMITTED','ROLLED BACK') DEFAULT NULL,
   `TRX_ID` bigint unsigned DEFAULT NULL,
-  `GTID` varchar(64) DEFAULT NULL,
+  `GTID` varchar(90) DEFAULT NULL,
   `XID_FORMAT_ID` int DEFAULT NULL,
   `XID_GTRID` varchar(130) DEFAULT NULL,
   `XID_BQUAL` varchar(130) DEFAULT NULL,
@@ -690,7 +687,7 @@ events_transactions_history_long	CREATE TABLE `events_transactions_history_long`
   `EVENT_NAME` varchar(128) NOT NULL,
   `STATE` enum('ACTIVE','COMMITTED','ROLLED BACK') DEFAULT NULL,
   `TRX_ID` bigint unsigned DEFAULT NULL,
-  `GTID` varchar(64) DEFAULT NULL,
+  `GTID` varchar(90) DEFAULT NULL,
   `XID_FORMAT_ID` int DEFAULT NULL,
   `XID_GTRID` varchar(130) DEFAULT NULL,
   `XID_BQUAL` varchar(130) DEFAULT NULL,
@@ -1248,6 +1245,7 @@ data_lock_waits	CREATE TABLE `data_lock_waits` (
   `BLOCKING_THREAD_ID` bigint unsigned DEFAULT NULL,
   `BLOCKING_EVENT_ID` bigint unsigned DEFAULT NULL,
   `BLOCKING_OBJECT_INSTANCE_BEGIN` bigint unsigned NOT NULL,
+  PRIMARY KEY (`REQUESTING_ENGINE_LOCK_ID`,`BLOCKING_ENGINE_LOCK_ID`,`ENGINE`),
   KEY `REQUESTING_ENGINE_LOCK_ID` (`REQUESTING_ENGINE_LOCK_ID`,`ENGINE`),
   KEY `BLOCKING_ENGINE_LOCK_ID` (`BLOCKING_ENGINE_LOCK_ID`,`ENGINE`),
   KEY `REQUESTING_ENGINE_TRANSACTION_ID` (`REQUESTING_ENGINE_TRANSACTION_ID`,`ENGINE`),

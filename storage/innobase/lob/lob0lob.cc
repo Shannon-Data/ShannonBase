@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -160,7 +161,7 @@ int zReader::setup_zstream() {
 
   m_stream.next_out = m_rctx.m_buf + local_prefix;
   m_stream.avail_out = static_cast<uInt>(m_rctx.m_len - local_prefix);
-  m_stream.next_in = Z_NULL;
+  m_stream.next_in = nullptr;
   m_stream.avail_in = 0;
 
   /* Zlib inflate needs 32 kilobytes for the default
@@ -1286,7 +1287,7 @@ bool rec_check_lobref_space_id(dict_index_t *index, const rec_t *rec,
       continue;
     }
 
-    byte *data = rec_get_nth_field(index, rec, offsets, i, &len);
+    const byte *data = rec_get_nth_field(index, rec, offsets, i, &len);
 
     if (len == UNIV_SQL_NULL) {
       continue;
@@ -1296,9 +1297,8 @@ bool rec_check_lobref_space_id(dict_index_t *index, const rec_t *rec,
       ulint local_len = len - BTR_EXTERN_FIELD_REF_SIZE;
       ut_ad(len >= BTR_EXTERN_FIELD_REF_SIZE);
 
-      byte *field_ref = data + local_len;
-      ref_t ref(field_ref);
-      if (!ref.check_space_id(index)) {
+      const byte *field_ref = data + local_len;
+      if (!ref_t{const_cast<byte *>(field_ref)}.check_space_id(index)) {
         return (false);
       }
     }

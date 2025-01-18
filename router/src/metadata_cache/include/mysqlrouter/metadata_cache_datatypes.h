@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -90,7 +91,7 @@ inline std::error_code make_error_code(metadata_errc e) noexcept {
   return std::error_code(static_cast<int>(e), metadata_cache_category());
 }
 
-enum class ServerMode { ReadWrite, ReadOnly, Unavailable };
+using ServerMode = mysqlrouter::ServerMode;
 enum class ServerRole { Primary, Secondary, Unavailable };
 
 /** @class ManagedInstance
@@ -163,6 +164,8 @@ class METADATA_CACHE_EXPORT ManagedCluster {
    * the GR cluster when the data in the GR metadata is not consistent with the
    * cluster metadata)*/
   bool md_discrepancy{false};
+
+  bool has_quorum{true};
 
   /** @brief Is this a PRIMARY Cluster in case of ClusterSet */
   bool is_primary{true};
@@ -237,6 +240,7 @@ struct RouterAttributes {
   std::string metadata_user_name;
   std::string rw_classic_port;
   std::string ro_classic_port;
+  std::string rw_split_classic_port;
   std::string rw_x_port;
   std::string ro_x_port;
 };

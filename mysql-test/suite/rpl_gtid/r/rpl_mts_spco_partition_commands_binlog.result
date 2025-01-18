@@ -1,4 +1,4 @@
-include/master-slave.inc
+include/rpl/init_source_replica.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -16,10 +16,8 @@ Warnings:
 Warning	1287	'@@replica_parallel_type' is deprecated and will be removed in a future release.
 SET GLOBAL replica_parallel_workers= 8;
 SET GLOBAL replica_preserve_commit_order= ON;
-include/start_slave.inc
+include/rpl/start_replica.inc
 [connection master1]
-SET @save_binlog_transaction_dependency_tracking= @@global.binlog_transaction_dependency_tracking;
-SET @@global.binlog_transaction_dependency_tracking = COMMIT_ORDER;
 CREATE TABLE t_part (i INTEGER) PARTITION BY RANGE(i)
 PARTITIONS 2 SUBPARTITION BY KEY(i) (
 PARTITION p0 VALUES LESS THAN(100) (
@@ -46,7 +44,7 @@ PARTITION p2 VALUES LESS THAN(300));
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -78,8 +76,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2;;
-include/sync_slave_sql_with_master.inc
-include/rpl_connect.inc [creating master]
+include/rpl/sync_to_replica.inc
+include/rpl/connect.inc [creating master]
 
 # Check for ALTER TABLE DISCARD TABLESPACE
 [connection master]
@@ -95,7 +93,7 @@ UNLOCK TABLES;
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -127,8 +125,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2;;
-include/sync_slave_sql_with_master.inc
-include/rpl_connect.inc [creating master]
+include/rpl/sync_to_replica.inc
+include/rpl/connect.inc [creating master]
 
 # Check for ALTER TABLE IMPORT TABLESPACE
 [connection master]
@@ -140,7 +138,7 @@ include/rpl_connect.inc [creating master]
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -172,8 +170,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2;;
-include/sync_slave_sql_with_master.inc
-include/rpl_connect.inc [creating master]
+include/rpl/sync_to_replica.inc
+include/rpl/connect.inc [creating master]
 
 # Check for ALTER TABLE COALESCE PARTITION
 
@@ -181,7 +179,7 @@ include/rpl_connect.inc [creating master]
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -214,7 +212,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Check for ALTER TABLE ANALYZE PARTITION
 
@@ -222,7 +220,7 @@ include/sync_slave_sql_with_master.inc
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -256,8 +254,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2;;
-include/sync_slave_sql_with_master.inc
-include/rpl_connect.inc [creating master]
+include/rpl/sync_to_replica.inc
+include/rpl/connect.inc [creating master]
 
 # Check for ALTER TABLE OPTIMIZE PARTITION
 
@@ -265,7 +263,7 @@ include/rpl_connect.inc [creating master]
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -300,8 +298,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2;;
-include/sync_slave_sql_with_master.inc
-include/rpl_connect.inc [creating master]
+include/rpl/sync_to_replica.inc
+include/rpl/connect.inc [creating master]
 
 # Check for ALTER TABLE REPAIR PARTITION
 
@@ -309,7 +307,7 @@ include/rpl_connect.inc [creating master]
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -343,8 +341,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2; truncate table t_part;;
-include/sync_slave_sql_with_master.inc
-include/rpl_connect.inc [creating master]
+include/rpl/sync_to_replica.inc
+include/rpl/connect.inc [creating master]
 
 # Check for ALTER TABLE REMOVE PARTITIONING
 
@@ -352,7 +350,7 @@ include/rpl_connect.inc [creating master]
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t_nopart1 LIKE t_part;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -385,7 +383,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2; DROP TABLE t_nopart1;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Check for ALTER TABLE EXCHANGE PARTITION
 
@@ -393,7 +391,7 @@ include/sync_slave_sql_with_master.inc
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB; INSERT INTO t_part VALUES(1),(2),(101),(102),(199); CREATE TABLE t_nopart1 LIKE t_part; ALTER TABLE t_nopart1 REMOVE PARTITIONING;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -425,8 +423,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2; DROP TABLE t_nopart1;;
-include/sync_slave_sql_with_master.inc
-include/rpl_connect.inc [creating master]
+include/rpl/sync_to_replica.inc
+include/rpl/connect.inc [creating master]
 
 # Check for ALTER TABLE REBUILD PARTITON
 
@@ -434,7 +432,7 @@ include/rpl_connect.inc [creating master]
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t_nopart2 LIKE t_part; ALTER TABLE t_nopart2 REMOVE PARTITIONING; INSERT INTO t_nopart2 VALUES(1000); INSERT INTO t_nopart2 VALUES(1); ALTER TABLE t_part EXCHANGE PARTITION sp01 WITH TABLE t_nopart2 WITHOUT VALIDATION;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -466,8 +464,8 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2;;
-include/sync_slave_sql_with_master.inc
-include/rpl_connect.inc [creating master]
+include/rpl/sync_to_replica.inc
+include/rpl/connect.inc [creating master]
 
 # Check for ALTER TABLE REORGANIZE PARTITION
 
@@ -475,7 +473,7 @@ include/rpl_connect.inc [creating master]
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -508,7 +506,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Check for ALTER TABLE ADD PARTITION
 
@@ -516,7 +514,7 @@ include/sync_slave_sql_with_master.inc
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -549,7 +547,7 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 drop table t1; drop table t2;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Check for ALTER TABLE DROP PARTITION
 
@@ -557,7 +555,7 @@ include/sync_slave_sql_with_master.inc
 
 [connection master]
 CREATE TABLE t1 (c1 INT PRIMARY KEY) ENGINE = InnoDB; CREATE TABLE t2 (c1 INT PRIMARY KEY) ENGINE = InnoDB;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Block slave sql applier threads
 
@@ -590,18 +588,17 @@ include/assert.inc [Exactly 0 GTIDs should have been committed since last invoca
 [connection slave]
 ROLLBACK;;
 DROP TABLE t1,t2,t_hash,t_part,t_part1,t_nopart2;;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Cleanup
 
 [connection master1]
-SET GLOBAL binlog_transaction_dependency_tracking=@save_binlog_transaction_dependency_tracking;
-include/sync_slave_sql_with_master.inc
-include/stop_slave.inc
+include/rpl/sync_to_replica.inc
+include/rpl/stop_replica.inc
 SET GLOBAL replica_parallel_type=@save_replica_parallel_type;
 Warnings:
 Warning	1287	'@@replica_parallel_type' is deprecated and will be removed in a future release.
 SET GLOBAL replica_parallel_workers=@save_replica_parallel_workers;
 SET GLOBAL replica_preserve_commit_order=@save_replica_preserve_commit_order;
-include/start_slave.inc
-include/rpl_end.inc
+include/rpl/start_replica.inc
+include/rpl/deinit.inc

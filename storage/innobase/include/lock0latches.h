@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -158,10 +159,12 @@ class Latches {
 
   using Padded_mutex = ut::Cacheline_padded<Lock_mutex>;
 
+ public:
   /** Number of page shards, and also number of table shards.
   Must be a power of two */
   static constexpr size_t SHARDS_COUNT = 512;
 
+ private:
   /*
   Functions related to sharding by page (containing records to lock).
 
@@ -201,6 +204,14 @@ class Latches {
     @return The mutex responsible for the shard containing the page
     */
     Lock_mutex &get_mutex(const page_id_t &page_id);
+
+    /**
+    Returns the mutex which (together with the global latch) protects the page
+    shard which contains record locks from given cell of hash tables.
+    @param[in]    cell_id    The cell_id of the hash table
+    @return The mutex responsible for the shard containing the page
+    */
+    Lock_mutex &get_mutex(const uint64_t cell_id);
   };
 
   /*

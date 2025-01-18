@@ -1,15 +1,16 @@
-// Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -74,8 +75,8 @@
 #include <windows.h>
 #endif
 
-#include "caching_sha2_passwordopt-vars.h"
-#include "client/client_priv.h"
+#include "client/include/caching_sha2_passwordopt-vars.h"
+#include "client/include/client_priv.h"
 #include "m_string.h"
 #include "map_helpers.h"
 #include "mf_wcomp.h"  // wild_compare
@@ -121,7 +122,7 @@
 #define MAX_VAR_NAME_LENGTH 256
 #define MAX_COLUMNS 256
 #define MAX_DELIMITER_LENGTH 16
-#define DEFAULT_MAX_CONN 128
+#define DEFAULT_MAX_CONN 512
 #define REPLACE_ROUND_MAX 16
 
 /* Flags controlling send and reap */
@@ -262,8 +263,9 @@ static uint opt_test_ssl_fips_mode = 0;
 static DWORD opt_safe_process_pid;
 static HANDLE mysqltest_thread;
 // Event handle for stacktrace request event
-static HANDLE stacktrace_request_event = nullptr;
-static std::thread wait_for_stacktrace_request_event_thread;
+static std::atomic<HANDLE> stacktrace_collector_event{nullptr};
+static std::thread stacktrace_collector_thread;
+static std::atomic<bool> stacktrace_collector_thread_should_stop{};
 #endif
 
 Logfile log_file;
@@ -386,7 +388,7 @@ struct st_command;
 typedef Prealloced_array<st_command *, 1024> Q_lines;
 Q_lines *q_lines;
 
-#include "sslopt-vars.h"
+#include "client/include/sslopt-vars.h"
 
 struct Parser {
   int read_lines, current_line;
@@ -501,8 +503,6 @@ enum enum_commands {
   Q_CHARACTER_SET,
   Q_DISABLE_PS_PROTOCOL,
   Q_ENABLE_PS_PROTOCOL,
-  Q_DISABLE_RECONNECT,
-  Q_ENABLE_RECONNECT,
   Q_IF,
   Q_DISABLE_TESTCASE,
   Q_ENABLE_TESTCASE,
@@ -564,10 +564,9 @@ const char *command_names[] = {
     "horizontal_results", "query_vertical", "query_horizontal", "sorted_result",
     "partially_sorted_result", "lowercase_result", "skip_if_hypergraph",
     "start_timer", "end_timer", "character_set", "disable_ps_protocol",
-    "enable_ps_protocol", "disable_reconnect", "enable_reconnect", "if",
-    "disable_testcase", "enable_testcase", "replace_regex",
-    "replace_numeric_round", "remove_file", "file_exists", "write_file",
-    "copy_file", "perl", "die", "assert",
+    "enable_ps_protocol", "if", "disable_testcase", "enable_testcase",
+    "replace_regex", "replace_numeric_round", "remove_file", "file_exists",
+    "write_file", "copy_file", "perl", "die", "assert",
 
     /* Don't execute any more commands, compare result */
     "exit", "skip", "chmod", "append_file", "cat_file", "diff_files",
@@ -1456,6 +1455,7 @@ static void handle_command_error(struct st_command *command,
 
 static void close_connections() {
   DBUG_TRACE;
+  cur_con = nullptr;
   for (--next_con; next_con >= connections; --next_con) {
     if (next_con->stmt) mysql_stmt_close(next_con->stmt);
     next_con->stmt = nullptr;
@@ -1485,9 +1485,18 @@ static void close_files() {
     my_free(cur_file->file_name);
     cur_file->file_name = nullptr;
   }
+  cur_file = file_stack;
 }
 
 static void free_used_memory() {
+  static std::atomic<bool> already_freed{false};
+
+  // The rest of this method is not thread-safe, we really want at most one
+  // thread to execute it.
+  if (already_freed.exchange(true)) {
+    return;
+  }
+
   // Delete the expected errors pointer
   delete expected_errors;
 
@@ -1534,7 +1543,7 @@ static void free_used_memory() {
 }
 
 static void cleanup_and_exit(int exit_code) {
-  if (opt_offload_count_file) {
+  if (opt_offload_count_file && cur_con) {
     // Check if the current connection is active, if not create one.
     if (cur_con->mysql.net.vio == nullptr) {
       mysql_real_connect(&cur_con->mysql, opt_host, opt_user, opt_pass, opt_db,
@@ -1579,16 +1588,25 @@ static void cleanup_and_exit(int exit_code) {
     }
   }
 
-// exit() appears to be not 100% reliable on Windows under some conditions.
+  // exit() appears to be not 100% reliable on Windows under some conditions.
 #ifdef _WIN32
   if (opt_safe_process_pid) {
-    // Close the stack trace request event handle
-    if (stacktrace_request_event != nullptr)
-      CloseHandle(stacktrace_request_event);
+    // Close the stack trace request thread by signaling it with a flag set to
+    // not execute the handler. It will close the event handle.
+    if (stacktrace_collector_event != nullptr) {
+      stacktrace_collector_thread_should_stop.store(true);
+      SetEvent(stacktrace_collector_event);
+    }
 
-    // Detach or stop the thread waiting for stack trace event to occur.
-    if (wait_for_stacktrace_request_event_thread.joinable())
-      wait_for_stacktrace_request_event_thread.detach();
+    // After we have set the event, the stacktrace_collector_thread must be
+    // waken up and exit. We must wait for this to finish if we are in the
+    // context of the main thread, as when the main thread ends, all other will
+    // be terminated. We can't join the thread with itself as it would throw
+    // `resource_deadlock_would_occur` exception.
+    if (stacktrace_collector_thread.joinable() &&
+        stacktrace_collector_thread.get_id() != std::this_thread::get_id()) {
+      stacktrace_collector_thread.join();
+    }
 
     // Close the thread handle
     if (!CloseHandle(mysqltest_thread))
@@ -1614,7 +1632,7 @@ static void print_file_stack() {
 }
 
 void die(const char *fmt, ...) {
-  static int dying = 0;
+  static std::atomic<bool> dying{false};
   va_list args;
   DBUG_PRINT("enter", ("start_lineno: %d", start_lineno));
 
@@ -1623,8 +1641,7 @@ void die(const char *fmt, ...) {
 
   // Protect against dying twice first time 'die' is called, try to
   // write log files second time, just exit.
-  if (dying) cleanup_and_exit(1);
-  dying = 1;
+  if (dying.exchange(true)) cleanup_and_exit(1);
 
   // Print the error message
   fprintf(stderr, "mysqltest: ");
@@ -2015,7 +2032,7 @@ static bool show_diff(DYNAMIC_STRING *ds, const char *filename1,
   else if (diff_check("mtrdiff"))
     diff_name = "mtrdiff";
   else
-    diff_name = 0;
+    diff_name = nullptr;
 #else
   // Otherwise always assume it's called diff
   diff_name = "diff";
@@ -2864,7 +2881,7 @@ static void var_set_escape(struct st_command *command, VAR *dst) {
     - the second string,
     - a bool that is false if the parsing succeeded; true if it failed.
   */
-  auto parse_args = [&]() -> auto {
+  auto parse_args = [&]() -> auto{
     // command->first_argument contains '(characters,text)'
     char *p = command->first_argument;
     // Find (
@@ -3540,7 +3557,7 @@ static void free_dynamic_strings(T *val) {
 ///              the function, through recursion, end up being
 ///              freed by dynstr_free().
 template <typename T1, typename... T2>
-static void free_dynamic_strings(T1 *first, T2 *... rest) {
+static void free_dynamic_strings(T1 *first, T2 *...rest) {
   free_dynamic_strings(first);
   free_dynamic_strings(rest...);
 }
@@ -4820,8 +4837,12 @@ static void do_change_user(struct st_command *command) {
   if (mysql_change_user(mysql, ds_user.str, ds_passwd.str, ds_db.str)) {
     handle_error(curr_command, mysql_errno(mysql), mysql_error(mysql),
                  mysql_sqlstate(mysql), &ds_res);
-    mysql->reconnect = true;
+    if (cur_con->stmt) mysql_stmt_close(cur_con->stmt);
+    cur_con->stmt = nullptr;
     mysql_reconnect(&cur_con->mysql);
+    /* mysql_reconnect changes this setting to true. We really want it to be
+    false at all times. */
+    cur_con->mysql.reconnect = false;
   }
 
   dynstr_free(&ds_user);
@@ -4908,9 +4929,6 @@ static void do_perl(struct st_command *command) {
     }
     error = pclose(res_file);
 
-    /* Remove the temporary file, but keep it if perl failed */
-    if (!error) my_delete(temp_file_path, MYF(0));
-
     /* Check for error code that indicates perl could not be started */
     const int exstat = WEXITSTATUS(error);
 #ifdef _WIN32
@@ -4921,6 +4939,12 @@ static void do_perl(struct st_command *command) {
 #endif
     else
       handle_command_error(command, exstat);
+
+    /*
+      Perl script has ended with expected exit status.
+      Now remove the temporary script file.
+    */
+    my_delete(temp_file_path, MYF(0));
   }
   dynstr_free(&ds_delimiter);
 }
@@ -5026,8 +5050,8 @@ static void do_sync_with_master2(struct st_command *command, long offset) {
 
   if (!result_str || result < 0) {
     /* source_pos_wait returned NULL or < 0 */
-    show_query(mysql, "SHOW MASTER STATUS");
-    show_query(mysql, "SHOW SLAVE STATUS");
+    show_query(mysql, "SHOW BINARY LOG STATUS");
+    show_query(mysql, "SHOW REPLICA STATUS");
     show_query(mysql, "SHOW PROCESSLIST");
     fprintf(stderr, "analyze: sync_with_master\n");
 
@@ -5191,14 +5215,14 @@ static int do_save_master_pos() {
   */
   ndb_wait_for_binlog_injector();
 
-  if (mysql_query_wrapper(mysql, query = "show master status"))
-    die("failed in 'show master status': %d %s", mysql_errno(mysql),
+  if (mysql_query_wrapper(mysql, query = "show binary log status"))
+    die("failed in 'SHOW BINARY LOG STATUS': %d %s", mysql_errno(mysql),
         mysql_error(mysql));
 
   if (!(res = mysql_store_result_wrapper(mysql)))
     die("mysql_store_result() retuned NULL for '%s'", query);
   if (!(row = mysql_fetch_row_wrapper(res)))
-    die("empty result in show master status");
+    die("empty result in SHOW BINARY LOG STATUS");
   my_stpnmov(master_pos.file, row[0], sizeof(master_pos.file) - 1);
   master_pos.pos = strtoul(row[1], (char **)nullptr, 10);
   mysql_free_result_wrapper(res);
@@ -5628,8 +5652,8 @@ static void do_disable_testcase(struct st_command *command) {
                      sizeof(disable_testcase_args) / sizeof(struct command_arg),
                      ' ');
 
-  /// Check if the bug number argument to disable_testcase is in a
-  /// proper format.
+  // Check if the bug number argument to disable_testcase is in a
+  // proper format.
   if (validate_bug_number_argument(ds_bug_number.str) == 0) {
     free_dynamic_strings(&ds_bug_number);
     die("Bug number mentioned in '%s' command is not in a correct format. "
@@ -5679,10 +5703,19 @@ static bool kill_process(int pid) {
   bool killed = true;
 #ifdef _WIN32
   HANDLE proc;
-  proc = OpenProcess(PROCESS_TERMINATE, false, pid);
+  proc = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, false, pid);
   if (proc == nullptr) return true; /* Process could not be found. */
 
-  if (!TerminateProcess(proc, 201)) killed = false;
+  // The `TerminateProcess()` is asynchronous. After it returns success, the
+  // process may be still being closed and finalized. The `WaitForSingleObject`
+  // is needed to wait for the process object to get into signaled state.
+  if (TerminateProcess(proc, 201)) {
+    // `INFINITE` is used as the process is killed and really need to be closed
+    // very soon.
+    WaitForSingleObject(proc, INFINITE);
+  } else {
+    killed = false;
+  }
 
   CloseHandle(proc);
 #else
@@ -5789,7 +5822,8 @@ static void do_shutdown_server(struct st_command *command) {
   // Get the servers pid_file name and use it to read pid
   if (query_get_string(mysql, "SHOW VARIABLES LIKE 'pid_file'", 1,
                        &ds_file_name))
-    die("Failed to get pid_file from server");
+    die("Failed to get pid_file from server %d: %s", mysql_errno(mysql),
+        mysql_error(mysql));
 
   // Read the pid from the file
   int fd;
@@ -6302,13 +6336,6 @@ static char *get_string(char **to_ptr, const char **from_ptr,
   return start;
 }
 
-static void set_reconnect(MYSQL *mysql, int val) {
-  bool reconnect = val;
-  DBUG_TRACE;
-  DBUG_PRINT("info", ("val: %d", val));
-  mysql_options(mysql, MYSQL_OPT_RECONNECT, (char *)&reconnect);
-}
-
 /**
   Change the current connection to the given st_connection, and update
   $mysql_get_server_version and $CURRENT_CONNECTION accordingly.
@@ -6631,6 +6658,8 @@ static void do_connect(struct st_command *command) {
   bool con_pipe = false, con_shm = false, con_cleartext_enable = false;
   struct st_connection *con_slot;
   const uint save_opt_ssl_mode = opt_ssl_mode;
+  bool con_socket = false, con_tcp = false;
+  unsigned int factor = 0;
 
   static DYNAMIC_STRING ds_connection_name;
   static DYNAMIC_STRING ds_host;
@@ -6647,9 +6676,9 @@ static void do_connect(struct st_command *command) {
   static DYNAMIC_STRING ds_password2;
   static DYNAMIC_STRING ds_password3;
   const struct command_arg connect_args[] = {
-      {"connection name", ARG_STRING, true, &ds_connection_name,
+      {"connection name", ARG_STRING, false, &ds_connection_name,
        "Name of the connection"},
-      {"host", ARG_STRING, true, &ds_host, "Host to connect to"},
+      {"host", ARG_STRING, false, &ds_host, "Host to connect to"},
       {"user", ARG_STRING, false, &ds_user, "User to connect as"},
       {"passsword", ARG_STRING, false, &ds_password1,
        "Password used when connecting"},
@@ -6679,6 +6708,36 @@ static void do_connect(struct st_command *command) {
   check_command_args(command, command->first_argument, connect_args,
                      sizeof(connect_args) / sizeof(struct command_arg), ',');
 
+  if (ds_connection_name.length == 0 || ds_host.length == 0) {
+    if (ds_connection_name.length == 0)
+      con_slot = cur_con;
+    else {
+      if (nullptr ==
+          (con_slot = find_connection_by_name(ds_connection_name.str)))
+        die("Connection %s doesn't exist for reconnect",
+            ds_connection_name.str);
+    }
+
+    if (cur_con->stmt) mysql_stmt_close(cur_con->stmt);
+    cur_con->stmt = nullptr;
+    if (mysql_reconnect(&con_slot->mysql)) {
+      var_set_errno(mysql_errno(&con_slot->mysql));
+      handle_error(command, mysql_errno(&con_slot->mysql),
+                   mysql_error(&con_slot->mysql),
+                   mysql_sqlstate(&con_slot->mysql), &ds_res);
+    } else {
+      var_set_errno(0);
+      handle_no_error(command);
+      revert_properties();
+      if (ds_connection_name.length) set_current_connection(con_slot);
+      assert(con_slot != next_con);
+    }
+    /* mysql_reconnect changes this setting to true. We really want it to be
+    false at all times. */
+    con_slot->mysql.reconnect = false;
+    goto free_options;
+  }
+
   /* Port */
   if (ds_port.length) {
     con_port = atoi(ds_port.str);
@@ -6707,7 +6766,6 @@ static void do_connect(struct st_command *command) {
 
   /* Options */
   con_options = ds_options.str;
-  bool con_socket = false, con_tcp = false;
   while (*con_options) {
     /* Step past any spaces in beginning of option */
     while (*con_options && my_isspace(charset_info, *con_options))
@@ -6848,7 +6906,6 @@ static void do_connect(struct st_command *command) {
     mysql_options(&con_slot->mysql, MYSQL_ENABLE_CLEARTEXT_PLUGIN,
                   (char *)&con_cleartext_enable);
 
-  unsigned int factor = 0;
   if (ds_password1.length) {
     factor = 1;
     mysql_options4(&con_slot->mysql, MYSQL_OPT_USER_PASSWORD, &factor,
@@ -6890,6 +6947,7 @@ static void do_connect(struct st_command *command) {
       next_con++; /* if we used the next_con slot, advance the pointer */
   }
 
+free_options:
   dynstr_free(&ds_connection_name);
   dynstr_free(&ds_host);
   dynstr_free(&ds_user);
@@ -7678,8 +7736,8 @@ static int read_command(struct st_command **command_ptr) {
 }
 
 static struct my_option my_long_options[] = {
-#include "caching_sha2_passwordopt-longopts.h"
-#include "sslopt-longopts.h"
+#include "client/include/caching_sha2_passwordopt-longopts.h"
+#include "client/include/sslopt-longopts.h"
     {"basedir", 'b', "Basedir for tests.", &opt_basedir, &opt_basedir, nullptr,
      GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr, 0, nullptr},
     {"character-sets-dir", OPT_CHARSETS_DIR,
@@ -7760,7 +7818,7 @@ static struct my_option my_long_options[] = {
      REQUIRED_ARG, 500, 1, 10000, nullptr, 0, nullptr},
     {"max-connections", OPT_MAX_CONNECTIONS,
      "Max number of open connections to server", &opt_max_connections,
-     &opt_max_connections, nullptr, GET_INT, REQUIRED_ARG, 128, 8, 5120,
+     &opt_max_connections, nullptr, GET_INT, REQUIRED_ARG, 512, 8, 5120,
      nullptr, 0, nullptr},
     {"no-skip", OPT_NO_SKIP, "Force the test to run without skip.", &no_skip,
      &no_skip, nullptr, GET_BOOL, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
@@ -7808,8 +7866,8 @@ static struct my_option my_long_options[] = {
      nullptr, 0, nullptr},
 #ifdef _WIN32
     {"safe-process-pid", OPT_SAFEPROCESS_PID, "PID of safeprocess.",
-     &opt_safe_process_pid, &opt_safe_process_pid, 0, GET_INT, REQUIRED_ARG, 0,
-     0, 0, 0, 0, 0},
+     &opt_safe_process_pid, &opt_safe_process_pid, nullptr, GET_INT,
+     REQUIRED_ARG, 0, 0, 0, nullptr, 0, nullptr},
 #endif
     {"shared-memory-base-name", OPT_SHARED_MEMORY_BASE_NAME,
      "Base name of shared memory.", &shared_memory_base_name,
@@ -7943,7 +8001,7 @@ static bool get_one_option(int optid, const struct my_option *opt,
       } else
         tty_password = true;
       break;
-#include "sslopt-case.h"
+#include "client/include/sslopt-case.h"
 
     case 't':
       my_stpnmov(TMPDIR, argument, sizeof(TMPDIR));
@@ -8136,7 +8194,7 @@ void init_win_path_patterns() {
   for (i = 0; i < num_paths; i++) {
     VAR *v;
     if (*(paths[i]) == '$') {
-      v = var_get(paths[i], 0, 0, 0);
+      v = var_get(paths[i], nullptr, 0, 0);
       p = my_strdup(PSI_NOT_INSTRUMENTED, v->str_val, MYF(MY_FAE));
     } else
       p = my_strdup(PSI_NOT_INSTRUMENTED, paths[i], MYF(MY_FAE));
@@ -8203,9 +8261,9 @@ void fix_win_paths(const char *val, size_t len [[maybe_unused]]) {
       DBUG_PRINT("info", ("Converted \\ to / in %s", val));
     }
   }
-  DBUG_PRINT("exit", (" val: %s, len: %d", val, len));
+  DBUG_PRINT("exit", (" val: %s, len: %zu", val, len));
 }
-#endif
+#endif  // _WIN32
 
 /*
   Append the result for one field to the dynamic string ds
@@ -8244,30 +8302,6 @@ static void append_field(DYNAMIC_STRING *ds, uint col_idx, MYSQL_FIELD *field,
   }
 #endif
 
-  const size_t temp_val_max_width = (1 << 14);
-  char temp_val[temp_val_max_width];
-  DYNAMIC_STRING ds_temp = {.str = nullptr, .length = 0, .max_length = 0};
-  if (field->type == MYSQL_TYPE_VECTOR && !is_null) {
-    /* Do a binary to hex conversion for vector type */
-    size_t orig_len = len;
-    len = 2 + orig_len * 2;
-    char *destination = temp_val;
-    if (len > temp_val_max_width) {
-      init_dynamic_string(&ds_temp, "", len + 1);
-      destination = ds_temp.str;
-    }
-    const char *ptr = val;
-    const char *end = ptr + orig_len;
-    val = destination;
-    int written = sprintf(destination, "0x");
-    destination += written;
-    for (; ptr < end; ptr++, destination += written) {
-      written = sprintf(
-          destination, "%02X",
-          *(static_cast<const uchar *>(static_cast<const void *>(ptr))));
-    }
-  }
-
   if (!display_result_vertically) {
     if (col_idx) dynstr_append_mem(ds, "\t", 1);
     replace_dynstr_append_mem(ds, val, len);
@@ -8277,10 +8311,6 @@ static void append_field(DYNAMIC_STRING *ds, uint col_idx, MYSQL_FIELD *field,
     replace_dynstr_append_mem(ds, val, len);
     dynstr_append_mem(ds, "\n", 1);
   }
-
-  if (ds_temp.str != nullptr) {
-    dynstr_free(&ds_temp);
-  }  
 }
 
 /*
@@ -8773,7 +8803,7 @@ static void run_query_stmt(MYSQL *mysql, struct st_command *command,
       enabled_warnings->count())
     append_warnings(&ds_prepare_warnings, mysql);
 
-  // No need to call mysql_stmt_bind_param() because we have no
+  // No need to call mysql_stmt_bind_named_param() because we have no
   // parameter markers.
   if (cursor_protocol_enabled) {
     // Use cursor when retrieving result.
@@ -8781,6 +8811,10 @@ static void run_query_stmt(MYSQL *mysql, struct st_command *command,
     if (mysql_stmt_attr_set(stmt, STMT_ATTR_CURSOR_TYPE, (void *)&type))
       die("mysql_stmt_attr_set(STMT_ATTR_CURSOR_TYPE) failed': %d %s",
           mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
+  }
+
+  if (global_attrs->set_params_stmt(stmt)) {
+    die("Failed to set query attributes for statement");
   }
 
   // Execute the query
@@ -8900,12 +8934,6 @@ end:
   // to the server into the mysqltest builtin variable $mysql_errno. This
   // variable then can be used from the test case itself.
   var_set_errno(mysql_stmt_errno(stmt));
-
-  // Close the statement if no reconnect, need new prepare.
-  if (mysql->reconnect) {
-    mysql_stmt_close(stmt);
-    cur_con->stmt = nullptr;
-  }
 }
 
 /*
@@ -9374,7 +9402,7 @@ static void init_signal_handling(void) {
 ///   structure
 /// - Call exception_filter() method to generate to stack trace
 /// - Resume the suspended test thread
-static void handle_wait_stacktrace_request_event() {
+static void handle_wait_stacktrace_collector_event() {
   fprintf(stderr, "Test case timeout failure.\n");
 
   // Suspend the thread running the test
@@ -9391,7 +9419,7 @@ static void handle_wait_stacktrace_request_event() {
   if (GetThreadContext(mysqltest_thread, &test_thread_ctx) == FALSE) {
     const DWORD error = GetLastError();
     CloseHandle(mysqltest_thread);
-    die("Error while fetching thread conext information, err = %lu.\n", error);
+    die("Error while fetching thread context information, err = %lu.\n", error);
   }
 
   EXCEPTION_POINTERS exp = {};
@@ -9416,18 +9444,23 @@ static void handle_wait_stacktrace_request_event() {
 
 /// Thread waiting for timeout event to occur. If the event occurs,
 /// this method will trigger signal_handler() function.
-static void wait_stacktrace_request_event() {
+static void wait_stacktrace_collector_event() {
   const DWORD wait_res =
-      WaitForSingleObject(stacktrace_request_event, INFINITE);
+      WaitForSingleObject(stacktrace_collector_event, INFINITE);
   switch (wait_res) {
     case WAIT_OBJECT_0:
-      handle_wait_stacktrace_request_event();
+      if (!stacktrace_collector_thread_should_stop.load()) {
+        handle_wait_stacktrace_collector_event();
+      }
       break;
     default:
-      die("Unexpected result %lu from WaitForSingleObject.", wait_res);
+      die("Unexpected result %lu from WaitForSingleObject() in %s().", wait_res,
+          __FUNCTION__);
       break;
   }
-  CloseHandle(stacktrace_request_event);
+
+  CloseHandle(stacktrace_collector_event);
+  stacktrace_collector_event = nullptr;
 }
 
 /// Create an event name from the safeprocess PID value of the form
@@ -9437,17 +9470,16 @@ static void wait_stacktrace_request_event() {
 /// When this event occurs, signal_handler() method is called and
 /// stacktrace for the mysqltest client process is printed in the
 /// log file.
-static void create_stacktrace_request_event() {
+static void create_stacktrace_collector_event() {
   char event_name[64];
   std::sprintf(event_name, "mysqltest[%lu]stacktrace", opt_safe_process_pid);
 
   // Create an event for the signal handler
-  if ((stacktrace_request_event =
+  if ((stacktrace_collector_event =
            CreateEvent(nullptr, TRUE, FALSE, event_name)) == nullptr)
-    die("Failed to create timeout_event.");
+    die("Failed to create stacktrace_collector_event.");
 
-  wait_for_stacktrace_request_event_thread =
-      std::thread(wait_stacktrace_request_event);
+  stacktrace_collector_thread = std::thread(wait_stacktrace_collector_event);
 }
 
 #else /* _WIN32 */
@@ -9543,7 +9575,7 @@ int main(int argc, char **argv) {
 
 #ifdef _WIN32
   // Create an event to request stack trace when timeout occurs
-  if (opt_safe_process_pid) create_stacktrace_request_event();
+  if (opt_safe_process_pid) create_stacktrace_collector_event();
 #endif
 
   /* Init connections, allocate 1 extra as buffer + 1 for default */
@@ -10143,15 +10175,6 @@ int main(int argc, char **argv) {
           break;
         case Q_ENABLE_PS_PROTOCOL:
           set_property(command, P_PS, ps_protocol);
-          break;
-        case Q_DISABLE_RECONNECT:
-          set_reconnect(&cur_con->mysql, 0);
-          break;
-        case Q_ENABLE_RECONNECT:
-          set_reconnect(&cur_con->mysql, 1);
-          enable_async_client = false;
-          /* Close any open statements - no reconnect, need new prepare */
-          close_statements();
           break;
         case Q_ENABLE_ASYNC_CLIENT:
           set_property(command, P_ASYNC, true);
@@ -11417,6 +11440,7 @@ void replace_dynstr_append_mem(DYNAMIC_STRING *ds, const char *val,
 
 /* Append zero-terminated string to ds, with optional replace */
 void replace_dynstr_append(DYNAMIC_STRING *ds, const char *val) {
+  assert(val != nullptr);
   replace_dynstr_append_mem(ds, val, std::strlen(val));
 }
 

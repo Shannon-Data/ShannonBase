@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -36,18 +37,6 @@ Created 2020-11-01 by Sunny Bains. */
 
 namespace ddl {
 
-#ifdef UNIV_DEBUG
-/** Print range.
-@param[in,out] out              Output stream.
-@param[in] range                Range to print.
-@return output stream. */
-std::ostream &operator<<(std::ostream &out,
-                         const Merge_file_sort::Range &range) noexcept {
-  out << "<" << range.first << ", " << range.second << ">";
-  return out;
-}
-#endif /* UNIV_DEBUG */
-
 /** Cursor for merging blocks from the same file. */
 struct Merge_file_sort::Cursor : private ut::Non_copyable {
   /** Constructor.
@@ -71,10 +60,11 @@ struct Merge_file_sort::Cursor : private ut::Non_copyable {
   }
 
   /** Prepare the cursor for reading.
-  @param[in] range              Ranges to merge in a pass.
+  @param[in] ranges             Ranges to merge in a pass.
   @param[in] buffer_size        IO Buffer size to use for reading.
   @return DB_SUCCESS or error code. */
-  [[nodiscard]] dberr_t prepare(Range range, size_t buffer_size) noexcept;
+  [[nodiscard]] dberr_t prepare(const Ranges &ranges,
+                                size_t buffer_size) noexcept;
 
   /** Fetch the next record.
   @param[out] mrec              Row read from the file.
@@ -87,10 +77,9 @@ struct Merge_file_sort::Cursor : private ut::Non_copyable {
   [[nodiscard]] dberr_t next() noexcept;
 
   /** Move the cursor to the start of the new records lists to merge.
-  @param[in] file               File being scanned.
   @param[in] range              Seek to these offsets.
   @return DB_SUCCESS or error code. */
-  [[nodiscard]] dberr_t seek(const file_t *file, Range range) noexcept;
+  [[nodiscard]] dberr_t seek(const Ranges &range) noexcept;
 
   /** @return the number of active readers. */
   [[nodiscard]] size_t size() const noexcept { return m_cursor.size(); }
@@ -198,24 +187,15 @@ struct Merge_file_sort::Output_file : private ut::Non_copyable {
   uint64_t m_interrupt_check{};
 };
 
-dberr_t Merge_file_sort::Cursor::prepare(Range range,
+dberr_t Merge_file_sort::Cursor::prepare(const Ranges &ranges,
                                          size_t buffer_size) noexcept {
-  {
-    auto err = m_cursor.add_file(*m_file, buffer_size, range.first);
-
-    if (err != DB_SUCCESS && err != DB_END_OF_INDEX) {
+  for (size_t i = 0; i < ranges.size() - 1; ++i) {
+    if (const auto err =
+            m_cursor.add_file(*m_file, buffer_size, {ranges[i], ranges[i + 1]});
+        err != DB_SUCCESS && err != DB_END_OF_INDEX) {
       return err;
     }
   }
-
-  {
-    auto err = m_cursor.add_file(*m_file, buffer_size, range.second);
-
-    if (err != DB_SUCCESS) {
-      return err;
-    }
-  }
-
   return m_cursor.open();
 }
 
@@ -226,26 +206,28 @@ dberr_t Merge_file_sort::Cursor::fetch(const mrec_t *&mrec,
 
 dberr_t Merge_file_sort::Cursor::next() noexcept { return m_cursor.next(); }
 
-dberr_t Merge_file_sort::Cursor::seek(const file_t *file,
-                                      Range range) noexcept {
+dberr_t Merge_file_sort::Cursor::seek(const Ranges &ranges) noexcept {
   auto file_readers = m_cursor.file_readers();
-  ut_a(file_readers.size() == 2);
+  ut_a(file_readers.size() == N_WAY_MERGE);
+  ut_a(ranges.size() == N_WAY_MERGE + 1);
 
-  dberr_t err;
+  dberr_t err{DB_ERROR_UNSET};
+  bool can_seek = false;
 
-  if (range.first == file->m_size) {
-    err = DB_END_OF_INDEX;
-  } else {
-    err = file_readers[0]->read(range.first);
+  for (size_t i = 0; i < ranges.size() - 1; ++i) {
+    if (ranges[i] == m_file->m_size) {
+      err = DB_END_OF_INDEX;
+    } else {
+      err = file_readers[i]->read({ranges[i], ranges[i + 1]});
+      if (err == DB_SUCCESS) {
+        can_seek = true;
+      }
+    }
   }
 
-  if ((err == DB_SUCCESS || err == DB_END_OF_INDEX) &&
-      range.second != file->m_size) {
-    err = file_readers[1]->read(range.second);
-  }
-
-  if (err == DB_SUCCESS) {
+  if (can_seek) {
     m_cursor.clear_eof();
+    err = DB_SUCCESS;
   }
 
   return err;
@@ -320,20 +302,28 @@ dberr_t Merge_file_sort::Output_file::write(const mrec_t *mrec,
   if (unlikely(m_ptr + rec_size + need >= m_buffer.first + m_buffer.second)) {
     const size_t n_write = m_ptr - m_buffer.first;
     const auto len = ut_uint64_align_down(n_write, IO_BLOCK_SIZE);
-    auto err = ddl::pwrite(m_file.get(), m_buffer.first, len, m_offset);
+    if (len != 0) {
+      auto err = ddl::pwrite(m_file.get(), m_buffer.first, len, m_offset);
 
-    if (err != DB_SUCCESS) {
-      return err;
+      if (err != DB_SUCCESS) {
+        return err;
+      }
+
+      ut_a(n_write >= len);
+      const auto n_move = n_write - len;
+
+      m_ptr = m_buffer.first;
+      memmove(m_ptr, m_ptr + len, n_move);
+      m_ptr += n_move;
+
+      m_offset += len;
     }
 
-    ut_a(n_write >= len);
-    const auto n_move = n_write - len;
-
-    m_ptr = m_buffer.first;
-    memmove(m_ptr, m_ptr + len, n_move);
-    m_ptr += n_move;
-
-    m_offset += len;
+    if (unlikely(m_ptr + rec_size + need >= m_buffer.first + m_buffer.second)) {
+      // Should be caught earlier
+      ut_d(ut_error);
+      ut_o(return DB_TOO_BIG_RECORD);
+    }
   }
 
   m_last_mrec = m_ptr;
@@ -353,6 +343,7 @@ dberr_t Merge_file_sort::Output_file::flush() noexcept {
   /* There must always be room to write the end of list marker. */
   ut_a(copied() < m_buffer.second);
 
+  /* End of the block marker */
   *m_ptr++ = 0;
 
   /* Reset the duplicate checks because we are going to start merging
@@ -386,22 +377,21 @@ dberr_t Merge_file_sort::Output_file::flush() noexcept {
   }
 }
 
-Merge_file_sort::Range Merge_file_sort::next_range(
+Merge_file_sort::Ranges Merge_file_sort::next_ranges(
     Merge_offsets &offsets) noexcept {
-  const auto size = m_merge_ctx->m_file->m_size;
-  Range range{size, size};
-
-  if (!offsets.empty()) {
-    range.first = offsets.front();
-    offsets.pop_front();
+  Ranges ranges(N_WAY_MERGE + 1, m_merge_ctx->m_file->m_size);
+  for (size_t i = 0; i < N_WAY_MERGE; i++) {
+    if (!offsets.empty()) {
+      ranges[i] = offsets.front();
+      offsets.pop_front();
+    }
   }
 
   if (!offsets.empty()) {
-    range.second = offsets.front();
-    offsets.pop_front();
+    ranges.back() = offsets.front();
   }
 
-  return range;
+  return ranges;
 }
 
 dberr_t Merge_file_sort::merge_rows(Cursor &cursor,
@@ -434,8 +424,8 @@ dberr_t Merge_file_sort::merge_rows(Cursor &cursor,
 dberr_t Merge_file_sort::merge_ranges(Cursor &cursor, Merge_offsets &offsets,
                                       Output_file &output_file,
                                       size_t buffer_size) noexcept {
-  auto range = next_range(offsets);
-  auto err = cursor.prepare(range, buffer_size);
+  auto ranges = next_ranges(offsets);
+  auto err = cursor.prepare(ranges, buffer_size);
 
   if (err != DB_SUCCESS) {
     return err;
@@ -460,10 +450,10 @@ dberr_t Merge_file_sort::merge_ranges(Cursor &cursor, Merge_offsets &offsets,
       return DB_DUPLICATE_KEY;
     }
 
-    range = next_range(offsets);
+    ranges = next_ranges(offsets);
 
-    /* Reposition the merge cursor on the new ranges to merge next. */
-  } while ((err = cursor.seek(m_merge_ctx->m_file, range)) == DB_SUCCESS);
+    /* Reposition the merge cursor on the new range to merge next. */
+  } while ((err = cursor.seek(ranges)) == DB_SUCCESS);
 
   m_next_offsets.pop_back();
 
@@ -513,6 +503,13 @@ dberr_t Merge_file_sort::sort(Builder *builder,
     if (unlikely(err != DB_SUCCESS)) {
       break;
     }
+
+#ifdef UNIV_DEBUG
+    ib::info() << " Merge sort pass completed. Input file: "
+               << file->m_file.get() << " Output file: " << tmpfd.get()
+               << " New offsets: " << m_next_offsets.size()
+               << " thread_id: " << std::this_thread::get_id();
+#endif /* UNIV_DEBUG */
 
     /* Swap the input file with the output file and repeat. */
     tmpfd.swap(file->m_file);

@@ -1,18 +1,19 @@
 #ifndef SQL_OPTIMIZER_INCLUDED
 #define SQL_OPTIMIZER_INCLUDED
 
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,9 +22,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
   @file sql/sql_optimizer.h
@@ -63,7 +62,6 @@ class THD;
 class Window;
 struct AccessPath;
 struct MYSQL_LOCK;
-struct PQ_optimized_var;
 
 class Item_equal;
 template <class T>
@@ -215,7 +213,6 @@ class JOIN {
      5. semi-joined tables used with materialization strategy
   */
   uint tables{0};          ///< Total number of tables in query block
-  uint old_tables{0};      ///< Save old total number of tables in query block  
   uint primary_tables{0};  ///< Number of primary input tables in query block
   uint const_tables{0};    ///< Number of primary tables deemed constant
   uint tmp_tables{0};      ///< Number of temporary tables used by query
@@ -331,7 +328,9 @@ class JOIN {
   /**
     The cost of best complete join plan found so far during optimization,
     after optimization phase - cost of picked join order (not taking into
-    account the changes made by test_if_skip_sort_order()).
+    account the changes made by test_if_skip_sort_order(). Exception: Single
+    table query cost is updated after access change in
+    test_if_skip_sort_order()).
   */
   double best_read{0.0};
   /**
@@ -351,13 +350,12 @@ class JOIN {
 
   Item_sum **sum_funcs{nullptr};
   /**
-     Describes a temporary table. Each tmp table has its own tmp_table_param.
+     Describes a temporary table.
+     Each tmp table has its own tmp_table_param.
      The one here is transiently used as a model by create_intermediate_table(),
      to build the tmp table's own tmp_table_param.
   */
-  Temp_table_param origin_tmp_table_param;
   Temp_table_param tmp_table_param;
-  Temp_table_param *saved_tmp_table_param;
   MYSQL_LOCK *lock;
 
   enum class RollupState { NONE, INITED, READY };
@@ -394,7 +392,7 @@ class JOIN {
     should be used instead of a filesort when computing
     ORDER/GROUP BY.
   */
-  enum ORDERED_INDEX_USAGE{
+  enum {
     ORDERED_INDEX_VOID,      // No ordered index avail.
     ORDERED_INDEX_GROUP_BY,  // Use index for GROUP BY
     ORDERED_INDEX_ORDER_BY   // Use index for ORDER BY
@@ -435,8 +433,6 @@ class JOIN {
     @see JOIN::make_tmp_tables_info()
   */
   mem_root_deque<Item *> *tmp_fields = nullptr;
-  mem_root_deque<Item *> *tmp_fields0 = nullptr;
-  mem_root_deque<Item *> *tmp_fields1 = nullptr;
 
   int error{0};  ///< set in optimize(), exec(), prepare_result()
 
@@ -458,6 +454,7 @@ class JOIN {
       PSI_NOT_INSTRUMENTED};
   Prealloced_array<Item_rollup_sum_switcher *, 4> rollup_sums{
       PSI_NOT_INSTRUMENTED};
+
   /**
     Any window definitions
   */
@@ -555,9 +552,6 @@ class JOIN {
    */
   Ref_item_array *ref_items{
       nullptr};  // cardinality: REF_SLICE_SAVED_BASE + 1 + #windows*2
-  Ref_item_array *ref_items0{
-      nullptr};  // cardinality: REF_SLICE_SAVED_BASE + 1 + #windows*2
-  Ref_item_array *ref_items1{nullptr};  // use for parallel Query leader
 
   /**
     The slice currently stored in ref_items[0].
@@ -565,9 +559,6 @@ class JOIN {
     has been overwritten by another slice (1-3).
   */
   uint current_ref_item_slice;
-
-  // used for Parallel Query
-  uint last_slice_before_pq;
 
   /**
     Used only if this query block is recursive. Contains count of
@@ -1044,13 +1035,13 @@ class JOIN {
 
   bool alloc_indirection_slices();
 
- public:
   /**
     Convert the executor structures to a set of access paths, storing
     the result in m_root_access_path.
    */
   void create_access_paths();
 
+ public:
   /**
     Create access paths with the knowledge that there are going to be zero rows
     coming from tables (before aggregation); typically because we know that
@@ -1060,7 +1051,6 @@ class JOIN {
    */
   AccessPath *create_access_paths_for_zero_rows() const;
 
-  AccessPath*& get_root_access_path() { return m_root_access_path; }
  private:
   void create_access_paths_for_index_subquery();
 
@@ -1120,10 +1110,6 @@ bool optimize_cond(THD *thd, Item **conds, COND_EQUAL **cond_equal,
 Item *substitute_for_best_equal_field(THD *thd, Item *cond,
                                       COND_EQUAL *cond_equal,
                                       JOIN_TAB **table_join_idx);
-bool build_equal_items(THD *thd, Item *cond, Item **retcond,
-                       COND_EQUAL *inherited, bool do_inherit,
-                       mem_root_deque<Table_ref *> *join_list,
-                       COND_EQUAL **cond_equal_ref);
 bool is_indexed_agg_distinct(JOIN *join,
                              mem_root_deque<Item_field *> *out_args);
 Key_use_array *create_keyuse_for_table(
@@ -1313,12 +1299,5 @@ double EstimateRowAccesses(const AccessPath *path, double num_evaluations,
 */
 bool IsHashEquijoinCondition(const Item_eq_base *item, table_map left_side,
                              table_map right_side);
-
-extern void record_optimized_group_order(PQ_Group_list_ptrs *ptr,
-                                         ORDER_with_src &new_list,
-                                         std::vector<bool> &optimized_flags);
-
-extern ORDER *restore_optimized_group_order(SQL_I_List<ORDER> &orig_list,
-                                            std::vector<bool> &optimized_flags);
 
 #endif /* SQL_OPTIMIZER_INCLUDED */

@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/default_values.h"
 
@@ -142,10 +141,6 @@ static bool find_record_length(const dd::Table &table, size_t min_length,
 
   // Hack to avoid bugs with small static rows in MySQL.
   share->reclength = std::max<size_t>(min_length, share->reclength);
-  //Here, due to we need an extra space to store ghost column, db_trx_id length
-  //therefore, 'MAX_DB_TRX_ID_WIDTH' is added.
-  
-  share->reclength += calc_pack_length(MYSQL_TYPE_DB_TRX_ID, 0);
   share->stored_rec_length = share->reclength;
 
   return false;
@@ -261,7 +256,7 @@ bool prepare_default_value(THD *thd, uchar *buf, TABLE *table,
 err:
   // Destroy the field, despite being MEM_ROOT allocated, to avoid memory
   // leak for fields that allocate extra memory (e.g Field_blob::value).
-  destroy(regfield);
+  if (regfield != nullptr) ::destroy_at(regfield);
   return retval;
 }
 
@@ -286,7 +281,7 @@ bool prepare_default_value_buffer_and_table_share(THD *thd,
   const size_t extra_length = file->extra_rec_buf_length();
   const size_t min_length =
       static_cast<size_t>(file->min_record_length(share->db_create_options));
-  destroy(file);
+  ::destroy_at(file);
 
   // Get the number of columns, record length etc.
   if (find_record_length(table, min_length, share)) return true;

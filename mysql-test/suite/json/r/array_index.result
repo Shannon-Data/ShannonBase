@@ -518,7 +518,7 @@ id	f1
 18	[8, 4, 3, 5]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[4,3]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	15	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	2	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[4, 3]')
 select * from t1 force index(i1) where json_contains(f1->"$[*]", "[5,7]");
@@ -527,7 +527,7 @@ id	f1
 6	[5, 6, 7]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[5,7]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	14	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	2	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[5, 7]')
 select * from t1 force index(i1) where json_contains(f1->"$[*]", "[7]");
@@ -543,7 +543,7 @@ id	f1
 19	[9, 2, 7]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[7]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	9	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	1	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[7]')
 set @save_opt=@@optimizer_switch;
@@ -558,7 +558,7 @@ id	f1
 18	[8, 4, 3, 5]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[4,3]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	15	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	2	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[4, 3]')
 select * from t1 force index(i1) where json_contains(f1->"$[*]", "[5,7]");
@@ -567,7 +567,7 @@ id	f1
 6	[5, 6, 7]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[5,7]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	14	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	2	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[5, 7]')
 select * from t1 force index(i1) where json_contains(f1->"$[*]", "[7]");
@@ -583,7 +583,7 @@ id	f1
 19	[9, 2, 7]
 explain select * from t1 force index(i1) where json_contains(f1->"$[*]", "[7]");
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	9	100.00	Using where
+1	SIMPLE	t1	NULL	range	i1	i1	9	NULL	1	100.00	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`f1` AS `f1` from `test`.`t1` FORCE INDEX (`i1`) where json_contains(cast(json_extract(`f1`,_utf8mb4'$[*]') as unsigned array),json'[7]')
 select * from t1 force index(i1) where 99 member of  (f1->"$[*]");
@@ -3359,4 +3359,136 @@ id	j
 5	["6", "3", "10", "95"]
 4	["7", "15", "3", "27"]
 DROP TABLE test;
+#
+# Bug#35507211 virtual longlong Item_typecast_signed::val_int():
+#              Assertion `is_nullable()' fail
+CREATE TABLE t1 ( c1 INT , c2 ENUM ( 0x0 ) PRIMARY KEY ) ;
+INSERT t1 SET c1 = DEFAULT ;
+UPDATE t1 SET c1 = 0x0 WHERE CONVERT ( c2 MEMBER OF ( c2 ) , SIGNED INT ) ;
+ERROR 22032: Invalid data type for JSON data in argument 2 to function member of; a JSON string or JSON type is required.
+CREATE TABLE t2(vc VARCHAR(10), j JSON DEFAULT (vc));
+INSERT INTO t2(vc) VALUES ('[1,2,3]'), ('[2,3,4]'), ('[3,4,5]'), ('[4,5,6]');
+SELECT * from t2 WHERE CONVERT ( json_overlaps('1234', 42) , SIGNED INT ) ;
+ERROR 22032: Invalid data type for JSON data in argument 2 to function json_overlaps; a JSON string or JSON type is required.
+DROP TABLE t1, t2;
+#
+# Bug#35507623 void Diagnostics_area::set_eof_status(THD*):
+#              Assertion `!is_set()' failed.
+#
+CREATE TABLE t1 ( c1 INT );
+INSERT INTO t1 VALUES(0);
+HANDLER t1 OPEN ;
+HANDLER t1 READ FIRST WHERE c1 MEMBER ( c1 ) IS NOT FALSE LIMIT 100 , 100 ;
+ERROR 22032: Invalid data type for JSON data in argument 2 to function member of; a JSON string or JSON type is required.
+DROP TABLE t1;
+#
+# Bug#36155387: Hypergraph: Too many rows from index range scan
+#               for JSON_CONTAINS
+#
+CREATE TABLE t(j JSON, KEY ((CAST(j->'$[*]' AS SIGNED ARRAY))));
+INSERT INTO t VALUES ('[1,2,3]'), ('[1]'), ('[2]'), ('[3]');
+INSERT INTO t SELECT '[]' FROM t;
+INSERT INTO t SELECT '[]' FROM t;
+INSERT INTO t SELECT '[]' FROM t;
+INSERT INTO t SELECT '[]' FROM t;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+EXPLAIN FORMAT=tree SELECT * FROM t WHERE JSON_CONTAINS(j->'$[*]', '[1,2,3]');
+EXPLAIN
+-> Filter: json_contains(cast(json_extract(j,_utf8mb4'$[*]') as signed array),json'[1, 2, 3]')  (rows=6)
+    -> Index range scan on t using functional_index over (3 MEMBER OF (json_extract(j,_utf8mb4'$[*]'))) OR (2 MEMBER OF (json_extract(j,_utf8mb4'$[*]'))) OR (1 MEMBER OF (json_extract(j,_utf8mb4'$[*]')))  (rows=6)
+
+SELECT * FROM t WHERE JSON_CONTAINS(j->'$[*]', '[1,2,3]');
+j
+[1, 2, 3]
+DROP TABLE t;
+#
+# Bug#36288425: Hypergraph: Wrong result with range queries
+#               and multi-valued indexes
+#
+CREATE TABLE t (
+id int NOT NULL,
+doc_id int DEFAULT NULL,
+doc json DEFAULT NULL,
+PRIMARY KEY (id),
+KEY mv_doc_id (doc_id,(cast(json_extract(doc,'$.val') as unsigned array)))
+);
+INSERT INTO t VALUES
+(1, 2, '{"val":[1,2,3,4,5]}'), (2, 1, '{"val":[2,3,4,5]}'),
+(3, 2, '{"val":[2]}'), (4, NULL, '{"val":[3,4,5]}'),
+(5, 2, '{"val":[4,5]}'), (6, 3, '{"val":[1]}'),
+(7, 4, '{"val":[2,3,4,5]}'),(9, NULL, '{"val":[3,4,5]}'),
+(10, 4, '{"val":[4,5]}');
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+test.t	analyze	status	OK
+EXPLAIN FORMAT = tree SELECT * FROM t WHERE doc_id >= 3 and doc_id < 4;
+EXPLAIN
+-> Filter: ((t.doc_id >= 3) and (t.doc_id < 4))  (rows=1)
+    -> Index range scan on t using mv_doc_id over (3 <= doc_id < 4)  (rows=1)
+
+SELECT * FROM t WHERE doc_id >= 3 and doc_id < 4;
+id	doc_id	doc
+6	3	{"val": [1]}
+DROP TABLE t;
 # restart:
+#
+# Bug#33334911 - Multi-valued index performance is too slow
+# (Access too many rows than required)
+#
+CREATE TABLE t1 (
+id INT NOT NULL,
+f1 enum('T1','T2','T3') NOT NULL,
+f2 INT NOT NULL,
+json_value json DEFAULT (json_array()),
+PRIMARY KEY (id),
+KEY idx (f1 ,(CAST(json_extract(json_value,_utf8mb4'$') AS UNSIGNED ARRAY)), f2)
+);
+INSERT INTO t1 VALUES (1, 'T2', 15, '[1, 3, 5, 7]');
+INSERT INTO t1 VALUES (2, 'T2', 25, '[10, 20, 30, 40]');
+INSERT INTO t1 VALUES (3, 'T2', 35, '[15, 25, 35, 45]');
+INSERT INTO t1 VALUES (4, 'T2', 45, '[100, 200, 300, 400]');
+INSERT INTO t1 VALUES (5, 'T2', 55, '[120, 220, 320, 420]');
+INSERT INTO t1 VALUES (6, 'T2', 65, '[140, 240, 340, 440]');
+INSERT INTO t1 VALUES (7, 'T2', 9, '[100, 200, 300, 400]');
+INSERT INTO t1 VALUES (8, 'T2', 9, '[100, 200, 300, 400]');
+INSERT INTO t1 VALUES (9, 'T2', 9, '[100, 200, 300, 400]');
+INSERT INTO t1 VALUES (10, 'T2', 9, '[100, 200, 300, 400]');
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+EXPLAIN SELECT COUNT(*) FROM t1
+WHERE f1 IN ('T2') AND JSON_OVERLAPS(json_value->'$', CAST('[100]' AS JSON)) AND f2>=10;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	range	idx	idx	14	NULL	1	100.00	Using where
+Warnings:
+Note	1003	/* select#1 */ select count(0) AS `COUNT(*)` from `test`.`t1` where ((`test`.`t1`.`f1` = 'T2') and json_overlaps(cast(json_extract(`json_value`,_utf8mb4'$') as unsigned array),json'[100]') and (`test`.`t1`.`f2` >= 10))
+FLUSH STATUS;
+SELECT COUNT(*) FROM t1
+WHERE f1 IN ('T2') AND JSON_OVERLAPS(json_value->'$', CAST('[100]' AS JSON)) AND f2>=10;
+COUNT(*)
+1
+SHOW STATUS LIKE 'Handler_read%';
+Variable_name	Value
+Handler_read_first	0
+Handler_read_key	1
+Handler_read_last	0
+Handler_read_next	1
+Handler_read_prev	0
+Handler_read_rnd	0
+Handler_read_rnd_next	0
+SET @save_opt=@@optimizer_switch;
+SET @@optimizer_switch="mrr_cost_based=off";
+EXPLAIN SELECT COUNT(*) FROM t1
+WHERE f1 IN ('T2') AND JSON_OVERLAPS(json_value->'$', CAST('[100]' AS JSON)) AND f2>=10;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	range	idx	idx	14	NULL	1	100.00	Using where
+Warnings:
+Note	1003	/* select#1 */ select count(0) AS `COUNT(*)` from `test`.`t1` where ((`test`.`t1`.`f1` = 'T2') and json_overlaps(cast(json_extract(`json_value`,_utf8mb4'$') as unsigned array),json'[100]') and (`test`.`t1`.`f2` >= 10))
+SELECT COUNT(*) FROM t1
+WHERE f1 IN ('T2') AND JSON_OVERLAPS(json_value->'$', CAST('[100]' AS JSON)) AND f2>=10;
+COUNT(*)
+1
+SET @@optimizer_switch=@save_opt;
+DROP TABLE t1;

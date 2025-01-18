@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -527,6 +528,8 @@ class Table_access_impl {
   size_t m_max_count;
   bool m_write;
   bool m_in_tx;
+  /** true if the mysys thread state needs cleanup */
+  bool m_clear_mysys;
 
   THD *m_parent_thd;
   THD *m_child_thd;
@@ -583,7 +586,11 @@ void TA_key_impl::key_copy(uchar *record, uint key_length) {
 }
 
 Table_access_impl::Table_access_impl(THD *thd, size_t count)
-    : m_current_count(0), m_max_count(count), m_write(false), m_in_tx(false) {
+    : m_current_count(0),
+      m_max_count(count),
+      m_write(false),
+      m_in_tx(false),
+      m_clear_mysys{false} {
   m_parent_thd = thd;
 
   m_child_thd = new THD(true);
@@ -596,6 +603,7 @@ Table_access_impl::Table_access_impl(THD *thd, size_t count)
     m_child_thd->security_context()->assign_user(
         STRING_WITH_LEN("table_access"));
     m_child_thd->security_context()->skip_grants("", "");
+    this->m_clear_mysys = !my_thread_is_inited();
     my_thread_init();
   }
 
@@ -634,7 +642,6 @@ Table_access_impl::~Table_access_impl() {
   }
 
   m_child_thd->release_resources();
-  m_child_thd->restore_globals();
 
   if (m_parent_thd) m_parent_thd->store_globals();
 
@@ -645,7 +652,7 @@ Table_access_impl::~Table_access_impl() {
   delete[] m_table_array;
   delete[] m_table_state_array;
 
-  if (!m_parent_thd) my_thread_end();
+  if (m_clear_mysys && !m_parent_thd) my_thread_end();
 
   // FIXME : kill flag ?
   // FIXME : nested THD status variables ?
@@ -739,6 +746,17 @@ size_t Table_access_impl::add_table(const char *schema_name,
 }
 
 int Table_access_impl::begin() {
+  /*
+    Read lock must be acquired during entire open_and_lock_tables function
+    call, because shutdown process can make its internals unavailable in the
+    middle of the call. If tables are acquired before the shutdown process, the
+    shutdown process will not deallocate internals until tables are closed.
+   */
+  rwlock_scoped_lock rdlock(&LOCK_server_shutting_down, false, __FILE__,
+                            __LINE__);
+
+  if (server_shutting_down) return TA_ERROR_OPEN;
+
   if (m_write && m_parent_thd != nullptr) {
     if (m_parent_thd->global_read_lock.is_acquired()) {
       /*

@@ -1,15 +1,16 @@
-// Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -141,7 +142,7 @@ class Message_decoder::Compressed_message_decoder {
   }
 
   template <typename... Args>
-  bool parse_compressed_header(Args *... values) {
+  bool parse_compressed_header(Args *...values) {
     {
       CodedInputStream is(m_input_stream);
       if (!read_ints(&is, values...)) return false;
@@ -200,7 +201,7 @@ class Message_decoder::Compressed_message_decoder {
   bool read_ints(CodedInputStream *) { return true; }
 
   template <typename... Rest>
-  bool read_ints(CodedInputStream *cis, uint8_t *first, Rest *... rest) {
+  bool read_ints(CodedInputStream *cis, uint8_t *first, Rest *...rest) {
     if (!cis->ReadRaw(first, 1)) return false;
     DBUG_LOG("debug", "Frame extra header uint8_t=" << *first);
 
@@ -208,7 +209,7 @@ class Message_decoder::Compressed_message_decoder {
   }
 
   template <typename... Rest>
-  bool read_ints(CodedInputStream *cis, uint32_t *first, Rest *... rest) {
+  bool read_ints(CodedInputStream *cis, uint32_t *first, Rest *...rest) {
     if (!cis->ReadLittleEndian32(first)) return false;
     DBUG_LOG("debug", "Frame extra header uint32_t=" << *first);
 

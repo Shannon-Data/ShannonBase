@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,9 +35,14 @@
 
 #include "my_compiler.h"
 #include "my_inttypes.h"
+#include "storage/perfschema/pfs_builtin_memory.h"
+#include "storage/perfschema/pfs_std_allocator.h"
 #include "storage/perfschema/table_helper.h"
 
 struct pk_pos_data_lock {
+ public:
+  static constexpr size_t max_len = 128;
+
   pk_pos_data_lock() { reset(); }
 
   void reset() {
@@ -49,8 +55,26 @@ struct pk_pos_data_lock {
     m_engine_lock_id_length = other->m_engine_lock_id_length;
   }
 
+  void set(const char *str, size_t len) {
+    if ((len == 0) || (len > max_len) || (str == nullptr)) {
+      reset();
+      return;
+    }
+
+    memcpy(m_engine_lock_id, str, len);
+    if (len < max_len) {
+      memset(&m_engine_lock_id[len], 0, max_len - len);
+    }
+
+    m_engine_lock_id_length = len;
+  }
+
+  const char *str() const { return m_engine_lock_id; }
+  size_t length() const { return m_engine_lock_id_length; }
+
+ private:
   /** Column ENGINE_LOCK_ID */
-  char m_engine_lock_id[128];
+  char m_engine_lock_id[max_len];
   size_t m_engine_lock_id_length;
 };
 
@@ -70,7 +94,7 @@ struct row_data_lock {
   /** Column EVENT_ID */
   ulonglong m_event_id;
   /** Columns OBJECT_TYPE, OBJECT_SCHEMA, OBJECT_NAME, INDEX_NAME */
-  PFS_index_row m_index_row;
+  PFS_index_view_row m_index_row;
   /** Column PARTITION_NAME */
   const char *m_partition_name;
   size_t m_partition_name_length;
@@ -90,6 +114,9 @@ struct row_data_lock {
 };
 
 struct pk_pos_data_lock_wait {
+ public:
+  static constexpr size_t max_len = 128;
+
   pk_pos_data_lock_wait() { reset(); }
 
   void reset() {
@@ -110,11 +137,57 @@ struct pk_pos_data_lock_wait {
     m_blocking_engine_lock_id_length = other->m_blocking_engine_lock_id_length;
   }
 
+  void set(const char *requesting_lock_id, size_t requesting_lock_id_length,
+           const char *blocking_lock_id, size_t blocking_lock_id_length) {
+    if ((requesting_lock_id_length == 0) ||
+        (requesting_lock_id_length > max_len) ||
+        (requesting_lock_id == nullptr) || (blocking_lock_id_length == 0) ||
+        (blocking_lock_id_length > max_len) || (blocking_lock_id == nullptr)) {
+      reset();
+      return;
+    }
+
+    // POT type, must initialize every byte for memcmp()
+
+    memcpy(m_requesting_engine_lock_id, requesting_lock_id,
+           requesting_lock_id_length);
+    if (requesting_lock_id_length < max_len) {
+      memset(&m_requesting_engine_lock_id[requesting_lock_id_length], 0,
+             max_len - requesting_lock_id_length);
+    }
+
+    m_requesting_engine_lock_id_length = requesting_lock_id_length;
+
+    memcpy(m_blocking_engine_lock_id, blocking_lock_id,
+           blocking_lock_id_length);
+    if (blocking_lock_id_length < max_len) {
+      memset(&m_blocking_engine_lock_id[blocking_lock_id_length], 0,
+             max_len - blocking_lock_id_length);
+    }
+
+    m_blocking_engine_lock_id_length = blocking_lock_id_length;
+  }
+
+  const char *get_requesting_lock_id() const {
+    return m_requesting_engine_lock_id;
+  }
+
+  size_t get_requesting_lock_id_length() const {
+    return m_requesting_engine_lock_id_length;
+  }
+
+  const char *get_blocking_lock_id() const { return m_blocking_engine_lock_id; }
+
+  size_t get_blocking_lock_id_length() const {
+    return m_blocking_engine_lock_id_length;
+  }
+
+ private:
   /** Column REQUESTING_ENGINE_LOCK_ID */
-  char m_requesting_engine_lock_id[128];
+  char m_requesting_engine_lock_id[max_len];
   size_t m_requesting_engine_lock_id_length;
   /** Column BLOCKING_ENGINE_LOCK_ID */
-  char m_blocking_engine_lock_id[128];
+  char m_blocking_engine_lock_id[max_len];
   size_t m_blocking_engine_lock_id_length;
 };
 
@@ -188,14 +261,40 @@ class PFS_index_data_locks : public PFS_engine_index {
   }
 };
 
-class PFS_index_data_locks_by_lock_id : public PFS_index_data_locks {
+class PFS_pk_data_locks : public PFS_index_data_locks {
  public:
-  PFS_index_data_locks_by_lock_id()
+  PFS_pk_data_locks()
       : PFS_index_data_locks(&m_key_1, &m_key_2),
         m_key_1("ENGINE_LOCK_ID"),
         m_key_2("ENGINE") {}
 
-  ~PFS_index_data_locks_by_lock_id() override = default;
+  ~PFS_pk_data_locks() override = default;
+
+  pk_pos_data_lock *get_pk() {
+    if (m_fields >= 1) {
+      const char *key_value;
+      size_t key_value_length;
+      bool is_null;
+
+      /* Read the value of ENGINE_LOCK_ID. */
+      m_key_1.get_exact_key_value(is_null, key_value, key_value_length);
+      if (is_null) {
+        return nullptr;
+      }
+
+      /* Build a primary key with it. */
+      m_pk_pos.set(key_value, key_value_length);
+
+      /*
+       * IMPORTANT NOTE:
+       * We do not read the second field, ENGINE.
+       * See comments in table_data_locks::index_next()
+       */
+      return &m_pk_pos;
+    }
+
+    return nullptr;
+  }
 
   bool match_lock_id(const char *engine_lock_id,
                      size_t engine_lock_id_length) override {
@@ -221,6 +320,7 @@ class PFS_index_data_locks_by_lock_id : public PFS_index_data_locks {
  private:
   PFS_key_engine_lock_id m_key_1;
   PFS_key_engine_name m_key_2;
+  pk_pos_data_lock m_pk_pos;
 };
 
 class PFS_index_data_locks_by_transaction_id : public PFS_index_data_locks {
@@ -343,6 +443,10 @@ class PFS_index_data_lock_waits : public PFS_engine_index {
   PFS_index_data_lock_waits(PFS_engine_key *key_1, PFS_engine_key *key_2)
       : PFS_engine_index(key_1, key_2) {}
 
+  PFS_index_data_lock_waits(PFS_engine_key *key_1, PFS_engine_key *key_2,
+                            PFS_engine_key *key_3)
+      : PFS_engine_index(key_1, key_2, key_3) {}
+
   ~PFS_index_data_lock_waits() override = default;
 
   virtual bool match_engine(const char *engine [[maybe_unused]],
@@ -387,6 +491,91 @@ class PFS_index_data_lock_waits : public PFS_engine_index {
                                                  [[maybe_unused]]) {
     return true;
   }
+};
+
+class PFS_pk_data_lock_waits : public PFS_index_data_lock_waits {
+ public:
+  PFS_pk_data_lock_waits()
+      : PFS_index_data_lock_waits(&m_key_1, &m_key_2, &m_key_3),
+        m_key_1("REQUESTING_ENGINE_LOCK_ID"),
+        m_key_2("BLOCKING_ENGINE_LOCK_ID"),
+        m_key_3("ENGINE") {}
+
+  ~PFS_pk_data_lock_waits() override = default;
+
+  pk_pos_data_lock_wait *get_pk() {
+    if (m_fields >= 2) {
+      const char *key_value_1;
+      size_t key_value_length_1;
+      bool is_null_1;
+      const char *key_value_2;
+      size_t key_value_length_2;
+      bool is_null_2;
+
+      /* Read the value of REQUESTING_ENGINE_LOCK_ID. */
+      m_key_1.get_exact_key_value(is_null_1, key_value_1, key_value_length_1);
+      if (is_null_1) {
+        return nullptr;
+      }
+
+      /* Read the value of BLOCKING_ENGINE_LOCK_ID. */
+      m_key_2.get_exact_key_value(is_null_2, key_value_2, key_value_length_2);
+      if (is_null_2) {
+        return nullptr;
+      }
+
+      /* Build a primary key with it. */
+      m_pk_pos.set(key_value_1, key_value_length_1, key_value_2,
+                   key_value_length_2);
+
+      /*
+       * IMPORTANT NOTE:
+       * We do not read the third field, ENGINE.
+       * See comments in table_data_lock_waits::index_next()
+       */
+      return &m_pk_pos;
+    }
+
+    return nullptr;
+  }
+
+  bool match_requesting_lock_id(const char *engine_lock_id,
+                                size_t engine_lock_id_length) override {
+    if (m_fields >= 1) {
+      if (!m_key_1.match(engine_lock_id, engine_lock_id_length)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  bool match_blocking_lock_id(const char *engine_lock_id,
+                              size_t engine_lock_id_length) override {
+    if (m_fields >= 2) {
+      if (!m_key_2.match(engine_lock_id, engine_lock_id_length)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  bool match_engine(const char *engine, size_t engine_length) override {
+    if (m_fields >= 3) {
+      if (!m_key_3.match(engine, engine_length)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+ private:
+  PFS_key_engine_lock_id m_key_1;
+  PFS_key_engine_lock_id m_key_2;
+  PFS_key_engine_name m_key_3;
+  pk_pos_data_lock_wait m_pk_pos;
 };
 
 class PFS_index_data_lock_waits_by_requesting_lock_id
@@ -596,17 +785,48 @@ class PFS_index_data_lock_waits_by_blocking_thread_id
   PFS_key_event_id m_key_2;
 };
 
-class PFS_data_cache {
+template <class T>
+class PFS_data_container_allocator : public PFS_std_allocator<T> {
  public:
-  PFS_data_cache();
-  ~PFS_data_cache();
+  PFS_data_container_allocator()
+      : PFS_std_allocator<T>(&builtin_memory_data_container) {}
 
-  const char *cache_data(const char *ptr, size_t length);
-  void clear();
+  PFS_data_container_allocator(const PFS_data_container_allocator &other)
+      : PFS_std_allocator<T>(other) {}
 
+  template <class U>
+  constexpr PFS_data_container_allocator(
+      const PFS_data_container_allocator<U> &u) noexcept
+      : PFS_std_allocator<T>(u) {}
+};
+
+class PFS_data_cache {
  private:
-  typedef std::unordered_set<std::string> set_type;
+  typedef std::unordered_set<std::string, std::hash<std::string>,
+                             std::equal_to<std::string>,
+                             PFS_data_container_allocator<std::string>>
+      set_type;
+
   set_type m_set;
+
+ public:
+  PFS_data_cache() {}
+  ~PFS_data_cache() {}
+
+  const char *cache_data(const char *ptr, size_t length) {
+    /*
+      std::string is just a sequence of bytes,
+      which actually can contain a 0 byte ...
+      Never use strlen() on the binary data.
+    */
+    const std::string key(ptr, length);
+    std::pair<set_type::iterator, bool> ret;
+
+    ret = m_set.insert(key);
+    return (*ret.first).data();
+  }
+
+  void clear() { m_set.clear(); }
 };
 
 class PFS_data_lock_container : public PSI_server_data_lock_container {
@@ -616,6 +836,9 @@ class PFS_data_lock_container : public PSI_server_data_lock_container {
 
   const char *cache_string(const char *string) override;
   const char *cache_data(const char *ptr, size_t length) override;
+  void cache_identifier(PSI_identifier kind, const char *str, size_t length,
+                        const char **cached_ptr,
+                        size_t *cached_length) override;
 
   bool accept_engine(const char *engine, size_t engine_length) override;
   bool accept_lock_id(const char *engine_lock_id,
@@ -658,7 +881,8 @@ class PFS_data_lock_container : public PSI_server_data_lock_container {
 
  private:
   size_t m_logical_row_index;
-  std::vector<row_data_lock> m_rows;
+  std::vector<row_data_lock, PFS_data_container_allocator<row_data_lock>>
+      m_rows;
   PFS_data_cache m_cache;
   PFS_index_data_locks *m_filter;
 };
@@ -711,7 +935,9 @@ class PFS_data_lock_wait_container
 
  private:
   size_t m_logical_row_index;
-  std::vector<row_data_lock_wait> m_rows;
+  std::vector<row_data_lock_wait,
+              PFS_data_container_allocator<row_data_lock_wait>>
+      m_rows;
   PFS_data_cache m_cache;
   PFS_index_data_lock_waits *m_filter;
 };

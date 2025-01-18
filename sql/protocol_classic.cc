@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -183,10 +184,7 @@
    - @subpage page_protocol_com_quit
    - @subpage page_protocol_com_init_db
    - @subpage page_protocol_com_field_list
-   - @subpage page_protocol_com_refresh
    - @subpage page_protocol_com_statistics
-   - @subpage page_protocol_com_process_info
-   - @subpage page_protocol_com_process_kill
    - @subpage page_protocol_com_debug
    - @subpage page_protocol_com_ping
    - @subpage page_protocol_com_change_user
@@ -449,11 +447,11 @@
 #include "mysql/strings/m_ctype.h"
 #include "mysqld_error.h"
 #include "mysys_err.h"
+#include "sql-common/my_decimal.h"
 #include "sql/field.h"
 #include "sql/item.h"
 #include "sql/item_func.h"  // Item_func_set_user_var
-#include "sql/my_decimal.h"
-#include "sql/mysqld.h"  // global_system_variables
+#include "sql/mysqld.h"     // global_system_variables
 #include "sql/session_tracker.h"
 #include "sql/sql_class.h"  // THD
 #include "sql/sql_error.h"
@@ -1761,11 +1759,9 @@ int Protocol_classic::read_packet() {
 
 /**
   @page page_protocol_com_field_list COM_FIELD_LIST
-
   @note As of MySQL 5.7.11, COM_FIELD_LIST is deprecated and will be removed in
   a future version of MySQL. Instead, use COM_QUERY to execute a SHOW COLUMNS
   statement.
-
   <table>
   <caption>Payload</caption>
   <tr><th>Type</th><th>Name</th><th>Description</th></tr>
@@ -1780,19 +1776,14 @@ int Protocol_classic::read_packet() {
       <td>wildcard</td>
       <td>field wildcard</td></tr>
   </table>
-
   @return @ref sect_protocol_com_field_list_response
-
   @sa mysql_list_fields, mysqld_list_fields
-
   @section sect_protocol_com_field_list_response COM_FIELD_LIST Response
-
   The response to @ref page_protocol_com_field_list can be one of:
    - @ref page_protocol_basic_err_packet
    - zero or more
      @ref page_protocol_com_query_response_text_resultset_column_definition
    - a closing @ref page_protocol_basic_eof_packet
-
   @warning if ::CLIENT_OPTIONAL_RESULTSET_METADATA is on and the server side
   variable ::Sys_resultset_metadata is not set to ::RESULTSET_METADATA_FULL
   no rows will be sent, just an empty resultset.
@@ -1806,39 +1797,7 @@ int Protocol_classic::read_packet() {
 
   @sa mysql_list_fields, mysqld_list_fields, THD::send_result_metadata,
   dispatch_command, cli_list_fields
-
 */
-
-/**
-  @page page_protocol_com_refresh COM_REFRESH
-
-  @warning As of MySQL 5.7.11, COM_REFRESH is deprecated and will be removed
-  in a future version of MySQL. Instead, use COM_QUERY to execute a
-  FLUSH statement.
-
-  A low-level version of several FLUSH ... and RESET ... statements.
-
-  Calls REFRESH or FLUSH statements.
-
-  <table>
-  <caption>Payload</caption>
-  <tr><th>Type</th><th>Name</th><th>Description</th></tr>
-  <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
-      <td>command</td>
-      <td>0x07: COM_REFRESH</td></tr>
-  <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
-      <td>sub_command</td>
-      <td>A bitmask of sub-systems to refresh.
-      A combination of the first 8 bits of
-      @ref group_cs_com_refresh_flags</td></tr>
-  </table>
-
-  @return @ref page_protocol_basic_err_packet or
-    @ref page_protocol_basic_ok_packet
-
-  @sa dispatch_command, handle_reload_request, mysql_refresh
-*/
-
 
 /**
   @page page_protocol_com_statistics COM_STATISTICS
@@ -1860,58 +1819,6 @@ int Protocol_classic::read_packet() {
   </table>
 
   @sa cli_read_statistics, mysql_stat, dispatch_command, calc_sum_of_all_status
-*/
-
-
-/**
-  @page page_protocol_com_process_info COM_PROCESS_INFO
-
-  @warning As of 5.7.11 ::COM_PROCESS_INFO is deprecated in favor of ::COM_QUERY
-    with SHOW PROCESSLIST
-
-  Get a list of active threads
-
-  @return @ref page_protocol_com_query_response_text_resultset or a
-  @ref page_protocol_basic_err_packet
-
-  <table>
-  <caption>Payload</caption>
-  <tr><th>Type</th><th>Name</th><th>Description</th></tr>
-  <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
-      <td>command</td>
-      <td>0x0A: COM_PROCESS_INFO</td></tr>
-  </table>
-
-  @sa mysql_list_processes, dispatch_command, mysqld_list_processes
-*/
-
-
-/**
-  @page page_protocol_com_process_kill COM_PROCESS_KILL
-
-  Ask the server to terminate a connection
-
-  @warning As of MySQL 5.7.11, COM_PROCESS_KILL is deprecated and will be
-  removed in a future version of MySQL. Instead, use ::COM_QUERY and
-  a KILL command.
-
-  Same as the SQL command `KILL <id>`.
-
-  <table>
-  <caption>Payload</caption>
-  <tr><th>Type</th><th>Name</th><th>Description</th></tr>
-  <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
-      <td>command</td>
-      <td>0x0C: COM_PROCESS_KILL</td></tr>
-  <tr><td>@ref a_protocol_type_int4 "int&lt;4&gt;"</td>
-      <td>connection_id</td>
-      <td>The connection to kill</td></tr>
-  </table>
-
-  @return @ref page_protocol_basic_err_packet or
-    @ref page_protocol_basic_ok_packet
-
-  @sa dispatch_command, mysql_kill, sql_kill
 */
 
 /**
@@ -2359,7 +2266,7 @@ int Protocol_classic::read_packet() {
 
   @section sect_protocol_binary_resultset_row_value Binary Protocol Value
 
-  @subsection sect_protocol_binary_resultset_row_value_string ProtocolBinary::MYSQL_TYPE_STRING, ProtocolBinary::MYSQL_TYPE_VARCHAR, ProtocolBinary::MYSQL_TYPE_VAR_STRING, ProtocolBinary::MYSQL_TYPE_ENUM, ProtocolBinary::MYSQL_TYPE_SET, ProtocolBinary::MYSQL_TYPE_LONG_BLOB, ProtocolBinary::MYSQL_TYPE_MEDIUM_BLOB, ProtocolBinary::MYSQL_TYPE_BLOB, ProtocolBinary::MYSQL_TYPE_TINY_BLOB, ProtocolBinary::MYSQL_TYPE_GEOMETRY, ProtocolBinary::MYSQL_TYPE_BIT, ProtocolBinary::MYSQL_TYPE_DECIMAL, ProtocolBinary::MYSQL_TYPE_NEWDECIMAL:
+  @subsection sect_protocol_binary_resultset_row_value_string ProtocolBinary::MYSQL_TYPE_STRING, ProtocolBinary::MYSQL_TYPE_VARCHAR, ProtocolBinary::MYSQL_TYPE_VAR_STRING, ProtocolBinary::MYSQL_TYPE_ENUM, ProtocolBinary::MYSQL_TYPE_SET, ProtocolBinary::MYSQL_TYPE_LONG_BLOB, ProtocolBinary::MYSQL_TYPE_MEDIUM_BLOB, ProtocolBinary::MYSQL_TYPE_BLOB, ProtocolBinary::MYSQL_TYPE_TINY_BLOB, ProtocolBinary::MYSQL_TYPE_GEOMETRY, ProtocolBinary::MYSQL_TYPE_BIT, ProtocolBinary::MYSQL_TYPE_DECIMAL, ProtocolBinary::MYSQL_TYPE_NEWDECIMAL, ProtocolBinary::MYSQL_TYPE_JSON
 
   <table>
   <caption>::MYSQL_TYPE_STRING</caption>
@@ -2781,8 +2688,9 @@ static bool parse_query_bind_params(
       if (!has_new_types && i >= stmt_data->m_param_count) return true;
 
       const enum enum_field_types type =
-          has_new_types ? params[i].type
-                        : stmt_data->m_param_array[i]->data_type_source();
+          (has_new_types || i >= stmt_data->m_param_count)
+              ? params[i].type
+              : stmt_data->m_param_array[i]->data_type_source();
       if (type == MYSQL_TYPE_BOOL)
         return true;  // unsupported in this version of the Server
       if (stmt_data && i < stmt_data->m_param_count &&
@@ -2839,16 +2747,6 @@ bool Protocol_classic::parse_packet(union COM_DATA *data,
       data->com_init_db.db_name =
           reinterpret_cast<const char *>(input_raw_packet);
       data->com_init_db.length = input_packet_length;
-      break;
-    }
-    case COM_REFRESH: {
-      if (input_packet_length < 1) goto malformed;
-      data->com_refresh.options = input_raw_packet[0];
-      break;
-    }
-    case COM_PROCESS_KILL: {
-      if (input_packet_length < 4) goto malformed;
-      data->com_kill.id = (ulong)uint4korr(input_raw_packet);
       break;
     }
     case COM_SET_OPTION: {
@@ -2958,12 +2856,9 @@ bool Protocol_classic::parse_packet(union COM_DATA *data,
       */
       const ulong len =
           strend((char *)input_raw_packet) - (char *)input_raw_packet;
-
       if (len >= input_packet_length || len > NAME_LEN) goto malformed;
-
       data->com_field_list.table_name = input_raw_packet;
       data->com_field_list.table_name_length = len;
-
       data->com_field_list.query = input_raw_packet + len + 1;
       data->com_field_list.query_length = input_packet_length - len;
       break;
@@ -3430,7 +3325,6 @@ bool Protocol_classic::store_string(const char *from, size_t length,
          field_types[field_pos] == MYSQL_TYPE_NEWDECIMAL ||
          field_types[field_pos] == MYSQL_TYPE_NEWDATE ||
          field_types[field_pos] == MYSQL_TYPE_JSON ||
-         field_types[field_pos] == MYSQL_TYPE_VECTOR ||
          (field_types[field_pos] >= MYSQL_TYPE_ENUM &&
           field_types[field_pos] <= MYSQL_TYPE_GEOMETRY));
   field_pos++;

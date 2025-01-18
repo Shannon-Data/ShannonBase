@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 #
 
 # ==== Purpose ====
@@ -11,6 +11,26 @@
 # not have any unwanted side affects.
 
 --disable_query_log
+--let $_server_id = `SELECT @@server_id`
+# There should be no expect file before nor after the test, because
+# existence of this file means author expects the server to be off,
+# while it is an assumption that the server is up and running at
+# the start and end of the test (in particular this script queries it).
+# Unfortunately, we can't verify this on Windows, because there the
+# unlink($expect_file) sometimes fails due to Permission Denied
+# despite numerous retries. In such case the test runner leaves the
+# file around, in hope it will be cleaned up later or not cause too
+# much trouble to the next test case. The trade-off here is that if
+# we insist on checking this on Windows, it will fail a lot without
+# revealing any real problem in how the test script is written, and
+# inceasing number of retries makes whole test suite time out, as this
+# happens quite frequently during whole test suite. Verifying on Linux
+# is enough to catch bugs in how the test scenario is writen.
+--source include/check_windows.inc
+if (!$have_windows)
+{
+  --list_files $MYSQLTEST_VARDIR/tmp mysqld.$_server_id.expect
+}
 
 # We want to ensure all slave configuration is restored. But SHOW
 # REPLICA STATUS returns nothing for servers not configured as slaves,
@@ -20,7 +40,7 @@
 # no error, and a few other invariants. So we issue SHOW REPLICA
 # STATUS, and if it returns no rows we fake the result.
 --let $tmp= 0
-if (`SELECT @@server_id <> 0`) {
+if ($_server_id) {
   --let $tmp= query_get_value(SHOW REPLICA STATUS, Replica_IO_Running, 1)
   --let $tmp= `SELECT '$tmp' = 'No such row'`
 }
@@ -106,6 +126,20 @@ if ($NDB_BACKUP_DIR)
   echo Checking that $backup_dir directory does not exist;
   --error 1
   file_exists $backup_dir;
+}
+if (`SELECT COUNT(*) = 1 FROM INFORMATION_SCHEMA.ENGINES
+       WHERE engine = 'ndbcluster' AND
+                    support IN ('YES', 'DEFAULT', 'ENABLED')`)
+{
+  echo Check that same data nodes are up and have same node group assignment.;
+  error 0, ER_GET_ERRMSG;
+  SELECT node_id, group_id FROM ndbinfo.ndb$membership ORDER BY node_id, group_id;
+
+  # Check that there are no left over error injections still active.
+  # To allow test with ndbcluster but without any data nodes allow error
+  # ER_GET_ERRMSG.
+  error 0, ER_GET_ERRMSG;
+  SELECT * FROM ndbinfo.ndb$threadblock_details;
 }
 
 # There might be more than one server used by a test and check-testcase.test
@@ -255,4 +289,7 @@ EOF
 
 --enable_query_log
 
+SET @use_secondary_engine_saved = @@use_secondary_engine;
+SET @@use_secondary_engine = OFF;
 CALL mtr.check_testcase();
+SET @@use_secondary_engine = @use_secondary_engine_saved;

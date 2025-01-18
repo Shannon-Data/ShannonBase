@@ -1,15 +1,16 @@
-# Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2010, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,8 +27,10 @@ ENDIF()
 
 MSVC_CPPCHECK_DISABLE()
 
-# Some tests require Boost.
-INCLUDE_DIRECTORIES(SYSTEM ${BOOST_PATCHES_DIR} ${BOOST_INCLUDE_DIR})
+IF(NOT WITH_DEBUG)
+  # the innodb parts are documented assuming WITH_DEBUG (UNIV_DEBUG)
+  DISABLE_DOCUMENTATION_WARNINGS()
+ENDIF()
 
 INCLUDE_DIRECTORIES(SYSTEM ${GMOCK_INCLUDE_DIRS})
 
@@ -81,6 +84,8 @@ ADD_STATIC_LIBRARY(gunit_large
   thread_utils.cc
   LINK_LIBRARIES ext::icu ext::zlib
 )
+TARGET_INCLUDE_DIRECTORIES(gunit_large SYSTEM PRIVATE 
+  ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include)
 
 # Add a library for enable_win_jemalloc.cc
 # and link it with both gunit_small and gunit_large below.
@@ -96,12 +101,6 @@ TARGET_LINK_LIBRARIES(gunit_small
   mysys strings ${GTEST_LIBRARIES} ${UNITTEST_JEMALLOC_LIB} extra::rapidjson)
 TARGET_LINK_LIBRARIES(gunit_large
   ${GTEST_LIBRARIES} ${UNITTEST_JEMALLOC_LIB} extra::rapidjson)
-
-IF(WIN32)
-  ## Create an object library of nt_servc.cc, so we don't have to
-  ## compile it again for each target
-  ADD_LIBRARY(my_nt_servc OBJECT ../../sql/nt_servc.cc)
-ENDIF()
 
 # Add some defines.
 ADD_DEFINITIONS(-DMYSQL_SERVER -DEXTRA_CODE_FOR_UNIT_TESTING)
@@ -166,7 +165,6 @@ SET(TESTS
   pattern_matcher
   prealloced_array
   priority_queue
-  pump_object_filter
   record_buffer
   sql_class_header
   sql_list
@@ -186,7 +184,6 @@ SET(TESTS
   timespec
   unhex
   val_int_compare
-  varlen_sort
   )
 
 SET(ALL_SMALL_TESTS)
@@ -196,6 +193,7 @@ ENDFOREACH()
 
 # Add tests (link them with gunit/gmock libraries and the server libraries)
 SET(SERVER_TESTS
+  authentication_policy
   bgc_ticket_manager
   character_set_deprecation
   compare_access_paths
@@ -238,6 +236,7 @@ SET(SERVER_TESTS
   gis_wkb_parser
   gis_wkb_writer
   graph_simplification
+  gtid_specification_parsing
   handler
   hash_join
   histograms
@@ -301,8 +300,16 @@ SET(SERVER_TESTS
   xid_extract
   log_event_status_size
 )
+# Hangs forever.
+IF(LINUX_ARM AND CMAKE_BUILD_TYPE_UPPER STREQUAL "RELWITHDEBINFO")
+  LIST(REMOVE_ITEM SERVER_TESTS bgc_ticket_manager)
+ENDIF()
+# Endless loop in FatalSignalDeathTest
+IF(LINUX_ALPINE)
+  LIST(REMOVE_ITEM SERVER_TESTS segfault)
+ENDIF()
 
-IF(MY_COMPILER_IS_GNU AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
+IF(MY_COMPILER_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
   ADD_COMPILE_FLAGS(regexp_engine-t.cc COMPILE_FLAGS "-Wno-restrict")
 ENDIF()
 
@@ -348,12 +355,10 @@ MYSQL_ADD_EXECUTABLE(merge_small_tests-t ${ALL_SMALL_TESTS}
   ADD_TEST merge_small_tests
   COMPILE_DEFINITIONS ${DISABLE_PSI_DEFINITIONS}
   ENABLE_EXPORTS
-  LINK_LIBRARIES sqlgunitlib gunit_small extra::rapidjson
+  LINK_LIBRARIES sqlgunitlib gunit_small extra::rapidjson extra::boost
   )
+DOWNGRADE_STRINGOP_WARNINGS(merge_small_tests-t)
 
-IF(WIN32)
-  LIST(APPEND ALL_LARGE_TESTS ../../sql/nt_servc.cc)
-ENDIF()
 LIST(APPEND ALL_LARGE_TESTS ../../storage/example/ha_example.cc)
 
 MYSQL_ADD_EXECUTABLE(merge_large_tests-t ${ALL_LARGE_TESTS}
@@ -361,13 +366,20 @@ MYSQL_ADD_EXECUTABLE(merge_large_tests-t ${ALL_LARGE_TESTS}
   ENABLE_EXPORTS
   LINK_LIBRARIES gunit_large server_unittest_library
   )
+IF(MY_COMPILER_IS_GNU)
+  MY_TARGET_LINK_OPTIONS(merge_large_tests-t "-Wno-alloc-size-larger-than")
+ENDIF()
+
+TARGET_INCLUDE_DIRECTORIES(merge_large_tests-t SYSTEM PRIVATE
+  ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include)
+
 
 FOREACH(test ${TESTS})
   MYSQL_ADD_EXECUTABLE(${test}-t ${test}-t.cc
     COMPILE_DEFINITIONS ${DISABLE_PSI_DEFINITIONS}
     ENABLE_EXPORTS
     EXCLUDE_FROM_ALL
-    LINK_LIBRARIES sqlgunitlib gunit_small
+    LINK_LIBRARIES sqlgunitlib gunit_small extra::boost
     SKIP_INSTALL
     )
 ENDFOREACH()
@@ -387,9 +399,6 @@ ADD_COMPILE_FLAGS(
 
 FOREACH(test ${SERVER_TESTS})
   SET(SRC_FILES ${test}-t.cc)
-  IF(WIN32)
-    LIST(APPEND SRC_FILES $<TARGET_OBJECTS:my_nt_servc>)
-  ENDIF()
   IF(test MATCHES "table_cache")
     LIST(APPEND SRC_FILES ../../storage/example/ha_example.cc)
   ENDIF()
@@ -423,7 +432,6 @@ MYSQL_ADD_EXECUTABLE(rpl_commit_order_queue-t rpl_commit_order_queue-t.cc
 
 ADD_SUBDIRECTORY(ddl_rewriter)
 ADD_SUBDIRECTORY(innodb)
-ADD_SUBDIRECTORY(keyring)
 ADD_SUBDIRECTORY(components/mysql_server)
 ADD_SUBDIRECTORY(components/keyring_common)
 ADD_SUBDIRECTORY(xplugin)
@@ -435,3 +443,5 @@ ADD_SUBDIRECTORY(memory)
 ADD_SUBDIRECTORY(containers)
 ADD_SUBDIRECTORY(locks)
 ADD_SUBDIRECTORY(changestreams)
+ADD_SUBDIRECTORY(libs/utils)
+ADD_SUBDIRECTORY(libs/serialization)

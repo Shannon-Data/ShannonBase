@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,7 @@
 #include <stdio.h>
 
 #include <algorithm>
+#include <memory>
 
 #include "field_types.h"
 #include "m_string.h"
@@ -37,17 +39,14 @@
 #include "mysql/components/services/bits/psi_bits.h"
 #include "mysql/service_mysql_alloc.h"
 #include "mysql/strings/m_ctype.h"
-#include "sql/iterators/basic_row_iterators.h"
 #include "sql/join_optimizer/bit_utils.h"
 #include "sql/key.h"
-#include "sql/mysqld.h"
 #include "sql/psi_memory_key.h"
 #include "sql/range_optimizer/reverse_index_range_scan.h"
 #include "sql/sql_bitmap.h"
 #include "sql/sql_class.h"
 #include "sql/sql_const.h"
 #include "sql/sql_executor.h"
-#include "sql/sql_optimizer.h"
 #include "sql/sql_select.h"
 #include "sql/system_variables.h"
 #include "sql/table.h"
@@ -61,18 +60,18 @@ IndexRangeScanIterator::IndexRangeScanIterator(
     MEM_ROOT *return_mem_root, uint mrr_flags, uint mrr_buf_size,
     Bounds_checked_array<QUICK_RANGE *> ranges_arg)
     : RowIDCapableRowIterator(thd, table_arg),
-      ranges(ranges_arg),
-      free_file(false),
-      cur_range(nullptr),
-      last_range(nullptr),
-      mrr_flags(mrr_flags),
-      mrr_buf_size(mrr_buf_size),
-      mrr_buf_desc(nullptr),
-      need_rows_in_rowid_order(need_rows_in_rowid_order),
-      reuse_handler(reuse_handler),
-      mem_root(return_mem_root),
-      m_expected_rows(expected_rows),
-      m_examined_rows(examined_rows) {
+      ranges{ranges_arg},
+      free_file{false},
+      cur_range{nullptr},
+      last_range{nullptr},
+      mrr_flags{mrr_flags},
+      mrr_buf_size{mrr_buf_size},
+      mrr_buf_desc{nullptr},
+      need_rows_in_rowid_order{need_rows_in_rowid_order},
+      reuse_handler{reuse_handler},
+      mem_root{return_mem_root},
+      m_expected_rows{expected_rows},
+      m_examined_rows{examined_rows} {
   DBUG_TRACE;
 
   in_ror_merged_scan = false;
@@ -112,7 +111,7 @@ IndexRangeScanIterator::~IndexRangeScanIterator() {
                  ("Freeing separate handler %p (free: %d)", file, free_file));
       file->ha_external_lock(thd(), F_UNLCK);
       file->ha_close();
-      destroy(file);
+      ::destroy_at(file);
     }
   }
   my_free(mrr_buf_desc);
@@ -171,10 +170,9 @@ uint quick_range_seq_next(range_seq_t rseq, KEY_MULTI_RANGE *range) {
   start_key->key = cur->min_key;
   start_key->length = cur->min_length;
   start_key->keypart_map = cur->min_keypart_map;
-  start_key->flag =
-      ((cur->flag & NEAR_MIN)
-           ? HA_READ_AFTER_KEY
-           : (cur->flag & EQ_RANGE) ? HA_READ_KEY_EXACT : HA_READ_KEY_OR_NEXT);
+  start_key->flag = ((cur->flag & NEAR_MIN)   ? HA_READ_AFTER_KEY
+                     : (cur->flag & EQ_RANGE) ? HA_READ_KEY_EXACT
+                                              : HA_READ_KEY_OR_NEXT);
   end_key->key = cur->max_key;
   end_key->length = cur->max_length;
   end_key->keypart_map = cur->max_keypart_map;
@@ -235,11 +233,19 @@ bool IndexRangeScanIterator::Init() {
     // outside of the record. So don't request a buffer in this case, even
     // though the current read_set gives the impression that using a
     // record buffer would be fine.
-    const bool skip_record_buffer =
-        need_rows_in_rowid_order &&
-        Overlaps(table()->file->ha_table_flags(),
-                 HA_PRIMARY_KEY_REQUIRED_FOR_POSITION) &&
-        has_blob_primary_key(table());
+    bool skip_record_buffer = need_rows_in_rowid_order &&
+                              Overlaps(table()->file->ha_table_flags(),
+                                       HA_PRIMARY_KEY_REQUIRED_FOR_POSITION) &&
+                              has_blob_primary_key(table());
+    // Skip the record buffer for covering multi-valued index range scans.
+    // The current implementation of Field_typed_array::key_cmp() needs the
+    // value of the generated column for the indexed expression, and this
+    // column is not available in the multi-valued index, so the storage
+    // engine cannot safely evaluate the end range condition when filling the
+    // record buffer when it's a covering scan.
+    skip_record_buffer |=
+        Overlaps(table()->key_info[index].flags, HA_MULTI_VALUED_KEY) &&
+        table()->key_read;
     if (!skip_record_buffer) {
       if (set_record_buffer(table(), m_expected_rows)) {
         return true; /* purecov: inspected */

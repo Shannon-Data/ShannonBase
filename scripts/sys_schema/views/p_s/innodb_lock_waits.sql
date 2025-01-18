@@ -1,4 +1,4 @@
--- Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+-- Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 --
 -- This program is free software; you can redistribute it and/or modify
 -- it under the terms of the GNU General Public License as published by
@@ -124,6 +124,8 @@ SELECT r.trx_wait_started AS wait_started,
     FROM performance_schema.data_lock_waits w
  INNER JOIN information_schema.innodb_trx b  ON b.trx_id = CAST(w.blocking_engine_transaction_id AS CHAR)
  INNER JOIN information_schema.innodb_trx r  ON r.trx_id = CAST(w.requesting_engine_transaction_id AS CHAR)
- INNER JOIN performance_schema.data_locks bl ON bl.engine_lock_id = w.blocking_engine_lock_id
- INNER JOIN performance_schema.data_locks rl ON rl.engine_lock_id = w.requesting_engine_lock_id
+ INNER JOIN performance_schema.data_locks bl
+   ON ((bl.engine_lock_id = w.blocking_engine_lock_id) AND (bl.engine = w.engine))
+ INNER JOIN performance_schema.data_locks rl
+   ON ((rl.engine_lock_id = w.requesting_engine_lock_id) AND (rl.engine = w.engine))
  ORDER BY r.trx_wait_started;

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,23 +29,21 @@
 
 #include "plugin_info_app.h"
 
-#include <iostream>
 #include <sstream>
 
 #include <gmock/gmock.h>
 
-#include "helpers/router_test_helpers.h"
 #include "mysql/harness/filesystem.h"
 #include "mysql/harness/plugin.h"
 #include "mysql/harness/vt100.h"
 #include "mysql/harness/vt100_filter.h"
 #include "print_version.h"
 #include "router_config.h"  // MYSQL_ROUTER_PACKAGE_NAME
+#include "router_test_helpers.h"
 #include "welcome_copyright_notice.h"
 
 using mysql_harness::Path;
 
-using testing::StartsWith;
 using testing::StrEq;
 using testing::ValuesIn;
 using testing::WithParamInterface;
@@ -290,7 +289,7 @@ TEST_P(PluginInfoAppTestReadInfo, ReadInfo) {
   const std::string plugin_conflicts = std::get<4>(GetParam());
   const std::string plugin_file_path = get_plugin_file_path(plugin_name);
 
-  std::vector<std::string> args{plugin_file_path.c_str(), plugin_name.c_str()};
+  std::vector<std::string> args{plugin_file_path, plugin_name};
 
   PluginInfoFrontend plugin_info_app(kPluginInfoAppExeFileName, args,
                                      out_stream_);

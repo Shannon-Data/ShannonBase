@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -314,8 +315,7 @@ void row_upd_rec_sys_fields_in_recovery(rec_t *rec, page_zip_des_t *page_zip,
     byte *field;
     ulint len;
 
-    field =
-        const_cast<byte *>(rec_get_nth_field(nullptr, rec, offsets, pos, &len));
+    field = rec_get_nth_field(nullptr, rec, offsets, pos, &len);
     ut_ad(len == DATA_TRX_ID_LEN);
     trx_write_trx_id(field, trx_id);
     trx_write_roll_ptr(field + DATA_TRX_ID_LEN, roll_ptr);
@@ -2881,9 +2881,6 @@ static bool row_upd_check_autoinc_counter(const upd_node_t *node, mtr_t *mtr) {
     heap = mem_heap_create(1024, UT_LOCATION_HERE);
   }
 
-  if (thr && thr->prebuilt && thr->prebuilt->m_to_pop_buff)
-    mtr->set_log_mode(MTR_LOG_ALL_WITH_POP);
-
   err = btr_cur_pessimistic_update(
       flags | BTR_NO_LOCKING_FLAG | BTR_KEEP_POS_FLAG, btr_cur, &offsets,
       offsets_heap, heap, &big_rec, node->update, node->cmpl_info, thr, trx_id,
@@ -3010,8 +3007,6 @@ func_exit:
   /* We have to restore the cursor to its position */
 
   mtr_start(&mtr);
-  if (thr && thr->prebuilt && thr->prebuilt->m_to_pop_buff)
-    mtr.set_log_mode(MTR_LOG_ALL_WITH_POP);
 
   /* Disable REDO logging as lifetime of temp-tables is limited to
   server or connection lifetime and so REDO information is not needed
@@ -3164,8 +3159,9 @@ static dberr_t row_upd(upd_node_t *node, /*!< in: row update node */
   ut_ad(!node->table->skip_alter_undo);
 
   DBUG_PRINT("row_upd", ("table: %s", node->table->name.m_name));
-  DBUG_PRINT("row_upd", ("info bits in update vector: 0x%lx",
-                         node->update ? node->update->info_bits : 0));
+  DBUG_PRINT("row_upd",
+             ("info bits in update vector: " IF_WIN("0x%llx", "0x%lx"),
+              node->update ? node->update->info_bits : 0));
   DBUG_PRINT("row_upd",
              ("foreign_id: %s", node->foreign ? node->foreign->id : "NULL"));
 

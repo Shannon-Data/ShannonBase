@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,12 +28,15 @@
 #include <array>
 #include <deque>
 #include <forward_list>
+#include <initializer_list>
 #include <list>
 #include <set>
 #include <unordered_set>
 #include <vector>
 
 #include "mysql/harness/utility/string.h"
+
+#include "unittest/gunit/benchmark.h"
 
 using mysql_harness::join;
 
@@ -42,7 +46,16 @@ class JoinTest : public ::testing::Test {};
 TYPED_TEST_SUITE_P(JoinTest);
 
 TYPED_TEST_P(JoinTest, many) {
+  TypeParam c_array[]{
+      "abc",
+      "def",
+  };
+
+  EXPECT_EQ(join(c_array, "-"), "abc-def");
   EXPECT_EQ(join(std::array<TypeParam, 2>{"abc", "def"}, "-"), "abc-def");
+  EXPECT_EQ(join(std::initializer_list<const char *>{"abc", "def"}, "-"),
+            "abc-def");
+
   EXPECT_EQ(join(std::deque<TypeParam>{"abc", "def"}, "-"), "abc-def");
   EXPECT_EQ(join(std::forward_list<TypeParam>{"abc", "def"}, "-"), "abc-def");
   EXPECT_EQ(join(std::list<TypeParam>{"abc", "def"}, "-"), "abc-def");
@@ -58,6 +71,11 @@ TYPED_TEST_P(JoinTest, many) {
 }
 
 TYPED_TEST_P(JoinTest, one) {
+  TypeParam c_array[1]{
+      "abc",
+  };
+  EXPECT_EQ(join(c_array, "-"), "abc");
+
   EXPECT_EQ(join(std::array<TypeParam, 1>{"abc"}, "-"), "abc");
   EXPECT_EQ(join(std::deque<TypeParam>{"abc"}, "-"), "abc");
   EXPECT_EQ(join(std::forward_list<TypeParam>{"abc"}, "-"), "abc");
@@ -79,8 +97,52 @@ TYPED_TEST_P(JoinTest, none) {
 
 REGISTER_TYPED_TEST_SUITE_P(JoinTest, many, one, none);
 
-using JoinTestTypes = ::testing::Types<std::string, const char *>;
+using JoinTestTypes =
+    ::testing::Types<std::string, const char *, std::string_view>;
 INSTANTIATE_TYPED_TEST_SUITE_P(Spec, JoinTest, JoinTestTypes);
+
+namespace {
+
+using namespace std::string_view_literals;
+
+template <class T, size_t N>
+constexpr auto init_bench_data() {
+  std::array<T, N> data;
+
+  for (auto &el : data) {
+    el = "fuzbuzshnuzz";
+  }
+
+  return data;
+}
+
+auto bench_ar_sv = init_bench_data<std::string_view, 1024>();
+auto bench_ar_cs = init_bench_data<const char *, 1024>();
+auto bench_ar_s = init_bench_data<std::string, 1024>();
+
+void BenchJoinStdArrayStringView(size_t iter) {
+  while ((iter--) != 0) {
+    std::string joined = join(bench_ar_sv, ", ");
+  }
+}
+
+void BenchJoinStdArrayCString(size_t iter) {
+  while ((iter--) != 0) {
+    std::string joined = join(bench_ar_cs, ", ");
+  }
+}
+
+void BenchJoinStdArrayStdString(size_t iter) {
+  while ((iter--) != 0) {
+    std::string joined = join(bench_ar_s, ", ");
+  }
+}
+
+}  // namespace
+
+BENCHMARK(BenchJoinStdArrayStdString)
+BENCHMARK(BenchJoinStdArrayStringView)
+BENCHMARK(BenchJoinStdArrayCString)
 
 int main(int argc, char *argv[]) {
   ::testing::InitGoogleTest(&argc, argv);

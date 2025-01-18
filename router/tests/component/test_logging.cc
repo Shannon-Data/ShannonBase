@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -46,6 +47,7 @@
 #include "random_generator.h"
 #include "router_component_test.h"
 #include "router_component_testutils.h"
+#include "router_config.h"
 #include "router_test_helpers.h"  // get_file_output
 #include "tcp_port_pool.h"
 
@@ -62,7 +64,7 @@ using testing::StartsWith;
 using namespace std::chrono_literals;
 using namespace std::string_literals;
 
-class RouterLoggingTest : public RouterComponentTest {
+class RouterLoggingTest : public RouterComponentBootstrapTest {
  protected:
   std::string create_config_file(
       const std::string &directory, const std::string &sections,
@@ -80,11 +82,52 @@ class RouterLoggingTest : public RouterComponentTest {
 
   ProcessWrapper &launch_router_for_success(
       const std::vector<std::string> &params) {
-    return launch_router(
-        params, EXIT_SUCCESS, true, false, 5s,
-        RouterComponentBootstrapTest::kBootstrapOutputResponder);
+    return launch_router(params, EXIT_SUCCESS, true);
   }
 };
+
+/** @test Check that the Router logs its version when it is started and stopped
+ */
+TEST_F(RouterLoggingTest, log_start_stop_with_version) {
+  // create tmp dir where we will log
+  TempDirectory logging_folder;
+
+  std::map<std::string, std::string> params = get_DEFAULT_defaults();
+  params.at("logging_folder") = logging_folder.name();
+  TempDirectory conf_dir("conf");
+  const std::string conf_file =
+      create_config_file(conf_dir.name(), "[keepalive]", &params);
+
+  // run the router and close right away
+  auto &router = launch_router_for_success({"-c", conf_file});
+  router.send_shutdown_event();
+  router.wait_for_exit();
+
+  auto file_content =
+      router.get_logfile_content("mysqlrouter.log", logging_folder.name());
+  auto lines = mysql_harness::split_string(file_content, '\n');
+
+#if defined(_WIN32)
+  const std::string stopping_info = "";
+#elif defined(__APPLE__)
+  const std::string stopping_info = " \\(Signal .*\\)";
+#else
+  const std::string stopping_info =
+      " \\(Signal .* sent by UID: .* and PID: .*\\)";
+#endif
+
+  EXPECT_THAT(
+      file_content,
+      ::testing::AllOf(
+          ::testing::ContainsRegex(
+              "main SYSTEM .* Starting 'MySQL Router', version: "s +
+              MYSQL_ROUTER_VERSION + " \\(" + MYSQL_ROUTER_VERSION_EDITION +
+              "\\)"),
+          ::testing::ContainsRegex(
+              "main SYSTEM .* Stopping 'MySQL Router', version: "s +
+              MYSQL_ROUTER_VERSION + " \\(" + MYSQL_ROUTER_VERSION_EDITION +
+              "\\), reason: REQUESTED" + stopping_info)));
+}
 
 /** @test This test verifies that fatal error messages thrown before switching
  * to logger specified in config file (before Loader::run() runs
@@ -817,7 +860,7 @@ INSTANTIATE_TEST_SUITE_P(
             /* filelog_expected_level =  */ LogLevel::kSystem)),
     [](auto const &info) { return info.param.test_name; });
 
-#ifndef WIN32
+#ifndef _WIN32
 INSTANTIATE_TEST_SUITE_P(
     LoggingConfigTestUnix, RouterLoggingTestConfig,
     ::testing::Values(
@@ -1701,6 +1744,8 @@ TEST_F(RouterLoggingTest, very_long_router_name_gets_properly_logged) {
   // launch the router in bootstrap mode
   auto &router = launch_router_for_fail({
       "--bootstrap=127.0.0.1:" + std::to_string(server_port),
+      "--conf-set-option=DEFAULT.plugin_folder=" +
+          ProcessManager::get_plugin_dir().str(),
       "--name",
       name,
       "-d",
@@ -1731,23 +1776,24 @@ TEST_F(RouterLoggingTest, is_debug_logs_disabled_if_no_bootstrap_config_file) {
   TempDirectory bootstrap_dir;
 
   const auto server_port = port_pool_.get_next_available();
+  const auto http_port = port_pool_.get_next_available();
 
   // launch mock server and wait for it to start accepting connections
-  /*auto &server_mock =*/launch_mysql_server_mock(json_stmts, server_port,
-                                                  false);
+  /*auto &server_mock =*/launch_mysql_server_mock(
+      json_stmts, server_port, EXIT_SUCCESS, false, http_port);
+  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
+                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
+
   // ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
 
   // launch the router in bootstrap mode
-  auto &router = launch_router(
+  auto &router = launch_router_for_bootstrap(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port),
-          "--report-host",
-          "dont.query.dns",
           "-d",
           bootstrap_dir.name(),
       },
-      EXIT_SUCCESS, true, false, -1s,
-      RouterComponentBootstrapTest::kBootstrapOutputResponder);
+      EXIT_SUCCESS);
 
   // check if the bootstrapping was successful
   check_exit_code(router, EXIT_SUCCESS);
@@ -1766,10 +1812,12 @@ TEST_F(RouterLoggingTest, is_debug_logs_enabled_if_bootstrap_config_file) {
   TempDirectory bootstrap_conf;
 
   const auto server_port = port_pool_.get_next_available();
+  const auto http_port = port_pool_.get_next_available();
 
-  // launch mock server and wait for it to start accepting connections
-  auto &server_mock = launch_mysql_server_mock(json_stmts, server_port, false);
-  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
+  launch_mysql_server_mock(json_stmts, server_port, EXIT_SUCCESS, false,
+                           http_port);
+  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
+                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
 
   // launch the router in bootstrap mode
   std::string logger_section = "[logger]\nlevel = DEBUG\n";
@@ -1780,19 +1828,16 @@ TEST_F(RouterLoggingTest, is_debug_logs_enabled_if_bootstrap_config_file) {
       bootstrap_conf.name(), logger_section, &conf_params, "bootstrap.conf", "",
       false);
 
-  auto &router = launch_router(
+  auto &router = launch_router_for_bootstrap(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port),
-          "--report-host",
-          "dont.query.dns",
           "--force",
           "-d",
           bootstrap_dir.name(),
           "-c",
           conf_file,
       },
-      EXIT_SUCCESS, true, false, -1s,
-      RouterComponentBootstrapTest::kBootstrapOutputResponder);
+      EXIT_SUCCESS);
 
   // check if the bootstrapping was successful
   check_exit_code(router, EXIT_SUCCESS);
@@ -1815,10 +1860,12 @@ TEST_F(RouterLoggingTest, is_debug_logs_written_to_file_if_logging_folder) {
   TempDirectory bootstrap_conf;
 
   const auto server_port = port_pool_.get_next_available();
+  const auto http_port = port_pool_.get_next_available();
 
-  // launch mock server and wait for it to start accepting connections
-  auto &server_mock = launch_mysql_server_mock(json_stmts, server_port, false);
-  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
+  /*auto &server_mock =*/launch_mysql_server_mock(
+      json_stmts, server_port, EXIT_SUCCESS, false, http_port);
+  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
+                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
 
   // create config with logging_folder set to that directory
   std::map<std::string, std::string> params = {{"logging_folder", ""}};
@@ -1827,19 +1874,16 @@ TEST_F(RouterLoggingTest, is_debug_logs_written_to_file_if_logging_folder) {
   const std::string conf_file =
       create_config_file(conf_dir.name(), "[logger]\nlevel = DEBUG\n", &params);
 
-  auto &router = launch_router(
+  auto &router = launch_router_for_bootstrap(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port),
-          "--report-host",
-          "dont.query.dns",
           "--force",
           "-d",
           bootstrap_dir.name(),
           "-c",
           conf_file,
       },
-      EXIT_SUCCESS, true, false, -1s,
-      RouterComponentBootstrapTest::kBootstrapOutputResponder);
+      EXIT_SUCCESS);
 
   // check if the bootstrapping was successful
   check_exit_code(router, EXIT_SUCCESS);
@@ -1868,10 +1912,12 @@ TEST_F(RouterLoggingTest, bootstrap_normal_logs_written_to_stdout) {
   TempDirectory bootstrap_conf;
 
   const auto server_port = port_pool_.get_next_available();
+  const auto http_port = port_pool_.get_next_available();
 
-  // launch mock server and wait for it to start accepting connections
-  auto &server_mock = launch_mysql_server_mock(json_stmts, server_port, false);
-  ASSERT_NO_FATAL_FAILURE(check_port_ready(server_mock, server_port));
+  /*auto &server_mock =*/launch_mysql_server_mock(
+      json_stmts, server_port, EXIT_SUCCESS, false, http_port);
+  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
+                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
 
   // launch the router in bootstrap mode
   std::string logger_section = "[logger]\nlevel = DEBUG\n";
@@ -1882,19 +1928,16 @@ TEST_F(RouterLoggingTest, bootstrap_normal_logs_written_to_stdout) {
       bootstrap_conf.name(), logger_section, &conf_params, "bootstrap.conf", "",
       false);
 
-  auto &router = ProcessManager::launch_router(
+  auto &router = launch_router_for_bootstrap(
       {
           "--bootstrap=127.0.0.1:" + std::to_string(server_port),
-          "--report-host",
-          "dont.query.dns",
           "--force",
           "-d",
           bootstrap_dir.name(),
           "-c",
           conf_file,
       },
-      EXIT_SUCCESS, /*catch_stderr=*/false, false, -1s,
-      RouterComponentBootstrapTest::kBootstrapOutputResponder);
+      EXIT_SUCCESS, true, true, /*catch_sterr=*/false);
 
   // check if the bootstrapping was successful
   check_exit_code(router, EXIT_SUCCESS);
@@ -1917,16 +1960,14 @@ TEST_F(RouterLoggingTest, bootstrap_normal_logs_written_to_stdout) {
 class MetadataCacheLoggingTest : public RouterLoggingTest {
  protected:
   void SetUp() override {
+    static mysql_harness::RandomGenerator rg;
+
     RouterLoggingTest::SetUp();
 
     mysql_harness::DIM &dim = mysql_harness::DIM::instance();
     // RandomGenerator
-    dim.set_RandomGenerator(
-        []() {
-          static mysql_harness::RandomGenerator rg;
-          return &rg;
-        },
-        [](mysql_harness::RandomGeneratorInterface *) {});
+    dim.set_RandomGenerator(&rg,
+                            [](mysql_harness::RandomGeneratorInterface *) {});
 
     cluster_nodes_ports = {port_pool_.get_next_available(),
                            port_pool_.get_next_available(),
@@ -1935,9 +1976,9 @@ class MetadataCacheLoggingTest : public RouterLoggingTest {
                                 port_pool_.get_next_available(),
                                 port_pool_.get_next_available()};
     router_port_ = port_pool_.get_next_available();
-    metadata_cache_section = get_metadata_cache_section(cluster_nodes_ports);
+    metadata_cache_section = get_metadata_cache_section();
     routing_section =
-        get_metadata_cache_routing_section("PRIMARY", "round-robin", "");
+        get_metadata_cache_routing_section("PRIMARY", "round-robin");
   }
 
   std::string get_static_routing_section() {
@@ -1949,21 +1990,11 @@ class MetadataCacheLoggingTest : public RouterLoggingTest {
                                 });
   }
 
-  std::string get_metadata_cache_section(std::vector<uint16_t> ports) {
-    std::string metadata_caches;
-
-    for (const auto &port : ports) {
-      if (!metadata_caches.empty()) {
-        metadata_caches.append(",");
-      }
-      metadata_caches += "mysql://127.0.0.1:" + std::to_string(port);
-    }
-
+  std::string get_metadata_cache_section() {
     return mysql_harness::ConfigBuilder::build_section(
         "metadata_cache:test",
         {
             {"router_id", "1"},
-            {"bootstrap_server_addresses", metadata_caches},
             {"user", "mysql_router1_user"},
             {"metadata_cluster", "test"},
             {"connect_timeout", "1"},
@@ -1972,8 +2003,7 @@ class MetadataCacheLoggingTest : public RouterLoggingTest {
   }
 
   std::string get_metadata_cache_routing_section(const std::string &role,
-                                                 const std::string &strategy,
-                                                 const std::string &mode = "") {
+                                                 const std::string &strategy) {
     std::vector<std::pair<std::string, std::string>> options{
         {"bind_port", std::to_string(router_port_)},
         {"destinations", "metadata-cache://test/default?role=" + role},
@@ -1981,7 +2011,6 @@ class MetadataCacheLoggingTest : public RouterLoggingTest {
     };
 
     if (!strategy.empty()) options.emplace_back("routing_strategy", strategy);
-    if (!mode.empty()) options.emplace_back("mode", mode);
 
     return mysql_harness::ConfigBuilder::build_section("routing:test_default",
                                                        options);
@@ -2008,6 +2037,12 @@ class MetadataCacheLoggingTest : public RouterLoggingTest {
                                            bool log_to_console) {
     auto default_section = get_DEFAULT_defaults();
     init_keyring(default_section, temp_test_dir.name());
+
+    const auto state_file = create_state_file(
+        get_test_temp_dir_name(),
+        create_state_file_content("uuid", "", cluster_nodes_ports, 0));
+    default_section["dynamic_state"] = state_file;
+
     default_section["logging_folder"] =
         log_to_console ? "" : get_logging_dir().str();
     const std::string sinks =
@@ -2081,7 +2116,7 @@ TEST_F(MetadataCacheLoggingTest,
   EXPECT_TRUE(error_timestamp);
   EXPECT_FALSE(get_log_timestamp(
       router.get_logfile_path(),
-      std::string{".*metadata_cache ERROR.*"} + fail_msg, 2, 20 * ttl_));
+      std::string{".*metadata_cache ERROR.*"} + fail_msg, 2, 5 * ttl_));
   // After logging an error next logs should be debug (unless the server state
   // changes)
   const auto debug_timestamp = get_log_timestamp(
@@ -2093,11 +2128,11 @@ TEST_F(MetadataCacheLoggingTest,
   // Launch metadata server
   const auto http_port = cluster_nodes_http_ports[0];
   auto &server = launch_mysql_server_mock(
-      get_data_dir().join("metadata_dynamic_nodes.js").str(),
+      get_data_dir().join("metadata_dynamic_nodes_v2_gr.js").str(),
       cluster_nodes_ports[0], EXIT_SUCCESS, false, http_port);
   ASSERT_NO_FATAL_FAILURE(check_port_ready(server, cluster_nodes_ports[0]));
   EXPECT_TRUE(MockServerRestClient(http_port).wait_for_rest_endpoint_ready());
-  set_mock_metadata(http_port, "",
+  set_mock_metadata(http_port, "uuid",
                     classic_ports_to_gr_nodes(cluster_nodes_ports), 0,
                     classic_ports_to_cluster_nodes(cluster_nodes_ports));
   wait_for_transaction_count_increase(http_port);
@@ -2139,7 +2174,7 @@ TEST_F(MetadataCacheLoggingTest,
       cluster_nodes_ports[1], EXIT_SUCCESS, false, http_port);
   ASSERT_NO_FATAL_FAILURE(check_port_ready(server, cluster_nodes_ports[1]));
   EXPECT_TRUE(MockServerRestClient(http_port).wait_for_rest_endpoint_ready());
-  set_mock_metadata(http_port, "",
+  set_mock_metadata(http_port, "uuid",
                     classic_ports_to_gr_nodes(cluster_nodes_ports), 1,
                     classic_ports_to_cluster_nodes(cluster_nodes_ports));
 
@@ -2182,12 +2217,12 @@ TEST_F(MetadataCacheLoggingTest,
   server.wait_for_exit();
 
   auto &new_server = launch_mysql_server_mock(
-      get_data_dir().join("metadata_dynamic_nodes.js").str(),
+      get_data_dir().join("metadata_dynamic_nodes_v2_gr.js").str(),
       cluster_nodes_ports[0], EXIT_SUCCESS, false, cluster_nodes_http_ports[0]);
   ASSERT_NO_FATAL_FAILURE(check_port_ready(new_server, cluster_nodes_ports[0]));
   EXPECT_TRUE(MockServerRestClient(cluster_nodes_http_ports[0])
                   .wait_for_rest_endpoint_ready());
-  set_mock_metadata(cluster_nodes_http_ports[0], "",
+  set_mock_metadata(cluster_nodes_http_ports[0], "uuid",
                     classic_ports_to_gr_nodes(cluster_nodes_ports), 0,
                     classic_ports_to_cluster_nodes(cluster_nodes_ports));
   wait_for_transaction_count_increase(cluster_nodes_http_ports[0]);
@@ -2547,7 +2582,7 @@ INSTANTIATE_TEST_SUITE_P(
 
 #define NOT_USED ""
 
-#ifndef WIN32
+#ifndef _WIN32
 #define NULL_DEVICE_NAME "/dev/null"
 #define STDOUT_DEVICE_NAME "/dev/stdout"
 #define STDERR_DEVICE_NAME "/dev/stderr"
@@ -2575,7 +2610,7 @@ TEST_P(RouterLoggingTestConfigFilenameDevices,
       (test_params.filename.compare(NULL_DEVICE_NAME) == 0 ? true : false);
 
   Path destination(test_params.filename);
-#ifndef WIN32
+#ifndef _WIN32
   EXPECT_TRUE(destination.exists());
 #endif
 
@@ -2615,7 +2650,7 @@ TEST_P(RouterLoggingTestConfigFilenameDevices,
   shouldnotexist = Path("/dev").join(DEFAULT_LOGFILE_NAME);
   EXPECT_FALSE(shouldnotexist.exists());
 
-#ifndef WIN32
+#ifndef _WIN32
   EXPECT_TRUE(destination.exists());
 #endif
 }
@@ -2631,7 +2666,7 @@ INSTANTIATE_TEST_SUITE_P(
         /*1*/
         LoggingConfigFilenameOkParams(NOT_USED, STDOUT_DEVICE_NAME, false)));
 
-#ifndef WIN32
+#ifndef _WIN32
 INSTANTIATE_TEST_SUITE_P(
     LoggingTestConsoleDestinationDevicesUnix,
     RouterLoggingTestConfigFilenameDevices,
@@ -2957,7 +2992,7 @@ class TempRelativeDirectory {
  private:
   std::string name_;
 
-#ifndef WIN32
+#ifndef _WIN32
   // mysql_harness::get_tmp_dir() returns a relative path on these platforms
   std::string get_tmp_dir_(const std::string &name) {
     return mysql_harness::get_tmp_dir(name);
@@ -3196,7 +3231,7 @@ TEST_F(RouterLoggingTest, log_console_non_existing_destination) {
   EXPECT_THAT(router.get_full_output(), ::testing::Not(::testing::IsEmpty()));
 }
 
-#ifndef WIN32
+#ifndef _WIN32
 /** @test This test verifies that filename may be set to /dev/null the ugly way
  */
 TEST_F(RouterLoggingTest, log_filename_dev_null_ugly) {

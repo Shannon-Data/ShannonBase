@@ -80,7 +80,7 @@ SELECT * FROM t1 WHERE MATCH(a,b) AGAINST ("coverage")	{
                 "range_analysis": {
                   "table_scan": {
                     "rows": 3,
-                    "cost": 2.90879
+                    "cost": 2.90732
                   },
                   "potential_range_indexes": [
                     {
@@ -91,7 +91,7 @@ SELECT * FROM t1 WHERE MATCH(a,b) AGAINST ("coverage")	{
                   ],
                   "setup_range_conditions": [
                   ],
-                  "group_index_range": {
+                  "group_index_skip_scan": {
                     "chosen": false,
                     "cause": "not_group_by_or_distinct"
                   },
@@ -120,7 +120,7 @@ SELECT * FROM t1 WHERE MATCH(a,b) AGAINST ("coverage")	{
                     },
                     {
                       "access_type": "scan",
-                      "cost": 0.808789,
+                      "cost": 0.807324,
                       "rows": 3,
                       "chosen": false,
                       "cause": "cost"

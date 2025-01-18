@@ -13,6 +13,7 @@ data_locks	1	performance_schema	THREAD_ID	HASH
 data_lock_waits	1	performance_schema	BLOCKING_ENGINE_LOCK_ID	HASH	
 data_lock_waits	1	performance_schema	BLOCKING_ENGINE_TRANSACTION_ID	HASH	
 data_lock_waits	1	performance_schema	BLOCKING_THREAD_ID	HASH	
+data_lock_waits	0	performance_schema	PRIMARY	HASH	
 data_lock_waits	1	performance_schema	REQUESTING_ENGINE_LOCK_ID	HASH	
 data_lock_waits	1	performance_schema	REQUESTING_ENGINE_TRANSACTION_ID	HASH	
 data_lock_waits	1	performance_schema	REQUESTING_THREAD_ID	HASH	
@@ -109,6 +110,8 @@ session_variables	0	performance_schema	PRIMARY	HASH
 setup_actors	0	performance_schema	PRIMARY	HASH	
 setup_consumers	0	performance_schema	PRIMARY	HASH	
 setup_instruments	0	performance_schema	PRIMARY	HASH	
+setup_meters	0	performance_schema	PRIMARY	HASH	
+setup_metrics	0	performance_schema	PRIMARY	HASH	
 setup_objects	0	performance_schema	OBJECT	HASH	
 setup_threads	0	performance_schema	PRIMARY	HASH	
 socket_instances	1	performance_schema	IP	HASH	
@@ -165,6 +168,9 @@ data_lock_waits	1	performance_schema	BLOCKING_ENGINE_TRANSACTION_ID	1	BLOCKING_E
 data_lock_waits	1	performance_schema	BLOCKING_ENGINE_TRANSACTION_ID	2	ENGINE	NULL	
 data_lock_waits	1	performance_schema	BLOCKING_THREAD_ID	1	BLOCKING_THREAD_ID	NULL	YES
 data_lock_waits	1	performance_schema	BLOCKING_THREAD_ID	2	BLOCKING_EVENT_ID	NULL	YES
+data_lock_waits	0	performance_schema	PRIMARY	1	REQUESTING_ENGINE_LOCK_ID	NULL	
+data_lock_waits	0	performance_schema	PRIMARY	2	BLOCKING_ENGINE_LOCK_ID	NULL	
+data_lock_waits	0	performance_schema	PRIMARY	3	ENGINE	NULL	
 data_lock_waits	1	performance_schema	REQUESTING_ENGINE_LOCK_ID	1	REQUESTING_ENGINE_LOCK_ID	NULL	
 data_lock_waits	1	performance_schema	REQUESTING_ENGINE_LOCK_ID	2	ENGINE	NULL	
 data_lock_waits	1	performance_schema	REQUESTING_ENGINE_TRANSACTION_ID	1	REQUESTING_ENGINE_TRANSACTION_ID	NULL	YES
@@ -321,6 +327,8 @@ setup_actors	0	performance_schema	PRIMARY	2	USER	NULL
 setup_actors	0	performance_schema	PRIMARY	3	ROLE	NULL	
 setup_consumers	0	performance_schema	PRIMARY	1	NAME	NULL	
 setup_instruments	0	performance_schema	PRIMARY	1	NAME	NULL	
+setup_meters	0	performance_schema	PRIMARY	1	NAME	NULL	
+setup_metrics	0	performance_schema	PRIMARY	1	NAME	NULL	
 setup_objects	0	performance_schema	OBJECT	1	OBJECT_TYPE	NULL	
 setup_objects	0	performance_schema	OBJECT	2	OBJECT_SCHEMA	NULL	YES
 setup_objects	0	performance_schema	OBJECT	3	OBJECT_NAME	NULL	

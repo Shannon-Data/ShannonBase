@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -75,6 +76,14 @@ Shard_naked_latch_guard::Shard_naked_latch_guard(ut::Location location,
                                                  const page_id_t &page_id)
     : Shard_naked_latch_guard{
           location, lock_sys->latches.page_shards.get_mutex(page_id)} {}
+
+// Please note, that the hash_table argument is ignored, but differentiates this
+// overload from the one for table_id_t which is uint64_t as well.
+Shard_naked_latch_guard::Shard_naked_latch_guard(ut::Location location,
+                                                 hash_table_t *,
+                                                 uint64_t cell_id)
+    : Shard_naked_latch_guard{
+          location, lock_sys->latches.page_shards.get_mutex(cell_id)} {}
 
 Shard_naked_latch_guard::~Shard_naked_latch_guard() {
   mutex_exit(&m_shard_mutex);

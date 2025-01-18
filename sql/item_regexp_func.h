@@ -1,18 +1,19 @@
 #ifndef SQL_ITEM_REGEXP_FUNC_H_
 #define SQL_ITEM_REGEXP_FUNC_H_
 
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,9 +22,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
   @file item_regexp_func.h
@@ -168,7 +167,7 @@ class Item_func_regexp : public Item_func {
 
  protected:
   String *convert_int_to_str(String *str) {
-    assert(fixed == 1);
+    assert(fixed);
     longlong nr = val_int();
     if (null_value) return nullptr;
     str->set_int(nr, unsigned_flag, collation.collation);
@@ -176,7 +175,7 @@ class Item_func_regexp : public Item_func {
   }
 
   my_decimal *convert_int_to_decimal(my_decimal *value) {
-    assert(fixed == 1);
+    assert(fixed);
     longlong nr = val_int();
     if (null_value) return nullptr; /* purecov: inspected */
     int2my_decimal(E_DEC_FATAL_ERROR, nr, unsigned_flag, value);
@@ -184,12 +183,12 @@ class Item_func_regexp : public Item_func {
   }
 
   double convert_int_to_real() {
-    assert(fixed == 1);
+    assert(fixed);
     return val_int();
   }
 
   double convert_str_to_real() {
-    assert(fixed == 1);
+    assert(fixed);
     int err_not_used;
     const char *end_not_used;
     String *res = val_str(&str_value);
@@ -199,7 +198,7 @@ class Item_func_regexp : public Item_func {
   }
 
   longlong convert_str_to_int() {
-    assert(fixed == 1);
+    assert(fixed);
     int err;
     String *res = val_str(&str_value);
     if (res == nullptr) return 0;

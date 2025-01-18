@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,7 +32,6 @@
 #include <algorithm>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 #include "field_types.h"  // enum_field_types
 #include "my_dbug.h"
@@ -264,11 +264,9 @@ class table_def {
     @param metadata_size Size of the field_metadata array
     @param null_bitmap The bitmap of fields that can be null
     @param flags Table flags
-    @param vector_dimensionality Vector dimensionality array
    */
   table_def(unsigned char *types, ulong size, uchar *field_metadata,
-            int metadata_size, uchar *null_bitmap, uint16 flags,
-            const std::vector<unsigned int> &vector_dimensionality);
+            int metadata_size, uchar *null_bitmap, uint16 flags);
 
   ~table_def();
 
@@ -308,17 +306,6 @@ class table_def {
       m_json_column_count = c;
     }
     return m_json_column_count;
-  }
-
-  /// Return the number of VECTOR columns
-  static uint vector_column_count(const unsigned char *types, ulong size) {
-    uint count = 0;
-    for (ulong i = 0; i < size; i++) {
-      if (static_cast<enum_field_types>(types[i]) == MYSQL_TYPE_VECTOR) {
-        count++;
-      }
-    }
-    return count;
   }
 
   /*
@@ -412,16 +399,6 @@ class table_def {
     data from the master to a specific column.
   */
   uint32 calc_field_size(uint col, const uchar *master_data) const;
-
-  std::vector<unsigned int>::const_iterator get_vector_dimensionality_begin()
-      const {
-    return m_vector_dimensionality.begin();
-  }
-
-  std::vector<unsigned int>::const_iterator get_vector_dimensionality_end()
-      const {
-    return m_vector_dimensionality.end();
-  }
 
 #ifdef MYSQL_SERVER
   /**
@@ -525,7 +502,6 @@ class table_def {
   bool *m_is_array;
   bool m_is_gipk_set;
   bool m_is_gipk_on_table;
-  std::vector<unsigned int> m_vector_dimensionality;
 };
 
 #ifdef MYSQL_SERVER
@@ -688,18 +664,6 @@ std::string replace_all_in_str(std::string from, std::string find,
           false otherwise
  */
 bool is_require_row_format_violation(const THD *thd);
-
-/**
-  This function shall blindly replace some deprecated terms used in the
-  field names with more recent ones. This function must be removed
-  once the related syntax (SHOW SLAVE STATUS and friends) is removed.
-
-  @param thd the thread context.
-  @param field_list the list of fields that will have their name checked
-                    and altered if needed.
- */
-void rename_fields_use_old_replica_source_terms(
-    THD *thd, mem_root_deque<Item *> &field_list);
 
 /**
   Checks if the immediate_server_version supports GIPKs or not

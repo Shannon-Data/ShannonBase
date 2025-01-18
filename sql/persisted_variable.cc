@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -767,8 +768,7 @@ bool Persisted_variables_cache::write_persist_file_v2(String &dest,
   Json_wrapper json_wrapper(&main_json_object);
   json_wrapper.set_alias();
   String str;
-  json_wrapper.to_string(&str, true, String().ptr(),
-                         JsonDocumentDefaultDepthHandler);
+  json_wrapper.to_string(&str, true, String().ptr(), JsonDepthErrorHandler);
   dest.append(str);
 
   if (encryption_success == return_status::SUCCESS) {
@@ -899,6 +899,9 @@ void Persisted_variables_cache::set_parse_early_sources() {
 
   for (auto &it : sorted_vars) {
     auto sysvar = intern_find_sys_var(it.key.c_str(), it.key.length());
+    if (sysvar == nullptr) {
+      continue;
+    }
     sysvar->set_source(enum_variable_source::PERSISTED);
 #ifndef NDEBUG
     bool source_truncated =
@@ -1904,7 +1907,7 @@ int Persisted_variables_cache::read_persist_file() {
     /* parse the file contents to check if it is in json format or not */
     json = Json_dom::parse(
         parsed_value.c_str(), parsed_value.length(),
-        [](const char *, size_t) {}, JsonDocumentDefaultDepthHandler);
+        [](const char *, size_t) {}, JsonDepthErrorHandler);
     if (!json.get()) return true;
     return false;
   };
@@ -1964,8 +1967,8 @@ int Persisted_variables_cache::read_persist_file() {
 
 /**
   append_parse_early_variables() does a lookup into persist_variables
-  for read only variables and place them after the command line options with a
-  separator "----persist-args-separator----"
+  for parse early variables and place them after the command line options with
+  a separator "----persist-args-separator----"
 
   This function does nothing when --no-defaults is set or if
   persisted_globals_load is disabled.
@@ -2535,8 +2538,7 @@ Persisted_variables_cache::encrypt_sensitive_variables() {
   Json_wrapper json_wrapper(&sensitive_variables_object);
   json_wrapper.set_alias();
   String str;
-  json_wrapper.to_string(&str, true, String().ptr(),
-                         JsonDocumentDefaultDepthHandler);
+  json_wrapper.to_string(&str, true, String().ptr(), JsonDepthErrorHandler);
 
   /* Encrypt sensitive variables */
   unsigned char iv[16];
@@ -2611,7 +2613,7 @@ Persisted_variables_cache::decrypt_sensitive_variables() {
   /* Parse the decrypted blob */
   std::unique_ptr<Json_dom> json(Json_dom::parse(
       reinterpret_cast<char *>(decrypted_data.get()), error,
-      [](const char *, size_t) {}, JsonDocumentDefaultDepthHandler));
+      [](const char *, size_t) {}, JsonDepthErrorHandler));
   if (!json.get()) return retval;
 
   if (json.get()->json_type() != enum_json_type::J_OBJECT) return retval;

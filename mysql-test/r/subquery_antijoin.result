@@ -27,7 +27,7 @@ test.t2	analyze	status	OK
 set optimizer_switch="firstmatch=on,materialization=off";
 select @@optimizer_switch;
 @@optimizer_switch
-index_merge=on,index_merge_union=on,index_merge_sort_union=on,index_merge_intersection=on,engine_condition_pushdown=on,index_condition_pushdown=on,mrr=on,mrr_cost_based=on,block_nested_loop=on,batched_key_access=off,materialization=off,semijoin=on,loosescan=on,firstmatch=on,duplicateweedout=on,subquery_materialization_cost_based=on,use_index_extensions=on,condition_fanout_filter=on,derived_merge=on,use_invisible_indexes=off,skip_scan=on,hash_join=on,subquery_to_derived=off,prefer_ordering_index=on,hypergraph_optimizer=off,derived_condition_pushdown=on
+index_merge=on,index_merge_union=on,index_merge_sort_union=on,index_merge_intersection=on,engine_condition_pushdown=on,index_condition_pushdown=on,mrr=on,mrr_cost_based=on,block_nested_loop=on,batched_key_access=off,materialization=off,semijoin=on,loosescan=on,firstmatch=on,duplicateweedout=on,subquery_materialization_cost_based=on,use_index_extensions=on,condition_fanout_filter=on,derived_merge=on,use_invisible_indexes=off,skip_scan=on,hash_join=on,subquery_to_derived=off,prefer_ordering_index=on,hypergraph_optimizer=off,derived_condition_pushdown=on,hash_set_operations=on
 EXPLAIN SELECT 1 as a FROM dual
 WHERE NOT EXISTS (SELECT * FROM t1 AS it);
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
@@ -88,7 +88,7 @@ EXPLAIN
             "read_cost: #
             "eval_cost: #
             "prefix_cost: #
-            "data_read_per_join": "240"
+            "data_read_per_join": "192"
           },
           "used_columns": [
             "pk"
@@ -120,7 +120,7 @@ EXPLAIN
             "read_cost: #
             "eval_cost: #
             "prefix_cost: #
-            "data_read_per_join": "624"
+            "data_read_per_join": "576"
           },
           "used_columns": [
             "uk"
@@ -163,7 +163,7 @@ pk
 set optimizer_switch="firstmatch=off,materialization=on";
 select @@optimizer_switch;
 @@optimizer_switch
-index_merge=on,index_merge_union=on,index_merge_sort_union=on,index_merge_intersection=on,engine_condition_pushdown=on,index_condition_pushdown=on,mrr=on,mrr_cost_based=on,block_nested_loop=on,batched_key_access=off,materialization=on,semijoin=on,loosescan=on,firstmatch=off,duplicateweedout=on,subquery_materialization_cost_based=on,use_index_extensions=on,condition_fanout_filter=on,derived_merge=on,use_invisible_indexes=off,skip_scan=on,hash_join=on,subquery_to_derived=off,prefer_ordering_index=on,hypergraph_optimizer=off,derived_condition_pushdown=on
+index_merge=on,index_merge_union=on,index_merge_sort_union=on,index_merge_intersection=on,engine_condition_pushdown=on,index_condition_pushdown=on,mrr=on,mrr_cost_based=on,block_nested_loop=on,batched_key_access=off,materialization=on,semijoin=on,loosescan=on,firstmatch=off,duplicateweedout=on,subquery_materialization_cost_based=on,use_index_extensions=on,condition_fanout_filter=on,derived_merge=on,use_invisible_indexes=off,skip_scan=on,hash_join=on,subquery_to_derived=off,prefer_ordering_index=on,hypergraph_optimizer=off,derived_condition_pushdown=on,hash_set_operations=on
 EXPLAIN SELECT 1 as a FROM dual
 WHERE NOT EXISTS (SELECT * FROM t1 AS it);
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
@@ -225,7 +225,7 @@ EXPLAIN
             "read_cost: #
             "eval_cost: #
             "prefix_cost: #
-            "data_read_per_join": "240"
+            "data_read_per_join": "192"
           },
           "used_columns": [
             "pk"
@@ -267,7 +267,7 @@ EXPLAIN
                   "read_cost: #
                   "eval_cost: #
                   "prefix_cost: #
-                  "data_read_per_join": "78"
+                  "data_read_per_join": "72"
                 },
                 "used_columns": [
                   "uk"
@@ -338,7 +338,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.30",
             "prefix_cost": "0.55",
-            "data_read_per_join": "54"
+            "data_read_per_join": "48"
           },
           "used_columns": [
             "a",
@@ -369,7 +369,7 @@ EXPLAIN
                   "read_cost": "0.25",
                   "eval_cost": "0.30",
                   "prefix_cost": "0.55",
-                  "data_read_per_join": "54"
+                  "data_read_per_join": "48"
                 },
                 "used_columns": [
                   "a"
@@ -391,7 +391,7 @@ EXPLAIN
             "read_cost": "0.25",
             "eval_cost": "0.90",
             "prefix_cost": "3.85",
-            "data_read_per_join": "162"
+            "data_read_per_join": "144"
           },
           "used_columns": [
             "a",
@@ -1031,7 +1031,7 @@ EXPLAIN
         "read_cost": "0.25",
         "eval_cost": "0.10",
         "prefix_cost": "0.35",
-        "data_read_per_join": "18"
+        "data_read_per_join": "16"
       },
       "used_columns": [
         "c1",

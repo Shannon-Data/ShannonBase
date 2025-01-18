@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -125,7 +126,7 @@ void thd_init(THD *thd, char *stack_start) {
 
   if (!thd->system_thread) {
     DBUG_PRINT("info",
-               ("init new connection. thd: %p fd: %d", thd,
+               ("init new connection. thd: %p fd: " MY_SOCKET_FMT, thd,
                 mysql_socket_getfd(
                     thd->get_protocol_classic()->get_vio()->mysql_socket)));
   }
@@ -232,12 +233,17 @@ void thd_increment_bytes_sent(size_t length) {
   if (likely(thd != nullptr)) { /* current_thd==NULL when close_connection()
                                 calls net_send_error() */
     thd->status_var.bytes_sent += length;
+    global_aggregated_stats.get_shard(thd->thread_id()).bytes_sent += length;
   }
 }
 
 void thd_increment_bytes_received(size_t length) {
   THD *thd = current_thd;
-  if (likely(thd != nullptr)) thd->status_var.bytes_received += length;
+  if (likely(thd != nullptr)) {
+    thd->status_var.bytes_received += length;
+    global_aggregated_stats.get_shard(thd->thread_id()).bytes_received +=
+        length;
+  }
 }
 
 partition_info *thd_get_work_part_info(THD *thd) { return thd->work_part_info; }

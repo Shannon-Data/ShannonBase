@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2020, 2024, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,12 +41,12 @@ class Test_context {
         m_plugin_handler(plugin_handler) {}
 
   template <typename... Args>
-  void log_test_line(const Args &... args) {
+  void log_test_line(const Args &...args) {
     log_test(utils::to_string(args...), "\n");
   }
 
   template <typename... Args>
-  void log_test(const Args &... args) {
+  void log_test(const Args &...args) {
     m_logger.print_to_file(utils::to_string(args...));
   }
 
@@ -56,7 +57,7 @@ class Test_context {
   }
 
   template <typename... Args>
-  void log_error(const Args &... args) {
+  void log_error(const Args &...args) {
     auto text = utils::to_string(args...);
 
     LogPluginErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, text.c_str());

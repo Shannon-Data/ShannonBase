@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -156,6 +157,24 @@ bool test_charset(const char *charset, const char *text, int buff_len) {
 }
 
 /**
+@brief tests for a memory leak on an invalid chaset
+
+@retval true failure
+@return false success
+*/
+static bool test_invalid_charset() {
+  my_h_string out_string = nullptr;
+  WRITE_LOG("%s\n", "Test invalid chaset: should fail but not leak");
+  if (mysql_service_mysql_string_converter->convert_from_buffer(
+          &out_string,
+          "haha",  // its a input buffer
+          4, "invalid charset")) {
+    WRITE_LOG("%s\n", "Convert from buffer failed.");
+  }
+  return out_string != nullptr;
+}
+
+/**
   Initialization entry method for test component.
   It executes the tests of the service.
 */
@@ -179,11 +198,12 @@ mysql_service_status_t test_string_service_init() {
   WRITE_LOG("%s\n", "test_string_service_long init:");
 
   retcode = test_charset(chs_latin1, test_text_eng, TEST_TEXT_LIT_LENGTH);
-  retcode = test_charset(chs_latin1, test_text_ger, TEST_TEXT_LIT_LENGTH);
-  retcode = test_charset(chs_utf8mb3, test_text_eng, TEST_TEXT_LIT_LENGTH);
-  retcode = test_charset(chs_utf8mb3, test_text_ger, TEST_TEXT_LIT_LENGTH);
-  retcode = test_charset(chs_utf8mb3, test_text_chinese, TEST_TEXT_LIT_LENGTH);
-  retcode = test_charset(chs_gb18030, test_text_chinese, TEST_TEXT_LIT_LENGTH);
+  retcode |= test_charset(chs_latin1, test_text_ger, TEST_TEXT_LIT_LENGTH);
+  retcode |= test_charset(chs_utf8mb3, test_text_eng, TEST_TEXT_LIT_LENGTH);
+  retcode |= test_charset(chs_utf8mb3, test_text_ger, TEST_TEXT_LIT_LENGTH);
+  retcode |= test_charset(chs_utf8mb3, test_text_chinese, TEST_TEXT_LIT_LENGTH);
+  retcode |= test_charset(chs_gb18030, test_text_chinese, TEST_TEXT_LIT_LENGTH);
+  retcode |= test_invalid_charset();
 
   WRITE_LOG("%s\n", "End of init");
   fclose(outfile);

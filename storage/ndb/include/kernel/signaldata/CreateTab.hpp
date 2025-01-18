@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2003, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,14 +30,11 @@
 
 #define JAM_FILE_ID 46
 
-
-struct CreateTabReq
-{
+struct CreateTabReq {
   static constexpr Uint32 SignalLength = 6;
   static constexpr Uint32 SignalLengthLDM = 6 + 11;
 
-  enum RequestType {
-  };
+  enum RequestType {};
 
   Uint32 senderRef;
   Uint32 senderData;
@@ -49,9 +47,9 @@ struct CreateTabReq
    * Used when sending to LQH++
    */
   Uint32 noOfCharsets;
-  Uint32 tableType;           // DictTabInfo::TableType
-  Uint32 primaryTableId;      // table of index or RNIL
-  Uint32 tablespace_id;       // RNIL for MM table
+  Uint32 tableType;       // DictTabInfo::TableType
+  Uint32 primaryTableId;  // table of index or RNIL
+  Uint32 tablespace_id;   // RNIL for MM table
   Uint32 forceVarPartFlag;
   Uint32 noOfAttributes;
   Uint32 noOfNullAttributes;
@@ -60,8 +58,8 @@ struct CreateTabReq
   Uint32 GCPIndicator;
   Uint32 extraRowAuthorBits;
 
-  SECTION( DICT_TAB_INFO = 0 );
-  SECTION( FRAGMENTATION = 1 );
+  SECTION(DICT_TAB_INFO = 0);
+  SECTION(FRAGMENTATION = 1);
 };
 
 struct CreateTabConf {
@@ -83,7 +81,7 @@ struct CreateTabRef {
   Uint32 senderRef;
   Uint32 senderData;
   Uint32 errorCode;
-  Uint32 errorLine; 
+  Uint32 errorLine;
   Uint32 errorKey;
   Uint32 errorStatus;
 };
@@ -92,8 +90,7 @@ struct CreateTabRef {
  * TcSchVerReq is CreateTab but towards TC...
  *   should be removed in favor of CreateTab
  */
-struct TcSchVerReq
-{
+struct TcSchVerReq {
   Uint32 tableId;
   Uint32 tableVersion;
   Uint32 tableLogged;
@@ -108,13 +105,11 @@ struct TcSchVerReq
   static constexpr Uint32 SignalLength = 11;
 };
 
-struct TcSchVerConf
-{
+struct TcSchVerConf {
   Uint32 senderRef;
   Uint32 senderData;
   static constexpr Uint32 SignalLength = 2;
 };
-
 
 #undef JAM_FILE_ID
 

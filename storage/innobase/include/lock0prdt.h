@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -41,20 +42,17 @@ typedef struct lock_prdt {
   uint16 op;  /* Predicate operator */
 } lock_prdt_t;
 
-/** Acquire a predicate lock on a block
- @return DB_SUCCESS, DB_SUCCESS_LOCKED_REC, DB_LOCK_WAIT, or DB_DEADLOCK */
-dberr_t lock_prdt_lock(buf_block_t *block,  /*!< in/out: buffer block of rec */
-                       lock_prdt_t *prdt,   /*!< in: Predicate for the lock */
-                       dict_index_t *index, /*!< in: secondary index */
-                       enum lock_mode mode, /*!< in: mode of the lock which
-                                            the read cursor should set on
-                                            records: LOCK_S or LOCK_X; the
-                                            latter is possible in
-                                            SELECT FOR UPDATE */
-                       ulint type_mode,
-                       /*!< in: LOCK_PREDICATE or LOCK_PRDT_PAGE */
-                       que_thr_t *thr); /*!< in: query thread
-                                       (can be NULL if BTR_NO_LOCKING_FLAG) */
+/** Acquires LOCK_S | LOCK_PREDICATE on a block. Always succeeds, because it
+never has to wait, because their only purpose is to block conflicting
+LOCK_X | LOCK_PREDICATE | LOCK_INSERT_INTENTION into the locked area.
+(In other words they are conceptually similar to gap locks in regular indexes,
+which also never have to wait for similar reasons)
+@param[in]  block   Buffer block containing the rec
+@param[in]  prdt    Predicate for the lock
+@param[in]  index   Secondary index containing the block
+@param[in]  thr     The query thread requesting the lock */
+void lock_prdt_lock(buf_block_t *block, lock_prdt_t *prdt, dict_index_t *index,
+                    que_thr_t *thr);
 
 /** Acquire a "Page" lock on a block
 @param[in]  page_id   id of the page to lock
@@ -151,17 +149,17 @@ void lock_prdt_rec_move(
     const buf_block_t *donator); /*!< in: buffer block containing
                                  the donating record */
 
-/** Check whether there are no R-tree Page locks on a page by other transactions
+/** Check whether there are R-tree Page locks on a page by other transactions
 @param[in]      trx     trx to test the lock
 @param[in]      page_id id of the page
-@retval true    if there is no lock
-@retval false   if some transaction other than trx holds a page lock */
-bool lock_test_prdt_page_lock(const trx_t *trx, const page_id_t &page_id);
+@retval false   if there is no lock
+@retval true    if some transaction other than trx holds a page lock */
+bool lock_other_has_prdt_page_lock(const trx_t *trx, const page_id_t &page_id);
 
 /** Removes predicate lock objects set on an index page which is discarded.
 @param[in]      block           page to be discarded
 @param[in]      lock_hash       lock hash */
 void lock_prdt_page_free_from_discard(const buf_block_t *block,
-                                      hash_table_t *lock_hash);
+                                      struct Locks_hashtable &lock_hash);
 
 #endif

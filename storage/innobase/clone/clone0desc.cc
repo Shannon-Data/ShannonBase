@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+Copyright (c) 2017, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -395,14 +396,14 @@ void Chnunk_Bitmap::deserialize(const byte *desc_chunk, uint &len_left) {
 
   if (len_left < 4) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   len_left -= 4;
 
   if (bitmap_size > m_size) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   for (ulint index = 0; index < bitmap_size; index++) {
@@ -412,7 +413,7 @@ void Chnunk_Bitmap::deserialize(const byte *desc_chunk, uint &len_left) {
 
     if (len_left < 4) {
       ut_d(ut_error);
-      ut_o(return );
+      ut_o(return);
     }
 
     len_left -= 4;
@@ -428,7 +429,7 @@ void Chunk_Info::deserialize(const byte *desc_chunk, uint &len_left) {
 
   if (len_left < 4) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   len_left -= 4;
@@ -439,7 +440,7 @@ void Chunk_Info::deserialize(const byte *desc_chunk, uint &len_left) {
     ib::error(ER_IB_CLONE_RESTART)
         << "Clone too many incomplete chunks: " << chunk_map_size;
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   for (ulint index = 0; index < chunk_map_size; index++) {
@@ -449,7 +450,7 @@ void Chunk_Info::deserialize(const byte *desc_chunk, uint &len_left) {
 
     if (len_left < 4) {
       ut_d(ut_error);
-      ut_o(return );
+      ut_o(return);
     }
     len_left -= 4;
 
@@ -458,7 +459,7 @@ void Chunk_Info::deserialize(const byte *desc_chunk, uint &len_left) {
 
     if (len_left < 4) {
       ut_d(ut_error);
-      ut_o(return );
+      ut_o(return);
     }
     len_left -= 4;
 
@@ -564,7 +565,7 @@ void Clone_Desc_Locator::deserialize(const byte *desc_loc, uint desc_len,
   if (m_header.m_length < CLONE_DESC_LOC_BASE_LEN ||
       m_header.m_length > desc_len) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   m_clone_id = mach_read_from_8(desc_loc + CLONE_LOC_CID_OFFSET);

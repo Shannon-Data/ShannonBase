@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -147,12 +148,10 @@ class Runnable : public MySQL_thread {
   @param[in]    args            Variable number of args to F
   @retval f return value. */
   template <typename F, typename... Args>
-  dberr_t operator()(F &&f, Args &&... args) {
+  dberr_t operator()(F &&f, Args &&...args) {
     MySQL_thread::preamble();
 
-    auto task = std::bind(std::forward<F>(f), std::forward<Args>(args)...);
-
-    auto r = task();
+    auto r = std::invoke(std::forward<F>(f), std::forward<Args>(args)...);
 
     MySQL_thread::epilogue();
 
@@ -178,7 +177,7 @@ class Detached_thread : public MySQL_thread {
   @param[in]    f               Callable object
   @param[in]    args            Variable number of args to F */
   template <typename F, typename... Args>
-  void operator()(F &&f, Args &&... args) {
+  void operator()(F &&f, Args &&...args) {
     while (m_thread.state() == IB_thread::State::NOT_STARTED) {
       UT_RELAX_CPU();
     }
@@ -189,9 +188,7 @@ class Detached_thread : public MySQL_thread {
 
     m_thread.set_state(IB_thread::State::STARTED);
 
-    auto task = std::bind(std::forward<F>(f), std::forward<Args>(args)...);
-
-    task();
+    std::invoke(std::forward<F>(f), std::forward<Args>(args)...);
 
     epilogue();
 
@@ -302,7 +299,7 @@ start the thread by calling start() on any of those objects.
 template <typename F, typename... Args>
 IB_thread create_detached_thread(mysql_pfs_key_t pfs_key,
                                  PSI_thread_seqnum pfs_seqnum, F &&f,
-                                 Args &&... args) {
+                                 Args &&...args) {
   Detached_thread detached_thread{pfs_key, pfs_seqnum};
   auto thread = detached_thread.thread();
 
@@ -331,7 +328,7 @@ IB_thread create_detached_thread(mysql_pfs_key_t pfs_key,
 @param[in]      args     Zero or more args */
 template <typename Container, typename F, typename... Args>
 void par_for(mysql_pfs_key_t pfs_key, const Container &c, size_t n, F &&f,
-             Args &&... args) {
+             Args &&...args) {
   if (c.empty()) {
     return;
   }

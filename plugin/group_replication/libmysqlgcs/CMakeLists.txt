@@ -1,15 +1,16 @@
-# Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2016, 2024, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -173,6 +174,13 @@ IF(MSVC)
       COMPILE_FLAGS
       "-Wno-unused-function"
       )
+    # clang has this, but clang++ does not.
+    MY_CHECK_C_COMPILER_FLAG("-Wdeprecated-non-prototype"
+      HAS_DEPRECATED_NON_PROTOTYPE)
+    IF(HAS_DEPRECATED_NON_PROTOTYPE)
+      ADD_COMPILE_FLAGS(${XCOM_SUNRPC_SOURCES} ${XCOM_RPCGEN_SOURCES}
+        COMPILE_FLAGS "-Wno-deprecated-non-prototype")
+    ENDIF()
   ELSE()
     ADD_COMPILE_FLAGS(${XCOM_SUNRPC_SOURCES} ${XCOM_RPCGEN_SOURCES}
       COMPILE_FLAGS "/wd4018")
@@ -220,11 +228,7 @@ IF(MYSQL_MAINTAINER_MODE)
   IF(MY_COMPILER_IS_CLANG)
     ADD_COMPILE_OPTIONS("-Wshadow")
   ELSEIF(MY_COMPILER_IS_GNU)
-    # GCC's -Wshadow is too noisy. Starting with GCC 7 we can use the
-    # more surgical -Wshadow=compatible-local
-    IF(NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 7.0)
-      ADD_COMPILE_OPTIONS("-Wshadow=compatible-local")
-    ENDIF()
+    ADD_COMPILE_OPTIONS("-Wshadow=compatible-local")
   ENDIF()
 ENDIF()
 
@@ -232,10 +236,6 @@ ADD_LIBRARY(mysqlgcs STATIC ${XCOM_SOURCES} ${GCS_SOURCES})
 # Dependency on mysys from gcs_logging_system.cc
 # but pick up symbols from the server:
 # TARGET_LINK_LIBRARIES(mysqlgcs mysys)
-
-IF(LINUX AND WITH_TIRPC STREQUAL "bundled")
-  ADD_DEPENDENCIES(mysqlgcs tirpc_ext)
-ENDIF()
 
 IF(CMAKE_VERSION VERSION_GREATER "3.19" AND NOT APPLE_XCODE)
   # New in version 3.19:
@@ -253,8 +253,8 @@ IF(WIN32)
   TARGET_COMPILE_OPTIONS(mysqlgcs PRIVATE "/wd4005")
 ENDIF()
 
-IF(TIRPC_LIBRARIES)
-  TARGET_LINK_LIBRARIES(mysqlgcs ${TIRPC_LIBRARIES})
+IF(TARGET ext::rpc)
+  TARGET_LINK_LIBRARIES(mysqlgcs PUBLIC ext::rpc)
 ENDIF()
 
 IF(MSVC)
