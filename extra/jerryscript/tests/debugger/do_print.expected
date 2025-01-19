@@ -1,0 +1,22 @@
+Connecting to: localhost:5001
+Stopped at tests/debugger/do_print.js:15
+(jerry-debugger) c
+Hello world!
+A [  ] 110 null true undefined
+
+[A
+B C
+D E
+F
+G]
+1: Az élet gyönyörű.
+2: Az élet gyönyörű.
+3: Az élet gyönyörű.
+4: Az élet gyönyörű.
+5: Az élet gyönyörű.
+6: Az élet gyönyörű.
+7: Az élet gyönyörű.
+8: Az élet gyönyörű.
+9: Az élet gyönyörű.
+10: Az élet gyönyörű.
+

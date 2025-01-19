@@ -716,6 +716,8 @@ class Query_expression {
     return down_cast<Query_term_set_op *>(m_query_term)->m_last_distinct > 0;
   }
 
+  void set_root_iterator(unique_ptr_destroy_only<RowIterator>& it) { m_root_iterator = std::move(it); }
+
  private:
   /**
     Marker for subqueries in WHERE, HAVING, ORDER BY, GROUP BY and
@@ -4586,6 +4588,11 @@ struct LEX : public Query_tables_list {
   Secondary_engine_execution_context *m_secondary_engine_context{nullptr};
 
  public:
+   /**
+    the offload or exec failed reason on secondary engine.
+   */
+  std::string m_secondary_engine_offload_or_exec_failed_reason;
+
   /**
     Gets the secondary engine execution context for this statement.
   */

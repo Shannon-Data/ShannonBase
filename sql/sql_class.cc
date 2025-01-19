@@ -75,12 +75,14 @@
 #include "sql/handler.h"
 #include "sql/item.h"
 #include "sql/item_func.h"        // user_var_entry
+#include "sql/join_optimizer/access_path.h"    // Access_path
 #include "sql/lock.h"             // mysql_lock_abort_for_thread
 #include "sql/locking_service.h"  // release_all_locking_service_locks
 #include "sql/log_event.h"
 #include "sql/mdl_context_backup.h"  // MDL context backup for XA
 #include "sql/mysqld.h"              // global_system_variables ...
 #include "sql/mysqld_thd_manager.h"  // Global_THD_manager
+#include "sql/sql_optimizer.h"      // optimize_table
 #include "sql/parse_location.h"
 #include "sql/protocol.h"
 #include "sql/protocol_classic.h"
@@ -614,6 +616,40 @@ void Open_tables_state::set_open_tables_state(Open_tables_state *state) {
   this->state_flags = state->state_flags;
 
   this->m_reprepare_observers = state->m_reprepare_observers;
+}
+
+//To cache all info need by secondary engine at RapidPrepareEstimateQueryCosts stage.
+void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN* join) {
+  m_primary_cost = thd->m_current_query_cost;
+
+  m_primary_plan = join;
+  m_count_all_base_tables = thd->lex->unit->first_query_block()->leaf_table_count;
+  //if it's a select query and involves more than 3 tables, menans complex query, otherwise not.
+  m_complex_query =
+    (thd->lex->sql_command == SQLCOM_SELECT && m_count_all_base_tables >= 3) ? true : false;
+
+  if(thd->lex->using_hypergraph_optimizer()) {
+
+  } else {
+    for (size_t i = join->const_tables; i < join->tables; ++i) {
+      Table_ref* tab_ref = join->qep_tab[i].table_ref;
+      if (!tab_ref) continue;
+      m_tables.emplace_back(tab_ref);
+      m_base_table_rows += (const_cast<Table_ref*>(tab_ref)->fetch_number_of_rows());
+
+      auto accesspath = join->qep_tab[i].access_path();
+      if (accesspath->type == AccessPath::EQ_REF || accesspath->type == AccessPath::INDEX_SCAN
+          || accesspath->type == AccessPath::INDEX_RANGE_SCAN)
+        m_count_ref_index_ts ++;
+    }
+  }
+
+  m_query_type =
+    (thd->lex->unit->first_query_block()->olap == ROLLUP_TYPE) ? QUERY_TYPE::OLAP : QUERY_TYPE::OLTP;
+
+  auto root_access_path = thd->lex->unit->root_access_path();
+  assert (root_access_path);
+  m_are_all_ts_index_ref = (m_count_ref_index_ts == m_count_all_base_tables) ? true : false;
 }
 
 void Open_tables_state::reset_open_tables_state() {

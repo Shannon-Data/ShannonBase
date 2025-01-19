@@ -113,6 +113,17 @@ ADD_DEFINITIONS(-DMYSQL_SERVER)
 ADD_SUBDIRECTORY(server_component)
 ADD_SUBDIRECTORY(protobuf)
 
+SET(ML_SOURCES
+  ../ml/auto_ml.cpp
+  ../ml/ml_algorithm.h
+  ../ml/ml_regression.cpp
+  ../ml/ml_classification.cpp
+  ../ml/ml_forecasting.cpp
+  ../ml/ml_anomaly_detection.cpp
+  ../ml/ml_recommendation.cpp
+  ../ml/ml_utils.cpp
+)
+
 SET(DD_SOURCES
   dd/collection.cc
   dd/dd_event.cc
@@ -998,6 +1009,14 @@ ADD_DEPENDENCIES(sql_dd GenError)
 ADD_DEPENDENCIES(sql_dd GenKeywordList)
 TARGET_LINK_LIBRARIES(sql_dd sql_gis sql_main)
 SET_TARGET_PROPERTIES(sql_dd PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
+
+ADD_LIBRARY(sql_ml STATIC ${ML_SOURCES})
+#gomp required by lightgbm
+TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp)
+TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC 
+                           ${CMAKE_SOURCE_DIR}/extra/lightgbm/LightGBM/include 
+                           ${CMAKE_SOURCE_DIR}/extra/jerryscript/jerry-core/include)
+SET_TARGET_PROPERTIES(sql_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 #
 # On Windows platform we compile in the client-side Windows Native Authentication

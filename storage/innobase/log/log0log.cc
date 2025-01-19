@@ -534,6 +534,14 @@ static void log_deallocate_write_events(log_t &log);
 @param[out]     log     redo log */
 static void log_allocate_write_events(log_t &log);
 
+/** Deallocates the array with rapid events.
+@param[out]     log     redo log */
+static void log_deallocate_rapid_events(log_t &log);
+
+/** Allocates the rapid log changes populate events.
+@param[out]     log     redo log */
+static void log_allocate_rapid_events(log_t &log);
+
 /** Allocates the log recent written buffer.
 @param[out]     log     redo log */
 static void log_allocate_recent_written(log_t &log);
@@ -642,6 +650,7 @@ static void log_sys_create() {
   mutex_create(LATCH_ID_LOG_FILES, &log.m_files_mutex);
   mutex_create(LATCH_ID_LOG_SN_MUTEX, &log.sn_x_lock_mutex);
   mutex_create(LATCH_ID_LOG_GOVERNOR_MUTEX, &log.governor_iteration_mutex);
+  mutex_create(LATCH_ID_LOG_RAPID_POP, &log.rapid_populator_mutex);
 
 #ifdef UNIV_PFS_RWLOCK
   /* pfs_psi is separated from sn_lock_inst,
@@ -664,6 +673,7 @@ static void log_sys_create() {
   log_allocate_recent_closed(log);
   log_allocate_flush_events(log);
   log_allocate_write_events(log);
+  log_allocate_rapid_events(log);
 
   log_reset_encryption_buffer(log);
 
@@ -760,6 +770,7 @@ dberr_t log_start(log_t &log, lsn_t checkpoint_lsn, lsn_t start_lsn,
 
   log.write_lsn = start_lsn;
   log.flushed_to_disk_lsn = start_lsn;
+  log.rapid_lsn = checkpoint_lsn;
 
   log.write_ahead_end_offset = 0;
 
@@ -818,6 +829,7 @@ static void log_sys_free() {
 
   log_consumer_unregister(log, &(log.m_checkpoint_consumer));
 
+  log_deallocate_rapid_events(log);
   log_deallocate_write_events(log);
   log_deallocate_flush_events(log);
   log_deallocate_recent_closed(log);
@@ -837,6 +849,7 @@ static void log_sys_free() {
   }
 #endif /* UNIV_PFS_RWLOCK */
 
+  mutex_free(&log.rapid_populator_mutex);
   mutex_free(&log.m_files_mutex);
   mutex_free(&log.sn_x_lock_mutex);
   mutex_free(&log.limits_mutex);
@@ -1391,6 +1404,33 @@ static void log_deallocate_flush_events(log_t &log) {
 
   ut::delete_arr(log.flush_events);
   log.flush_events = nullptr;
+}
+
+static void log_allocate_rapid_events(log_t &log) {
+  const size_t n = 1;
+
+  ut_a(log.rapid_events == nullptr);
+  ut_a(n >= 1);
+  ut_a((n & (n - 1)) == 0);
+
+  log.rapid_events_size = n;
+  log.rapid_events =
+      ut::new_arr_withkey<os_event_t>(UT_NEW_THIS_FILE_PSI_KEY, ut::Count{n});
+
+  for (size_t i = 0; i < log.rapid_events_size; ++i) {
+    log.rapid_events[i] = os_event_create();
+  }
+}
+
+static void log_deallocate_rapid_events(log_t &log) {
+  ut_a(log.rapid_events != nullptr);
+
+  for (size_t i = 0; i < log.rapid_events_size; ++i) {
+    os_event_destroy(log.rapid_events[i]);
+  }
+
+  ut::delete_arr(log.rapid_events);
+  log.rapid_events = nullptr;
 }
 
 static void log_allocate_write_events(log_t &log) {

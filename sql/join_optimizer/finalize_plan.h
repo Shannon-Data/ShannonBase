@@ -45,4 +45,11 @@ bool FinalizePlanForQueryBlock(THD *thd, Query_block *query_block,
 void ReplaceOrderItemsWithTempTableFields(THD *thd, ORDER *order,
                                           const Func_ptr_array &items_to_copy);
 
+// to test whether query is point select query or not.
+// returns true if a point select, otherwise, returns false.
+bool is_point_select (THD *thd [[maybe_unused]], Query_block *query_block);
+
+// the query is fast query or not.
+bool is_very_fast_query(THD *thd);
+
 #endif  // SQL_JOIN_OPTIMIZER_FINALIZE_PLAN_H_
