@@ -677,6 +677,7 @@ enum legacy_db_type {
   /** Performance schema engine. */
   DB_TYPE_PERFORMANCE_SCHEMA,
   DB_TYPE_TEMPTABLE,
+  DB_TYPE_RAPID,
   DB_TYPE_FIRST_DYNAMIC = 42,
   DB_TYPE_DEFAULT = 127  // Must be last
 };

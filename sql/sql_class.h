@@ -160,6 +160,7 @@ class Time_zone;
 class sp_cache;
 struct Binlog_user_var_event;
 struct LOG_INFO;
+class JOIN;
 
 typedef struct user_conn USER_CONN;
 struct MYSQL_LOCK;
@@ -934,9 +935,48 @@ class Secondary_engine_statement_context {
     may override the destructor in subclasses and add code that
     performs cleanup tasks that are needed after query execution.
   */
+
+  enum class QUERY_TYPE : int8 {
+    OLTP,
+    OLAP
+  };
+
   virtual ~Secondary_engine_statement_context() = default;
 
   virtual bool is_primary_engine_optimal() const { return true; }
+
+  virtual void cache_primary_plan_info(THD* thd, JOIN* join);
+
+  virtual JOIN* get_cached_primary_plan_info() const {
+    return m_primary_plan;
+  }
+
+  double get_primary_cost() const { return m_primary_cost; }
+
+  uint get_count_base_table() const { return m_count_all_base_tables; }
+
+  QUERY_TYPE get_query_type() const { return m_query_type; }
+
+  std::vector<Table_ref*>& get_query_tables() { return m_tables; }
+ private:
+  // query plan on primary engine.
+  JOIN* m_primary_plan {nullptr};
+  // query type: OLTP or OLAP.
+  QUERY_TYPE m_query_type {QUERY_TYPE::OLTP};
+  //all tables used in query, gets from qep_tab.
+  std::vector<Table_ref*> m_tables;
+  //the # of base table used in statement.
+  uint m_count_all_base_tables{0};
+  // cost on primary engine.
+  double m_primary_cost {0};
+  //# of refereing to index table scan.
+  uint m_count_ref_index_ts{0};
+  //the # of rows of all base tables.
+  uint m_base_table_rows {0};
+  //whether all tables use index table scan.
+  bool m_are_all_ts_index_ref {false};
+  //is a complex query or not.
+  bool m_complex_query {false};  
 };
 
 /**
