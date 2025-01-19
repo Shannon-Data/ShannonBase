@@ -111,7 +111,7 @@ MYSQL_ADD_PLUGIN(shannon_rapid
   STORAGE_ENGINE
   MANDATORY
   MODULE_OUTPUT_NAME ha_rapid
-  LINK_LIBRARIES sql_dd ${ZLIB_LIBRARY} ${LZ4_LIBRARY} ${NUMA_LIBRARY})
+  LINK_LIBRARIES sql_dd ${ZLIB_LIBRARY} ${LZ4_LIBRARY} ${NUMA_LIBRARY} _lightgbm gomp)
 
 # Avoid generating Hardware Capabilities due to crc32 instructions
 IF(SOLARIS_INTEL)
