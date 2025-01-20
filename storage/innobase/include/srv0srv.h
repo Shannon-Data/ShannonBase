@@ -828,6 +828,8 @@ extern mysql_pfs_key_t parallel_read_thread_key;
 extern mysql_pfs_key_t parallel_rseg_init_thread_key;
 extern mysql_pfs_key_t bulk_flusher_thread_key;
 extern mysql_pfs_key_t bulk_alloc_thread_key;
+extern mysql_pfs_key_t rapid_populate_thread_key;
+extern mysql_pfs_key_t rapid_purge_thread_key;
 #endif /* UNIV_PFS_THREAD */
 #endif /* !UNIV_HOTBACKUP */
 

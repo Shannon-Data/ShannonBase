@@ -52,8 +52,11 @@ enum mtr_log_t {
   /** Inserts are logged in a shorter form */
   MTR_LOG_SHORT_INSERTS = 3,
 
+  /** Log the operations and will be copied to pop buff */
+  MTR_LOG_ALL_WITH_POP = 4,
+
   /** Last element */
-  MTR_LOG_MODE_MAX = 4
+  MTR_LOG_MODE_MAX = 5
 };
 
 /** @name Log item types

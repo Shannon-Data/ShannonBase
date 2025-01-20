@@ -51,6 +51,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef UNIV_HOTBACKUP
 #include "page0types.h"
 #include "trx0purge.h"
+#include "storage/rapid_engine/populate/populate.h"
 #endif /* !UNIV_HOTBACKUP */
 
 static_assert(static_cast<int>(MTR_MEMO_PAGE_S_FIX) ==
@@ -412,6 +413,7 @@ class mtr_t::Command {
   /** Prepare to write the mini-transaction log to the redo log buffer.
   @return number of bytes to write in finish_write() */
   ulint prepare_write();
+  lsn_t cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len);  
 #endif /* !UNIV_HOTBACKUP */
 
   /** true if it is a sync mini-transaction. */
@@ -432,32 +434,35 @@ false: ignore new mode
    A  - MTR_LOG_ALL
    N  - MTR_LOG_NONE
    NR - MTR_LOG_NO_REDO
-   S  - MTR_LOG_SHORT_INSERTS */
+   S  - MTR_LOG_SHORT_INSERTS
+   AP - MTR_LOG_ALL_WITH_POP */
 bool mtr_t::s_mode_update[MTR_LOG_MODE_MAX][MTR_LOG_MODE_MAX] = {
-    /*      |  A      N    NR     S  */
-    /* A */ {false, true, true, true},   /* A is default and we allow to switch
+    /*      |  A      N    NR     S  AP  */
+    /* A */ {false, true, true, true, true},   /* A is default and we allow to switch
                                             to all other modes. */
-    /* N */ {true, false, true, false},  /* For both A & NR, we can shortly
+    /* N */ {true, false, true, false, false},  /* For both A & NR, we can shortly
                                              switch to N and return back*/
-    /* NR*/ {false, true, false, false}, /* Default is NR when global redo is
+    /* NR*/ {false, true, false, false, false}, /* Default is NR when global redo is
                                             disabled. Allow to move to N */
-    /* S */ {true, false, false, false}  /* Only allow return back to A after
+    /* S */ {true, false, false, false, false},  /* Only allow return back to A after
                                             short switch from A to S */
+    /* AP */ {true, false, false, true, false}
 };
 #ifdef UNIV_DEBUG
 /* Mode update validity matrix. The array is indexed as [old mode][new mode]. */
 bool mtr_t::s_mode_update_valid[MTR_LOG_MODE_MAX][MTR_LOG_MODE_MAX] = {
-    /*      | A      N    NR    S  */
-    /* A */ {true, true, true, true}, /* No assert case. */
+    /*      | A      N    NR    S  AP    */
+    /* A */ {true, true, true, true, true}, /* No assert case. */
 
-    /* N */ {true, true, true, true},
+    /* N */ {true, true, true, true, true},
 
-    /* NR*/ {true, true, true, true}, /* We generally never return back from
+    /* NR*/ {true, true, true, true, true}, /* We generally never return back from
                                          NR to A but need to allow for LOB
                                          restarting B-tree mtr. */
 
-    /* S */ {true, false, false, true} /* Short Insert state is set transiently
+    /* S */ {true, false, false, true, true}, /* Short Insert state is set transiently
                                           and we don't expect N or NR switch. */
+    /* AP*/ {true, true, true, true, true}                                        
 };
 #endif /* UNIV_DEBUG */
 
@@ -765,6 +770,7 @@ ulint mtr_t::Command::prepare_write() {
       ut_ad(m_impl->m_log.size() == 0);
       return 0;
     case MTR_LOG_ALL:
+    case MTR_LOG_ALL_WITH_POP:
       break;
     default:
       ut_d(ut_error);
@@ -804,11 +810,133 @@ ulint mtr_t::Command::prepare_write() {
     ++len;
   }
 
-  ut_ad(m_impl->m_log_mode == MTR_LOG_ALL);
+  ut_ad(m_impl->m_log_mode == MTR_LOG_ALL ||
+        m_impl->m_log_mode == MTR_LOG_ALL_WITH_POP);
   ut_ad(m_impl->m_log.size() == len);
   ut_ad(len > 0);
 
   return len;
+}
+
+lsn_t mtr_t::Command::cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len) {
+  ut_a(log.buf != nullptr);
+  ut_a(log.buf_size > 0);
+  ut_a(log.buf_size % OS_FILE_LOG_BLOCK_SIZE == 0);
+
+  ShannonBase::Populate::mtr_log_rec log_rec(str_len);
+  ShannonBase::Populate::sys_pop_data_sz.fetch_add(str_len);
+
+  size_t pos {0};
+  /* That's only used in the assertion at the very end. */
+  const sn_t end_sn = log_translate_lsn_to_sn(start_lsn) + sn_t{str_len};
+
+  /* A guard used to detect when we should wrap (to avoid overflowing
+  outside the log buffer). */
+  byte *buf_end = log.buf + log.buf_size;
+
+  /* Pointer to next data byte to set within the log buffer. */
+  byte *ptr = log.buf + (start_lsn % log.buf_size);
+
+  /* Lsn value for the next byte to copy. */
+  lsn_t lsn = start_lsn;
+
+  /* Copy log records to the reserved space in the log buffer.
+  Decrease number of bytes to copy (str_len) after some are
+  copied. Proceed until number of bytes to copy reaches zero. */
+  while (true) {
+    /* Calculate offset from the beginning of log block. */
+    const auto offset = lsn % OS_FILE_LOG_BLOCK_SIZE;
+
+    ut_a(offset >= LOG_BLOCK_HDR_SIZE);
+    ut_a(offset < OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE);
+
+    /* Calculate how many free data bytes are available
+    within current log block. */
+    const auto left = OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_TRL_SIZE - offset;
+
+    ut_a(left > 0);
+    ut_a(left < OS_FILE_LOG_BLOCK_SIZE);
+
+    size_t len, lsn_diff;
+
+    if (left > str_len) {
+      /* There are enough free bytes to finish copying
+      the remaining part, leaving at least single free
+      data byte in the log block. */
+
+      len = str_len;
+
+      lsn_diff = str_len;
+
+    } else {
+      /* We have more to copy than the current log block
+      has remaining data bytes, or exactly the same.
+
+      In both cases, next lsn value will belong to the
+      next log block. Copy data up to the end of the
+      current log block and start a next iteration if
+      there is more to copy. */
+
+      len = left;
+
+      lsn_diff = left + LOG_BLOCK_TRL_SIZE + LOG_BLOCK_HDR_SIZE;
+    }
+
+    ut_a(len > 0);
+    ut_a(ptr + len <= buf_end);
+
+    /* This is the critical memcpy operation, which copies data
+    from internal mtr's buffer to the shared log buffer. */
+    /* Pointer to next data byte to set within the log buffer. */
+    std::memcpy(log_rec.data.get() + pos, ptr, len);
+    ut_a(len <= str_len);
+
+    pos += len;
+    str_len -= len;
+    lsn += lsn_diff;
+    ptr += lsn_diff;
+
+    ut_a(log_is_data_lsn(lsn));
+
+    if (ptr >= buf_end) {
+      /* Wrap - next copy operation will write at the
+      beginning of the log buffer. */
+
+      ptr -= log.buf_size;
+    }
+
+    if (lsn_diff > left) {
+      /* We have crossed boundaries between consecutive log
+      blocks. Either we finish in next block, in which case
+      user will set the proper first_rec_group field after
+      this function is finished, or we finish even further,
+      in which case next block should have 0. In both cases,
+      we reset next block's value to 0 now, and in the first
+      case, user will simply overwrite it afterwards. */
+
+      ut_a((uintptr_t(ptr) % OS_FILE_LOG_BLOCK_SIZE) == LOG_BLOCK_HDR_SIZE);
+
+      ut_a((uintptr_t(ptr) & ~uintptr_t(LOG_BLOCK_HDR_SIZE)) %
+               OS_FILE_LOG_BLOCK_SIZE ==
+           0);
+
+      if (str_len == 0) {
+        /* We have finished at the boundary. */
+        break;
+      }
+    } else {
+      /* Nothing more to copy - we have finished! */
+      break;
+    }
+  }
+
+  ShannonBase::Populate::sys_pop_buff.emplace(start_lsn, std::move(log_rec));
+  ut_a(ptr >= log.buf);
+  ut_a(ptr <= buf_end);
+  ut_a(buf_end == log.buf + log.buf_size);
+  ut_a(log_translate_lsn_to_sn(lsn) == end_sn);
+
+  return lsn;
 }
 #endif /* !UNIV_HOTBACKUP */
 
@@ -856,6 +984,15 @@ void mtr_t::Command::execute() {
 
     ut_ad(write_log.m_left_to_write == 0);
     ut_ad(write_log.m_lsn == handle.end_lsn);
+
+    if (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
+      ShannonBase::Populate::Populator::active() &&
+      !recv_recovery_is_on() &&
+      m_impl->m_log_mode == MTR_LOG_ALL_WITH_POP) {
+       //after each of block copied to log.buf without holes, then cpy to pop.
+       auto end_lsn = cp_to_pop_buff(*log_sys, handle.start_lsn, len);
+       ut_a(end_lsn == handle.end_lsn);
+    }
 
     log_wait_for_space_in_log_recent_closed(*log_sys, handle.start_lsn);
 

@@ -560,9 +560,10 @@ static void rapid_kill_connection(handlerton *hton, /*!< in:  innobase handlerto
 
 static inline bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::string_view msg) {
   assert(thd);
-  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = msg;
-  my_error(ER_SECONDARY_ENGINE, MYF(0), msg);
+  std::string msg_str(msg);  // 将msg转换为std::string
+  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = msg_str;
 
+  my_error(ER_SECONDARY_ENGINE, MYF(0), msg_str.c_str());
   return 0;
 }
 

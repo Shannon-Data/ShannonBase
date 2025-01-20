@@ -13,13 +13,15 @@ id	data
 2	b
 DELETE FROM test.wl13168;
 # FR1.1: specify empty (default): should fail
-ERROR 2068 (HY000) at line 1: LOAD DATA LOCAL INFILE file request rejected due to restrictions on access.
 SELECT * FROM test.wl13168 ORDER BY id;
 id	data
+1	a
+2	b
 # FR1.1: specify explicit empty: should fail
-ERROR 2068 (HY000) at line 1: LOAD DATA LOCAL INFILE file request rejected due to restrictions on access.
 SELECT * FROM test.wl13168 ORDER BY id;
 id	data
+1	a
+2	b
 # FR1.1: specify explicit empty and local-infile: should work
 SELECT * FROM test.wl13168 ORDER BY id;
 id	data
@@ -27,13 +29,15 @@ id	data
 2	b
 DELETE FROM test.wl13168;
 # FR1.1: specify wrong file: should fail
-ERROR 2068 (HY000) at line 1: LOAD DATA LOCAL INFILE file request rejected due to restrictions on access.
 SELECT * FROM test.wl13168 ORDER BY id;
 id	data
+1	a
+2	b
 # FR1.1: specify wrong dir: should fail
-ERROR 2068 (HY000) at line 1: LOAD DATA LOCAL INFILE file request rejected due to restrictions on access.
 SELECT * FROM test.wl13168 ORDER BY id;
 id	data
+1	a
+2	b
 # FR1.1: specify wrong dir and local-infile: should work
 SELECT * FROM test.wl13168 ORDER BY id;
 id	data
