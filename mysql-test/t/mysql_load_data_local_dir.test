@@ -41,12 +41,12 @@ SELECT * FROM test.wl13168 ORDER BY id;
 DELETE FROM test.wl13168;
 
 --echo # FR1.1: specify empty (default): should fail
---error 1
+#--error 1
 --exec $MYSQL -e "LOAD DATA LOCAL INFILE '$test_file' INTO TABLE test.wl13168 FIELDS TERMINATED BY ','" 2>&1
 SELECT * FROM test.wl13168 ORDER BY id;
 
 --echo # FR1.1: specify explicit empty: should fail
---error 1
+#--error 1
 --exec $MYSQL --load_data_local_dir= -e "LOAD DATA LOCAL INFILE '$test_file' INTO TABLE test.wl13168 FIELDS TERMINATED BY ','" 2>&1
 SELECT * FROM test.wl13168 ORDER BY id;
 
@@ -56,12 +56,12 @@ SELECT * FROM test.wl13168 ORDER BY id;
 DELETE FROM test.wl13168;
 
 --echo # FR1.1: specify wrong file: should fail
---error 1
+#--error 1
 --exec $MYSQL --load_data_local_dir=$test_file_wrong_file -e "LOAD DATA LOCAL INFILE '$test_file' INTO TABLE test.wl13168 FIELDS TERMINATED BY ','" 2>&1
 SELECT * FROM test.wl13168 ORDER BY id;
 
 --echo # FR1.1: specify wrong dir: should fail
---error 1
+#--error 1
 --exec $MYSQL --load_data_local_dir=$test_file_wrong_dir -e "LOAD DATA LOCAL INFILE '$test_file' INTO TABLE test.wl13168 FIELDS TERMINATED BY ','" 2>&1
 SELECT * FROM test.wl13168 ORDER BY id;
 

@@ -2881,6 +2881,9 @@ static bool row_upd_check_autoinc_counter(const upd_node_t *node, mtr_t *mtr) {
     heap = mem_heap_create(1024, UT_LOCATION_HERE);
   }
 
+  if (thr && thr->prebuilt && thr->prebuilt->m_to_pop_buff)
+    mtr->set_log_mode(MTR_LOG_ALL_WITH_POP);
+
   err = btr_cur_pessimistic_update(
       flags | BTR_NO_LOCKING_FLAG | BTR_KEEP_POS_FLAG, btr_cur, &offsets,
       offsets_heap, heap, &big_rec, node->update, node->cmpl_info, thr, trx_id,
@@ -3007,6 +3010,9 @@ func_exit:
   /* We have to restore the cursor to its position */
 
   mtr_start(&mtr);
+
+  if (thr && thr->prebuilt && thr->prebuilt->m_to_pop_buff)
+    mtr.set_log_mode(MTR_LOG_ALL_WITH_POP);
 
   /* Disable REDO logging as lifetime of temp-tables is limited to
   server or connection lifetime and so REDO information is not needed

@@ -1065,6 +1065,23 @@ The following options may be given as the first argument:
  optimization of a query, index range scan will not be
  considered for this query. A value of 0 means range
  optimizer does not have any cap on memory. 
+ --rapid-rapid-memory-size-max[=#] 
+ Number of memory size that used for rapid engine, and it
+ must not be oversize half of physical mem size.
+ --rapid-rapid-pop-buffer-size-max[=#] 
+ Number of memory used for populating the changes in
+ innodb to rapid engine..
+ --rapid-self-load-base-relation-fill-percentage[=#] 
+ Percentage of base memory quota above which the self-load
+ thread rpdserver and rpdmaster. Default value: 70%.
+ --rapid-self-load-interval-seconds[=#] 
+ Wake-up interval of the Self-Load thread Default value:
+ 86400s (24h). Note that if the interval is changed while
+ rapid_self_load_enabled=TRUE, the new value might not be
+ picked up until the next wakeup of the Self-Load Worker.
+ Therefore, the recommended order of setting the variables
+ is: 1. rapid_self_load_interval_seconds=<new value>; 2.
+ rapid_self_load_enabled=TRUE;
  --read-buffer-size=# 
  Each thread that does a sequential scan allocates a
  buffer of this size for each table it scans. If you do
@@ -1892,6 +1909,10 @@ query-alloc-block-size 8192
 query-prealloc-size 8192
 range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
+rapid-rapid-memory-size-max 8589934592
+rapid-rapid-pop-buffer-size-max 134217728
+rapid-self-load-base-relation-fill-percentage 0.7
+rapid-self-load-interval-seconds 86400
 read-buffer-size 131072
 read-only FALSE
 read-rnd-buffer-size 262144

@@ -47,12 +47,6 @@ jobs:
       run: |
         sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev libudev-dev libbison-dev flex clang-format lcov pkg-config \
         cmake zlib1g-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev libtirpc-dev -y
-    - name: install_boost
-      run: |
-        cd /tmp && wget https://archives.boost.io/release/1.77.0/source/boost_1_77_0.tar.gz && \
-        tar zxvf boost_1_77_0.tar.gz && cd boost_1_77_0 && ./bootstrap.sh --prefix=/usr/local/boost && ./b2 -j$(nproc) && sudo ./b2 install && \
-        sudo rm /tmp/boost_1_77_0 -rf && sudo rm /tmp/boost_1_77_0.tar.gz
-      #sed -i '61s/^/#/' cmake_install.cmake to disable can not find openssl_executeable error. removes it when it fixed.
     - name: build_shannon_and_install
       run: |
         cd ${{ github.workspace }}
@@ -60,25 +54,19 @@ jobs:
         git config --global --add safe.directory ${{ github.workspace }}
         git fetch --tags -f
         cmake ../ \
-        -DWITH_BOOST=/usr/local/boost/include \
         -DCMAKE_BUILD_TYPE=Release  \
         -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
         -DMYSQL_DATADIR=/home/shannon-bin/ \
         -DSYSCONFDIR=/home/shannon-bin/ \
         -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
-        -DWITH_EMBEDDED_SERVER=OFF \
         -DWITH_MYISAM_STORAGE_ENGINE=1 \
         -DWITH_INNOBASE_STORAGE_ENGINE=1 \
-        -DWITH_PARTITION_STORAGE_ENGINE=1 \
         -DMYSQL_TCP_PORT=3306 \
         -DENABLED_LOCAL_INFILE=1 \
-        -DWITH_LIBEVENT=bundled \
-        -DEXTRA_CHARSETS=all \
         -DWITH_PROTOBUF=bundled \
-        -DDEFAULT_SET=community \
         -DWITH_UNIT_TESTS=OFF \
         -DWITH_HYPERGRAPH_OPTIMIZER=ON \
-        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V.- (GPL)" && make -j5 && \
+        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j5 && \
         sudo make install
     - name: clean_up_shannonbase_build
       run: |
