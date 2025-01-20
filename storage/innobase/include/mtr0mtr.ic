@@ -152,7 +152,7 @@ Gets the logging mode of a mini-transaction.
 
 mtr_log_t mtr_t::get_log_mode() const {
   ut_ad(m_impl.m_log_mode >= MTR_LOG_ALL);
-  ut_ad(m_impl.m_log_mode <= MTR_LOG_SHORT_INSERTS);
+  ut_ad(m_impl.m_log_mode <= MTR_LOG_ALL_WITH_POP);
 
   return (m_impl.m_log_mode);
 }

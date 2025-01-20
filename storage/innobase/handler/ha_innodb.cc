@@ -215,6 +215,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <sstream>
 #include <string>
 #include <vector>
+#include "../rapid_engine/include/rapid_status.h"
 
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -723,6 +724,7 @@ static PSI_mutex_info all_innodb_mutexes[] = {
     PSI_MUTEX_KEY(log_sys_arch_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(log_cmdq_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(log_sn_mutex, 0, 0, PSI_DOCUMENT_ME),
+    PSI_MUTEX_KEY(log_rapid_pop_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(mutex_list_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(page_sys_arch_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(page_sys_arch_oper_mutex, 0, 0, PSI_DOCUMENT_ME),
@@ -875,7 +877,9 @@ static PSI_thread_info all_innodb_threads[] = {
                    PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(bulk_flusher_thread, "ib_bl_flush", 0, 0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(bulk_alloc_thread, "ib_bl_alloc", PSI_FLAG_SINGLETON, 0,
-                   PSI_DOCUMENT_ME)};
+                   PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(rapid_populate_thread, "ib_rpd_pop",0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(rapid_purge_thread, "ib_rpd_purge",0, 0, PSI_DOCUMENT_ME)};
 #endif /* UNIV_PFS_THREAD */
 
 #ifdef UNIV_PFS_IO
@@ -1902,6 +1906,26 @@ static inline void innobase_srv_conc_force_exit_innodb(
   /* This is to avoid making an unnecessary function call. */
   if (trx->declared_to_be_inside_innodb) {
     srv_conc_force_exit_innodb(trx);
+  }
+}
+
+/** if can be route to pop then set true, or not. */
+static inline void log_route_to_pop(THD* thd, row_prebuilt_t *prebuilt,
+                                    TABLE* table) {
+  switch (thd_sql_command(thd)) {
+    case SQLCOM_LOAD:
+    case SQLCOM_REPLACE:
+    case SQLCOM_INSERT_SELECT:
+    case SQLCOM_REPLACE_SELECT:
+    case SQLCOM_INSERT:
+    case SQLCOM_UPDATE:
+    case SQLCOM_DELETE: {
+      prebuilt->m_to_pop_buff = (ShannonBase::shannon_loaded_tables)? (
+        ShannonBase::shannon_loaded_tables->get(std::string(table->s->db.str),
+              std::string(table->s->table_name.str)) ? true : false) : false;
+    }break;
+    default:
+      break;
   }
 }
 
@@ -6367,6 +6391,16 @@ static int innobase_close_connection(
   DBUG_TRACE;
   assert(hton == innodb_hton_ptr);
 
+  //close the secondary engine. TODO:[RAPID]
+  #if 0
+  if (ShannonBase::shannon_rapid_hton_ptr){
+    handlerton *secondary_engine = ShannonBase::shannon_rapid_hton_ptr;
+    secondary_engine != nullptr &&
+          secondary_engine->close_connection != nullptr &&
+          secondary_engine->close_connection(secondary_engine, thd);
+  }
+  #endif
+
   trx_t *trx = thd_to_trx(thd);
   bool free_trx = false;
 
@@ -8883,6 +8917,8 @@ void ha_innobase::build_template(bool whole_row) {
       templ->rec_field_no = templ->clust_rec_field_no;
     }
   }
+
+  m_prebuilt->m_to_pop_buff = false;
 }
 
 /** This special handling is really to overcome the limitations of MySQL's
@@ -9302,6 +9338,8 @@ int ha_innobase::write_row(uchar *record) /*!< in: a row in MySQL format */
   if (error != DB_SUCCESS) {
     goto report_error;
   }
+
+  log_route_to_pop(m_user_thd, m_prebuilt, table);
 
   /* Execute insert graph that will result in actual insert. */
   error = row_insert_for_mysql((byte *)record, m_prebuilt);
@@ -10041,6 +10079,8 @@ int ha_innobase::update_row(const uchar *old_row, uchar *new_row) {
     goto func_exit;
   }
 
+  log_route_to_pop(m_user_thd, m_prebuilt, table);
+
   error = row_update_for_mysql((byte *)old_row, m_prebuilt);
 
   if (dict_table_has_autoinc_col(m_prebuilt->table)) {
@@ -10160,6 +10200,7 @@ int ha_innobase::delete_row(
   error = innobase_srv_conc_enter_innodb(m_prebuilt);
 
   if (error == DB_SUCCESS) {
+    log_route_to_pop(m_user_thd, m_prebuilt, table);
     error = row_update_for_mysql((byte *)record, m_prebuilt);
     innobase_srv_conc_exit_innodb(m_prebuilt);
   }
