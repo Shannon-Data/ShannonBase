@@ -1,0 +1,65 @@
+##############################################################################
+# ShannonBase test case for loaded table information.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--source include/no_ps_protocol.inc 
+
+CREATE DATABASE rpd_load_test;
+USE rpd_load_test;
+
+--echo #
+--echo # Load into and unload from secondary engine test.
+--echo #
+CREATE TABLE t1 (score int, name char(10), id int primary key, gender char(1)) SECONDARY_ENGINE RAPID;
+
+#not loaded
+--error ER_SECONDARY_ENGINE_DDL
+ALTER TABLE t1 secondary_unload;
+ALTER TABLE t1 secondary_load;
+
+#existed already
+--error ER_SECONDARY_ENGINE_DDL
+ALTER TABLE t1 secondary_load;
+
+SELECT TABLE_SCHEMA, TABLE_NAME, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES 
+       WHERE CREATE_OPTIONS LIKE '%SECONDARY_ENGINE%' AND TABLE_SCHEMA LIKE 'rpd_load_test';
+
+--replace_column 1 IGNORE
+SELECT * FROM performance_schema.rpd_tables;
+
+--replace_column 1 IGNORE
+SELECT * FROM performance_schema.rpd_table_id;
+
+--replace_column 1 IGNORE
+SELECT * FROM performance_schema.rpd_columns;
+
+--replace_column 2 IGNORE
+SELECT * FROM performance_schema.rpd_column_id;
+
+--replace_column 1 IGNORE
+SELECT * FROM performance_schema.rpd_table_id;
+
+ALTER TABLE t1 secondary_unload;
+SELECT TABLE_SCHEMA, TABLE_NAME, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES 
+       WHERE CREATE_OPTIONS LIKE '%SECONDARY_ENGINE%' AND TABLE_SCHEMA LIKE 'rpd_load_test';
+
+--replace_column 1 IGNORE
+SELECT * FROM performance_schema.rpd_tables;
+
+--replace_column 1 IGNORE
+SELECT * FROM performance_schema.rpd_table_id;
+
+--replace_column 1 IGNORE
+SELECT * FROM performance_schema.rpd_columns;
+
+--replace_column 2 IGNORE
+SELECT * FROM performance_schema.rpd_column_id;
+
+--replace_column 1 IGNORE
+SELECT * FROM performance_schema.rpd_table_id;
+
+
+DROP TABLE t1;
+
+DROP DATABASE rpd_load_test;

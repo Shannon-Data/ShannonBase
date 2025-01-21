@@ -1,0 +1,413 @@
+create database tpch_1024;
+alter database tpch_1024 CHARACTER SET ascii COLLATE ascii_bin;
+use tpch_1024;
+CREATE TABLE NATION  ( N_NATIONKEY  INTEGER NOT NULL,
+N_NAME       CHAR(25) NOT NULL,
+N_REGIONKEY  INTEGER NOT NULL,
+N_COMMENT    VARCHAR(152),
+PRIMARY KEY (N_NATIONKEY));
+CREATE TABLE REGION  ( R_REGIONKEY  INTEGER NOT NULL,
+R_NAME       CHAR(25) NOT NULL,
+R_COMMENT    VARCHAR(152),
+PRIMARY KEY (R_REGIONKEY));
+CREATE TABLE PART  ( P_PARTKEY     INTEGER NOT NULL,
+P_NAME        VARCHAR(55) NOT NULL,
+P_MFGR        CHAR(25) NOT NULL,
+P_BRAND       CHAR(10) NOT NULL,
+P_TYPE        VARCHAR(25) NOT NULL,
+P_SIZE        INTEGER NOT NULL,
+P_CONTAINER   CHAR(10) NOT NULL,
+P_RETAILPRICE DECIMAL(15,2) NOT NULL,
+P_COMMENT     VARCHAR(23) NOT NULL,
+PRIMARY KEY (P_PARTKEY));
+CREATE TABLE SUPPLIER ( S_SUPPKEY     INTEGER NOT NULL,
+S_NAME        CHAR(25) NOT NULL,
+S_ADDRESS     VARCHAR(40) NOT NULL,
+S_NATIONKEY   INTEGER NOT NULL,
+S_PHONE       CHAR(15) NOT NULL,
+S_ACCTBAL     DECIMAL(15,2) NOT NULL,
+S_COMMENT     VARCHAR(101) NOT NULL,
+PRIMARY KEY (S_SUPPKEY));
+CREATE TABLE PARTSUPP ( PS_PARTKEY     INTEGER NOT NULL,
+PS_SUPPKEY     INTEGER NOT NULL,
+PS_AVAILQTY    INTEGER NOT NULL,
+PS_SUPPLYCOST  DECIMAL(15,2)  NOT NULL,
+PS_COMMENT     VARCHAR(199) NOT NULL,
+PRIMARY KEY (PS_PARTKEY, PS_SUPPKEY));
+CREATE TABLE CUSTOMER ( C_CUSTKEY     INTEGER NOT NULL,
+C_NAME        VARCHAR(25) NOT NULL,
+C_ADDRESS     VARCHAR(40) NOT NULL,
+C_NATIONKEY   INTEGER NOT NULL,
+C_PHONE       CHAR(15) NOT NULL,
+C_ACCTBAL     DECIMAL(15,2)   NOT NULL,
+C_MKTSEGMENT  CHAR(10) NOT NULL,
+C_COMMENT     VARCHAR(117) NOT NULL,
+PRIMARY KEY (C_CUSTKEY));
+CREATE TABLE ORDERS  ( O_ORDERKEY       BIGINT NOT NULL,
+O_CUSTKEY        INTEGER NOT NULL,
+O_ORDERSTATUS    CHAR(1) NOT NULL,
+O_TOTALPRICE     DECIMAL(15,2) NOT NULL,
+O_ORDERDATE      DATE NOT NULL,
+O_ORDERPRIORITY  CHAR(15) NOT NULL,
+O_CLERK          CHAR(15) NOT NULL,
+O_SHIPPRIORITY   INTEGER NOT NULL,
+O_COMMENT        VARCHAR(79) NOT NULL,
+PRIMARY KEY (O_ORDERKEY));
+CREATE TABLE LINEITEM ( L_ORDERKEY    BIGINT NOT NULL,
+L_PARTKEY     INTEGER NOT NULL,
+L_SUPPKEY     INTEGER NOT NULL,
+L_LINENUMBER  INTEGER NOT NULL,
+L_QUANTITY    DECIMAL(15,2) NOT NULL,
+L_EXTENDEDPRICE  DECIMAL(15,2) NOT NULL,
+L_DISCOUNT    DECIMAL(15,2) NOT NULL,
+L_TAX         DECIMAL(15,2) NOT NULL,
+L_RETURNFLAG  CHAR(1) NOT NULL,
+L_LINESTATUS  CHAR(1) NOT NULL,
+L_SHIPDATE    DATE NOT NULL,
+L_COMMITDATE  DATE NOT NULL,
+L_RECEIPTDATE DATE NOT NULL,
+L_SHIPINSTRUCT CHAR(25) NOT NULL,
+L_SHIPMODE     CHAR(10) NOT NULL,
+L_COMMENT      VARCHAR(44) NOT NULL,
+PRIMARY KEY (L_ORDERKEY, L_LINENUMBER))
+PARTITION BY KEY()
+PARTITIONS 128;
+alter table NATION secondary_engine NULL;
+alter table REGION secondary_engine NULL;
+alter table LINEITEM secondary_engine NULL;
+alter table SUPPLIER secondary_engine NULL;
+alter table ORDERS secondary_engine NULL;
+alter table CUSTOMER secondary_engine NULL;
+alter table PART secondary_engine NULL;
+alter table PARTSUPP secondary_engine NULL;
+alter table NATION change N_NAME N_NAME CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table NATION change N_COMMENT N_COMMENT VARCHAR(152) COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table REGION change R_NAME R_NAME CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table REGION change R_COMMENT R_COMMENT VARCHAR(152) COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table PART change P_NAME P_NAME VARCHAR(55) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table PART change P_MFGR P_MFGR CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table PART change P_BRAND P_BRAND CHAR(10) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table PART change P_TYPE P_TYPE VARCHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table PART change P_CONTAINER P_CONTAINER CHAR(10) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table PART change P_COMMENT P_COMMENT VARCHAR(23) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_NAME S_NAME CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_ADDRESS S_ADDRESS VARCHAR(40) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_PHONE S_PHONE CHAR(15) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table PARTSUPP change PS_COMMENT PS_COMMENT VARCHAR(199) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table CUSTOMER change C_NAME C_NAME VARCHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table CUSTOMER change C_ADDRESS C_ADDRESS VARCHAR(40) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table CUSTOMER change C_PHONE C_PHONE CHAR(15) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table CUSTOMER change C_MKTSEGMENT C_MKTSEGMENT CHAR(10) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table CUSTOMER change C_COMMENT C_COMMENT VARCHAR(117) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table ORDERS change O_ORDERSTATUS O_ORDERSTATUS CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table ORDERS change O_ORDERPRIORITY O_ORDERPRIORITY CHAR(15) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table ORDERS change O_CLERK O_CLERK CHAR(15) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table ORDERS change O_COMMENT O_COMMENT VARCHAR(79) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM change L_RETURNFLAG L_RETURNFLAG CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM change L_LINESTATUS L_LINESTATUS CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM change L_SHIPINSTRUCT L_SHIPINSTRUCT CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM change L_COMMENT L_COMMENT VARCHAR(44) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM change L_SHIPMODE L_SHIPMODE CHAR(10) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table CUSTOMER change C_PHONE C_PHONE CHAR(15) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
+alter table ORDERS change O_COMMENT O_COMMENT VARCHAR(79) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
+alter table PART change P_NAME P_NAME VARCHAR(55) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
+alter table PART change P_TYPE P_TYPE VARCHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
+alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
+alter table LINEITEM change L_ORDERKEY L_ORDERKEY BIGINT NOT NULL COMMENT 'RAPID_COLUMN=DATA_PLACEMENT_KEY=1';
+alter table NATION secondary_engine RAPID;
+alter table REGION secondary_engine RAPID;
+alter table LINEITEM secondary_engine RAPID;
+alter table SUPPLIER secondary_engine RAPID;
+alter table ORDERS secondary_engine RAPID;
+alter table CUSTOMER secondary_engine RAPID;
+alter table PART secondary_engine RAPID;
+alter table PARTSUPP secondary_engine RAPID;
+alter table NATION secondary_load;
+alter table REGION secondary_load;
+alter table LINEITEM secondary_load;
+alter table SUPPLIER secondary_load;
+alter table ORDERS secondary_load;
+alter table CUSTOMER secondary_load;
+alter table PART secondary_load;
+alter table PARTSUPP secondary_load;
+select * from NATION LIMIT 100;
+N_NATIONKEY	N_NAME	N_REGIONKEY	N_COMMENT
+0	ALGERIA	0	 haggle. carefully final deposits detect slyly agai
+1	ARGENTINA	1	al foxes promise slyly according to the regular accounts. bold requests alon
+2	BRAZIL	1	y alongside of the pending deposits. carefully special packages are about the ironic forges. slyly special 
+3	CANADA	1	eas hang ironic, silent packages. slyly regular packages are furiously over the tithes. fluffily bold
+4	EGYPT	4	y above the carefully unusual theodolites. final dugouts are quickly across the furiously regular d
+5	ETHIOPIA	0	ven packages wake quickly. regu
+6	FRANCE	3	refully final requests. regular, ironi
+7	GERMANY	3	l platelets. regular accounts x-ray: unusual, regular acco
+8	INDIA	2	ss excuses cajole slyly across the packages. deposits print aroun
+9	INDONESIA	2	 slyly express asymptotes. regular deposits haggle slyly. carefully ironic hockey players sleep blithely. carefull
+10	IRAN	4	efully alongside of the slyly final dependencies. 
+11	IRAQ	4	nic deposits boost atop the quickly final requests? quickly regula
+12	JAPAN	2	ously. final, express gifts cajole a
+13	JORDAN	4	ic deposits are blithely about the carefully regular pa
+14	KENYA	0	 pending excuses haggle furiously deposits. pending, express pinto beans wake fluffily past t
+15	MOROCCO	0	rns. blithely bold courts among the closely regular packages use furiously bold platelets?
+16	MOZAMBIQUE	0	s. ironic, unusual asymptotes wake blithely r
+17	PERU	1	platelets. blithely pending dependencies use fluffily across the even pinto beans. carefully silent accoun
+18	CHINA	2	c dependencies. furiously express notornis sleep slyly regular accounts. ideas sleep. depos
+19	ROMANIA	3	ular asymptotes are about the furious multipliers. express dependencies nag above the ironically ironic account
+20	SAUDI ARABIA	4	ts. silent requests haggle. closely express packages sleep across the blithely
+21	VIETNAM	2	hely enticingly express accounts. even, final 
+22	RUSSIA	3	 requests against the platelets use never according to the quickly regular pint
+23	UNITED KINGDOM	3	eans boost carefully special requests. accounts are. carefull
+24	UNITED STATES	1	y final packages. slow foxes cajole quickly. quickly silent platelets breach ironic accounts. unusual pinto be
+select * from REGION LIMIT 100;
+R_REGIONKEY	R_NAME	R_COMMENT
+0	AFRICA	lar deposits. blithely final packages cajole. regular waters are final requests. regular accounts are according to 
+1	AMERICA	hs use ironic, even requests. s
+2	ASIA	ges. thinly even pinto beans ca
+3	EUROPE	ly final courts cajole furiously final excuse
+4	MIDDLE EAST	uickly special accounts cajole carefully blithely close requests. carefully final asymptotes haggle furiousl
+select * from LINEITEM LIMIT 100;
+L_ORDERKEY	L_PARTKEY	L_SUPPKEY	L_LINENUMBER	L_QUANTITY	L_EXTENDEDPRICE	L_DISCOUNT	L_TAX	L_RETURNFLAG	L_LINESTATUS	L_SHIPDATE	L_COMMITDATE	L_RECEIPTDATE	L_SHIPINSTRUCT	L_SHIPMODE	L_COMMENT
+23999975	625094	15140	2	23.00	23438.38	0.05	0.06	N	O	1996-10-23	1996-09-11	1996-11-12	DELIVER IN PERSON	AIR	ly regular realms after the
+24000000	677354	17387	2	30.00	39939.60	0.00	0.01	N	O	1996-04-21	1996-06-08	1996-05-08	TAKE BACK RETURN	REG AIR	le? blithely unusual deposits above
+23999975	350648	30649	3	18.00	30575.34	0.08	0.01	N	O	1996-10-07	1996-08-22	1996-10-19	DELIVER IN PERSON	TRUCK	ully pending dependencies hagg
+23999974	737406	7461	5	2.00	2886.74	0.03	0.07	N	O	1997-04-25	1997-05-31	1997-05-21	NONE	REG AIR	nding accounts. ironic, final
+23999974	770178	30217	6	48.00	59910.72	0.02	0.08	N	O	1997-03-15	1997-05-26	1997-03-26	TAKE BACK RETURN	FOB	fy packages nag evenly
+24000000	277642	37643	3	20.00	32392.60	0.01	0.02	N	O	1996-05-14	1996-06-11	1996-06-04	TAKE BACK RETURN	REG AIR	s. blithely regular instructi
+23999975	353843	3852	1	1.00	1896.83	0.05	0.01	N	O	1996-08-03	1996-09-14	1996-08-15	TAKE BACK RETURN	RAIL	pending instructions affix qu
+23999974	311819	31820	4	22.00	40277.60	0.08	0.01	N	O	1997-03-25	1997-04-24	1997-03-28	COLLECT COD	REG AIR	uickly ironic pains. bli
+24000000	712607	2625	4	7.00	11336.99	0.09	0.00	N	O	1996-07-16	1996-06-18	1996-08-04	COLLECT COD	SHIP	ckly express requests. even, pendin
+24000000	651246	21263	1	5.00	5986.05	0.06	0.05	N	O	1996-06-11	1996-05-16	1996-06-22	NONE	TRUCK	nts use. ir
+select * from SUPPLIER LIMIT 100;
+S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
+1	Supplier#000000001	 N kD4on9OM Ipw3,gf0JBoQDd7tgrzrddZ	17	27-918-335-1736	5755.94	each slyly above the careful
+2	Supplier#000000002	89eJ5ksX3ImxJQBvxObC,	5	15-679-861-2259	4032.68	 slyly bold instructions. idle dependen
+3	Supplier#000000003	q1,G3Pj6OjIuUYfUoH18BFTKP5aU9bEV3	1	11-383-516-1199	4192.40	blithely silent requests after the express dependencies are sl
+4	Supplier#000000004	Bk7ah4CK8SYQTepEmvMkkgMwg	15	25-843-787-7479	4641.08	riously even requests above the exp
+5	Supplier#000000005	Gcdm2rJRzl5qlTVzc	11	21-151-690-3663	-283.84	. slyly regular pinto bea
+6	Supplier#000000006	tQxuVm7s7CnK	14	24-696-997-4969	1365.79	final accounts. regular dolphins use against the furiously ironic decoys. 
+7	Supplier#000000007	s,4TicNGB4uO6PaSqNBUq	23	33-990-965-2201	6820.35	s unwind silently furiously regular courts. final requests are deposits. requests wake quietly blit
+8	Supplier#000000008	9Sq4bBH2FQEmaFOocY45sRTxo6yuoG	17	27-498-742-3860	7627.85	al pinto beans. asymptotes haggl
+9	Supplier#000000009	1KhUgZegwM3ua7dsYmekYBsK	10	20-403-398-8662	5302.37	s. unusual, even requests along the furiously regular pac
+10	Supplier#000000010	Saygah3gYWMp72i PY	24	34-852-489-8585	3891.91	ing waters. regular requests ar
+11	Supplier#000000011	JfwTs,LZrV, M,9C	18	28-613-996-1505	3393.08	y ironic packages. slyly ironic accounts affix furiously; ironically unusual excuses across the flu
+12	Supplier#000000012	aLIW  q0HYd	8	18-179-925-7181	1432.69	al packages nag alongside of the bold instructions. express, daring accounts
+13	Supplier#000000013	HK71HQyWoqRWOX8GI FpgAifW,2PoH	3	13-727-620-7813	9107.22	requests engage regularly instructions. furiously special requests ar
+14	Supplier#000000014	EXsnO5pTNj4iZRm	15	25-656-247-5058	9189.82	l accounts boost. fluffily bold warhorses wake
+15	Supplier#000000015	olXVbNBfVzRqgokr1T,Ie	8	18-453-357-6394	308.56	 across the furiously regular platelets wake even deposits. quickly express she
+16	Supplier#000000016	YjP5C55zHDXL7LalK27zfQnwejdpin4AMpvh	22	32-822-502-4215	2972.26	ously express ideas haggle quickly dugouts? fu
+17	Supplier#000000017	c2d,ESHRSkK3WYnxpgw6aOqN0q	19	29-601-884-9219	1687.81	eep against the furiously bold ideas. fluffily bold packa
+18	Supplier#000000018	PGGVE5PWAMwKDZw 	16	26-729-551-1115	7040.82	accounts snooze slyly furiously bold 
+19	Supplier#000000019	edZT3es,nBFD8lBXTGeTl	24	34-278-310-2731	6150.38	refully final foxes across the dogged theodolites sleep slyly abou
+20	Supplier#000000020	iybAE,RmTymrZVYaFZva2SH,j	3	13-715-945-6730	530.82	n, ironic ideas would nag blithely about the slyly regular accounts. silent, expr
+21	Supplier#000000021	81CavellcrJ0PQ3CPBID0Z0JwyJm0ka5igEs	2	12-253-590-5816	9365.80	d. instructions integrate sometimes slyly pending instructions. accounts nag among the 
+22	Supplier#000000022	okiiQFk 8lm6EVX6Q0,bEcO	4	14-144-830-2814	-966.20	 ironically among the deposits. closely expre
+23	Supplier#000000023	ssetugTcXc096qlD7 2TL5crEEeS3zk	9	19-559-422-5776	5926.41	ges could have to are ironic deposits. regular, even request
+24	Supplier#000000024	C4nPvLrVmKPPabFCj	0	10-620-939-2254	9170.71	usly pending deposits. slyly final accounts run 
+25	Supplier#000000025	RCQKONXMFnrodzz6w7fObFVV6CUm2q	22	32-431-945-3541	9198.31	ely regular deposits. carefully regular sauternes engage furiously above the regular accounts. idly 
+26	Supplier#000000026	iV,MHzAx6Z939uzFNkq09M0a1 MBfH7	21	31-758-894-4436	21.18	 ideas poach carefully after the blithely bold asymptotes. furiously pending theodoli
+27	Supplier#000000027	lC4CjKwNHUr6L4xIpzOBK4NlHkFTg	18	28-708-999-2028	1887.62	s according to the quickly regular hockey playe
+28	Supplier#000000028	GBhvoRh,7YIN V	0	10-538-384-8460	-891.99	ld requests across the pinto beans are carefully against the quickly final courts. accounts sleep 
+29	Supplier#000000029	658tEqXLPvRd6xpFdqC2	1	11-555-705-5922	-811.62	y express ideas play furiously. even accounts sleep fluffily across the accounts. careful
+30	Supplier#000000030	84NmC1rmQfO0fj3zkobLT	16	26-940-594-4852	8080.14	ias. carefully silent accounts cajole blithely. pending, special accounts cajole quickly above the f
+31	Supplier#000000031	fRJimA7zchyApqRLHcQeocVpP	16	26-515-530-4159	5916.91	into beans wake after the special packages. slyly fluffy requests cajole furio
+32	Supplier#000000032	yvoD3TtZSx1skQNCK8agk5bZlZLug	23	33-484-637-7873	3556.47	usly even depths. quickly ironic theodolites s
+33	Supplier#000000033	gfeKpYw3400L0SDywXA6Ya1Qmq1w6YB9f3R	7	17-138-897-9374	8564.12	n sauternes along the regular asymptotes are regularly along the 
+34	Supplier#000000034	mYRe3KvA2O4lL4HhxDKkkrPUDPMKRCSp,Xpa	10	20-519-982-2343	237.31	eposits. slyly final deposits toward the slyly regular dependencies sleep among the excu
+35	Supplier#000000035	QymmGXxjVVQ5OuABCXVVsu,4eF gU0Qc6	21	31-720-790-5245	4381.41	 ironic deposits! final, bold platelets haggle quickly quickly pendin
+36	Supplier#000000036	mzSpBBJvbjdx3UKTW3bLFewRD78D91lAC879	13	23-273-493-3679	2371.51	ular theodolites must haggle regular, bold accounts. slyly final pinto beans bo
+37	Supplier#000000037	cqjyB5h1nV	0	10-470-144-1330	3017.47	iously final instructions. quickly special accounts hang fluffily above the accounts. deposits
+38	Supplier#000000038	xEcx45vD0FXHT7c9mvWFY	4	14-361-296-6426	2512.41	ins. fluffily special accounts haggle slyly af
+39	Supplier#000000039	ZM, nSYpEPWr1yAFHaC91qjFcijjeU5eH	8	18-851-856-5633	6115.65	le slyly requests. special packages shall are blithely. slyly unusual packages sleep 
+40	Supplier#000000040	zyIeWzbbpkTV37vm1nmSGBxSgd2Kp	22	32-231-247-6991	-290.06	 final patterns. accounts haggle idly pas
+41	Supplier#000000041	G 1FKHR435 wMKFmyt	18	28-739-447-2525	6942.67	odolites boost across the furiously regular fo
+42	Supplier#000000042	1Y5lwEgpe3j2vbUBYj3SwLhK62JlwEMtDC	22	32-698-298-6317	6565.11	 fluffily even requests cajole blithely fu
+43	Supplier#000000043	Z5mLuAoTUEeKY5v22VnnA4D87Ao6jF2LvMYnlX8h	12	22-421-568-4862	7773.41	unts. unusual, final asymptotes 
+44	Supplier#000000044	kERxlLDnlIZJdN66zAPHklyL	7	17-713-930-5667	9759.38	x. carefully quiet account
+45	Supplier#000000045	LcKnsa8XGtIO0WYSB7hkOrH rnzRg1	9	19-189-635-8862	2944.23	iously according to the ironic, silent accounts.
+46	Supplier#000000046	e0URUXfDOYMdKe16Z5h5StMRbzGmTs,D2cjap	24	34-748-308-3215	3580.35	gular, regular ideas across th
+47	Supplier#000000047	3XM1x,Pcxqw,HK4XNlgbnZMbLhBHLA	14	24-810-354-4471	2958.09	sly ironic deposits sleep carefully along t
+48	Supplier#000000048	jg0U FNPMQDuyuKvTnLXXaLf3Wl6OtONA6mQlWJ	14	24-722-551-9498	5630.62	xpress instructions affix. fluffily even requests boos
+49	Supplier#000000049	Nvq 6macF4GtJvz	24	34-211-567-6800	9915.24	the finally bold dependencies. dependencies after the fluffily final foxes boost fluffi
+50	Supplier#000000050	rGobqSMMYz0ErrPhCGS	9	19-561-560-7437	4515.87	warhorses. ironic, regular accounts detect slyly after the quickly f
+51	Supplier#000000051	rDkBXb01POIKjOwrij62uM8O4	9	19-475-537-1368	7241.40	ges nag at the blithely busy instructions. fluffy packages wake quickly. even, ironic ideas boost b
+52	Supplier#000000052	WCk XCHYzBA1dvJDSol4ZJQQcQN,	19	29-974-934-4713	287.16	dolites are slyly against the furiously regular packages. ironic, final deposits cajole quickly
+53	Supplier#000000053	i9v3 EsYCfLKFU6PIt8iihBOHBB37yR7b3GD7Rt	7	17-886-101-6083	6177.35	onic, special deposits wake furio
+54	Supplier#000000054	J1s,Wxb5pg	12	22-966-435-7200	2733.69	blithely pending dolphins. quickly regular theodolites haggle slyly
+55	Supplier#000000055	OqdYSiOQeG4eGi636Tj	24	34-876-912-6007	7162.15	kages. blithely even foxes cajole special, final accounts. blithely even dependencies r
+56	Supplier#000000056	fUVtlUVal GiHBOuYoUQ XQ9NfNLQR3Gl	16	26-471-195-5486	-632.16	 sleep special deposits. unusual requests wake blithely slyly regular ideas. 
+57	Supplier#000000057	bEWqUVRR f0mb2o18Y	17	27-681-514-6892	-831.07	detect according to the furiously br
+58	Supplier#000000058	01dEADIZoCULZXg	16	26-659-969-5586	92.44	refully final foxes are. even, express courts according to the b
+59	Supplier#000000059	N8lKbYjMnVlEHmTPRmBgtLiX8rrJx	17	27-249-395-9123	586.16	ffily along the even decoys. final instructions abov
+60	Supplier#000000060	cb08ntDTARo47WmnBcYXu	8	18-550-360-2464	4515.80	thely express ideas use blithely 
+61	Supplier#000000061	Oz0M1qBR9I	8	18-396-489-9719	6096.58	s the slyly regular ideas shall 
+62	Supplier#000000062	bSmlFYUKBeRsqJxwC9 zS6xpFdEf5jNTb	19	29-603-653-2494	9202.57	ts. furiously ironic pinto beans are permanently after the bold ideas. regular, express f
+63	Supplier#000000063	NlV0OQyIoPvPkw5AYuWGomX,hgqm1	5	15-781-401-3047	5742.03	ar deposits. blithely bold accounts against the slyly final pinto beans sleep about the exp
+64	Supplier#000000064	w80JjnIP lGoLdUjRutbv81gGlqqpW4PQBeOtSYU	24	34-278-790-7004	1309.70	uickly regular requests use. carefully i
+65	Supplier#000000065	BsAnHUmSFArppKrM	22	32-444-835-2434	-963.79	l ideas wake carefully around the regular packages. furiously ruthless pinto bea
+66	Supplier#000000066	qYdruFJQJYYiKvnNVmYfCVydVB8bcW,AW,U6SOV3	23	33-300-836-9529	2455.98	ar requests. express orbits de
+67	Supplier#000000067	7YrEKJncHFk5D W7ZaqfAXV	4	14-563-538-1657	3576.55	ray slyly final foxes. furio
+68	Supplier#000000068	Ue6N50wH2CwE4PPgTGLmat,ibGYYlDoOb3xQwtgb	21	31-267-327-4328	5119.38	inal requests. ruthlessly ironic packages cajole
+69	Supplier#000000069	T2Dl9,f97e333eRuMi2z 	4	14-491-707-8310	8466.50	! carefully ironic instructions nag quickly pending requests. fluffily even deposits sleep a
+70	Supplier#000000070	INWNH2w,OOWgNDq0BRCcBwOMQc6PdFDc4	6	16-821-608-1166	9508.37	ests sleep quickly express ideas. ironic ideas haggle about the final T
+71	Supplier#000000071	YFo8an7P6wi Q	1	11-743-919-7272	8179.68	 final accounts. bold, final escapades must have to cajole about the special platelets. fu
+72	Supplier#000000072	mKpAJojtawk2alqV4 ZEbJ3PH3wfYqy AM8rGq1	18	28-113-898-6643	7014.50	 theodolites sublate furiously about the regularly e
+73	Supplier#000000073	HBZA1NHvrswQCxTTjg 5XrfSOGgMRKNCe2ovE	16	26-758-310-7496	3793.13	. never pending asymptotes a
+74	Supplier#000000074	uM3yV5NOc6b5wNdpxF69CW 8QvDxqvKubRJtA	20	30-166-486-1559	4170.51	carefully along the quickly regular sentiments. ironic accounts sleep. regular deposits are blith
+75	Supplier#000000075	7f3gN4rP1livII	18	28-716-704-8686	-224.84	eans. even, silent packages c
+76	Supplier#000000076	JBhSBa3cLYvNgHUYtUHmtECCD	14	24-228-763-7840	2971.10	, even instructions. furiously unusual deposits wake slyly about the ev
+77	Supplier#000000077	wVtcr0uH3CyrSiWMLsqnB09Syo,UuZxPMeBghlY	7	17-281-345-4863	4186.95	the slyly final asymptotes. blithely pending theodoli
+78	Supplier#000000078	9y3OZ2CV hGrsrQxzB7V3zTtygHVHlG3SD6yrz	5	15-670-998-6860	1044.10	, regular packages wake quickly bold requests. carefully unusual requests about the unusual request
+79	Supplier#000000079	p0u3tztSXUD2J8vFfLNFNKsrRRv7qyUtTBTA	14	24-402-227-9600	1191.94	nto beans integrate slyly across the fluffily pending multipliers. carefully ste
+80	Supplier#000000080	cJ2MHSEJ13rIL2Wj3D5i6hRo30,ZiNUXhqn	21	31-646-289-1906	-40.45	ackages. blithely bold requests wake quickly. carefully regular foxes are slyly instructions. caref
+81	Supplier#000000081	SLlacbhgpKmVa,gF3saYv12e0	12	22-535-310-6971	166.32	oost carefully quickly regular packages. carefully final excuses sleep blithely slyly pendi
+82	Supplier#000000082	WyTKA7ZpF15t1aCNlT3	18	28-177-572-9691	-724.31	xpress multipliers wake furiously even foxes. furiously iro
+83	Supplier#000000083	WRJUkzCn050seVz57oAfrbCuw	14	24-529-559-2461	1467.77	ly pending courts would cajole enticingly even deposits. slyly express
+84	Supplier#000000084	DcYjWMiZGQqEKOJi4wAmIV08ikx	24	34-869-118-7803	4780.93	even depths. regular foxes use slyly. theod
+85	Supplier#000000085	Ckls9RtlzKSF	7	17-167-806-8199	7174.74	egular packages. bold pinto beans wake fur
+86	Supplier#000000086	J1fgg5QaqnN	19	29-903-665-7065	1883.37	cajole furiously special, final requests: furiously spec
+87	Supplier#000000087	WCw7URDj8zoZ7tqC3cpm7	24	34-860-229-1674	4746.66	all are quickly after the ironic platelets. pending dolphins are. final the
+88	Supplier#000000088	yOshY8wwzMgS	11	21-191-938-9469	3086.13	furiously special excuses aff
+89	Supplier#000000089	fhtzZcSorhud1	9	19-259-876-1014	1638.02	en instructions across the slyly ironic requests engage
+90	Supplier#000000090	bPE6Uhz1f2m3gwSGMrnRt,g,3gq37r5kxgphqss1	6	16-380-123-9217	6201.77	hely fluffily regular theodoli
+91	Supplier#000000091	YV45D7TkfdQanOOZ7q9QxkyGUapU1oOWU6q3	3	13-604-986-9056	6255.87	nstructions use carefully according to the special packages: quickly silent th
+92	Supplier#000000092	n48Wy4QI3lml8T217rk	2	12-701-432-8346	2470.84	 even theodolites wake against the blithely fluffy packages
+93	Supplier#000000093	wd1djjKXT,4zBm	16	26-528-528-1157	368.76	yly final accounts could are carefully. fluffily ironic instruct
+94	Supplier#000000094	lK,pLPjAMVGJOXN80zPZuNQjpChliE	4	14-728-888-8882	2766.80	usly. furiously slow theodolites could haggle carefully fina
+95	Supplier#000000095	p2 2hBfH5TD	19	29-142-539-1403	2588.83	sual instructions cajole slyly with the final ac
+96	Supplier#000000096	Lbxp3WIipye o2wZme1i9iJx,xTt1Mp	12	22-888-654-7193	3437.24	efully unusual excuses wake fluffily regular theodo
+97	Supplier#000000097	MrCQha2G6ndX1fp6CA	4	14-618-678-1789	6642.22	s, regular accounts. furiously bold ideas u
+98	Supplier#000000098	ogHn8dpXB5Q	21	31-914-775-1978	5873.07	esias use slyly under the ironic foxes. re
+99	Supplier#000000099	4SxkTHG28nZrtT0,MnVF9H	18	28-272-909-1617	3671.34	nic dependencies dazzle flu
+100	Supplier#000000100	rIlN li8zvW22l2slbcx ECP4fL	21	31-351-324-5062	3191.70	es. regular instructions sleep carefully. slyly ironic packages across the foxes boost 
+select * from ORDERS LIMIT 100;
+O_ORDERKEY	O_CUSTKEY	O_ORDERSTATUS	O_TOTALPRICE	O_ORDERDATE	O_ORDERPRIORITY	O_CLERK	O_SHIPPRIORITY	O_COMMENT
+23999943	324892	O	20086.99	1997-07-15	5-LOW	Clerk#000002598	0	uickly regular request
+23999968	435076	O	17906.35	1995-12-01	3-MEDIUM	Clerk#000001954	0	pths. furiously bold packages affix fluffily pending deposits. carefully iron
+23999969	101908	F	130091.31	1993-02-21	4-NOT SPECIFIED	Clerk#000001820	0	 quickly slyly even deposits. quietly even 
+23999970	346319	O	286223.99	1995-09-08	3-MEDIUM	Clerk#000002441	0	 packages are carefully furiously id
+23999971	580138	O	157427.23	1995-12-23	3-MEDIUM	Clerk#000000526	0	 cajole carefully against the blithely unusual packages. quickly bol
+23999972	361898	F	94762.98	1993-10-18	2-HIGH	Clerk#000001242	0	furiously ironic accounts acros
+23999973	211588	O	231279.14	1996-06-11	1-URGENT	Clerk#000003378	0	 blithely-- pinto beans are among the blithely 
+23999974	536512	O	221768.47	1997-03-14	3-MEDIUM	Clerk#000001003	0	nstructions. blithely pending attainments 
+23999975	356203	O	53833.03	1996-07-20	2-HIGH	Clerk#000000964	0	cording to the furi
+24000000	494116	O	89273.91	1996-04-06	1-URGENT	Clerk#000002055	0	e furiously. blithely ironic packages cajole furiou
+select * from CUSTOMER LIMIT 100;
+C_CUSTKEY	C_NAME	C_ADDRESS	C_NATIONKEY	C_PHONE	C_ACCTBAL	C_MKTSEGMENT	C_COMMENT
+599991	Customer#000599991	p93wF9omq62FpFMPlHSQCNht	4	14-369-810-1153	8054.37	BUILDING	dencies. blithely regular requests integrate above the fluffily regular pinto beans. slyly express excuses 
+599992	Customer#000599992	fRXFasH2hl6iwqJiZHjNA9l7kxU43hNDqWZiw	3	13-717-684-8699	1893.37	BUILDING	e slyly final foxes. slyly even packages doze furiously fluffily final 
+599993	Customer#000599993	v9pKJc57Qv1dwmPrBSy11U6SGj	14	24-272-718-3195	7899.23	FURNITURE	ly bold accounts according to the 
+599994	Customer#000599994	oLGtHg3FdCBDTtOtUG3Ix4VXyeSPQD	11	21-236-655-7339	1369.52	MACHINERY	manent accounts grow quickly alongside of the carefully special accounts
+599995	Customer#000599995	UcbEhEI Xjkcad8r	12	22-447-346-6367	3404.64	MACHINERY	sits cajole among the furiously careful theodolites. carefu
+599996	Customer#000599996	 j,C0WgDx50ZMk2bLcevaiWR91hraSvb	8	18-436-123-3760	8783.75	FURNITURE	ly pending packages. quickly special platelets boost finally above the pinto 
+599997	Customer#000599997	VhwcEh WLigcIFKgsG1T6q5S08	22	32-630-334-3387	6532.59	MACHINERY	g requests nag blithely pending requests. blithely final deposits haggle quickly special packages; expr
+599998	Customer#000599998	n74LS6oD8K4Iez3r	16	26-458-721-6413	326.31	HOUSEHOLD	ounts cajole fluffily blithely ironic packages-- slyly silent frays sleep across th
+599999	Customer#000599999	OhzTmKjlTsjgJzdO2R7woql1HEG0ui	11	21-417-873-3297	4154.40	BUILDING	s. ideas affix carefully. blithely final deposits use. slyly even instructions slee
+600000	Customer#000600000	oiW3kc,i6jU8c qXzMKlTaj0QAxcFx0V2,	1	11-288-619-1849	3929.36	HOUSEHOLD	fter the regular instructions. evenly silent theodolites cajole of the express foxes. s
+select * from PART LIMIT 100;
+P_PARTKEY	P_NAME	P_MFGR	P_BRAND	P_TYPE	P_SIZE	P_CONTAINER	P_RETAILPRICE	P_COMMENT
+799991	pale white sandy antique hot	Manufacturer#3	Brand#32	PROMO BRUSHED COPPER	19	LG JAR	2090.96	lyly even pac
+799992	tan misty purple wheat grey	Manufacturer#3	Brand#34	MEDIUM BURNISHED STEEL	33	JUMBO JAR	2091.96	quest
+799993	royal aquamarine brown seashell cyan	Manufacturer#2	Brand#22	SMALL POLISHED TIN	23	SM PKG	2092.96	ironic reques
+799994	goldenrod aquamarine pale burnished royal	Manufacturer#3	Brand#33	PROMO BURNISHED TIN	32	MED CAN	2093.96	ly up 
+799995	thistle gainsboro powder deep orange	Manufacturer#3	Brand#35	ECONOMY BRUSHED TIN	7	LG DRUM	2094.96	fily 
+799996	tomato saddle brown blue frosted	Manufacturer#2	Brand#23	PROMO POLISHED STEEL	14	JUMBO JAR	2095.96	y regul
+799997	cornflower drab honeydew khaki snow	Manufacturer#4	Brand#44	STANDARD PLATED STEEL	30	WRAP CASE	2096.96	s are 
+799998	plum maroon brown firebrick coral	Manufacturer#5	Brand#53	ECONOMY BURNISHED NICKEL	47	JUMBO DRUM	2097.96	its. even dolp
+799999	turquoise steel navy light goldenrod	Manufacturer#1	Brand#12	ECONOMY BURNISHED NICKEL	49	WRAP DRUM	2098.96	 instruc
+800000	maroon wheat midnight grey snow	Manufacturer#3	Brand#35	LARGE PLATED TIN	28	SM PKG	1099.97	cies. furiously unu
+select * from PARTSUPP LIMIT 100;
+PS_PARTKEY	PS_SUPPKEY	PS_AVAILQTY	PS_SUPPLYCOST	PS_COMMENT
+799998	20037	8346	882.69	ts cajole furiously across the final, regular deposits. slyly ironic instructions haggle furiously about the special ideas. blithely bold a
+799998	30056	1845	254.73	the blithely regular theodolites affix blithely even, regular deposits: 
+799999	10019	9501	551.79	l foxes. carefully regular accounts haggle about the blithely regular accounts. blithely even requests shall have to cajole furiou
+799999	20038	4613	457.58	sly slyly silent ideas. furiously permanent requests wake slyly. furiously pending accounts above the slyly bold deposits wake slyly after the caref
+799999	30057	3864	473.57	ns sleep blithely. special packages print carefully across the blithely final dependencies-- furiously busy sauternes sleep. furiously ste
+799999	40000	7528	676.62	 pinto beans. regular, unusual packages nod blithely across the silent ideas. regular forges are carefully pe
+800000	1	3542	396.29	pinto beans. carefully unusual tithes wake blithely. pending, close escapades ought to haggle blithely. carefully ironic dependencie
+800000	10020	6605	356.96	instructions integrate carefully. blithely blithe platelets haggle blithely against the p
+800000	20039	83	637.55	 slyly to the ironic packages. carefully ironic deposits wake. slyly final deposits breach carefully even asymptotes. even accounts haggle. slyly ironic asymptotes wak
+800000	30058	2012	227.34	ial packages. pending packages wake after the requests. furiously permanent dependencies thrash after the special, ironic hockey players. carefull
+set use_secondary_engine=forced;
+SELECT  
+PS_PARTKEY, SUM(PS_SUPPLYCOST * PS_AVAILQTY) AS VALUE
+FROM
+PARTSUPP,
+SUPPLIER,
+NATION
+WHERE
+PS_SUPPKEY = S_SUPPKEY
+AND S_NATIONKEY = N_NATIONKEY
+AND N_NAME = 'GERMANY'
+GROUP BY PS_PARTKEY
+HAVING SUM(PS_SUPPLYCOST * PS_AVAILQTY) > (SELECT 
+SUM(PS_SUPPLYCOST * PS_AVAILQTY) * 0.0001
+FROM
+PARTSUPP,
+SUPPLIER,
+NATION
+WHERE
+PS_SUPPKEY = S_SUPPKEY
+AND S_NATIONKEY = N_NATIONKEY
+AND N_NAME = 'GERMANY')
+ORDER BY VALUE DESC;
+PS_PARTKEY	VALUE
+set use_secondary_engine=off;
+SELECT  
+PS_PARTKEY, SUM(PS_SUPPLYCOST * PS_AVAILQTY) AS VALUE
+FROM
+PARTSUPP,
+SUPPLIER,
+NATION
+WHERE
+PS_SUPPKEY = S_SUPPKEY
+AND S_NATIONKEY = N_NATIONKEY
+AND N_NAME = 'GERMANY'
+GROUP BY PS_PARTKEY
+HAVING SUM(PS_SUPPLYCOST * PS_AVAILQTY) > (SELECT 
+SUM(PS_SUPPLYCOST * PS_AVAILQTY) * 0.0001
+FROM
+PARTSUPP,
+SUPPLIER,
+NATION
+WHERE
+PS_SUPPKEY = S_SUPPKEY
+AND S_NATIONKEY = N_NATIONKEY
+AND N_NAME = 'GERMANY')
+ORDER BY VALUE DESC;
+PS_PARTKEY	VALUE
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+set use_secondary_engine=1;
+set secondary_engine_cost_threshold =1.5;
+set rapid_use_dynamic_offload=1;
+SET optimizer_trace = 'enabled=on';
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SELECT * FROM   NATION, REGION  WHERE  n_regionkey = r_regionkey ORDER BY N_NATIONKEY;
+N_NATIONKEY	N_NAME	N_REGIONKEY	N_COMMENT	R_REGIONKEY	R_NAME	R_COMMENT
+0	ALGERIA	0	 haggle. carefully final deposits detect slyly agai	0	AFRICA	lar deposits. blithely final packages cajole. regular waters are final requests. regular accounts are according to 
+1	ARGENTINA	1	al foxes promise slyly according to the regular accounts. bold requests alon	1	AMERICA	hs use ironic, even requests. s
+2	BRAZIL	1	y alongside of the pending deposits. carefully special packages are about the ironic forges. slyly special 	1	AMERICA	hs use ironic, even requests. s
+3	CANADA	1	eas hang ironic, silent packages. slyly regular packages are furiously over the tithes. fluffily bold	1	AMERICA	hs use ironic, even requests. s
+4	EGYPT	4	y above the carefully unusual theodolites. final dugouts are quickly across the furiously regular d	4	MIDDLE EAST	uickly special accounts cajole carefully blithely close requests. carefully final asymptotes haggle furiousl
+5	ETHIOPIA	0	ven packages wake quickly. regu	0	AFRICA	lar deposits. blithely final packages cajole. regular waters are final requests. regular accounts are according to 
+6	FRANCE	3	refully final requests. regular, ironi	3	EUROPE	ly final courts cajole furiously final excuse
+7	GERMANY	3	l platelets. regular accounts x-ray: unusual, regular acco	3	EUROPE	ly final courts cajole furiously final excuse
+8	INDIA	2	ss excuses cajole slyly across the packages. deposits print aroun	2	ASIA	ges. thinly even pinto beans ca
+9	INDONESIA	2	 slyly express asymptotes. regular deposits haggle slyly. carefully ironic hockey players sleep blithely. carefull	2	ASIA	ges. thinly even pinto beans ca
+10	IRAN	4	efully alongside of the slyly final dependencies. 	4	MIDDLE EAST	uickly special accounts cajole carefully blithely close requests. carefully final asymptotes haggle furiousl
+11	IRAQ	4	nic deposits boost atop the quickly final requests? quickly regula	4	MIDDLE EAST	uickly special accounts cajole carefully blithely close requests. carefully final asymptotes haggle furiousl
+12	JAPAN	2	ously. final, express gifts cajole a	2	ASIA	ges. thinly even pinto beans ca
+13	JORDAN	4	ic deposits are blithely about the carefully regular pa	4	MIDDLE EAST	uickly special accounts cajole carefully blithely close requests. carefully final asymptotes haggle furiousl
+14	KENYA	0	 pending excuses haggle furiously deposits. pending, express pinto beans wake fluffily past t	0	AFRICA	lar deposits. blithely final packages cajole. regular waters are final requests. regular accounts are according to 
+15	MOROCCO	0	rns. blithely bold courts among the closely regular packages use furiously bold platelets?	0	AFRICA	lar deposits. blithely final packages cajole. regular waters are final requests. regular accounts are according to 
+16	MOZAMBIQUE	0	s. ironic, unusual asymptotes wake blithely r	0	AFRICA	lar deposits. blithely final packages cajole. regular waters are final requests. regular accounts are according to 
+17	PERU	1	platelets. blithely pending dependencies use fluffily across the even pinto beans. carefully silent accoun	1	AMERICA	hs use ironic, even requests. s
+18	CHINA	2	c dependencies. furiously express notornis sleep slyly regular accounts. ideas sleep. depos	2	ASIA	ges. thinly even pinto beans ca
+19	ROMANIA	3	ular asymptotes are about the furious multipliers. express dependencies nag above the ironically ironic account	3	EUROPE	ly final courts cajole furiously final excuse
+20	SAUDI ARABIA	4	ts. silent requests haggle. closely express packages sleep across the blithely	4	MIDDLE EAST	uickly special accounts cajole carefully blithely close requests. carefully final asymptotes haggle furiousl
+21	VIETNAM	2	hely enticingly express accounts. even, final 	2	ASIA	ges. thinly even pinto beans ca
+22	RUSSIA	3	 requests against the platelets use never according to the quickly regular pint	3	EUROPE	ly final courts cajole furiously final excuse
+23	UNITED KINGDOM	3	eans boost carefully special requests. accounts are. carefull	3	EUROPE	ly final courts cajole furiously final excuse
+24	UNITED STATES	1	y final packages. slow foxes cajole quickly. quickly silent platelets breach ironic accounts. unusual pinto be	1	AMERICA	hs use ironic, even requests. s
+drop database tpch_1024;

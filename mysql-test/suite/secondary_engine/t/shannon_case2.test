@@ -1,0 +1,29 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+#multi-times runs
+create database sh_test2;
+use sh_test2;
+
+set use_secondary_engine=forced;
+
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
+insert into tt1 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm'), (4,'n4',4,'f');
+alter table tt1 secondary_load;
+
+select * from tt1 where score >=1  and id < 3 order by id;
+select * from tt1 where score >=1  and score < 3 order by id;
+select * from tt1 where id >=1  and id < 3 order by id;
+select score from tt1 where id > 2  and score = 30 order by id;
+
+select count(1) from tt1;
+select count(*) from tt1;
+select count(score), gender from tt1 group by gender order by gender;
+select sum(score), gender from tt1 group by gender order by gender;
+select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
+
+--sleep 5
+drop database sh_test2;
