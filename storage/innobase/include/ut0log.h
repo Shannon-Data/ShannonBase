@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -53,7 +54,7 @@ class logger {
   @param[in]    err             Error code from errmsg-*.txt.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  logger &log(int err, Args &&... args) {
+  logger &log(int err, Args &&...args) {
     ut_a(m_err == ER_IB_MSG_0);
 
     m_err = err;
@@ -110,7 +111,7 @@ class logger {
   @param[in]    err     Error code from errmsg-*.txt.
   @param[in]    args    Variable length argument list */
   template <class... Args>
-  static std::string msg(int err, Args &&... args) {
+  static std::string msg(int err, Args &&...args) {
     const char *fmt = srv_get_server_errmsgs(err);
 
     int ret;
@@ -162,7 +163,7 @@ class logger {
   @param[in]    err             Error message code.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  explicit logger(loglevel level, int err, Args &&... args)
+  explicit logger(loglevel level, int err, Args &&...args)
       : m_err(err), m_level(level) {
     m_oss << msg(err, std::forward<Args>(args)...);
   }
@@ -196,7 +197,7 @@ class info : public logger {
   @param[in]    err             Error code from errmsg-*.txt.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  explicit info(int err, Args &&... args)
+  explicit info(int err, Args &&...args)
       : logger(INFORMATION_LEVEL, err, std::forward<Args>(args)...) {}
 #else
   /** Destructor */
@@ -216,7 +217,7 @@ class warn : public logger {
   @param[in]    err             Error code from errmsg-*.txt.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  explicit warn(int err, Args &&... args)
+  explicit warn(int err, Args &&...args)
       : logger(WARNING_LEVEL, err, std::forward<Args>(args)...) {}
 
 #else
@@ -237,7 +238,7 @@ class error : public logger {
   @param[in]    err             Error code from errmsg-*.txt.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  explicit error(int err, Args &&... args)
+  explicit error(int err, Args &&...args)
       : logger(ERROR_LEVEL, err, std::forward<Args>(args)...) {}
 
 #else
@@ -262,7 +263,7 @@ class fatal : public logger {
   @param[in]    err             Error code from errmsg-*.txt.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  explicit fatal(ut::Location location, int err, Args &&... args)
+  explicit fatal(ut::Location location, int err, Args &&...args)
       : logger(ERROR_LEVEL, err, std::forward<Args>(args)...),
         m_location(location) {}
 #else
@@ -295,7 +296,7 @@ class error_or_warn : public logger {
   @param[in]    err             Error code from errmsg-*.txt.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  explicit error_or_warn(bool pred, int err, Args &&... args)
+  explicit error_or_warn(bool pred, int err, Args &&...args)
       : logger(pred ? ERROR_LEVEL : WARNING_LEVEL, err,
                std::forward<Args>(args)...) {}
 
@@ -320,7 +321,7 @@ class fatal_or_error : public logger {
   @param[in]    args            Variable length argument list */
   template <class... Args>
   explicit fatal_or_error(bool fatal, ut::Location location, int err,
-                          Args &&... args)
+                          Args &&...args)
       : logger(ERROR_LEVEL, err, std::forward<Args>(args)...),
         m_fatal(fatal),
         m_location(location) {}
@@ -357,7 +358,7 @@ class trace_1 : public logger {
   @param[in]    err             Error code from errmsg-*.txt.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  explicit trace_1(int err, Args &&... args)
+  explicit trace_1(int err, Args &&...args)
       : logger(INFORMATION_LEVEL, err, std::forward<Args>(args)...) {
     m_trace_level = 1;
   }
@@ -380,7 +381,7 @@ class trace_2 : public logger {
   @param[in]    err             Error code from errmsg-*.txt.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  explicit trace_2(int err, Args &&... args)
+  explicit trace_2(int err, Args &&...args)
       : logger(INFORMATION_LEVEL, err, std::forward<Args>(args)...) {
     m_trace_level = 2;
   }
@@ -402,7 +403,7 @@ class trace_3 : public logger {
   @param[in]    err             Error code from errmsg-*.txt.
   @param[in]    args            Variable length argument list */
   template <class... Args>
-  explicit trace_3(int err, Args &&... args)
+  explicit trace_3(int err, Args &&...args)
       : logger(INFORMATION_LEVEL, err, std::forward<Args>(args)...) {
     m_trace_level = 3;
   }
@@ -465,7 +466,7 @@ static inline auto log_fatal_or_error(bool fatal, ut::Location location) {
 }
 
 template <typename... Args>
-static inline auto log_info(int err, Args &&... args) {
+static inline auto log_info(int err, Args &&...args) {
 #ifdef UNIV_NO_ERR_MSGS
   return log_info();
 #else
@@ -473,7 +474,7 @@ static inline auto log_info(int err, Args &&... args) {
 #endif
 }
 template <typename... Args>
-static inline auto log_warn(int err, Args &&... args) {
+static inline auto log_warn(int err, Args &&...args) {
 #ifdef UNIV_NO_ERR_MSGS
   return log_warn();
 #else
@@ -481,7 +482,7 @@ static inline auto log_warn(int err, Args &&... args) {
 #endif
 }
 template <typename... Args>
-static inline auto log_error(int err, Args &&... args) {
+static inline auto log_error(int err, Args &&...args) {
 #ifdef UNIV_NO_ERR_MSGS
   return log_error();
 #else
@@ -489,7 +490,7 @@ static inline auto log_error(int err, Args &&... args) {
 #endif
 }
 template <typename... Args>
-static inline auto log_fatal(ut::Location location, int err, Args &&... args) {
+static inline auto log_fatal(ut::Location location, int err, Args &&...args) {
 #ifdef UNIV_NO_ERR_MSGS
   return log_fatal(location);
 #else
@@ -497,7 +498,7 @@ static inline auto log_fatal(ut::Location location, int err, Args &&... args) {
 #endif
 }
 template <typename... Args>
-static inline auto log_error_or_warn(bool pred, int err, Args &&... args) {
+static inline auto log_error_or_warn(bool pred, int err, Args &&...args) {
 #ifdef UNIV_NO_ERR_MSGS
   return log_error_or_warn(pred);
 #else
@@ -506,7 +507,7 @@ static inline auto log_error_or_warn(bool pred, int err, Args &&... args) {
 }
 template <typename... Args>
 static inline auto log_fatal_or_error(bool fatal, ut::Location location,
-                                      int err, Args &&... args) {
+                                      int err, Args &&...args) {
 #ifdef UNIV_NO_ERR_MSGS
   return log_fatal_or_error(fatal, location);
 #else
@@ -520,7 +521,7 @@ static inline auto log_trace_2() { return ib::trace_2(); }
 static inline auto log_trace_3() { return ib::trace_3(); }
 
 template <typename... Args>
-static inline auto log_trace_1(int err, Args &&... args) {
+static inline auto log_trace_1(int err, Args &&...args) {
 #ifdef UNIV_NO_ERR_MSGS
   return log_trace_1();
 #else
@@ -528,7 +529,7 @@ static inline auto log_trace_1(int err, Args &&... args) {
 #endif
 }
 template <typename... Args>
-static inline auto log_trace_2(int err, Args &&... args) {
+static inline auto log_trace_2(int err, Args &&...args) {
 #ifdef UNIV_NO_ERR_MSGS
   return log_trace_2();
 #else
@@ -536,7 +537,7 @@ static inline auto log_trace_2(int err, Args &&... args) {
 #endif
 }
 template <typename... Args>
-static inline auto log_trace_3(int err, Args &&... args) {
+static inline auto log_trace_3(int err, Args &&...args) {
 #ifdef UNIV_NO_ERR_MSGS
   return log_trace_3();
 #else

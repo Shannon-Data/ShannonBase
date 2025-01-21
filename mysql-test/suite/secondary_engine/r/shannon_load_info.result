@@ -5,10 +5,10 @@ USE rpd_load_test;
 #
 CREATE TABLE t1 (score int, name char(10), id int primary key, gender char(1)) SECONDARY_ENGINE RAPID;
 ALTER TABLE t1 secondary_unload;
-ERROR HY000: Secondary engine load the table failed. rpd_load_test.t1 table is not loaded into.
+ERROR HY000: DDLs on a table with a secondary engine defined are not allowed.
 ALTER TABLE t1 secondary_load;
 ALTER TABLE t1 secondary_load;
-ERROR HY000: Secondary engine load the table failed. rpd_load_test.t1 already loaded.
+ERROR HY000: DDLs on a table with a secondary engine defined are not allowed.
 SELECT TABLE_SCHEMA, TABLE_NAME, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES 
 WHERE CREATE_OPTIONS LIKE '%SECONDARY_ENGINE%' AND TABLE_SCHEMA LIKE 'rpd_load_test';
 TABLE_SCHEMA	TABLE_NAME	CREATE_OPTIONS

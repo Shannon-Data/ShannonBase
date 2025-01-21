@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,16 +26,14 @@
 #ifndef _PROCESS_WRAPPER_H_
 #define _PROCESS_WRAPPER_H_
 
-#include "process_launcher.h"
-#include "router_test_helpers.h"
-
 #include <atomic>
-#include <cstring>
 #include <mutex>
 #include <optional>
 #include <thread>
 
-using mysql_harness::Path;
+#include "mysql/harness/string_utils.h"  // split_string
+#include "process_launcher.h"
+#include "router_test_helpers.h"
 
 // test performance tweaks
 // shorter timeout -> faster test execution, longer timeout -> increased test
@@ -87,8 +86,37 @@ class ProcessWrapper {
    *         of calling this method.
    */
   std::string get_full_output() {
-    std::lock_guard<std::mutex> output_lock(output_mtx_);
-    return execute_output_raw_;
+    std::vector<std::string> lines;
+    std::string result;
+
+    {
+      std::lock_guard<std::mutex> output_lock(output_mtx_);
+      lines = mysql_harness::split_string(execute_output_raw_, '\n');
+    }
+
+    if (lines.size() > 1) {
+      // remove last empty line
+      lines.pop_back();
+    }
+
+    bool core_file_req_failed{false};
+    for (const std::string &line : lines) {
+      // setrlimit sometimes fails on pb2 macos, resulting in additional,
+      // unwanted console output that we remove here
+      if (line.starts_with(
+              "NOTE: core-file requested, but resource-limits say")) {
+        core_file_req_failed = true;
+        continue;
+      }
+      if (core_file_req_failed &&
+          line.starts_with("stopping to log to the console") &&
+          lines.size() == 2) {
+        continue;
+      }
+      result += (line + "\n");
+    }
+
+    return result;
   }
 
   /** @brief returns the content of the process app logfile as a string

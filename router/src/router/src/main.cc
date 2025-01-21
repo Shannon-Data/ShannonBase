@@ -1,16 +1,17 @@
 ﻿/*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -71,7 +72,7 @@
 #define MYSQL_ROUTER_LOG_DOMAIN \
   ::mysql_harness::logging::kMainLogger  // must precede #include "logging.h"
 
-#include <iostream>
+#include <iostream>  // cerr
 #include <stdexcept>
 
 #include <mysql.h>
@@ -100,31 +101,18 @@ IMPORT_LOG_FUNCTIONS()
  * objects they need their own way.
  */
 static void init_DIM() {
-  mysql_harness::DIM &dim = mysql_harness::DIM::instance();
+  static mysql_harness::RandomGenerator static_rg;
 
   // RandomGenerator
-  dim.set_RandomGenerator(
-      []() {
-        static mysql_harness::RandomGenerator rg;
-        return &rg;
-      },
-      [](mysql_harness::RandomGeneratorInterface *) {}
-      // don't delete our static!
-  );
+  mysql_harness::DIM::instance().set_static_RandomGenerator(&static_rg);
 }
 
 static void preconfig_log_init(bool use_os_logger_initially) noexcept {
+  static mysql_harness::logging::Registry static_registry;
+
   // setup registry object in DIM
-  {
-    mysql_harness::DIM &dim = mysql_harness::DIM::instance();
-    dim.set_LoggingRegistry(
-        []() {
-          static mysql_harness::logging::Registry registry;
-          return &registry;
-        },
-        [](mysql_harness::logging::Registry *) {}  // don't delete our static!
-    );
-  }
+
+  mysql_harness::DIM::instance().set_static_LoggingRegistry(&static_registry);
 
   // initialize logger to log to stderr or OS logger. After reading
   // configuration inside of MySQLRouter::start(), it will be re-initialized

@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -153,13 +154,13 @@ class SysTablespace : public Tablespace {
   @return DB_SUCCESS or error code */
   [[nodiscard]] dberr_t open_or_create(bool is_temp, bool create_new_db,
                                        page_no_t *sum_new_sizes,
-                                       lsn_t *flush_lsn, lsn_t* rapid_lsn);
+                                       lsn_t *flush_lsn);
 
  private:
   /** Check the tablespace header for this tablespace.
   @param[out]   flushed_lsn     value stored at offset FIL_PAGE_FILE_FLUSH_LSN
   @return DB_SUCCESS or error code */
-  dberr_t read_lsn_and_check_flags(lsn_t *flushed_lsn, lsn_t* rapid_lsn);
+  dberr_t read_lsn_and_check_flags(lsn_t *flushed_lsn);
 
   /** Note that the data file was not found.
   @param[in]    file            data file object

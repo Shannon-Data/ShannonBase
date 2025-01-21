@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -63,7 +64,7 @@ static const uint32_t TRX_FORCE_ROLLBACK_DISABLE = 1 << 29;
 /** Mark the transaction for forced rollback */
 static const uint32_t TRX_FORCE_ROLLBACK = 1U << 31;
 
-/** For masking out the above four flags */
+/** For masking out the above flags */
 static const uint32_t TRX_FORCE_ROLLBACK_MASK = 0x1FFFFFFF;
 
 /** Transaction execution states when trx->state == TRX_STATE_ACTIVE */
@@ -171,6 +172,43 @@ typedef ib_mutex_t TrxMutex;
 typedef ib_mutex_t UndoMutex;
 typedef ib_mutex_t PQMutex;
 typedef ib_mutex_t TrxSysMutex;
+
+/** Used to identify trx uniquely over time */
+struct trx_guid_t {
+  /** The immutable id of trx_t object - if you have a pointer to trx_t then we
+  guarantee that immutable id of it will not change over time. Also there are
+  never two trx_t objects at the same time with same immutable id. However it
+  may happen that two different transactions that do not occur at the same time
+  reuse the same trx_t and thus have same immutable id. Use m_version to detect
+  this situation. */
+  uint64_t m_immutable_id{};
+
+  /** As trx_t objects and thus immutable ids can be reused we need also trx's
+  version, which is incremented each time trx_t object gets reused. */
+  uint64_t m_version{};
+
+  /** Initializes trx_guid_t object to a value which doesn't match any real
+  transaction. */
+  trx_guid_t() = default;
+
+  /** Initializes trx_guid_t with data uniquely identifying the transaction
+  represented by trx_t object.
+  @param[in]  trx   the object representing the transaction */
+  trx_guid_t(const trx_t &trx);
+
+  /** Checks if two guids represent the same transaction:
+  they refer to the same trx_t struct and it was not reused meanwhile.
+  @param[in]  rhs   another guid to compare against
+  @return true iff the two guids are equal and thus represent same transaction*/
+  bool operator==(const trx_guid_t &rhs) const {
+    return m_immutable_id == rhs.m_immutable_id && m_version == rhs.m_version;
+  }
+
+  /** Checks if the instance is non-empty, i.e. was not default-constructed,
+  but rather initialized to correspond to a real trx_t.
+  @return true iff this guid was initialized to match a real transaction */
+  operator bool() const { return m_immutable_id != 0; }
+};
 
 /** The rollback segment memory object */
 struct trx_rseg_t {

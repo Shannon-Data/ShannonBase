@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -50,9 +51,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef UNIV_HOTBACKUP
 #include "page0types.h"
 #include "trx0purge.h"
-#endif /* !UNIV_HOTBACKUP */
-
 #include "storage/rapid_engine/populate/populate.h"
+#endif /* !UNIV_HOTBACKUP */
 
 static_assert(static_cast<int>(MTR_MEMO_PAGE_S_FIX) ==
                   static_cast<int>(RW_S_LATCH),
@@ -332,10 +332,7 @@ struct Add_dirty_blocks_to_flush_list {
     ut_ad(m_end_lsn > m_start_lsn || (m_end_lsn == 0 && m_start_lsn == 0));
 
 #ifndef UNIV_HOTBACKUP
-    buf_block_t *block;
-
-    block = reinterpret_cast<buf_block_t *>(slot->object);
-
+    buf_block_t *block = reinterpret_cast<buf_block_t *>(slot->object);
     buf_flush_note_modification(block, m_start_lsn, m_end_lsn,
                                 m_flush_observer);
 #endif /* !UNIV_HOTBACKUP */
@@ -416,9 +413,9 @@ class mtr_t::Command {
   /** Prepare to write the mini-transaction log to the redo log buffer.
   @return number of bytes to write in finish_write() */
   ulint prepare_write();
+  lsn_t cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len);  
 #endif /* !UNIV_HOTBACKUP */
- /**cpy the mlog to pop buffer, without block header and tailer.*/
-  lsn_t cp_to_pop_buff(log_t& log, lsn_t start_lsn, ulint str_len);
+
   /** true if it is a sync mini-transaction. */
   bool m_sync;
 
@@ -437,12 +434,14 @@ false: ignore new mode
    A  - MTR_LOG_ALL
    N  - MTR_LOG_NONE
    NR - MTR_LOG_NO_REDO
-   S  - MTR_LOG_SHORT_INSERTS */
+   S  - MTR_LOG_SHORT_INSERTS
+   AP - MTR_LOG_ALL_WITH_POP */
 bool mtr_t::s_mode_update[MTR_LOG_MODE_MAX][MTR_LOG_MODE_MAX] = {
     /*      |  A    AP    N    NR     S  */
     /* A */ {false, true, true, true, true},   /* A is default and we allow to switch
                                                   to all other modes. */
     /* AP */{true, false, true, true, true},    /**for all log with pop.*/
+
     /* N */ {true, true, false, true, false},  /* For both A & NR, we can shortly
                                                   switch to N and return back*/
     /* NR*/ {false, false, true, false, false}, /* Default is NR when global redo is

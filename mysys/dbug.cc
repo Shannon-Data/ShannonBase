@@ -686,9 +686,10 @@ static int DbugParse(CODE_STATE *cs, const char *control) {
   return !rel || f_used;
 }
 
-#define framep_trace_flag(cs, frp) \
-  (frp ? frp->level & TRACE_ON     \
-       : (ListFlags(cs->stack->functions) & INCLUDE) ? 0 : (uint)TRACE_ON)
+#define framep_trace_flag(cs, frp)                                       \
+  (frp                                           ? frp->level & TRACE_ON \
+   : (ListFlags(cs->stack->functions) & INCLUDE) ? 0                     \
+                                                 : (uint)TRACE_ON)
 
 static void FixTraceFlags_helper(CODE_STATE *cs, const char *func,
                                  struct _db_stack_frame_ *framep) {
@@ -924,19 +925,6 @@ void _db_pop_() {
     FixTraceFlags(old_fflags, cs);
     unlock_stack(cs);
   }
-}
-
-void db_stack_copy(CODE_STATE *leader_cs) {
-  CODE_STATE *cs;
-  get_code_state_or_return;
-  assert(cs->stack == &init_settings);
-  cs->stack = leader_cs->stack;
-}
-
-void db_stack_reset() {
-  CODE_STATE *cs;
-  get_code_state_or_return;
-  cs->stack = &init_settings;
 }
 
 /*

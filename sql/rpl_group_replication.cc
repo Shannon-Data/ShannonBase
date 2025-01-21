@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,12 +30,12 @@
 #include <mysql/components/my_service.h>
 #include <mysql/components/services/component_sys_var_service.h>
 #include <mysql/components/services/group_replication_status_service.h>
-#include "libbinlogevents/include/binlog_event.h"  // binary_log::max_log_event_size
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "my_sys.h"
 #include "my_systime.h"
 #include "my_time.h"
+#include "mysql/binlog/event/binlog_event.h"  // mysql::binlog::event::max_log_event_size
 #include "mysql/components/services/log_builtins.h"
 #include "mysql/components/services/log_shared.h"
 #include "mysql/my_loglevel.h"
@@ -65,8 +66,6 @@ REQUIRES_SERVICE_PLACEHOLDER(component_sys_variable_unregister);
 
 class THD;
 
-extern ulong opt_mi_repository_id;
-extern ulong opt_rli_repository_id;
 std::atomic_flag start_stop_executing = ATOMIC_FLAG_INIT;
 
 /*
@@ -183,11 +182,11 @@ int group_replication_start(char **error_message, THD *thd) {
       goto err;
     }
     if (lex != nullptr &&
-        (lex->slave_connection.user || lex->slave_connection.plugin_auth)) {
+        (lex->replica_connection.user || lex->replica_connection.plugin_auth)) {
       if (Rpl_channel_credentials::get_instance().store_credentials(
-              "group_replication_recovery", lex->slave_connection.user,
-              lex->slave_connection.password,
-              lex->slave_connection.plugin_auth)) {
+              "group_replication_recovery", lex->replica_connection.user,
+              lex->replica_connection.password,
+              lex->replica_connection.plugin_auth)) {
         // Parallel START/STOP GR is blocked.
         // So by now START GR command should fail if running or stop should have
         // cleared credentials. Post UNINSTALL we should not reach here.
@@ -492,10 +491,6 @@ void get_server_startup_prerequirements(Trans_context_info &requirements) {
   requirements.binlog_checksum_options = binlog_checksum_options;
   requirements.gtid_mode = global_gtid_mode.get();
   requirements.log_replica_updates = opt_log_replica_updates;
-  requirements.transaction_write_set_extraction =
-      global_system_variables.transaction_write_set_extraction;
-  requirements.mi_repository_type = opt_mi_repository_id;
-  requirements.rli_repository_type = opt_rli_repository_id;
   requirements.parallel_applier_type = mts_parallel_option;
   requirements.parallel_applier_workers = opt_mts_replica_parallel_workers;
   requirements.parallel_applier_preserve_commit_order =
@@ -507,7 +502,7 @@ void get_server_startup_prerequirements(Trans_context_info &requirements) {
 
 bool get_server_encoded_gtid_executed(uchar **encoded_gtid_executed,
                                       size_t *length) {
-  Checkable_rwlock::Guard g(*global_sid_lock, Checkable_rwlock::WRITE_LOCK);
+  Checkable_rwlock::Guard g(*global_tsid_lock, Checkable_rwlock::WRITE_LOCK);
 
   assert(global_gtid_mode.get() != Gtid_mode::OFF);
 
@@ -523,9 +518,9 @@ bool get_server_encoded_gtid_executed(uchar **encoded_gtid_executed,
 
 #if !defined(NDEBUG)
 char *encoded_gtid_set_to_string(uchar *encoded_gtid_set, size_t length) {
-  /* No sid_lock because this is a completely local object. */
-  Sid_map sid_map(nullptr);
-  Gtid_set set(&sid_map);
+  /* No tsid_lock because this is a completely local object. */
+  Tsid_map tsid_map(nullptr);
+  Gtid_set set(&tsid_map);
 
   if (set.add_gtid_encoding(encoded_gtid_set, length) != RETURN_STATUS_OK)
     return nullptr;
@@ -545,7 +540,7 @@ void global_thd_manager_remove_thd(THD *thd) {
 }
 
 bool is_gtid_committed(const Gtid &gtid) {
-  Checkable_rwlock::Guard g(*global_sid_lock, Checkable_rwlock::READ_LOCK);
+  Checkable_rwlock::Guard g(*global_tsid_lock, Checkable_rwlock::READ_LOCK);
 
   assert(global_gtid_mode.get() != Gtid_mode::OFF);
 
@@ -559,12 +554,12 @@ bool is_gtid_committed(const Gtid &gtid) {
 bool wait_for_gtid_set_committed(const char *gtid_set_text, double timeout,
                                  bool update_thd_status) {
   THD *thd = current_thd;
-  Gtid_set wait_for_gtid_set(global_sid_map, nullptr);
+  Gtid_set wait_for_gtid_set(global_tsid_map, nullptr);
 
-  global_sid_lock->rdlock();
+  global_tsid_lock->rdlock();
 
   if (wait_for_gtid_set.add_gtid_text(gtid_set_text) != RETURN_STATUS_OK) {
-    global_sid_lock->unlock();
+    global_tsid_lock->unlock();
     return true;
   }
 
@@ -575,7 +570,7 @@ bool wait_for_gtid_set_committed(const char *gtid_set_text, double timeout,
   */
   if (thd->owned_gtid.sidno > 0 &&
       wait_for_gtid_set.contains_gtid(thd->owned_gtid)) {
-    global_sid_lock->unlock();
+    global_tsid_lock->unlock();
     return true;
   }
 
@@ -584,7 +579,7 @@ bool wait_for_gtid_set_committed(const char *gtid_set_text, double timeout,
                                               update_thd_status);
   gtid_state->end_gtid_wait();
 
-  global_sid_lock->unlock();
+  global_tsid_lock->unlock();
 
   return result;
 }
@@ -594,7 +589,7 @@ unsigned long get_replica_max_allowed_packet() {
 }
 
 unsigned long get_max_replica_max_allowed_packet() {
-  return binary_log::max_log_event_size;
+  return mysql::binlog::event::max_log_event_size;
 }
 
 bool is_server_restarting_after_clone() { return clone_startup; }

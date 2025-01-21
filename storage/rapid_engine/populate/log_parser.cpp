@@ -79,7 +79,7 @@ uint LogParser::get_trxid(const rec_t *rec, const dict_index_t *index, const uli
       templ.is_multi_val = false;
       templ.mysql_col_len = DATA_TRX_ID_LEN;
       ulint len{0};
-      byte *data = rec_get_nth_field(index, rec, offsets, trx_id_pos, &len);
+      byte *data = rec_get_nth_field(index, const_cast<rec_t *>(rec), offsets, trx_id_pos, &len);
       ut_a(len == DATA_TRX_ID_LEN);
       row_sel_field_store_in_mysql_format(trx_id, &templ, index, trx_id_pos, data, len, ULINT_UNDEFINED);
       break;
@@ -505,7 +505,7 @@ std::string LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t
     byte *data{nullptr};
 
     auto mtype = real_index->get_col(idx)->mtype;
-    data = rec_get_nth_field(index, rec, offsets, idx, &len);
+    data = rec_get_nth_field(index, const_cast<rec_t *>(rec), offsets, idx, &len);
     if (UNIV_UNLIKELY(rec_offs_nth_extern(index, offsets, idx))) {  // store external.
       // TODO: deal with off-page scenario. see comment at blob0blob.cc:385.
       ut_a(len >= BTR_EXTERN_FIELD_REF_SIZE);
@@ -1400,7 +1400,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
       (fil_space_t) */
 
       if (page != nullptr && page_no == 0 && mach_read_from_2(ptr) == FSP_HEADER_OFFSET + FSP_SPACE_FLAGS) {
-        ptr = mlog_parse_nbytes(MLOG_4BYTES, ptr, end_ptr, page, page_zip);
+        ptr = const_cast<byte *>(mlog_parse_nbytes(MLOG_4BYTES, ptr, end_ptr, page, page_zip));
 
         /* When applying log, we have complete records.
         They can be incomplete (ptr=nullptr) only during
@@ -1424,7 +1424,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
         ulint offset = fsp_header_get_encryption_progress_offset(page_size_t(space->flags));
 
         if (offs == offset) {
-          ptr = mlog_parse_nbytes(MLOG_1BYTE, ptr, end_ptr, page, page_zip);
+          ptr = const_cast<byte *>(mlog_parse_nbytes(MLOG_1BYTE, ptr, end_ptr, page, page_zip));
           // ignore the opers, just advance the pointer.
         }
         fil_space_release(space);
@@ -1435,14 +1435,14 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
     case MLOG_2BYTES:
     case MLOG_8BYTES:
 
-      ptr = mlog_parse_nbytes(type, ptr, end_ptr, nullptr, page_zip);
+      ptr = const_cast<byte *>(mlog_parse_nbytes(type, ptr, end_ptr, nullptr, page_zip));
       break;
 
     case MLOG_REC_INSERT:
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index(ptr, end_ptr, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
         ptr = parse_cur_and_apply_insert_rec(context, false, ptr, end_ptr, block, page, page_zip, index, mtr);
       }
@@ -1453,7 +1453,8 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_INSERT_8027, &index))) {
+      if (nullptr !=
+          (ptr = const_cast<byte *>(mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_INSERT_8027, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_cur_and_apply_insert_rec(context, false, ptr, end_ptr, block, page, page_zip, index, mtr);
@@ -1464,7 +1465,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index(ptr, end_ptr, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_cur_and_apply_delete_mark_rec(context, ptr, end_ptr, block, index, mtr);
@@ -1477,8 +1478,8 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr !=
-          (ptr = mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_CLUST_DELETE_MARK_8027, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(
+                          mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_CLUST_DELETE_MARK_8027, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_cur_and_apply_delete_mark_rec(context, ptr, end_ptr, block, index, mtr);
@@ -1496,7 +1497,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
       ut_a(!page || page_is_comp(page));
       ut_a(!page_zip);
 
-      ptr = mlog_parse_index_8027(ptr, end_ptr, true, &index);
+      ptr = const_cast<byte *>(mlog_parse_index_8027(ptr, end_ptr, true, &index));
 
       if (ptr == nullptr) {
         break;
@@ -1515,7 +1516,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index(ptr, end_ptr, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_cur_update_in_place_and_apply(context, ptr, end_ptr, block, page, page_zip, index);
@@ -1528,7 +1529,8 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_UPDATE_IN_PLACE_8027, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(
+                          mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_UPDATE_IN_PLACE_8027, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_cur_update_in_place_and_apply(context, ptr, end_ptr, block, page, page_zip, index);
@@ -1541,7 +1543,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index(ptr, end_ptr, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         /* Read the record offset as a 2-byte ulint */
@@ -1561,9 +1563,9 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
       ut_ad(!page || fil_page_type_is_index(page_type));
 
       if (nullptr !=
-          (ptr = mlog_parse_index_8027(
+          (ptr = const_cast<byte *>(mlog_parse_index_8027(
                ptr, end_ptr, type == MLOG_COMP_LIST_END_DELETE_8027 || type == MLOG_COMP_LIST_START_DELETE_8027,
-               &index))) {
+               &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
         /* Read the record offset as a 2-byte ulint */
         if (end_ptr < ptr + 2) {
@@ -1579,7 +1581,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index(ptr, end_ptr, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_copy_rec_list_to_created_page(context, ptr, end_ptr, block, page, page_zip, index, mtr);
@@ -1592,8 +1594,8 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr !=
-          (ptr = mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_LIST_END_COPY_CREATED_8027, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(
+                          mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_LIST_END_COPY_CREATED_8027, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_copy_rec_list_to_created_page(context, ptr, end_ptr, block, page, page_zip, index, mtr);
@@ -1605,7 +1607,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index(ptr, end_ptr, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_btr_page_reorganize(ptr, end_ptr, index, type == MLOG_ZIP_PAGE_REORGANIZE_8027, block, mtr);
@@ -1629,7 +1631,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index(ptr, end_ptr, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_btr_page_reorganize(ptr, end_ptr, index, true, block, mtr);
@@ -1642,7 +1644,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index_8027(ptr, end_ptr, true, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index_8027(ptr, end_ptr, true, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_btr_page_reorganize(ptr, end_ptr, index, type == MLOG_ZIP_PAGE_REORGANIZE_8027, block, mtr);
@@ -1706,7 +1708,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index(ptr, end_ptr, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_cur_and_apply_delete_rec(context, ptr, end_ptr, block, index, mtr);
@@ -1719,9 +1721,8 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
       ut_ad(!page || fil_page_type_is_index(page_type));
 
-      if (nullptr != (ptr = mlog_parse_index_8027(
-
-                          ptr, end_ptr, type == MLOG_COMP_REC_DELETE_8027, &index))) {
+      if (nullptr !=
+          (ptr = const_cast<byte *>(mlog_parse_index_8027(ptr, end_ptr, type == MLOG_COMP_REC_DELETE_8027, &index)))) {
         ut_a(!page || page_is_comp(page) == dict_table_is_comp(index->table));
 
         ptr = parse_cur_and_apply_delete_rec(context, ptr, end_ptr, block, index, mtr);
@@ -1747,7 +1748,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
     case MLOG_WRITE_STRING:
 
       ut_ad(!page || page_type != FIL_PAGE_TYPE_ALLOCATED || page_no == 0);
-      ptr = mlog_parse_string(ptr, end_ptr, nullptr, page_zip);
+      ptr = const_cast<byte *>(mlog_parse_string(ptr, end_ptr, nullptr, page_zip));
       break;
 
     case MLOG_ZIP_WRITE_NODE_PTR: {
@@ -1824,7 +1825,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
     case MLOG_ZIP_PAGE_COMPRESS_NO_DATA:
 
-      if (nullptr != (ptr = mlog_parse_index(ptr, end_ptr, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index(ptr, end_ptr, &index)))) {
         ut_a(!page || (page_is_comp(page) == dict_table_is_comp(index->table)));
         if (end_ptr == ptr) {
           return nullptr;
@@ -1836,7 +1837,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
     case MLOG_ZIP_PAGE_COMPRESS_NO_DATA_8027:
 
-      if (nullptr != (ptr = mlog_parse_index_8027(ptr, end_ptr, true, &index))) {
+      if (nullptr != (ptr = const_cast<byte *>(mlog_parse_index_8027(ptr, end_ptr, true, &index)))) {
         ut_a(!page || (page_is_comp(page) == dict_table_is_comp(index->table)));
 
         if (end_ptr == ptr) {
@@ -1851,7 +1852,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
       ut_a(false);
 #ifndef UNIV_HOTBACKUP
       if (log_test != nullptr) {
-        ptr = log_test->parse_mlog_rec(ptr, end_ptr);
+        ptr = const_cast<byte *>(log_test->parse_mlog_rec(ptr, end_ptr));
       } else {
         /* Just parse and ignore record to pass it and go forward. Note that
         this record is also used in the innodb.log_first_rec_group mtr test.
@@ -1861,7 +1862,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
         Log_test::Value value;
         lsn_t start_lsn, end_lsn;
 
-        ptr = Log_test::parse_mlog_rec(ptr, end_ptr, key, value, start_lsn, end_lsn);
+        ptr = const_cast<byte *>(Log_test::parse_mlog_rec(ptr, end_ptr, key, value, start_lsn, end_lsn));
       }
       break;
 #endif /* !UNIV_HOTBACKUP */
@@ -1931,7 +1932,7 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
       *page_no = FIL_NULL;
       *space_id = SPACE_UNKNOWN;
 
-      new_ptr = mlog_parse_initial_dict_log_record(ptr, end_ptr, type, &id, &version);
+      new_ptr = const_cast<byte *>(mlog_parse_initial_dict_log_record(ptr, end_ptr, type, &id, &version));
 
       if (new_ptr != nullptr) {
         new_ptr = advance_parseMetadataLog(id, version, new_ptr, end_ptr);
@@ -1939,7 +1940,7 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
       return new_ptr == nullptr ? 0 : new_ptr - ptr;
   }
 
-  new_ptr = mlog_parse_initial_log_record(ptr, end_ptr, type, space_id, page_no);
+  new_ptr = const_cast<byte *>(mlog_parse_initial_log_record(ptr, end_ptr, type, space_id, page_no));
   *body = new_ptr;
 
   if (new_ptr == nullptr) {

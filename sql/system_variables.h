@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,14 +19,13 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #ifndef SYSTEM_VARIABLES_INCLUDED
 #define SYSTEM_VARIABLES_INCLUDED
 
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 #include "my_base.h"  // ha_rows
@@ -39,7 +39,7 @@
 class MY_LOCALE;
 class Time_zone;
 
-typedef ulonglong sql_mode_t;
+using sql_mode_t = uint64_t;
 struct LIST;
 
 // Values for binlog_format sysvar
@@ -79,13 +79,6 @@ enum enum_binlog_row_value_options {
 enum enum_binlog_row_metadata {
   BINLOG_ROW_METADATA_MINIMAL = 0,
   BINLOG_ROW_METADATA_FULL = 1
-};
-
-// Values for transaction_write_set_extraction sysvar
-enum enum_transaction_write_set_hashing_algorithm {
-  HASH_ALGORITHM_OFF = 0,
-  HASH_ALGORITHM_MURMUR32 = 1,
-  HASH_ALGORITHM_XXHASH64 = 2
 };
 
 // Values for session_track_gtids sysvar
@@ -147,19 +140,22 @@ enum class Explain_format_type : ulong {
 };
 
 /* Bits for different SQL modes modes (including ANSI mode) */
-#define MODE_REAL_AS_FLOAT 1
-#define MODE_PIPES_AS_CONCAT 2
-#define MODE_ANSI_QUOTES 4
-#define MODE_IGNORE_SPACE 8
-#define MODE_NOT_USED 16
-#define MODE_ONLY_FULL_GROUP_BY 32
-#define MODE_NO_UNSIGNED_SUBTRACTION 64
-#define MODE_NO_DIR_IN_CREATE 128
-#define MODE_ANSI 262144L
-#define MODE_NO_AUTO_VALUE_ON_ZERO (MODE_ANSI * 2)
-#define MODE_NO_BACKSLASH_ESCAPES (MODE_NO_AUTO_VALUE_ON_ZERO * 2)
-#define MODE_STRICT_TRANS_TABLES (MODE_NO_BACKSLASH_ESCAPES * 2)
-#define MODE_STRICT_ALL_TABLES (MODE_STRICT_TRANS_TABLES * 2)
+inline constexpr sql_mode_t MODE_REAL_AS_FLOAT = 1;
+inline constexpr sql_mode_t MODE_PIPES_AS_CONCAT = 2;
+inline constexpr sql_mode_t MODE_ANSI_QUOTES = 4;
+inline constexpr sql_mode_t MODE_IGNORE_SPACE = 8;
+inline constexpr sql_mode_t MODE_NOT_USED = 16;
+inline constexpr sql_mode_t MODE_ONLY_FULL_GROUP_BY = 32;
+inline constexpr sql_mode_t MODE_NO_UNSIGNED_SUBTRACTION = 64;
+inline constexpr sql_mode_t MODE_NO_DIR_IN_CREATE = 128;
+inline constexpr sql_mode_t MODE_ANSI = 0x40000;
+inline constexpr sql_mode_t MODE_NO_AUTO_VALUE_ON_ZERO = MODE_ANSI * 2;
+inline constexpr sql_mode_t MODE_NO_BACKSLASH_ESCAPES =
+    MODE_NO_AUTO_VALUE_ON_ZERO * 2;
+inline constexpr sql_mode_t MODE_STRICT_TRANS_TABLES =
+    MODE_NO_BACKSLASH_ESCAPES * 2;
+inline constexpr sql_mode_t MODE_STRICT_ALL_TABLES =
+    MODE_STRICT_TRANS_TABLES * 2;
 /*
  * NO_ZERO_DATE, NO_ZERO_IN_DATE and ERROR_FOR_DIVISION_BY_ZERO modes are
  * removed in 5.7 and their functionality is merged with STRICT MODE.
@@ -167,31 +163,34 @@ enum class Explain_format_type : ulong {
  * but they are not used. Setting these modes in 5.7 will give warning and
  * have no effect.
  */
-#define MODE_NO_ZERO_IN_DATE (MODE_STRICT_ALL_TABLES * 2)
-#define MODE_NO_ZERO_DATE (MODE_NO_ZERO_IN_DATE * 2)
-#define MODE_INVALID_DATES (MODE_NO_ZERO_DATE * 2)
-#define MODE_ERROR_FOR_DIVISION_BY_ZERO (MODE_INVALID_DATES * 2)
-#define MODE_TRADITIONAL (MODE_ERROR_FOR_DIVISION_BY_ZERO * 2)
-#define MODE_HIGH_NOT_PRECEDENCE (1ULL << 29)
-#define MODE_NO_ENGINE_SUBSTITUTION (MODE_HIGH_NOT_PRECEDENCE * 2)
-#define MODE_PAD_CHAR_TO_FULL_LENGTH (1ULL << 31)
+inline constexpr sql_mode_t MODE_NO_ZERO_IN_DATE = MODE_STRICT_ALL_TABLES * 2;
+inline constexpr sql_mode_t MODE_NO_ZERO_DATE = MODE_NO_ZERO_IN_DATE * 2;
+inline constexpr sql_mode_t MODE_INVALID_DATES = MODE_NO_ZERO_DATE * 2;
+inline constexpr sql_mode_t MODE_ERROR_FOR_DIVISION_BY_ZERO =
+    MODE_INVALID_DATES * 2;
+inline constexpr sql_mode_t MODE_TRADITIONAL =
+    MODE_ERROR_FOR_DIVISION_BY_ZERO * 2;
+inline constexpr sql_mode_t MODE_HIGH_NOT_PRECEDENCE = 1ULL << 29;
+inline constexpr sql_mode_t MODE_NO_ENGINE_SUBSTITUTION =
+    MODE_HIGH_NOT_PRECEDENCE * 2;
+inline constexpr sql_mode_t MODE_PAD_CHAR_TO_FULL_LENGTH = 1ULL << 31;
 /*
   If this mode is set the fractional seconds which cannot fit in given fsp will
   be truncated.
 */
-#define MODE_TIME_TRUNCATE_FRACTIONAL (1ULL << 32)
+inline constexpr sql_mode_t MODE_TIME_TRUNCATE_FRACTIONAL = 1ULL << 32;
 
-#define MODE_LAST (1ULL << 33)
+inline constexpr sql_mode_t MODE_LAST = 1ULL << 33;
 
-#define MODE_ALLOWED_MASK                                                      \
-  (MODE_REAL_AS_FLOAT | MODE_PIPES_AS_CONCAT | MODE_ANSI_QUOTES |              \
-   MODE_IGNORE_SPACE | MODE_NOT_USED | MODE_ONLY_FULL_GROUP_BY |               \
-   MODE_NO_UNSIGNED_SUBTRACTION | MODE_NO_DIR_IN_CREATE | MODE_ANSI |          \
-   MODE_NO_AUTO_VALUE_ON_ZERO | MODE_NO_BACKSLASH_ESCAPES |                    \
-   MODE_STRICT_TRANS_TABLES | MODE_STRICT_ALL_TABLES | MODE_NO_ZERO_IN_DATE |  \
-   MODE_NO_ZERO_DATE | MODE_INVALID_DATES | MODE_ERROR_FOR_DIVISION_BY_ZERO |  \
-   MODE_TRADITIONAL | MODE_HIGH_NOT_PRECEDENCE | MODE_NO_ENGINE_SUBSTITUTION | \
-   MODE_PAD_CHAR_TO_FULL_LENGTH | MODE_TIME_TRUNCATE_FRACTIONAL)
+inline constexpr sql_mode_t MODE_ALLOWED_MASK =
+    (MODE_REAL_AS_FLOAT | MODE_PIPES_AS_CONCAT | MODE_ANSI_QUOTES |
+     MODE_IGNORE_SPACE | MODE_NOT_USED | MODE_ONLY_FULL_GROUP_BY |
+     MODE_NO_UNSIGNED_SUBTRACTION | MODE_NO_DIR_IN_CREATE | MODE_ANSI |
+     MODE_NO_AUTO_VALUE_ON_ZERO | MODE_NO_BACKSLASH_ESCAPES |
+     MODE_STRICT_TRANS_TABLES | MODE_STRICT_ALL_TABLES | MODE_NO_ZERO_IN_DATE |
+     MODE_NO_ZERO_DATE | MODE_INVALID_DATES | MODE_ERROR_FOR_DIVISION_BY_ZERO |
+     MODE_TRADITIONAL | MODE_HIGH_NOT_PRECEDENCE | MODE_NO_ENGINE_SUBSTITUTION |
+     MODE_PAD_CHAR_TO_FULL_LENGTH | MODE_TIME_TRUNCATE_FRACTIONAL);
 
 /*
   We can safely ignore and reset these obsolete mode bits while replicating:
@@ -302,8 +301,6 @@ struct System_variables {
   uint binlog_trx_compression_level_zstd;
   ulonglong binlog_row_value_options;
   bool sql_log_bin;
-  // see enum_transaction_write_set_hashing_algorithm
-  ulong transaction_write_set_extraction;
   ulong completion_type;
   ulong transaction_isolation;
   ulong updatable_views_with_limit;
@@ -326,7 +323,6 @@ struct System_variables {
   */
   bool transaction_read_only;
   bool low_priority_updates;
-  bool new_mode;
   bool keep_files_on_create;
 
   bool old_alter_table;
@@ -390,12 +386,6 @@ struct System_variables {
   */
   bool show_create_table_verbosity;
 
-  /**
-    Compatibility option to mark the pre MySQL-5.6.4 temporals columns using
-    the old format using comments for SHOW CREATE TABLE and in I_S.COLUMNS
-    'COLUMN_TYPE' field.
-  */
-  bool show_old_temporals;
   // Used for replication delay and lag monitoring
   ulonglong original_commit_timestamp;
 
@@ -538,20 +528,29 @@ struct System_variables {
    */
   Explain_format_type explain_format;
 
-  // add for parallel load data
-  bool gdb_parallel_load;
-  uint gdb_parallel_load_workers;
-  uint gdb_parallel_load_chunk_size;
-  bool gdb_parallel_load_executor;  // not displayed, need delete THD after use.
-                                    // inited to false by memset of THD()
-  bool force_parallel_execute;
+  /**
+    Used to specify the JSON format version used by EXPLAIN FORMAT=JSON with
+    the old (non-hypergraph) join optimizer.
+    @sa Sys_explain_json_format_version
+   */
+  uint explain_json_format_version;
 
-  ulong parallel_cost_threshold;
+  /// Max size of set operations hash buffer size.
+  ulonglong set_operations_buffer_size;
+#ifndef NDEBUG
+  char *debug_set_operations_secondary_overflow_at;
+#endif
 
-  ulong parallel_default_dop;
-
-  ulong parallel_queue_timeout;
+  /**
+    Restrict foreign keys on non-unique or partial keys.
+    @sa Sys_restrict_fk_on_non_standard_key
+  */
+  bool restrict_fk_on_non_standard_key;
 };
+
+static_assert(std::is_trivially_copyable<System_variables>::value);
+static_assert(std::is_trivial<System_variables>::value);
+static_assert(std::is_standard_layout<System_variables>::value);
 
 /**
   Per thread status variables.

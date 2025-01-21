@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+Copyright (c) 2012, 2024, Oracle and/or its affiliates.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -12,12 +12,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -449,6 +450,7 @@ LatchDebug::LatchDebug() {
   LEVEL_MAP_INSERT(SYNC_LOCK_FREE_HASH);
   LEVEL_MAP_INSERT(SYNC_MONITOR_MUTEX);
   LEVEL_MAP_INSERT(SYNC_ANY_LATCH);
+  LEVEL_MAP_INSERT(SYNC_ALTER_STAGE);
   LEVEL_MAP_INSERT(SYNC_FIL_SHARD);
   LEVEL_MAP_INSERT(SYNC_DBLWR);
   LEVEL_MAP_INSERT(SYNC_BUF_CHUNKS);
@@ -473,13 +475,14 @@ LatchDebug::LatchDebug() {
   LEVEL_MAP_INSERT(SYNC_RECV_WRITER);
   LEVEL_MAP_INSERT(SYNC_LOG_SN);
   LEVEL_MAP_INSERT(SYNC_LOG_SN_MUTEX);
-  LEVEL_MAP_INSERT(SYNC_LOG_SN_MUTEX);
+  LEVEL_MAP_INSERT(SYNC_LOG_RAPID_POP_MUTEX);
   LEVEL_MAP_INSERT(SYNC_LOG_LIMITS);
   LEVEL_MAP_INSERT(SYNC_LOG_FLUSHER);
   LEVEL_MAP_INSERT(SYNC_LOG_FILES);
   LEVEL_MAP_INSERT(SYNC_LOG_WRITER);
   LEVEL_MAP_INSERT(SYNC_LOG_WRITE_NOTIFIER);
   LEVEL_MAP_INSERT(SYNC_LOG_FLUSH_NOTIFIER);
+  LEVEL_MAP_INSERT(SYNC_LOG_GOVERNOR_MUTEX);
   LEVEL_MAP_INSERT(SYNC_LOG_CLOSER);
   LEVEL_MAP_INSERT(SYNC_LOG_CHECKPOINTER);
   LEVEL_MAP_INSERT(SYNC_LOG_ARCH);
@@ -730,6 +733,7 @@ Latches *LatchDebug::check_order(const latch_t *latch,
     case SYNC_LOG_WRITE_NOTIFIER:
     case SYNC_LOG_FLUSH_NOTIFIER:
     case SYNC_LOG_LIMITS:
+    case SYNC_LOG_GOVERNOR_MUTEX:
     case SYNC_LOG_FILES:
     case SYNC_LOG_ARCH:
     case SYNC_PAGE_ARCH:
@@ -765,6 +769,7 @@ Latches *LatchDebug::check_order(const latch_t *latch,
     case SYNC_PARSER:
     case SYNC_DICT:
     case SYNC_AHI_ENABLED:
+    case SYNC_ALTER_STAGE:
 
       /* This is the most typical case, in which we expect requested<held. */
       assert_requested_is_lower_than_held(level, latches);
@@ -1203,6 +1208,8 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
 
   LATCH_ADD_MUTEX(AHI_ENABLED, SYNC_AHI_ENABLED, ahi_enabled_mutex_key);
 
+  LATCH_ADD_MUTEX(ALTER_STAGE, SYNC_ALTER_STAGE, alter_stage_mutex_key);
+
   LATCH_ADD_MUTEX(AUTOINC, SYNC_DICT_AUTOINC_MUTEX, autoinc_mutex_key);
 
   LATCH_ADD_MUTEX(DDL_AUTOINC, SYNC_NO_ORDER_CHECK, ddl_autoinc_mutex_key);
@@ -1289,6 +1296,9 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
   LATCH_ADD_MUTEX(LOG_LIMITS, SYNC_LOG_LIMITS, log_limits_mutex_key);
 
   LATCH_ADD_MUTEX(LOG_FILES, SYNC_LOG_FILES, log_files_mutex_key);
+
+  LATCH_ADD_MUTEX(LOG_GOVERNOR_MUTEX, SYNC_LOG_GOVERNOR_MUTEX,
+                  log_governor_mutex_key);
 
   LATCH_ADD_RWLOCK(LOG_SN, SYNC_LOG_SN, log_sn_lock_key);
 

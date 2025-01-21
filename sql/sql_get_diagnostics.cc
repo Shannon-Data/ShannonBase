@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,6 +35,7 @@
 #include "sql/sp_rcontext.h"  // sp_rcontext
 #include "sql/sql_class.h"    // THD
 #include "sql/sql_error.h"    // Diagnostics_area
+#include "sql/sql_lex.h"      // LEX, Query_expression
 #include "sql/sql_list.h"     // List_iterator
 #include "sql_string.h"
 
@@ -64,6 +66,10 @@ bool Sql_cmd_get_diagnostics::execute(THD *thd) {
   Diagnostics_area *first_da = thd->get_stmt_da();
   const Diagnostics_area *second_da = thd->get_stacked_da();
   DBUG_TRACE;
+
+  // Set preparation and execution state for current statement:
+  if (!thd->lex->unit->is_prepared()) thd->lex->unit->set_prepared();
+  thd->lex->set_exec_started();
 
   /* Push new Diagnostics Area, execute statement and pop. */
   thd->push_diagnostics_area(&new_stmt_da);

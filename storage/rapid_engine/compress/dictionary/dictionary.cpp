@@ -66,9 +66,9 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
   }
 
   std::scoped_lock lk(m_content_mtx);
-  std::string orgin_str((char *)str, len);
+  std::string origin_str((char *)str, len);
   Compress_algorithm *algr = CompressFactory::get_instance(alg);
-  std::string compressed_str(algr->compressString(orgin_str));
+  std::string compressed_str(algr->compressString(origin_str));
   {
     auto content_pos = m_content.find(compressed_str);
     // found it, then return it.
@@ -79,7 +79,7 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
     // compressed string <---> str id. get a copy of string and store it in map.
     m_content.emplace(compressed_str, id);
 
-    // id<---> orginal string
+    // id<---> original string
     ut_a(m_id2content.find(id) == m_id2content.end());
     m_id2content.emplace(id, compressed_str);
 

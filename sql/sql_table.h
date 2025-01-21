@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -123,12 +124,28 @@ bool mysql_discard_or_import_tablespace(THD *thd, Table_ref *table_list);
 */
 class Foreign_key_parents_invalidator {
  private:
-  typedef std::map<std::pair<dd::String_type, dd::String_type>, handlerton *>
+  enum enum_invalidation_type {
+    INVALIDATE_AND_CLOSE_TABLE,
+    INVALIDATE_AND_MARK_FOR_REOPEN
+  };
+  typedef std::map<std::pair<dd::String_type, dd::String_type>,
+                   std::pair<handlerton *, enum_invalidation_type>>
       Parent_map;
   Parent_map m_parent_map;
 
  public:
-  void add(const char *db_name, const char *table_name, handlerton *hton);
+  void add(
+      const char *db_name, const char *table_name, handlerton *hton,
+      enum_invalidation_type invalidation_type = INVALIDATE_AND_CLOSE_TABLE);
+  // Usually tables added to a Foreign_key_parents_invalidator instance are
+  // closed by the invalidate member function.  However, occasionally tables
+  // are added that we subsequently discover should only be invalidated and
+  // not closed by the invalidate member function as they will be closed
+  // elsewhere.
+  // See bool Query_result_create::send_eof(THD *thd) for an example.
+  // The mark_for_reopen_if_added member function updates the
+  // corresponding Parent_map entry if necessary in this situation.
+  void mark_for_reopen_if_added(const char *db_name, const char *table_name);
   void invalidate(THD *thd);
   const Parent_map &parents() const { return m_parent_map; }
   bool is_empty() const { return m_parent_map.empty(); }
@@ -390,6 +407,7 @@ bool collect_fk_names_for_new_fks(THD *thd, const char *db_name,
 
   @sa prepare_fk_parent_key(THD, handlerton, FOREIGN_KEY)
 
+  @param  thd                   Thread handle.
   @param  hton                  Handlerton for tables' storage engine.
   @param  parent_table_def      Object describing new version of parent table.
   @param  old_child_table_def   Object describing old version of child table.
@@ -406,7 +424,7 @@ bool collect_fk_names_for_new_fks(THD *thd, const char *db_name,
 
   @retval Operation result. False if success.
 */
-[[nodiscard]] bool prepare_fk_parent_key(handlerton *hton,
+[[nodiscard]] bool prepare_fk_parent_key(THD *thd, handlerton *hton,
                                          const dd::Table *parent_table_def,
                                          const dd::Table *old_parent_table_def,
                                          const dd::Table *old_child_table_def,
@@ -643,4 +661,8 @@ bool lock_check_constraint_names_for_rename(THD *thd, const char *db,
 bool prepare_check_constraints_for_create(THD *thd, const char *db_name,
                                           const char *table_name,
                                           Alter_info *alter_info);
+
+extern std::atomic_ulong deprecated_use_fk_on_non_standard_key_count;
+extern std::atomic_ullong deprecated_use_fk_on_non_standard_key_last_timestamp;
+
 #endif /* SQL_TABLE_INCLUDED */

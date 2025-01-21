@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+Copyright (c) 2012, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -1113,7 +1114,7 @@ dberr_t row_import::match_index_columns(THD *thd, const dict_index_t *index)
     ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
             "Index %s not found in tablespace meta-data file.", index->name());
 
-    return (DB_ERROR);
+    return DB_ERROR;
   }
 
   if (cfg_index->m_n_fields != index->n_fields) {
@@ -1122,10 +1123,19 @@ dberr_t row_import::match_index_columns(THD *thd, const dict_index_t *index)
             " tablespace metadata file value %lu",
             (ulong)index->n_fields, (ulong)cfg_index->m_n_fields);
 
-    return (DB_ERROR);
+    return DB_ERROR;
   }
 
   cfg_index->m_srv_index = index;
+
+  if (cfg_index->m_n_nullable != index->n_nullable) {
+    ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+            "Index %s's nullability of %u doesn't match tablespace metadata "
+            "file value of " ULINTPF,
+            index->name(), index->n_nullable, cfg_index->m_n_nullable);
+
+    return DB_ERROR;
+  }
 
   const dict_field_t *field = index->fields;
   const dict_field_t *cfg_field = cfg_index->m_fields;
@@ -1174,7 +1184,7 @@ dberr_t row_import::match_index_columns(THD *thd, const dict_index_t *index)
     }
   }
 
-  return (err);
+  return err;
 }
 
 /** Check if the column default values of table schema that was
@@ -3740,8 +3750,7 @@ dict_col_t structure, along with the column name.
 
     ulint len = mach_read_from_4(ptr);
 
-    /* FIXME: What is the maximum column name length? */
-    if (len == 0 || len > 128) {
+    if (len == 0 || len > NAME_CHAR_LEN * system_charset_info->mbmaxlen) {
       std::ostringstream msg;
       msg << "Column name length " << len << ", is invalid";
 
@@ -4307,9 +4316,8 @@ help to detect the missing .cfg file for a table with instant added columns.
 @return DB_SUCCESS or error code. */
 dberr_t row_import_check_corruption(dict_table_t *table, THD *thd,
                                     bool missing) {
-  dberr_t err = DB_SUCCESS;
-  if (!btr_validate_index(table->first_index(), nullptr, false)) {
-    err = DB_CORRUPTION;
+  dict_index_t *clust_index = table->first_index();
+  if (!btr_validate_index(clust_index, nullptr, true)) {
     if (missing) {
       ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
               "Clustered index validation failed. Because"
@@ -4321,9 +4329,22 @@ dberr_t row_import_check_corruption(dict_table_t *table, THD *thd,
               "Clustered index validation failed, due to"
               " data file corruption.");
     }
+    return DB_CORRUPTION;
   }
 
-  return (err);
+  /* Check secondary indexes for corruption. If an index is found corrupt, mark
+  it but allow IMPORT to continue as the corrupt index can be recreated from the
+  clustered index. Any FTS index is already marked corrupt and skipped. */
+  for (dict_index_t *index = clust_index->next(); index != nullptr;
+       index = index->next()) {
+    if (!index->is_corrupted() && !btr_validate_index(index, nullptr, true)) {
+      ib_errf(thd, IB_LOG_LEVEL_WARN, ER_INNODB_INDEX_CORRUPT,
+              "Index '%s' is found to be corrupt and should be recreated.",
+              index->name());
+      dict_set_corrupted(index);
+    }
+  }
+  return DB_SUCCESS;
 }
 
 /** Imports a tablespace. The space id in the .ibd file must match the space id

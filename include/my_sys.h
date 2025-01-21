@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -69,6 +70,7 @@
 #include "mysql/components/services/bits/psi_bits.h"
 #include "mysql/components/services/bits/psi_file_bits.h"
 #include "mysql/components/services/bits/psi_memory_bits.h"
+#include "mysql/components/services/bits/psi_metric_bits.h"
 #include "mysql/components/services/bits/psi_stage_bits.h"
 #include "sql/stream_cipher.h"
 #include "string_with_len.h"
@@ -85,6 +87,7 @@ struct PSI_file_bootstrap;
 struct PSI_idle_bootstrap;
 struct PSI_mdl_bootstrap;
 struct PSI_memory_bootstrap;
+struct PSI_metric_bootstrap;
 struct PSI_mutex_bootstrap;
 struct PSI_rwlock_bootstrap;
 struct PSI_socket_bootstrap;
@@ -496,6 +499,7 @@ inline bool my_b_inited(const IO_CACHE *info) {
 constexpr int my_b_EOF = INT_MIN;
 
 inline int my_b_read(IO_CACHE *info, uchar *buffer, size_t count) {
+  assert(info->type != WRITE_CACHE);
   if (info->read_pos + count <= info->read_end) {
     memcpy(buffer, info->read_pos, count);
     info->read_pos += count;
@@ -505,6 +509,7 @@ inline int my_b_read(IO_CACHE *info, uchar *buffer, size_t count) {
 }
 
 inline int my_b_write(IO_CACHE *info, const uchar *buffer, size_t count) {
+  assert(info->type != READ_CACHE);
   if (info->write_pos + count <= info->write_end) {
     memcpy(info->write_pos, buffer, count);
     info->write_pos += count;
@@ -894,7 +899,7 @@ extern bool resolve_collation(const char *cl_name,
                               const CHARSET_INFO *default_cl,
                               const CHARSET_INFO **cl);
 extern char *get_charsets_dir(char *buf);
-extern bool init_compiled_charsets(myf flags);
+
 extern size_t escape_string_for_mysql(const CHARSET_INFO *charset_info,
                                       char *to, size_t to_length,
                                       const char *from, size_t length);
@@ -948,6 +953,8 @@ extern void set_psi_mdl_service(void *psi);
 extern MYSQL_PLUGIN_IMPORT PSI_memory_bootstrap *psi_memory_hook;
 extern void set_psi_memory_service(void *psi);
 extern MYSQL_PLUGIN_IMPORT PSI_mutex_bootstrap *psi_mutex_hook;
+extern void set_psi_metric_service(void *psi);
+extern MYSQL_PLUGIN_IMPORT PSI_metric_bootstrap *psi_metric_hook;
 extern void set_psi_mutex_service(void *psi);
 extern MYSQL_PLUGIN_IMPORT PSI_rwlock_bootstrap *psi_rwlock_hook;
 extern void set_psi_rwlock_service(void *psi);
@@ -968,6 +975,13 @@ extern void set_psi_transaction_service(void *psi);
 extern MYSQL_PLUGIN_IMPORT PSI_tls_channel_bootstrap *psi_tls_channel_hook;
 extern void set_psi_tls_channel_service(void *psi);
 #endif /* HAVE_PSI_INTERFACE */
+
+/* Total physical memory available */
+[[nodiscard]] extern unsigned long long my_physical_memory();
+
+/* Compares versions and determine if clone is allowed */
+[[nodiscard]] extern bool are_versions_clone_compatible(std::string ver1,
+                                                        std::string ver2);
 
 /**
   @} (end of group MYSYS)

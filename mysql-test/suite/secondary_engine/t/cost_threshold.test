@@ -2,7 +2,9 @@
 --echo # Test cases for the secondary_engine_cost_threshold variable.
 --echo #
 
-set rapid_use_dynamic_offload=0;
+--disable_query_log
+--eval INSTALL PLUGIN mock SONAME '$MOCK_PLUGIN'
+--enable_query_log
 
 # Remember the original threshold and restore it at the end of the test.
 SELECT @@secondary_engine_cost_threshold,
@@ -28,7 +30,7 @@ ANALYZE TABLE t1;
 # Some queries with different costs.
 let $q1 = SELECT * FROM t1;
 let $q2 = SELECT (SELECT y FROM t1 WHERE x = 1);
-let $q3 = SELECT * FROM v1 ORDER BY x1,x2,x3,x4,x5,x6,x7,x8,x9,x10,x11,x12,x13;
+let $q3 = SELECT * FROM v1;
 let $q4 = SELECT * FROM t1 WHERE x = (SELECT COUNT(*) FROM v1);
 let $q5 = SELECT * FROM t1 tt WHERE x = (SELECT SUM(x) FROM t1);
 
@@ -50,7 +52,7 @@ let $q5 = SELECT * FROM t1 tt WHERE x = (SELECT SUM(x) FROM t1);
 #--eval EXPLAIN $q5
 #SHOW STATUS LIKE 'Last_query_cost';
 
-ALTER TABLE t1 SECONDARY_ENGINE RAPID;
+ALTER TABLE t1 SECONDARY_ENGINE MOCK;
 ALTER TABLE t1 SECONDARY_LOAD;
 ANALYZE TABLE t1;
 
@@ -151,3 +153,4 @@ SET @@secondary_engine_cost_threshold = @saved_threshold;
 SELECT @@secondary_engine_cost_threshold,
        @@global.secondary_engine_cost_threshold;
 
+UNINSTALL PLUGIN mock;

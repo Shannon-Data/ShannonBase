@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -73,11 +74,10 @@
 #include "sql/dd/string_type.h"
 #include "sql/dd/types/abstract_table.h"
 #include "sql/dd/types/schema.h"
-#include "sql/dd/upgrade_57/upgrade.h"  // dd::upgrade::in_progress
-#include "sql/debug_sync.h"             // DEBUG_SYNC
-#include "sql/derror.h"                 // ER_THD
-#include "sql/error_handler.h"          // Drop_table_error_handler
-#include "sql/events.h"                 // Events
+#include "sql/debug_sync.h"     // DEBUG_SYNC
+#include "sql/derror.h"         // ER_THD
+#include "sql/error_handler.h"  // Drop_table_error_handler
+#include "sql/events.h"         // Events
 #include "sql/handler.h"
 #include "sql/lock.h"       // lock_schema_name
 #include "sql/log.h"        // log_*()
@@ -420,8 +420,7 @@ bool mysql_create_db(THD *thd, const char *db, HA_CREATE_INFO *create_info) {
   MY_STAT stat_info;
   const bool schema_dir_exists =
       (mysql_file_stat(key_file_misc, path, &stat_info, MYF(0)) != nullptr);
-  if (thd->is_dd_system_thread() &&
-      (!opt_initialize || dd::upgrade_57::in_progress()) &&
+  if (thd->is_dd_system_thread() && !opt_initialize &&
       dd::get_dictionary()->is_dd_schema_name(db)) {
     /*
       CREATE SCHEMA statement is being executed from bootstrap thread.
@@ -913,7 +912,7 @@ bool mysql_rm_db(THD *thd, const LEX_CSTRING &db, bool if_exists) {
         if (thd->variables.gtid_next.type == ASSIGNED_GTID &&
             dropped_non_atomic) {
           char gtid_buf[Gtid::MAX_TEXT_LENGTH + 1];
-          thd->variables.gtid_next.gtid.to_string(global_sid_map, gtid_buf,
+          thd->variables.gtid_next.gtid.to_string(global_tsid_map, gtid_buf,
                                                   true);
           my_error(ER_CANNOT_LOG_PARTIAL_DROP_DATABASE_WITH_GTID, MYF(0), path,
                    gtid_buf, db.str);
@@ -1436,14 +1435,14 @@ bool mysql_change_db(THD *thd, const LEX_CSTRING &new_db_name,
   DBUG_PRINT("info", ("Use database: %s", new_db_file_name.str));
 
   if (sctx->get_active_roles()->size() == 0) {
-    db_access =
-        sctx->check_access(DB_OP_ACLS, new_db_file_name.str)
-            ? DB_OP_ACLS
-            : acl_get(thd, sctx->host().str, sctx->ip().str,
-                      sctx->priv_user().str, new_db_file_name.str, false) |
-                  sctx->master_access(new_db_file_name.str);
+    db_access = sctx->check_access(DB_OP_ACLS, new_db_file_name.str)
+                    ? DB_OP_ACLS
+                    : sctx->check_db_level_access(thd, new_db_file_name.str,
+                                                  new_db_file_name.length) |
+                          sctx->master_access(new_db_file_name.str);
   } else {
-    db_access = sctx->db_acl(new_db_file_name_cstr) |
+    db_access = sctx->check_db_level_access(thd, new_db_file_name.str,
+                                            new_db_file_name.length) |
                 sctx->master_access(new_db_file_name.str);
   }
 

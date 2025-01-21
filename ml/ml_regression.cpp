@@ -58,7 +58,7 @@ int ML_regression::train() {
   if (!share) {
     std::ostringstream err;
     err << m_sch_name.c_str() << "." << m_table_name.c_str() << " NOT loaded into rapid engine.";
-    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 

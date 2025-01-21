@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,8 +21,6 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
 #include "sql/sql_class.h"
@@ -38,6 +37,7 @@
 #include "mutex_lock.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
+#include "my_rnd.h"
 #include "my_systime.h"
 #include "my_thread.h"
 #include "my_time.h"
@@ -75,13 +75,14 @@
 #include "sql/handler.h"
 #include "sql/item.h"
 #include "sql/item_func.h"        // user_var_entry
+#include "sql/join_optimizer/access_path.h"    // Access_path
 #include "sql/lock.h"             // mysql_lock_abort_for_thread
 #include "sql/locking_service.h"  // release_all_locking_service_locks
 #include "sql/log_event.h"
-#include "sql/sql_optimizer.h"    // JOIN
 #include "sql/mdl_context_backup.h"  // MDL context backup for XA
 #include "sql/mysqld.h"              // global_system_variables ...
 #include "sql/mysqld_thd_manager.h"  // Global_THD_manager
+#include "sql/sql_optimizer.h"      // optimize_table
 #include "sql/parse_location.h"
 #include "sql/protocol.h"
 #include "sql/protocol_classic.h"
@@ -116,11 +117,9 @@
 #include "sql/xa/transaction_cache.h"            // xa::Transaction_cache
 #include "storage/perfschema/pfs_instr_class.h"  // PFS_CLASS_STAGE
 #include "storage/perfschema/terminology_use_previous.h"
-#include "storage/rapid_engine/populate/populate.h"
 #include "string_with_len.h"
 #include "template_utils.h"
 #include "thr_mutex.h"
-#include "join_optimizer/access_path.h"
 
 class Parse_tree_root;
 
@@ -619,16 +618,6 @@ void Open_tables_state::set_open_tables_state(Open_tables_state *state) {
   this->m_reprepare_observers = state->m_reprepare_observers;
 }
 
-void Open_tables_state::reset_open_tables_state() {
-  open_tables = nullptr;
-  temporary_tables = nullptr;
-  lock = nullptr;
-  extra_lock = nullptr;
-  locked_tables_mode = LTM_NONE;
-  state_flags = 0U;
-  reset_reprepare_observers();
-}
-
 //To cache all info need by secondary engine at RapidPrepareEstimateQueryCosts stage.
 void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN* join) {
   m_primary_cost = thd->m_current_query_cost;
@@ -639,7 +628,7 @@ void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN*
   m_complex_query =
     (thd->lex->sql_command == SQLCOM_SELECT && m_count_all_base_tables >= 3) ? true : false;
 
-  if(thd->lex->using_hypergraph_optimizer) {
+  if(thd->lex->using_hypergraph_optimizer()) {
 
   } else {
     for (size_t i = join->const_tables; i < join->tables; ++i) {
@@ -661,6 +650,16 @@ void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN*
   auto root_access_path = thd->lex->unit->root_access_path();
   assert (root_access_path);
   m_are_all_ts_index_ref = (m_count_ref_index_ts == m_count_all_base_tables) ? true : false;
+}
+
+void Open_tables_state::reset_open_tables_state() {
+  open_tables = nullptr;
+  temporary_tables = nullptr;
+  lock = nullptr;
+  extra_lock = nullptr;
+  locked_tables_mode = LTM_NONE;
+  state_flags = 0U;
+  reset_reprepare_observers();
 }
 
 THD::THD(bool enable_plugins)
@@ -739,8 +738,9 @@ THD::THD(bool enable_plugins)
       m_enable_plugins(enable_plugins),
       m_audited(true),
 #ifdef HAVE_GTID_NEXT_LIST
-      owned_gtid_set(global_sid_map),
+      owned_gtid_set(global_tsid_map),
 #endif
+      rpl_thd_ctx(key_memory_rpl_thd_context),
       skip_gtid_rollback(false),
       is_commit_in_middle_of_statement(false),
       has_gtid_consistency_violation(false),
@@ -760,6 +760,7 @@ THD::THD(bool enable_plugins)
       external_store_(),
       events_cache_(nullptr),
       audit_plugins_present(false) {
+  has_incremented_gtid_automatic_count = false;
   main_lex->reset();
   set_psi(nullptr);
   mdl_context.init(this);
@@ -859,6 +860,7 @@ THD::THD(bool enable_plugins)
   protocol_text->init(this);
   protocol_binary->init(this);
   protocol_text->set_client_capabilities(0);  // minimalistic client
+  m_cached_is_connection_alive.store(m_protocol->connection_alive());
 
   /*
     Make sure thr_lock_info_init() is called for threads which do not get
@@ -1167,7 +1169,7 @@ void THD::init(void) {
   session_tracker.enable(this);
 
   owned_gtid.clear();
-  owned_sid.clear();
+  owned_tsid.clear();
   m_se_gtid_flags.reset();
   owned_gtid.dbug_print(nullptr, "set owned_gtid (clear) in THD::init");
 
@@ -1474,7 +1476,11 @@ THD::~THD() {
   DBUG_TRACE;
   DBUG_PRINT("info", ("THD dtor, this %p", this));
 
-assert(m_secondary_engine_statement_context == nullptr);
+  assert(m_secondary_engine_statement_context == nullptr);
+
+  if (has_incremented_gtid_automatic_count) {
+    gtid_state->decrease_gtid_automatic_tagged_count();
+  }
 
   if (!release_resources_done()) release_resources();
 
@@ -1773,7 +1779,7 @@ void THD::store_globals() {
 */
 void THD::restore_globals() {
   // Remove reference to specific OS thread.
-  real_id = 0;
+  real_id = null_thread_initializer;
   /*
     Assert that thread_stack is initialized: it's necessary to be able
     to track stack overrun.
@@ -2068,7 +2074,7 @@ void Query_arena::add_item(Item *item) {
   m_item_list = item;
 }
 
-void Query_arena::free_items(bool parallel_exec MY_ATTRIBUTE((unused))) {
+void Query_arena::free_items() {
   Item *next;
   DBUG_TRACE;
   /* This works because items are allocated with (*THR_MALLOC)->Alloc() */
@@ -3045,8 +3051,7 @@ bool THD::is_current_stmt_binlog_enabled_and_caches_empty() const {
 }
 
 bool THD::is_current_stmt_binlog_row_enabled_with_write_set_extraction() const {
-  return ((variables.transaction_write_set_extraction != HASH_ALGORITHM_OFF) &&
-          is_current_stmt_binlog_format_row() &&
+  return (is_current_stmt_binlog_format_row() &&
           !is_current_stmt_binlog_disabled());
 }
 
@@ -3162,8 +3167,6 @@ bool THD::is_secondary_storage_engine_eligible() const {
   if ((in_multi_stmt_transaction_mode() &&
        lex->sql_command != SQLCOM_CREATE_TABLE))
     return false;
-  //  It is a sub-statement of a stored procedure
-  if (sp_runtime_ctx != nullptr) return false;
   return true;
 }
 
@@ -3207,13 +3210,22 @@ bool THD::is_classic_protocol() const {
          get_protocol()->type() == Protocol::PROTOCOL_TEXT;
 }
 
-bool THD::is_connected() {
+bool THD::is_connected(bool use_cached_connection_alive) {
   /*
     All system threads (e.g., the slave IO thread) are connected but
     not using vio. So this function always returns true for all
     system threads.
   */
   if (system_thread) return true;
+
+  /*
+    In some situations, e.g. when generating information_schema.processlist,
+    we can live with a cached value to avoid introducing mutex usage.
+  */
+  if (use_cached_connection_alive) {
+    DEBUG_SYNC(current_thd, "wait_before_checking_alive");
+    return m_cached_is_connection_alive.load();
+  }
 
   if (is_classic_protocol())
     return get_protocol()->connection_alive() &&
@@ -3222,17 +3234,30 @@ bool THD::is_connected() {
   return get_protocol()->connection_alive();
 }
 
+Protocol *THD::get_protocol() {
+  m_cached_is_connection_alive.store(m_protocol->connection_alive());
+  return m_protocol;
+}
+
+Protocol_classic *THD::get_protocol_classic() {
+  assert(is_classic_protocol());
+  m_cached_is_connection_alive.store(m_protocol->connection_alive());
+  return pointer_cast<Protocol_classic *>(m_protocol);
+}
+
 void THD::push_protocol(Protocol *protocol) {
   assert(m_protocol != nullptr);
   assert(protocol != nullptr);
   m_protocol->push_protocol(protocol);
   m_protocol = protocol;
+  m_cached_is_connection_alive.store(m_protocol->connection_alive());
 }
 
 void THD::pop_protocol() {
   assert(m_protocol != nullptr);
   m_protocol = m_protocol->pop_protocol();
   assert(m_protocol != nullptr);
+  m_cached_is_connection_alive.store(m_protocol->connection_alive());
 }
 
 void THD::set_time() {
@@ -3666,6 +3691,11 @@ void Transactional_ddl_context::init(dd::String_type db,
                                      dd::String_type tablename,
                                      const handlerton *hton) {
   assert(m_hton == nullptr);
+  /*
+    Currently, Transactional_ddl_context is used only for CREATE TABLE ... START
+    TRANSACTION statement.
+  */
+  assert(m_thd->lex->sql_command == SQLCOM_CREATE_TABLE);
   m_db = db;
   m_tablename = tablename;
   m_hton = hton;
@@ -3677,7 +3707,15 @@ void Transactional_ddl_context::init(dd::String_type db,
 */
 void Transactional_ddl_context::rollback() {
   if (!inited()) return;
+  /*
+    Since the transaction is being rolledback, We need to unlock and close the
+    table belonging to this transaction.
+  */
+  if (m_thd->lock) mysql_unlock_tables(m_thd, m_thd->lock);
+  m_thd->lock = nullptr;
+  if (m_thd->open_tables) close_thread_table(m_thd, &m_thd->open_tables);
   table_cache_manager.lock_all_and_tdc();
+
   TABLE_SHARE *share =
       get_cached_table_share(m_db.c_str(), m_tablename.c_str());
   if (share) {
@@ -3721,5 +3759,18 @@ void my_eof(THD *thd) {
   if (thd->variables.session_track_transaction_info > TX_TRACK_NONE) {
     TX_TRACKER_GET(tst);
     tst->add_trx_state(thd, TX_RESULT_SET);
+  }
+}
+
+void THD::init_cost_model() {
+  m_cost_model.init(Optimizer::kOriginal);
+  m_cost_model_hypergraph.init(Optimizer::kHypergraph);
+}
+
+const Cost_model_server *THD::cost_model() const {
+  if (lex->using_hypergraph_optimizer()) {
+    return &m_cost_model_hypergraph;
+  } else {
+    return &m_cost_model;
   }
 }

@@ -36,6 +36,9 @@ namespace Optimizer {
 
 class Rapid_SE_cost_constants : public SE_cost_constants {
  public:
+  Rapid_SE_cost_constants() : SE_cost_constants(::Optimizer::kHypergraph) {}
+  virtual ~Rapid_SE_cost_constants() = default;
+
   cost_constant_error rapid_update_func(const LEX_CSTRING &name, const double value) { return update(name, value); }
 
   cost_constant_error rapid_update_default_func(const LEX_CSTRING &name, const double value) {
@@ -55,7 +58,7 @@ class Rapid_Cost_model_server : public Cost_model_server {
  public:
   Rapid_Cost_model_server() {
     // Create default values for server cost constants
-    m_server_cost_constants = new Server_cost_constants();
+    m_server_cost_constants = new Server_cost_constants(::Optimizer::kHypergraph);
 #if !defined(NDEBUG)
     m_initialized = true;
 #endif

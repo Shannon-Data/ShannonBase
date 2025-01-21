@@ -14,12 +14,12 @@ USE rpd_load_test;
 CREATE TABLE t1 (score int, name char(10), id int primary key, gender char(1)) SECONDARY_ENGINE RAPID;
 
 #not loaded
---error ER_SECONDARY_ENGINE_LOAD
+--error ER_SECONDARY_ENGINE_DDL
 ALTER TABLE t1 secondary_unload;
 ALTER TABLE t1 secondary_load;
 
 #existed already
---error ER_SECONDARY_ENGINE_LOAD
+--error ER_SECONDARY_ENGINE_DDL
 ALTER TABLE t1 secondary_load;
 
 SELECT TABLE_SCHEMA, TABLE_NAME, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES 

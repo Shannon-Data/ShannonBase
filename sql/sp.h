@@ -1,15 +1,16 @@
-/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,15 +19,14 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #ifndef _SP_H_
 #define _SP_H_
 
 #include <assert.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 #include <string>
@@ -59,7 +59,7 @@ class sp_cache;
 struct TABLE;
 class Table_ref;
 
-typedef ulonglong sql_mode_t;
+using sql_mode_t = uint64_t;
 template <typename T>
 class SQL_I_List;
 
@@ -136,14 +136,6 @@ enum {
   MYSQL_PROC_FIELD_COUNT
 };
 
-/** which language the stored procedure is. */
-enum class enum_sp_language{
-  NONE = 0,
-  SQL,
-  JAVASCRIPT,
-  R
-};
-
 /*************************************************************************/
 
 /**
@@ -211,7 +203,7 @@ bool sp_show_create_routine(THD *thd, enum_sp_type type, sp_name *name);
 
 enum_sp_return_code db_load_routine(
     THD *thd, enum_sp_type type, const char *sp_db, size_t sp_db_len,
-    const char *ssp_name, size_t ssp_name_len, sp_head **sphp,
+    const char *sp_name, size_t sp_name_len, sp_head **sphp,
     sql_mode_t sql_mode, const char *params, const char *returns,
     const char *body, st_sp_chistics *chistics, const char *definer_user,
     const char *definer_host, longlong created, longlong modified,
@@ -408,8 +400,6 @@ void sp_finish_parsing(THD *thd);
 
 ///////////////////////////////////////////////////////////////////////////
 
-Item_result sp_map_result_type(enum enum_field_types type);
-Item::Type sp_map_item_type(enum enum_field_types type);
 uint sp_get_flags_for_command(LEX *lex);
 
 bool sp_check_name(LEX_STRING *ident);
@@ -417,9 +407,10 @@ bool sp_check_name(LEX_STRING *ident);
 Table_ref *sp_add_to_query_tables(THD *thd, LEX *lex, const char *db,
                                   const char *name);
 
-Item *sp_prepare_func_item(THD *thd, Item **it_addr);
+Item *sp_prepare_func_item(THD *thd, bool standalone, Item **it_addr);
 
-bool sp_eval_expr(THD *thd, Field *result_field, Item **expr_item_ptr);
+bool sp_eval_expr(THD *thd, bool standalone, Field *result_field,
+                  Item **expr_item_ptr);
 
 String *sp_get_item_value(THD *thd, Item *item, String *str);
 

@@ -1,15 +1,16 @@
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
-   
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.*/
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /*
   This file is a container for general functionality related
@@ -509,13 +508,6 @@ static bool set_up_field_array(TABLE *table, bool is_sub_part) {
             A BLOB takes too long time to evaluate so we don't want it for
             performance reasons.
         */
-
-        if (field->real_type() == MYSQL_TYPE_VECTOR) {
-          /* vector column as partition key is not supported */
-          my_error(ER_FIELD_TYPE_NOT_ALLOWED_AS_PARTITION_FIELD, MYF(0),
-                   field->field_name);
-          result = true;
-        }
 
         if (field->is_flag_set(BLOB_FLAG)) {
           my_error(ER_BLOB_FIELD_IN_PART_FUNC_ERROR, MYF(0));
@@ -1486,7 +1478,7 @@ bool fix_partition_func(THD *thd, TABLE *table, bool is_create_table_ind) {
   partition_info *part_info = table->part_info;
   const enum_mark_columns save_mark_used_columns = thd->mark_used_columns;
   Partition_handler *part_handler;
-  const ulong save_want_privilege = thd->want_privilege;
+  const Access_bitmask save_want_privilege = thd->want_privilege;
   DBUG_TRACE;
 
   if (part_info->fixed) {
@@ -1956,13 +1948,6 @@ static int check_part_field(enum_field_types sql_type, const char *field_name,
     my_error(ER_BLOB_FIELD_IN_PART_FUNC_ERROR, MYF(0));
     return true;
   }
-  if (sql_type == MYSQL_TYPE_VECTOR) {
-    /* vector column as partition key is not supported */
-    /* LCOV_EXCL_START */
-    my_error(ER_FIELD_TYPE_NOT_ALLOWED_AS_PARTITION_FIELD, MYF(0), field_name);
-    return true;
-    /* LCOV_EXCL_STOP */
-  }  
   switch (sql_type) {
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT:
@@ -2517,8 +2502,8 @@ bool partition_key_modified(TABLE *table, const MY_BITMAP *fields) {
 
 static inline int part_val_int(Item *item_expr, longlong *result) {
   *result = item_expr->val_int();
+  if (current_thd->is_error()) return true;
   if (item_expr->null_value) {
-    if (current_thd->is_error()) return true;
     *result = LLONG_MIN;
   }
   return false;
@@ -5244,8 +5229,6 @@ void append_row_to_str(String &str, const uchar *row, TABLE *table) {
   if (!fields) return;
   fields[num_fields] = nullptr;
   for (field_ptr = table->field; *field_ptr; field_ptr++) {
-    //skip ghost column.
-    if ((*field_ptr)->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     if (!bitmap_is_set(table->read_set, (*field_ptr)->field_index())) continue;
     fields[curr_field_index++] = *field_ptr;
   }
@@ -5254,8 +5237,6 @@ void append_row_to_str(String &str, const uchar *row, TABLE *table) {
 
   for (field_ptr = fields; *field_ptr; field_ptr++) {
     Field *field = *field_ptr;
-    //skip ghost column.
-    if (field->type() == MYSQL_TYPE_DB_TRX_ID) continue;
     str.append(" ");
     str.append(field->field_name);
     str.append(":");

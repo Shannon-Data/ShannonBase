@@ -2,18 +2,19 @@
 #define HANDLER_INCLUDED
 
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,8 +24,6 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
 /* Definitions for parameters to do with handler-routines */
@@ -38,13 +37,14 @@
 #include <bitset>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <random>  // std::mt19937
 #include <set>
 #include <string>
 #include <string_view>
-#include <thread>
 
+#include <mysql/components/services/bulk_data_service.h>
 #include <mysql/components/services/page_track_service.h>
 #include "ft_global.h"  // ft_hints
 #include "lex_string.h"
@@ -671,7 +671,7 @@ enum legacy_db_type {
   DB_TYPE_SOLID,
   DB_TYPE_PBXT,
   DB_TYPE_TABLE_FUNCTION,
-  DB_TYPE_MEMCACHE,
+  DB_TYPE_MEMCACHE [[deprecated]],
   DB_TYPE_FALCON,
   DB_TYPE_MARIA,
   /** Performance schema engine. */
@@ -699,7 +699,8 @@ enum enum_binlog_func {
   BFN_RESET_SLAVE = 2,
   BFN_BINLOG_WAIT = 3,
   BFN_BINLOG_END = 4,
-  BFN_BINLOG_PURGE_FILE = 5
+  BFN_BINLOG_PURGE_FILE = 5,
+  BFN_BINLOG_PURGE_WAIT = 6
 };
 
 enum enum_binlog_command {
@@ -929,7 +930,6 @@ enum enum_schema_tables : int {
   SCH_PROCESSLIST,
   SCH_PROFILES,
   SCH_SCHEMA_PRIVILEGES,
-  SCH_TABLESPACES,
   SCH_TABLE_PRIVILEGES,
   SCH_USER_PRIVILEGES,
   SCH_TMP_TABLE_COLUMNS,
@@ -1315,7 +1315,7 @@ class Xa_state_list {
       the ability, for now, to set the transaction state to those values.
 
     @param xid The XID to be added (the key).
-    @param xid The state to be added (the value).
+    @param state The state to be added (the value).
 
     @return The current value of the transaction state if the XID has
             already been added, Ha_recover_states::NOT_FOUND otherwise.
@@ -1357,6 +1357,13 @@ typedef void (*kill_connection_t)(handlerton *hton, THD *thd);
   the data dictionary, before the main shutdown.
 */
 typedef void (*pre_dd_shutdown_t)(handlerton *hton);
+
+/**
+  Some plugin session variables may require some special handling
+  upon clean up. Reset appropriately these variables before
+  ending the THD connection
+*/
+typedef void (*reset_plugin_vars_t)(THD *thd);
 
 /**
   sv points to a storage area, that was earlier passed
@@ -1693,7 +1700,7 @@ typedef int (*table_exists_in_engine_t)(handlerton *hton, THD *thd,
     0     on success
     error otherwise
 */
-using push_to_engine_t = int (*)(THD *thd, AccessPath *query, JOIN *);
+using push_to_engine_t = int (*)(THD *thd, AccessPath *query, JOIN *join);
 
 /**
   Check if the given db.tablename is a system table for this SE.
@@ -1866,10 +1873,8 @@ typedef void (*replace_native_transaction_in_thd_t)(THD *thd, void *new_trx_arg,
 
 /** Mode for initializing the data dictionary. */
 enum dict_init_mode_t {
-  DICT_INIT_CREATE_FILES,      ///< Create all required SE files
-  DICT_INIT_CHECK_FILES,       ///< Verify existence of expected files
-  DICT_INIT_UPGRADE_57_FILES,  ///< Used for upgrade from mysql-5.7
-  DICT_INIT_IGNORE_FILES       ///< Don't care about files at all
+  DICT_INIT_CREATE_FILES,  ///< Create all required SE files
+  DICT_INIT_CHECK_FILES    ///< Verify existence of expected files
 };
 
 /**
@@ -2053,10 +2058,10 @@ typedef bool (*notify_alter_table_t)(THD *thd, const MDL_key *mdl_key,
                             or was RENAMEd.
   @param notification_type  Indicates whether this is pre-RENAME TABLE or
                             post-RENAME TABLE notification.
-  @param old_db_name
-  @param old_table_name
-  @param new_db_name
-  @param new_table_name
+  @param old_db_name        old db name
+  @param old_table_name     old table name
+  @param new_db_name        new db name
+  @param new_table_name     new table name
 */
 typedef bool (*notify_rename_table_t)(THD *thd, const MDL_key *mdl_key,
                                       ha_notification_type notification_type,
@@ -2438,18 +2443,40 @@ using secondary_engine_modify_access_path_cost_t = bool (*)(
     THD *thd, const JoinHypergraph &hypergraph, AccessPath *access_path);
 
 /**
+  Checks whether the tables used in an explain query are loaded in the secondary
+  engine.
+  @param thd thread context.
+
+  @retval true if there is a table not loaded to the secondary engine, false
+  otherwise
+*/
+using external_engine_explain_check_t = bool (*)(THD *thd);
+
+/**
   Looks up and returns a specific secondary engine query offload or exec
   failure reason as a string given a thread context (representing the query)
   when the offloaded query fails in the secondary storage engine.
 
   @param thd thread context.
 
-  @retval const char * as the offload failure reason.
+  @retval std::string_view as the offload failure reason.
           The memory pointed to is managed by the handlerton and may be freed
           when the statement completes.
 */
 using get_secondary_engine_offload_or_exec_fail_reason_t =
-    const char *(*)(THD *thd);
+    std::string_view (*)(const THD *thd);
+
+/**
+  Finds and returns a specific secondary engine query offload failure reason
+  as a string given a thread context (representing the query) whenever
+  get_secondary_engine_offload_or_exec_fail_reason_t returns an empty reason.
+
+  @param thd thread context.
+
+  @retval std::string_view as the offload failure reason.
+*/
+using find_secondary_engine_offload_fail_reason_t =
+    std::string_view (*)(THD *thd);
 
 /**
   Sets a specific secondary engine offload failure reason for a query
@@ -2458,10 +2485,13 @@ using get_secondary_engine_offload_or_exec_fail_reason_t =
 
   @param thd thread context.
 
-  @param const char * as the offload failure reason.
+  @param reason offload failure reason.
+
+  @retval bool to indicate if the setting succeeded or failed
 */
-using set_secondary_engine_offload_fail_reason_t = void (*)(THD *thd,
-                                                            const char *);
+using set_secondary_engine_offload_fail_reason_t =
+    bool (*)(const THD *thd, std::string_view reason);
+
 enum class SecondaryEngineGraphSimplificationRequest {
   /** Continue optimization phase with current hypergraph. */
   kContinue = 0,
@@ -2569,11 +2599,6 @@ using notify_create_table_t = void (*)(struct HA_CREATE_INFO *create_info,
                                        const char *db, const char *table_name);
 
 /**
- * Notify plugins when a table is dropped.
- */
-using notify_drop_table_t = void (*)(Table_ref *tab);
-
-/**
   Secondary engine hook called after PRIMARY_TENTATIVELY optimization is
   complete, and decides if secondary engine optimization will be performed, and
   comparison of primary engine cost and secondary engine cost will determine
@@ -2585,6 +2610,12 @@ using notify_drop_table_t = void (*)(Table_ref *tab);
 
  */
 using secondary_engine_pre_prepare_hook_t = bool (*)(THD *thd);
+
+/**
+ * Notify plugins when a table is dropped.
+ */
+using notify_drop_table_t = void (*)(Table_ref *tab);
+
 /*
   Page Tracking : interfaces to handlerton functions which starts/stops page
   tracking, and purges/fetches page tracking information.
@@ -2738,6 +2769,7 @@ struct handlerton {
   close_connection_t close_connection;
   kill_connection_t kill_connection;
   pre_dd_shutdown_t pre_dd_shutdown;
+  reset_plugin_vars_t reset_plugin_vars;
   savepoint_set_t savepoint_set;
   savepoint_rollback_t savepoint_rollback;
   savepoint_rollback_can_release_mdl_t savepoint_rollback_can_release_mdl;
@@ -2909,6 +2941,12 @@ struct handlerton {
   /// does not support the hypergraph join optimizer.
   SecondaryEngineFlags secondary_engine_flags;
 
+  /// Pointer to a function that checks if the table is loaded in the
+  /// secondary engine in the case of an explain statement.
+  ///
+  /// @see external_engine_explain_check_t for function signature.
+  external_engine_explain_check_t external_engine_explain_check;
+
   /// Pointer to a function that evaluates the cost of executing an access path
   /// in a secondary storage engine.
   ///
@@ -2924,6 +2962,15 @@ struct handlerton {
   /// signature.
   get_secondary_engine_offload_or_exec_fail_reason_t
       get_secondary_engine_offload_or_exec_fail_reason;
+
+  /// Pointer to a function that finds and returns the query offload failure
+  /// reason as a string given a thread context (representing the query) when
+  /// get_secondary_engine_offload_or_exec_fail_reason returns an empty reason.
+  ///
+  /// @see find_secondary_engine_offload_fail_reason_t for function
+  /// signature.
+  find_secondary_engine_offload_fail_reason_t
+      find_secondary_engine_offload_fail_reason;
 
   /// Pointer to a function that sets the offload failure reason as a string
   /// for a thread context (representing the query) when the offloaded query
@@ -2950,6 +2997,7 @@ struct handlerton {
   se_before_rollback_t se_before_rollback;
 
   notify_after_select_t notify_after_select;
+
   notify_create_table_t notify_create_table;
   notify_drop_table_t notify_drop_table;
 
@@ -3045,6 +3093,16 @@ constexpr const decltype(
    a primary engine only.
  */
 #define HTON_SUPPORTS_EXTERNAL_SOURCE (1 << 21)
+
+constexpr const decltype(handlerton::flags) HTON_SUPPORTS_BULK_LOAD{1 << 22};
+
+/** Engine supports index distance scan. */
+inline constexpr const decltype(handlerton::flags) HTON_SUPPORTS_DISTANCE_SCAN{
+    1 << 23};
+
+/* Whether the engine supports being specified as a default storage engine */
+inline constexpr const decltype(handlerton::flags)
+    HTON_NO_DEFAULT_ENGINE_SUPPORT{1 << 24};
 
 inline bool secondary_engine_supports_ddl(const handlerton *hton) {
   assert(hton->flags & HTON_IS_SECONDARY_ENGINE);
@@ -3674,7 +3732,9 @@ class Alter_inplace_info {
         handler_trivial_ctx(0),
         unsupported_reason(nullptr) {}
 
-  ~Alter_inplace_info() { destroy(handler_ctx); }
+  ~Alter_inplace_info() {
+    if (handler_ctx != nullptr) ::destroy_at(handler_ctx);
+  }
 
   /**
     Used after check_if_supported_inplace_alter() to report
@@ -4133,9 +4193,7 @@ class Ft_hints {
 
      @return pointer to ft_hints struct
    */
-  struct ft_hints *get_hints() {
-    return &hints;
-  }
+  struct ft_hints *get_hints() { return &hints; }
 };
 
 /**
@@ -4552,7 +4610,7 @@ class handler {
     of the current range.
   */
   enum enum_range_scan_direction { RANGE_SCAN_ASC, RANGE_SCAN_DESC };
-  int get_key_comp_result() { return key_compare_result_on_equal; }
+
  private:
   Record_buffer *m_record_buffer = nullptr;  ///< Buffer for multi-row reads.
   /*
@@ -4639,7 +4697,7 @@ class handler {
   */
   PSI_table *m_psi;
 
-  std::mt19937 m_random_number_engine;
+  std::mt19937 *m_random_number_engine{nullptr};
   double m_sampling_percentage;
 
  private:
@@ -4703,9 +4761,7 @@ class handler {
     if (rc) end_psi_batch_mode();
     return rc;
   }
-  enum_range_scan_direction get_range_scan_direction() {
-    return range_scan_direction;
-  }
+
  private:
   /**
     The lock type set by when calling::ha_external_lock(). This is
@@ -4852,9 +4908,10 @@ class handler {
   int ha_index_last(uchar *buf);
   int ha_index_next_same(uchar *buf, const uchar *key, uint keylen);
   int ha_reset();
-
   /* this is necessary in many places, e.g. in HANDLER command */
-  int ha_index_or_rnd_end();
+  int ha_index_or_rnd_end() {
+    return inited == INDEX ? ha_index_end() : inited == RND ? ha_rnd_end() : 0;
+  }
   /**
     The cached_table_flags is set at ha_open and ha_external_lock
   */
@@ -4918,7 +4975,7 @@ class handler {
                                       parallel read threads that can be
                                       spawned at a time
     @param[in]  max_desired_threads   Maximum number of desired scan threads;
-                                      passing 0 has no effect, it is ignored.                                     
+                                      passing 0 has no effect, it is ignored.
     @return error code
     @retval 0 on success
   */
@@ -5001,6 +5058,61 @@ class handler {
   */
   virtual void parallel_scan_end(void *scan_ctx [[maybe_unused]]) { return; }
 
+  /** Check if the table is ready for bulk load
+  @param[in] thd user session
+  @return true iff bulk load can be done on the table. */
+  virtual bool bulk_load_check(THD *thd [[maybe_unused]]) const {
+    return false;
+  }
+
+  /** Get the total memory available for bulk load in SE.
+   @param[in] thd user session
+   @return available memory for bulk load */
+  virtual size_t bulk_load_available_memory(THD *thd [[maybe_unused]]) const {
+    return 0;
+  }
+
+  /** Begin parallel bulk data load to the table.
+  @param[in] thd user session
+  @param[in] data_size total data size to load
+  @param[in] memory memory to be used by SE
+  @param[in] num_threads number of concurrent threads used for load.
+  @return bulk load context or nullptr if unsuccessful. */
+  virtual void *bulk_load_begin(THD *thd [[maybe_unused]],
+                                size_t data_size [[maybe_unused]],
+                                size_t memory [[maybe_unused]],
+                                size_t num_threads [[maybe_unused]]) {
+    return nullptr;
+  }
+
+  /** Execute bulk load operation. To be called by each of the concurrent
+  threads idenified by thread index.
+  @param[in,out]  thd         user session
+  @param[in,out]  load_ctx    load execution context
+  @param[in]      thread_idx  index of the thread executing
+  @param[in]      rows        rows to be loaded to the table
+  @return error code. */
+  virtual int bulk_load_execute(THD *thd [[maybe_unused]],
+                                void *load_ctx [[maybe_unused]],
+                                size_t thread_idx [[maybe_unused]],
+                                const Rows_mysql &rows [[maybe_unused]],
+                                Bulk_load::Stat_callbacks &wait_cbk
+                                [[maybe_unused]]) {
+    return HA_ERR_UNSUPPORTED;
+  }
+
+  /** End bulk load operation. Must be called after all execution threads have
+  completed. Must be called even if the bulk load execution failed.
+  @param[in,out]  thd       user session
+  @param[in,out]  load_ctx  load execution context
+  @param[in]      is_error  true, if bulk load execution have failed
+  @return error code. */
+  virtual int bulk_load_end(THD *thd [[maybe_unused]],
+                            void *load_ctx [[maybe_unused]],
+                            bool is_error [[maybe_unused]]) {
+    return false;
+  }
+
   /**
     Submit a dd::Table object representing a core DD table having
     hardcoded data to be filled in by the DDSE. This function can be
@@ -5060,6 +5172,7 @@ class handler {
     table_share = share;
   }
   const TABLE_SHARE *get_table_share() const { return table_share; }
+  const TABLE *get_table() const { return table; }
 
   /* Estimates calculation */
 
@@ -5282,10 +5395,9 @@ class handler {
   double estimate_in_memory_buffer(ulonglong table_index_size) const;
 
  public:
-  virtual ha_rows multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
-                                              void *seq_init_param,
-                                              uint n_ranges, uint *bufsz,
-                                              uint *flags, Cost_estimate *cost);
+  virtual ha_rows multi_range_read_info_const(
+      uint keyno, RANGE_SEQ_IF *seq, void *seq_init_param, uint n_ranges,
+      uint *bufsz, uint *flags, bool *force_default_mrr, Cost_estimate *cost);
   virtual ha_rows multi_range_read_info(uint keyno, uint n_ranges, uint keys,
                                         uint *bufsz, uint *flags,
                                         Cost_estimate *cost);
@@ -7137,13 +7249,12 @@ class Temp_table_handle {
   auxiliary standalone function.
 
   @param[in]  table    TABLE object
-  @param[in]  check_temporal_upgrade  Check if temporal upgrade is needed
 
   @retval 0            ON SUCCESS
   @retval error code   ON FAILURE
 */
 
-int check_table_for_old_types(const TABLE *table, bool check_temporal_upgrade);
+int check_table_for_old_types(const TABLE *table);
 
 /*
   A Disk-Sweep MRR interface implementation
@@ -7315,6 +7426,7 @@ int ha_finalize_handlerton(st_plugin_int *plugin);
 
 TYPELIB *ha_known_exts();
 int ha_panic(enum ha_panic_function flag);
+void ha_reset_plugin_vars(THD *thd);
 void ha_close_connection(THD *thd);
 void ha_kill_connection(THD *thd);
 /** Invoke handlerton::pre_dd_shutdown() on every storage engine plugin. */
@@ -7469,7 +7581,42 @@ void trans_register_ha(THD *thd, bool all, handlerton *ht,
                        const ulonglong *trxid);
 
 int ha_reset_logs(THD *thd);
+
+/**
+  Inform storage engine(s) that a binary log file will be purged and any
+  references to it should be removed.
+
+  The function is called for all purged files, regardless if it is an explicit
+  PURGE BINARY LOGS statement, or an automatic purge performed by the server.
+
+  @note Since function is called with the LOCK_index mutex held the work
+  performed in this callback should be kept at minimum. One way to defer work is
+  to schedule work and use the `ha_binlog_index_purge_wait` callback to wait for
+  completion.
+
+  @param thd Thread handle of session purging file. The nullptr value indicates
+  that purge is done at server startup.
+  @param file Name of file being purged.
+  @return Always 0, return value are ignored by caller.
+*/
 int ha_binlog_index_purge_file(THD *thd, const char *file);
+
+/**
+  Request the storage engine to complete any operations that were initiated
+  by `ha_binlog_index_purge_file` and which need to complete
+  before PURGE BINARY LOGS completes.
+
+  The function is called only from PURGE BINARY LOGS. Each PURGE BINARY LOGS
+  statement will result in 0, 1 or more calls to `ha_binlog_index_purge_file`,
+  followed by exactly 1 call to `ha_binlog_index_purge_wait`.
+
+  @note This function is called without LOCK_index mutex held and thus any
+  waiting performed will only affect the current session.
+
+  @param thd Thread handle of session.
+*/
+void ha_binlog_index_purge_wait(THD *thd);
+
 void ha_reset_slave(THD *thd);
 void ha_binlog_log_query(THD *thd, handlerton *db_type,
                          enum_binlog_command binlog_command, const char *query,

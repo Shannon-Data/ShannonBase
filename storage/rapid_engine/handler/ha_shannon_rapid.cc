@@ -266,7 +266,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
     std::ostringstream err;
     err << table_arg.s->db.str << "." << table_arg.s->table_name.str << " already loaded";
-    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
     return HA_ERR_KEY_NOT_FOUND;
   }
 
@@ -277,7 +277,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
       std::ostringstream err;
       err << fld->field_name << " type not allowed";
-      my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+      my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
       return HA_ERR_GENERIC;
     }
   }
@@ -289,7 +289,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_thd = m_thd;
 
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
-    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
+    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
     return HA_ERR_GENERIC;
   }
 
@@ -308,7 +308,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   if (error_if_not_loaded && shannon_loaded_tables->get(db_name, table_name) == nullptr) {
     std::ostringstream err;
     err << db_name << "." << table_name << " table is not loaded into";
-    my_error(ER_SECONDARY_ENGINE_LOAD, MYF(0), err.str().c_str());
+    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
 
     return HA_ERR_GENERIC;
   } else {
@@ -558,13 +558,16 @@ static void rapid_kill_connection(handlerton *hton, /*!< in:  innobase handlerto
   }
 }
 
-static inline void SetSecondaryEngineOffloadFailedReason(THD *thd, const char *msg) {
+static inline bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::string_view msg) {
   assert(thd);
-  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = msg;
-  my_error(ER_SECONDARY_ENGINE, MYF(0), msg);
+  std::string msg_str(msg);
+  thd->lex->m_secondary_engine_offload_or_exec_failed_reason = msg_str;
+
+  my_error(ER_SECONDARY_ENGINE, MYF(0), msg_str.c_str());
+  return 0;
 }
 
-const char *GetSecondaryEngineOffloadorExecFailedReason(THD *thd) {
+std::string_view GetSecondaryEngineOffloadorExecFailedReason(const THD *thd) {
   assert(thd);
   return thd->lex->m_secondary_engine_offload_or_exec_failed_reason.c_str();
 }
@@ -766,7 +769,7 @@ static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
 
   DEBUG_SYNC(thd, "before_rapid_optimize");
 
-  if (lex->using_hypergraph_optimizer) {
+  if (lex->using_hypergraph_optimizer()) {
     WalkAccessPaths(lex->unit->root_access_path(), nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
                     [](AccessPath *path, const JOIN *) {
                       AssertSupportedPath(path);

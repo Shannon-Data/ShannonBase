@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2024, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -441,14 +442,14 @@ mysql_col_len, mbminlen, mbmaxlen
 void row_sel_field_store_in_mysql_format_func(
     byte *dest, const mysql_row_templ_t *templ, const dict_index_t *index,
     ulint field_no, const byte *data,
-    ulint len , ulint sec_field);
+    ulint len, ulint sec_field);
 
 /** Convert a non-SQL-NULL field from Innobase format to MySQL format. */
 static inline void row_sel_field_store_in_mysql_format(
     byte *dest, const mysql_row_templ_t *templ, const dict_index_t *idx,
     ulint field, const byte *src, ulint len, ulint sec) {
   row_sel_field_store_in_mysql_format_func(
-      dest, templ, idx, field,  src, len , sec);
+      dest, templ, idx, field, src, len, sec);
 }
 
 /** Search the record present in innodb_table_stats table using
@@ -472,42 +473,6 @@ cardinality for the each column.
 bool row_search_index_stats(const char *db_name, const char *tbl_name,
                             const char *index_name, ulint col_offset,
                             ulonglong *cardinality);
-
-/** Helper class to cache clust_rec and old_ver */
-class Row_sel_get_clust_rec_for_mysql {
-  const rec_t *cached_clust_rec;
-  rec_t *cached_old_vers;
-
- public:
-  /** Constructor */
-  Row_sel_get_clust_rec_for_mysql()
-      : cached_clust_rec(nullptr), cached_old_vers(nullptr) {}
-  ~Row_sel_get_clust_rec_for_mysql() {}
-  /** Retrieve the clustered index record corresponding to a record in a
-  non-clustered index. Does the necessary locking.
-  @param[in]     prebuilt    prebuilt struct in the handle
-  @param[in]     sec_index   secondary index where rec resides
-  @param[in]     rec         record in a non-clustered index
-  @param[in]     thr         query thread
-  @param[out]    out_rec     clustered record or an old version of it,
-                             NULL if the old version did not exist in the
-                             read view, i.e., it was a fresh inserted version
-  @param[in,out] offsets     in: offsets returned by
-                                 rec_get_offsets(rec, sec_index);
-                             out: offsets returned by
-                                 rec_get_offsets(out_rec, clust_index)
-  @param[in,out] offset_heap memory heap from which the offsets are allocated
-  @param[out]    vrow        virtual column to fill
-  @param[in]     mtr         mtr used to get access to the non-clustered record;
-                             the same mtr is used to access the clustered index
-  @param[in]     lob_undo    the LOB undo information.
-  @return DB_SUCCESS, DB_SUCCESS_LOCKED_REC, or error code */
-  dberr_t operator()(row_prebuilt_t *prebuilt, dict_index_t *sec_index,
-                     const rec_t *rec, que_thr_t *thr, const rec_t **out_rec,
-                     ulint **offsets, mem_heap_t **offset_heap,
-                     const dtuple_t **vrow, mtr_t *mtr,
-                     lob::undo_vers_t *lob_undo);
-};
 
 #include "row0sel.ic"
 

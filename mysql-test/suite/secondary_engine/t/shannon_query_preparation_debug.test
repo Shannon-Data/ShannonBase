@@ -57,7 +57,7 @@ SET DEBUG = "+d,secondary_engine_rapid_optimize_error";
 FLUSH STATUS;
 --sorted_result
 SELECT * FROM t1;
-#--error ER_SECONDARY_ENGINE
+--error ER_SECONDARY_ENGINE_PLUGIN
 SELECT /*+ SET_VAR(use_secondary_engine = FORCED) */ x FROM t1;
 --sorted_result
 SELECT (SELECT y FROM t2 WHERE y = 1) FROM t1;

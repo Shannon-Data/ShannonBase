@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/dd_table_share.h"
 
@@ -28,6 +27,7 @@
 
 #include <string.h>
 #include <algorithm>
+#include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -52,12 +52,10 @@
 #include "mysql/udf_registration_types.h"
 #include "mysql_com.h"
 #include "mysqld_error.h"
+#include "sql/aggregated_stats.h"
 #include "sql/dd/collection.h"
-#include "sql/create_field.h"      //create_field
 #include "sql/dd/dd_table.h"       // dd::FIELD_NAME_SEPARATOR_CHAR
 #include "sql/dd/dd_tablespace.h"  // dd::get_tablespace_name
-#include "sql/dd/dictionary.h"
-#include "sql/dd/dd.h"             // dd::get_dictionary
 // TODO: Avoid exposing dd/impl headers in public files.
 #include "sql/dd/impl/utils.h"  // dd::eat_str
 #include "sql/dd/properties.h"  // dd::Properties
@@ -72,7 +70,6 @@
 #include "sql/dd/types/partition.h"            // dd::Partition
 #include "sql/dd/types/partition_value.h"      // dd::Partition_value
 #include "sql/dd/types/table.h"                // dd::Table
-#include "sql/dd/upgrade_57/upgrade.h"
 #include "sql/default_values.h"  // prepare_default_value_buffer...
 #include "sql/error_handler.h"   // Internal_error_handler
 #include "sql/field.h"
@@ -98,6 +95,8 @@
 #include "sql/table.h"
 #include "sql/thd_raii.h"
 #include "typelib.h"
+
+extern struct aggregated_stats global_aggregated_stats;
 
 enum_field_types dd_get_old_field_type(dd::enum_column_types type) {
   switch (type) {
@@ -178,9 +177,6 @@ enum_field_types dd_get_old_field_type(dd::enum_column_types type) {
 
     case dd::enum_column_types::LONG_BLOB:
       return MYSQL_TYPE_LONG_BLOB;
-
-    case dd::enum_column_types::VECTOR:
-      return MYSQL_TYPE_VECTOR;
 
     case dd::enum_column_types::BLOB:
       return MYSQL_TYPE_BLOB;
@@ -279,7 +275,7 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
 
   // Setup other fields =====================================================
 
-  if (share->tmp_table == NO_TMP_TABLE) {
+  if (share->tmp_table == NO_TMP_TABLE && share->is_primary_engine()) {
     share->m_histograms = new (&share->mem_root) Table_histograms_collection();
     if (share->m_histograms == nullptr) return true;  // OOM.
   }
@@ -302,8 +298,9 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
   if (share->keys) {
     KEY *keyinfo;
     KEY_PART_INFO *key_part;
-    uint primary_key = (uint)(
-        find_type(primary_key_name, &share->keynames, FIND_TYPE_NO_PREFIX) - 1);
+    uint primary_key = (uint)(find_type(primary_key_name, &share->keynames,
+                                        FIND_TYPE_NO_PREFIX) -
+                              1);
     const longlong ha_option = handler_file->ha_table_flags();
     keyinfo = share->key_info;
     key_part = keyinfo->key_part;
@@ -366,7 +363,6 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
         }
 
         Field *field = key_part->field;
-        assert(field->type() != MYSQL_TYPE_DB_TRX_ID);
 
         key_part->type = field->key_type();
         if (field->is_nullable()) {
@@ -493,7 +489,7 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
       share->primary_key = MAX_KEY;  // we do not have a primary key
   } else
     share->primary_key = MAX_KEY;
-  destroy(handler_file);
+  ::destroy_at(handler_file);
 
   if (share->found_next_number_field) {
     Field *reg_field = *share->found_next_number_field;
@@ -1116,17 +1112,12 @@ static bool fill_column_from_dd(THD *thd, TABLE_SHARE *share,
 /**
   Populate TABLE_SHARE::field array according to column metadata
   from dd::Table object.
-  Here, in order to getting trx_id from innodb to MySQL, we add a
-  new extra column named 'DB_TRX_ID' to table definition at the last postion,
-  and this field will be used to build a row_template_t in build_template().
-  This field is invisible to user, we can not see it by selection statement.
-  It's a 'ghost' column in table's defintion.
 */
 
 static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
                                  const dd::Table *tab_obj) {
-  // Allocate space for fields in TABLE_SHARE. Adds one extra field.
-  const uint fields_size = ((share->fields + 1 + 1) * sizeof(Field *));
+  // Allocate space for fields in TABLE_SHARE.
+  const uint fields_size = ((share->fields + 1) * sizeof(Field *));
   share->field = (Field **)share->mem_root.Alloc((uint)fields_size);
   memset(share->field, 0, fields_size);
   share->vfields = 0;
@@ -1157,19 +1148,20 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
                               rec_pos, field_nr))
         return true;
 
+      /*
+        Account for NULL bits if it's a regular column.
+        If it's a generated column, we do it below so the NULL
+        bits end up in the expected order.
+      */
+      if ((null_bit_pos += column_preamble_bits(col_obj)) > 7) {
+        null_pos++;
+        null_bit_pos -= 8;
+      }
+
       rec_pos += share->field[field_nr]->pack_length_in_rec();
     } else
       has_vgc = true;
 
-    /*
-      Virtual generated columns still need to be accounted in null bits and
-      field_nr calculations, since they reside at the normal place in record
-      preamble and TABLE_SHARE::field array.
-    */
-    if ((null_bit_pos += column_preamble_bits(col_obj)) > 7) {
-      null_pos++;
-      null_bit_pos -= 8;
-    }
     field_nr++;
   }
 
@@ -1182,8 +1174,6 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
         static_cast<ulong>(rec_pos - share->default_values))
       share->stored_rec_length = (rec_pos - share->default_values);
 
-    null_pos = share->default_values;
-    null_bit_pos = (share->db_create_options & HA_OPTION_PACK_RECORD) ? 0 : 1;
     field_nr = 0;
 
     for (const dd::Column *col_obj2 : tab_obj->columns()) {
@@ -1196,44 +1186,27 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
                                 rec_pos, field_nr))
           return true;
 
+        /*
+          Account for generated columns -- we do this separately here
+          so the NULL bits end up in the expected order.
+        */
+        if ((null_bit_pos += column_preamble_bits(col_obj2)) > 7) {
+          null_pos++;
+          null_bit_pos -= 8;
+        }
+
         rec_pos += share->field[field_nr]->pack_length_in_rec();
       }
 
-      /*
-        Account for all columns while evaluating null_pos/null_bit_pos and
-        field_nr.
-      */
-      if ((null_bit_pos += column_preamble_bits(col_obj2)) > 7) {
-        null_pos++;
-        null_bit_pos -= 8;
-      }
       field_nr++;
     }
-  }
-
-  assert(share->fields == field_nr);
-
-  bool is_in_upgrade = dd::upgrade_57::in_progress();
-  bool is_system_objs = is_system_object(share->db.str, share->table_name.str);
-  /*we dont add the extra file for system table or in upgrading phase.*/
-  if (!is_in_upgrade && !is_system_objs){
-    Create_field db_trx_id_field;
-    db_trx_id_field.sql_type = MYSQL_TYPE_DB_TRX_ID;
-    db_trx_id_field.is_nullable = db_trx_id_field.is_zerofill = false;
-    db_trx_id_field.is_unsigned = true;
-    Field *sys_trx_id_field = make_field(db_trx_id_field, share, "MYSQL_TYPE_DB_TRX_ID",
-                                                    MAX_DB_TRX_ID_WIDTH, rec_pos, null_pos, 0);
-    sys_trx_id_field->set_field_index(field_nr);
-    share->field[field_nr] = sys_trx_id_field;
-    assert (sys_trx_id_field->pack_length_in_rec() == MAX_DB_TRX_ID_WIDTH);
-    //rec_pos += share->field[field_nr]->pack_length_in_rec();
-    field_nr++;
-    assert(share->fields + 1 == field_nr);
   }
 
   // Make sure the scan of the columns is consistent with other data.
   assert(share->null_bytes == (null_pos - null_flags + (null_bit_pos + 7) / 8));
   assert(share->last_null_bit_pos == null_bit_pos);
+  assert(share->fields == field_nr);
+
   return (false);
 }
 
@@ -1254,7 +1227,7 @@ static void fill_index_element_from_dd(TABLE_SHARE *share,
   // field
   assert(keypart->fieldnr > 0);
   Field *field = keypart->field = share->field[keypart->fieldnr - 1];
-  assert(field->type() != MYSQL_TYPE_DB_TRX_ID);
+
   // offset
   keypart->offset = field->offset(share->default_values);
 
@@ -1938,11 +1911,6 @@ static bool fill_partitioning_from_dd(THD *thd, TABLE_SHARE *share,
                                       const dd::Table *tab_obj) {
   if (tab_obj->partition_type() == dd::Table::PT_NONE) return false;
 
-  // The DD only has information about how the table is partitioned in
-  // the primary storage engine, so don't use this information for
-  // tables in a secondary storage engine.
-  if (share->is_secondary_engine()) return false;
-
   partition_info *part_info;
   part_info = new (&share->mem_root) partition_info;
 
@@ -2339,6 +2307,7 @@ bool open_table_def(THD *thd, TABLE_SHARE *share, const dd::Table &table_def) {
   if (!error) {
     share->table_category = get_table_category(share->db, share->table_name);
     thd->status_var.opened_shares++;
+    global_aggregated_stats.get_shard(thd->thread_id()).opened_shares++;
     return false;
   }
   return true;

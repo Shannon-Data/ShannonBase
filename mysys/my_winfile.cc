@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2024, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -163,7 +164,7 @@ HandleInfo GetHandleInfo(File fd) {
 }
 
 File RegisterHandle(HANDLE handle, int oflag) {
-  assert(handle != 0);
+  assert(handle != nullptr);
   HandleInfoVector &hiv = *hivp;
 
   MUTEX_LOCK(g, &THR_LOCK_open);
@@ -205,7 +206,9 @@ LARGE_INTEGER MakeLargeInteger(int64_t src) {
   return li;
 }
 
-OVERLAPPED MakeOverlapped(DWORD l, DWORD h) { return {0, 0, {{l, h}}, 0}; }
+OVERLAPPED MakeOverlapped(DWORD l, DWORD h) {
+  return {0, 0, {{l, h}}, nullptr};
+}
 
 OVERLAPPED MakeOverlapped(int64_t src) {
   const LARGE_INTEGER li = MakeLargeInteger(src);
@@ -684,7 +687,7 @@ FILE *my_win_fopen(const char *filename, const char *mode) {
                      flags) < 0)
     return nullptr;
 
-  sg.commit();  // Do not close the stream we are about to return
+  sg.release();  // Do not close the stream we are about to return
   return stream;
 }
 
@@ -784,8 +787,8 @@ FILE *my_win_freopen(const char *path, const char *mode, FILE *stream) {
   if (_dup2(handle_fd, fd) < 0) return nullptr;
 
   // Leave the handle and fd open, but close handle_fd
-  chg.commit();
-  cfdg.commit();
+  chg.release();
+  cfdg.release();
 
   return stream;
 }
