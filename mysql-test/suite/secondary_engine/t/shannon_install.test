@@ -1,0 +1,19 @@
+##############################################################################
+# ShannonBase copyright 2023-
+# shannon rapid plugin is mandatory engine, INSTALLATION TEST
+##############################################################################
+#--disable_query_log
+#eval INSTALL PLUGIN mock SONAME '$SHANNON_PLUGIN';
+#--enable_query_log
+
+CREATE DATABASE shannon_inst_db;
+USE shannon_inst_db;
+
+SELECT PLUGIN_NAME, PLUGIN_STATUS, PLUGIN_TYPE
+FROM INFORMATION_SCHEMA.PLUGINS
+WHERE PLUGIN_NAME="RAPID";
+
+--error ER_ILLEGAL_HA
+CREATE TABLE t1 (a INT) ENGINE RAPID;
+
+DROP DATABASE shannon_inst_db;
