@@ -156,9 +156,10 @@ static void parse_log_func_main(log_t *log_ptr) {
 
       mutex_enter(&log_sys->rapid_populator_mutex);
       auto iter = sys_pop_buff.find(ret_lsn);
-      ut_a(iter != sys_pop_buff.end());
-      sys_pop_buff.erase(ret_lsn);
-      sys_pop_data_sz.fetch_sub(iter->second.size);
+      if (iter != sys_pop_buff.end()) {
+        sys_pop_buff.erase(ret_lsn);
+        sys_pop_data_sz.fetch_sub(iter->second.size);
+      }
       mutex_exit(&log_sys->rapid_populator_mutex);
     }
 

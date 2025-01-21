@@ -437,32 +437,34 @@ false: ignore new mode
    S  - MTR_LOG_SHORT_INSERTS
    AP - MTR_LOG_ALL_WITH_POP */
 bool mtr_t::s_mode_update[MTR_LOG_MODE_MAX][MTR_LOG_MODE_MAX] = {
-    /*      |  A      N    NR     S  AP  */
+    /*      |  A    AP    N    NR     S  */
     /* A */ {false, true, true, true, true},   /* A is default and we allow to switch
-                                            to all other modes. */
-    /* N */ {true, false, true, false, false},  /* For both A & NR, we can shortly
-                                             switch to N and return back*/
-    /* NR*/ {false, true, false, false, false}, /* Default is NR when global redo is
-                                            disabled. Allow to move to N */
-    /* S */ {true, false, false, false, false},  /* Only allow return back to A after
-                                            short switch from A to S */
-    /* AP */ {true, false, false, true, false}
+                                                  to all other modes. */
+    /* AP */{true, false, true, true, true},    /**for all log with pop.*/
+
+    /* N */ {true, true, false, true, false},  /* For both A & NR, we can shortly
+                                                  switch to N and return back*/
+    /* NR*/ {false, false, true, false, false}, /* Default is NR when global redo is
+                                                  disabled. Allow to move to N */
+    /* S */ {true, true, false, false, false}  /* Only allow return back to A after
+                                                  short switch from A to S */
 };
 #ifdef UNIV_DEBUG
 /* Mode update validity matrix. The array is indexed as [old mode][new mode]. */
 bool mtr_t::s_mode_update_valid[MTR_LOG_MODE_MAX][MTR_LOG_MODE_MAX] = {
-    /*      | A      N    NR    S  AP    */
+    /*      | A     AP   N    NR    S  */
     /* A */ {true, true, true, true, true}, /* No assert case. */
+
+    /* AP*/ {true, true, true, true, true},
 
     /* N */ {true, true, true, true, true},
 
     /* NR*/ {true, true, true, true, true}, /* We generally never return back from
-                                         NR to A but need to allow for LOB
-                                         restarting B-tree mtr. */
+                                             NR to A but need to allow for LOB
+                                             restarting B-tree mtr. */
 
-    /* S */ {true, false, false, true, true}, /* Short Insert state is set transiently
-                                          and we don't expect N or NR switch. */
-    /* AP*/ {true, true, true, true, true}                                        
+    /* S */ {true, true, false, false, true} /* Short Insert state is set transiently
+                                             and we don't expect N or NR switch. */
 };
 #endif /* UNIV_DEBUG */
 
