@@ -57,7 +57,7 @@ std::string &zstd_compress::compressString(std::string &orginal) {
   size_t compressedBufferSize = ZSTD_compressBound(inputSize);
   if (compressedBufferSize <= 0) return m_result.assign("error");
 
-  m_result.clear();
+  memset(m_buffer, 0, Compress_algorithm::MAX_BUFF_LEN);
   size_t compressedSize = ZSTD_compress(m_buffer, compressedBufferSize, orginal.c_str(), inputSize, 1);
   if (ZSTD_isError(compressedSize)) return m_result.assign("error");
   m_result.assign(m_buffer, compressedSize);
@@ -67,6 +67,7 @@ std::string &zstd_compress::compressString(std::string &orginal) {
 std::string &zstd_compress::decompressString(std::string &compressed_str) {
   size_t compressedSize = compressed_str.size();
   size_t decompressedBufferSize = ZSTD_getFrameContentSize(compressed_str.c_str(), compressedSize);
+  memset(m_buffer, 0, Compress_algorithm::MAX_BUFF_LEN);
   size_t decompressedSize = ZSTD_decompress(m_buffer, decompressedBufferSize, compressed_str.c_str(), compressedSize);
 
   if (ZSTD_isError(decompressedSize)) return m_result.assign("error");
@@ -91,6 +92,7 @@ std::string &zlib_compress::compressString(std::string &orginal) {
     return m_result.assign("error");
   }
 
+  memset(m_buffer, 0, Compress_algorithm::MAX_BUFF_LEN);
   do {
     zStream.avail_out = Compress_algorithm::MAX_BUFF_LEN;
     zStream.next_out = (Bytef *)m_buffer;
@@ -115,6 +117,7 @@ std::string &zlib_compress::decompressString(std::string &compressed_str) {
 
   if (inflateInit(&zStream) != Z_OK) return m_result.assign("error");
 
+  memset(m_buffer, 0, Compress_algorithm::MAX_BUFF_LEN);
   do {
     zStream.avail_out = Compress_algorithm::MAX_BUFF_LEN;
     zStream.next_out = (Bytef *)m_buffer;
@@ -132,27 +135,24 @@ std::string &zlib_compress::decompressString(std::string &compressed_str) {
 lz4_compress::lz4_compress() { m_result.reserve(Compress_algorithm::MAX_BUFF_LEN); }
 
 std::string &lz4_compress::compressString(std::string &original) {
-  m_result.clear();
-
   int maxCompressedSize = LZ4_compressBound(original.size());
   if (maxCompressedSize == 0) return m_result.assign("error");
 
-  std::unique_ptr<char[]> comp_data = std::make_unique<char[]>(maxCompressedSize);
-  int compressedSize = LZ4_compress_default(original.c_str(), comp_data.get(), original.size(), maxCompressedSize);
+  // std::unique_ptr<char[]> comp_data = std::make_unique<char[]>(maxCompressedSize);
+  memset(m_buffer, 0, Compress_algorithm::MAX_BUFF_LEN);
+  int compressedSize = LZ4_compress_default(original.c_str(), m_buffer, original.size(), maxCompressedSize);
   if (!compressedSize) return m_result.assign("error");
-  m_result.assign(comp_data.get());
+  m_result.assign(m_buffer, compressedSize);
   return m_result;
 }
 std::string &lz4_compress::decompressString(std::string &compressed_str) {
-  m_result.clear();
-
   auto original_size = LZ4_compressBound(compressed_str.size());
-  std::unique_ptr<char[]> comp_data = std::make_unique<char[]>(original_size);
-  int decompressedSize =
-      LZ4_decompress_safe(compressed_str.data(), comp_data.get(), compressed_str.size(), original_size);
+  // std::unique_ptr<char[]> comp_data = std::make_unique<char[]>(original_size);
+  memset(m_buffer, 0, Compress_algorithm::MAX_BUFF_LEN);
+  int decompressedSize = LZ4_decompress_safe(compressed_str.data(), m_buffer, compressed_str.size(), original_size);
   if (decompressedSize <= 0) return m_result.assign("error");
 
-  m_result.assign(comp_data.get());
+  m_result.assign(m_buffer, decompressedSize);
   return m_result;
 }
 
