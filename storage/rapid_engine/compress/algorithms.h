@@ -47,15 +47,6 @@ class Compress_algorithm {
   virtual std::string &decompressString(std::string &compressed_str) = 0;
   static constexpr uint MAX_BUFF_LEN = 65535;
 };
-class default_compress : public Compress_algorithm {
- public:
-  virtual std::string &compressString(std::string &original) final;
-  virtual std::string &decompressString(std::string &compressed_str) final;
-
- private:
-  char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
-  std::string m_result;
-};
 
 class zstd_compress : public Compress_algorithm {
  public:
@@ -89,13 +80,12 @@ class lz4_compress : public Compress_algorithm {
   virtual std::string &decompressString(std::string &compressed_str) final;
 
  private:
-  char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
   std::string m_result;
 };
 
 class CompressFactory {
  public:
-  static Compress_algorithm *get_instance(compress_algos algo);
+  static std::unique_ptr<Compress_algorithm> get_instance(compress_algos algo);
   // using AlgorithmFactoryT = std::map<compress_algos,
   // std::unique_ptr<Compress_algorithm>>;
   using AlgorithmFactoryT = std::vector<std::unique_ptr<Compress_algorithm>>;

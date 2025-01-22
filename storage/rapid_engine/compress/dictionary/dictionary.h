@@ -51,7 +51,7 @@ class Dictionary {
   virtual ~Dictionary() = default;
   virtual uint32 store(const uchar *, size_t, Encoding_type type = Encoding_type::NONE);
   virtual uint32 get(uint64 strid, String &ret_val);
-  virtual uchar *get(uint64 strid);
+  virtual std::string get(uint64 strid);
   virtual void set_algo(Encoding_type type) { m_encoding_type = type; }
   virtual inline Encoding_type get_algo() const { return m_encoding_type; }
   virtual inline uint32 content_size() const { return m_content.size(); }
