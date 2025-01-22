@@ -59,7 +59,7 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
       alg = compress_algos::LZ4;
       break;
     case Encoding_type::NONE:
-      alg = compress_algos::NONE;
+      alg = compress_algos::ZSTD;
       break;
     default:
       break;
@@ -67,7 +67,7 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
 
   std::scoped_lock lk(m_content_mtx);
   std::string origin_str((char *)str, len);
-  Compress_algorithm *algr = CompressFactory::get_instance(alg);
+  auto algr = CompressFactory::get_instance(alg);
   std::string compressed_str(algr->compressString(origin_str));
   {
     auto content_pos = m_content.find(compressed_str);
@@ -91,13 +91,13 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
 }
 
 uint32 Dictionary::get(uint64 strid, String &ret_val) {
-  auto compressed_str = reinterpret_cast<char *>(get(strid));
-  String strs(compressed_str, strlen(compressed_str), ret_val.charset());
+  auto compressed_str = get(strid);
+  String strs(compressed_str.c_str(), compressed_str.length(), ret_val.charset());
   copy_if_not_alloced(&ret_val, &strs, strs.length());
   return 0;
 }
 
-uchar *Dictionary::get(uint64 strid) {
+std::string Dictionary::get(uint64 strid) {
   compress_algos alg [[maybe_unused]]{compress_algos::NONE};
   switch (m_encoding_type) {
     case Encoding_type::SORTED:
@@ -107,7 +107,7 @@ uchar *Dictionary::get(uint64 strid) {
       alg = compress_algos::LZ4;
       break;
     case Encoding_type::NONE:
-      alg = compress_algos::NONE;
+      alg = compress_algos::ZSTD;
       break;
     default:
       break;
@@ -118,12 +118,11 @@ uchar *Dictionary::get(uint64 strid) {
     auto id_pos = m_id2content.find(strid);
     if (id_pos != m_id2content.end()) {
       auto compressed_str = id_pos->second;
-      auto ret_strp = CompressFactory::get_instance(alg)->decompressString(compressed_str).c_str();
-      return reinterpret_cast<uchar *>(const_cast<char *>(ret_strp));
+      return CompressFactory::get_instance(alg)->decompressString(compressed_str);
     }
   }
 
-  return nullptr;
+  return std::string("");
 }
 
 }  // namespace Compress

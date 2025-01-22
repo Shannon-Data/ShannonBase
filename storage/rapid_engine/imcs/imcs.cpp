@@ -98,7 +98,7 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
     DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
-      my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), source->s->db.str, source->s->table_name.str);
+      my_error(ER_SECONDARY_ENGINE, MYF(0), source->s->db.str, source->s->table_name.str);
       source->file->ha_rnd_end();
       return HA_ERR_GENERIC;
     });
@@ -126,7 +126,7 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
       }
 
       if (!m_cus[key.str()]->write_row(context, data_ptr, data_len)) {
-        my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), source->s->db.str, source->s->table_name.str);
+        my_error(ER_SECONDARY_ENGINE, MYF(0), source->s->db.str, source->s->table_name.str);
         source->file->ha_rnd_end();
         return HA_ERR_GENERIC;
       }
