@@ -19,7 +19,9 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #ifndef _SP_H_
 #define _SP_H_
@@ -136,6 +138,14 @@ enum {
   MYSQL_PROC_FIELD_COUNT
 };
 
+/** which language the stored procedure is. */
+enum class enum_sp_language{
+  NONE = 0,
+  SQL,
+  JAVASCRIPT,
+  R
+};
+
 /*************************************************************************/
 
 /**
@@ -203,7 +213,7 @@ bool sp_show_create_routine(THD *thd, enum_sp_type type, sp_name *name);
 
 enum_sp_return_code db_load_routine(
     THD *thd, enum_sp_type type, const char *sp_db, size_t sp_db_len,
-    const char *sp_name, size_t sp_name_len, sp_head **sphp,
+    const char *ssp_name, size_t ssp_name_len, sp_head **sphp,
     sql_mode_t sql_mode, const char *params, const char *returns,
     const char *body, st_sp_chistics *chistics, const char *definer_user,
     const char *definer_host, longlong created, longlong modified,

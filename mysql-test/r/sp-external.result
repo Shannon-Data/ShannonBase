@@ -22,11 +22,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -55,38 +54,39 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
-CREATE FUNCTION JAVASCRIPT(x INTEGER) RETURNS INTEGER DETERMINISTIC
+CREATE FUNCTION JAVASC(x INTEGER) RETURNS INTEGER DETERMINISTIC
 LANGUAGE JAVASCRIPT
 AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
-SHOW CREATE FUNCTION JAVASCRIPT//
+SHOW CREATE FUNCTION JAVASC//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
-JAVASCRIPT	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `JAVASCRIPT`(x INTEGER) RETURNS int
+JAVASC	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `JAVASC`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
 return x-1;
 $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
-SHOW FUNCTION STATUS WHERE Name = 'JAVASCRIPT'//
+SHOW FUNCTION STATUS WHERE Name = 'JAVASC'//
 Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
-test	JAVASCRIPT	FUNCTION	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+test	JAVASC	FUNCTION	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SELECT routine_name, routine_type, data_type, routine_body,
 external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
-JAVASCRIPT	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL	
+JAVASC	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL	
 return x-1;
 
-SELECT JAVASCRIPT(2)//
-ERROR HY000: Language component: Not available.
-DROP FUNCTION JAVASCRIPT//
+SELECT JAVASC(2)//
+JAVASC(2)
+1
+DROP FUNCTION JAVASC//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER DETERMINISTIC LANGUAGE PYTHON
 AS $$
 return x-1;
@@ -151,11 +151,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -173,7 +172,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 # Test mixed-case
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER DETERMINISTIC LANGUAGE jAvaScRIpt
@@ -181,11 +181,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -203,7 +202,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 # Any valid identifier can be used for language name
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER DETERMINISTIC LANGUAGE JAVA1
@@ -403,11 +403,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -425,7 +424,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 # Multiple languages in one clause is not allowed
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
@@ -445,11 +445,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$
 return x-1;
@@ -466,7 +465,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 LANGUAGE	
@@ -475,11 +475,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$
 return x-1;
@@ -496,7 +495,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 LANGUAGE	  	 JAVASCRIPT  DETERMINISTIC	
@@ -504,11 +504,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -526,7 +525,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 LANGUAGE
@@ -537,11 +537,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$
 return x-1;
@@ -558,7 +557,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 The language will here be interpreted to be BEGIN
 CREATE FUNCTION foo(a INTEGER) RETURNS INTEGER
@@ -598,8 +598,6 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
@@ -621,7 +619,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS INTEGER DETERMINISTIC NO SQL
 LANGUAGE SQL
@@ -636,8 +635,6 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
@@ -658,7 +655,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER DETERMINISTIC READS SQL DATA
 LANGUAGE JAVASCRIPT
@@ -666,12 +664,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
-    READS SQL DATA
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -689,7 +685,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER DETERMINISTIC LANGUAGE JAVASCRIPT
 MODIFIES SQL DATA
@@ -697,8 +694,6 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
@@ -720,7 +715,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS INTEGER DETERMINISTIC LANGUAGE SQL
 CONTAINS SQL
@@ -743,11 +739,10 @@ AS $$
 return x-1;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$
 return x-1;
@@ -764,7 +759,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 # This is not SQL
 CREATE FUNCTION foo(a INTEGER) RETURNS INTEGER
@@ -793,11 +789,10 @@ DROP PROCEDURE bar//
 # Currently, no other language than SQL is supported
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -822,29 +817,28 @@ bar	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a;
 CALL bar(2)//
 ERROR HY000: Language component: Not available.
 DROP PROCEDURE bar//
-CREATE PROCEDURE JAVASCRIPT(a INTEGER) DETERMINISTIC
+CREATE PROCEDURE JAVASC(a INTEGER) DETERMINISTIC
 LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
-SHOW CREATE procedure JAVASCRIPT//
+SHOW CREATE procedure JAVASC//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
-JAVASCRIPT	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `JAVASCRIPT`(a INTEGER)
+JAVASC	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `JAVASC`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
-SHOW PROCEDURE STATUS WHERE Name = 'JAVASCRIPT'//
+SHOW PROCEDURE STATUS WHERE Name = 'JAVASC'//
 Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
-test	JAVASCRIPT	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+test	JAVASC	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SELECT routine_name, routine_type, data_type, routine_body,
 external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
-JAVASCRIPT	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
-CALL JAVASCRIPT(2)//
+JAVASC	PROCEDURE		EXTERNAL	NULL	JAVASCRIPT	SQL	 let b = a; 
+CALL JAVASC(2)//
 ERROR HY000: Language component: Not available.
-DROP procedure JAVASCRIPT//
+DROP procedure JAVASC//
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE PYTHON
 AS $$ let b = a; $$ //
 Warnings:
@@ -892,11 +886,10 @@ DROP procedure bar//
 # Test lower-case
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE javascript
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -915,11 +908,10 @@ DROP procedure bar//
 # Test mixed-case
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE jAvaScRIpt
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -1063,11 +1055,10 @@ DROP PROCEDURE bar//
 CREATE PROCEDURE bar(a INTEGER)
 LANGUAGE SQL DETERMINISTIC LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -1093,11 +1084,10 @@ CREATE PROCEDURE bar(a INTEGER)
 LANGUAGE
 JAVASCRIPT
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SHOW PROCEDURE STATUS WHERE Name = 'bar'//
@@ -1116,11 +1106,10 @@ CREATE PROCEDURE bar(a INTEGER)
 LANGUAGE	
 JAVASCRIPT
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SHOW PROCEDURE STATUS WHERE Name = 'bar'//
@@ -1138,11 +1127,10 @@ DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 LANGUAGE	  	 JAVASCRIPT  DETERMINISTIC	
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -1164,11 +1152,10 @@ LANGUAGE
 JAVASCRIPT
 -- Comment
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SHOW PROCEDURE STATUS WHERE Name = 'bar'//
@@ -1200,8 +1187,6 @@ ERROR 42000: You have an error in your SQL syntax; check the manual that corresp
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC NO SQL
 LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
@@ -1231,8 +1216,6 @@ DROP PROCEDURE bar//
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE JAVASCRIPT
 CONTAINS SQL
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
@@ -1254,12 +1237,10 @@ DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC READS SQL DATA
 LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
-    READS SQL DATA
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -1278,8 +1259,6 @@ DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE JAVASCRIPT
 MODIFIES SQL DATA
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
@@ -1316,11 +1295,10 @@ BEGIN DECLARE b INTEGER DEFAULT a; END //
 DROP PROCEDURE bar//
 CREATE PROCEDURE bar(a INTEGER) NOT DETERMINISTIC LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SHOW PROCEDURE STATUS WHERE Name = 'bar'//
@@ -1388,11 +1366,10 @@ DETERMINISTIC LANGUAGE JAVASCRIPT
 AS $$
 return x-1;
 $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -1410,16 +1387,16 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
 return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 DETERMINISTIC LANGUAGE JAVASCRIPT
 AS 'return x-1;' //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$return x-1;$$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -1433,16 +1410,16 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL	return x-1;
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 DETERMINISTIC LANGUAGE JAVASCRIPT
 AS "return x-1;" //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$return x-1;$$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -1456,18 +1433,18 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL	return x-1;
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 DETERMINISTIC LANGUAGE JAVASCRIPT
 AS '
   return x-1;
 ' //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -1485,7 +1462,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
   return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1493,11 +1471,10 @@ AS
 "
    return x-1;
 " //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -1515,7 +1492,8 @@ foo	FUNCTION	int	EXTERNAL	NULL	JAVASCRIPT	SQL
    return x-1;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+1
 DROP FUNCTION foo//
 Routine body must come after characteristics
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
@@ -1535,11 +1513,10 @@ AS
   return "$$" + a + "$$";
 '
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1557,7 +1534,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
   return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1566,11 +1544,10 @@ $code$
 return "$$" + a + "$$";
 $code$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1588,7 +1565,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1597,11 +1575,10 @@ $coDE$
 return "$$" + a + "$$";
 $coDE$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1619,7 +1596,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1628,11 +1606,10 @@ $CODE$
 return "$$" + a + "$$";
 $CODE$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1650,7 +1627,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1659,11 +1637,10 @@ $tag$
 return "$$" + a + "$$";
 $tag$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1681,7 +1658,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1690,11 +1668,10 @@ $TAG$
 return "$$" + a + "$$";
 $TAG$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1712,7 +1689,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1721,11 +1699,10 @@ $NULL$
 return "$$" + a + "$$";
 $NULL$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1743,7 +1720,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1752,11 +1730,10 @@ $abdc_1234$
 return "$$" + a + "$$";
 $abdc_1234$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1774,7 +1751,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1783,11 +1761,10 @@ $_a$
 return "$$" + a + "$$";
 $_a$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1805,7 +1782,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1814,11 +1792,10 @@ $_$
 return "$$" + a + "$$";
 $_$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1836,7 +1813,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1845,11 +1823,10 @@ $0$
 return "$$" + a + "$$";
 $0$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1867,7 +1844,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1876,11 +1854,10 @@ $100$
 return "$$" + a + "$$";
 $100$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1898,7 +1875,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1907,11 +1885,10 @@ $12345678901234$
 return "$$" + a + "$$";
 $12345678901234$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1929,7 +1906,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1938,11 +1916,10 @@ $1234567890qwertyuiopasdfghjklzxcvbnm_QWERTYUIOPASDFGHJKLZXCVBNM$
 return "$$" + a + "$$";
 $1234567890qwertyuiopasdfghjklzxcvbnm_QWERTYUIOPASDFGHJKLZXCVBNM$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1960,7 +1937,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -1969,11 +1947,10 @@ $¡$
 return "$$" + a + "$$";
 $¡$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -1991,7 +1968,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2000,11 +1978,10 @@ $1234567890qwertyuiopasdfghjklzxcvbnm_QWERTYUIOPASDFGHJKLZXCVBNM¡™£¢∞§¶
 return "$$" + a + "$$";
 $1234567890qwertyuiopasdfghjklzxcvbnm_QWERTYUIOPASDFGHJKLZXCVBNM¡™£¢∞§¶•ªº–≠œ∑´®†¥¨ˆøπ“‘«åß∂ƒ©˙∆˚¬…æΩ≈ç√∫µ≤≥÷⁄€‹›ﬁﬂ‡°·‚—±ÅÍÎÏ˝ÓÔÒÚÆ¸˛Ç◊ıÂ¯˘¿$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -2022,7 +1999,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$$" + a + "$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$$2$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2032,11 +2010,10 @@ const $y$ = 4;
 return $x + $y$ + a;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2058,7 +2035,8 @@ const $y$ = 4;
 return $x + $y$ + a;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2069,11 +2047,10 @@ const $y$$z = 4;
 return x$$ + $y$$z + a;
 $code$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -2095,7 +2072,8 @@ const $y$$z = 4;
 return x$$ + $y$$z + a;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2297,11 +2275,10 @@ AS $$
 return "∂" + a + "$∂$";
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2319,7 +2296,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "∂" + a + "$∂$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+∂2$∂$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2327,11 +2305,10 @@ AS $code$
 return "∂" + a + "$∂$$";
 $code$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -2349,7 +2326,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "∂" + a + "$∂$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+∂2$∂$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2357,11 +2335,10 @@ AS $code$
 return "∂" + a + "$∂$$∂";
 $code$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -2379,7 +2356,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "∂" + a + "$∂$$∂";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+∂2$∂$$∂
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2387,11 +2365,10 @@ AS $$∂
 return "∂" + a + "$∂$";
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$∂
@@ -2409,7 +2386,7 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL	∂
 return "∂" + a + "$∂$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+ERROR HY000: Definition of stored routine 'test.foo' contains an invalid utf8mb3 character string: 'execute failed'.
 DROP FUNCTION foo//
 Test multi-byte characters in quote tags
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
@@ -2418,11 +2395,10 @@ AS $∂$
 return "∂" + a + "∂$";
 $∂$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2440,7 +2416,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "∂" + a + "∂$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+∂2∂$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2448,11 +2425,10 @@ AS $co∂e$
 return "∂" + a + "$∂$$";
 $co∂e$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -2470,7 +2446,8 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "∂" + a + "$∂$$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+∂2$∂$$
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2481,10 +2458,10 @@ $😀$
 Warnings:
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2502,7 +2479,10 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "?$?" + a + "?$?$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+
+Warnings:
+Warning	1366	Incorrect string value: '\xED\xA0\xBD\xED\xB8\x80...' for column 'foo(2)' at row 1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2513,10 +2493,10 @@ $😀😔$
 Warnings:
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2534,7 +2514,10 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "?$?" + a + "?$?$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+
+Warnings:
+Warning	1366	Incorrect string value: '\xED\xA0\xBD\xED\xB8\x80...' for column 'foo(2)' at row 1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2545,10 +2528,10 @@ $x😀$
 Warnings:
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2566,7 +2549,10 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$x??" + a + "$x??$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$x
+Warnings:
+Warning	1366	Incorrect string value: '\xED\xA0\xBD\xED\xB8\x80...' for column 'foo(2)' at row 1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2577,10 +2563,10 @@ $😀x$
 Warnings:
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2598,7 +2584,10 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$?x?$" + a + "$??x$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$
+Warnings:
+Warning	1366	Incorrect string value: '\xED\xA0\xBD\xED\xB8\x80...' for column 'foo(2)' at row 1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2609,10 +2598,10 @@ $x😀y$
 Warnings:
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2630,7 +2619,10 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "$x??y$" + a + "$x?y?$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+$x
+Warnings:
+Warning	1366	Incorrect string value: '\xED\xA0\xBD\xED\xB8\x80...' for column 'foo(2)' at row 1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2641,10 +2633,10 @@ $x😀y😔$
 Warnings:
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Aretur...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(a INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2662,7 +2654,10 @@ foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL
 return "??$" + a + "?$?$";
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+foo(2)
+
+Warnings:
+Warning	1366	Incorrect string value: '\xED\xA0\xBD\xED\xB8\x80...' for column 'foo(2)' at row 1
 DROP FUNCTION foo//
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2695,11 +2690,10 @@ $code$' at line 4
 CREATE FUNCTION foo(x INTEGER) RETURNS VARCHAR(20)
 DETERMINISTIC LANGUAGE JAVASCRIPT
 AS $code$ rtrn "$$" + x + "$foo$"; $code$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS varchar(20) CHARSET utf8mb4
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$ rtrn "$$" + x + "$foo$"; $JAVASCRIPT$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -2713,7 +2707,7 @@ WHERE routine_schema = "test" //
 ROUTINE_NAME	ROUTINE_TYPE	DATA_TYPE	ROUTINE_BODY	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	ROUTINE_DEFINITION
 foo	FUNCTION	varchar	EXTERNAL	NULL	JAVASCRIPT	SQL	 rtrn "$$" + x + "$foo$"; 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+ERROR HY000: Definition of stored routine 'test.foo' contains an invalid utf8mb3 character string: 'execute failed'.
 DROP FUNCTION foo//
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER
 DETERMINISTIC LANGUAGE JAVASCRIPT
@@ -2723,11 +2717,10 @@ const $y = 1
 return $x + $y;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE FUNCTION foo//
 Function	sql_mode	Create Function	character_set_client	collation_connection	Database Collation
 foo	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` FUNCTION `foo`(x INTEGER) RETURNS int
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2749,7 +2742,7 @@ const $y = 1
 return $x + $y;
 
 SELECT foo(2)//
-ERROR HY000: Language component: Not available.
+ERROR HY000: Definition of stored routine 'test.foo' contains an invalid utf8mb3 character string: 'execute failed'.
 DROP FUNCTION foo//
 # Multiple occurrences of routine body is not allowed
 CREATE FUNCTION foo(a INTEGER) RETURNS VARCHAR(20)
@@ -2784,11 +2777,10 @@ DETERMINISTIC LANGUAGE JAVASCRIPT
 AS $$
 let b = a;
 $$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2811,11 +2803,10 @@ DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
 AS 'let b = a;' //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$let b = a;$$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -2834,11 +2825,10 @@ DROP procedure bar//
 CREATE PROCEDURE bar(a INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
 AS "let b = a;" //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$let b = a;$$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -2859,11 +2849,10 @@ DETERMINISTIC LANGUAGE JAVASCRIPT
 AS '
   let b = a;
 ' //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2889,11 +2878,10 @@ AS
 "
    let b = a;
 " //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -2931,11 +2919,10 @@ AS
   let b = "$$" + a + "$$";
 '
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -2962,11 +2949,10 @@ $code$
 let b = "$$" + a + "$$";
 $code$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -2993,11 +2979,10 @@ $coDE$
 let b = "$$" + a + "$$";
 $coDE$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3024,11 +3009,10 @@ $CODE$
 let b = "$$" + a + "$$";
 $CODE$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3055,11 +3039,10 @@ $tag$
 let b = "$$" + a + "$$";
 $tag$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3086,11 +3069,10 @@ $TAG$
 let b = "$$" + a + "$$";
 $TAG$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3117,11 +3099,10 @@ $NULL$
 let b = "$$" + a + "$$";
 $NULL$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3148,11 +3129,10 @@ $abdc_1234$
 let b = "$$" + a + "$$";
 $abdc_1234$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3179,11 +3159,10 @@ $_a$
 let b = "$$" + a + "$$";
 $_a$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3210,11 +3189,10 @@ $_$
 let b = "$$" + a + "$$";
 $_$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3241,11 +3219,10 @@ $0$
 let b = "$$" + a + "$$";
 $0$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3272,11 +3249,10 @@ $100$
 let b = "$$" + a + "$$";
 $100$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3303,11 +3279,10 @@ $12345678901234$
 let b = "$$" + a + "$$";
 $12345678901234$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3334,11 +3309,10 @@ $1234567890qwertyuiopasdfghjklzxcvbnm_QWERTYUIOPASDFGHJKLZXCVBNM$
 let b = "$$" + a + "$$";
 $1234567890qwertyuiopasdfghjklzxcvbnm_QWERTYUIOPASDFGHJKLZXCVBNM$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3365,11 +3339,10 @@ $¡$
 let b = "$$" + a + "$$";
 $¡$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3396,11 +3369,10 @@ $1234567890qwertyuiopasdfghjklzxcvbnm_QWERTYUIOPASDFGHJKLZXCVBNM¡™£¢∞§¶
 let b = "$$" + a + "$$";
 $1234567890qwertyuiopasdfghjklzxcvbnm_QWERTYUIOPASDFGHJKLZXCVBNM¡™£¢∞§¶•ªº–≠œ∑´®†¥¨ˆøπ“‘«åß∂ƒ©˙∆˚¬…æΩ≈ç√∫µ≤≥÷⁄€‹›ﬁﬂ‡°·‚—±ÅÍÎÏ˝ÓÔÒÚÆ¸˛Ç◊ıÂ¯˘¿$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3428,11 +3400,10 @@ const $y$ = 4;
 let b = $x + $y$ + a;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -3465,11 +3436,10 @@ const $y$$z = 4;
 let b = x$$ + $y$$z + a;
 $code$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3693,11 +3663,10 @@ AS $$
 let b = "∂" + a + "$∂$";
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -3723,11 +3692,10 @@ AS $code$
 let b = "∂" + a + "$∂$$";
 $code$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3753,11 +3721,10 @@ AS $code$
 let b = "∂" + a + "$∂$$∂";
 $code$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3783,11 +3750,10 @@ AS $$∂
 let b = "∂" + a + "$∂$";
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$∂
@@ -3814,11 +3780,10 @@ AS $∂$
 let b = "∂" + a + "∂$";
 $∂$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -3844,11 +3809,10 @@ AS $co∂e$
 let b = "∂" + a + "$∂$$";
 $co∂e$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$
@@ -3877,10 +3841,10 @@ $😀$
 Warnings:
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -3909,10 +3873,10 @@ $😀😔$
 Warnings:
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -3941,10 +3905,10 @@ $x😀$
 Warnings:
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -3973,10 +3937,10 @@ $😀x$
 Warnings:
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -4005,10 +3969,10 @@ $x😀y$
 Warnings:
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -4037,10 +4001,10 @@ $x😀y😔$
 Warnings:
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
 Warning	1300	Cannot convert string '\x0Alet b...' from utf8mb4 to utf8mb3
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(a INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$
@@ -4091,11 +4055,10 @@ $code$' at line 4
 CREATE PROCEDURE bar(x INTEGER)
 DETERMINISTIC LANGUAGE JAVASCRIPT
 AS $code$ let b := "$$" + x + "$foo$"; $code$ //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(x INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $JAVASCRIPT$ let b := "$$" + x + "$foo$"; $JAVASCRIPT$	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
@@ -4119,11 +4082,10 @@ const $y = 1
 let b = $x + $y;
 $$
 //
-Warnings:
-Warning	6001	Language component: Not available.
 SHOW CREATE procedure bar//
 Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
 bar	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` PROCEDURE `bar`(x INTEGER)
+    NO SQL
     DETERMINISTIC
     LANGUAGE JAVASCRIPT
 AS $$

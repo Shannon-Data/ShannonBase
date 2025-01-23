@@ -1,0 +1,61 @@
+
+CREATE DATABASE JAVASCRIPT_DB;
+USE JAVASCRIPT_DB;
+
+DELIMITER |;
+CREATE FUNCTION IS_EVEN (VAL INT) RETURNS INT
+LANGUAGE JAVASCRIPT AS $$
+function isEven(num) {
+    return num % 2 == 0;
+}
+return isEven(VAL);
+$$|
+DELIMITER ;|
+
+show create function IS_EVEN;
+
+select is_even(3);
+select is_even(40);
+
+DELIMITER |;
+CREATE FUNCTION gcd_js (a INT, b INT) RETURNS INT
+LANGUAGE JAVASCRIPT AS $$
+  let [x, y] = [Math.abs(a), Math.abs(b)];
+  while(y) [x, y] = [y, x % y];
+  return x;
+$$|
+DELIMITER ;|
+
+show create function gcd_js;
+select gcd_js(10,20);
+select gcd_js(536, 1676);
+
+DELIMITER |;
+CREATE FUNCTION string_sim(
+s1 VARCHAR(255), s2 VARCHAR(255)) RETURNS INT
+LANGUAGE JAVASCRIPT AS $$
+const [ str1, str2, len1, len2 ] =
+s1.length < s2.length ?
+[ [...s2], [...s1], s2.length, s1.length ] :
+[ [...s1], [...s2], s1.length, s2.length ];
+var res = [...Array( len1 + 1 )].map( x =>
+[...Array(len2 + 1).keys()]
+);
+str1.forEach( (c,i) => {
+res[i+1][0] = i+1;
+str2.forEach( (d,j) => {
+res[i+1][j+1] = Math.min(
+res[i][j+1] + 1,
+res[i+1][j] + 1,
+res[i][j] + ((c == d) ? 0 : 1)
+)
+})
+})
+return res[len1][len2];
+$$|
+DELIMITER ;|
+
+show create function string_sim;
+select string_sim('this is a', 'this is another');
+
+DROP DATABASE JAVASCRIPT_DB;

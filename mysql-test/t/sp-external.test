@@ -40,26 +40,24 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_name = "foo" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
-CREATE FUNCTION JAVASCRIPT(x INTEGER) RETURNS INTEGER DETERMINISTIC
+CREATE FUNCTION JAVASC(x INTEGER) RETURNS INTEGER DETERMINISTIC
 LANGUAGE JAVASCRIPT
 AS $$
   return x-1;
 $$
 //
-SHOW CREATE FUNCTION JAVASCRIPT//
+SHOW CREATE FUNCTION JAVASC//
 --replace_column 6 <modified> 7 <created>
-SHOW FUNCTION STATUS WHERE Name = 'JAVASCRIPT'//
+SHOW FUNCTION STATUS WHERE Name = 'JAVASC'//
 SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
-SELECT JAVASCRIPT(2)//
-DROP FUNCTION JAVASCRIPT//
+SELECT JAVASC(2)//
+DROP FUNCTION JAVASC//
 
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER DETERMINISTIC LANGUAGE PYTHON
 AS $$
@@ -106,7 +104,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -123,7 +120,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -272,7 +268,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -302,7 +297,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -320,7 +314,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -337,7 +330,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -357,7 +349,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -407,7 +398,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -434,7 +424,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -452,7 +441,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -470,7 +458,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -506,7 +493,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -556,19 +542,19 @@ WHERE routine_name = "bar" //
 CALL bar(2)//
 DROP PROCEDURE bar//
 
-CREATE PROCEDURE JAVASCRIPT(a INTEGER) DETERMINISTIC
+CREATE PROCEDURE JAVASC(a INTEGER) DETERMINISTIC
 LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$ //
-SHOW CREATE procedure JAVASCRIPT//
+SHOW CREATE procedure JAVASC//
 --replace_column 6 <modified> 7 <created>
-SHOW PROCEDURE STATUS WHERE Name = 'JAVASCRIPT'//
+SHOW PROCEDURE STATUS WHERE Name = 'JAVASC'//
 SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
 --error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
-CALL JAVASCRIPT(2)//
-DROP procedure JAVASCRIPT//
+CALL JAVASC(2)//
+DROP procedure JAVASC//
 
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE PYTHON
 AS $$ let b = a; $$ //
@@ -961,7 +947,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -975,7 +960,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -989,7 +973,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1005,7 +988,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1022,7 +1004,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1049,7 +1030,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1067,7 +1047,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1085,7 +1064,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1103,7 +1081,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1121,7 +1098,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1139,7 +1115,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1157,7 +1132,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1175,7 +1149,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1193,7 +1166,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1211,7 +1183,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1229,7 +1200,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1247,7 +1217,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1265,7 +1234,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1283,7 +1251,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1301,7 +1268,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1319,7 +1285,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1338,7 +1303,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1359,7 +1323,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1558,7 +1521,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1575,7 +1537,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1592,7 +1553,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1609,7 +1569,7 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
+--error 4089
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1627,7 +1587,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1644,7 +1603,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1662,7 +1620,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1679,7 +1636,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1696,7 +1652,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1713,7 +1668,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1730,7 +1684,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1747,7 +1700,6 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1789,7 +1741,7 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
+--error 4089
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1808,7 +1760,7 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
+--error 4089
 SELECT foo(2)//
 DROP FUNCTION foo//
 
