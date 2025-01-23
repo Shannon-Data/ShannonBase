@@ -583,7 +583,6 @@ ERROR at line 1: 'system' command received, but the --system-command option is o
 
 # Test support for dollar quoting
 
-Warning (Code 6001): Language component: Not available.
 ERROR 1064 (42000) at line 1: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '$mle$test$mle$' at line 1
 ERROR 1064 (42000) at line 1: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '$mle$test$mle' at line 1
 ERROR 1064 (42000) at line 1: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '$mle$test$ml$' at line 1

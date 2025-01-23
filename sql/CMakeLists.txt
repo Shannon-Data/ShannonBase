@@ -969,12 +969,13 @@ MYSQL_ADD_PLUGIN(mysql_native_password
   STATIC_ONLY DEFAULT)
 
 TARGET_INCLUDE_DIRECTORIES(sql_main SYSTEM PUBLIC
-  ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include)
+  ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include
+  ${CMAKE_SOURCE_DIR}/extra/jerryscript/jerry-core/include)
 
 TARGET_LINK_LIBRARIES(sql_main ${MYSQLD_STATIC_PLUGIN_LIBS}
   mysql_server_component_services mysys strings vio
   mysql_binlog_event ${LIBWRAP} ${LIBDL} OpenSSL::SSL OpenSSL::Crypto
-  extra::rapidjson extra::boost)
+  extra::rapidjson sql_ml extra::boost jerry-core jerry-ext jerry-port)
 
 # sql/immutable_string.h uses
 # google::protobuf::io::CodedOutputStream::WriteVarint64ToArray
@@ -1014,8 +1015,7 @@ ADD_LIBRARY(sql_ml STATIC ${ML_SOURCES})
 #gomp required by lightgbm
 TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp)
 TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC 
-                           ${CMAKE_SOURCE_DIR}/extra/lightgbm/LightGBM/include 
-                           ${CMAKE_SOURCE_DIR}/extra/jerryscript/jerry-core/include)
+                           ${CMAKE_SOURCE_DIR}/extra/lightgbm/LightGBM/include)
 SET_TARGET_PROPERTIES(sql_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 #
