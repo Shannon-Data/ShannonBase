@@ -1,0 +1,3 @@
+let $engine_type=InnoDB;
+let $vector_max_dim=16383;
+--source common/rpl/rpl_vector.test

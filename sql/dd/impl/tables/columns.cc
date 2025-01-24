@@ -74,10 +74,10 @@ Columns::Columns() {
                          "    'MYSQL_TYPE_NEWDECIMAL', 'MYSQL_TYPE_ENUM',\n"
                          "    'MYSQL_TYPE_SET', 'MYSQL_TYPE_TINY_BLOB',\n"
                          "    'MYSQL_TYPE_MEDIUM_BLOB', "
-                         "'MYSQL_TYPE_LONG_BLOB',\n"
+                         "    'MYSQL_TYPE_LONG_BLOB',\n"
                          "    'MYSQL_TYPE_BLOB', 'MYSQL_TYPE_VAR_STRING',\n"
                          "    'MYSQL_TYPE_STRING', 'MYSQL_TYPE_GEOMETRY',\n"
-                         "    'MYSQL_TYPE_JSON'\n"
+                         "    'MYSQL_TYPE_JSON', 'MYSQL_TYPE_VECTOR'\n"
                          "  ) NOT NULL");
   m_target_def.add_field(FIELD_IS_NULLABLE, "FIELD_IS_NULLABLE",
                          "is_nullable BOOL NOT NULL");

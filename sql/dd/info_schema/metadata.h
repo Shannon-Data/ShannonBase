@@ -263,6 +263,10 @@ namespace info_schema {
                   if all values are empty string.
     Changed derived data type from CHAR(0) to VARCHAR(0) for some columns in
     such view definitions.
+
+  ----------------------------------------------------------------------------
+  Changes:
+  - WL#16081: Native Vector Embeddings Support In MySQL And HeatWave
 */
 
 static const uint IS_DD_VERSION = 80400;

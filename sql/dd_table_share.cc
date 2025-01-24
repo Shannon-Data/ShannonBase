@@ -181,6 +181,9 @@ enum_field_types dd_get_old_field_type(dd::enum_column_types type) {
     case dd::enum_column_types::BLOB:
       return MYSQL_TYPE_BLOB;
 
+    case dd::enum_column_types::VECTOR:
+      return MYSQL_TYPE_VECTOR;
+
     case dd::enum_column_types::VAR_STRING:
       return MYSQL_TYPE_VAR_STRING;
 
