@@ -78,8 +78,6 @@ class List;
 
 /* Function items used by mysql */
 
-extern bool reject_geometry_args(uint arg_count, Item **args,
-                                 Item_result_field *me);
 void unsupported_json_comparison(size_t arg_count, Item **args,
                                  const char *msg);
 
@@ -134,7 +132,9 @@ class Item_func : public Item_result_field {
   inline Item **arguments() const {
     return (argument_count() > 0) ? args : nullptr;
   }
-
+  bool reject_vector_args();
+  uint num_vector_args();
+  bool reject_geometry_args();
  protected:
   /*
     These decide of types of arguments which are prepared-statement
@@ -1111,6 +1111,7 @@ class Item_typecast_decimal final : public Item_func {
   my_decimal *val_decimal(my_decimal *) override;
   enum Item_result result_type() const override { return DECIMAL_RESULT; }
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (args[0]->propagate_type(thd, MYSQL_TYPE_NEWDECIMAL, false, true))
       return true;
     return false;
@@ -1148,6 +1149,7 @@ class Item_typecast_real final : public Item_func {
   my_decimal *val_decimal(my_decimal *decimal_value) override;
   enum Item_result result_type() const override { return REAL_RESULT; }
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     return args[0]->propagate_type(thd, MYSQL_TYPE_DOUBLE, false, true);
   }
   const char *func_name() const override { return "cast_as_real"; }
@@ -1750,6 +1752,28 @@ class Item_func_length : public Item_int_func {
   const char *func_name() const override { return "length"; }
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
+    max_length = 10;
+    return false;
+  }
+};
+
+class Item_func_vector_dim : public Item_int_func {
+  String value;
+ public:
+  Item_func_vector_dim(const POS &pos, Item *a) : Item_int_func(pos, a) {}
+  longlong val_int() override;
+  const char *func_name() const override { return "vector_dim"; }
+  bool resolve_type(THD *thd) override {
+    if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_VECTOR)) {
+      return true;
+    }
+    bool valid_type = (args[0]->data_type() == MYSQL_TYPE_VECTOR) ||
+                      (args[0]->result_type() == STRING_RESULT &&
+                       args[0]->collation.collation == &my_charset_bin);
+    if (!valid_type) {
+      my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+      return true;
+    }
     max_length = 10;
     return false;
   }

@@ -1457,6 +1457,7 @@ void warn_on_deprecated_user_defined_collation(
 %token<lexer.keyword> BERNOULLI_SYM              1213  /* SQL-2016-N */
 %token<lexer.keyword> TABLESAMPLE_SYM            1214  /* SQL-2016-R */
 
+%token<lexer.keyword> VECTOR_SYM 1215
 %token<lexer.keyword> JAVASCRIPT_SYM 1216
 /*
   NOTE! When adding new non-standard keywords, make sure they are added to the
@@ -6991,6 +6992,10 @@ type:
         | VARBINARY_SYM field_length
           {
             $$= NEW_PTN PT_char_type(@$, Char_type::VARCHAR, $2, &my_charset_bin);
+          }
+        | VECTOR_SYM opt_field_length
+          {
+            $$= NEW_PTN PT_vector_type(@$, $2);
           }
         | YEAR_SYM opt_field_length field_options
           {
@@ -15718,6 +15723,7 @@ ident_keywords_unambiguous:
         | XML_SYM
         | YEAR_SYM
         | ZONE_SYM
+        | VECTOR_SYM
         ;
 
 /*

@@ -1162,6 +1162,11 @@ static COMMANDS commands[] = {
     {"TO_DAYS", 0, nullptr, false, ""},
     {"TOUCHES", 0, nullptr, false, ""},
     {"TRIM", 0, nullptr, false, ""},
+    {"TO_VECTOR", 0, nullptr, false, ""},
+    {"STRING_TO_VECTOR", 0, nullptr, false, ""},
+    {"FROM_VECTOR", 0, nullptr, false, ""},
+    {"VECTOR_TO_STRING", 0, nullptr, false, ""},
+    {"VECTOR_DIM", 0, nullptr, false, ""},
     {"UCASE", 0, nullptr, false, ""},
     {"UNCOMPRESS", 0, nullptr, false, ""},
     {"UNCOMPRESSED_LENGTH", 0, nullptr, false, ""},
@@ -3925,6 +3930,7 @@ static bool is_binary_field(MYSQL_FIELD *field) {
            field->type == MYSQL_TYPE_VAR_STRING ||
            field->type == MYSQL_TYPE_STRING ||
            field->type == MYSQL_TYPE_VARCHAR ||
+           field->type == MYSQL_TYPE_VECTOR ||
            field->type == MYSQL_TYPE_GEOMETRY));
 }
 

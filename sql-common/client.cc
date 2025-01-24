@@ -9635,6 +9635,8 @@ const char *fieldtype2str(enum enum_field_types type) {
       return "VARCHAR";
     case MYSQL_TYPE_VAR_STRING:
       return "VAR_STRING";
+    case MYSQL_TYPE_VECTOR:
+      return "VECTOR";
     case MYSQL_TYPE_YEAR:
       return "YEAR";
     case MYSQL_TYPE_INVALID:

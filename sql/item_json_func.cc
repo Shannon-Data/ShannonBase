@@ -1040,6 +1040,7 @@ bool get_json_wrapper(Item **args, uint arg_idx, String *str,
 
 bool Item_func_json_type::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
+  if (reject_vector_args()) return true;
   set_nullable(true);
   m_value.set_charset(&my_charset_utf8mb4_bin);
   set_data_type_string(kMaxJsonTypeNameLength + 1, &my_charset_utf8mb4_bin);
@@ -1720,6 +1721,7 @@ bool Item_func_json_extract::eq(const Item *item, bool binary_cmp) const {
 
 bool Item_func_modify_json_in_path::resolve_type(THD *thd) {
   if (Item_json_func::resolve_type(thd)) return true;
+  if (reject_vector_args()) return true;
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
   if (param_type_is_default(thd, 1, -1, 2, MYSQL_TYPE_VARCHAR)) return true;
   if (param_type_is_default(thd, 2, -1, 2, MYSQL_TYPE_JSON)) return true;
@@ -3561,6 +3563,7 @@ void Item_func_array_cast::add_json_info(Json_object *obj) {
 }
 
 bool Item_func_array_cast::resolve_type(THD *) {
+  if (reject_vector_args()) return true;
   set_nullable(true);
   return false;
 }

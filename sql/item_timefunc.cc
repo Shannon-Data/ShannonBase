@@ -1050,6 +1050,7 @@ bool Item_func_at_time_zone::check_type() const {
 }
 
 bool Item_func_period_add::resolve_type(THD *thd) {
+  if (reject_vector_args()) return true;
   return param_type_is_default(thd, 0, -1, MYSQL_TYPE_LONGLONG);
 }
 
@@ -1068,6 +1069,7 @@ longlong Item_func_period_add::val_int() {
 }
 
 bool Item_func_period_diff::resolve_type(THD *thd) {
+  if (reject_vector_args()) return true;
   return param_type_is_default(thd, 0, -1, MYSQL_TYPE_LONGLONG);
 }
 
@@ -1087,6 +1089,7 @@ longlong Item_func_period_diff::val_int() {
 }
 
 bool Item_func_to_days::resolve_type(THD *thd) {
+  if (reject_vector_args()) return true;
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
   // The maximum string length returned by TO_DAYS is 7, as its range is
   // [0000-01-01, 9999-12-31] -> [0, 3652424]. Set the maximum length to one
@@ -1131,6 +1134,7 @@ longlong Item_func_to_seconds::val_int_endpoint(bool, bool *) {
 
 bool Item_func_to_seconds::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   set_nullable(true);
   return false;
 }
@@ -1231,6 +1235,7 @@ longlong Item_func_to_days::val_int_endpoint(bool left_endp, bool *incl_endp) {
 
 bool Item_func_dayofyear::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   // Returns a value in the range [1, 366], so max three digits. Add one to the
   // character length for the sign.
   fix_char_length(4);
@@ -1249,6 +1254,7 @@ longlong Item_func_dayofyear::val_int() {
 
 bool Item_func_dayofmonth::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   // Returns a value in the range [0, 31], so max two digits. Add one to the
   // character length for the sign.
   fix_char_length(3);
@@ -1265,6 +1271,7 @@ longlong Item_func_dayofmonth::val_int() {
 
 bool Item_func_month::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   // Returns a value in the range [1, 12], so max two digits. Add one to the
   // character length for the sign.
   fix_char_length(3);
@@ -1281,6 +1288,7 @@ longlong Item_func_month::val_int() {
 
 bool Item_func_monthname::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   const CHARSET_INFO *cs = thd->variables.collation_connection;
   const uint32 repertoire = my_charset_repertoire(cs);
   locale = thd->variables.lc_time_names;
@@ -1307,6 +1315,7 @@ String *Item_func_monthname::val_str(String *str) {
 
 bool Item_func_quarter::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   // Always one digit [1, 4]. Add one character for the sign.
   fix_char_length(2);
   assert(decimal_precision() == 1);
@@ -1327,6 +1336,7 @@ longlong Item_func_quarter::val_int() {
 
 bool Item_func_hour::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   // Can have up to three digits (TIME_MAX_HOUR == 838). Add one for the sign.
   fix_char_length(4);
   assert(decimal_precision() == 3);
@@ -1342,6 +1352,7 @@ longlong Item_func_hour::val_int() {
 
 bool Item_func_minute::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   // Can have up to two digits [0, 59]. Add one for the sign.
   fix_char_length(3);
   assert(decimal_precision() == 2);
@@ -1357,6 +1368,7 @@ longlong Item_func_minute::val_int() {
 
 bool Item_func_second::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   // Can have up to two digits [0, 59]. Add one for the sign.
   fix_char_length(3);
   assert(decimal_precision() == 2);
@@ -1393,6 +1405,7 @@ bool Item_func_week::do_itemize(Parse_context *pc, Item **res) {
 bool Item_func_week::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
   if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_LONGLONG)) return true;
+  if (reject_vector_args()) return true;
   // Can have up to two digits [0, 53] (0 when using WEEK_YEAR, otherwise [1,
   // 53]). Add one for the sign.
   fix_char_length(3);
@@ -1443,6 +1456,7 @@ longlong Item_func_week::val_int() {
 bool Item_func_yearweek::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
   if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_LONGLONG)) return true;
+  if (reject_vector_args()) return true;
   // Returns six digits (YYYYWW). Add one character for the sign.
   fix_char_length(7);
   assert(decimal_precision() == 6);
@@ -1462,6 +1476,7 @@ longlong Item_func_yearweek::val_int() {
 
 bool Item_func_weekday::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   // Always one digit (either [0, 6] or [1, 7], depending on whether it's called
   // as WEEKDAY or DAYOFWEEK). Add one character for the sign.
   fix_char_length(2);
@@ -1482,6 +1497,7 @@ longlong Item_func_weekday::val_int() {
 
 bool Item_func_dayname::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   const CHARSET_INFO *cs = thd->variables.collation_connection;
   const uint32 repertoire = my_charset_repertoire(cs);
   locale = thd->variables.lc_time_names;
@@ -1507,6 +1523,7 @@ String *Item_func_dayname::val_str(String *str) {
 
 bool Item_func_year::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   set_data_type_year();
   set_nullable(true);
   return false;
@@ -1519,7 +1536,7 @@ longlong Item_func_year::val_int() {
 }
 
 bool Item_typecast_year::resolve_type(THD *thd) {
-  if (reject_geometry_args(arg_count, args, this)) return true;
+  if (reject_geometry_args() || reject_vector_args()) return true;
   if (args[0]->propagate_type(thd, MYSQL_TYPE_YEAR, false, true)) return true;
   assert(decimal_precision() == 4);
   set_nullable(true);
@@ -1719,6 +1736,7 @@ longlong Item_func_unix_timestamp::val_int_endpoint(bool, bool *) {
 
 bool Item_func_time_to_sec::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_TIME)) return true;
+  if (reject_vector_args()) return true;
   fix_char_length(10);
   set_nullable(true);
   return false;
@@ -2198,6 +2216,7 @@ bool Item_func_sec_to_time::get_time(MYSQL_TIME *ltime) {
 bool Item_func_date_format::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
   if (param_type_is_default(thd, 1, 2)) return true;
+  if (reject_vector_args()) return true;
   /*
     Must use this_item() in case it's a local SP variable
     (for ->max_length and ->str_value)
@@ -2355,6 +2374,7 @@ null_date:
 
 bool Item_func_from_unixtime::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_NEWDECIMAL)) return true;
+  if (reject_vector_args()) return true;
   set_data_type_datetime(min(args[0]->decimals, uint8{DATETIME_MAX_DECIMALS}));
   set_nullable(true);
   thd->time_zone_used = true;
@@ -2417,6 +2437,7 @@ bool Item_func_from_unixtime::get_date(MYSQL_TIME *ltime,
 bool Item_func_convert_tz::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
   if (param_type_is_default(thd, 1, -1)) return true;
+  if (reject_vector_args()) return true;
   set_data_type_datetime(args[0]->datetime_precision());
   set_nullable(true);
   return false;
@@ -2467,6 +2488,7 @@ void Item_func_convert_tz::cleanup() {
 }
 
 bool Item_date_add_interval::resolve_type(THD *thd) {
+  if (reject_geometry_args() || reject_vector_args()) return true;
   set_nullable(true);
 
   /*
@@ -2714,6 +2736,7 @@ void Item_extract::print(const THD *thd, String *str,
 
 bool Item_extract::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   set_nullable(true);  // If wrong date
   switch (int_type) {
     case INTERVAL_YEAR:
@@ -3034,6 +3057,7 @@ bool Item_func_add_time::resolve_type(THD *thd) {
                             m_datetime ? MYSQL_TYPE_DATETIME : MYSQL_TYPE_TIME))
     return true;
   if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_TIME)) return true;
+  if (reject_vector_args()) return true;
 
   /*
     The field type for the result of an Item_func_add_time function is defined
@@ -3307,6 +3331,7 @@ longlong Item_func_microsecond::val_int() {
 
 bool Item_func_microsecond::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_DATETIME)) return true;
+  if (reject_vector_args()) return true;
   set_nullable(true);
   return false;
 }
@@ -3567,6 +3592,7 @@ void Item_func_str_to_date::fix_from_format(const char *format, size_t length) {
 
 bool Item_func_str_to_date::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 2)) return true;
+  if (reject_vector_args()) return true;
   set_nullable(true);
   cached_timestamp_type = MYSQL_TIMESTAMP_DATETIME;
   set_data_type_datetime(DATETIME_MAX_DECIMALS);

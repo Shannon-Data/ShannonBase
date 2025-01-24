@@ -169,7 +169,8 @@ static size_t CalculateColumnStorageSize(const Column &column) {
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
-    case MYSQL_TYPE_BLOB: {
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR: {
       is_blob_column = true;
       break;
     }

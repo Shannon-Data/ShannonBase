@@ -387,7 +387,8 @@ static void set_parameter_type(Item_param *param, enum enum_field_types type,
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
-    case MYSQL_TYPE_BLOB: {
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR: {
       param->set_collation_source(&my_charset_bin);
       break;
     }
@@ -563,7 +564,8 @@ static bool set_parameter_value(
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
-    case MYSQL_TYPE_BLOB: {
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR: {
       param->set_str((const char *)*pos, len);
 
       break;
@@ -2805,6 +2807,7 @@ bool Prepared_statement::check_parameter_types() {
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_VECTOR:
       case MYSQL_TYPE_LONG_BLOB:
         if (item->data_type_actual() == MYSQL_TYPE_LONGLONG ||
             item->data_type_actual() == MYSQL_TYPE_NEWDECIMAL ||

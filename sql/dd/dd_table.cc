@@ -206,6 +206,9 @@ dd::enum_column_types get_new_field_type(enum_field_types type) {
     case MYSQL_TYPE_BLOB:
       return dd::enum_column_types::BLOB;
 
+    case MYSQL_TYPE_VECTOR:
+      return dd::enum_column_types::VECTOR;
+
     case MYSQL_TYPE_VAR_STRING:
       return dd::enum_column_types::VAR_STRING;
 
