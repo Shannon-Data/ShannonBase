@@ -154,6 +154,8 @@
 #include "template_utils.h"  // pointer_cast
 #include "thr_mutex.h"
 
+#include "ml/auto_ml.h" //auto_ml
+
 using std::max;
 using std::min;
 
@@ -10191,5 +10193,142 @@ longlong Item_func_internal_is_enabled_role::val_int() {
     if (rid == std::make_pair(lex_user, lex_host)) return 1;
   }
 
+  return 0;
+}
+
+// for ML libs impl.
+longlong Item_func_ml_train::val_int() {
+  DBUG_TRACE;
+  //ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle)
+  assert(arg_count>= 3 && arg_count <= 4 );
+  THD* thd [[maybe_unused]] = current_thd;
+
+  /**schema_table_name can not be empty, it checked in ML_train SP. and the format of that
+   * is `schema_name.table_name`  */
+  String sch_tb_name, target_col_name, handle_name;
+  String *handle_name_ptr;
+  auto sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
+  auto sch_tb_name_cptr = sch_tb_name_ptr->c_ptr_safe();
+  auto pos = std::strstr(sch_tb_name_cptr, ".") - sch_tb_name_cptr;
+  std::string schema_name(sch_tb_name_cptr, pos);
+  std::string table_name(sch_tb_name_cptr + pos +1, sch_tb_name_ptr->length() - pos);
+
+  auto target_col_name_ptr = args[1]->val_str(&target_col_name);
+
+  Json_wrapper options;
+  if (arg_count> 3) {
+    auto ret = args[2]->val_json(&options);
+    if (ret) //cannot get the options.
+      return 1;
+    handle_name_ptr = args[3]->val_str(&handle_name);
+  } else{
+    handle_name_ptr = args[2]->val_str(&handle_name);
+  }
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>(schema_name,
+                                                table_name,
+                                                std::string(target_col_name_ptr->c_ptr()),
+                                                &options,
+                                                std::string(handle_name_ptr->c_ptr()));
+  /**To invoke ML libs to train ML models*/
+  auto result = auto_ml->train();
+  return result;
+}
+
+longlong Item_func_ml_model_load::val_int() {
+  DBUG_TRACE;
+  //ML_MODEL_LOAD(in_model_handle_name, v_model_meta, v_model_data)
+  assert(arg_count == 3);
+  THD* thd [[maybe_unused]] = current_thd;
+
+  String handle_name;
+  String *handle_name_ptr[[maybe_unused]] = args[0]->val_str(&handle_name);
+
+  Json_wrapper model_meta;
+  bool flag[[maybe_unused]] = args[1]->val_json(&model_meta);
+
+  String model_content;
+  String* model_content_ptr[[maybe_unused]] = args[2]->val_str(&model_content);
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  /**To invoke ML libs to load the trainned ML models into memory*/
+  auto result = auto_ml->load(&model_meta, &model_content);
+  return result;
+}
+
+longlong Item_func_ml_model_unload::val_int() {
+  DBUG_TRACE;
+  //ML_MODEL_UNLOAD(in_model_handle_name, v_model_meta)
+  assert(arg_count == 2);
+  THD* thd [[maybe_unused]] = current_thd;
+
+  String handle_name;
+  String *handle_name_ptr[[maybe_unused]] = args[0]->val_str(&handle_name);
+
+  Json_wrapper model_meta;
+  bool flag[[maybe_unused]] = args[1]->val_json(&model_meta);
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  /**To invoke ML libs to load the trainned ML models into memory*/
+  auto result = auto_ml->unload(&handle_name, &model_meta);
+  return result;
+}
+
+longlong Item_func_ml_model_import::val_int() {
+  //ML_MODEL_IMPORT(in_model_handle_name, in_user_name, v_model_meta, in_model_content) 
+  assert(arg_count == 4);
+  THD* thd [[maybe_unused]] = current_thd;
+
+  String handle_name;
+  String *handle_name_ptr[[maybe_unused]] = args[0]->val_str(&handle_name);
+
+  String in_user_name;
+  String *in_user_name_ptr[[maybe_unused]] = args[1]->val_str(&in_user_name);
+
+  Json_wrapper model_meta;
+  bool flag[[maybe_unused]] = args[2]->val_json(&model_meta);
+
+  String model_content;
+  String *model_content_ptr[[maybe_unused]] = args[3]->val_str(&model_content);
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  /**To invoke ML libs to load the trainned ML models into memory*/
+  auto result = auto_ml->import(&handle_name, &in_user_name,
+                                &model_meta, &model_content);
+  return result;
+}
+
+longlong Item_func_ml_score::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_predicte_row::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_predicte_table::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_explain::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+longlong Item_func_ml_explain_row::val_int() {
+  assert(fixed);
+  return 0;
+}
+
+
+longlong Item_func_ml_explain_table::val_int() {
+  assert(fixed);
   return 0;
 }

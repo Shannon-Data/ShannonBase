@@ -4054,6 +4054,167 @@ class Item_func_internal_is_enabled_role : public Item_int_func {
 };
 
 /**
+  Internal function used by sys implementation to train ML model.
+*/
+class Item_func_ml_train : public Item_int_func {
+ public:
+  Item_func_ml_train(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  longlong val_int() override;
+  const char *func_name() const override {
+    return "ML_TRAIN";
+  }
+  bool resolve_type(THD *) override {
+    set_nullable(false);
+    null_on_null = false;
+    return false;
+  }
+};
+
+class Item_func_ml_model_load final : public Item_int_func {
+ public:
+  Item_func_ml_model_load(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  longlong val_int() override;
+  bool resolve_type(THD *) override {
+    set_nullable(true);
+    null_on_null = false;
+    return false;
+  }
+  const char *func_name() const override {
+    return "ML_MODE_LOAD";
+  }
+};
+
+class Item_func_ml_model_unload final : public Item_int_func {
+ public:
+  Item_func_ml_model_unload(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  longlong val_int() override;
+  bool resolve_type(THD *) override {
+    set_nullable(true);
+    null_on_null = false;
+    return false;
+  }
+  const char *func_name() const override {
+    return "ML_MODEL_UNLOAD";
+  }
+};
+
+class Item_func_ml_model_import : public Item_int_func {
+ public:
+  Item_func_ml_model_import(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  longlong val_int() override;
+  const char *func_name() const override {
+    return "ML_MODEL_IMPORT";
+  }
+  bool resolve_type(THD *) override {
+    set_nullable(false);
+    null_on_null = false;
+    return false;
+  }
+};
+
+class Item_func_ml_score : public Item_int_func {
+ public:
+  Item_func_ml_score(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  longlong val_int() override;
+  const char *func_name() const override {
+    return "ML_MODEL_SCORE";
+  }
+  bool resolve_type(THD *) override {
+    set_nullable(false);
+    null_on_null = false;
+    return false;
+  }
+};
+
+class Item_func_ml_predicte_row : public Item_int_func {
+ public:
+  Item_func_ml_predicte_row(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  longlong val_int() override;
+  const char *func_name() const override {
+    return "ML_MODEL_SCORE";
+  }
+  bool resolve_type(THD *) override {
+    set_nullable(false);
+    null_on_null = false;
+    return false;
+  }
+};
+
+class Item_func_ml_predicte_table : public Item_int_func {
+ public:
+  Item_func_ml_predicte_table(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  longlong val_int() override;
+  const char *func_name() const override {
+    return "ML_PREDICT_TABLE";
+  }
+  bool resolve_type(THD *) override {
+    set_nullable(false);
+    null_on_null = false;
+    return false;
+  }
+};
+
+class Item_func_ml_explain : public Item_int_func {
+ public:
+  Item_func_ml_explain(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  longlong val_int() override;
+  const char *func_name() const override {
+    return "ML_EXPLAIN";
+  }
+  bool resolve_type(THD *) override {
+    set_nullable(false);
+    null_on_null = false;
+    return false;
+  }
+};
+
+class Item_func_ml_explain_row : public Item_int_func {
+ public:
+  Item_func_ml_explain_row(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  longlong val_int() override;
+  const char *func_name() const override {
+    return "ML_EXPLAIN_ROW";
+  }
+  bool resolve_type(THD *) override {
+    set_nullable(false);
+    null_on_null = false;
+    return false;
+  }
+};
+
+class Item_func_ml_explain_table : public Item_int_func {
+ public:
+  Item_func_ml_explain_table(const POS &pos, PT_item_list *list)
+      : Item_int_func(pos, list) {}
+  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  longlong val_int() override;
+  const char *func_name() const override {
+    return "ML_EXPLAIN_TABLE";
+  }
+  bool resolve_type(THD *) override {
+    set_nullable(false);
+    null_on_null = false;
+    return false;
+  }
+};
+
+/**
   Create new Item_func_get_system_var object
 
   @param pc     Parse context

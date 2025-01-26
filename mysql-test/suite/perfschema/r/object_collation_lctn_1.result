@@ -22,6 +22,8 @@ performance_schema	events_waits_history_long	OBJECT_SCHEMA	utf8mb4_0900_ai_ci
 performance_schema	metadata_locks	OBJECT_SCHEMA	utf8mb4_0900_ai_ci
 performance_schema	objects_summary_global_by_type	OBJECT_SCHEMA	utf8mb4_0900_ai_ci
 performance_schema	prepared_statements_instances	OWNER_OBJECT_SCHEMA	utf8mb4_0900_ai_ci
+performance_schema	rpd_preload_stats	TABLE_SCHEMA	utf8mb4_bin
+performance_schema	rpd_table_id	SCHEMA_NAME	utf8mb4_bin
 performance_schema	setup_objects	OBJECT_SCHEMA	utf8mb4_0900_ai_ci
 performance_schema	table_handles	OBJECT_SCHEMA	utf8mb4_0900_ai_ci
 performance_schema	table_io_waits_summary_by_index_usage	OBJECT_SCHEMA	utf8mb4_0900_ai_ci
@@ -56,6 +58,9 @@ WHERE TABLE_SCHEMA = 'performance_schema'
   ORDER BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME;
 TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	COLLATION_NAME
 performance_schema	metadata_locks	COLUMN_NAME	utf8mb4_0900_ai_ci
+performance_schema	rpd_column_id	COLUMN_NAME	utf8mb4_bin
+performance_schema	rpd_columns	COLUMN_ID	NULL
+performance_schema	rpd_preload_stats	COLUMN_NAME	utf8mb4_bin
 TRUNCATE TABLE performance_schema.events_waits_history_long;
 TRUNCATE TABLE performance_schema.events_statements_history_long;
 CREATE SCHEMA `BroKen`;
