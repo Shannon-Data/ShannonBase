@@ -90,6 +90,11 @@ replication_connection_configuration
 replication_connection_status
 replication_group_member_stats
 replication_group_members
+rpd_column_id
+rpd_columns
+rpd_preload_stats
+rpd_table_id
+rpd_tables
 rwlock_instances
 session_account_connect_attrs
 session_connect_attrs
