@@ -29,63 +29,39 @@
 namespace ShannonBase {
 namespace ML {
 
-ML_anomaly_detection::ML_anomaly_detection() {
-}
+ML_anomaly_detection::ML_anomaly_detection() {}
 
-ML_anomaly_detection::~ML_anomaly_detection() {
-}
+ML_anomaly_detection::~ML_anomaly_detection() {}
 
-int ML_anomaly_detection::train() {
+int ML_anomaly_detection::train() { return 0; }
+
+int ML_anomaly_detection::predict() { return 0; }
+
+int ML_anomaly_detection::load(std::string &model_content [[maybe_unused]]) { return 0; }
+
+int ML_anomaly_detection::load_from_file(std::string modle_file_full_path [[maybe_unused]],
+                                         std::string model_handle_name [[maybe_unused]]) {
   return 0;
 }
 
-int ML_anomaly_detection::predict() {
+int ML_anomaly_detection::unload(std::string model_handle_name [[maybe_unused]]) { return 0; }
+
+int ML_anomaly_detection::import(std::string model_handle_name [[maybe_unused]], std::string user_name [[maybe_unused]],
+                                 std::string &content [[maybe_unused]]) {
   return 0;
 }
 
-int ML_anomaly_detection::load(std::string& model_content[[maybe_unused]]) {
-  return 0;
-}
+double ML_anomaly_detection::score() { return 0; }
 
-int ML_anomaly_detection::load_from_file (std::string modle_file_full_path [[maybe_unused]],
-                                       std::string model_handle_name[[maybe_unused]]) {
-  return 0;
-}
+int ML_anomaly_detection::explain_row() { return 0; }
 
-int ML_anomaly_detection::unload(std::string model_handle_name[[maybe_unused]]) {
-  return 0;
-}
+int ML_anomaly_detection::explain_table() { return 0; }
 
-int ML_anomaly_detection::import(std::string model_handle_name[[maybe_unused]],
-                                std::string user_name[[maybe_unused]],
-                                std::string& content[[maybe_unused]]) {
-  return 0;
-}
+int ML_anomaly_detection::predict_row() { return 0; }
 
-double ML_anomaly_detection::score() {
-  return 0;
-}
+int ML_anomaly_detection::predict_table() { return 0; }
 
-int ML_anomaly_detection::explain_row() {
-  return 0;
-}
+ML_TASK_TYPE ML_anomaly_detection::type() { return ML_TASK_TYPE::ANOMALY_DETECTION; }
 
-int ML_anomaly_detection::explain_table() {
-  return 0;
-}
-
-int ML_anomaly_detection::predict_row() {
-  return 0;
-}
-
-int ML_anomaly_detection::predict_table() {
-  return 0;
-}
-
-ML_TASK_TYPE ML_anomaly_detection::type() {
-  return ML_TASK_TYPE::ANOMALY_DETECTION;
-}
-
-
-} //ml
-} //shannonbase
+}  // namespace ML
+}  // namespace ShannonBase

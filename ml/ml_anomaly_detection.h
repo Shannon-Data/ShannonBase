@@ -32,26 +32,26 @@ namespace ShannonBase {
 namespace ML {
 
 class ML_anomaly_detection : public ML_algorithm {
-  public:
-    ML_anomaly_detection();
-    ~ML_anomaly_detection();
-    int train() override;
-    int predict() override;
-    int load(std::string& model_content) override;
-    int load_from_file (std::string modle_file_full_path,
-                        std::string model_handle_name) override;
-    int unload(std::string model_handle_name) override;
-    int import(std::string model_handle_name, std::string user_name, std::string& content) override;
-    double score() override;
-    int explain_row() override;
-    int explain_table() override;
-    int predict_row() override;
-    int predict_table() override;
-    ML_TASK_TYPE type() override;
+ public:
+  ML_anomaly_detection();
+  ~ML_anomaly_detection();
+  int train() override;
+  int predict() override;
+  int load(std::string &model_content) override;
+  int load_from_file(std::string modle_file_full_path, std::string model_handle_name) override;
+  int unload(std::string model_handle_name) override;
+  int import(std::string model_handle_name, std::string user_name, std::string &content) override;
+  double score() override;
+  int explain_row() override;
+  int explain_table() override;
+  int predict_row() override;
+  int predict_table() override;
+  ML_TASK_TYPE type() override;
+
  private:
 };
 
-} //ML
-} //shannonbase
+}  // namespace ML
+}  // namespace ShannonBase
 
-#endif //__SHANNONBASE_ML_ANOMALY_DECTION_H__
+#endif  //__SHANNONBASE_ML_ANOMALY_DECTION_H__

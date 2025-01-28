@@ -29,63 +29,39 @@
 namespace ShannonBase {
 namespace ML {
 
-ML_forecasting::ML_forecasting() {
-}
+ML_forecasting::ML_forecasting() {}
 
-ML_forecasting::~ML_forecasting() {
-}
+ML_forecasting::~ML_forecasting() {}
 
-int ML_forecasting::train() {
+int ML_forecasting::train() { return 0; }
+
+int ML_forecasting::predict() { return 0; }
+
+int ML_forecasting::load(std::string &model_content [[maybe_unused]]) { return 0; }
+
+int ML_forecasting::load_from_file(std::string modle_file_full_path [[maybe_unused]],
+                                   std::string model_handle_name [[maybe_unused]]) {
   return 0;
 }
 
-int ML_forecasting::predict() {
+int ML_forecasting::unload(std::string model_handle_name [[maybe_unused]]) { return 0; }
+
+int ML_forecasting::import(std::string model_handle_name [[maybe_unused]], std::string user_name [[maybe_unused]],
+                           std::string &content [[maybe_unused]]) {
   return 0;
 }
 
-int ML_forecasting::load(std::string& model_content [[maybe_unused]]) {
-  return 0;
-}
+double ML_forecasting::score() { return 0; }
 
-int ML_forecasting::load_from_file (std::string modle_file_full_path [[maybe_unused]],
-                                    std::string model_handle_name [[maybe_unused]]) {
-  return 0;
-}
+int ML_forecasting::explain_row() { return 0; }
 
-int ML_forecasting::unload(std::string model_handle_name [[maybe_unused]]) {
-  return 0;
-}
+int ML_forecasting::explain_table() { return 0; }
 
-int ML_forecasting::import(std::string model_handle_name [[maybe_unused]],
-                          std::string user_name [[maybe_unused]],
-                          std::string& content [[maybe_unused]]) {
-  return 0;
-}
+int ML_forecasting::predict_row() { return 0; }
 
-double ML_forecasting::score() {
-  return 0;
-}
+int ML_forecasting::predict_table() { return 0; }
 
-int ML_forecasting::explain_row() {
-  return 0;
-}
+ML_TASK_TYPE ML_forecasting::type() { return ML_TASK_TYPE::FORECASTING; }
 
-int ML_forecasting::explain_table() {
-  return 0;
-}
-
-int ML_forecasting::predict_row() {
-  return 0;
-}
-
-int ML_forecasting::predict_table() {
-  return 0;
-}
-
-ML_TASK_TYPE ML_forecasting::type() {
-  return ML_TASK_TYPE::FORECASTING;
-}
-
-
-} //ml
-} //shannonbase
+}  // namespace ML
+}  // namespace ShannonBase

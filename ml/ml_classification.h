@@ -28,30 +28,46 @@
 
 #include "ml_algorithm.h"
 
+namespace LightGBM {
+class DatasetLoader;
+class Dataset;
+class Boosting;
+class ObjectiveFunction;
+class Metric;
+class Config;
+}  // namespace LightGBM
+
+class Json_wrapper;
 namespace ShannonBase {
 namespace ML {
-
 class ML_classification : public ML_algorithm {
-  public:
-    ML_classification();
-    ~ML_classification();
-    int train() override;
-    int predict() override;
-    int load(std::string& model_content) override;
-    int load_from_file (std::string modle_file_full_path,
-                        std::string model_handle_name) override;
-    int unload(std::string model_handle_name) override;
-    int import(std::string model_handle_name, std::string user_name, std::string& content) override;
-    double score() override;
-    int explain_row() override;
-    int explain_table() override;
-    int predict_row() override;
-    int predict_table() override;
-    ML_TASK_TYPE type() override;
+ public:
+  ML_classification();
+  ~ML_classification();
+  int train() override;
+  int predict() override;
+  int load(std::string &model_content) override;
+  int load_from_file(std::string modle_file_full_path, std::string model_handle_name) override;
+  int unload(std::string model_handle_name) override;
+  int import(std::string model_handle_name, std::string user_name, std::string &content) override;
+  double score() override;
+  int explain_row() override;
+  int explain_table() override;
+  int predict_row() override;
+  int predict_table() override;
+  ML_TASK_TYPE type() override;
+
  private:
+  std::string m_sch_name;
+  std::string m_table_name;
+  std::string m_target_name;
+  std::string m_handler_name;
+  const Json_wrapper *m_options;
+
+  void *m_handler{nullptr};
 };
 
-} //ML
-} //shannonbase
+}  // namespace ML
+}  // namespace ShannonBase
 
-#endif //__SHANNONBASE_ML_CLASSICIFICATION_H__
+#endif  //__SHANNONBASE_ML_CLASSICIFICATION_H__
