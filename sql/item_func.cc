@@ -10196,41 +10196,49 @@ longlong Item_func_internal_is_enabled_role::val_int() {
   return 0;
 }
 
-// for ML libs impl.
+// for ML funcs libs impl.
 longlong Item_func_ml_train::val_int() {
   DBUG_TRACE;
   //ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle)
-  assert(arg_count>= 3 && arg_count <= 4 );
+  assert(arg_count >= 3 && arg_count <= 4 );
   THD* thd [[maybe_unused]] = current_thd;
 
   /**schema_table_name can not be empty, it checked in ML_train SP. and the format of that
    * is `schema_name.table_name`  */
-  String sch_tb_name, target_col_name, handle_name;
-  String *handle_name_ptr;
+  String sch_tb_name;
   auto sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
   auto sch_tb_name_cptr = sch_tb_name_ptr->c_ptr_safe();
   auto pos = std::strstr(sch_tb_name_cptr, ".") - sch_tb_name_cptr;
   std::string schema_name(sch_tb_name_cptr, pos);
   std::string table_name(sch_tb_name_cptr + pos +1, sch_tb_name_ptr->length() - pos);
 
-  auto target_col_name_ptr = args[1]->val_str(&target_col_name);
+  String target_col_name;
+  auto target_col_name_ptr = args[1]->val_str(&target_col_name)->c_ptr_safe();
 
-  Json_wrapper options;
-  if (arg_count> 3) {
+  String handle_name;
+  const char* handle_name_ptr{nullptr};
+  if (arg_count == 3) {
+    handle_name_ptr = args[2]->val_str(&handle_name)?
+                      args[2]->val_str(&handle_name)->c_ptr_safe() : nullptr;
+  }
+
+  Json_wrapper options; //is optional
+  if (arg_count == 4) {
     auto ret = args[2]->val_json(&options);
     if (ret) //cannot get the options.
       return 1;
-    handle_name_ptr = args[3]->val_str(&handle_name);
-  } else{
-    handle_name_ptr = args[2]->val_str(&handle_name);
+
+    handle_name_ptr = args[3]->val_str(&handle_name) ?
+                      args[3]->val_str(&handle_name)->c_ptr_safe() : nullptr;
   }
 
+  auto handler_name = handle_name_ptr ? std::string(handle_name_ptr) : std::string("");
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>(schema_name,
                                                 table_name,
-                                                std::string(target_col_name_ptr->c_ptr()),
+                                                std::string(target_col_name_ptr),
                                                 &options,
-                                                std::string(handle_name_ptr->c_ptr()));
+                                                handler_name);
   /**To invoke ML libs to train ML models*/
   auto result = auto_ml->train();
   return result;

@@ -27,26 +27,35 @@
 #define __SHANNONBASE_ML_UTILS_H__
 
 #include <string>
-
-#include "include/thr_lock.h" //TL_READ
+#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
+#include "include/thr_lock.h"  //TL_READ
 
 class TABLE;
 class handler;
+class Json_wrapper;
 
 namespace ShannonBase {
 namespace ML {
-
 class Utils {
-public:
-  static int open_table_by_name (std::string schema_name, std::string table_name, thr_lock_type mode, TABLE** table_ptr);
-  static handler* get_secondary_handler(TABLE* source_table_ptr);
-  static int close_table(TABLE* table);
-private:
+ public:
+  static int open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type mode, TABLE **table_ptr);
+  static handler *get_secondary_handler(TABLE *source_table_ptr);
+  static handler *get_primary_handler(TABLE *source_table_ptr);
+  static int close_table(TABLE *table);
+
+  // do the ML jobs.
+  static BoosterHandle ML_train(std::string &task_mode, const void *training_data, uint n_data, uint data_type,
+                                const char **features, uint n_feature, std::string &model_content);
+  static int store_model_catalog(std::string &mode_type, std::string &oper_type, const Json_wrapper *options,
+                                 std::string &user_name, std::string &handler_name, std::string &model_content,
+                                 std::string &target_name, std::string &source_name);
+
+ private:
   Utils() = delete;
   virtual ~Utils() = delete;
-  //disable copy ctor, operator=, etc.
+  // disable copy ctor, operator=, etc.
 };
 
-} //ns:ml
-} //ns:shannonbase
-#endif // __SHANNONBASE_ML_REGRESSION_H__
+}  // namespace ML
+}  // namespace ShannonBase
+#endif  // __SHANNONBASE_ML_REGRESSION_H__

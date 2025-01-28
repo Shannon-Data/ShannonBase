@@ -40,13 +40,16 @@ jobs:
 
   build:
     needs: lint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - name: Clean old build cache
+      run: |
+        cd ${{ github.workspace }}
+        rm -rf cmake_build
     - name: install_lib
       run: |
-        sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev libudev-dev libbison-dev flex clang-format lcov pkg-config \
-        cmake zlib1g-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev libtirpc-dev -y
+        sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libtirpc-dev
     - name: build_shannon_and_install
       run: |
         cd ${{ github.workspace }}

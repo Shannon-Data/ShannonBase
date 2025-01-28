@@ -58,26 +58,26 @@ enum class MODEL_CATALOG_FIELD_INDEX : int {
   NOTES
 };
 
-//the interface of ml tasks.
+// the interface of ml tasks.
 class ML_algorithm {
-  public:
-    ML_algorithm() {}
-    virtual ~ML_algorithm() {}
+ public:
+  ML_algorithm() {}
+  virtual ~ML_algorithm() {}
 
-    virtual int train() = 0;
-    virtual int predict() = 0;
-    virtual int load(std::string& model_content) = 0;
-    virtual int load_from_file (std::string modle_file_full_path, std::string model_handle_name) = 0;
-    virtual int unload(std::string model_handle_name) = 0;
-    virtual int import(std::string model_handle_name, std::string user_name, std::string& content) = 0;
-    virtual double score() = 0;
-    virtual int explain_row() = 0;
-    virtual int explain_table() = 0;
-    virtual int predict_row() = 0;
-    virtual int predict_table() =0;
-    virtual ML_TASK_TYPE type() =0;
+  virtual int train() = 0;
+  virtual int predict() = 0;
+  virtual int load(std::string &model_content) = 0;
+  virtual int load_from_file(std::string modle_file_full_path, std::string model_handle_name) = 0;
+  virtual int unload(std::string model_handle_name) = 0;
+  virtual int import(std::string model_handle_name, std::string user_name, std::string &content) = 0;
+  virtual double score() = 0;
+  virtual int explain_row() = 0;
+  virtual int explain_table() = 0;
+  virtual int predict_row() = 0;
+  virtual int predict_table() = 0;
+  virtual ML_TASK_TYPE type() = 0;
 };
 
-} //ml
-} //shannonbase
-#endif //__SHANNONBASE_ML_ALGORITHM_H__
+}  // namespace ML
+}  // namespace ShannonBase
+#endif  //__SHANNONBASE_ML_ALGORITHM_H__

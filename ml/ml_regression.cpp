@@ -39,11 +39,11 @@
 #include "sql/sql_class.h"  //THD
 #include "sql/table.h"
 
-#include "ml_utils.h"                                       //ml utils
-#include "storage/innobase/include/ut0dbg.h"                //for ut_a
-#include "storage/rapid_engine/include/rapid_status.h"      //loaded table.
+#include "ml_utils.h"                         //ml utils
+#include "storage/innobase/include/ut0dbg.h"  //for ut_a
 
 #include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
+#include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
 
 // clang-format off
 // clang-format on
@@ -122,129 +122,19 @@ int ML_regression::train() {
   tb_handler->ha_close();
   Utils::close_table(source_table_ptr);
 
-  std::string parameters = "max_bin=254 ";
-  DatasetHandle train_dataset_handler{nullptr};
-  auto ret = LGBM_DatasetCreateFromMat(reinterpret_cast<const void *>(train_data.data()), C_API_DTYPE_FLOAT64, n_sample,
-                                       n_feature, 1, parameters.c_str(), nullptr, &train_dataset_handler);
-  int num_data{0}, feat_nums{0};
-  ret = LGBM_DatasetSetFeatureNames(train_dataset_handler, (const char **)feature_name_vec.data(), n_feature);
-  ret = LGBM_DatasetGetNumData(train_dataset_handler, &num_data);
-  ret = LGBM_DatasetGetNumFeature(train_dataset_handler, &feat_nums);
-
-  if (ret == -1) return HA_ERR_GENERIC;
-
   std::string mode_params = "task=train objective=regression num_leaves=31 verbose=0";
-  BoosterHandle booster;
-  ret = LGBM_BoosterCreate(train_dataset_handler, mode_params.c_str(), &booster);
-  ret = LGBM_BoosterAddValidData(booster, train_dataset_handler);
-  if (ret == -1) return HA_ERR_GENERIC;
+  std::string model_content;
+  if (!(m_handler =
+            Utils::ML_train(mode_params, reinterpret_cast<const void *>(train_data.data()), n_sample,
+                            C_API_DTYPE_FLOAT64, (const char **)feature_name_vec.data(), n_feature, model_content)))
+    return HA_ERR_GENERIC;
 
-  int finished{0};
-  for (auto iter = 0; iter < 100; ++iter) {
-    ret = LGBM_BoosterUpdateOneIter(booster, &finished);
-    if (ret == -1) return HA_ERR_GENERIC;
-    if (finished) break;
-  }
-
-  int64_t bufflen(1024), out_len{0};
-  std::unique_ptr<char[]> model_buffer = std::make_unique<char[]>(out_len);
-  ret = LGBM_BoosterSaveModelToString(booster, 0, -1, 0, bufflen, &out_len, model_buffer.get());
-  if (ret == -1) return HA_ERR_GENERIC;
-
-  if (out_len > bufflen) {
-    bufflen = out_len;
-    model_buffer.reset(new char[bufflen + 1]);
-    ret = LGBM_BoosterSaveModelToString(booster,
-                                        0,                              // start iter idx
-                                        -1,                             // end inter idx
-                                        C_API_FEATURE_IMPORTANCE_GAIN,  // feature_importance_type
-                                        bufflen,                        // buff len
-                                        &out_len,                       // out len
-                                        model_buffer.get());
-  }
-
-  ret = LGBM_DatasetFree(train_dataset_handler);
-  ret = LGBM_BoosterFree(booster);
   // the definition of this table, ref: `ml_train.sql`
-  TABLE *cat_tale_ptr{nullptr};
-  std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
-  std::string cat_table_name = "MODEL_CATALOG";
-  if (Utils::open_table_by_name(catalog_schema_name, cat_table_name, TL_WRITE, &cat_tale_ptr)) return HA_ERR_GENERIC;
-
-  cat_tale_ptr->file->ha_external_lock(thd, F_WRLCK | F_RDLCK);
-  cat_tale_ptr->use_all_columns();
-
-  cat_tale_ptr->file->ha_index_init(0, true);
-  cat_tale_ptr->file->ha_index_last(cat_tale_ptr->record[0]);
-  int64_t next_id = (*(cat_tale_ptr->field))->val_int() + 1;
-  cat_tale_ptr->file->ha_index_end();
-  Field *field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_ID)];
-  field_ptr->set_notnull();
-  field_ptr->store(next_id);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
-  field_ptr->set_notnull();
-  field_ptr->store(m_handler_name.c_str(), m_handler_name.length(), &my_charset_utf8mb4_general_ci);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
-  field_ptr->set_notnull();
-  field_ptr->store(model_buffer.get(), out_len, &my_charset_utf8mb4_general_ci);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OWNER)];
-  field_ptr->set_notnull();
-  field_ptr->store(user_name.c_str(), user_name.length(), &my_charset_utf8mb4_general_ci);
-
-  std::time_t timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-  const my_timeval tm = {static_cast<int64_t>(timestamp), 0};
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::BUILD_TIMESTAMP)];
-  field_ptr->set_notnull();
-  field_ptr->store_timestamp(&tm);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TARGET_COLUMN_NAME)];
-  field_ptr->set_notnull();
-  field_ptr->store(m_target_name.c_str(), m_target_name.length(), &my_charset_utf8mb4_general_ci);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TRAIN_TABLE_NAME)];
-  field_ptr->set_notnull();
-  field_ptr->store(m_table_name.c_str(), m_table_name.length(), &my_charset_utf8mb4_general_ci);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT_SIZE)];
-  field_ptr->set_notnull();
-  field_ptr->store(bufflen);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_TYPE)];
-  field_ptr->set_notnull();
-  field_ptr->store("regression", 10, &my_charset_utf8mb4_general_ci);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TASK)];
-  field_ptr->set_notnull();
-  field_ptr->store("train", 5, &my_charset_utf8mb4_general_ci);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::COLUMN_NAMES)];
-  field_ptr->set_notnull();
-  field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci);  // columns
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_EXPLANATION)];
-  field_ptr->set_notnull();
-  field_ptr->store(1.0);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::LAST_ACCESSED)];
-  field_ptr->set_notnull();
-  field_ptr->store_timestamp(&tm);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_METADATA)];
-  field_ptr->set_notnull();
-  down_cast<Field_json *>(field_ptr)->store_json(m_options);
-
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::NOTES)];
-  field_ptr->set_notnull();
-  field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci);
-  //???binlog??? pop thread is running ????
-  ret = cat_tale_ptr->file->ha_write_row(cat_tale_ptr->record[0]);
-  cat_tale_ptr->file->ha_external_lock(thd, F_UNLCK);
-
-  m_handler = booster;
-  return ret;
+  std::string mode_type("regression"), oper_type("train");
+  if (Utils::store_model_catalog(mode_type, oper_type, m_options, user_name, m_handler_name, model_content,
+                                 m_target_name, m_table_name))
+    return HA_ERR_GENERIC;
+  return 0;
 }
 
 int ML_regression::predict() { return 0; }

@@ -29,62 +29,39 @@
 namespace ShannonBase {
 namespace ML {
 
-ML_recommendation::ML_recommendation() {
-}
+ML_recommendation::ML_recommendation() {}
 
-ML_recommendation::~ML_recommendation() {
-}
+ML_recommendation::~ML_recommendation() {}
 
-int ML_recommendation::train() {
+int ML_recommendation::train() { return 0; }
+
+int ML_recommendation::predict() { return 0; }
+
+int ML_recommendation::load(std::string &model_content [[maybe_unused]]) { return 0; }
+
+int ML_recommendation::load_from_file(std::string modle_file_full_path [[maybe_unused]],
+                                      std::string model_handle_name [[maybe_unused]]) {
   return 0;
 }
 
-int ML_recommendation::predict() {
+int ML_recommendation::unload(std::string model_handle_name [[maybe_unused]]) { return 0; }
+
+int ML_recommendation::import(std::string model_handle_name [[maybe_unused]], std::string user_name [[maybe_unused]],
+                              std::string &content [[maybe_unused]]) {
   return 0;
 }
 
-int ML_recommendation::load(std::string& model_content[[maybe_unused]]) {
-  return 0;
-}
+double ML_recommendation::score() { return 0; }
 
-int ML_recommendation::load_from_file (std::string modle_file_full_path [[maybe_unused]],
-                                       std::string model_handle_name[[maybe_unused]]) {
-  return 0;
-}
+int ML_recommendation::explain_row() { return 0; }
 
-int ML_recommendation::unload(std::string model_handle_name[[maybe_unused]]) {
-  return 0;
-}
+int ML_recommendation::explain_table() { return 0; }
 
-int ML_recommendation::import(std::string model_handle_name[[maybe_unused]],
-                              std::string user_name[[maybe_unused]],
-                              std::string& content[[maybe_unused]]) {
-  return 0;
-}
+int ML_recommendation::predict_row() { return 0; }
 
-double ML_recommendation::score() {
-  return 0;
-}
+int ML_recommendation::predict_table() { return 0; }
 
-int ML_recommendation::explain_row() {
-  return 0;
-}
+ML_TASK_TYPE ML_recommendation::type() { return ML_TASK_TYPE::RECOMMENDATION; }
 
-int ML_recommendation::explain_table() {
-  return 0;
-}
-
-int ML_recommendation::predict_row() {
-  return 0;
-}
-
-int ML_recommendation::predict_table() {
-  return 0;
-}
-
-ML_TASK_TYPE ML_recommendation::type() {
-  return ML_TASK_TYPE::RECOMMENDATION;
-}
-
-} //ml
-} //shannonbase
+}  // namespace ML
+}  // namespace ShannonBase
