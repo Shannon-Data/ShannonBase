@@ -20,6 +20,8 @@ perl mysql-test-run.pl --exclude-platform=_el7-|_solaris11- --debug-server --for
 perl mysql-test-run.pl --exclude-platform=_el7-|_solaris11- --debug-server --force --timer --testcase-timeout=60 --suite-timeout=600  --comment=ndb-sec  --vardir=var-ndb-sec  --report-features --no-skip --with-ndb-only --defaults-extra-file=suite/ndb/secure.cnf
 perl mysql-test-run.pl --platform=_el7-|_solaris11- --debug-server --force --timer --testcase-timeout=60 --suite-timeout=600  --comment=ndb-sec-notls  --vardir=var-ndb-sec-notls  --report-features --no-skip --with-ndb-only --defaults-extra-file=suite/ndb/secure-notls.cnf --skip-suite=ndb_tls
 
+# Secondary engine
+perl mysql-test-run.pl --timer --force --parallel=$(nproc) --comment=secondary_engine --vardir=var-secondary_engine --suite=secondary_engine
 ############END OF SECTION1(DEFAULT SUITES) ######################
 
 

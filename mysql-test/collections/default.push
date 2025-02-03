@@ -12,7 +12,7 @@ perl mysql-test-run.pl --timer --testcase-timeout=30 --suite-timeout=300 --debug
 # Windows - run RPL separately with 8 threads
 #
 perl mysql-test-run.pl --timer --testcase-timeout=30 --suite-timeout=300 --debug-server --force  --comment=all-default-debug --vardir=var-all-default --skip-combinations --skip-rpl --unit-tests-report --no-skip --platform=windows --skip-ndb
-perl mysql-test-run.pl --timer --testcase-timeout=30 --suite-timeout=300 --debug-server --force --parallel=8 --comment=rpl-suites --vardir=var-rpl-suites --skip-combinations --suite=rpl,rpl_gtid,rpl_nogtid --platform=windows
+perl mysql-test-run.pl --timer --testcase-timeout=30 --suite-timeout=300 --debug-server --force --parallel=$(nproc) --comment=rpl-suites --vardir=var-rpl-suites --skip-combinations --suite=rpl,rpl_gtid,rpl_nogtid --platform=windows
 
 #
 # Run all Ndb tests separately.
@@ -23,4 +23,8 @@ perl mysql-test-run.pl --exclude-platform=_el7-|_solaris11- --timer --testcase-t
 
 #
 # Group Replication
-perl mysql-test-run.pl --timer --force --parallel=6 --comment=group_replication --vardir=var-group_replication --suite=group_replication
+perl mysql-test-run.pl --timer --force --parallel=$(nproc) --comment=group_replication --vardir=var-group_replication --suite=group_replication
+
+#
+# Secondary engine
+perl mysql-test-run.pl --timer --force --parallel=$(nproc) --comment=secondary_engine --vardir=var-secondary_engine --suite=secondary_engine

@@ -40,6 +40,8 @@ perl mysql-test-run.pl --debug-server --force --timer --big-test --testcase-time
 # If no Ndb support, no tests will be attempted.
 perl mysql-test-run.pl --debug-server --force --timer --big-test --testcase-timeout=90 --comment=ndb-hypergraph-debug-big --vardir=var-ndb-hyp-default-big --hypergraph --platform=el7-x86-64bit --no-skip --with-ndb-only --skip-suite=ndb_tls
 
+# Secondary engine
+perl mysql-test-run.pl --timer --force --parallel=$(nproc) --comment=secondary_engine --vardir=var-secondary_engine --suite=secondary_engine
 ############END OF SECTION1(DEFAULT SUITES) ######################
 
 

@@ -6,7 +6,7 @@ on:
     tags:
       - "*v*"
   schedule:
-    - cron: '0 1 * * 6'   # every week at saturday 1 AM
+    - cron: '0 3 * * 6'   # every week at saturday 1 AM
 
 concurrency:
   group: weekly
@@ -20,7 +20,7 @@ jobs:
   lint:
     name: lint
     # if: ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-testing') && github.event.pull_request.merged != true }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,23 +40,28 @@ jobs:
 
   build:
     needs: lint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - name: Clean old build cache
+      run: |
+        cd ${{ github.workspace }}
+        rm -rf cmake_build     
     - name: install_lib
       run: |
-        sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libssl-dev libncurses-dev libudev-dev libbison-dev flex clang-format lcov pkg-config \
-        cmake zlib1g-dev wget build-essential libldap-dev libisl-dev libmpfr-dev patchelf libevent-dev openssl libssl-dev -y && sudo apt install libsasl2-dev libtirpc-dev -y
+        sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libtirpc-dev
     - name: build_shannon_and_install
       run: |
         cd ${{ github.workspace }}
         mkdir cmake_build && cd cmake_build
+        sudo mkdir -p /home/shannon-bin && sudo mkdir -p /home/shannon-bin/data
+        sudo chown -R $USER:$USER /home/shannon-bin/
         git config --global --add safe.directory ${{ github.workspace }}
         git fetch --tags -f
         cmake ../ \
         -DCMAKE_BUILD_TYPE=Release  \
         -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
-        -DMYSQL_DATADIR=/home/shannon-bin/ \
+        -DMYSQL_DATADIR=/home/shannon-bin/data \
         -DSYSCONFDIR=/home/shannon-bin/ \
         -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
         -DWITH_MYISAM_STORAGE_ENGINE=1 \
@@ -76,6 +81,7 @@ jobs:
         mkdir -p /home/shannon-bin/log
         sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
-        sudo chmod -R u+rwx mysql-test-run.pl
-        ./mysql-test-run.pl --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
-        --big-test --nocheck-testcases --retry=3 --parallel=$(nproc)
+        sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.weekly && \
+        chmod +x ./collections/default.weekly.basic
+        ./collections/default.weekly.basic
+        ./collections/default.weekly

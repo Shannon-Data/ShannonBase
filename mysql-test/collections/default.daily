@@ -98,4 +98,5 @@ perl mysql-test-run.pl --timer --force   --comment=innodb-page-size-8k --vardir=
 ####END OF SECTION4(EXTENDED INNODB) ####################
 
 
-
+# Secondary engine
+perl mysql-test-run.pl --timer --force --parallel=$(nproc) --comment=secondary_engine --vardir=var-secondary_engine --suite=secondary_engine
