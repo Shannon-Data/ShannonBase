@@ -59,7 +59,7 @@ jobs:
 
   build:
     needs: lint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
     - name: Clean old build cache
@@ -73,12 +73,14 @@ jobs:
       run: |
         cd ${{ github.workspace }}
         mkdir cmake_build && cd cmake_build
+        sudo mkdir -p /home/shannon-bin && sudo mkdir -p /home/shannon-bin/data
+        sudo chown -R $USER:$USER /home/shannon-bin/
         git config --global --add safe.directory ${{ github.workspace }}
         git fetch --tags -f
         cmake ../ \
-        -DCMAKE_BUILD_TYPE=Release  \
+        -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
-        -DMYSQL_DATADIR=/home/shannon-bin/ \
+        -DMYSQL_DATADIR=/home/shannon-bin/data \
         -DSYSCONFDIR=/home/shannon-bin/ \
         -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
         -DWITH_MYISAM_STORAGE_ENGINE=1 \
@@ -101,4 +103,7 @@ jobs:
         sudo chmod -R u+rwx mysql-test-run.pl
         ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
         information_schema \
-        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
+        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)        
+        # when we have a fast git action runner, we can use the following command to run the test.
+        # sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.push
+        #./collections/default.push

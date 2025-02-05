@@ -129,6 +129,14 @@ version_patch	FUNCTION
 create_synonym_db	PROCEDURE
 diagnostics	PROCEDURE
 execute_prepared_stmt	PROCEDURE
+ml_explain	PROCEDURE
+ml_explain_row	PROCEDURE
+ml_explain_table	PROCEDURE
+ml_model_import	PROCEDURE
+ml_model_load	PROCEDURE
+ml_predict_table	PROCEDURE
+ml_score	PROCEDURE
+ml_train	PROCEDURE
 ps_setup_disable_background_threads	PROCEDURE
 ps_setup_disable_consumer	PROCEDURE
 ps_setup_disable_instrument	PROCEDURE
