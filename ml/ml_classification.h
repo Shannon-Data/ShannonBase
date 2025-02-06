@@ -26,6 +26,7 @@
 #ifndef __SHANNONBASE_ML_CLASSICIFICATION_H__
 #define __SHANNONBASE_ML_CLASSICIFICATION_H__
 
+#include <vector>
 #include "ml_algorithm.h"
 
 namespace LightGBM {
@@ -37,13 +38,14 @@ class Metric;
 class Config;
 }  // namespace LightGBM
 
+class TABLE;
 class Json_wrapper;
 namespace ShannonBase {
 namespace ML {
 class ML_classification : public ML_algorithm {
  public:
   ML_classification();
-  ~ML_classification();
+  virtual ~ML_classification();
   int train() override;
   int predict() override;
   int load(std::string &model_content) override;
@@ -57,11 +59,30 @@ class ML_classification : public ML_algorithm {
   int predict_table() override;
   ML_TASK_TYPE type() override;
 
+  void set_schema(std::string &schema_name) { m_sch_name = schema_name; }
+  std::string get_schema() const { return m_sch_name; }
+  void set_table(std::string &table_name) { m_table_name = table_name; }
+  std::string get_table() const { return m_table_name; }
+  void set_target(std::string &target_name) { m_target_name = target_name; }
+  std::string get_target() const { return m_target_name; }
+  void set_handle_name(std::string &handle_name) { m_handler_name = handle_name; }
+  std::string get_handle_name() const { return m_handler_name; }
+  void set_options(const Json_wrapper *options) { m_options = options; }
+  const Json_wrapper *get_options() const { return m_options; }
+
  private:
+  int read_data(TABLE *table, std::vector<double> &train_data, std::string &label_name, std::vector<float> &label_data);
+
+ private:
+  // source data schema name.
   std::string m_sch_name;
+  // source data table name.
   std::string m_table_name;
+  // source labelled column name.
   std::string m_target_name;
+  // model handle name.
   std::string m_handler_name;
+  // model options JSON format.
   const Json_wrapper *m_options;
 
   void *m_handler{nullptr};

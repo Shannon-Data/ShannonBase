@@ -34,7 +34,7 @@ namespace ML {
 class ML_recommendation : public ML_algorithm {
  public:
   ML_recommendation();
-  ~ML_recommendation();
+  virtual ~ML_recommendation();
   int train() override;
   int predict() override;
   int load(std::string &model_content) override;

@@ -18,7 +18,10 @@ DROP PROCEDURE IF EXISTS ml_train;
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_train (
-        IN in_table_name VARCHAR(64), IN in_target_name VARCHAR(64), IN in_option JSON, IN in_model_handle VARCHAR(64)
+        IN in_table_name VARCHAR(64),
+        IN in_target_name VARCHAR(64),
+        IN in_option JSON,
+        IN in_model_handle VARCHAR(64)
     )
     COMMENT '
 Description
@@ -48,7 +51,7 @@ mysql> CALL sys.ML_TRAIN(\'ml_data.iris_train\', \'class\',
 '
     SQL SECURITY INVOKER
     NOT DETERMINISTIC
-    CONTAINS SQL
+    MODIFIES SQL DATA
 BEGIN
     DECLARE v_error BOOLEAN DEFAULT FALSE;
     DECLARE v_user_name VARCHAR(64);
@@ -69,6 +72,7 @@ BEGIN
     WHERE SCHEMA_NAME = v_sys_schema_name;
 
     IF v_db_name_check IS NULL THEN
+        START TRANSACTION;
         SET @create_db_stmt = CONCAT('CREATE DATABASE ', v_sys_schema_name, ';');
         PREPARE create_db_stmt FROM @create_db_stmt;
         EXECUTE create_db_stmt;
@@ -77,14 +81,14 @@ BEGIN
         SET @create_tb_stmt = CONCAT(' CREATE TABLE ', v_sys_schema_name, '.MODEL_CATALOG(
                                         MODEL_ID INT NOT NULL AUTO_INCREMENT,
                                         MODEL_HANDLE VARCHAR(255) UNIQUE,
-                                        MODEL_OBJECT LONGTEXT,
-                                        MODEL_OWNER VARCHAR(64),
+                                        MODEL_OBJECT LONGBLOB,
+                                        MODEL_OWNER VARCHAR(255),
                                         BUILD_TIMESTAMP TIMESTAMP,
-                                        TARGET_COLUMN_NAME VARCHAR(64),
+                                        TARGET_COLUMN_NAME VARCHAR(255),
                                         TRAIN_TABLE_NAME VARCHAR(255),
                                         MODEL_OBJECT_SIZE INT,
-                                        MODEL_TYPE  VARCHAR(64),
-                                        TASK  VARCHAR(64),
+                                        MODEL_TYPE  VARCHAR(128),
+                                        TASK  VARCHAR(128),
                                         COLUMN_NAMES VARCHAR(1024),
                                         MODEL_EXPLANATION NUMERIC,
                                         LAST_ACCESSED TIMESTAMP,
@@ -94,6 +98,7 @@ BEGIN
         PREPARE create_tb_stmt FROM @create_tb_stmt;
         EXECUTE create_tb_stmt;
         DEALLOCATE PREPARE create_tb_stmt;
+        COMMIT;
     END IF;
 
     SELECT SUBSTRING_INDEX(in_table_name, '.', 1) INTO v_train_schema_name;
@@ -109,7 +114,8 @@ BEGIN
     END IF;
 
     IF in_model_handle IS NOT NULL THEN
-      SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_HANDLE) INTO @MODEL_HANDLE_COUNT  FROM ',  v_sys_schema_name, '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle, '\";');
+      SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_HANDLE) INTO @MODEL_HANDLE_COUNT  FROM ',  v_sys_schema_name,
+                                     '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle, '\";');
       PREPARE select_model_stmt FROM @select_model_stm;
       EXECUTE select_model_stmt;
       SELECT @MODEL_HANDLE_COUNT INTO v_train_obj_check;
@@ -129,7 +135,13 @@ BEGIN
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;
     END IF;
+
+    -- DN NOT REMOVE STAART TRANSACTION AND COMMIT STATEMENTS. THEY ARE REQUIRED FOR THE TRANSACTIONAL CONSISTENCY
+    -- IN ML_TRAIN, WE INSERT META INFO INTO MODEL_CATALOG TABLE
+    START TRANSACTION;
     SELECT ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle) INTO v_train_obj_check;
+    COMMIT;
+
     IF v_train_obj_check != 0 THEN
         SET v_db_err_msg = CONCAT('ML_TRAIN failed.');
         SIGNAL SQLSTATE 'HY000'

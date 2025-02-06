@@ -10206,11 +10206,10 @@ longlong Item_func_ml_train::val_int() {
   /**schema_table_name can not be empty, it checked in ML_train SP. and the format of that
    * is `schema_name.table_name`  */
   String sch_tb_name;
-  auto sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
-  auto sch_tb_name_cptr = sch_tb_name_ptr->c_ptr_safe();
+  auto sch_tb_name_cptr = args[0]->val_str(&sch_tb_name)->c_ptr_safe();
   auto pos = std::strstr(sch_tb_name_cptr, ".") - sch_tb_name_cptr;
   std::string schema_name(sch_tb_name_cptr, pos);
-  std::string table_name(sch_tb_name_cptr + pos +1, sch_tb_name_ptr->length() - pos);
+  std::string table_name(sch_tb_name_cptr + pos +1, strlen(sch_tb_name_cptr) - pos);
 
   String target_col_name;
   auto target_col_name_ptr = args[1]->val_str(&target_col_name)->c_ptr_safe();
@@ -10247,22 +10246,19 @@ longlong Item_func_ml_train::val_int() {
 longlong Item_func_ml_model_load::val_int() {
   DBUG_TRACE;
   //ML_MODEL_LOAD(in_model_handle_name, v_model_meta, v_model_data)
-  assert(arg_count == 3);
+  assert(arg_count == 2);
   THD* thd [[maybe_unused]] = current_thd;
 
   String handle_name;
-  String *handle_name_ptr[[maybe_unused]] = args[0]->val_str(&handle_name);
+  String *handle_name_ptr = args[0]->val_str(&handle_name);
 
-  Json_wrapper model_meta;
-  bool flag[[maybe_unused]] = args[1]->val_json(&model_meta);
-
-  String model_content;
-  String* model_content_ptr[[maybe_unused]] = args[2]->val_str(&model_content);
+  String model_user;
+  String* model_content_ptr = args[1]->val_str(&model_user);
 
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   /**To invoke ML libs to load the trainned ML models into memory*/
-  auto result = auto_ml->load(&model_meta, &model_content);
+  auto result = auto_ml->load(handle_name_ptr, model_content_ptr);
   return result;
 }
 

@@ -4074,8 +4074,8 @@ class Item_func_ml_train : public Item_int_func {
 
 class Item_func_ml_model_load final : public Item_int_func {
  public:
-  Item_func_ml_model_load(const POS &pos, PT_item_list *list)
-      : Item_int_func(pos, list) {}
+  Item_func_ml_model_load(const POS &pos, Item *a, Item *b)
+      : Item_int_func(pos, a, b) {}
   longlong val_int() override;
   bool resolve_type(THD *) override {
     set_nullable(true);
@@ -4089,8 +4089,8 @@ class Item_func_ml_model_load final : public Item_int_func {
 
 class Item_func_ml_model_unload final : public Item_int_func {
  public:
-  Item_func_ml_model_unload(const POS &pos, PT_item_list *list)
-      : Item_int_func(pos, list) {}
+  Item_func_ml_model_unload(const POS &pos, Item* a)
+      : Item_int_func(pos, a) {}
   longlong val_int() override;
   bool resolve_type(THD *) override {
     set_nullable(true);
@@ -4104,8 +4104,8 @@ class Item_func_ml_model_unload final : public Item_int_func {
 
 class Item_func_ml_model_import : public Item_int_func {
  public:
-  Item_func_ml_model_import(const POS &pos, PT_item_list *list)
-      : Item_int_func(pos, list) {}
+  Item_func_ml_model_import(const POS &pos, Item* a, Item* b, Item* c, Item* d)
+      : Item_int_func(pos, a, b, c, d) {}
   enum Functype functype() const override { return DD_INTERNAL_FUNC; }
   longlong val_int() override;
   const char *func_name() const override {
@@ -4141,7 +4141,7 @@ class Item_func_ml_predicte_row : public Item_int_func {
   enum Functype functype() const override { return DD_INTERNAL_FUNC; }
   longlong val_int() override;
   const char *func_name() const override {
-    return "ML_MODEL_SCORE";
+    return "ML_PREDICT_ROW";
   }
   bool resolve_type(THD *) override {
     set_nullable(false);

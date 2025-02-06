@@ -43,23 +43,37 @@ class Auto_ML {
   Auto_ML(std::string schema, std::string table_name, std::string target_name, Json_wrapper *options,
           std::string handler);
   Auto_ML() = default;
-  ~Auto_ML();
+  virtual ~Auto_ML();
+
+  // do ML training.
   int train();
-  int load(Json_wrapper *model_meta, String *model_content);
+  // load the trainned model into Rapid.
+  int load(String *model_handler_name, String *model_user);
+  // unload the loaded mode from Rapid.
   int unload(String *model_handler_name, Json_wrapper *model_meta);
+  // import the model from another.
   int import(String *model_handler_name, String *user_name, Json_wrapper *model_meta, String *model_content);
+  // get the type of job.
   ML_TASK_TYPE type();
 
  private:
+  // get the json array value.
   std::string get_array_string(Json_array *array);
+  // init task job map, get an instance by type.
   void init_task_map();
+  // build the a ML task, such as regress, classification, etc.
   void build_task(std::string task_str);
 
  private:
+  // the source schema name.
   std::string m_schema_name;
+  // the source table name.
   std::string m_table_name;
+  // the label column name.
   std::string m_target_name;
+  // the options in JSON format.
   Json_wrapper *m_options;
+  // name of the model content.
   std::string m_handler;
 
   // the followings are parsed from m_options.
