@@ -27,6 +27,9 @@
 #include "ml_utils.h"
 
 #include "include/my_inttypes.h"
+
+#include "ml_algorithm.h"
+#include "sql/binlog.h"
 #include "sql/current_thd.h"
 #include "sql/derror.h"  //ER_TH
 #include "sql/field.h"
@@ -35,27 +38,31 @@
 #include "sql/sql_class.h"
 #include "sql/table.h"
 
-#include "ml_algorithm.h"
-
 namespace ShannonBase {
 namespace ML {
-int Utils::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode,
-                              TABLE **table_ptr) {
-  THD *thd = current_thd;
-  Open_table_context table_ref_context(thd, 0);
-  thr_lock_type lock_mode(lk_mode);
 
-  // the definition of this table, ref: `ml_train.sql`
-  Table_ref table_ref(schema_name.c_str(), schema_name.length(), table_name.c_str(), table_name.length(),
-                      table_name.c_str(), TL_WRITE);
-  MDL_REQUEST_INIT(&table_ref.mdl_request, MDL_key::TABLE, schema_name.c_str(), table_name.c_str(),
-                   (lock_mode > TL_READ) ? MDL_SHARED_WRITE : MDL_SHARED_READ, MDL_TRANSACTION);
+// open table by name. return table ptr, otherwise return nullptr.
+TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
+  THD *thd = current_thd;
+  Open_table_context table_ref_context(thd, MYSQL_OPEN_IGNORE_GLOBAL_READ_LOCK);
+
+  Table_ref table_ref(schema_name.c_str(), table_name.c_str(), lk_mode);
+  table_ref.open_strategy = Table_ref::OPEN_IF_EXISTS;
 
   if (open_table(thd, &table_ref, &table_ref_context) || !table_ref.table->file) {
-    return HA_ERR_GENERIC;
+    return nullptr;
   }
-  *table_ptr = table_ref.table;
 
+  auto table_ptr = table_ref.table;
+  if (!table_ptr->next_number_field)  // in case.
+    table_ptr->next_number_field = table_ptr->found_next_number_field;
+
+  return table_ptr;
+}
+
+int Utils::close_table(TABLE *table [[maybe_unused]]) {
+  assert(table);
+  // it will close in close_thread_tables(). so here do nothing.
   return 0;
 }
 
@@ -90,19 +97,25 @@ handler *Utils::get_secondary_handler(TABLE *source_table_ptr) {
   return get_new_handler(source_table_ptr->s, is_partitioned, thd->mem_root, hton);
 }
 
-int Utils::close_table(TABLE *table [[maybe_unused]]) { return 0; }
-
-BoosterHandle Utils::ML_train(std::string &task_mode, const void *training_data, uint n_data, uint data_type,
-                              const char **features, uint n_feature, std::string &model_content) {
+// do ML train jobs.
+BoosterHandle Utils::ML_train(std::string &task_mode, uint data_type, const void *training_data, uint n_data,
+                              uint n_feature, uint label_data_type, const void *label_data,
+                              std::string &model_content) {
   std::string parameters = "max_bin=254 ";
   DatasetHandle train_dataset_handler{nullptr};
-  auto ret = LGBM_DatasetCreateFromMat(training_data, data_type, n_data, n_feature, 1, parameters.c_str(), nullptr,
+  //clang-format off
+  auto ret = LGBM_DatasetCreateFromMat(training_data,       // feature data ptr
+                                       data_type,           // type of sampe data
+                                       n_data,              // # of sample data
+                                       n_feature,           // # of features
+                                       1,                   // 1 row-first, 0 column-first.
+                                       parameters.c_str(),  // params.
+                                       nullptr,             // ref.
                                        &train_dataset_handler);
-  int num_data{0}, feat_nums{0};
-  ret = LGBM_DatasetSetFeatureNames(train_dataset_handler, features, n_feature);
-  ret = LGBM_DatasetGetNumData(train_dataset_handler, &num_data);
-  ret = LGBM_DatasetGetNumFeature(train_dataset_handler, &feat_nums);
 
+  // to set label data
+  ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
+  //clang-format on
   if (ret == -1) return nullptr;
 
   BoosterHandle booster;
@@ -118,27 +131,25 @@ BoosterHandle Utils::ML_train(std::string &task_mode, const void *training_data,
   }
 
   int64_t bufflen(1024), out_len{0};
-  std::unique_ptr<char[]> model_buffer = std::make_unique<char[]>(out_len);
-  ret = LGBM_BoosterSaveModelToString(booster, 0, -1, 0, bufflen, &out_len, model_buffer.get());
+  auto model_content_buff = std::make_unique<char[]>(out_len);
+  ret = LGBM_BoosterSaveModelToString(booster, 0, -1, 0, bufflen, &out_len, model_content_buff.get());
   if (ret == -1) return nullptr;
 
   if (out_len > bufflen) {
     bufflen = out_len;
-    model_buffer.reset(new char[bufflen + 1]);
+    model_content_buff.reset(new char[bufflen]);
     ret = LGBM_BoosterSaveModelToString(booster,
                                         0,                              // start iter idx
                                         -1,                             // end inter idx
                                         C_API_FEATURE_IMPORTANCE_GAIN,  // feature_importance_type
                                         bufflen,                        // buff len
                                         &out_len,                       // out len
-                                        model_buffer.get());
+                                        model_content_buff.get());
   }
 
   ret = LGBM_DatasetFree(train_dataset_handler);
   ret = LGBM_BoosterFree(booster);
-
-  model_content.clear();
-  model_content.assign(model_buffer.get(), bufflen);
+  model_content.assign(model_content_buff.get(), bufflen);
   return booster;
 }
 
@@ -146,85 +157,170 @@ int Utils::store_model_catalog(std::string &mode_type, std::string &oper_type, c
                                std::string &user_name, std::string &handler_name, std::string &model_content,
                                std::string &target_name, std::string &source_name) {
   THD *thd = current_thd;
-  TABLE *cat_tale_ptr{nullptr};
   std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
   std::string cat_table_name = "MODEL_CATALOG";
-  if (Utils::open_table_by_name(catalog_schema_name, cat_table_name, TL_WRITE, &cat_tale_ptr)) return HA_ERR_GENERIC;
 
-  cat_tale_ptr->file->ha_external_lock(thd, F_WRLCK | F_RDLCK);
-  cat_tale_ptr->use_all_columns();
+  auto cat_table_ptr = Utils::open_table_by_name(catalog_schema_name, cat_table_name, TL_WRITE);
+  if (!cat_table_ptr) {
+    std::ostringstream err;
+    err << catalog_schema_name.c_str() << "." << cat_table_name.c_str() << " open failed for ML";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
 
-  cat_tale_ptr->file->ha_index_init(0, true);
-  cat_tale_ptr->file->ha_index_last(cat_tale_ptr->record[0]);
-  int64_t next_id = (*(cat_tale_ptr->field))->val_int() + 1;
-  cat_tale_ptr->file->ha_index_end();
-  Field *field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_ID)];
+  // Here, why we set MODEL_CATALOG IS NOT REPLCIATED, this called by SELECT sys.ML_TRAIN()
+  // it's a select statement. And in ML_TRAIN function, if the train process is proceeded successfull,
+  // then stores the meta info of trainned model. If we dont rpl the meta to replica to set.
+  // if binlog statement format is stmt, call statement will record, and replay on replica.
+  // therefore, we do not need to record the meta info of trainned model to replica. it will be
+  // replayed thee call statement on replica.
+  auto org_no_replicate = cat_table_ptr->no_replicate;
+  if (thd->variables.binlog_format == BINLOG_FORMAT_STMT) {
+    cat_table_ptr->no_replicate = true;
+  } else {
+    // To write the binlog statement.
+    thd->binlog_write_table_map(cat_table_ptr, true, true);
+  }
+
+  cat_table_ptr->file->ha_external_lock(thd, F_WRLCK | F_RDLCK);
+  cat_table_ptr->use_all_columns();
+
+  Field *field_ptr{nullptr};
+  cat_table_ptr->file->ha_index_init(cat_table_ptr->s->next_number_index, true);
+  cat_table_ptr->file->ha_index_last(cat_table_ptr->record[0]);
+  int64_t next_id = (*(cat_table_ptr->field))->val_int() + 1;
+
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_ID)];
   field_ptr->set_notnull();
   field_ptr->store(next_id);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
   field_ptr->set_notnull();
   field_ptr->store(handler_name.c_str(), handler_name.length(), &my_charset_utf8mb4_general_ci);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
   field_ptr->set_notnull();
-  field_ptr->store(model_content.c_str(), model_content.length(), &my_charset_utf8mb4_general_ci);
+  field_ptr->store(model_content.data(), model_content.length(), &my_charset_utf8mb4_general_ci);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OWNER)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OWNER)];
   field_ptr->set_notnull();
   field_ptr->store(user_name.c_str(), user_name.length(), &my_charset_utf8mb4_general_ci);
 
   std::time_t timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
   const my_timeval tm = {static_cast<int64_t>(timestamp), 0};
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::BUILD_TIMESTAMP)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::BUILD_TIMESTAMP)];
   field_ptr->set_notnull();
   field_ptr->store_timestamp(&tm);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TARGET_COLUMN_NAME)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TARGET_COLUMN_NAME)];
   field_ptr->set_notnull();
   field_ptr->store(target_name.c_str(), target_name.length(), &my_charset_utf8mb4_general_ci);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TRAIN_TABLE_NAME)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TRAIN_TABLE_NAME)];
   field_ptr->set_notnull();
   field_ptr->store(source_name.c_str(), source_name.length(), &my_charset_utf8mb4_general_ci);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT_SIZE)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT_SIZE)];
   field_ptr->set_notnull();
   field_ptr->store(model_content.length());
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_TYPE)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_TYPE)];
   field_ptr->set_notnull();
   field_ptr->store(mode_type.c_str(), mode_type.length(), &my_charset_utf8mb4_general_ci);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TASK)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::TASK)];
   field_ptr->set_notnull();
   field_ptr->store(oper_type.c_str(), oper_type.length(), &my_charset_utf8mb4_general_ci);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::COLUMN_NAMES)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::COLUMN_NAMES)];
   field_ptr->set_notnull();
   field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci);  // columns
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_EXPLANATION)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_EXPLANATION)];
   field_ptr->set_notnull();
   field_ptr->store(1.0);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::LAST_ACCESSED)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::LAST_ACCESSED)];
   field_ptr->set_notnull();
   field_ptr->store_timestamp(&tm);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_METADATA)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_METADATA)];
   field_ptr->set_notnull();
   assert(options);
   down_cast<Field_json *>(field_ptr)->store_json(options);
 
-  field_ptr = cat_tale_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::NOTES)];
+  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::NOTES)];
   field_ptr->set_notnull();
   field_ptr->store(" ", 1, &my_charset_utf8mb4_general_ci);
-  //???binlog??? pop thread is running ????
-  auto ret = cat_tale_ptr->file->ha_write_row(cat_tale_ptr->record[0]);
-  cat_tale_ptr->file->ha_external_lock(thd, F_UNLCK);
 
+  auto ret = cat_table_ptr->file->ha_write_row(cat_table_ptr->record[0]);
+  cat_table_ptr->file->ha_index_end();
+  cat_table_ptr->file->ha_external_lock(thd, F_UNLCK);
+
+  // restore the no_replicate.
+  if (thd->variables.binlog_format == BINLOG_FORMAT_STMT) {
+    cat_table_ptr->no_replicate = org_no_replicate;
+  }
+
+  Utils::close_table(cat_table_ptr);
   return ret;
+}
+
+int Utils::read_model_content(std::string model_user_name, std::string model_handle_name, Json_wrapper *options,
+                              std::string &model_content_str) {
+  std::string model_schema_name = "ML_SCHEMA_" + model_user_name;
+  auto cat_table_ptr = Utils::open_table_by_name(model_schema_name, "MODEL_CATALOG", TL_READ);
+  if (!cat_table_ptr) return HA_ERR_GENERIC;
+
+  // get the model content from model catalog table by model handle name. table
+  my_bitmap_map *old_map = tmp_use_all_columns(cat_table_ptr, cat_table_ptr->read_set);
+  if (cat_table_ptr->file->ha_external_lock(current_thd, F_RDLCK)) {
+    return HA_ERR_GENERIC;
+  }
+
+  if (cat_table_ptr->file->ha_rnd_init(true)) {
+    cat_table_ptr->file->ha_rnd_end();
+    cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);
+    return HA_ERR_GENERIC;
+  }
+
+  while (cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]) == 0) {
+    // handle_name.
+    String handle_name, model_content;
+    auto field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE));
+    handle_name.set_charset(field_ptr->charset());
+    field_ptr->val_str(&handle_name);
+
+    // user name.
+    field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OWNER));
+    String owner_name;
+    handle_name.set_charset(field_ptr->charset());
+    field_ptr->val_str(&owner_name);
+    assert(!strcmp(model_user_name.c_str(), owner_name.c_ptr_safe()));
+
+    if (likely(strcmp(handle_name.c_ptr_safe(), model_handle_name.c_str())))
+      continue;
+    else {
+      // model object.[trainned model content]
+      field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT));
+      model_content.set_charset(field_ptr->charset());
+      field_ptr->val_str(&model_content);
+      model_content_str.assign(model_content.c_ptr_safe(), model_content.length());
+
+      field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_METADATA));
+      assert(field_ptr->type() == MYSQL_TYPE_JSON);
+      down_cast<Field_json *>(field_ptr)->val_json(options);
+      break;
+    }
+  }  // while
+
+  if (old_map) tmp_restore_column_map(cat_table_ptr->read_set, old_map);
+  cat_table_ptr->file->ha_rnd_end();
+  cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);
+
+  Utils::close_table(cat_table_ptr);
+
+  return 0;
 }
 
 }  // namespace ML

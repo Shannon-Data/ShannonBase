@@ -25,27 +25,42 @@
 */
 #include "auto_ml.h"
 
+#include <map>
 #include <string>
 
+#include "include/my_base.h"
+#include "include/my_bitmap.h"
+#include "include/mysqld_error.h"
 #include "include/sql_string.h"  //String
+#include "sql/current_thd.h"
+#include "sql/field.h"
+#include "sql/table.h"
+
 #include "sql-common/json_error_handler.h"
 
 #include "ml_algorithm.h"
 #include "ml_anomaly_detection.h"
 #include "ml_classification.h"
 #include "ml_forecasting.h"
+#include "ml_info.h"
 #include "ml_recommendation.h"
 #include "ml_regression.h"
+#include "ml_utils.h"
 
 namespace ShannonBase {
 namespace ML {
+
+std::map<std::string, std::string> Loaded_models;
+
 Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_name, Json_wrapper *options,
                  std::string handler)
     : m_schema_name(schema),
       m_table_name(table_name),
       m_target_name(target_name),
       m_options(options),
-      m_handler(handler) {}
+      m_handler(handler) {
+  init_task_map();
+}
 
 Auto_ML::~Auto_ML() {}
 
@@ -157,6 +172,12 @@ void Auto_ML::build_task(std::string task_str) {
     case ML_TASK_TYPE::CLASSIFICATION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::CLASSIFICATION)
         m_ml_task.reset(new ML_classification());
+
+      down_cast<ML_classification *>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_classification *>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_classification *>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_classification *>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_classification *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     case ML_TASK_TYPE::REGRESSION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::REGRESSION) m_ml_task.reset(new ML_regression());
@@ -185,18 +206,37 @@ void Auto_ML::build_task(std::string task_str) {
 }
 
 int Auto_ML::train() {
-  if (!m_opt_task_map.size()) {
-    init_task_map();
-  }
+  assert(m_opt_task_map.size());
 
   auto ret = m_ml_task ? m_ml_task->train() : 1;
   return ret;
 }
 
-int Auto_ML::load(Json_wrapper *model_meta, String *model_content) {
+int Auto_ML::load(String *model_handler_name, String *model_user) {
   // in load, the schem_name means user name.
-  assert(model_meta && model_content);
-  std::string model_content_str(model_content->ptr());
+  assert(model_handler_name && model_user);
+  std::string model_handler_name_str(model_handler_name->c_ptr_safe());
+  std::string model_user_str(model_user->c_ptr_safe());
+
+  // has been loaded, no need load anymore.
+  if (Loaded_models.find(model_handler_name_str) != Loaded_models.end()) {
+    std::ostringstream err;
+    err << model_handler_name_str << " has been loaded";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  std::string model_content_str;
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_user_str, model_handler_name_str, &model_meta, model_content_str))
+    return HA_ERR_GENERIC;
+
+  m_options = &model_meta;
+  m_handler = model_handler_name_str;
+  if (m_opt_task_map.empty()) {
+    init_task_map();
+    build_task(m_task_type_str);
+  }
 
   if (m_ml_task) return m_ml_task->load(model_content_str);
   return 0;

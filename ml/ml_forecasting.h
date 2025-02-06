@@ -35,7 +35,7 @@ namespace ML {
 class ML_forecasting : public ML_algorithm {
  public:
   ML_forecasting();
-  ~ML_forecasting();
+  virtual ~ML_forecasting();
   int train() override;
   int predict() override;
   int load(std::string &model_content) override;

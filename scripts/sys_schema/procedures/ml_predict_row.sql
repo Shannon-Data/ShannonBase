@@ -14,32 +14,36 @@
 -- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
 -- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-DROP PROCEDURE IF EXISTS ml_model_load;
+DROP PROCEDURE IF EXISTS ml_predict_row;
 
 DELIMITER $$
 
-CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_model_load (
+CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_predict_row (
+        IN in_input_data JSON,
         IN in_model_handle_name VARCHAR(64),
-        IN in_user_name VARCHAR(64)
+        IN in_model_option JSON
     )
     COMMENT '
 Description
 -----------
 
-Run the ML_MODEL_LOAD routine load the trained model into memory.
+Run the ml_predict_row routine on a labeled training dataset to produce a trained machine learning model.
 
 Parameters
 -----------
 
+in_input_data JSON:
+  the data to be predicted.
 in_model_handle_name (VARCHAR(64)):
-   user-defined session variable storing the ML model handle for the duration of the connection
-in_user_name (VARCHAR(64)):
-  name of user
+  user-defined session variable storing the ML model handle for the duration of the connection.
+in_model_option JSON:
+  This parameter only supports the recommendation and anomaly_detection tasks.
+  For all other tasks, set this parameter to NULL.
 Example
 -----------
-mysql> SET @iris_model = \'iris_manual\';
-mysql> CALL sys.ML_MODEL_LOAD(@iris_model, \'root\');
-...
+mysql> SELECT sys.ML_PREDICT_ROW(JSON_OBJECT(\"column_name\", value,
+          \"column_name\", value, ...),
+          model_handle, options);
 '
     SQL SECURITY INVOKER
     NOT DETERMINISTIC
@@ -50,35 +54,29 @@ BEGIN
     DECLARE v_sys_schema_name VARCHAR(64);
 
     DECLARE v_db_err_msg TEXT;
-    DECLARE v_train_obj_check INT;
-    DECLARE v_model_meta JSON;
-    DECLARE v_model_data LONGTEXT;
+    DECLARE v_pred_row_obj_check INT;
+    DECLARE v_model_id INT;
 
-   IF in_user_name IS NULL THEN
-     SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
-     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
-     SET in_user_name = v_user_name;
-   ELSE
-     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', in_user_name);
-   END IF;
+   SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
+   SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
 
-   SET @select_model_stm = CONCAT('SELECT MODEL_METADATA, MODEL_OBJECT INTO  @MODEL_META, @MODEL_DATA FROM ',  v_sys_schema_name,
+   SET @select_model_stm = CONCAT('SELECT MODEL_ID INTO @MODEL_ID FROM ',  v_sys_schema_name,
                                   '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle_name, '\";');
    PREPARE select_model_stmt FROM @select_model_stm;
    EXECUTE select_model_stmt;
-   SELECT @MODEL_META, @MODEL_DATA into v_model_meta, v_model_data;
+   SELECT @MODEL_ID into v_model_id;
    DEALLOCATE PREPARE select_model_stmt;
 
-   IF (v_model_meta IS NULL) OR (v_model_data IS NULL) THEN
-     SIGNAL SQLSTATE 'HY000'
-        SET MESSAGE_TEXT = "The model you loading does NOT exist.";
+   IF (v_model_id IS NULL) THEN
+      SIGNAL SQLSTATE 'HY000'
+      SET MESSAGE_TEXT = "The model you try to do predict row does NOT exist.";
    END IF;
 
-   SELECT ML_MODEL_LOAD(in_model_handle_name, v_model_meta, v_model_data) INTO v_train_obj_check;
-   IF v_train_obj_check != 0 THEN
-        SET v_db_err_msg = CONCAT('ML_MODEL_LOAD failed.');
+   SELECT ML_MODEL_PREDICT_ROW(in_input_data, in_model_handle_name, in_model_option) INTO v_pred_row_obj_check;
+   IF v_pred_row_obj_check != 0 THEN
+        SET v_db_err_msg = CONCAT('ML_MODEL_PREDICT_ROW failed.');
         SIGNAL SQLSTATE 'HY000'
-            SET MESSAGE_TEXT = v_db_err_msg;
+        SET MESSAGE_TEXT = v_db_err_msg;
    END IF;
 END$$
 DELIMITER ;

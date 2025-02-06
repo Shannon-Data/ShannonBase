@@ -57,13 +57,13 @@ int ML_regression::train() {
   auto share = ShannonBase::shannon_loaded_tables->get(m_sch_name.c_str(), m_table_name.c_str());
   if (!share) {
     std::ostringstream err;
-    err << m_sch_name.c_str() << "." << m_table_name.c_str() << " NOT loaded into rapid engine.";
+    err << m_sch_name.c_str() << "." << m_table_name.c_str() << " NOT loaded into rapid engine";
     my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
-  TABLE *source_table_ptr{nullptr};
-  if (Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ, &source_table_ptr)) return HA_ERR_GENERIC;
+  auto source_table_ptr = Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ);
+  if (!source_table_ptr) return HA_ERR_GENERIC;
 
   auto n_sample = source_table_ptr->file->stats.records;
   auto n_feature = source_table_ptr->s->fields;
@@ -82,6 +82,9 @@ int ML_regression::train() {
                       source_table_ptr->s->tmp_table_def);
   if (tb_handler && tb_handler->ha_external_lock(thd, F_RDLCK)) return HA_ERR_GENERIC;
   if (tb_handler->ha_rnd_init(true)) {
+    tb_handler->ha_rnd_end();
+    tb_handler->ha_external_lock(thd, F_UNLCK);
+    tb_handler->ha_close();
     return HA_ERR_GENERIC;
   }
 
@@ -124,16 +127,29 @@ int ML_regression::train() {
 
   std::string mode_params = "task=train objective=regression num_leaves=31 verbose=0";
   std::string model_content;
-  if (!(m_handler =
-            Utils::ML_train(mode_params, reinterpret_cast<const void *>(train_data.data()), n_sample,
-                            C_API_DTYPE_FLOAT64, (const char **)feature_name_vec.data(), n_feature, model_content)))
+  // clang-format off
+  if (!(m_handler = Utils::ML_train(mode_params,
+                                    C_API_DTYPE_FLOAT64,
+                                    reinterpret_cast<const void *>(train_data.data()),
+                                    n_sample,
+                                    n_feature,
+                                    C_API_DTYPE_FLOAT32,
+                                    nullptr /**label_data*/,
+                                    model_content)))
     return HA_ERR_GENERIC;
 
   // the definition of this table, ref: `ml_train.sql`
   std::string mode_type("regression"), oper_type("train");
-  if (Utils::store_model_catalog(mode_type, oper_type, m_options, user_name, m_handler_name, model_content,
-                                 m_target_name, m_table_name))
+  if (Utils::store_model_catalog(mode_type,
+                                 oper_type,
+                                 m_options,
+                                 user_name,
+                                 m_handler_name,
+                                 model_content,
+                                 m_target_name,
+                                 m_table_name))
     return HA_ERR_GENERIC;
+  // clang-format off
   return 0;
 }
 
@@ -180,10 +196,11 @@ int ML_regression::import(std::string model_handle_name, std::string user_name, 
 
   m_handler = bt_handler;
 
-  TABLE *cat_tale_ptr{nullptr};
   std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
   std::string cat_table_name = "MODEL_CATALOG";
-  if (Utils::open_table_by_name(catalog_schema_name, cat_table_name, TL_WRITE, &cat_tale_ptr)) return HA_ERR_GENERIC;
+
+  auto cat_tale_ptr = Utils::open_table_by_name(catalog_schema_name, cat_table_name, TL_WRITE);
+  if (!cat_tale_ptr) return HA_ERR_GENERIC;
 
   cat_tale_ptr->file->ha_external_lock(thd, F_WRLCK | F_RDLCK);
   cat_tale_ptr->use_all_columns();
