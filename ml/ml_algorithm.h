@@ -27,50 +27,37 @@
 #define __SHANNONBASE_ML_ALGORITHM_H__
 
 #include <string>
+#include "ml_info.h"
 
 namespace ShannonBase {
 namespace ML {
-
-enum class ML_TASK_TYPE : int {
-  UNKNOWN = -1,
-  CLASSIFICATION,
-  REGRESSION,
-  FORECASTING,
-  ANOMALY_DETECTION,
-  RECOMMENDATION
-};
 
 enum class MODEL_CATALOG_FIELD_INDEX : int {
   MODEL_ID = 0,
   MODEL_HANDLE,
   MODEL_OBJECT,
   MODEL_OWNER,
-  BUILD_TIMESTAMP,
-  TARGET_COLUMN_NAME,
-  TRAIN_TABLE_NAME,
   MODEL_OBJECT_SIZE,
-  MODEL_TYPE,
-  TASK,
-  COLUMN_NAMES,
-  MODEL_EXPLANATION,
-  LAST_ACCESSED,
   MODEL_METADATA,
-  NOTES
+  END_OF_COLUMN_ID
 };
+
+enum class MODEL_OBJECT_CATALOG_FIELD_INDEX : int { CHUNK_ID = 0, MODEL_HANDLE, MODEL_OBJECT, END_OF_COLUMN_ID };
 
 // the interface of ml tasks.
 class ML_algorithm {
  public:
   ML_algorithm() {}
-  virtual ~ML_algorithm() {}
+  virtual ~ML_algorithm() = default;
 
   virtual int train() = 0;
   virtual int predict() = 0;
   virtual int load(std::string &model_content) = 0;
-  virtual int load_from_file(std::string modle_file_full_path, std::string model_handle_name) = 0;
-  virtual int unload(std::string model_handle_name) = 0;
-  virtual int import(std::string model_handle_name, std::string user_name, std::string &content) = 0;
-  virtual double score() = 0;
+  virtual int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) = 0;
+  virtual int unload(std::string &model_handle_name) = 0;
+  virtual int import(std::string &model_handle_name, std::string &user_name, std::string &content) = 0;
+  virtual double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+                       std::string &metric_str) = 0;
   virtual int explain_row() = 0;
   virtual int explain_table() = 0;
   virtual int predict_row() = 0;

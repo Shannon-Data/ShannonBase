@@ -29,6 +29,11 @@
 namespace ShannonBase {
 namespace ML {
 
+const std::vector<std::string> ML_forecasting::metrics = {
+    "neg_max_absolute_error",        "neg_mean_absolute_error",     "neg_mean_abs_scaled_error",
+    "neg_mean_squared_error",        "neg_root_mean_squared_error", "neg_root_mean_squared_percent_error",
+    "neg_sym_mean_abs_percent_error"};
+
 ML_forecasting::ML_forecasting() {}
 
 ML_forecasting::~ML_forecasting() {}
@@ -39,19 +44,22 @@ int ML_forecasting::predict() { return 0; }
 
 int ML_forecasting::load(std::string &model_content [[maybe_unused]]) { return 0; }
 
-int ML_forecasting::load_from_file(std::string modle_file_full_path [[maybe_unused]],
-                                   std::string model_handle_name [[maybe_unused]]) {
+int ML_forecasting::load_from_file(std::string &modle_file_full_path [[maybe_unused]],
+                                   std::string &model_handle_name [[maybe_unused]]) {
   return 0;
 }
 
-int ML_forecasting::unload(std::string model_handle_name [[maybe_unused]]) { return 0; }
+int ML_forecasting::unload(std::string &model_handle_name [[maybe_unused]]) { return 0; }
 
-int ML_forecasting::import(std::string model_handle_name [[maybe_unused]], std::string user_name [[maybe_unused]],
+int ML_forecasting::import(std::string &model_handle_name [[maybe_unused]], std::string &user_name [[maybe_unused]],
                            std::string &content [[maybe_unused]]) {
   return 0;
 }
 
-double ML_forecasting::score() { return 0; }
+double ML_forecasting::score(std::string &sch_tb_name [[maybe_unused]], std::string &target_name [[maybe_unused]],
+                             std::string &model_handle [[maybe_unused]], std::string &metric_str [[maybe_unused]]) {
+  return 0;
+}
 
 int ML_forecasting::explain_row() { return 0; }
 

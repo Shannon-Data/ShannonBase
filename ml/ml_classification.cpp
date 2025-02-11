@@ -33,8 +33,7 @@
 #include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"  //LightGBM
 
 #include "include/my_inttypes.h"
-#include "include/thr_lock.h"     //TL_READ
-#include "sql-common/json_dom.h"  //Json_wrapper.
+#include "include/thr_lock.h"  //TL_READ
 #include "sql/current_thd.h"
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/derror.h"  //ER_TH
@@ -42,7 +41,6 @@
 #include "sql/handler.h"
 #include "sql/sql_class.h"  //THD
 #include "sql/table.h"
-
 #include "storage/innobase/include/ut0dbg.h"            //for ut_a
 #include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
 
@@ -53,15 +51,33 @@
 namespace ShannonBase {
 namespace ML {
 
-ML_classification::ML_classification() {}
+const std::vector<std::string> ML_classification::score_olny_metrics = {"balanced_accuracy", "f1_samples",
+                                                                        "precision_samples", "recall_samples"};
 
+const std::vector<std::string> ML_classification::binary_only_metrics = {"f1", "precision", "recall", "roc_auc"};
+const std::vector<std::string> ML_classification::binary_multi_metrics = {
+    "accuracy",           "balanced_accuracy", "f1_macro",        "f1_micro",        "f1_samples",
+    "f1_weighted",        "neg_log_loss",      "precision_macro", "precision_micro", "precision_samples",
+    "precision_weighted", "recall_macro",      "recall_micro",    "recall_samples",  "recall_weighted"};
+
+ML_classification::ML_classification() {}
 ML_classification::~ML_classification() {}
 
 // returuns the # of record read successfully, otherwise 0 read failed.
-int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, std::string &label_name,
-                                 std::vector<float> &label_data) {
+int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
+                                 std::string &label_name, std::vector<float> &label_data) {
   THD *thd = current_thd;
   auto n_read{0u};
+
+  // read the training data from target table.
+  std::map<std::string, std::set<std::string>> txt2numeric;
+  for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
+    Field *field_ptr = *(table->field + field_id);
+    txt2numeric[field_ptr->field_name];
+
+    if (likely(!strcmp(field_ptr->field_name, label_name.c_str()))) continue;
+    features_name.push_back(field_ptr->field_name);
+  }
 
   const dd::Table *table_obj{nullptr};
   const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
@@ -86,13 +102,6 @@ int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, 
     sec_tb_handler->ha_external_lock(thd, F_UNLCK);
     sec_tb_handler->ha_close();
     return n_read;
-  }
-
-  // read the training data from target table.
-  std::map<std::string, std::set<std::string>> txt2numeric;
-  for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
-    Field *field_ptr = *(table->field + field_id);
-    txt2numeric[field_ptr->field_name];
   }
 
   while (sec_tb_handler->ha_rnd_next(table->record[0]) == 0) {
@@ -173,11 +182,12 @@ int ML_classification::train() {
 
   std::vector<double> train_data;
   std::vector<float> label_data;
-  auto n_sample = read_data(source_table_ptr, train_data, m_target_name, label_data);
+  std::vector<std::string> features_name;
+  auto n_sample = read_data(source_table_ptr, train_data, features_name, m_target_name, label_data);
   Utils::close_table(source_table_ptr);
 
   // if it's a multi-target, then minus the size of target columns.
-  auto n_feature = source_table_ptr->s->fields - 1;
+  auto n_feature = features_name.size();
   std::string mode_params =
       "task = train "
       "objective = binary "
@@ -187,6 +197,7 @@ int ML_classification::train() {
       "num_iterations = 100";
   std::string model_content;
   // clang-format off
+  auto start = std::chrono::steady_clock::now();
   if (!(m_handler = Utils::ML_train(mode_params,
                                     C_API_DTYPE_FLOAT64,
                                     reinterpret_cast<const void *>(train_data.data()),
@@ -196,17 +207,59 @@ int ML_classification::train() {
                                     reinterpret_cast<const void *>(label_data.data()),
                                     model_content)))
     return HA_ERR_GENERIC;
+  auto end = std::chrono::steady_clock::now();
+  auto train_duration =
+    std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0f;
 
   // the definition of this table, ref: `ml_train.sql`
-  std::string mode_type("classification"), oper_type("train");
-  if (Utils::store_model_catalog(mode_type,
-                                 oper_type,
-                                 m_options,
-                                 user_name,
-                                 m_handler_name,
-                                 model_content,
-                                 m_target_name,
-                                 m_table_name))
+  std::string oper_type("train");
+  std::string sch_tb_name = m_sch_name + "." ;
+  sch_tb_name += m_table_name;
+  std::string notes, opt_metrics;
+
+  auto content_dom = Json_dom::parse(model_content.c_str(),
+                             model_content.length(),
+                             [](const char *, size_t) { assert(false); },
+                             [] { assert(false); });
+  if (!content_dom.get()) return HA_ERR_GENERIC;
+  Json_wrapper content_json(content_dom.get(), true);
+
+  auto meta_json = Utils::build_up_model_metadata(task_name_str[type()],  /* task */
+                                                m_target_name,  /*labelled col name */
+                                                sch_tb_name,    /* trained table */
+                                                features_name,  /* feature columns*/
+                                                nullptr,        /* model explanation*/
+                                                notes,          /* notes*/
+                                                model_format_str[model_format::VER_1],   /* model format*/
+                                                model_status_str[model_status::READY],   /* model_status */
+                                                model_quality_str[model_quality::HIGH],  /* model_qulity */
+                                                train_duration,  /*the time in seconds taken to train the model.*/
+                                                task_name_str[type()], /**task algo name */
+                                                0,              /*train score*/
+                                                n_sample,       /*# of rows in training tbl*/
+                                                n_feature + 1,  /*# of columns in training tbl*/
+                                                n_sample,       /*# of rows selected by adaptive sampling*/
+                                                n_feature,      /*# of columns selected by feature selection.*/
+                                                opt_metrics,    /* optimization metric */
+                                                features_name,  /* names of the columns selected by feature selection*/
+                                                0,              /*contamination*/
+                                                &m_options,     /*options of ml_train*/
+                                                nullptr,        /**training_params */
+                                                nullptr,        /**onnx_inputs_info */
+                                                nullptr,        /*onnx_outputs_info*/
+                                                nullptr,        /*training_drift_metric*/
+                                                1               /* chunks */
+                                              );
+
+  if (!meta_json)
+    return HA_ERR_GENERIC;
+  Json_wrapper model_meta(meta_json);
+  if (Utils::store_model_catalog(model_content.length(),
+                                 &model_meta,
+                                 m_handler_name))
+    return HA_ERR_GENERIC;
+
+  if (Utils::store_model_object_catalog(m_handler_name, &content_json))
     return HA_ERR_GENERIC;
   // clang-format on
   return 0;
@@ -223,19 +276,63 @@ int ML_classification::load(std::string &model_content) {
   return 0;
 }
 
-int ML_classification::load_from_file(std::string modle_file_full_path [[maybe_unused]],
-                                      std::string model_handle_name [[maybe_unused]]) {
+int ML_classification::load_from_file(std::string &modle_file_full_path [[maybe_unused]],
+                                      std::string &model_handle_name [[maybe_unused]]) {
   return 0;
 }
 
-int ML_classification::unload(std::string model_handle_name [[maybe_unused]]) { return 0; }
+int ML_classification::unload(std::string &model_handle_name) {
+  assert(!Loaded_models.empty());
 
-int ML_classification::import(std::string model_handle_name [[maybe_unused]], std::string user_name [[maybe_unused]],
+  auto cnt = Loaded_models.erase(model_handle_name);
+  assert(cnt == 1);
+  return 0;
+}
+
+int ML_classification::import(std::string &model_handle_name [[maybe_unused]], std::string &user_name [[maybe_unused]],
                               std::string &content [[maybe_unused]]) {
   return 0;
 }
 
-double ML_classification::score() { return 0; }
+double ML_classification::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+                                std::string &metric_str) {
+  assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
+
+  if (strcasecmp(metric_str.c_str(), "balanced_accuracy")) {
+    std::ostringstream err;
+    err << metric_str << " is invalid for classification scoring";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
+  std::string schema_name(sch_tb_name.c_str(), pos);
+  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+
+  auto source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
+  if (!source_table_ptr) {
+    std::ostringstream err;
+    err << schema_name.c_str() << "." << table_name.c_str() << " open failed for ML";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  std::vector<double> train_data;
+  std::vector<float> label_data;
+  std::vector<std::string> features_name;
+  auto n_sample [[maybe_unused]] = read_data(source_table_ptr, train_data, features_name, target_name, label_data);
+  Utils::close_table(source_table_ptr);
+  std::string &model_content = Loaded_models[model_handle];
+  BoosterHandle handler = Utils::load_trained_model_from_string(model_content);
+  if (!handler) {
+    std::ostringstream err;
+    err << schema_name.c_str() << "." << table_name.c_str() << " can not load model from content string";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  return 0;
+}
 
 int ML_classification::explain_row() { return 0; }
 

@@ -26,7 +26,11 @@
 #ifndef __SHANNONBASE_ML_CLASSICIFICATION_H__
 #define __SHANNONBASE_ML_CLASSICIFICATION_H__
 
+#include <string>
 #include <vector>
+
+#include "sql-common/json_dom.h"  //Json_wrapper.
+
 #include "ml_algorithm.h"
 
 namespace LightGBM {
@@ -40,19 +44,21 @@ class Config;
 
 class TABLE;
 class Json_wrapper;
+
 namespace ShannonBase {
 namespace ML {
 class ML_classification : public ML_algorithm {
  public:
   ML_classification();
-  virtual ~ML_classification();
+  virtual ~ML_classification() override;
   int train() override;
   int predict() override;
   int load(std::string &model_content) override;
-  int load_from_file(std::string modle_file_full_path, std::string model_handle_name) override;
-  int unload(std::string model_handle_name) override;
-  int import(std::string model_handle_name, std::string user_name, std::string &content) override;
-  double score() override;
+  int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
+  int unload(std::string &model_handle_name) override;
+  int import(std::string &model_handle_name, std::string &user_name, std::string &content) override;
+  double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+               std::string &metric_str) override;
   int explain_row() override;
   int explain_table() override;
   int predict_row() override;
@@ -67,11 +73,16 @@ class ML_classification : public ML_algorithm {
   std::string get_target() const { return m_target_name; }
   void set_handle_name(std::string &handle_name) { m_handler_name = handle_name; }
   std::string get_handle_name() const { return m_handler_name; }
-  void set_options(const Json_wrapper *options) { m_options = options; }
-  const Json_wrapper *get_options() const { return m_options; }
+  void set_options(Json_wrapper &options) { m_options = options; }
+  const Json_wrapper &get_options() const { return m_options; }
+
+  static const std::vector<std::string> score_olny_metrics;
+  static const std::vector<std::string> binary_only_metrics;
+  static const std::vector<std::string> binary_multi_metrics;
 
  private:
-  int read_data(TABLE *table, std::vector<double> &train_data, std::string &label_name, std::vector<float> &label_data);
+  int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
+                std::string &label_name, std::vector<float> &label_data);
 
  private:
   // source data schema name.
@@ -83,7 +94,7 @@ class ML_classification : public ML_algorithm {
   // model handle name.
   std::string m_handler_name;
   // model options JSON format.
-  const Json_wrapper *m_options;
+  Json_wrapper m_options;
 
   void *m_handler{nullptr};
 };

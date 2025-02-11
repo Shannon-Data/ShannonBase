@@ -34,6 +34,20 @@ namespace ML {
 
 extern std::map<std::string, std::string> Loaded_models;
 
+enum class ML_TASK_TYPE { UNKNOWN = -1, CLASSIFICATION, REGRESSION, FORECASTING, ANOMALY_DETECTION, RECOMMENDATION };
+
+enum class model_status { CREATING = 0, READY, ERROR };
+
+enum class model_format { VER_1, ONNX };
+
+enum class model_quality { LOW, HIGH };
+
+extern std::map<std::string, ML_TASK_TYPE> opt_task_map;
+extern std::map<ML_TASK_TYPE, std::string> task_name_str;
+extern std::map<model_status, std::string> model_status_str;
+extern std::map<model_format, std::string> model_format_str;
+extern std::map<model_quality, std::string> model_quality_str;
+
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_AUTO_ML_INFO_H__
