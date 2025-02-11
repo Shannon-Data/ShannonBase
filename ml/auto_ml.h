@@ -40,23 +40,36 @@ namespace ML {
 
 class Auto_ML {
  public:
-  Auto_ML(std::string schema, std::string table_name, std::string target_name, Json_wrapper *options,
+  Auto_ML(std::string schema, std::string table_name, std::string target_name, Json_wrapper options,
           std::string handler);
   Auto_ML() = default;
   virtual ~Auto_ML();
+
+  // get the type of job.
+  inline ML_TASK_TYPE type() { return (m_ml_task) ? m_ml_task->type() : ML_TASK_TYPE::UNKNOWN; }
 
   // do ML training.
   int train();
   // load the trainned model into Rapid.
   int load(String *model_handler_name, String *model_user);
   // unload the loaded mode from Rapid.
-  int unload(String *model_handler_name, Json_wrapper *model_meta);
+  int unload(String *model_handler_name, String *model_user);
   // import the model from another.
   int import(String *model_handler_name, String *user_name, Json_wrapper *model_meta, String *model_content);
-  // get the type of job.
-  ML_TASK_TYPE type();
+  // evaluate and test the model.
+  double score(String *sch_table_name, String *taget_column_name, String *model_handle_name, String *model_usr_name,
+               String *metric, Json_wrapper *options);
 
  private:
+  /**check loaded or not, if yes, then get model meta info and model content.
+   * @param[in] model_hanle_name, the hanlde name of model to check.
+   * @param[in] model_user_name, the model user name.
+   * @param[in/out] model_content, the content of this trained model.
+   * @param[in] should_loaded, true is to check whether is loaded into, false to check it should not be loaded.
+   * @return true has been loaded, otherwise not.
+   *  */
+  int precheck_and_process_meta_info(std::string &model_hanle_name, std::string &model_user_name,
+                                     std::string &model_content, bool should_loaded = true);
   // get the json array value.
   std::string get_array_string(Json_array *array);
   // init task job map, get an instance by type.
@@ -72,14 +85,13 @@ class Auto_ML {
   // the label column name.
   std::string m_target_name;
   // the options in JSON format.
-  Json_wrapper *m_options;
+  Json_wrapper m_options;
   // name of the model content.
   std::string m_handler;
 
   // the followings are parsed from m_options.
   //  {'classification'|'regression'|'forecasting'|'anomaly_detection'|'recommendation'}|NULL
   std::string m_task_type_str;
-  std::map<std::string, ML_TASK_TYPE> m_opt_task_map;
   //'column'
   std::string m_opt_datetime_index;
   // JSON_ARRAY('column'[,'column'] ...), to string.

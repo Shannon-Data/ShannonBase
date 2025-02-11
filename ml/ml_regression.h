@@ -26,11 +26,13 @@
 #ifndef __SHANNONBASE_ML_REGRESSION_H__
 #define __SHANNONBASE_ML_REGRESSION_H__
 
-#include "ml_algorithm.h"
-
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "sql-common/json_dom.h"  //Json_wrapper.
+
+#include "ml_algorithm.h"
 
 namespace LightGBM {
 class DatasetLoader;
@@ -45,20 +47,19 @@ class Json_wrapper;
 namespace ShannonBase {
 namespace ML {
 
-enum class STAGE { UNKNOWN, TRAINED, PREDICT };
-
-enum class DATA_FROMAT { ORDER_COLUMN = 0, ORDER_ROW = 1 };
-
 using Traing_data_t = std::vector<std::vector<double>>;
 class ML_regression : public ML_algorithm {
  public:
+  ML_regression();
+  virtual ~ML_regression() override;
   int train() override;
   int predict() override;
   int load(std::string &model_content) override;
-  int load_from_file(std::string modle_file_full_path, std::string model_handle_name) override;
-  int unload(std::string model_handle_name) override;
-  int import(std::string model_handle_name, std::string user_name, std::string &content) override;
-  double score() override;
+  int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
+  int unload(std::string &model_handle_name) override;
+  int import(std::string &model_handle_name, std::string &user_name, std::string &content) override;
+  double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+               std::string &metric_str) override;
   int explain_row() override;
   int explain_table() override;
   int predict_row() override;
@@ -73,15 +74,17 @@ class ML_regression : public ML_algorithm {
   std::string get_target() const { return m_target_name; }
   void set_handle_name(std::string &handle_name) { m_handler_name = handle_name; }
   std::string get_handle_name() const { return m_handler_name; }
-  void set_options(const Json_wrapper *options) { m_options = options; }
-  const Json_wrapper *get_options() const { return m_options; }
+  void set_options(Json_wrapper &options) { m_options = options; }
+  Json_wrapper &get_options() { return m_options; }
+
+  static const std::vector<std::string> metrics;
 
  private:
   std::string m_sch_name;
   std::string m_table_name;
   std::string m_target_name;
   std::string m_handler_name;
-  const Json_wrapper *m_options;
+  Json_wrapper m_options;
 
   void *m_handler{nullptr};
 };

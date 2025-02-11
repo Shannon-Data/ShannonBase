@@ -45,7 +45,6 @@ mysql> CALL sys.ML_MODEL_LOAD(@iris_model, \'root\');
     NOT DETERMINISTIC
     MODIFIES SQL DATA
 BEGIN
-    DECLARE v_error BOOLEAN DEFAULT FALSE;
     DECLARE v_user_name VARCHAR(64);
     DECLARE v_sys_schema_name VARCHAR(64);
 
@@ -79,14 +78,5 @@ BEGIN
         SIGNAL SQLSTATE 'HY000'
           SET MESSAGE_TEXT = v_db_err_msg;
    END IF;
-
-   -- UPDATE LAST ACCESS TIME.
-   SET @update_model_acces_time_stm = CONCAT('UPDATE ',  v_sys_schema_name,
-                                            '.MODEL_CATALOG SET LAST_ACCESSED = now() WHERE MODEL_HANDLE = \"',
-                                            in_model_handle_name, '\";');
-   PREPARE update_model_stmt FROM @update_model_acces_time_stm;
-   EXECUTE update_model_stmt;
-   DEALLOCATE PREPARE update_model_stmt;
-
 END$$
 DELIMITER ;

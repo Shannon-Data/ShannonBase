@@ -25,7 +25,7 @@ CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_model_unload (
 Description
 -----------
 
-Run the ML_MODEL_UNLOAD routine load the trained model into memory.
+Run the ML_MODEL_UNLOAD routine unload the trained model from memory.
 
 Parameters
 -----------
@@ -42,7 +42,6 @@ mysql> CALL sys.ML_MODEL_UNLOAD(@iris_model);
     NOT DETERMINISTIC
     MODIFIES SQL DATA
 BEGIN
-    DECLARE v_error BOOLEAN DEFAULT FALSE;
     DECLARE v_user_name VARCHAR(64);
     DECLARE v_sys_schema_name VARCHAR(64);
 
@@ -65,7 +64,7 @@ BEGIN
         SET MESSAGE_TEXT = "The model you unloading does NOT exist.";
    END IF;
 
-   SELECT ML_MODEL_UNLOAD(in_model_handle_name) INTO v_unload_obj_check;
+   SELECT ML_MODEL_UNLOAD(in_model_handle_name, v_user_name) INTO v_unload_obj_check;
    IF v_unload_obj_check != 0 THEN
         SET v_db_err_msg = CONCAT('ML_MODEL_UNLOAD failed.');
         SIGNAL SQLSTATE 'HY000'

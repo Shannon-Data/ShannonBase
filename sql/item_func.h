@@ -4089,8 +4089,8 @@ class Item_func_ml_model_load final : public Item_int_func {
 
 class Item_func_ml_model_unload final : public Item_int_func {
  public:
-  Item_func_ml_model_unload(const POS &pos, Item* a)
-      : Item_int_func(pos, a) {}
+  Item_func_ml_model_unload(const POS &pos, Item* a, Item* b)
+      : Item_int_func(pos, a, b) {}
   longlong val_int() override;
   bool resolve_type(THD *) override {
     set_nullable(true);
@@ -4118,12 +4118,12 @@ class Item_func_ml_model_import : public Item_int_func {
   }
 };
 
-class Item_func_ml_score : public Item_int_func {
+class Item_func_ml_score : public Item_real_func {
  public:
   Item_func_ml_score(const POS &pos, PT_item_list *list)
-      : Item_int_func(pos, list) {}
+      : Item_real_func(pos, list) {}
   enum Functype functype() const override { return DD_INTERNAL_FUNC; }
-  longlong val_int() override;
+  double val_real() override;
   const char *func_name() const override {
     return "ML_MODEL_SCORE";
   }

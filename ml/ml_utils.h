@@ -35,6 +35,7 @@
 class TABLE;
 class handler;
 class Json_wrapper;
+class Json_object;
 
 namespace ShannonBase {
 namespace ML {
@@ -69,33 +70,62 @@ class Utils {
                                 uint n_feature, uint label_data_type, const void *label_data,
                                 std::string &model_content);
 
+  /**
+   * to build up a json format model metadata.
+   * params defintion ref to: https://dev.mysql.com/doc/heatwave/en/mys-hwaml-ml-model-metadata.html
+   * @retrun none-nullptr success, meta_data is the built meta inforation, otherwise failed.
+   */
+  static Json_object *build_up_model_metadata(
+      std::string &task, std::string &target_column_name, std::string &tain_table_name,
+      std::vector<std::string> &featurs_name, Json_object *model_explanation, std::string &notes, std::string &format,
+      std::string &status, std::string &model_quality, double training_time, std::string &algorithm_name,
+      double training_score, size_t n_rows, size_t n_columns, size_t n_selected_rows, size_t n_selected_columns,
+      std::string &optimization_metric, std::vector<std::string> &selected_column_names, double contamination,
+      Json_wrapper *train_options, Json_object *training_params, Json_object *onnx_inputs_info,
+      Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks);
+
   /** to store the trained model into ML_SCHEMA_xxx.MODEL_CATALOG.
-   *  @param[in] mode_type, the model_type, such as classification, regression, etc.
-   *  @param[in] oper_type, which type of this operations. train, prediction, etc.
+   *  @param[in] model_content, the trainned model in string formation.
    *  @param[in] option, the model option, in JSON formation.
    *  @param[in] user_name, the who create/build this model.
    *  @param[in] handler_name, the handler name, unique key.
-   *  @param[in] model_content, the trainned model in string formation.
-   *  @param[in] target_name, the labelled data/column name.
-   *  @param[in] source_name, the table name, which trainning data loaded from.
    *  @retval 0 success.
    *  @retval errcode failed.
    *  */
-  static int store_model_catalog(std::string &mode_type, std::string &oper_type, const Json_wrapper *options,
-                                 std::string &user_name, std::string &handler_name, std::string &model_content,
-                                 std::string &target_name, std::string &source_name);
+  static int store_model_catalog(size_t model_obj_size, const Json_wrapper *model_meta, std::string &handler_name);
+
+  /**
+   * store the model meta info into model_object_catalog table.
+   * @param[in] model_handle_name, the name of this model handler.
+   * @param[in] model_meta, the json wrapper handler of this json-formattted model.
+   * @return 0 success, otherwise failed.
+   */
+  static int store_model_object_catalog(std::string &model_handle_name, Json_wrapper *model_meta);
 
   /* get the model content via handle name, sucess return 0, otherise failed.
-   * @param[in] schema_name, source data schema name.
-   * @param[in] table_name, source data table name.
-   * @param[in] tareget_name, labelled data column name.
+   * @param[in] model_user_name, model user name.
+   * @param[in] model_handle_name,model user name.
    * @param[in] options, the model option we got. JSON format.
-   * @param[out] model_content_str, the trainned model in string format.
    * @retval 0 success.
    * @retval error code failed.
    */
-  static int read_model_content(std::string model_user_name, std::string model_handle_name, Json_wrapper *options,
-                                std::string &model_content_str);
+  static int read_model_content(std::string &model_user_name, std::string &model_handle_name, Json_wrapper &options);
+
+  /* get the model object content via handle name, sucess return 0, otherise failed.
+   * @param[in] model_user_name, model user name.
+   * @param[in/out] model_content, the model content. JSON format.
+   * @retval 0 success.
+   * @retval error code failed.
+   */
+  static int read_model_object_content(std::string &model_user_name, std::string &model_handle_name,
+                                       std::string &model_content);
+
+  /**
+   * to build a model from string, which is stored by saviing the model to file/string.
+   * @param[in] model_content, the trained model content.
+   * @return BoosterHandle success, otherwise nullptr.
+   */
+  static BoosterHandle load_trained_model_from_string(std::string &model_content);
 
  private:
   Utils() = delete;

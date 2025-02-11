@@ -14,15 +14,16 @@
 -- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
 -- Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-DROP PROCEDURE IF EXISTS ml_predict_row;
+DROP FUNCTION IF EXISTS ml_predict_row;
 
 DELIMITER $$
 
-CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_predict_row (
-        IN in_input_data JSON,
-        IN in_model_handle_name VARCHAR(64),
-        IN in_model_option JSON
+CREATE DEFINER='mysql.sys'@'localhost' FUNCTION ml_predict_row (
+        in_predict_data JSON,
+        in_model_handle_name VARCHAR(64),
+        in_model_option JSON
     )
+    RETURNS JSON
     COMMENT '
 Description
 -----------
@@ -41,42 +42,25 @@ in_model_option JSON:
   For all other tasks, set this parameter to NULL.
 Example
 -----------
-mysql> SELECT sys.ML_PREDICT_ROW(JSON_OBJECT(\"column_name\", value,
-          \"column_name\", value, ...),
+mysql> SELECT sys.ML_PREDICT_ROW(JSON_OBJECT(\'column_name\', value,
+          \'column_name\', value, ...),
           model_handle, options);
 '
     SQL SECURITY INVOKER
-    NOT DETERMINISTIC
-    MODIFIES SQL DATA
+    DETERMINISTIC
+    CONTAINS SQL
 BEGIN
-    DECLARE v_error BOOLEAN DEFAULT FALSE;
-    DECLARE v_user_name VARCHAR(64);
-    DECLARE v_sys_schema_name VARCHAR(64);
-
     DECLARE v_db_err_msg TEXT;
-    DECLARE v_pred_row_obj_check INT;
-    DECLARE v_model_id INT;
-
-   SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
-   SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
-
-   SET @select_model_stm = CONCAT('SELECT MODEL_ID INTO @MODEL_ID FROM ',  v_sys_schema_name,
-                                  '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle_name, '\";');
-   PREPARE select_model_stmt FROM @select_model_stm;
-   EXECUTE select_model_stmt;
-   SELECT @MODEL_ID into v_model_id;
-   DEALLOCATE PREPARE select_model_stmt;
-
-   IF (v_model_id IS NULL) THEN
-      SIGNAL SQLSTATE 'HY000'
-      SET MESSAGE_TEXT = "The model you try to do predict row does NOT exist.";
-   END IF;
+    DECLARE v_pred_row_obj_check JSON;
 
    SELECT ML_MODEL_PREDICT_ROW(in_input_data, in_model_handle_name, in_model_option) INTO v_pred_row_obj_check;
-   IF v_pred_row_obj_check != 0 THEN
+   IF v_pred_row_obj_check IS NULL THEN
         SET v_db_err_msg = CONCAT('ML_MODEL_PREDICT_ROW failed.');
         SIGNAL SQLSTATE 'HY000'
         SET MESSAGE_TEXT = v_db_err_msg;
    END IF;
+
+   RETURN v_pred_row_obj_check;
 END$$
+
 DELIMITER ;
