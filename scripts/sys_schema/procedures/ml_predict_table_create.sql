@@ -69,13 +69,5 @@ BEGIN
           SET MESSAGE_TEXT = v_db_err_msg;
    END IF;
 
-   -- UPDATE LAST ACCESS TIME.
-   SET @update_model_acces_time_stm = CONCAT('UPDATE ',  v_sys_schema_name,
-                                            '.MODEL_CATALOG SET LAST_ACCESSED = now() WHERE MODEL_HANDLE = \"',
-                                            in_model_handle_name, '\";');
-   PREPARE update_model_stmt FROM @update_model_acces_time_stm;
-   EXECUTE update_model_stmt;
-   DEALLOCATE PREPARE update_model_stmt;
-
 END$$
 DELIMITER ;

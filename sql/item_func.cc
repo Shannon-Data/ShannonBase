@@ -10243,38 +10243,30 @@ longlong Item_func_ml_train::val_int() {
 
 longlong Item_func_ml_model_load::val_int() {
   DBUG_TRACE;
-  //ML_MODEL_LOAD(in_model_handle_name, v_model_meta, v_model_data)
-  assert(arg_count == 2);
+  assert(arg_count == 1);
   THD* thd [[maybe_unused]] = current_thd;
 
   String handle_name;
   String *handle_name_ptr = args[0]->val_str(&handle_name);
 
-  String model_user;
-  String* model_content_ptr = args[1]->val_str(&model_user);
-
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   /**To invoke ML libs to load the trainned ML models into memory*/
-  auto result = auto_ml->load(handle_name_ptr, model_content_ptr);
+  auto result = auto_ml->load(handle_name_ptr);
   return result;
 }
 
 longlong Item_func_ml_model_unload::val_int() {
   DBUG_TRACE;
-  //ML_MODEL_UNLOAD(in_model_handle_name, v_handler_user_name)
-  assert(arg_count == 2);
+  assert(arg_count == 1);
 
   String handle_name;
   String *handle_name_ptr = args[0]->val_str(&handle_name);
 
-  String handle_user_name;
-  String *handle_user_name_ptr = args[1]->val_str(&handle_user_name);
-
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   /**To invoke ML libs to unload the trainned ML models into memory*/
-  auto result = auto_ml->unload(handle_name_ptr, handle_user_name_ptr);
+  auto result = auto_ml->unload(handle_name_ptr);
   return result;
 }
 
@@ -10347,8 +10339,28 @@ longlong Item_func_ml_predicte_table::val_int() {
 }
 
 longlong Item_func_ml_explain::val_int() {
-  assert(fixed);
-  return 0;
+  DBUG_TRACE;
+  assert(fixed && arg_count >= 3 && arg_count <= 4);
+
+  String sch_tb_name;
+  String *sch_tb_name_ptr = args[0]->val_str(&sch_tb_name);
+
+  String target_name;
+  String *target_name_ptr = args[1]->val_str(&target_name);
+
+  String handle_name;
+  String *handle_name_ptr = args[3]->val_str(&handle_name);
+
+  Json_wrapper exp_options;
+  if (arg_count == 4) {
+    args[5]->val_json(&exp_options);
+  }
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  /**To invoke ML libs to unload the trainned ML models into memory*/
+  auto result = auto_ml->explain(sch_tb_name_ptr, target_name_ptr, handle_name_ptr, exp_options);
+  return result;
 }
 
 longlong Item_func_ml_explain_row::val_int() {

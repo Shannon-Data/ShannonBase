@@ -72,7 +72,7 @@ BEGIN
         SET MESSAGE_TEXT = "The model you loading does NOT exist.";
    END IF;
 
-   SELECT ML_MODEL_LOAD(in_model_handle_name, in_user_name) INTO v_load_obj_check;
+   SELECT ML_MODEL_LOAD(in_model_handle_name) INTO v_load_obj_check;
    IF v_load_obj_check != 0 THEN
         SET v_db_err_msg = CONCAT('ML_MODEL_LOAD failed.');
         SIGNAL SQLSTATE 'HY000'

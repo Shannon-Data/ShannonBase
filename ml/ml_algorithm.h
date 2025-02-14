@@ -58,11 +58,14 @@ class ML_algorithm {
   virtual int import(std::string &model_handle_name, std::string &user_name, std::string &content) = 0;
   virtual double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
                        std::string &metric_str) = 0;
+
+  virtual int explain(std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
+                      Json_wrapper &exp_option) = 0;
   virtual int explain_row() = 0;
   virtual int explain_table() = 0;
   virtual int predict_row() = 0;
   virtual int predict_table() = 0;
-  virtual ML_TASK_TYPE type() = 0;
+  virtual ML_TASK_TYPE_T type() = 0;
 };
 
 }  // namespace ML

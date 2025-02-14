@@ -79,12 +79,5 @@ BEGIN
 
    SELECT ML_MODEL_SCORE(in_table_name, in_target_name, in_handle_name, v_user_name, in_metric_name, in_option) INTO in_score_var;
 
-   -- UPDATE LAST ACCESS TIME.
-   SET @score_model_acces_time_stm = CONCAT('UPDATE ',  v_sys_schema_name,
-                                            '.MODEL_CATALOG SET LAST_ACCESSED = now() WHERE MODEL_HANDLE = \"',
-                                            in_handle_name, '\";');
-   PREPARE score_model_stmt FROM @score_model_acces_time_stm;
-   EXECUTE score_model_stmt;
-   DEALLOCATE PREPARE score_model_stmt;
 END$$
 DELIMITER ;

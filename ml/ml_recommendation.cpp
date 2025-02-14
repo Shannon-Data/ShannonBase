@@ -26,6 +26,12 @@
 
 #include "ml_recommendation.h"
 
+#include <sstream>
+#include <string>
+
+#include "my_base.h"
+#include "mysqld_error.h"
+
 namespace ShannonBase {
 namespace ML {
 
@@ -61,6 +67,16 @@ double ML_recommendation::score(std::string &sch_tb_name [[maybe_unused]], std::
   return 0;
 }
 
+int ML_recommendation::explain(std::string &sch_tb_name [[maybe_unused]],
+                               std::string &target_column_name [[maybe_unused]],
+                               std::string &model_handle_name [[maybe_unused]],
+                               Json_wrapper &exp_options [[maybe_unused]]) {
+  std::ostringstream err;
+  err << "recommendation does not soupport explain operation";
+  my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  return HA_ERR_GENERIC;
+}
+
 int ML_recommendation::explain_row() { return 0; }
 
 int ML_recommendation::explain_table() { return 0; }
@@ -69,7 +85,7 @@ int ML_recommendation::predict_row() { return 0; }
 
 int ML_recommendation::predict_table() { return 0; }
 
-ML_TASK_TYPE ML_recommendation::type() { return ML_TASK_TYPE::RECOMMENDATION; }
+ML_TASK_TYPE_T ML_recommendation::type() { return ML_TASK_TYPE_T::RECOMMENDATION; }
 
 }  // namespace ML
 }  // namespace ShannonBase

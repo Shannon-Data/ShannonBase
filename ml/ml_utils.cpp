@@ -28,7 +28,7 @@
 
 #include "include/my_inttypes.h"
 
-#include "ml_algorithm.h"
+#include "decimal.h"
 #include "sql-common/json_dom.h"
 #include "sql/binlog.h"
 #include "sql/current_thd.h"
@@ -39,29 +39,125 @@
 #include "sql/sql_class.h"
 #include "sql/table.h"
 
+#include "ml_algorithm.h"
+#include "ml_info.h"
+
 namespace ShannonBase {
 namespace ML {
 
-std::map<std::string, ML_TASK_TYPE> opt_task_map{{"", ML_TASK_TYPE::UNKNOWN},
-                                                 {"CLASSIFICATION", ML_TASK_TYPE::CLASSIFICATION},
-                                                 {"REGRESSION", ML_TASK_TYPE::REGRESSION},
-                                                 {"FORECASTING", ML_TASK_TYPE::FORECASTING},
-                                                 {"ANOMALY_DETECTION", ML_TASK_TYPE::ANOMALY_DETECTION},
-                                                 {"RECOMMENDATION", ML_TASK_TYPE::RECOMMENDATION}};
+std::map<std::string, ML_TASK_TYPE_T> OPT_TASKS_MAP = {{"", ML_TASK_TYPE_T::UNKNOWN},
+                                                       {"CLASSIFICATION", ML_TASK_TYPE_T::CLASSIFICATION},
+                                                       {"REGRESSION", ML_TASK_TYPE_T::REGRESSION},
+                                                       {"FORECASTING", ML_TASK_TYPE_T::FORECASTING},
+                                                       {"ANOMALY_DETECTION", ML_TASK_TYPE_T::ANOMALY_DETECTION},
+                                                       {"RECOMMENDATION", ML_TASK_TYPE_T::RECOMMENDATION}};
 
-std::map<ML_TASK_TYPE, std::string> task_name_str = {{ML_TASK_TYPE::CLASSIFICATION, "CLASSIFICATION"},
-                                                     {ML_TASK_TYPE::REGRESSION, "REGRESSION"},
-                                                     {ML_TASK_TYPE::FORECASTING, "FORECASTING"},
-                                                     {ML_TASK_TYPE::ANOMALY_DETECTION, "ANOMALY_DETECTION"},
-                                                     {ML_TASK_TYPE::RECOMMENDATION, "RECOMMENDATION"}};
+std::map<ML_TASK_TYPE_T, std::string> TASK_NAMES_MAP = {{ML_TASK_TYPE_T::CLASSIFICATION, "CLASSIFICATION"},
+                                                        {ML_TASK_TYPE_T::REGRESSION, "REGRESSION"},
+                                                        {ML_TASK_TYPE_T::FORECASTING, "FORECASTING"},
+                                                        {ML_TASK_TYPE_T::ANOMALY_DETECTION, "ANOMALY_DETECTION"},
+                                                        {ML_TASK_TYPE_T::RECOMMENDATION, "RECOMMENDATION"}};
 
-std::map<model_status, std::string> model_status_str = {
-    {model_status::CREATING, "CREATEING"}, {model_status::READY, "READY"}, {model_status::ERROR, "ERROR"}};
+std::map<std::string, MODEL_PREDICTION_EXP_T> MODEL_EXPLAINERS_MAP = {
+    {"MODEL_PERMUTATION_IMPORTANCE", MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE},
+    {"MODEL_SHAP", MODEL_PREDICTION_EXP_T::MODEL_SHAP},
+    {"MODEL_FAST_SHAP", MODEL_PREDICTION_EXP_T::MODEL_FAST_SHAP},
+    {"MODEL_PARTIAL_DEPENDENCE", MODEL_PREDICTION_EXP_T::MODEL_PARTIAL_DEPENDENCE},
+    {"PREDICT_PARTIAL_DEPENDENCE", MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE},
+    {"PREDICT_SHAP", MODEL_PREDICTION_EXP_T::PREDICT_SHAP}};
 
-std::map<model_format, std::string> model_format_str = {{model_format::VER_1, "HWMLv1.0"},
-                                                        {model_format::ONNX, "ONNX"}};
+std::map<MODEL_STATUS_T, std::string> MODEL_STATUS_MAP = {
+    {MODEL_STATUS_T::CREATING, "CREATEING"}, {MODEL_STATUS_T::READY, "READY"}, {MODEL_STATUS_T::ERROR, "ERROR"}};
 
-std::map<model_quality, std::string> model_quality_str = {{model_quality::LOW, "LOW"}, {model_quality::HIGH, "HIGH"}};
+std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP = {{MODEL_FORMAT_T::VER_1, "HWMLv1.0"},
+                                                           {MODEL_FORMAT_T::ONNX, "ONNX"}};
+
+std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP = {{MODEL_QUALITY_T::LOW, "LOW"},
+                                                              {MODEL_QUALITY_T::HIGH, "HIGH"}};
+
+int Utils::parse_option(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth) {
+  enum_json_type type = options.type();
+  // Treat strings saved in opaque as plain json strings
+  // @see val_json_func_field_subselect()
+  if (type == enum_json_type::J_OPAQUE && options.field_type() == MYSQL_TYPE_VAR_STRING)
+    type = enum_json_type::J_STRING;
+
+  switch (type) {
+    case enum_json_type::J_TIME:
+    case enum_json_type::J_DATE:
+    case enum_json_type::J_DATETIME:
+    case enum_json_type::J_TIMESTAMP:
+      assert(false);
+      break;
+    case enum_json_type::J_ARRAY: {
+      const size_t array_len = options.length();
+      for (uint32 i = 0; i < array_len; ++i) {
+        auto opt = options[i];
+        if (parse_option(opt, option_value, key, depth)) return true; /* purecov: inspected */
+      }
+      break;
+    }
+    case enum_json_type::J_BOOLEAN: {
+      options.get_boolean() ? option_value[key].push_back("true") : option_value[key].push_back("false");
+    } break;
+    case enum_json_type::J_DECIMAL: {
+      int length = DECIMAL_MAX_STR_LENGTH + 1;
+      auto buffer = std::unique_ptr<char[]>(new char[length + 1]);
+      char *ptr = buffer.get() + length;
+
+      my_decimal m;
+      std::string decimal_str;
+      if (options.get_decimal_data(&m) || decimal2string(&m, ptr, &length)) return true; /* purecov: inspected */
+      option_value[key].push_back(decimal_str);
+      break;
+    }
+    case enum_json_type::J_DOUBLE: {
+      auto double_value = std::to_string(options.get_double());
+      option_value[key].push_back(double_value);
+      break;
+    }
+    case enum_json_type::J_INT: {
+      auto int_value = std::to_string(options.get_int());
+      option_value[key].push_back(int_value);
+      break;
+    }
+    case enum_json_type::J_NULL:
+      option_value[key].push_back("null");
+      break;
+    case enum_json_type::J_OBJECT: {
+      for (const auto &iter : Json_object_wrapper(options)) {
+        const MYSQL_LEX_CSTRING &key_lex = iter.first;
+        std::string option_key(key_lex.str, key_lex.length);
+        option_value[option_key];
+        auto iter_value = iter.second;
+        if (parse_option(iter_value, option_value, option_key, depth)) return true; /* purecov: inspected */
+      }
+      break;
+    }
+    case enum_json_type::J_OPAQUE: {
+      assert(false);
+      break;
+    }
+    case enum_json_type::J_STRING: {
+      std::string data_str(options.get_data(), options.get_data_length());
+      assert(data_str.length());
+      option_value[key].push_back(data_str);
+      break;
+    }
+    case enum_json_type::J_UINT: {
+      auto int_value = std::to_string(options.get_uint());
+      option_value[key].push_back(int_value);
+      break;
+    }
+    default:
+      /* purecov: begin inspected */
+      DBUG_PRINT("info", ("JSON wrapper: unexpected type %d", static_cast<int>(options.type())));
+      assert(false);
+      my_error(ER_INTERNAL_ERROR, MYF(0), "JSON wrapper: unexpected type");
+      /* purecov: end inspected */
+  }
+  return 0;
+}
 
 // open table by name. return table ptr, otherwise return nullptr.
 TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
@@ -138,33 +234,35 @@ BoosterHandle Utils::ML_train(std::string &task_mode, uint data_type, const void
   // to set label data
   ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
   //clang-format on
-  if (ret == -1) return nullptr;
+  if (ret) return nullptr;
 
   BoosterHandle booster;
   ret = LGBM_BoosterCreate(train_dataset_handler, task_mode.c_str(), &booster);
   ret = LGBM_BoosterAddValidData(booster, train_dataset_handler);
-  if (ret == -1) return nullptr;
+  if (ret) return nullptr;
 
   int finished{0};
   for (auto iter = 0; iter < 100; ++iter) {
     ret = LGBM_BoosterUpdateOneIter(booster, &finished);
-    if (ret == -1) return nullptr;
+    if (ret) return nullptr;
     if (finished) break;
   }
 
   int64_t bufflen(1024), out_len{0};
   auto model_content_buff = std::make_unique<char[]>(bufflen);
+  memset(model_content_buff.get(), 0x0, bufflen);
   ret =
       LGBM_BoosterDumpModel(booster, 0, -1, C_API_FEATURE_IMPORTANCE_GAIN, bufflen, &out_len, model_content_buff.get());
-  if (ret == -1) return nullptr;
+  if (ret) return nullptr;
 
   if (out_len > bufflen) {
-    model_content_buff.reset(new char[out_len]);
+    model_content_buff.reset(new char[out_len + 1]);
+    memset(model_content_buff.get(), 0x0, bufflen);
     ret = LGBM_BoosterDumpModel(booster,
                                 0,                              // start iter idx
                                 -1,                             // end inter idx
                                 C_API_FEATURE_IMPORTANCE_GAIN,  // feature_importance_type
-                                bufflen,                        // buff len
+                                out_len,                        // buff len
                                 &out_len,                       // out len
                                 model_content_buff.get());
   }
@@ -271,7 +369,6 @@ int Utils::store_model_catalog(size_t model_obj_size, const Json_wrapper *model_
   cat_table_ptr->file->ha_index_last(cat_table_ptr->record[0]);
   field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_ID)];
   int64_t next_id = field_ptr->val_int() + 1;
-  // field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_ID)];
   field_ptr->set_notnull();
   field_ptr->store(next_id);
 
@@ -281,7 +378,6 @@ int Utils::store_model_catalog(size_t model_obj_size, const Json_wrapper *model_
 
   field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
   field_ptr->set_null();  // in ver 9.0, it's set to null.
-  // down_cast<Field_json *>(field_ptr)->store_json(model_content);
 
   field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OWNER)];
   field_ptr->set_notnull();
@@ -341,7 +437,6 @@ int Utils::store_model_object_catalog(std::string &model_handle_name, Json_wrapp
   cat_table_ptr->file->ha_index_last(cat_table_ptr->record[0]);
   field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::CHUNK_ID)];
   int64_t next_id = field_ptr->val_int() + 1;
-  // field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_ID)];
   field_ptr->set_notnull();
   field_ptr->store(next_id);
 
@@ -374,7 +469,8 @@ BoosterHandle Utils::load_trained_model_from_string(std::string &model_content) 
   return ret ? handle : nullptr;
 }
 
-int Utils::read_model_content(std::string &model_user_name, std::string &model_handle_name, Json_wrapper &options) {
+int Utils::read_model_content(std::string &model_handle_name, Json_wrapper &options) {
+  std::string model_user_name(current_thd->security_context()->user().str);
   std::string model_schema_name = "ML_SCHEMA_" + model_user_name;
   auto cat_table_ptr = Utils::open_table_by_name(model_schema_name, "MODEL_CATALOG", TL_READ);
   if (!cat_table_ptr) return HA_ERR_GENERIC;
@@ -416,15 +512,15 @@ int Utils::read_model_content(std::string &model_user_name, std::string &model_h
   return 0;
 }
 
-int Utils::read_model_object_content(std::string &model_user_name, std::string &model_handle_name,
-                                     std::string &model_content) {
+int Utils::read_model_object_content(std::string &model_handle_name, std::string &model_content) {
+  std::string model_user_name(current_thd->security_context()->user().str);
   std::string model_schema_name = "ML_SCHEMA_" + model_user_name;
   auto cat_table_ptr = Utils::open_table_by_name(model_schema_name, "MODEL_OBJECT_CATALOG", TL_READ);
   if (!cat_table_ptr) return HA_ERR_GENERIC;
 
   // get the model content from model object catalog table by model handle name. table
   my_bitmap_map *old_map = tmp_use_all_columns(cat_table_ptr, cat_table_ptr->read_set);
-  if (cat_table_ptr->file->ha_external_lock(current_thd, F_RDLCK)) {
+  if (cat_table_ptr->file->ha_external_lock(current_thd, F_WRLCK | F_RDLCK)) {
     return HA_ERR_GENERIC;
   }
 

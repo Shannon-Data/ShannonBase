@@ -64,7 +64,7 @@ BEGIN
         SET MESSAGE_TEXT = "The model you unloading does NOT exist.";
    END IF;
 
-   SELECT ML_MODEL_UNLOAD(in_model_handle_name, v_user_name) INTO v_unload_obj_check;
+   SELECT ML_MODEL_UNLOAD(in_model_handle_name) INTO v_unload_obj_check;
    IF v_unload_obj_check != 0 THEN
         SET v_db_err_msg = CONCAT('ML_MODEL_UNLOAD failed.');
         SIGNAL SQLSTATE 'HY000'

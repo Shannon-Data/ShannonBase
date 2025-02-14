@@ -61,6 +61,11 @@ double ML_forecasting::score(std::string &sch_tb_name [[maybe_unused]], std::str
   return 0;
 }
 
+int ML_forecasting::explain(std::string &sch_tb_name [[maybe_unused]], std::string &target_column_name [[maybe_unused]],
+                            std::string &model_handle_name [[maybe_unused]],
+                            Json_wrapper &exp_options [[maybe_unused]]) {
+  return 0;
+}
 int ML_forecasting::explain_row() { return 0; }
 
 int ML_forecasting::explain_table() { return 0; }
@@ -69,7 +74,7 @@ int ML_forecasting::predict_row() { return 0; }
 
 int ML_forecasting::predict_table() { return 0; }
 
-ML_TASK_TYPE ML_forecasting::type() { return ML_TASK_TYPE::FORECASTING; }
+ML_TASK_TYPE_T ML_forecasting::type() { return ML_TASK_TYPE_T::FORECASTING; }
 
 }  // namespace ML
 }  // namespace ShannonBase
