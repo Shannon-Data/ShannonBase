@@ -215,6 +215,11 @@ double ML_regression::score(std::string &sch_tb_name [[maybe_unused]], std::stri
   return 0;
   }
 
+int ML_regression::explain(std::string& sch_tb_name [[maybe_unused]], std::string& target_column_name [[maybe_unused]], std::string& model_handle_name [[maybe_unused]],
+    Json_wrapper& exp_options [[maybe_unused]])  {
+      return 0;
+}
+
 int ML_regression::explain_row() { return 0; }
 
 int ML_regression::explain_table() { return 0; }
@@ -223,7 +228,7 @@ int ML_regression::predict_row() { return 0; }
 
 int ML_regression::predict_table() { return 0; }
 
-ML_TASK_TYPE ML_regression::type() { return ML_TASK_TYPE::REGRESSION; }
+ML_TASK_TYPE_T ML_regression::type() { return ML_TASK_TYPE_T::REGRESSION; }
 
 }  // namespace ML
 }  // namespace ShannonBase

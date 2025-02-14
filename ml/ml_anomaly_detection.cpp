@@ -62,6 +62,12 @@ double ML_anomaly_detection::score(std::string &sch_tb_name [[maybe_unused]], st
   return 0;
 }
 
+int ML_anomaly_detection::explain(std::string &sch_tb_name [[maybe_unused]],
+                                  std::string &target_column_name [[maybe_unused]],
+                                  std::string &model_handle_name [[maybe_unused]],
+                                  Json_wrapper &exp_options [[maybe_unused]]) {
+  return 0;
+}
 int ML_anomaly_detection::explain_row() { return 0; }
 
 int ML_anomaly_detection::explain_table() { return 0; }
@@ -70,7 +76,7 @@ int ML_anomaly_detection::predict_row() { return 0; }
 
 int ML_anomaly_detection::predict_table() { return 0; }
 
-ML_TASK_TYPE ML_anomaly_detection::type() { return ML_TASK_TYPE::ANOMALY_DETECTION; }
+ML_TASK_TYPE_T ML_anomaly_detection::type() { return ML_TASK_TYPE_T::ANOMALY_DETECTION; }
 
 }  // namespace ML
 }  // namespace ShannonBase

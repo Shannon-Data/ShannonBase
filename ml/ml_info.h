@@ -32,21 +32,57 @@
 namespace ShannonBase {
 namespace ML {
 
+#define CHECK_CALL(x)      \
+  if ((x) != 0) {          \
+    RETURN HA_ERR_GENERIC; \
+  }
+
 extern std::map<std::string, std::string> Loaded_models;
 
-enum class ML_TASK_TYPE { UNKNOWN = -1, CLASSIFICATION, REGRESSION, FORECASTING, ANOMALY_DETECTION, RECOMMENDATION };
+// clang-format off
+enum class ML_TASK_TYPE_T {
+   UNKNOWN = -1,
+   CLASSIFICATION,
+   REGRESSION,
+   FORECASTING,
+   ANOMALY_DETECTION,
+   RECOMMENDATION
+};
 
-enum class model_status { CREATING = 0, READY, ERROR };
+enum class MODEL_STATUS_T {
+   CREATING = 0,
+   READY, ERROR
+};
 
-enum class model_format { VER_1, ONNX };
+enum class MODEL_FORMAT_T {
+   VER_1 = 0,
+   ONNX
+};
 
-enum class model_quality { LOW, HIGH };
+enum class MODEL_QUALITY_T {
+   LOW = 0,
+   HIGH
+};
 
-extern std::map<std::string, ML_TASK_TYPE> opt_task_map;
-extern std::map<ML_TASK_TYPE, std::string> task_name_str;
-extern std::map<model_status, std::string> model_status_str;
-extern std::map<model_format, std::string> model_format_str;
-extern std::map<model_quality, std::string> model_quality_str;
+enum class MODEL_PREDICTION_EXP_T {
+   MODEL_PERMUTATION_IMPORTANCE = 0,
+   MODEL_SHAP,
+   MODEL_FAST_SHAP,
+   MODEL_PARTIAL_DEPENDENCE,
+   PREDICT_PERMUTATION_IMPORTANCE,
+   PREDICT_SHAP
+};
+// clang-format off
+
+extern std::map<std::string, ML_TASK_TYPE_T> OPT_TASKS_MAP;
+extern std::map<ML_TASK_TYPE_T, std::string> TASK_NAMES_MAP;
+extern std::map<MODEL_STATUS_T, std::string> MODEL_STATUS_MAP;
+extern std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP;
+extern std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP;
+extern std::map<std::string, MODEL_PREDICTION_EXP_T> MODEL_EXPLAINERS_MAP;
+
+
+using OPTION_VALUE_T = std::map<std::string, std::vector<std::string>>;
 
 }  // namespace ML
 }  // namespace ShannonBase

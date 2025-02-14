@@ -103,12 +103,12 @@ BEGIN
         EXECUTE create_tb_stmt;
         DEALLOCATE PREPARE create_tb_stmt;
 
-        SET @create_tb_stmt = CONCAT(' ALTER TABLE ', v_sys_schema_name, '.MODEL_OBJECT_CATALOG
+        SET @add_fk_tb_stmt = CONCAT(' ALTER TABLE ', v_sys_schema_name, '.MODEL_OBJECT_CATALOG
                                      ADD CONSTRAINT fk_cat_handle_objcat_handl FOREIGN KEY (MODEL_HANDLE)',
                                      'REFERENCES ', v_sys_schema_name, '.MODEL_CATALOG(MODEL_HANDLE);');
-        PREPARE create_tb_stmt FROM @create_tb_stmt;
-        EXECUTE create_tb_stmt;
-        DEALLOCATE PREPARE create_tb_stmt;
+        PREPARE add_fk_tb_stmt FROM @add_fk_tb_stmt;
+        EXECUTE add_fk_tb_stmt;
+        DEALLOCATE PREPARE add_fk_tb_stmt;
         COMMIT;
     END IF;
 
@@ -151,6 +151,10 @@ BEGIN
 
     -- DN NOT REMOVE STAART TRANSACTION AND COMMIT STATEMENTS. THEY ARE REQUIRED FOR THE TRANSACTIONAL CONSISTENCY
     -- IN ML_TRAIN, WE INSERT META INFO INTO MODEL_CATALOG TABLE
+    IF in_option IS NULL THEN
+      SET in_option = JSON_OBJECT('task', 'classification');
+    END IF;
+
     START TRANSACTION;
     SELECT ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle) INTO v_train_obj_check;
     COMMIT;

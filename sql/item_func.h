@@ -4074,8 +4074,8 @@ class Item_func_ml_train : public Item_int_func {
 
 class Item_func_ml_model_load final : public Item_int_func {
  public:
-  Item_func_ml_model_load(const POS &pos, Item *a, Item *b)
-      : Item_int_func(pos, a, b) {}
+  Item_func_ml_model_load(const POS &pos, Item *a)
+      : Item_int_func(pos, a) {}
   longlong val_int() override;
   bool resolve_type(THD *) override {
     set_nullable(true);
@@ -4089,8 +4089,8 @@ class Item_func_ml_model_load final : public Item_int_func {
 
 class Item_func_ml_model_unload final : public Item_int_func {
  public:
-  Item_func_ml_model_unload(const POS &pos, Item* a, Item* b)
-      : Item_int_func(pos, a, b) {}
+  Item_func_ml_model_unload(const POS &pos, Item* a)
+      : Item_int_func(pos, a) {}
   longlong val_int() override;
   bool resolve_type(THD *) override {
     set_nullable(true);

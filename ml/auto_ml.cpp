@@ -77,80 +77,11 @@ std::string Auto_ML::get_array_string(Json_array *array) {
 }
 
 void Auto_ML::init_task_map() {
-  auto dom_ptr = m_options.clone_dom();
-  if (!dom_ptr) return;
-  // parse the options.
-  Json_object *json_obj = down_cast<Json_object *>(dom_ptr.get());
-  Json_dom *value_dom_ptr{nullptr};
-  value_dom_ptr = json_obj->get("task");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
-    m_task_type_str = down_cast<Json_string *>(value_dom_ptr)->value();
-    std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
-  }
-
-  value_dom_ptr = json_obj->get("datetime_index");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
-    m_opt_datetime_index = down_cast<Json_string *>(value_dom_ptr)->value();
-  }
-  value_dom_ptr = json_obj->get("endogenous_variables");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
-    auto var_arrary = down_cast<Json_array *>(value_dom_ptr);
-    m_opt_endogenous_variables = get_array_string(var_arrary);
-  }
-  value_dom_ptr = json_obj->get("exogenous_variables");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
-    auto var_arrary = down_cast<Json_array *>(value_dom_ptr);
-    m_opt_exogenous_variables = get_array_string(var_arrary);
-  }
-  value_dom_ptr = json_obj->get("model_list");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
-    auto var_arrary = down_cast<Json_array *>(value_dom_ptr);
-    m_opt_model_list = get_array_string(var_arrary);
-  }
-  value_dom_ptr = json_obj->get("exclude_model_list");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
-    auto var_arrary = down_cast<Json_array *>(value_dom_ptr);
-    m_opt_exclude_model_list = get_array_string(var_arrary);
-  }
-  value_dom_ptr = json_obj->get("optimization_metric");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
-    m_opt_optimization_metric = down_cast<Json_string *>(value_dom_ptr)->value();
-  }
-  value_dom_ptr = json_obj->get("include_column_list");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
-    auto var_arrary = down_cast<Json_array *>(value_dom_ptr);
-    m_opt_include_column_list = get_array_string(var_arrary);
-  }
-  value_dom_ptr = json_obj->get("exclude_column_list");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_ARRAY) {
-    auto var_arrary = down_cast<Json_array *>(value_dom_ptr);
-    m_opt_exclude_column_list = get_array_string(var_arrary);
-  }
-  value_dom_ptr = json_obj->get("contamination");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_DOUBLE) {
-    m_opt_contamination = down_cast<Json_double *>(value_dom_ptr)->value();
-  }
-  value_dom_ptr = json_obj->get("users");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
-    m_opt_users = down_cast<Json_string *>(value_dom_ptr)->value();
-  }
-  value_dom_ptr = json_obj->get("items");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
-    m_opt_item = down_cast<Json_string *>(value_dom_ptr)->value();
-  }
-  value_dom_ptr = json_obj->get("notes");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
-    m_opt_notes = down_cast<Json_string *>(value_dom_ptr)->value();
-  }
-  value_dom_ptr = json_obj->get("feedback");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
-    m_opt_feedback = down_cast<Json_string *>(value_dom_ptr)->value();
-  }
-  value_dom_ptr = json_obj->get("feedback_threshold");
-  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_DOUBLE) {
-    m_opt_feedback_threshold = down_cast<Json_double *>(value_dom_ptr)->value();
-  }
-
+  OPTION_VALUE_T opt_values;
+  std::string keystr;
+  Utils::parse_option(m_options, opt_values, keystr, 0);
+  m_task_type_str = opt_values["task"].size() ? opt_values["task"][0] : "classification";
+  std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
   build_task(m_task_type_str);
 }
 
@@ -158,10 +89,10 @@ void Auto_ML::build_task(std::string task_str) {
   if (!task_str.length()) return;
 
   auto option_obj = m_options.clone_dom();
-  switch (opt_task_map[task_str]) {
+  switch (OPT_TASKS_MAP[task_str]) {
     // if we have already had an instance of cf task, then do nothing, using the old instance.
-    case ML_TASK_TYPE::CLASSIFICATION:
-      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::CLASSIFICATION)
+    case ML_TASK_TYPE_T::CLASSIFICATION:
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::CLASSIFICATION)
         m_ml_task.reset(new ML_classification());
 
       down_cast<ML_classification *>(m_ml_task.get())->set_schema(m_schema_name);
@@ -170,8 +101,8 @@ void Auto_ML::build_task(std::string task_str) {
       down_cast<ML_classification *>(m_ml_task.get())->set_options(m_options);
       down_cast<ML_classification *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
-    case ML_TASK_TYPE::REGRESSION:
-      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::REGRESSION) m_ml_task.reset(new ML_regression());
+    case ML_TASK_TYPE_T::REGRESSION:
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::REGRESSION) m_ml_task.reset(new ML_regression());
 
       down_cast<ML_regression *>(m_ml_task.get())->set_schema(m_schema_name);
       down_cast<ML_regression *>(m_ml_task.get())->set_table(m_table_name);
@@ -179,15 +110,16 @@ void Auto_ML::build_task(std::string task_str) {
       down_cast<ML_regression *>(m_ml_task.get())->set_options(m_options);
       down_cast<ML_regression *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
-    case ML_TASK_TYPE::FORECASTING:
-      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::FORECASTING) m_ml_task.reset(new ML_forecasting());
+    case ML_TASK_TYPE_T::FORECASTING:
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::FORECASTING)
+        m_ml_task.reset(new ML_forecasting());
       break;
-    case ML_TASK_TYPE::ANOMALY_DETECTION:
-      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::ANOMALY_DETECTION)
+    case ML_TASK_TYPE_T::ANOMALY_DETECTION:
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::ANOMALY_DETECTION)
         m_ml_task.reset(new ML_anomaly_detection());
       break;
-    case ML_TASK_TYPE::RECOMMENDATION:
-      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE::RECOMMENDATION)
+    case ML_TASK_TYPE_T::RECOMMENDATION:
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::RECOMMENDATION)
         m_ml_task.reset(new ML_recommendation());
       break;
     default:
@@ -196,8 +128,8 @@ void Auto_ML::build_task(std::string task_str) {
   return;
 }
 
-int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::string &model_user_name,
-                                            std::string &model_content, bool should_loaded) {
+int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::string &model_content,
+                                            bool should_loaded) {
   if (should_loaded && (Loaded_models.find(model_hanle_name) == Loaded_models.end())) {
     // should been loaded, but not loaded.
     std::ostringstream err;
@@ -212,7 +144,7 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
     return HA_ERR_GENERIC;
   }
 
-  if (Utils::read_model_content(model_user_name, model_hanle_name, m_options)) return HA_ERR_GENERIC;
+  if (Utils::read_model_content(model_hanle_name, m_options)) return HA_ERR_GENERIC;
   auto dom_ptr = m_options.clone_dom();
   if (!dom_ptr) return HA_ERR_GENERIC;
 
@@ -224,7 +156,7 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
     std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
   }
 
-  if (Utils::read_model_object_content(model_user_name, model_hanle_name, model_content)) return HA_ERR_GENERIC;
+  if (Utils::read_model_object_content(model_hanle_name, model_content)) return HA_ERR_GENERIC;
 
   if (m_task_type_str.length()) {
     init_task_map();
@@ -239,43 +171,41 @@ int Auto_ML::train() {
   return ret;
 }
 
-int Auto_ML::load(String *model_handler_name, String *model_user) {
+int Auto_ML::load(String *model_handler_name) {
   // in load, the schem_name means user name.
-  assert(model_handler_name && model_user);
+  assert(model_handler_name);
   m_handler = model_handler_name->c_ptr_safe();
-  std::string model_user_str(model_user->c_ptr_safe());
 
   std::string model_content_str;
-  if (precheck_and_process_meta_info(m_handler, model_user_str, model_content_str, false)) return HA_ERR_GENERIC;
+  if (precheck_and_process_meta_info(m_handler, model_content_str, false)) return HA_ERR_GENERIC;
 
   return m_ml_task ? m_ml_task->load(model_content_str) : HA_ERR_GENERIC;
 }
 
-int Auto_ML::unload(String *model_handler_name, String *model_user) {
+int Auto_ML::unload(String *model_handler_name) {
   // in unload, the schem_name means user name.
-  assert(model_handler_name && model_user);
+  assert(model_handler_name);
   m_handler = model_handler_name->c_ptr_safe();
-  std::string model_user_str(model_user->c_ptr_safe());
 
   std::string model_content_str;
-  if (precheck_and_process_meta_info(m_handler, model_user_str, model_content_str, true)) return HA_ERR_GENERIC;
+  if (precheck_and_process_meta_info(m_handler, model_content_str, true)) return HA_ERR_GENERIC;
 
   return m_ml_task ? m_ml_task->unload(m_handler) : HA_ERR_GENERIC;
 }
 
-double Auto_ML::score(String *sch_table_name, String *taget_column_name, String *model_handle_name,
+double Auto_ML::score(String *sch_table_name, String *target_column_name, String *model_handle_name,
                       String *model_usr_name, String *metric, Json_wrapper *options) {
-  assert(sch_table_name && taget_column_name && model_handle_name && model_usr_name);
+  assert(sch_table_name && target_column_name && model_handle_name && model_usr_name);
 
   std::string model_handler_name_str(model_handle_name->c_ptr_safe());
   std::string model_user_str(model_usr_name->c_ptr_safe());
 
   std::string model_content_str;
-  if (precheck_and_process_meta_info(model_handler_name_str, model_user_str, model_content_str, true)) return 0;
+  if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
   assert(metric && options);
   std::string sch_table_name_str(sch_table_name->c_ptr_safe());
-  std::string taget_column_name_str(taget_column_name->c_ptr_safe());
+  std::string taget_column_name_str(target_column_name->c_ptr_safe());
   std::string metric_str(metric->c_ptr_safe());
   return m_ml_task ? m_ml_task->score(sch_table_name_str, taget_column_name_str, model_handler_name_str, metric_str)
                    : 0;
@@ -291,6 +221,22 @@ int Auto_ML::import(String *model_handler_name, String *user_name, Json_wrapper 
   if (m_ml_task) return m_ml_task->import(model_user_name_str, handler_name_str, model_content_str);
 
   return 0;
+}
+
+int Auto_ML::explain(String *sch_tb_name, String *target_column_name, String *model_handler_name,
+                     Json_wrapper exp_options) {
+  assert(sch_tb_name && target_column_name && model_handler_name);
+  m_options = exp_options;
+
+  m_handler = model_handler_name->c_ptr_safe();
+  std::string model_content_str;
+  if (precheck_and_process_meta_info(m_handler, model_content_str, false)) return HA_ERR_GENERIC;
+
+  std::string sch_tb_name_str(sch_tb_name->c_ptr_safe());
+  std::string target_column_name_str(target_column_name->c_ptr_safe());
+  std::string modle_handle_name_str(model_handler_name->c_ptr_safe());
+  return m_ml_task ? m_ml_task->explain(sch_tb_name_str, target_column_name_str, modle_handle_name_str, exp_options)
+                   : HA_ERR_GENERIC;
 }
 
 }  // namespace ML

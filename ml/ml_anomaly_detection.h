@@ -49,11 +49,13 @@ class ML_anomaly_detection : public ML_algorithm {
   int import(std::string &model_handle_name, std::string &user_name, std::string &content) override;
   double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
                std::string &metric_str) override;
+  int explain(std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
+              Json_wrapper &exp_options) override;
   int explain_row() override;
   int explain_table() override;
   int predict_row() override;
   int predict_table() override;
-  ML_TASK_TYPE type() override;
+  ML_TASK_TYPE_T type() override;
 
   // Metrics for anomaly detection can only be used with the ML_SCORE routine.
   // They cannot be used with the ML_TRAIN routine.

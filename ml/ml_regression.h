@@ -60,11 +60,13 @@ class ML_regression : public ML_algorithm {
   int import(std::string &model_handle_name, std::string &user_name, std::string &content) override;
   double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
                std::string &metric_str) override;
+  int explain(std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
+              Json_wrapper &exp_options) override;
   int explain_row() override;
   int explain_table() override;
   int predict_row() override;
   int predict_table() override;
-  ML_TASK_TYPE type() override;
+  ML_TASK_TYPE_T type() override;
 
   void set_schema(std::string &schema_name) { m_sch_name = schema_name; }
   std::string get_schema() const { return m_sch_name; }

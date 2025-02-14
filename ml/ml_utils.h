@@ -32,6 +32,8 @@
 #include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
 #include "include/thr_lock.h"  //TL_READ
 
+#include "ml_info.h"
+
 class TABLE;
 class handler;
 class Json_wrapper;
@@ -103,13 +105,12 @@ class Utils {
   static int store_model_object_catalog(std::string &model_handle_name, Json_wrapper *model_meta);
 
   /* get the model content via handle name, sucess return 0, otherise failed.
-   * @param[in] model_user_name, model user name.
    * @param[in] model_handle_name,model user name.
    * @param[in] options, the model option we got. JSON format.
    * @retval 0 success.
    * @retval error code failed.
    */
-  static int read_model_content(std::string &model_user_name, std::string &model_handle_name, Json_wrapper &options);
+  static int read_model_content(std::string &model_handle_name, Json_wrapper &options);
 
   /* get the model object content via handle name, sucess return 0, otherise failed.
    * @param[in] model_user_name, model user name.
@@ -117,8 +118,7 @@ class Utils {
    * @retval 0 success.
    * @retval error code failed.
    */
-  static int read_model_object_content(std::string &model_user_name, std::string &model_handle_name,
-                                       std::string &model_content);
+  static int read_model_object_content(std::string &model_handle_name, std::string &model_content);
 
   /**
    * to build a model from string, which is stored by saviing the model to file/string.
@@ -126,6 +126,16 @@ class Utils {
    * @return BoosterHandle success, otherwise nullptr.
    */
   static BoosterHandle load_trained_model_from_string(std::string &model_content);
+
+  /**
+   * parse the model option into string formation, and get the value. rewrites from `wrapper_to_string` function.
+   * @param[in] options, the model option in JSON format.
+   * @param[out] option_value, the value of the option.
+   * @param[in] key, the key of the option.
+   * @param[in] depth, the depth of the option, start from 0.
+   * @return 0 success, otherwise failed.
+   */
+  static int parse_option(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth);
 
  private:
   Utils() = delete;

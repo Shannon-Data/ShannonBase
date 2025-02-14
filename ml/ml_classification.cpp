@@ -161,6 +161,33 @@ int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, 
   return n_read;
 }
 
+MODEL_PREDICTION_EXP_T ML_classification::parse_option(Json_wrapper &options) {
+  MODEL_PREDICTION_EXP_T explainer_type{MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE};
+  auto dom_ptr = options.clone_dom();
+  if (!dom_ptr) return explainer_type;
+
+  Json_object *json_obj = down_cast<Json_object *>(dom_ptr.get());
+  Json_dom *value_dom_ptr{nullptr};
+
+  value_dom_ptr = json_obj->get("model_explainer");
+  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+    auto exp_type_str = down_cast<Json_string *>(value_dom_ptr)->value();
+    std::transform(exp_type_str.begin(), exp_type_str.end(), exp_type_str.begin(), ::toupper);
+    exp_type_str = "MODEL_" + exp_type_str;
+    explainer_type = MODEL_EXPLAINERS_MAP[exp_type_str];
+  }
+
+  value_dom_ptr = json_obj->get("prediction_explainer");
+  if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
+    auto exp_type_str = down_cast<Json_string *>(value_dom_ptr)->value();
+    std::transform(exp_type_str.begin(), exp_type_str.end(), exp_type_str.begin(), ::toupper);
+    exp_type_str = "PREDICT_" + exp_type_str;
+    explainer_type = MODEL_EXPLAINERS_MAP[exp_type_str];
+  }
+
+  return explainer_type;
+}
+
 int ML_classification::train() {
   THD *thd = current_thd;
   std::string user_name(thd->security_context()->user().str);
@@ -224,17 +251,17 @@ int ML_classification::train() {
   if (!content_dom.get()) return HA_ERR_GENERIC;
   Json_wrapper content_json(content_dom.get(), true);
 
-  auto meta_json = Utils::build_up_model_metadata(task_name_str[type()],  /* task */
+  auto meta_json = Utils::build_up_model_metadata(TASK_NAMES_MAP[type()],  /* task */
                                                 m_target_name,  /*labelled col name */
                                                 sch_tb_name,    /* trained table */
                                                 features_name,  /* feature columns*/
                                                 nullptr,        /* model explanation*/
                                                 notes,          /* notes*/
-                                                model_format_str[model_format::VER_1],   /* model format*/
-                                                model_status_str[model_status::READY],   /* model_status */
-                                                model_quality_str[model_quality::HIGH],  /* model_qulity */
+                                                MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1],   /* model format*/
+                                                MODEL_STATUS_MAP[MODEL_STATUS_T::READY],   /* model_status */
+                                                MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH],  /* model_qulity */
                                                 train_duration,  /*the time in seconds taken to train the model.*/
-                                                task_name_str[type()], /**task algo name */
+                                                TASK_NAMES_MAP[type()], /**task algo name */
                                                 0,              /*train score*/
                                                 n_sample,       /*# of rows in training tbl*/
                                                 n_feature + 1,  /*# of columns in training tbl*/
@@ -334,6 +361,46 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   return 0;
 }
 
+int ML_classification::explain(std::string &sch_tb_name, std::string &model_handle_name, std::string &target_name,
+                               Json_wrapper &exp_options) {
+  assert(sch_tb_name.length() && target_name.length());
+
+  auto model_predict_type = parse_option(exp_options);
+
+  std::string model_content = Loaded_models[model_handle_name];
+  assert(model_content.length());
+
+  int importance_type{0};
+  switch (model_predict_type) {
+    case MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE: {
+      importance_type = C_API_FEATURE_IMPORTANCE_SPLIT;
+    } break;
+    case MODEL_PREDICTION_EXP_T::MODEL_SHAP:
+    case MODEL_PREDICTION_EXP_T::MODEL_FAST_SHAP:
+    case MODEL_PREDICTION_EXP_T::MODEL_PARTIAL_DEPENDENCE:
+    case MODEL_PREDICTION_EXP_T::PREDICT_PERMUTATION_IMPORTANCE:
+    case MODEL_PREDICTION_EXP_T::PREDICT_SHAP: {
+      importance_type = C_API_FEATURE_IMPORTANCE_GAIN;
+    } break;
+    default:
+      importance_type = C_API_FEATURE_IMPORTANCE_SPLIT;
+  }
+
+  BoosterHandle booster = nullptr;
+  int num_iterations;
+  if (LGBM_BoosterLoadModelFromString(model_content.c_str(), &num_iterations, &booster)) return HA_ERR_GENERIC;
+
+  int num_features;
+  if (LGBM_BoosterGetNumFeature(booster, &num_features)) return HA_ERR_GENERIC;
+
+  std::vector<double> feature_importance(num_features);
+  if (LGBM_BoosterFeatureImportance(booster, importance_type, 0 /*last iter*/, feature_importance.data()))
+    return HA_ERR_GENERIC;
+
+  LGBM_BoosterFree(booster);
+  return 0;
+}
+
 int ML_classification::explain_row() { return 0; }
 
 int ML_classification::explain_table() { return 0; }
@@ -342,7 +409,7 @@ int ML_classification::predict_row() { return 0; }
 
 int ML_classification::predict_table() { return 0; }
 
-ML_TASK_TYPE ML_classification::type() { return ML_TASK_TYPE::CLASSIFICATION; }
+ML_TASK_TYPE_T ML_classification::type() { return ML_TASK_TYPE_T::CLASSIFICATION; }
 
 }  // namespace ML
 }  // namespace ShannonBase
