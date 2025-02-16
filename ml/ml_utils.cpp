@@ -40,7 +40,6 @@
 #include "sql/table.h"
 
 #include "ml_algorithm.h"
-#include "ml_info.h"
 
 namespace ShannonBase {
 namespace ML {
@@ -75,7 +74,21 @@ std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP = {{MODEL_FORMAT_T::VER_
 std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP = {{MODEL_QUALITY_T::LOW, "LOW"},
                                                               {MODEL_QUALITY_T::HIGH, "HIGH"}};
 
-int Utils::parse_option(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth) {
+int Utils::splitString(const std::string &str, char delimiter, std::vector<std::string> &result) {
+  std::stringstream ss(str);
+  std::string item;
+
+  while (std::getline(ss, item, delimiter)) {
+    // to erase the space chars.
+    item.erase(0, item.find_first_not_of(" \t"));
+    item.erase(item.find_last_not_of(" \t") + 1);
+    result.push_back(item);
+  }
+
+  return 0;
+}
+
+int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth) {
   enum_json_type type = options.type();
   // Treat strings saved in opaque as plain json strings
   // @see val_json_func_field_subselect()
@@ -93,7 +106,7 @@ int Utils::parse_option(Json_wrapper &options, OPTION_VALUE_T &option_value, std
       const size_t array_len = options.length();
       for (uint32 i = 0; i < array_len; ++i) {
         auto opt = options[i];
-        if (parse_option(opt, option_value, key, depth)) return true; /* purecov: inspected */
+        if (parse_json(opt, option_value, key, depth)) return true; /* purecov: inspected */
       }
       break;
     }
@@ -130,7 +143,7 @@ int Utils::parse_option(Json_wrapper &options, OPTION_VALUE_T &option_value, std
         std::string option_key(key_lex.str, key_lex.length);
         option_value[option_key];
         auto iter_value = iter.second;
-        if (parse_option(iter_value, option_value, option_key, depth)) return true; /* purecov: inspected */
+        if (parse_json(iter_value, option_value, option_key, depth)) return true; /* purecov: inspected */
       }
       break;
     }
@@ -140,7 +153,6 @@ int Utils::parse_option(Json_wrapper &options, OPTION_VALUE_T &option_value, std
     }
     case enum_json_type::J_STRING: {
       std::string data_str(options.get_data(), options.get_data_length());
-      assert(data_str.length());
       option_value[key].push_back(data_str);
       break;
     }
@@ -215,64 +227,6 @@ handler *Utils::get_secondary_handler(TABLE *source_table_ptr) {
   return get_new_handler(source_table_ptr->s, is_partitioned, thd->mem_root, hton);
 }
 
-// do ML train jobs.
-BoosterHandle Utils::ML_train(std::string &task_mode, uint data_type, const void *training_data, uint n_data,
-                              uint n_feature, uint label_data_type, const void *label_data,
-                              std::string &model_content) {
-  std::string parameters = "max_bin=254 ";
-  DatasetHandle train_dataset_handler{nullptr};
-  //clang-format off
-  auto ret = LGBM_DatasetCreateFromMat(training_data,       // feature data ptr
-                                       data_type,           // type of sampe data
-                                       n_data,              // # of sample data
-                                       n_feature,           // # of features
-                                       1,                   // 1 row-first, 0 column-first.
-                                       parameters.c_str(),  // params.
-                                       nullptr,             // ref.
-                                       &train_dataset_handler);
-
-  // to set label data
-  ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
-  //clang-format on
-  if (ret) return nullptr;
-
-  BoosterHandle booster;
-  ret = LGBM_BoosterCreate(train_dataset_handler, task_mode.c_str(), &booster);
-  ret = LGBM_BoosterAddValidData(booster, train_dataset_handler);
-  if (ret) return nullptr;
-
-  int finished{0};
-  for (auto iter = 0; iter < 100; ++iter) {
-    ret = LGBM_BoosterUpdateOneIter(booster, &finished);
-    if (ret) return nullptr;
-    if (finished) break;
-  }
-
-  int64_t bufflen(1024), out_len{0};
-  auto model_content_buff = std::make_unique<char[]>(bufflen);
-  memset(model_content_buff.get(), 0x0, bufflen);
-  ret =
-      LGBM_BoosterDumpModel(booster, 0, -1, C_API_FEATURE_IMPORTANCE_GAIN, bufflen, &out_len, model_content_buff.get());
-  if (ret) return nullptr;
-
-  if (out_len > bufflen) {
-    model_content_buff.reset(new char[out_len + 1]);
-    memset(model_content_buff.get(), 0x0, bufflen);
-    ret = LGBM_BoosterDumpModel(booster,
-                                0,                              // start iter idx
-                                -1,                             // end inter idx
-                                C_API_FEATURE_IMPORTANCE_GAIN,  // feature_importance_type
-                                out_len,                        // buff len
-                                &out_len,                       // out len
-                                model_content_buff.get());
-  }
-
-  ret = LGBM_DatasetFree(train_dataset_handler);
-  ret = LGBM_BoosterFree(booster);
-  model_content.assign(model_content_buff.get(), out_len);
-  return booster;
-}
-
 Json_object *Utils::build_up_model_metadata(
     std::string &task, std::string &target_column_name, std::string &tain_table_name,
     std::vector<std::string> &featurs_name, Json_object *model_explanation, std::string &notes, std::string &format,
@@ -331,6 +285,13 @@ Json_object *Utils::build_up_model_metadata(
   model_obj->add_clone("chunks", new (std::nothrow) Json_double(chunks));
 
   return model_obj;
+}
+
+BoosterHandle Utils::load_trained_model_from_string(std::string &model_content) {
+  BoosterHandle handle{nullptr};
+  int n_iteration;
+  auto ret = LGBM_BoosterLoadModelFromString(model_content.c_str(), &n_iteration, &handle);
+  return (ret == 0) ? handle : nullptr;
 }
 
 int Utils::store_model_catalog(size_t model_obj_size, const Json_wrapper *model_meta, std::string &handler_name) {
@@ -462,13 +423,6 @@ int Utils::store_model_object_catalog(std::string &model_handle_name, Json_wrapp
   return ret;
 }
 
-BoosterHandle Utils::load_trained_model_from_string(std::string &model_content) {
-  BoosterHandle handle{nullptr};
-  int n_iteration;
-  auto ret = LGBM_BoosterLoadModelFromString(model_content.c_str(), &n_iteration, &handle);
-  return ret ? handle : nullptr;
-}
-
 int Utils::read_model_content(std::string &model_handle_name, Json_wrapper &options) {
   std::string model_user_name(current_thd->security_context()->user().str);
   std::string model_schema_name = "ML_SCHEMA_" + model_user_name;
@@ -544,9 +498,17 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
       field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_OBJECT));
       assert(field_ptr->type() == MYSQL_TYPE_JSON);
       down_cast<Field_json *>(field_ptr)->val_json(&json_content);
+#ifdef LIGHTGBM_UNIFY_FORMAT
       String model_str;
-      json_content.to_string(&model_str, true, "read_model_object_content", [] {});
+      json_content.to_string(&model_str, true, "read_model_object_content", [] { assert(false); });
       model_content = model_str.c_ptr_safe();
+#else
+      std::string keystr;
+      OPTION_VALUE_T option_value;
+      Utils::parse_json(json_content, option_value, keystr, 0);
+      assert(option_value["SHANNON_LIGHTGBM_CONTENT"].size() == 1);
+      model_content = option_value["SHANNON_LIGHTGBM_CONTENT"][0];
+#endif
       break;
     }
   }
@@ -557,6 +519,185 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
 
   Utils::close_table(cat_table_ptr);
   return 0;
+}
+
+// do ML train jobs.
+int Utils::ML_train(std::string &task_mode, uint data_type, const void *training_data, uint n_data,
+                    const char **features_name, uint n_feature, uint label_data_type, const void *label_data,
+                    std::string &model_content) {
+  DatasetHandle train_dataset_handler{nullptr};
+  //clang-format off
+  auto ret = LGBM_DatasetCreateFromMat(training_data,      // feature data ptr
+                                       data_type,          // type of sampe data
+                                       n_data,             // # of sample data
+                                       n_feature,          // # of features
+                                       1,                  // 1 row-first, 0 column-first.
+                                       task_mode.c_str(),  // params.
+                                       nullptr,            // ref.
+                                       &train_dataset_handler);
+
+  // to set label data
+  // clang-format on
+
+  ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
+  if (ret) {
+    LGBM_DatasetFree(train_dataset_handler);
+    return ret;
+  }
+  ret = LGBM_DatasetSetFeatureNames(train_dataset_handler, features_name, n_feature);
+  if (ret) {
+    LGBM_DatasetFree(train_dataset_handler);
+    return ret;
+  }
+
+  BoosterHandle booster;
+  ret = LGBM_BoosterCreate(train_dataset_handler, task_mode.c_str(), &booster);
+  if (ret) {
+    LGBM_DatasetFree(train_dataset_handler);
+    return ret;
+  }
+  LGBM_BoosterAddValidData(booster, train_dataset_handler);
+
+  int finished{0};
+  for (auto iter = 0; iter < 100; ++iter) {
+    ret = LGBM_BoosterUpdateOneIter(booster, &finished);
+    if (ret) {
+      LGBM_DatasetFree(train_dataset_handler);
+      LGBM_BoosterFree(booster);
+      return ret;
+    }
+    if (finished) break;
+  }
+
+  /* to dump the model conent to a string in json fomrat. But on till now ver 4.6.0. it can
+   * not recreate model from the dumped string. The lightgbm is still on unifying the model
+   * format. Therefore, we will use `LGBM_BoosterSaveModelToString` to a string, then wrappe
+   * it into a json format. When the unified model format is ready to remove the wrapper by
+   * defining `LIGHTGBM_UNIFY_FORMAT`.
+   */
+  int64_t bufflen{1024}, out_len{0};
+  auto model_content_buff = std::make_unique<char[]>(bufflen);
+  memset(model_content_buff.get(), 0x0, bufflen);
+
+#ifdef LIGHTGBM_UNIFY_FORMAT
+  ret =
+      LGBM_BoosterDumpModel(booster, 0, -1, C_API_FEATURE_IMPORTANCE_GAIN, bufflen, &out_len, model_content_buff.get());
+#else
+  ret = LGBM_BoosterSaveModelToString(booster, 0, -1, C_API_FEATURE_IMPORTANCE_GAIN, bufflen, &out_len,
+                                      model_content_buff.get());
+#endif
+  if (ret) {
+    LGBM_DatasetFree(train_dataset_handler);
+    LGBM_BoosterFree(booster);
+    return ret;
+  }
+
+  if (out_len > bufflen) {
+    model_content_buff.reset(new char[out_len + 1]);
+    memset(model_content_buff.get(), 0x0, bufflen);
+    // clang-format off
+  #ifdef LIGHTGBM_UNIFY_FORMAT
+    LGBM_BoosterDumpModel(booster,
+                          0,                              // start iter idx
+                          1,                             // end inter idx
+                          C_API_FEATURE_IMPORTANCE_GAIN,  // feature_importance_type
+                          out_len,                        // buff len
+                          &out_len,                       // out len
+                          model_content_buff.get());
+  #else
+    LGBM_BoosterSaveModelToString(booster,
+                                  0,
+                                  -1,
+                                  C_API_FEATURE_IMPORTANCE_GAIN,
+                                  out_len,
+                                  &out_len,
+                                  model_content_buff.get());
+  #endif
+  }
+  model_content.assign(model_content_buff.get(), out_len);
+  #ifndef LIGHTGBM_UNIFY_FORMAT
+    Json_object *model_obj = new (std::nothrow) Json_object();
+    if (model_obj == nullptr) return -1;
+    model_obj->add_clone("SHANNON_LIGHTGBM_CONTENT", new (std::nothrow) Json_string(model_content));
+    Json_wrapper model_content_json(model_obj);
+    String json_format_content;
+    model_content_json.to_string(&json_format_content, false, "ML_train", [] { assert(false); });
+    model_content.assign(json_format_content.c_ptr_safe(), json_format_content.length());
+  #endif
+  // clang-format on
+
+  LGBM_DatasetFree(train_dataset_handler);
+  LGBM_BoosterFree(booster);
+  return ret;
+}
+
+double Utils::calculate_balanced_accuracy(size_t n_samples, std::vector<double> &predictions,
+                                          std::vector<float> &label_data) {
+  // calculate the balanced accuracy.
+  int TP = 0, TN = 0, FP = 0, FN = 0;
+  for (size_t i = 0; i < n_samples; i++) {
+    int predicted = (predictions[i] >= 0.5) ? 1 : 0;
+    auto actual = (int)label_data[i];
+
+    if (predicted == 1 && actual == 1) TP++;  // true positive
+    if (predicted == 1 && actual == 0) FP++;  // false positive
+    if (predicted == 0 && actual == 0) TN++;  // true negtive
+    if (predicted == 0 && actual == 1) FN++;  // false negtive
+  }
+
+  auto sensitivity = (TP + FN) > 0 ? (double)TP / (TP + FN) : 0;
+  auto specificity = (TN + FP) > 0 ? (double)TN / (TN + FP) : 0;
+  auto balanced_accuracy = (sensitivity + specificity) / 2.0;
+
+  return balanced_accuracy;
+}
+double Utils::model_score(std::string &model_handle_name, int metric_type, size_t n_samples, size_t n_features,
+                          std::vector<double> &testing_data, std::vector<float> &label_data) {
+  std::string score_params;
+  BoosterHandle handler = Utils::load_trained_model_from_string(Loaded_models[model_handle_name]);
+  if (!handler) {
+    std::ostringstream err;
+    err << model_handle_name << " can not load model from content string";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  auto data_type = sizeof(double) == 8 ? C_API_DTYPE_FLOAT64 : C_API_DTYPE_FLOAT32;
+  std::vector<double> predictions(n_samples);
+  int64_t out_len;
+  // clang-format off
+  auto ret = LGBM_BoosterPredictForMat(handler,               /* model handler */
+                            testing_data.data(),   /* test data */
+                            data_type,             /* testing data type */
+                            n_samples,             /* # of testing data */
+                            n_features,            /* # of features of testing data */
+                            1,                     /* row-based format */
+                            C_API_PREDICT_NORMAL,  /* What should be predicted */
+                            0,                     /* Start index of the iteration */ 
+                            -1,                    /* # of iteration for prediction, <= 0 no limit*/
+                            score_params.c_str(),  /* params */
+                            &out_len,              /* Length of output result[out] */
+                            predictions.data());   /* Pointer to array with predictions[out] */
+  //clang-format on
+  if (ret) {
+    LGBM_BoosterFree(handler);
+    return 0.0f;
+  }
+  LGBM_BoosterFree(handler);
+
+  // calculate the balanced accuracy.
+  double balanced_accuracy{0.0};
+  switch (metric_type){
+    case 0:  // balanced_accuracy
+      balanced_accuracy = Utils::calculate_balanced_accuracy(n_samples, predictions, label_data);
+      break;
+    case 1: {
+
+    } break;
+    default:
+     break;
+  }
+  return balanced_accuracy;
 }
 
 }  // namespace ML

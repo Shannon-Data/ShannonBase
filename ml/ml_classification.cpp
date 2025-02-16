@@ -51,14 +51,29 @@
 namespace ShannonBase {
 namespace ML {
 
-const std::vector<std::string> ML_classification::score_olny_metrics = {"balanced_accuracy", "f1_samples",
-                                                                        "precision_samples", "recall_samples"};
-
-const std::vector<std::string> ML_classification::binary_only_metrics = {"f1", "precision", "recall", "roc_auc"};
-const std::vector<std::string> ML_classification::binary_multi_metrics = {
-    "accuracy",           "balanced_accuracy", "f1_macro",        "f1_micro",        "f1_samples",
-    "f1_weighted",        "neg_log_loss",      "precision_macro", "precision_micro", "precision_samples",
-    "precision_weighted", "recall_macro",      "recall_micro",    "recall_samples",  "recall_weighted"};
+// clang-format off
+std::map<std::string, ML_classification::SCORE_METRIC_T> ML_classification::score_metrics =
+{{"BALANCED_ACCURACY", ML_classification::SCORE_METRIC_T::BALANCED_ACCURACY},
+ {"F1_SAMPLES", ML_classification::SCORE_METRIC_T::F1_SAMPLES},
+ {"PRECISION_SAMPLES", ML_classification::SCORE_METRIC_T::PRECISION_SAMPLES},
+ {"RECALL_SAMPLES", ML_classification::SCORE_METRIC_T::RECALL_SAMPLES},
+ {"F1", ML_classification::SCORE_METRIC_T::F1},
+ {"PRECISION", ML_classification::SCORE_METRIC_T::PRECISION},
+ {"RECALL", ML_classification::SCORE_METRIC_T::RECALL},
+ {"ROC_AUC", ML_classification::SCORE_METRIC_T::ROC_AUC},
+ {"ACCURACY", ML_classification::SCORE_METRIC_T::ACCURACY},
+ {"F1_MACRO", ML_classification::SCORE_METRIC_T::F1_MACRO},
+ {"F1_MICRO", ML_classification::SCORE_METRIC_T::F1_MICRO},
+ {"F1_WEIGTHED", ML_classification::SCORE_METRIC_T::F1_WEIGTHED},
+ {"NEG_LOG_LOSS", ML_classification::SCORE_METRIC_T::NEG_LOG_LOSS},
+ {"PRECISION_MACRO", ML_classification::SCORE_METRIC_T::PRECISION_MACRO},
+ {"PRECISION_MICRO", ML_classification::SCORE_METRIC_T::PRECISION_MICRO},
+ {"PRECISION_WEIGHTED", ML_classification::SCORE_METRIC_T::PRECISION_WEIGHTED},
+ {"RECALL_MACRO", ML_classification::SCORE_METRIC_T::RECALL_MACRO},
+ {"RECALL_MICRO", ML_classification::SCORE_METRIC_T::RECALL_MICRO},
+ {"RECALL_WEIGHTED", ML_classification::SCORE_METRIC_T::RECALL_WEIGHTED}
+};
+// clang-format off
 
 ML_classification::ML_classification() {}
 ML_classification::~ML_classification() {}
@@ -210,29 +225,42 @@ int ML_classification::train() {
   std::vector<double> train_data;
   std::vector<float> label_data;
   std::vector<std::string> features_name;
-  auto n_sample = read_data(source_table_ptr, train_data, features_name, m_target_name, label_data);
+  std::vector<std::string> target_names;
+  Utils::splitString(m_target_name, ',', target_names);
+  assert(target_names.size() == 1);
+
+  auto n_sample = read_data(source_table_ptr, train_data, features_name, target_names[0], label_data);
   Utils::close_table(source_table_ptr);
 
   // if it's a multi-target, then minus the size of target columns.
   auto n_feature = features_name.size();
   std::string mode_params =
-      "task = train "
-      "objective = binary "
-      "metric = auc "
-      "num_leaves = 31 "
-      "learning_rate = 0.1 "
-      "num_iterations = 100";
+      "task=train "
+      "boosting_type=gbdt "
+      "objective=binary "
+      "metric=binary_logloss,auc "
+      "metric_freq=1 "
+      "num_trees=100 "
+      "learning_rate=0.1 "
+      "num_leaves=63 "
+      "max_bin=254 ";
   std::string model_content;
+
+  std::vector<const char*> feature_names_cstr;
+  for (const auto& name : features_name) {
+      feature_names_cstr.push_back(name.c_str());
+  }  
   // clang-format off
   auto start = std::chrono::steady_clock::now();
-  if (!(m_handler = Utils::ML_train(mode_params,
-                                    C_API_DTYPE_FLOAT64,
-                                    reinterpret_cast<const void *>(train_data.data()),
-                                    n_sample,
-                                    n_feature,
-                                    C_API_DTYPE_FLOAT32,
-                                    reinterpret_cast<const void *>(label_data.data()),
-                                    model_content)))
+  if (Utils::ML_train(mode_params,
+                      C_API_DTYPE_FLOAT64,
+                      static_cast<const void *>(train_data.data()),
+                      n_sample,
+                      feature_names_cstr.data(),
+                      n_feature,
+                      C_API_DTYPE_FLOAT32,
+                      static_cast<const void *>(label_data.data()),
+                      model_content))
     return HA_ERR_GENERIC;
   auto end = std::chrono::steady_clock::now();
   auto train_duration =
@@ -322,20 +350,40 @@ int ML_classification::import(std::string &model_handle_name [[maybe_unused]], s
 }
 
 double ML_classification::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
-                                std::string &metric_str) {
+                                std::string &metric_str, Json_wrapper &option) {
   assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
 
-  if (strcasecmp(metric_str.c_str(), "balanced_accuracy")) {
+  if (!option.empty()) {
     std::ostringstream err;
-    err << metric_str << " is invalid for classification scoring";
+    err << "option params should be null for classification";
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
+  }
+
+  std::transform(metric_str.begin(), metric_str.end(), metric_str.begin(), ::toupper);
+  std::vector<std::string> metrics;
+  Utils::splitString(metric_str, ',', metrics);
+  for (auto &metric : metrics) {
+    if (score_metrics.find(metric) == score_metrics.end()) {
+      std::ostringstream err;
+      err << metric_str << " is invalid for classification scoring";
+      my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
   }
 
   auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
   std::string schema_name(sch_tb_name.c_str(), pos);
   std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+  auto share = ShannonBase::shannon_loaded_tables->get(schema_name.c_str(), table_name.c_str());
+  if (!share) {
+    std::ostringstream err;
+    err << schema_name.c_str() << "." << table_name.c_str() << " NOT loaded into rapid engine for ML";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
 
+  // load the test data from rapid engine.
   auto source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
   if (!source_table_ptr) {
     std::ostringstream err;
@@ -344,33 +392,32 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
     return HA_ERR_GENERIC;
   }
 
-  std::vector<double> train_data;
+  std::vector<double> test_data;
   std::vector<float> label_data;
   std::vector<std::string> features_name;
-  auto n_sample [[maybe_unused]] = read_data(source_table_ptr, train_data, features_name, target_name, label_data);
+  auto n_sample = read_data(source_table_ptr, test_data, features_name, target_name, label_data);
   Utils::close_table(source_table_ptr);
-  std::string &model_content = Loaded_models[model_handle];
-  BoosterHandle handler = Utils::load_trained_model_from_string(model_content);
-  if (!handler) {
-    std::ostringstream err;
-    err << schema_name.c_str() << "." << table_name.c_str() << " can not load model from content string";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
-  }
+  if (!n_sample) return 0.0f;
 
-  return 0;
+  return Utils::model_score(model_handle, (int)score_metrics[metrics[0]], n_sample, features_name.size(), test_data,
+                            label_data);
 }
 
-int ML_classification::explain(std::string &sch_tb_name, std::string &model_handle_name, std::string &target_name,
+int ML_classification::explain(std::string &sch_tb_name, std::string &target_name, std::string &model_handle_name,
                                Json_wrapper &exp_options) {
   assert(sch_tb_name.length() && target_name.length());
 
-  auto model_predict_type = parse_option(exp_options);
+  OPTION_VALUE_T explaination_values;
+  std::string keystr;
+  Utils::parse_json(exp_options, explaination_values, keystr, 0);
+  assert(explaination_values.size());
+  auto model_prediction_type = explaination_values["columns_to_explain"];
 
   std::string model_content = Loaded_models[model_handle_name];
   assert(model_content.length());
 
   int importance_type{0};
+  MODEL_PREDICTION_EXP_T model_predict_type = MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE;
   switch (model_predict_type) {
     case MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE: {
       importance_type = C_API_FEATURE_IMPORTANCE_SPLIT;

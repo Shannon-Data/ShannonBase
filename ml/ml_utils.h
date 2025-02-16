@@ -38,6 +38,7 @@ class TABLE;
 class handler;
 class Json_wrapper;
 class Json_object;
+using std::string;
 
 namespace ShannonBase {
 namespace ML {
@@ -65,13 +66,24 @@ class Utils {
    *  @param[in] label_data_type, the type of labelled data.
    *  @param[in] label_data, the source of the labelled data.
    *  @param[in] model_content, the trained model in string format.
-   *  @retval handler of trained mode.
-   *  @retval nullptr failed.
+   *  @retval handler of trained mode on success. Otherwise, null failed
    */
-  static BoosterHandle ML_train(std::string &task_mode, uint data_type, const void *training_data, uint n_data,
-                                uint n_feature, uint label_data_type, const void *label_data,
-                                std::string &model_content);
+  static int ML_train(std::string &task_mode, uint data_type, const void *training_data, uint n_data,
+                      const char **features_name, uint n_feature, uint label_data_type, const void *label_data,
+                      std::string &model_content);
 
+  /**
+   * to calcl the quality and reliability of a trained model.
+   * @param[in] model_handle_name, the name of loaded model name.
+   * @param[in] metrics, metrics name string.
+   * @param[in] testing_data, the test data.
+   * @param[in] features, feature names array.
+   * @param[in] lable_col_name, label column name.
+   * @param[in] label_data, the label data of testing data.
+   * @retval value of trained model.
+   */
+  static double model_score(std::string &model_handle_name, int metric_type, size_t n_samples, size_t n_features,
+                            std::vector<double> &testing_data, std::vector<float> &label_data);
   /**
    * to build up a json format model metadata.
    * params defintion ref to: https://dev.mysql.com/doc/heatwave/en/mys-hwaml-ml-model-metadata.html
@@ -133,11 +145,20 @@ class Utils {
    * @param[out] option_value, the value of the option.
    * @param[in] key, the key of the option.
    * @param[in] depth, the depth of the option, start from 0.
-   * @return 0 success, otherwise failed.
+   * @return 0 success, otherwise failed.f
    */
-  static int parse_option(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth);
+  static int parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth);
+
+  /**
+   * to split a string by a del, and stores into a vector.
+   * @param[in]
+   *
+   * */
+  static int splitString(const std::string &str, char delimiter, std::vector<std::string> &output);
 
  private:
+  static double calculate_balanced_accuracy(size_t n_samples, std::vector<double> &predictions,
+                                            std::vector<float> &label_data);
   Utils() = delete;
   virtual ~Utils() = delete;
   // disable copy ctor, operator=, etc.

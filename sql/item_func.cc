@@ -10311,19 +10311,16 @@ double Item_func_ml_score::val_real() {
   String handle_name;
   auto handle_name_cptr = args[2]->val_str(&handle_name);
 
-  String handle_usr_name;
-  auto handle_usr_name_cptr = args[3]->val_str(&handle_usr_name);
-
   String metric_name;
-  auto metric_name_cptr = args[4]->val_str(&metric_name);
+  auto metric_name_cptr = args[3]->val_str(&metric_name);
 
   Json_wrapper score_options;
-  args[5]->val_json(&score_options);
+  args[4]->val_json(&score_options);
 
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   auto score = auto_ml->score(sch_tb_name_cptr, target_name_cptr, handle_name_cptr,
-                               handle_usr_name_cptr, metric_name_cptr, &score_options);
+                               metric_name_cptr, score_options);
 
   return score;
 }
@@ -10349,11 +10346,11 @@ longlong Item_func_ml_explain::val_int() {
   String *target_name_ptr = args[1]->val_str(&target_name);
 
   String handle_name;
-  String *handle_name_ptr = args[3]->val_str(&handle_name);
+  String *handle_name_ptr = args[2]->val_str(&handle_name);
 
   Json_wrapper exp_options;
   if (arg_count == 4) {
-    args[5]->val_json(&exp_options);
+    args[3]->val_json(&exp_options);
   }
 
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =

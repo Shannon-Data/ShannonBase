@@ -18,7 +18,7 @@ DROP PROCEDURE IF EXISTS ml_score;
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_score (
-        IN in_table_name VARCHAR(64), IN in_target_name VARCHAR(64), IN in_handle_name VARCHAR(64),
+        IN in_sch_tb_name VARCHAR(64), IN in_target_name VARCHAR(64), IN in_handle_name VARCHAR(64),
         IN in_metric_name VARCHAR(64), OUT in_score_var FLOAT, IN in_option JSON
     )
     COMMENT '
@@ -29,7 +29,7 @@ Run the ml_score routine on a labeled training dataset to predict to ground trut
 
 Parameters
 -----------
- in_table_name VARCHAR(64): fully qualified name of the table containing the dataset used to compute model quality.
+ in_sch_tb_name VARCHAR(64): fully qualified name of the table containing the dataset used to compute model quality.
  in_target_name VARCHAR(64): name of the target column in \'table_name\' containing ground truth values.
  in_handle_name VARCHAR(64): explicit model handle string or session variable containing the model handle.
  in_metric_name VARCHAR(64): specifies which metric should be used to evaluate model quality. Different values can be used depending on ML task and
@@ -47,12 +47,14 @@ BEGIN
     DECLARE in_user_name VARCHAR(64);
     DECLARE v_user_name VARCHAR(64);
     DECLARE v_sys_schema_name VARCHAR(64);
+    DECLARE v_train_test_schema_name VARCHAR(64);
+    DECLARE v_train_test_table_name VARCHAR(64);
 
     DECLARE v_db_err_msg TEXT;
-    DECLARE v_score_obj_check INT;
+    DECLARE v_train_test_obj_check INT;
     DECLARE v_model_id INT;
 
-   IF in_table_name NOT REGEXP '^[^.]+\.[^.]+$' THEN
+   IF in_sch_tb_name NOT REGEXP '^[^.]+\.[^.]+$' THEN
       SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Invalid schema.table format, please using fully qualified name of the table.';
    END IF;
@@ -77,7 +79,19 @@ BEGIN
         SET MESSAGE_TEXT = "The model you scoring does NOT exist.";
    END IF;
 
-   SELECT ML_MODEL_SCORE(in_table_name, in_target_name, in_handle_name, v_user_name, in_metric_name, in_option) INTO in_score_var;
+  SELECT SUBSTRING_INDEX(in_sch_tb_name, '.', 1) INTO v_train_test_schema_name;
+  SELECT SUBSTRING_INDEX(in_sch_tb_name, '.', -1) INTO v_train_test_table_name;
+
+  SELECT COUNT(*) INTO v_train_test_obj_check
+  FROM INFORMATION_SCHEMA.TABLES
+  WHERE TABLE_SCHEMA = v_train_test_schema_name AND TABLE_NAME = v_train_test_table_name;
+  IF v_train_test_obj_check = 0 THEN
+      SET v_db_err_msg = CONCAT(in_table_name, ' used to do training test does not exists.');
+        SIGNAL SQLSTATE 'HY000'
+        SET MESSAGE_TEXT = v_db_err_msg;
+  END IF;
+
+  SELECT ML_MODEL_SCORE(in_sch_tb_name, in_target_name, in_handle_name, in_metric_name, in_option) INTO in_score_var;
 
 END$$
 DELIMITER ;

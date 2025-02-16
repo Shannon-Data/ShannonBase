@@ -57,7 +57,8 @@ int ML_forecasting::import(std::string &model_handle_name [[maybe_unused]], std:
 }
 
 double ML_forecasting::score(std::string &sch_tb_name [[maybe_unused]], std::string &target_name [[maybe_unused]],
-                             std::string &model_handle [[maybe_unused]], std::string &metric_str [[maybe_unused]]) {
+                             std::string &model_handle [[maybe_unused]], std::string &metric_str [[maybe_unused]],
+                             Json_wrapper &option [[maybe_unused]]) {
   return 0;
 }
 
