@@ -361,16 +361,22 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   return 0;
 }
 
-int ML_classification::explain(std::string &sch_tb_name, std::string &model_handle_name, std::string &target_name,
+int ML_classification::explain(std::string &sch_tb_name, std::string &target_name, std::string &model_handle_name,
                                Json_wrapper &exp_options) {
   assert(sch_tb_name.length() && target_name.length());
 
-  auto model_predict_type = parse_option(exp_options);
+  OPTION_VALUE_T explaination_values;
+  std::string keystr;
+  Utils::parse_option(exp_options, explaination_values, keystr, 0);
+  assert(explaination_values.size());
+  auto model_prediction_type = explaination_values["columns_to_explain"];
+  //std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
 
   std::string model_content = Loaded_models[model_handle_name];
   assert(model_content.length());
 
   int importance_type{0};
+  MODEL_PREDICTION_EXP_T model_predict_type = MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE;
   switch (model_predict_type) {
     case MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE: {
       importance_type = C_API_FEATURE_IMPORTANCE_SPLIT;

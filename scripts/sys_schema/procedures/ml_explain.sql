@@ -78,7 +78,7 @@ BEGIN
    END IF;
 
    SET @select_model_stm = CONCAT('SELECT MODEL_ID INTO @MODEL_ID FROM ',  v_sys_schema_name,
-                                  '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_handle_name, '\";');
+                                  '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle, '\";');
    PREPARE select_model_stmt FROM @select_model_stm;
    EXECUTE select_model_stmt;
    SELECT @MODEL_ID into v_model_id;

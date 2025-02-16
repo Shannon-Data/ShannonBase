@@ -60,7 +60,7 @@ class ML_classification : public ML_algorithm {
   double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
                std::string &metric_str) override;
 
-  int explain(std::string &sch_tb_name, std::string &model_handle_name, std::string &target_name,
+  int explain(std::string &sch_tb_name, std::string &target_name, std::string &model_handle_name,
               Json_wrapper &exp_options) override;
   int explain_row() override;
   int explain_table() override;

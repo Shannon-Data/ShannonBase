@@ -1516,7 +1516,7 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"ML_MODEL_SCORE", SQL_FN_V_LIST(Item_func_ml_score, 5, 6)},
     {"ML_PREDICT_ROW", SQL_FN_V_LIST(Item_func_ml_predicte_row, 2, 3)},
     {"ML_PREDICT_TABLE", SQL_FN_V_LIST(Item_func_ml_predicte_table, 3, 4)},
-    {"ML_EXPLAIN", SQL_FN_V_LIST(Item_func_ml_explain, 3, 4)},
+    {"ML_MODEL_EXPLAIN", SQL_FN_V_LIST(Item_func_ml_explain, 3, 4)},
     {"ML_EXPLAIN_ROW", SQL_FN_V_LIST(Item_func_ml_explain_row, 2, 3)},
     {"ML_EXPLAIN_TABLE", SQL_FN_V_LIST(Item_func_ml_explain_table, 3, 4)},
     {"MONTHNAME", SQL_FN(Item_func_monthname, 1)},

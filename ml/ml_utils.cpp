@@ -140,7 +140,6 @@ int Utils::parse_option(Json_wrapper &options, OPTION_VALUE_T &option_value, std
     }
     case enum_json_type::J_STRING: {
       std::string data_str(options.get_data(), options.get_data_length());
-      assert(data_str.length());
       option_value[key].push_back(data_str);
       break;
     }
