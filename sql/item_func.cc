@@ -10349,11 +10349,11 @@ longlong Item_func_ml_explain::val_int() {
   String *target_name_ptr = args[1]->val_str(&target_name);
 
   String handle_name;
-  String *handle_name_ptr = args[3]->val_str(&handle_name);
+  String *handle_name_ptr = args[2]->val_str(&handle_name);
 
   Json_wrapper exp_options;
   if (arg_count == 4) {
-    args[5]->val_json(&exp_options);
+    args[3]->val_json(&exp_options);
   }
 
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =

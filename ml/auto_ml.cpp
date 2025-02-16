@@ -80,6 +80,7 @@ void Auto_ML::init_task_map() {
   OPTION_VALUE_T opt_values;
   std::string keystr;
   Utils::parse_option(m_options, opt_values, keystr, 0);
+  assert(opt_values.size());
   m_task_type_str = opt_values["task"].size() ? opt_values["task"][0] : "classification";
   std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
   build_task(m_task_type_str);
@@ -230,7 +231,7 @@ int Auto_ML::explain(String *sch_tb_name, String *target_column_name, String *mo
 
   m_handler = model_handler_name->c_ptr_safe();
   std::string model_content_str;
-  if (precheck_and_process_meta_info(m_handler, model_content_str, false)) return HA_ERR_GENERIC;
+  if (precheck_and_process_meta_info(m_handler, model_content_str, true)) return HA_ERR_GENERIC;
 
   std::string sch_tb_name_str(sch_tb_name->c_ptr_safe());
   std::string target_column_name_str(target_column_name->c_ptr_safe());
