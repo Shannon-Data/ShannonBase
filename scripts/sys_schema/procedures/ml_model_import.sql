@@ -20,7 +20,7 @@ DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_model_import (
         IN in_model_content LONGTEXT,
-        IN in_option JSON,
+        IN in_metadata JSON,
         IN in_model_handle_name VARCHAR(64)
     )
     COMMENT '
@@ -34,7 +34,7 @@ Parameters
 
 in_model_content LONGTEXT:
   model content.
-in_option (JSON)
+in_metadata (JSON)
   optional training parameters as key-value pairs in JSON format.
     1: The most important parameter is \'task\', which specifies the ML task to be performed (if not specified, \'classification\' is assumed)
     2: Other parameters allow finer-grained control on the training task
@@ -57,7 +57,7 @@ BEGIN
     DECLARE v_sys_schema_name VARCHAR(64);
 
     DECLARE v_db_err_msg TEXT;
-    DECLARE v_train_obj_check INT;
+    DECLARE v_import_obj_check INT;
     DECLARE v_model_meta JSON;
 
    IF in_user_name IS NULL THEN
@@ -68,7 +68,7 @@ BEGIN
      SET v_sys_schema_name = CONCAT('ML_SCHEMA_', in_user_name);
    END IF;
 
-   IF in_option IS NULL THEN
+   IF in_metadata IS NULL THEN
      SIGNAL SQLSTATE 'HY000'
         SET MESSAGE_TEXT = "The options missed.";
    END IF;
@@ -86,9 +86,9 @@ BEGIN
         SET MESSAGE_TEXT = "The model you importing already exists.";
    END IF;
 
-   SELECT in_option into v_model_meta;
-   SELECT ML_MODEL_IMPORT(in_model_handle_name, in_user_name, v_model_meta, in_model_content) INTO v_train_obj_check;
-   IF v_train_obj_check != 0 THEN
+   SELECT in_metadata into v_model_meta;
+   SELECT ML_MODEL_IMPORT(in_model_handle_name, in_user_name, v_model_meta, in_model_content) INTO v_import_obj_check;
+   IF v_import_obj_check != 0 THEN
         SET v_db_err_msg = CONCAT('ML_MODEL_IMPORT failed.');
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;

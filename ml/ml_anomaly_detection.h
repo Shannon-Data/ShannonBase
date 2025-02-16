@@ -47,8 +47,8 @@ class ML_anomaly_detection : public ML_algorithm {
   int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;
   int import(std::string &model_handle_name, std::string &user_name, std::string &content) override;
-  double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
-               std::string &metric_str) override;
+  double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle, std::string &metric_str,
+               Json_wrapper &option) override;
   int explain(std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
               Json_wrapper &exp_options) override;
   int explain_row() override;

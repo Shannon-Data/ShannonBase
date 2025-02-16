@@ -26,8 +26,8 @@
 #ifndef __SHANNONBASE_ML_CLASSICIFICATION_H__
 #define __SHANNONBASE_ML_CLASSICIFICATION_H__
 
+#include <map>
 #include <string>
-#include <vector>
 
 #include "sql-common/json_dom.h"  //Json_wrapper.
 
@@ -47,6 +47,7 @@ class Json_wrapper;
 
 namespace ShannonBase {
 namespace ML {
+
 class ML_classification : public ML_algorithm {
  public:
   ML_classification();
@@ -57,10 +58,10 @@ class ML_classification : public ML_algorithm {
   int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;
   int import(std::string &model_handle_name, std::string &user_name, std::string &content) override;
-  double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
-               std::string &metric_str) override;
+  double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle, std::string &metric_str,
+               Json_wrapper &option) override;
 
-  int explain(std::string &sch_tb_name, std::string &model_handle_name, std::string &target_name,
+  int explain(std::string &sch_tb_name, std::string &target_name, std::string &model_handle_name,
               Json_wrapper &exp_options) override;
   int explain_row() override;
   int explain_table() override;
@@ -79,9 +80,29 @@ class ML_classification : public ML_algorithm {
   void set_options(Json_wrapper &options) { m_options = options; }
   const Json_wrapper &get_options() const { return m_options; }
 
-  static const std::vector<std::string> score_olny_metrics;
-  static const std::vector<std::string> binary_only_metrics;
-  static const std::vector<std::string> binary_multi_metrics;
+  enum class SCORE_METRIC_T {
+    BALANCED_ACCURACY,
+    F1_SAMPLES,
+    PRECISION_SAMPLES,
+    RECALL_SAMPLES,
+    F1,
+    PRECISION,
+    RECALL,
+    ROC_AUC,
+    ACCURACY,
+    F1_MACRO,
+    F1_MICRO,
+    F1_WEIGTHED,
+    NEG_LOG_LOSS,
+    PRECISION_MACRO,
+    PRECISION_MICRO,
+    PRECISION_WEIGHTED,
+    RECALL_MACRO,
+    RECALL_MICRO,
+    RECALL_WEIGHTED
+  };
+
+  static std::map<std::string, SCORE_METRIC_T> score_metrics;
 
  private:
   int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,

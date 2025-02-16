@@ -71,94 +71,6 @@ int ML_regression::train() {
   auto source_table_ptr = Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ);
   if (!source_table_ptr) return HA_ERR_GENERIC;
 
-  auto n_sample = source_table_ptr->file->stats.records;
-  auto n_feature = source_table_ptr->s->fields;
-
-  std::vector<const char *> feature_name_vec(n_feature);
-  for (auto idx = 0u; idx < n_feature; idx++) {
-    auto field_ptr = *(source_table_ptr->s->field + idx);
-    feature_name_vec.emplace_back(field_ptr->field_name);
-  }
-
-  unique_ptr_destroy_only<handler> tb_handler(Utils::get_secondary_handler(source_table_ptr));
-  /* Read the traning data into train_data vector from rapid engine. here, we use training data
-  as lablels too */
-  my_bitmap_map *old_map = tmp_use_all_columns(source_table_ptr, source_table_ptr->read_set);
-  tb_handler->ha_open(source_table_ptr, source_table_ptr->s->table_name.str, O_RDONLY, HA_OPEN_IGNORE_IF_LOCKED,
-                      source_table_ptr->s->tmp_table_def);
-  if (tb_handler && tb_handler->ha_external_lock(thd, F_RDLCK)) return HA_ERR_GENERIC;
-  if (tb_handler->ha_rnd_init(true)) {
-    tb_handler->ha_rnd_end();
-    tb_handler->ha_external_lock(thd, F_UNLCK);
-    tb_handler->ha_close();
-    return HA_ERR_GENERIC;
-  }
-
-  // table full scan to train the model. the cols means `sample data` and row menas `feature number`
-  ha_rows r_index = 0;
-  Traing_data_t train_data(n_sample, std::vector<double>(n_feature));
-  while (tb_handler->ha_rnd_next(source_table_ptr->record[0]) == 0) {
-    for (auto field_id = 0u; field_id < source_table_ptr->s->fields; field_id++) {
-      Field *field_ptr = *(source_table_ptr->field + field_id);
-
-      double data_val{0.0};
-      switch (field_ptr->type()) {
-        case MYSQL_TYPE_INT24:
-        case MYSQL_TYPE_LONG:
-        case MYSQL_TYPE_LONGLONG:
-        case MYSQL_TYPE_FLOAT:
-        case MYSQL_TYPE_DOUBLE: {
-          data_val = field_ptr->val_real();
-        } break;
-        case MYSQL_TYPE_DECIMAL:
-        case MYSQL_TYPE_NEWDECIMAL: {
-          my_decimal dval;
-          field_ptr->val_decimal(&dval);
-          my_decimal2double(10, &dval, &data_val);
-        } break;
-        default:
-          break;
-      }
-      train_data[r_index][field_id] = data_val;
-    }
-    r_index++;
-  }
-  ut_a(n_sample == r_index);
-
-  if (old_map) tmp_restore_column_map(source_table_ptr->read_set, old_map);
-  tb_handler->ha_rnd_end();
-  tb_handler->ha_external_lock(thd, F_UNLCK);
-  tb_handler->ha_close();
-  Utils::close_table(source_table_ptr);
-
-  std::string mode_params = "task=train objective=regression num_leaves=31 verbose=0";
-  std::string model_content;
-  // clang-format off
-  if (!(m_handler = Utils::ML_train(mode_params,
-                                    C_API_DTYPE_FLOAT64,
-                                    reinterpret_cast<const void *>(train_data.data()),
-                                    n_sample,
-                                    n_feature,
-                                    C_API_DTYPE_FLOAT32,
-                                    nullptr /**label_data*/,
-                                    model_content)))
-    return HA_ERR_GENERIC;
-
-  // the definition of this table, ref: `ml_train.sql`
-  std::string mode_type("regression"), oper_type("train");
-  auto dom = Json_dom::parse(model_content.c_str(),
-                             model_content.length(),
-                             [](const char *, size_t) {},
-                             [] {});
-  
-  Json_object *json_ob = down_cast<Json_object *>(dom.get());
-  Json_wrapper content_json (json_ob->clone());
- 
-  if (Utils::store_model_catalog(model_content.length(),
-                                 &content_json,
-                                 m_handler_name))
-    return HA_ERR_GENERIC;
-  // clang-format off
   return 0;
 }
 
@@ -175,7 +87,7 @@ int ML_regression::load(std::string &model_content) {
   return 0;
 }
 
-int ML_regression::load_from_file(std::string& modle_file_full_path, std::string& model_handle_name) {
+int ML_regression::load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) {
   // to update the `MODEL_CATALOG.MODEL_OBJECT`
   if (check_valid_path(modle_file_full_path.c_str(), modle_file_full_path.length()) || !model_handle_name.length())
     return HA_ERR_GENERIC;
@@ -183,7 +95,7 @@ int ML_regression::load_from_file(std::string& modle_file_full_path, std::string
   return 0;
 }
 
-int ML_regression::unload(std::string& model_handle_name) {
+int ML_regression::unload(std::string &model_handle_name) {
   if (!model_handle_name.length()) {
     return HA_ERR_GENERIC;
   }
@@ -196,7 +108,7 @@ int ML_regression::unload(std::string& model_handle_name) {
   return 0;
 }
 
-int ML_regression::import(std::string& model_handle_name, std::string& user_name, std::string &content) {
+int ML_regression::import(std::string &model_handle_name, std::string &user_name, std::string &content) {
   assert(model_handle_name.length() && user_name.length() && content.length());
 
   BoosterHandle bt_handler;
@@ -208,16 +120,16 @@ int ML_regression::import(std::string& model_handle_name, std::string& user_name
   return 0;
 }
 
-double ML_regression::score(std::string &sch_tb_name [[maybe_unused]], std::string& target_name [[maybe_unused]], 
-  std::string& model_handle [[maybe_unused]],
-  std::string& metric_str [[maybe_unused]]
-  ) {
+double ML_regression::score(std::string &sch_tb_name [[maybe_unused]], std::string &target_name [[maybe_unused]],
+                            std::string &model_handle [[maybe_unused]], std::string &metric_str [[maybe_unused]],
+                            Json_wrapper &option [[maybe_unused]]) {
   return 0;
-  }
+}
 
-int ML_regression::explain(std::string& sch_tb_name [[maybe_unused]], std::string& target_column_name [[maybe_unused]], std::string& model_handle_name [[maybe_unused]],
-    Json_wrapper& exp_options [[maybe_unused]])  {
-      return 0;
+int ML_regression::explain(std::string &sch_tb_name [[maybe_unused]], std::string &target_column_name [[maybe_unused]],
+                           std::string &model_handle_name [[maybe_unused]],
+                           Json_wrapper &exp_options [[maybe_unused]]) {
+  return 0;
 }
 
 int ML_regression::explain_row() { return 0; }

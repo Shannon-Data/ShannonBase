@@ -79,7 +79,8 @@ std::string Auto_ML::get_array_string(Json_array *array) {
 void Auto_ML::init_task_map() {
   OPTION_VALUE_T opt_values;
   std::string keystr;
-  Utils::parse_option(m_options, opt_values, keystr, 0);
+  Utils::parse_json(m_options, opt_values, keystr, 0);
+  assert(opt_values.size());
   m_task_type_str = opt_values["task"].size() ? opt_values["task"][0] : "classification";
   std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
   build_task(m_task_type_str);
@@ -193,22 +194,20 @@ int Auto_ML::unload(String *model_handler_name) {
   return m_ml_task ? m_ml_task->unload(m_handler) : HA_ERR_GENERIC;
 }
 
-double Auto_ML::score(String *sch_table_name, String *target_column_name, String *model_handle_name,
-                      String *model_usr_name, String *metric, Json_wrapper *options) {
-  assert(sch_table_name && target_column_name && model_handle_name && model_usr_name);
+double Auto_ML::score(String *sch_table_name, String *target_column_name, String *model_handle_name, String *metric,
+                      Json_wrapper options) {
+  assert(sch_table_name && target_column_name && model_handle_name);
 
   std::string model_handler_name_str(model_handle_name->c_ptr_safe());
-  std::string model_user_str(model_usr_name->c_ptr_safe());
-
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
-  assert(metric && options);
   std::string sch_table_name_str(sch_table_name->c_ptr_safe());
-  std::string taget_column_name_str(target_column_name->c_ptr_safe());
+  std::string target_column_name_str(target_column_name->c_ptr_safe());
   std::string metric_str(metric->c_ptr_safe());
-  return m_ml_task ? m_ml_task->score(sch_table_name_str, taget_column_name_str, model_handler_name_str, metric_str)
-                   : 0;
+  return m_ml_task
+             ? m_ml_task->score(sch_table_name_str, target_column_name_str, model_handler_name_str, metric_str, options)
+             : 0;
 }
 
 int Auto_ML::import(String *model_handler_name, String *user_name, Json_wrapper *model_meta, String *model_content) {
@@ -230,7 +229,7 @@ int Auto_ML::explain(String *sch_tb_name, String *target_column_name, String *mo
 
   m_handler = model_handler_name->c_ptr_safe();
   std::string model_content_str;
-  if (precheck_and_process_meta_info(m_handler, model_content_str, false)) return HA_ERR_GENERIC;
+  if (precheck_and_process_meta_info(m_handler, model_content_str, true)) return HA_ERR_GENERIC;
 
   std::string sch_tb_name_str(sch_tb_name->c_ptr_safe());
   std::string target_column_name_str(target_column_name->c_ptr_safe());

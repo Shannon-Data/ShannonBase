@@ -57,7 +57,7 @@ class ML_algorithm {
   virtual int unload(std::string &model_handle_name) = 0;
   virtual int import(std::string &model_handle_name, std::string &user_name, std::string &content) = 0;
   virtual double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
-                       std::string &metric_str) = 0;
+                       std::string &metric_str, Json_wrapper &option) = 0;
 
   virtual int explain(std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
                       Json_wrapper &exp_option) = 0;

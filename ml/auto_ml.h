@@ -57,8 +57,8 @@ class Auto_ML {
   // import the model from another.
   int import(String *model_handler_name, String *user_name, Json_wrapper *model_meta, String *model_content);
   // evaluate and test the model.
-  double score(String *sch_table_name, String *target_column_name, String *model_handle_name, String *model_usr_name,
-               String *metric, Json_wrapper *options);
+  double score(String *sch_table_name, String *target_column_name, String *model_handle_name, String *metric,
+               Json_wrapper options);
   int explain(String *sch_tb_name, String *target_column_name, String *model_handler_name, Json_wrapper exp_options);
 
  private:
