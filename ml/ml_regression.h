@@ -57,7 +57,7 @@ class ML_regression : public ML_algorithm {
   int load(std::string &model_content) override;
   int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;
-  int import(std::string &model_handle_name, std::string &user_name, std::string &content) override;
+  int import(Json_wrapper &model_object, Json_wrapper &model_metadata, std::string &model_handle_name) override;
   double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle, std::string &metric_str,
                Json_wrapper &option) override;
   int explain(std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,

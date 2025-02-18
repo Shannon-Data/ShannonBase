@@ -51,8 +51,9 @@ int ML_anomaly_detection::load_from_file(std::string &modle_file_full_path [[may
 
 int ML_anomaly_detection::unload(std::string &model_handle_name [[maybe_unused]]) { return 0; }
 
-int ML_anomaly_detection::import(std::string &model_handle_name [[maybe_unused]],
-                                 std::string &user_name [[maybe_unused]], std::string &content [[maybe_unused]]) {
+int ML_anomaly_detection::import(Json_wrapper &model_object [[maybe_unused]],
+                                 Json_wrapper &model_metadata [[maybe_unused]],
+                                 std::string &model_handle_name [[maybe_unused]]) {
   return 0;
 }
 

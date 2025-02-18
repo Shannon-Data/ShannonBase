@@ -210,14 +210,10 @@ double Auto_ML::score(String *sch_table_name, String *target_column_name, String
              : 0;
 }
 
-int Auto_ML::import(String *model_handler_name, String *user_name, Json_wrapper *model_meta, String *model_content) {
-  assert(model_handler_name && user_name && model_meta && model_content);
-
-  std::string model_user_name_str(user_name->ptr());
+int Auto_ML::import(Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_handler_name) {
   std::string handler_name_str(model_handler_name->ptr());
-  std::string model_content_str(model_content->ptr());
 
-  if (m_ml_task) return m_ml_task->import(model_user_name_str, handler_name_str, model_content_str);
+  if (m_ml_task) return m_ml_task->import(model_object, model_metadata, handler_name_str);
 
   return 0;
 }

@@ -10272,26 +10272,22 @@ longlong Item_func_ml_model_unload::val_int() {
 
 longlong Item_func_ml_model_import::val_int() {
   //ML_MODEL_IMPORT(in_model_handle_name, in_user_name, v_model_meta, in_model_content) 
-  assert(arg_count == 4);
+  assert(arg_count == 3);
   THD* thd [[maybe_unused]] = current_thd;
 
-  String handle_name;
-  String *handle_name_ptr[[maybe_unused]] = args[0]->val_str(&handle_name);
-
-  String in_user_name;
-  String *in_user_name_ptr[[maybe_unused]] = args[1]->val_str(&in_user_name);
+  Json_wrapper model_obj;
+  args[0]->val_json(&model_obj);
 
   Json_wrapper model_meta;
-  bool flag[[maybe_unused]] = args[2]->val_json(&model_meta);
+  args[1]->val_json(&model_meta);
 
-  String model_content;
-  String *model_content_ptr[[maybe_unused]] = args[3]->val_str(&model_content);
+  String model_handle_name;
+  args[2]->val_str(&model_handle_name);
 
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   /**To invoke ML libs to load the trainned ML models into memory*/
-  auto result = auto_ml->import(&handle_name, &in_user_name,
-                                &model_meta, &model_content);
+  auto result = auto_ml->import(model_obj, model_meta, &model_handle_name);
   return result;
 }
 

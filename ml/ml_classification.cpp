@@ -209,7 +209,7 @@ int ML_classification::train() {
   auto share = ShannonBase::shannon_loaded_tables->get(m_sch_name.c_str(), m_table_name.c_str());
   if (!share) {
     std::ostringstream err;
-    err << m_sch_name.c_str() << "." << m_table_name.c_str() << " NOT loaded into rapid engine for ML";
+    err << m_sch_name << "." << m_table_name << " NOT loaded into rapid engine for ML";
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
@@ -217,7 +217,7 @@ int ML_classification::train() {
   auto source_table_ptr = Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ);
   if (!source_table_ptr) {
     std::ostringstream err;
-    err << m_sch_name.c_str() << "." << m_table_name.c_str() << " open failed for ML";
+    err << m_sch_name << "." << m_table_name << " open failed for ML";
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
@@ -254,12 +254,12 @@ int ML_classification::train() {
   auto start = std::chrono::steady_clock::now();
   if (Utils::ML_train(mode_params,
                       C_API_DTYPE_FLOAT64,
-                      static_cast<const void *>(train_data.data()),
+                      train_data.data(),
                       n_sample,
                       feature_names_cstr.data(),
                       n_feature,
                       C_API_DTYPE_FLOAT32,
-                      static_cast<const void *>(label_data.data()),
+                      label_data.data(),
                       model_content))
     return HA_ERR_GENERIC;
   auto end = std::chrono::steady_clock::now();
@@ -267,10 +267,9 @@ int ML_classification::train() {
     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0f;
 
   // the definition of this table, ref: `ml_train.sql`
-  std::string oper_type("train");
-  std::string sch_tb_name = m_sch_name + "." ;
-  sch_tb_name += m_table_name;
-  std::string notes, opt_metrics;
+  std::ostringstream oss;
+  oss << m_sch_name <<  "."  << m_table_name;
+  std::string oper_type("train"), sch_tb_name (oss.str().c_str()), notes, opt_metrics;
 
   auto content_dom = Json_dom::parse(model_content.c_str(),
                              model_content.length(),
@@ -344,8 +343,16 @@ int ML_classification::unload(std::string &model_handle_name) {
   return 0;
 }
 
-int ML_classification::import(std::string &model_handle_name [[maybe_unused]], std::string &user_name [[maybe_unused]],
-                              std::string &content [[maybe_unused]]) {
+int ML_classification::import(Json_wrapper &model_object [[maybe_unused]],
+                              Json_wrapper &model_metadata [[maybe_unused]],
+                              std::string &model_handle_name [[maybe_unused]]) {
+  std::string keystr;
+  OPTION_VALUE_T model_meta_info;
+  Utils::parse_json(model_metadata, model_meta_info, keystr, 0);
+  if (model_meta_info.find("schema") != model_meta_info.end()) {  // load from a table.
+
+  } else {  // load from meta info json file.
+  }
   return 0;
 }
 

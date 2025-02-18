@@ -163,6 +163,6 @@ BEGIN
         SET v_db_err_msg = CONCAT('ML_TRAIN failed.');
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;
-    END IF; 
+    END IF;
 END$$
 DELIMITER ;
