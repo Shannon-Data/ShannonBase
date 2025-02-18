@@ -55,7 +55,7 @@ class Auto_ML {
   // unload the loaded mode from Rapid.
   int unload(String *model_handler_name);
   // import the model from another.
-  int import(String *model_handler_name, String *user_name, Json_wrapper *model_meta, String *model_content);
+  int import(Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_content);
   // evaluate and test the model.
   double score(String *sch_table_name, String *target_column_name, String *model_handle_name, String *metric,
                Json_wrapper options);

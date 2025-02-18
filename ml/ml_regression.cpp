@@ -108,15 +108,8 @@ int ML_regression::unload(std::string &model_handle_name) {
   return 0;
 }
 
-int ML_regression::import(std::string &model_handle_name, std::string &user_name, std::string &content) {
-  assert(model_handle_name.length() && user_name.length() && content.length());
-
-  BoosterHandle bt_handler;
-  int out_num_iterations;
-  if (LGBM_BoosterLoadModelFromString(content.c_str(), &out_num_iterations, &bt_handler) == -1) return HA_ERR_GENERIC;
-
-  m_handler = bt_handler;
-
+int ML_regression::import(Json_wrapper &model_object [[maybe_unused]], Json_wrapper &model_metadata [[maybe_unused]],
+                          std::string &model_handle_name [[maybe_unused]]) {
   return 0;
 }
 

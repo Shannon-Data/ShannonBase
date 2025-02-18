@@ -4104,8 +4104,8 @@ class Item_func_ml_model_unload final : public Item_int_func {
 
 class Item_func_ml_model_import : public Item_int_func {
  public:
-  Item_func_ml_model_import(const POS &pos, Item* a, Item* b, Item* c, Item* d)
-      : Item_int_func(pos, a, b, c, d) {}
+  Item_func_ml_model_import(const POS &pos, Item* a, Item* b, Item* c)
+      : Item_int_func(pos, a, b, c) {}
   enum Functype functype() const override { return DD_INTERNAL_FUNC; }
   longlong val_int() override;
   const char *func_name() const override {

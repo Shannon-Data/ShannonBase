@@ -92,6 +92,5 @@ BEGIN
   END IF;
 
   SELECT ML_MODEL_SCORE(in_sch_tb_name, in_target_name, in_handle_name, in_metric_name, in_option) INTO in_score_var;
-
 END$$
 DELIMITER ;
