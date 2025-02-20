@@ -50,17 +50,13 @@ mysql> SELECT sys.ML_PREDICT_ROW(JSON_OBJECT(\'column_name\', value,
     DETERMINISTIC
     CONTAINS SQL
 BEGIN
-    DECLARE v_db_err_msg TEXT;
-    DECLARE v_pred_row_obj_check JSON;
 
-   SELECT ML_MODEL_PREDICT_ROW(in_input_data, in_model_handle_name, in_model_option) INTO v_pred_row_obj_check;
-   IF v_pred_row_obj_check IS NULL THEN
-        SET v_db_err_msg = CONCAT('ML_MODEL_PREDICT_ROW failed.');
-        SIGNAL SQLSTATE 'HY000'
-        SET MESSAGE_TEXT = v_db_err_msg;
-   END IF;
+  DECLARE v_db_err_msg TEXT;
+  DECLARE v_model_id INT;
+  DECLARE v_pred_row_res JSON;
 
-   RETURN v_pred_row_obj_check;
+  SELECT ML_MODEL_PREDICT_ROW(in_predict_data, in_model_handle_name, in_model_option) INTO v_pred_row_res;
+  RETURN v_pred_row_res;
 END$$
 
 DELIMITER ;

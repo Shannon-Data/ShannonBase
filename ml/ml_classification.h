@@ -65,7 +65,8 @@ class ML_classification : public ML_algorithm {
               Json_wrapper &exp_options) override;
   int explain_row() override;
   int explain_table() override;
-  int predict_row() override;
+  int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+                  Json_wrapper &result) override;
   int predict_table() override;
   ML_TASK_TYPE_T type() override;
 
@@ -106,7 +107,7 @@ class ML_classification : public ML_algorithm {
 
  private:
   int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
-                std::string &label_name, std::vector<float> &label_data);
+                std::string &label_name, std::vector<float> &label_data, int &n_class);
   MODEL_PREDICTION_EXP_T parse_option(Json_wrapper &options);
 
  private:
