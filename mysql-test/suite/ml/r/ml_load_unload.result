@@ -1,0 +1,37 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml;
+CREATE DATABASE shannon_ml;
+ALTER DATABASE shannon_ml CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml;
+CREATE TABLE census_train ( age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
+CREATE TABLE census_test LIKE census_train;
+SET @census_model = 'census_test_load';
+ALTER TABLE census_train SECONDARY_LOAD;
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', NULL, @census_model);
+CALL sys.ML_MODEL_UNLOAD(@census_model);
+ERROR HY000: Secondary engine operation failed. census_test_load has not been loaded.
+CALL sys.ML_MODEL_LOAD(@census_model, NULL);
+CALL sys.ML_MODEL_LOAD(@census_model, NULL);
+ERROR HY000: Secondary engine operation failed. census_test_load has been loaded.
+CALL sys.ML_MODEL_UNLOAD(@census_model, NULL);
+ERROR 42000: Incorrect number of arguments for PROCEDURE sys.ML_MODEL_UNLOAD; expected 1, got 2
+CALL sys.ML_MODEL_UNLOAD(@census_model);
+CALL sys.ML_MODEL_UNLOAD(@census_model);
+ERROR HY000: Secondary engine operation failed. census_test_load has not been loaded.
+SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
+JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+FROM ML_SCHEMA_root.MODEL_CATALOG;
+MODEL_ID	MODEL_HANDLE	MODEL_OBJECT	MODEL_OWNER	task	feature_names
+1	census_test_load	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
+SELECT CHUNK_ID, MODEL_HANDLE from ML_SCHEMA_root.MODEL_OBJECT_CATALOG;
+CHUNK_ID	MODEL_HANDLE
+1	census_test_load
+SELECT MODEL_ID, ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE, ML_SCHEMA_root.MODEL_CATALOG.MODEL_OBJECT, MODEL_OWNER, 
+JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+FROM  ML_SCHEMA_root.MODEL_CATALOG, ML_SCHEMA_root.MODEL_OBJECT_CATALOG
+WHERE ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE = ML_SCHEMA_root.MODEL_OBJECT_CATALOG.MODEL_HANDLE;
+MODEL_ID	MODEL_HANDLE	MODEL_OBJECT	MODEL_OWNER	task	feature_names
+1	census_test_load	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;

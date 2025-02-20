@@ -73,7 +73,11 @@ int ML_anomaly_detection::explain_row() { return 0; }
 
 int ML_anomaly_detection::explain_table() { return 0; }
 
-int ML_anomaly_detection::predict_row() { return 0; }
+int ML_anomaly_detection::predict_row(Json_wrapper &input_data [[maybe_unused]],
+                                      std::string &model_handle_name [[maybe_unused]],
+                                      Json_wrapper &option [[maybe_unused]], Json_wrapper &result [[maybe_unused]]) {
+  return 0;
+}
 
 int ML_anomaly_detection::predict_table() { return 0; }
 

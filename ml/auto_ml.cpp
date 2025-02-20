@@ -210,6 +210,15 @@ double Auto_ML::score(String *sch_table_name, String *target_column_name, String
              : 0;
 }
 
+int Auto_ML::predict_row(Json_wrapper &input, String *model_handler_name, Json_wrapper options, Json_wrapper &result) {
+  assert(model_handler_name);
+  std::string model_handler_name_str(model_handler_name->c_ptr_safe());
+  std::string model_content_str;
+  if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
+
+  return m_ml_task ? m_ml_task->predict_row(input, model_handler_name_str, options, result) : HA_ERR_GENERIC;
+}
+
 int Auto_ML::import(Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_handler_name) {
   std::string handler_name_str(model_handler_name->ptr());
 

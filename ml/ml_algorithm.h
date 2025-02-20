@@ -63,7 +63,8 @@ class ML_algorithm {
                       Json_wrapper &exp_option) = 0;
   virtual int explain_row() = 0;
   virtual int explain_table() = 0;
-  virtual int predict_row() = 0;
+  virtual int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+                          Json_wrapper &result) = 0;
   virtual int predict_table() = 0;
   virtual ML_TASK_TYPE_T type() = 0;
 };

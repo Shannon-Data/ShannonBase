@@ -174,10 +174,28 @@ int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::
 // open table by name. return table ptr, otherwise return nullptr.
 TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
   THD *thd = current_thd;
+  /**
+   * due to in function, `select xxxx`, when the statment executed, it enter lock table mode
+   * but there's not even a opened table, so that, here we try to open a table, it failed before
+   * exiting the lock table mode. such as executing `selecct ml_predict_row(xxx) int xx;`
+   */
+  auto table_already_open{false};
+  for (auto table = thd->open_tables; table; table = table->next) {
+    if (!strcmp(schema_name.c_str(), table->s->db.str) && !strcmp(table_name.c_str(), table->s->table_name.str)) {
+      table_already_open = true;
+      break;
+    }
+  }
+
+  auto old_mode = thd->locked_tables_mode;
+  if (!table_already_open && thd->locked_tables_mode == LTM_PRELOCKED) {
+    thd->locked_tables_mode = LTM_NONE;
+  }
+
   Open_table_context table_ref_context(thd, MYSQL_OPEN_IGNORE_GLOBAL_READ_LOCK);
 
   Table_ref table_ref(schema_name.c_str(), table_name.c_str(), lk_mode);
-  table_ref.open_strategy = Table_ref::OPEN_IF_EXISTS;
+  table_ref.open_strategy = Table_ref::OPEN_NORMAL;
 
   if (open_table(thd, &table_ref, &table_ref_context) || !table_ref.table->file) {
     return nullptr;
@@ -187,6 +205,7 @@ TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name
   if (!table_ptr->next_number_field)  // in case.
     table_ptr->next_number_field = table_ptr->found_next_number_field;
 
+  thd->locked_tables_mode = old_mode;
   return table_ptr;
 }
 
@@ -526,6 +545,10 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
                     const char **features_name, uint n_feature, uint label_data_type, const void *label_data,
                     std::string &model_content) {
   DatasetHandle train_dataset_handler{nullptr};
+  BoosterHandle booster{nullptr};
+  int finished{0};
+  int64_t bufflen{1024}, out_len{0};
+  std::unique_ptr<char[]> model_content_buff;
   //clang-format off
   auto ret = LGBM_DatasetCreateFromMat(training_data,      // feature data ptr
                                        data_type,          // type of sampe data
@@ -535,37 +558,23 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
                                        task_mode.c_str(),  // params.
                                        nullptr,            // ref.
                                        &train_dataset_handler);
-
-  // to set label data
   // clang-format on
-
+  // to set label data
   ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
-  if (ret) {
-    LGBM_DatasetFree(train_dataset_handler);
-    return ret;
-  }
+  if (ret) goto cleanup_dataset;
+
   ret = LGBM_DatasetSetFeatureNames(train_dataset_handler, features_name, n_feature);
-  if (ret) {
-    LGBM_DatasetFree(train_dataset_handler);
-    return ret;
-  }
+  if (ret) goto cleanup_dataset;
 
-  BoosterHandle booster;
   ret = LGBM_BoosterCreate(train_dataset_handler, task_mode.c_str(), &booster);
-  if (ret) {
-    LGBM_DatasetFree(train_dataset_handler);
-    return ret;
-  }
-  LGBM_BoosterAddValidData(booster, train_dataset_handler);
+  if (ret) goto cleanup_dataset;
 
-  int finished{0};
+  ret = LGBM_BoosterAddValidData(booster, train_dataset_handler);
+  if (ret) goto cleanup_booster;
+
   for (auto iter = 0; iter < 100; ++iter) {
     ret = LGBM_BoosterUpdateOneIter(booster, &finished);
-    if (ret) {
-      LGBM_DatasetFree(train_dataset_handler);
-      LGBM_BoosterFree(booster);
-      return ret;
-    }
+    if (ret) goto cleanup_booster;
     if (finished) break;
   }
 
@@ -575,10 +584,8 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
    * it into a json format. When the unified model format is ready to remove the wrapper by
    * defining `LIGHTGBM_UNIFY_FORMAT`.
    */
-  int64_t bufflen{1024}, out_len{0};
-  auto model_content_buff = std::make_unique<char[]>(bufflen);
+  model_content_buff = std::make_unique<char[]>(bufflen);
   memset(model_content_buff.get(), 0x0, bufflen);
-
 #ifdef LIGHTGBM_UNIFY_FORMAT
   ret =
       LGBM_BoosterDumpModel(booster, 0, -1, C_API_FEATURE_IMPORTANCE_GAIN, bufflen, &out_len, model_content_buff.get());
@@ -586,12 +593,7 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
   ret = LGBM_BoosterSaveModelToString(booster, 0, -1, C_API_FEATURE_IMPORTANCE_GAIN, bufflen, &out_len,
                                       model_content_buff.get());
 #endif
-  if (ret) {
-    LGBM_DatasetFree(train_dataset_handler);
-    LGBM_BoosterFree(booster);
-    return ret;
-  }
-
+  if (ret) goto cleanup_booster;
   if (out_len > bufflen) {
     model_content_buff.reset(new char[out_len + 1]);
     memset(model_content_buff.get(), 0x0, bufflen);
@@ -615,7 +617,9 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
   #endif
   }
   model_content.assign(model_content_buff.get(), out_len);
+
   #ifndef LIGHTGBM_UNIFY_FORMAT
+  { //start to assemble the model object json file.
     Json_object *model_obj = new (std::nothrow) Json_object();
     if (model_obj == nullptr) return -1;
     model_obj->add_clone("SHANNON_LIGHTGBM_CONTENT", new (std::nothrow) Json_string(model_content));
@@ -623,11 +627,14 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
     String json_format_content;
     model_content_json.to_string(&json_format_content, false, "ML_train", [] { assert(false); });
     model_content.assign(json_format_content.c_ptr_safe(), json_format_content.length());
+  }
   #endif
   // clang-format on
 
-  LGBM_DatasetFree(train_dataset_handler);
+cleanup_booster:
   LGBM_BoosterFree(booster);
+cleanup_dataset:
+  LGBM_DatasetFree(train_dataset_handler);
   return ret;
 }
 

@@ -1,0 +1,50 @@
+##############################################################################
+# ShannonBase test case for ML functions.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--disable_warnings
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml;
+CREATE DATABASE shannon_ml;
+ALTER DATABASE shannon_ml CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml;
+--enable_warnings
+
+CREATE TABLE census_train ( age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
+CREATE TABLE census_test LIKE census_train;
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_train_load.csv' INTO TABLE census_train FIELDS TERMINATED BY ',' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_test_load.csv' INTO TABLE census_test FIELDS TERMINATED BY ',' ;
+--enable_query_log
+
+SET @census_model = 'census_test_train';
+
+ALTER TABLE census_train SECONDARY_LOAD;
+
+#NULL OPTIONS
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', NULL, @census_model);
+
+SET @census_model = 'census_test_train1';
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
+
+SET @census_model = 'census_test_train2';
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task','classification', 'exclude_model_list', JSON_ARRAY('LogisticRegression', 'GaussianNB')),   @census_model);
+
+SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
+       JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+FROM ML_SCHEMA_root.MODEL_CATALOG;
+
+SELECT CHUNK_ID, MODEL_HANDLE from ML_SCHEMA_root.MODEL_OBJECT_CATALOG;
+
+SELECT MODEL_ID, ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE, ML_SCHEMA_root.MODEL_CATALOG.MODEL_OBJECT, MODEL_OWNER, 
+       JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+FROM  ML_SCHEMA_root.MODEL_CATALOG, ML_SCHEMA_root.MODEL_OBJECT_CATALOG
+WHERE ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE = ML_SCHEMA_root.MODEL_OBJECT_CATALOG.MODEL_HANDLE
+      AND ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE='census_test_train2';
+
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;

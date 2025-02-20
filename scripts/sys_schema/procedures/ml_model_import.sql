@@ -180,14 +180,14 @@ BEGIN
                                   '(MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, MODEL_OBJECT_SIZE, MODEL_METADATA)',
                                   ' VALUES(', '\"', in_model_handle_name, '\", NULL,',
                                   '\"', v_user_name, '\",', @model_obj_size, ',',
-                                  JSON_UNQUOTE(JSON_EXTRACT(v_model_meta, '$')), ');');
+                                  '''',JSON_UNQUOTE(JSON_EXTRACT(v_model_meta, '$')), ''');');
       PREPARE select_model_stmt FROM @model_obj_stm;
       EXECUTE select_model_stmt;
       DEALLOCATE PREPARE select_model_stmt;
 
       SET @model_obj_stm = CONCAT('INSERT INTO ', v_sys_meta_catalog_obj_name, '(MODEL_HANDLE, MODEL_OBJECT)',
                                     ' VALUES(', '\"', in_model_handle_name, '\",',
-                                    CAST(v_model_object AS CHAR), ');');
+                                    JSON_QUOTE(CAST(v_model_object AS CHAR)), ');');
       PREPARE select_model_stmt FROM @model_obj_stm;
       EXECUTE select_model_stmt;
       DEALLOCATE PREPARE select_model_stmt;

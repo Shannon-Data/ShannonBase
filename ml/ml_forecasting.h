@@ -53,7 +53,8 @@ class ML_forecasting : public ML_algorithm {
               Json_wrapper &exp_options) override;
   int explain_row() override;
   int explain_table() override;
-  int predict_row() override;
+  int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+                  Json_wrapper &result) override;
   int predict_table() override;
   ML_TASK_TYPE_T type() override;
 

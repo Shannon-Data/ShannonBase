@@ -10321,11 +10321,6 @@ double Item_func_ml_score::val_real() {
   return score;
 }
 
-longlong Item_func_ml_predicte_row::val_int() {
-  assert(fixed);
-  return 0;
-}
-
 longlong Item_func_ml_predicte_table::val_int() {
   assert(fixed);
   return 0;

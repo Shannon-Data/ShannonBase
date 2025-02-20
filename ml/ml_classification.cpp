@@ -80,7 +80,7 @@ ML_classification::~ML_classification() {}
 
 // returuns the # of record read successfully, otherwise 0 read failed.
 int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
-                                 std::string &label_name, std::vector<float> &label_data) {
+                                 std::string &label_name, std::vector<float> &label_data, int& n_class) {
   THD *thd = current_thd;
   auto n_read{0u};
 
@@ -119,48 +119,53 @@ int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, 
     return n_read;
   }
 
+  std::map<float, int> n_classes;
   while (sec_tb_handler->ha_rnd_next(table->record[0]) == 0) {
     for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
       Field *field_ptr = *(table->field + field_id);
-      // if (field_ptr->is_real_null())
+
       auto data_val{0.0};
-      String buf;
-      my_decimal dval;
       switch (field_ptr->type()) {
         case MYSQL_TYPE_INT24:
         case MYSQL_TYPE_LONG:
         case MYSQL_TYPE_LONGLONG:
         case MYSQL_TYPE_FLOAT:
-        case MYSQL_TYPE_DOUBLE:
+        case MYSQL_TYPE_DOUBLE: {
           data_val = field_ptr->val_real();
-          break;
+        } break;
         case MYSQL_TYPE_DECIMAL:
-        case MYSQL_TYPE_NEWDECIMAL:
+        case MYSQL_TYPE_NEWDECIMAL: {
+          my_decimal dval;
           field_ptr->val_decimal(&dval);
           my_decimal2double(10, &dval, &data_val);
-          break;
+        } break;
         case MYSQL_TYPE_VARCHAR:
         case MYSQL_TYPE_VAR_STRING:
-        case MYSQL_TYPE_STRING:  // convert txt string to numeric
+        case MYSQL_TYPE_STRING: { // convert txt string to numeric
+          String buf;
           buf.set_charset(field_ptr->charset());
           field_ptr->val_str(&buf);
           txt2numeric[field_ptr->field_name].insert(buf.c_ptr_safe());
           assert(txt2numeric[field_ptr->field_name].find(buf.c_ptr_safe()) != txt2numeric[field_ptr->field_name].end());
           data_val = std::distance(txt2numeric[field_ptr->field_name].begin(),
                                    txt2numeric[field_ptr->field_name].find(buf.c_ptr_safe()));
-          break;
+        } break;
         case MYSQL_TYPE_DATE:
         case MYSQL_TYPE_DATETIME:
-        case MYSQL_TYPE_TIME:
+        case MYSQL_TYPE_TIME: {
           data_val = field_ptr->val_real();
+        } break;
         default:
+          assert(false);
           break;
       }
 
       if (likely(strcmp(field_ptr->field_name, label_name.c_str()))) {
         train_data.push_back(data_val);
       } else {  // is label data.
-        label_data.push_back(data_val);
+        if (n_classes.find((float)data_val) == n_classes.end())
+          n_classes[(float)data_val] = n_classes.size();
+        label_data.push_back(n_classes[(float)data_val]);
       }
     }  // for
     n_read++;
@@ -173,6 +178,7 @@ int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, 
   // to close the secondary engine table.
   sec_tb_handler->ha_close();
 
+  n_class = n_classes.size();
   return n_read;
 }
 
@@ -224,27 +230,27 @@ int ML_classification::train() {
 
   std::vector<double> train_data;
   std::vector<float> label_data;
-  std::vector<std::string> features_name;
-  std::vector<std::string> target_names;
+  std::vector<std::string> features_name, target_names;
   Utils::splitString(m_target_name, ',', target_names);
   assert(target_names.size() == 1);
-
-  auto n_sample = read_data(source_table_ptr, train_data, features_name, target_names[0], label_data);
+  int n_class;
+  auto n_sample = read_data(source_table_ptr, train_data, features_name, target_names[0], label_data, n_class);
   Utils::close_table(source_table_ptr);
 
   // if it's a multi-target, then minus the size of target columns.
   auto n_feature = features_name.size();
-  std::string mode_params =
-      "task=train "
-      "boosting_type=gbdt "
-      "objective=binary "
-      "metric=binary_logloss,auc "
-      "metric_freq=1 "
-      "num_trees=100 "
-      "learning_rate=0.1 "
-      "num_leaves=63 "
-      "max_bin=254 ";
-  std::string model_content;
+  std::ostringstream oss;
+  if (n_class <= 2) { // binary-classification. pay attention to the format of params
+    oss << "task=train boosting_type=gbdt objective=binary metric=binary_logloss,auc metric_freq=1" <<
+            " is_training_metric=true num_trees=100 learning_rate=0.1 num_leaves=63 tree_learner=serial"<<
+            " feature_fraction=0.8 max_bin=255 bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=50" <<
+            " min_sum_hessian_in_leaf=5.0 is_enable_sparse=true use_two_round_loading=false";
+  } else { //multi classification
+    oss << "task=train boosting_type=gbdt objective=multiclass metric=multi_logloss,auc_mu" <<
+           " num_class=" << n_class << " metric_freq=1 is_training_metric=true max_bin=255" <<
+           " early_stopping=10 num_trees=100 learning_rate=0.05 num_leaves=31";
+  }
+  std::string model_content, mode_params(oss.str().c_str());
 
   std::vector<const char*> feature_names_cstr;
   for (const auto& name : features_name) {
@@ -267,7 +273,7 @@ int ML_classification::train() {
     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0f;
 
   // the definition of this table, ref: `ml_train.sql`
-  std::ostringstream oss;
+  oss.clear();
   oss << m_sch_name <<  "."  << m_table_name;
   std::string oper_type("train"), sch_tb_name (oss.str().c_str()), notes, opt_metrics;
 
@@ -402,7 +408,8 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   std::vector<double> test_data;
   std::vector<float> label_data;
   std::vector<std::string> features_name;
-  auto n_sample = read_data(source_table_ptr, test_data, features_name, target_name, label_data);
+  int n_class;
+  auto n_sample = read_data(source_table_ptr, test_data, features_name, target_name, label_data, n_class);
   Utils::close_table(source_table_ptr);
   if (!n_sample) return 0.0f;
 
@@ -459,7 +466,11 @@ int ML_classification::explain_row() { return 0; }
 
 int ML_classification::explain_table() { return 0; }
 
-int ML_classification::predict_row() { return 0; }
+int ML_classification::predict_row(Json_wrapper &input_data [[maybe_unused]],
+                                   std::string &model_handle_name [[maybe_unused]],
+                                   Json_wrapper &option [[maybe_unused]], Json_wrapper &result [[maybe_unused]]) {
+  return 0;
+}
 
 int ML_classification::predict_table() { return 0; }
 
