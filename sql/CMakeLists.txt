@@ -1015,6 +1015,7 @@ ADD_LIBRARY(sql_ml STATIC ${ML_SOURCES})
 #gomp required by lightgbm
 TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp)
 TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC 
+                           ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include
                            ${CMAKE_SOURCE_DIR}/extra/lightgbm/LightGBM/include)
 SET_TARGET_PROPERTIES(sql_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 

@@ -26,6 +26,11 @@
 #ifndef __SHANNONBASE_ML_CLASSICIFICATION_H__
 #define __SHANNONBASE_ML_CLASSICIFICATION_H__
 
+#include <map>
+#include <string>
+
+#include "sql-common/json_dom.h"  //Json_wrapper.
+
 #include "ml_algorithm.h"
 
 namespace LightGBM {
@@ -37,32 +42,85 @@ class Metric;
 class Config;
 }  // namespace LightGBM
 
+class TABLE;
 class Json_wrapper;
+
 namespace ShannonBase {
 namespace ML {
+
 class ML_classification : public ML_algorithm {
  public:
   ML_classification();
-  ~ML_classification();
+  virtual ~ML_classification() override;
   int train() override;
   int predict() override;
   int load(std::string &model_content) override;
-  int load_from_file(std::string modle_file_full_path, std::string model_handle_name) override;
-  int unload(std::string model_handle_name) override;
-  int import(std::string model_handle_name, std::string user_name, std::string &content) override;
-  double score() override;
+  int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
+  int unload(std::string &model_handle_name) override;
+  int import(Json_wrapper &model_object, Json_wrapper &model_metadata, std::string &model_handle_name) override;
+  double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle, std::string &metric_str,
+               Json_wrapper &option) override;
+
+  int explain(std::string &sch_tb_name, std::string &target_name, std::string &model_handle_name,
+              Json_wrapper &exp_options) override;
   int explain_row() override;
   int explain_table() override;
-  int predict_row() override;
+  int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+                  Json_wrapper &result) override;
   int predict_table() override;
-  ML_TASK_TYPE type() override;
+  ML_TASK_TYPE_T type() override;
+
+  void set_schema(std::string &schema_name) { m_sch_name = schema_name; }
+  std::string get_schema() const { return m_sch_name; }
+  void set_table(std::string &table_name) { m_table_name = table_name; }
+  std::string get_table() const { return m_table_name; }
+  void set_target(std::string &target_name) { m_target_name = target_name; }
+  std::string get_target() const { return m_target_name; }
+  void set_handle_name(std::string &handle_name) { m_handler_name = handle_name; }
+  std::string get_handle_name() const { return m_handler_name; }
+  void set_options(Json_wrapper &options) { m_options = options; }
+  const Json_wrapper &get_options() const { return m_options; }
+
+  enum class SCORE_METRIC_T {
+    BALANCED_ACCURACY,
+    F1_SAMPLES,
+    PRECISION_SAMPLES,
+    RECALL_SAMPLES,
+    F1,
+    PRECISION,
+    RECALL,
+    ROC_AUC,
+    ACCURACY,
+    F1_MACRO,
+    F1_MICRO,
+    F1_WEIGTHED,
+    NEG_LOG_LOSS,
+    PRECISION_MACRO,
+    PRECISION_MICRO,
+    PRECISION_WEIGHTED,
+    RECALL_MACRO,
+    RECALL_MICRO,
+    RECALL_WEIGHTED
+  };
+
+  static std::map<std::string, SCORE_METRIC_T> score_metrics;
 
  private:
+  int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
+                std::string &label_name, std::vector<float> &label_data, int &n_class);
+  MODEL_PREDICTION_EXP_T parse_option(Json_wrapper &options);
+
+ private:
+  // source data schema name.
   std::string m_sch_name;
+  // source data table name.
   std::string m_table_name;
+  // source labelled column name.
   std::string m_target_name;
+  // model handle name.
   std::string m_handler_name;
-  const Json_wrapper *m_options;
+  // model options JSON format.
+  Json_wrapper m_options;
 
   void *m_handler{nullptr};
 };

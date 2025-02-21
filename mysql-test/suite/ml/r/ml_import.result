@@ -1,0 +1,35 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml;
+CREATE DATABASE shannon_ml;
+ALTER DATABASE shannon_ml CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml;
+CREATE TABLE census_train ( age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
+CREATE TABLE census_test LIKE census_train;
+SET @census_model = 'census_test_im';
+ALTER TABLE census_train SECONDARY_LOAD;
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
+SET @shml_model = "census_test_im";
+SET @shml_object = ( SELECT model_object FROM ML_SCHEMA_root.MODEL_OBJECT_CATALOG  WHERE model_handle COLLATE utf8mb4_0900_ai_ci = @shml_model);
+SET @shml_metadata = (SELECT model_metadata FROM ML_SCHEMA_root.MODEL_CATALOG WHERE model_handle COLLATE utf8mb4_0900_ai_ci = @shml_model );
+SET @imported_model = 'census_test_imported';
+CALL sys.ML_MODEL_IMPORT(@shml_object, @shml_metadata, @imported_model);
+SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
+JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+FROM ML_SCHEMA_root.MODEL_CATALOG;
+MODEL_ID	MODEL_HANDLE	MODEL_OBJECT	MODEL_OWNER	task	feature_names
+1	census_test_im	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
+2	census_test_imported	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
+SELECT CHUNK_ID, MODEL_HANDLE from ML_SCHEMA_root.MODEL_OBJECT_CATALOG;
+CHUNK_ID	MODEL_HANDLE
+1	census_test_im
+2	census_test_imported
+SELECT MODEL_ID, ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE, ML_SCHEMA_root.MODEL_CATALOG.MODEL_OBJECT, MODEL_OWNER, 
+JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+FROM  ML_SCHEMA_root.MODEL_CATALOG, ML_SCHEMA_root.MODEL_OBJECT_CATALOG
+WHERE ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE = ML_SCHEMA_root.MODEL_OBJECT_CATALOG.MODEL_HANDLE;
+MODEL_ID	MODEL_HANDLE	MODEL_OBJECT	MODEL_OWNER	task	feature_names
+1	census_test_im	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
+2	census_test_imported	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;

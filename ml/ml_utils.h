@@ -26,31 +26,139 @@
 #ifndef __SHANNONBASE_ML_UTILS_H__
 #define __SHANNONBASE_ML_UTILS_H__
 
+#include <memory>
 #include <string>
+
 #include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
 #include "include/thr_lock.h"  //TL_READ
+
+#include "ml_info.h"
 
 class TABLE;
 class handler;
 class Json_wrapper;
+class Json_object;
+using std::string;
 
 namespace ShannonBase {
 namespace ML {
 class Utils {
  public:
-  static int open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type mode, TABLE **table_ptr);
-  static handler *get_secondary_handler(TABLE *source_table_ptr);
+  // open a table via schema name and table name.
+  static TABLE *open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type mode);
+
+  // get the primary a openned table handler on success, otherwise nullptr.
   static handler *get_primary_handler(TABLE *source_table_ptr);
+
+  // get the secondary handler of a openned table.
+  static handler *get_secondary_handler(TABLE *source_table_ptr);
+
+  // close a opened table.
   static int close_table(TABLE *table);
 
-  // do the ML jobs.
-  static BoosterHandle ML_train(std::string &task_mode, const void *training_data, uint n_data, uint data_type,
-                                const char **features, uint n_feature, std::string &model_content);
-  static int store_model_catalog(std::string &mode_type, std::string &oper_type, const Json_wrapper *options,
-                                 std::string &user_name, std::string &handler_name, std::string &model_content,
-                                 std::string &target_name, std::string &source_name);
+  /** to training a mode by using specific data. success, returns hanlde of the trained model,
+   *  otherwise, returns nullptr.
+   *  @param[in] task_mode, task mode, such as classification, regression, etc.
+   *  @param[in] data_type, the data type, such as INT32, FLOAT32, etc.
+   *  @param[in] training data, the source data.
+   *  @param[in] n_data, # of source data.
+   *  @param[in] n_feature, # of features used to do training.
+   *  @param[in] label_data_type, the type of labelled data.
+   *  @param[in] label_data, the source of the labelled data.
+   *  @param[in] model_content, the trained model in string format.
+   *  @retval handler of trained mode on success. Otherwise, null failed
+   */
+  static int ML_train(std::string &task_mode, uint data_type, const void *training_data, uint n_data,
+                      const char **features_name, uint n_feature, uint label_data_type, const void *label_data,
+                      std::string &model_content);
+
+  /**
+   * to calcl the quality and reliability of a trained model.
+   * @param[in] model_handle_name, the name of loaded model name.
+   * @param[in] metrics, metrics name string.
+   * @param[in] testing_data, the test data.
+   * @param[in] features, feature names array.
+   * @param[in] lable_col_name, label column name.
+   * @param[in] label_data, the label data of testing data.
+   * @retval value of trained model.
+   */
+  static double model_score(std::string &model_handle_name, int metric_type, size_t n_samples, size_t n_features,
+                            std::vector<double> &testing_data, std::vector<float> &label_data);
+  /**
+   * to build up a json format model metadata.
+   * params defintion ref to: https://dev.mysql.com/doc/heatwave/en/mys-hwaml-ml-model-metadata.html
+   * @retrun none-nullptr success, meta_data is the built meta inforation, otherwise failed.
+   */
+  static Json_object *build_up_model_metadata(
+      std::string &task, std::string &target_column_name, std::string &tain_table_name,
+      std::vector<std::string> &featurs_name, Json_object *model_explanation, std::string &notes, std::string &format,
+      std::string &status, std::string &model_quality, double training_time, std::string &algorithm_name,
+      double training_score, size_t n_rows, size_t n_columns, size_t n_selected_rows, size_t n_selected_columns,
+      std::string &optimization_metric, std::vector<std::string> &selected_column_names, double contamination,
+      Json_wrapper *train_options, Json_object *training_params, Json_object *onnx_inputs_info,
+      Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks);
+
+  /** to store the trained model into ML_SCHEMA_xxx.MODEL_CATALOG.
+   *  @param[in] model_content, the trainned model in string formation.
+   *  @param[in] option, the model option, in JSON formation.
+   *  @param[in] user_name, the who create/build this model.
+   *  @param[in] handler_name, the handler name, unique key.
+   *  @retval 0 success.
+   *  @retval errcode failed.
+   *  */
+  static int store_model_catalog(size_t model_obj_size, const Json_wrapper *model_meta, std::string &handler_name);
+
+  /**
+   * store the model meta info into model_object_catalog table.
+   * @param[in] model_handle_name, the name of this model handler.
+   * @param[in] model_meta, the json wrapper handler of this json-formattted model.
+   * @return 0 success, otherwise failed.
+   */
+  static int store_model_object_catalog(std::string &model_handle_name, Json_wrapper *model_meta);
+
+  /* get the model content via handle name, sucess return 0, otherise failed.
+   * @param[in] model_handle_name,model user name.
+   * @param[in] options, the model option we got. JSON format.
+   * @retval 0 success.
+   * @retval error code failed.
+   */
+  static int read_model_content(std::string &model_handle_name, Json_wrapper &options);
+
+  /* get the model object content via handle name, sucess return 0, otherise failed.
+   * @param[in] model_user_name, model user name.
+   * @param[in/out] model_content, the model content. JSON format.
+   * @retval 0 success.
+   * @retval error code failed.
+   */
+  static int read_model_object_content(std::string &model_handle_name, std::string &model_content);
+
+  /**
+   * to build a model from string, which is stored by saviing the model to file/string.
+   * @param[in] model_content, the trained model content.
+   * @return BoosterHandle success, otherwise nullptr.
+   */
+  static BoosterHandle load_trained_model_from_string(std::string &model_content);
+
+  /**
+   * parse the model option into string formation, and get the value. rewrites from `wrapper_to_string` function.
+   * @param[in] options, the model option in JSON format.
+   * @param[out] option_value, the value of the option.
+   * @param[in] key, the key of the option.
+   * @param[in] depth, the depth of the option, start from 0.
+   * @return 0 success, otherwise failed.f
+   */
+  static int parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth);
+
+  /**
+   * to split a string by a del, and stores into a vector.
+   * @param[in]
+   *
+   * */
+  static int splitString(const std::string &str, char delimiter, std::vector<std::string> &output);
 
  private:
+  static double calculate_balanced_accuracy(size_t n_samples, std::vector<double> &predictions,
+                                            std::vector<float> &label_data);
   Utils() = delete;
   virtual ~Utils() = delete;
   // disable copy ctor, operator=, etc.

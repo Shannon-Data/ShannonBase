@@ -18,7 +18,10 @@ DROP PROCEDURE IF EXISTS ml_train;
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_train (
-        IN in_table_name VARCHAR(64), IN in_target_name VARCHAR(64), IN in_option JSON, IN in_model_handle VARCHAR(64)
+        IN in_table_name VARCHAR(64),
+        IN in_target_name VARCHAR(64),
+        IN in_option JSON,
+        IN in_model_handle VARCHAR(64)
     )
     COMMENT '
 Description
@@ -48,9 +51,8 @@ mysql> CALL sys.ML_TRAIN(\'ml_data.iris_train\', \'class\',
 '
     SQL SECURITY INVOKER
     NOT DETERMINISTIC
-    CONTAINS SQL
+    MODIFIES SQL DATA
 BEGIN
-    DECLARE v_error BOOLEAN DEFAULT FALSE;
     DECLARE v_user_name VARCHAR(64);
     DECLARE v_db_name_check VARCHAR(64);
     DECLARE v_sys_schema_name VARCHAR(64);
@@ -61,6 +63,11 @@ BEGIN
     DECLARE v_train_table_name VARCHAR(64);
     DECLARE v_model_name VARCHAR(255);
 
+    IF in_table_name NOT REGEXP '^[^.]+\.[^.]+$' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Invalid schema.table format, please using fully qualified name of the table.';
+    END IF;
+
     SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;  
     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
   
@@ -69,6 +76,7 @@ BEGIN
     WHERE SCHEMA_NAME = v_sys_schema_name;
 
     IF v_db_name_check IS NULL THEN
+        START TRANSACTION;
         SET @create_db_stmt = CONCAT('CREATE DATABASE ', v_sys_schema_name, ';');
         PREPARE create_db_stmt FROM @create_db_stmt;
         EXECUTE create_db_stmt;
@@ -77,23 +85,31 @@ BEGIN
         SET @create_tb_stmt = CONCAT(' CREATE TABLE ', v_sys_schema_name, '.MODEL_CATALOG(
                                         MODEL_ID INT NOT NULL AUTO_INCREMENT,
                                         MODEL_HANDLE VARCHAR(255) UNIQUE,
-                                        MODEL_OBJECT LONGTEXT,
-                                        MODEL_OWNER VARCHAR(64),
-                                        BUILD_TIMESTAMP TIMESTAMP,
-                                        TARGET_COLUMN_NAME VARCHAR(64),
-                                        TRAIN_TABLE_NAME VARCHAR(255),
-                                        MODEL_OBJECT_SIZE INT,
-                                        MODEL_TYPE  VARCHAR(64),
-                                        TASK  VARCHAR(64),
-                                        COLUMN_NAMES VARCHAR(1024),
-                                        MODEL_EXPLANATION NUMERIC,
-                                        LAST_ACCESSED TIMESTAMP,
-                                        MODEL_METADATA JSON,
-                                        NOTES VARCHAR(1024),
+                                        MODEL_OBJECT JSON DEFAULT NULL,
+                                        MODEL_OWNER VARCHAR(255) DEFAULT NULL,
+                                        MODEL_OBJECT_SIZE INT DEFAULT 0,
+                                        MODEL_METADATA JSON DEFAULT NULL,
                                         PRIMARY KEY (MODEL_ID));');
         PREPARE create_tb_stmt FROM @create_tb_stmt;
         EXECUTE create_tb_stmt;
         DEALLOCATE PREPARE create_tb_stmt;
+
+        SET @create_tb_stmt = CONCAT(' CREATE TABLE ', v_sys_schema_name, '.MODEL_OBJECT_CATALOG (
+                                        CHUNK_ID INT NOT NULL AUTO_INCREMENT,
+                                        MODEL_HANDLE VARCHAR(255),
+                                        MODEL_OBJECT JSON DEFAULT NULL,
+                                        PRIMARY KEY (CHUNK_ID, MODEL_HANDLE));');
+        PREPARE create_tb_stmt FROM @create_tb_stmt;
+        EXECUTE create_tb_stmt;
+        DEALLOCATE PREPARE create_tb_stmt;
+
+        SET @add_fk_tb_stmt = CONCAT(' ALTER TABLE ', v_sys_schema_name, '.MODEL_OBJECT_CATALOG
+                                     ADD CONSTRAINT fk_cat_handle_objcat_handl FOREIGN KEY (MODEL_HANDLE)',
+                                     'REFERENCES ', v_sys_schema_name, '.MODEL_CATALOG(MODEL_HANDLE);');
+        PREPARE add_fk_tb_stmt FROM @add_fk_tb_stmt;
+        EXECUTE add_fk_tb_stmt;
+        DEALLOCATE PREPARE add_fk_tb_stmt;
+        COMMIT;
     END IF;
 
     SELECT SUBSTRING_INDEX(in_table_name, '.', 1) INTO v_train_schema_name;
@@ -103,13 +119,14 @@ BEGIN
     FROM INFORMATION_SCHEMA.TABLES
     WHERE TABLE_SCHEMA = v_train_schema_name AND TABLE_NAME = v_train_table_name;
     IF v_train_obj_check = 0 THEN
-        SET v_db_err_msg = CONCAT(in_table_name, ' does not exists.');
+        SET v_db_err_msg = CONCAT(in_table_name, ' used to do training does not exists.');
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;
     END IF;
 
     IF in_model_handle IS NOT NULL THEN
-      SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_HANDLE) INTO @MODEL_HANDLE_COUNT  FROM ',  v_sys_schema_name, '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle, '\";');
+      SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_HANDLE) INTO @MODEL_HANDLE_COUNT  FROM ',  v_sys_schema_name,
+                                     '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle, '\";');
       PREPARE select_model_stmt FROM @select_model_stm;
       EXECUTE select_model_stmt;
       SELECT @MODEL_HANDLE_COUNT INTO v_train_obj_check;
@@ -119,21 +136,33 @@ BEGIN
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = "The model has already existed.";
       END IF;
+    ELSE
+      SET in_model_handle = CONCAT(in_table_name, '_', v_user_name, '_', SUBSTRING(MD5(RAND()), 1, 10));
     END IF;
 
     SELECT COUNT(COLUMN_NAME) INTO v_train_obj_check
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = v_train_schema_name AND TABLE_NAME = v_train_table_name AND COLUMN_NAME = in_target_name;
     IF v_train_obj_check = 0 THEN
-        SET v_db_err_msg = CONCAT(in_target_name, ' does not exists.');
+        SET v_db_err_msg = CONCAT('column ', in_target_name, ' labelled does not exists in ', v_train_table_name);
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;
     END IF;
+
+    -- DN NOT REMOVE STAART TRANSACTION AND COMMIT STATEMENTS. THEY ARE REQUIRED FOR THE TRANSACTIONAL CONSISTENCY
+    -- IN ML_TRAIN, WE INSERT META INFO INTO MODEL_CATALOG TABLE
+    IF in_option IS NULL THEN
+      SET in_option = JSON_OBJECT('task', 'classification');
+    END IF;
+
+    START TRANSACTION;
     SELECT ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle) INTO v_train_obj_check;
+    COMMIT;
+
     IF v_train_obj_check != 0 THEN
         SET v_db_err_msg = CONCAT('ML_TRAIN failed.');
         SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;
-    END IF; 
+    END IF;
 END$$
 DELIMITER ;

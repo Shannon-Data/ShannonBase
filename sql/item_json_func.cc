@@ -74,6 +74,8 @@
 #include "string_with_len.h"
 #include "template_utils.h"  // down_cast
 
+#include "ml/auto_ml.h" //auto_ml
+
 class PT_item_list;
 
 /** Helper routines */
@@ -2980,6 +2982,25 @@ bool Item_func_json_merge_preserve::val_json(Json_wrapper *wr) {
   *wr = Json_wrapper(std::move(result_dom));
   null_value = false;
   return false;
+}
+
+bool Item_func_ml_predicte_row::val_json(Json_wrapper* wr) {
+  assert(fixed && arg_count == 3);
+
+  Json_wrapper input_data;
+  args[0]->val_json(&input_data);
+
+  String handle_name;
+  auto handle_name_cptr = args[1]->val_str(&handle_name);
+
+  Json_wrapper predict_options;
+  args[2]->val_json(&predict_options);
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  auto ret = auto_ml->
+    predict_row(input_data, handle_name_cptr, predict_options, *wr);
+  return (ret == 0) ? false : true;
 }
 
 String *Item_func_json_quote::val_str(String *str) {

@@ -883,6 +883,24 @@ class Item_func_json_merge_patch : public Item_json_func {
   bool val_json(Json_wrapper *wr) override;
 };
 
+class Item_func_ml_predicte_row : public Item_json_func {
+  public:
+   Item_func_ml_predicte_row(THD *thd, const POS &pos, PT_item_list *a)
+       : Item_json_func(thd, pos, a) {}
+   enum Functype functype() const override { return JSON_OBJECT_FUNC; }
+   bool val_json(Json_wrapper* wr) override;
+   const char *func_name() const override {
+     return "ML_PREDICT_ROW";
+   }
+   bool resolve_type(THD *thd) override {
+    if (Item_json_func::resolve_type(thd)) return true;
+    if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_JSON)) return true;
+    if (param_type_is_default(thd, 2, 3, MYSQL_TYPE_JSON)) return true;
+    if (param_type_is_default(thd, 1, 2)) return true;    
+     return false;
+   }
+ };
+
 /**
   Represents the JSON function JSON_QUOTE()
 */
