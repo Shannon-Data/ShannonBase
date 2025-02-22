@@ -80,12 +80,13 @@ ML_classification::~ML_classification() {}
 
 // returuns the # of record read successfully, otherwise 0 read failed.
 int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
-                                 std::string &label_name, std::vector<float> &label_data, int& n_class) {
+                                std::string &label_name, std::vector<float> &label_data,
+                                int& n_class, txt2numeric_map_t& txt2numeric_dict) {
   THD *thd = current_thd;
   auto n_read{0u};
 
+  txt2numeric_map_t txt2numeric;
   // read the training data from target table.
-  std::map<std::string, std::set<std::string>> txt2numeric;
   for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
     Field *field_ptr = *(table->field + field_id);
     txt2numeric[field_ptr->field_name];
@@ -149,6 +150,7 @@ int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, 
           assert(txt2numeric[field_ptr->field_name].find(buf.c_ptr_safe()) != txt2numeric[field_ptr->field_name].end());
           data_val = std::distance(txt2numeric[field_ptr->field_name].begin(),
                                    txt2numeric[field_ptr->field_name].find(buf.c_ptr_safe()));
+          txt2numeric_dict[field_ptr->field_name].insert(buf.c_ptr_safe());
         } break;
         case MYSQL_TYPE_DATE:
         case MYSQL_TYPE_DATETIME:
@@ -234,7 +236,9 @@ int ML_classification::train() {
   Utils::splitString(m_target_name, ',', target_names);
   assert(target_names.size() == 1);
   int n_class;
-  auto n_sample = read_data(source_table_ptr, train_data, features_name, target_names[0], label_data, n_class);
+  txt2numeric_map_t txt2num_dict;
+  auto n_sample = read_data(source_table_ptr, train_data, features_name, target_names[0], label_data, 
+                            n_class, txt2num_dict);
   Utils::close_table(source_table_ptr);
 
   // if it's a multi-target, then minus the size of target columns.
@@ -274,6 +278,7 @@ int ML_classification::train() {
 
   // the definition of this table, ref: `ml_train.sql`
   oss.clear();
+  oss.str("");
   oss << m_sch_name <<  "."  << m_table_name;
   std::string oper_type("train"), sch_tb_name (oss.str().c_str()), notes, opt_metrics;
 
@@ -304,11 +309,12 @@ int ML_classification::train() {
                                                 features_name,  /* names of the columns selected by feature selection*/
                                                 0,              /*contamination*/
                                                 &m_options,     /*options of ml_train*/
-                                                nullptr,        /**training_params */
+                                                mode_params,    /**training_params */
                                                 nullptr,        /**onnx_inputs_info */
                                                 nullptr,        /*onnx_outputs_info*/
                                                 nullptr,        /*training_drift_metric*/
-                                                1               /* chunks */
+                                                1               /* chunks */,
+                                                txt2num_dict   /* txt2numeric dict */
                                               );
 
   if (!meta_json)
@@ -409,7 +415,8 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   std::vector<float> label_data;
   std::vector<std::string> features_name;
   int n_class;
-  auto n_sample = read_data(source_table_ptr, test_data, features_name, target_name, label_data, n_class);
+  txt2numeric_map_t txt2numeric;
+  auto n_sample = read_data(source_table_ptr, test_data, features_name, target_name, label_data, n_class, txt2numeric);
   Utils::close_table(source_table_ptr);
   if (!n_sample) return 0.0f;
 
@@ -466,10 +473,90 @@ int ML_classification::explain_row() { return 0; }
 
 int ML_classification::explain_table() { return 0; }
 
-int ML_classification::predict_row(Json_wrapper &input_data [[maybe_unused]],
-                                   std::string &model_handle_name [[maybe_unused]],
-                                   Json_wrapper &option [[maybe_unused]], Json_wrapper &result [[maybe_unused]]) {
-  return 0;
+int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+                                   Json_wrapper &result) {
+  assert(result.empty());
+  std::ostringstream err;
+  if (!option.empty()) {
+    err << "classification does not support option.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  txt2numeric_map_t txt2numeric;
+  std::string keystr;
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
+
+  OPTION_VALUE_T meta_feature_names, input_data_col_names;
+  if (Utils::parse_json(input_data, input_data_col_names, keystr, 0) ||
+      Utils::parse_json(model_meta, meta_feature_names, keystr, 0)) {
+    err << "invalid input data or model meta info.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  auto feature_names = meta_feature_names["column_names"];
+  if (feature_names.size() != input_data_col_names.size()) {
+    err << "input data columns size does not match the model feature columns size.";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  for (auto &feature_name : feature_names) {
+    if (input_data_col_names.find(feature_name) == input_data_col_names.end()) {
+      err << "input data columns does not contain the model feature column: " << feature_name;
+      my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  std::string model_content = Loaded_models[model_handle_name];
+  assert(model_content.length());
+  BoosterHandle booster = nullptr;
+  booster = Utils::load_trained_model_from_string(model_content);
+  if (!booster) return HA_ERR_GENERIC;
+
+  auto n_feature = feature_names.size();
+  int64 num_results = n_feature + 1;  // contri value + bias
+  std::vector<double> sample_data, predictions(num_results, 0.0);
+  Json_object *json_obj = new (std::nothrow) Json_object();
+  if (json_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+
+  for (auto &feature_name : feature_names) {
+    auto value = 0.0;
+    if (meta_feature_names.find(feature_name) == meta_feature_names.end()) {  // not a txt field.
+      value = std::stod(input_data_col_names[feature_name][0]);
+      json_obj->add_alias(feature_name, new (std::nothrow) Json_string(input_data_col_names[feature_name][0]));
+    } else {  // find in txt2num_dict.
+      auto txt2num = meta_feature_names[feature_name];
+      auto input_val = input_data_col_names[feature_name][0];
+      json_obj->add_alias(feature_name, new (std::nothrow) Json_string(input_val));
+      value = std::distance(txt2num.begin(), std::find(txt2num.begin(), txt2num.end(), input_val));
+    }
+    sample_data.push_back(value);
+  }
+  result = Json_wrapper(json_obj);
+
+  // clang-format off
+  auto ret = LGBM_BoosterPredictForMat(booster,
+                                       sample_data.data(),
+                                       C_API_DTYPE_FLOAT64,
+                                       1,                   // # of row
+                                       n_feature,           // # of col
+                                       1,                    // row oriented
+                                       C_API_PREDICT_CONTRIB,
+                                       0,                    // start iter
+                                       -1,                   // stop iter
+                                       "",                   // contribution params
+                                       &num_results,         // # of results
+                                       predictions.data());
+  // clang-format on
+  if (ret) goto fin;
+fin:
+  LGBM_BoosterFree(booster);
+  return ret;
 }
 
 int ML_classification::predict_table() { return 0; }
