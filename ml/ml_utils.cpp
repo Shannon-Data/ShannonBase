@@ -141,7 +141,7 @@ int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::
       for (const auto &iter : Json_object_wrapper(options)) {
         const MYSQL_LEX_CSTRING &key_lex = iter.first;
         std::string option_key(key_lex.str, key_lex.length);
-        option_value[option_key];
+        if (option_key.length()) option_value[option_key];
         auto iter_value = iter.second;
         if (parse_json(iter_value, option_value, option_key, depth)) return true; /* purecov: inspected */
       }
@@ -252,16 +252,19 @@ Json_object *Utils::build_up_model_metadata(
     std::string &status, std::string &model_quality, double training_time, std::string &algorithm_name,
     double training_score, size_t n_rows, size_t n_columns, size_t n_selected_rows, size_t n_selected_columns,
     std::string &optimization_metric, std::vector<std::string> &selected_column_names, double contamination,
-    Json_wrapper *train_options, Json_object *training_params, Json_object *onnx_inputs_info,
-    Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks) {
+    Json_wrapper *train_options, std::string &training_params, Json_object *onnx_inputs_info,
+    Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks,
+    std::map<std::string, std::set<std::string>> &txt2num_dict) {
   auto now = std::chrono::system_clock::now();
   auto now_seconds = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
 
   Json_object *model_obj = new (std::nothrow) Json_object();
   if (model_obj == nullptr) return nullptr;
 
+  if (training_params.empty()) training_params = "{}";
+
   model_obj->add_clone("options", train_options->clone_dom().get());
-  model_obj->add_clone("training_params", training_params);
+  model_obj->add_clone("training_params", new (std::nothrow) Json_string(training_params));
   model_obj->add_clone("onnx_inputs_info", onnx_inputs_info);
   model_obj->add_clone("onnx_outputs_info", onnx_outputs_info);
   model_obj->add_clone("training_drift_metric", training_drift_metric);
@@ -303,6 +306,19 @@ Json_object *Utils::build_up_model_metadata(
 
   model_obj->add_clone("chunks", new (std::nothrow) Json_double(chunks));
 
+  if (txt2num_dict.size()) {
+    Json_object *txt2num_dict_obj = new (std::nothrow) Json_object();
+    for (const auto &iter : txt2num_dict) {
+      const std::string &key = iter.first;
+      const std::set<std::string> &value = iter.second;
+      Json_array *value_arr = new (std::nothrow) Json_array();
+      for (const auto &val : value) {
+        value_arr->append_clone(new (std::nothrow) Json_string(val));
+      }
+      txt2num_dict_obj->add_clone(key.c_str(), value_arr);
+    }
+    model_obj->add_clone("txt2num_dict", txt2num_dict_obj);
+  }
   return model_obj;
 }
 

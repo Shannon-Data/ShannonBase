@@ -216,7 +216,43 @@ int Auto_ML::predict_row(Json_wrapper &input, String *model_handler_name, Json_w
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
-  return m_ml_task ? m_ml_task->predict_row(input, model_handler_name_str, options, result) : HA_ERR_GENERIC;
+  // start to check validity of input options.
+  std::ostringstream err;
+  int ret{0};
+  if (!options.empty()) {
+    OPTION_VALUE_T opt_values;
+    std::string keystr;
+    Utils::parse_json(options, opt_values, keystr, 0);
+
+    auto opt_value = opt_values["remove_seen"];
+    assert(opt_value.size() == 1);
+    if (opt_value[0] != "true" && opt_value[0] != "false") {
+      err << "wrong remove_seen value in optin you specified: " << opt_value[0];
+      ret = HA_ERR_GENERIC;
+      goto error;
+    }
+    opt_value = opt_values["additional_details"];
+    assert(opt_value.size() == 1);
+    if (opt_value[0] != "true" && opt_value[0] != "false") {
+      err << "wrong additional_details value in optin you specified: " << opt_value[0];
+      ret = HA_ERR_GENERIC;
+      goto error;
+    }
+    opt_value = opt_values["recommend"];  // for recommendation option.
+    if (opt_value.size() && (opt_value[0] != "ratings" && opt_value[0] != "items" && opt_value[0] != "users" &&
+                             opt_value[0] != "users_to_items" && opt_value[0] != "items_to_users" &&
+                             opt_value[0] != "items_to_items" && opt_value[0] != "users_to_users")) {
+      err << "wrong additional_details value in optin you specified: " << opt_value[0];
+      ret = HA_ERR_GENERIC;
+      goto error;
+    }
+  }
+  ret = m_ml_task ? m_ml_task->predict_row(input, model_handler_name_str, options, result) : HA_ERR_GENERIC;
+error:
+  if (ret) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  }
+  return ret;
 }
 
 int Auto_ML::import(Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_handler_name) {

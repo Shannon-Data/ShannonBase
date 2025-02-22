@@ -27,6 +27,7 @@
 #define __SHANNONBASE_ML_UTILS_H__
 
 #include <memory>
+#include <set>
 #include <string>
 
 #include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
@@ -95,8 +96,9 @@ class Utils {
       std::string &status, std::string &model_quality, double training_time, std::string &algorithm_name,
       double training_score, size_t n_rows, size_t n_columns, size_t n_selected_rows, size_t n_selected_columns,
       std::string &optimization_metric, std::vector<std::string> &selected_column_names, double contamination,
-      Json_wrapper *train_options, Json_object *training_params, Json_object *onnx_inputs_info,
-      Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks);
+      Json_wrapper *train_options, std::string &training_params, Json_object *onnx_inputs_info,
+      Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks,
+      std::map<std::string, std::set<std::string>> &txt2num_dict);
 
   /** to store the trained model into ML_SCHEMA_xxx.MODEL_CATALOG.
    *  @param[in] model_content, the trainned model in string formation.
