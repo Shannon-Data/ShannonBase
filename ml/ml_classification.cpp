@@ -519,8 +519,8 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   auto n_feature = feature_names.size();
   int64 num_results = n_feature + 1;  // contri value + bias
   std::vector<double> sample_data, predictions(num_results, 0.0);
-  Json_object *json_obj = new (std::nothrow) Json_object();
-  if (json_obj == nullptr) {
+  Json_object *root_obj = new (std::nothrow) Json_object();
+  if (root_obj == nullptr) {
     return HA_ERR_GENERIC;
   }
 
@@ -528,16 +528,15 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
     auto value = 0.0;
     if (meta_feature_names.find(feature_name) == meta_feature_names.end()) {  // not a txt field.
       value = std::stod(input_data_col_names[feature_name][0]);
-      json_obj->add_alias(feature_name, new (std::nothrow) Json_string(input_data_col_names[feature_name][0]));
+      root_obj->add_alias(feature_name, new (std::nothrow) Json_string(input_data_col_names[feature_name][0]));
     } else {  // find in txt2num_dict.
       auto txt2num = meta_feature_names[feature_name];
       auto input_val = input_data_col_names[feature_name][0];
-      json_obj->add_alias(feature_name, new (std::nothrow) Json_string(input_val));
+      root_obj->add_alias(feature_name, new (std::nothrow) Json_string(input_val));
       value = std::distance(txt2num.begin(), std::find(txt2num.begin(), txt2num.end(), input_val));
     }
     sample_data.push_back(value);
   }
-  result = Json_wrapper(json_obj);
 
   // clang-format off
   auto ret = LGBM_BoosterPredictForMat(booster,
@@ -553,9 +552,40 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
                                        &num_results,         // # of results
                                        predictions.data());
   // clang-format on
-  if (ret) goto fin;
-fin:
   LGBM_BoosterFree(booster);
+  if (ret) {
+    return HA_ERR_GENERIC;
+  }
+
+  // prediction
+  root_obj->add_alias("Prediction", new (std::nothrow) Json_string(meta_feature_names["train_table_name"][0]));
+
+  // ml_results
+  Json_object *ml_results_obj = new (std::nothrow) Json_object();
+  if (ml_results_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+  // ml_results: prediction
+  Json_object *predictions_obj = new (std::nothrow) Json_object();
+  if (predictions_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+  predictions_obj->add_alias("class", new (std::nothrow) Json_string(meta_feature_names["train_table_name"][0]));
+  ml_results_obj->add_alias("predictions", predictions_obj);
+
+  Json_object *probabilities_obj = new (std::nothrow) Json_object();
+  if (probabilities_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+  auto index{0};
+  for (auto &feat_name : feature_names) {
+    probabilities_obj->add_alias(feat_name, new (std::nothrow) Json_double(predictions[index]));
+    index++;
+  }
+  ml_results_obj->add_alias("probabilities", probabilities_obj);
+
+  root_obj->add_alias("ml_results", ml_results_obj);
+  result = Json_wrapper(root_obj);
   return ret;
 }
 
