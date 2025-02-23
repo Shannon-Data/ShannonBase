@@ -43,7 +43,7 @@ class ML_recommendation : public ML_algorithm {
   int train() override;
   int predict() override;
   int load(std::string &model_content) override;
-  int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
+  int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;
   int import(Json_wrapper &model_object, Json_wrapper &model_metadata, std::string &model_handle_name) override;
   double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle, std::string &metric_str,
@@ -54,7 +54,8 @@ class ML_recommendation : public ML_algorithm {
   int explain_table() override;
   int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                   Json_wrapper &result) override;
-  int predict_table() override;
+  int predict_table(std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
+                    Json_wrapper &options) override;
   ML_TASK_TYPE_T type() override;
 
   static const std::vector<std::string> explicit_metrics;

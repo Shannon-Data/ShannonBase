@@ -10322,8 +10322,25 @@ double Item_func_ml_score::val_real() {
 }
 
 longlong Item_func_ml_predicte_table::val_int() {
-  assert(fixed);
-  return 0;
+  DBUG_TRACE;
+  assert(fixed && arg_count >= 3 && arg_count <= 4);
+  String sch_tb_name;
+  auto sch_tb_name_cptr = args[0]->val_str(&sch_tb_name);
+
+  String handle_name;
+  auto handle_name_cptr = args[1]->val_str(&handle_name);
+
+  String out_sch_tb_name;
+  auto out_sch_tb_name_cptr = args[2]->val_str(&out_sch_tb_name);
+
+  Json_wrapper predict_table_options;
+  args[3]->val_json(&predict_table_options);
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  auto ret = auto_ml->predict_table(sch_tb_name_cptr, handle_name_cptr, out_sch_tb_name_cptr,
+                                    predict_table_options);
+  return ret;
 }
 
 longlong Item_func_ml_explain::val_int() {
