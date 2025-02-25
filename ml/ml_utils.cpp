@@ -36,6 +36,7 @@
 #include "sql-common/json_dom.h"
 #include "sql/binlog.h"
 #include "sql/current_thd.h"
+#include "sql/dd/cache/dictionary_client.h"
 #include "sql/derror.h"  //ER_TH
 #include "sql/field.h"
 #include "sql/handler.h"
@@ -44,6 +45,8 @@
 #include "sql/table.h"
 
 #include "ml_algorithm.h"
+#include "ml_classification.h"
+#include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
 
 namespace ShannonBase {
 namespace ML {
@@ -189,6 +192,25 @@ int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::
   return 0;
 }
 
+int Utils::check_table_available(std::string &sch_tb_name) {
+  std::string schema_name, table_name;
+  std::ostringstream err;
+
+  auto pos = sch_tb_name.find('.');
+  if (pos != std::string::npos) {
+    schema_name = sch_tb_name.substr(0, pos);
+    table_name = sch_tb_name.substr(pos + 1);
+  } else
+    return HA_ERR_GENERIC;
+
+  auto share = ShannonBase::shannon_loaded_tables->get(schema_name.c_str(), table_name.c_str());
+  if (!share) {
+    err << sch_tb_name << " NOT loaded into rapid engine for ML";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  return 0;
+}
 // open table by name. return table ptr, otherwise return nullptr.
 TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
   THD *thd = current_thd;
@@ -262,6 +284,111 @@ handler *Utils::get_secondary_handler(TABLE *source_table_ptr) {
   // Get handler to the secondary engine into which the table will be loaded.
   const bool is_partitioned = source_table_ptr->s->m_part_info != nullptr;
   return get_new_handler(source_table_ptr->s, is_partitioned, thd->mem_root, hton);
+}
+
+// return the # of rows read from table successfully. otherwise, 0.
+int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
+                     std::string &label_name, std::vector<float> &label_data, int &n_class,
+                     txt2numeric_map_t &txt2numeric_dict) {
+  THD *thd = current_thd;
+  auto n_read{0u};
+
+  txt2numeric_map_t txt2numeric;
+  // read the training data from target table.
+  for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
+    Field *field_ptr = *(table->field + field_id);
+    txt2numeric[field_ptr->field_name];
+
+    if (likely(!strcmp(field_ptr->field_name, label_name.c_str()))) continue;
+    features_name.push_back(field_ptr->field_name);
+  }
+
+  const dd::Table *table_obj{nullptr};
+  const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+  if (!table_obj && table->s->table_category != TABLE_UNKNOWN_CATEGORY) {
+    if (thd->dd_client()->acquire(table->s->db.str, table->s->table_name.str, &table_obj)) {
+      return n_read;
+    }
+  }
+
+  // must read from secondary engine.
+  unique_ptr_destroy_only<handler> sec_tb_handler(Utils::get_secondary_handler(table));
+  /* Read the traning data into train_data vector from rapid engine. here, we use training data
+  as lablels too */
+  my_bitmap_map *old_map = tmp_use_all_columns(table, table->read_set);
+  sec_tb_handler->ha_open(table, table->s->normalized_path.str, O_RDONLY, HA_OPEN_IGNORE_IF_LOCKED, table_obj);
+  if (sec_tb_handler && sec_tb_handler->ha_external_lock(thd, F_RDLCK)) {
+    sec_tb_handler->ha_close();
+    return n_read;
+  }
+
+  if (sec_tb_handler->ha_rnd_init(true)) {
+    sec_tb_handler->ha_external_lock(thd, F_UNLCK);
+    sec_tb_handler->ha_close();
+    return n_read;
+  }
+
+  std::map<float, int> n_classes;
+  while (sec_tb_handler->ha_rnd_next(table->record[0]) == 0) {
+    for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
+      Field *field_ptr = *(table->field + field_id);
+
+      auto data_val{0.0};
+      switch (field_ptr->type()) {
+        case MYSQL_TYPE_INT24:
+        case MYSQL_TYPE_LONG:
+        case MYSQL_TYPE_LONGLONG:
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DOUBLE: {
+          data_val = field_ptr->val_real();
+        } break;
+        case MYSQL_TYPE_DECIMAL:
+        case MYSQL_TYPE_NEWDECIMAL: {
+          my_decimal dval;
+          field_ptr->val_decimal(&dval);
+          my_decimal2double(10, &dval, &data_val);
+        } break;
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING:
+        case MYSQL_TYPE_STRING: {  // convert txt string to numeric
+          String buf;
+          buf.set_charset(field_ptr->charset());
+          field_ptr->val_str(&buf);
+          txt2numeric[field_ptr->field_name].insert(buf.c_ptr_safe());
+          assert(txt2numeric[field_ptr->field_name].find(buf.c_ptr_safe()) != txt2numeric[field_ptr->field_name].end());
+          data_val = std::distance(txt2numeric[field_ptr->field_name].begin(),
+                                   txt2numeric[field_ptr->field_name].find(buf.c_ptr_safe()));
+          txt2numeric_dict[field_ptr->field_name].insert(buf.c_ptr_safe());
+        } break;
+        case MYSQL_TYPE_DATE:
+        case MYSQL_TYPE_DATETIME:
+        case MYSQL_TYPE_TIME: {
+          data_val = field_ptr->val_real();
+        } break;
+        default:
+          assert(false);
+          break;
+      }
+
+      if (likely(strcmp(field_ptr->field_name, label_name.c_str()))) {
+        train_data.push_back(data_val);
+      } else {  // is label data.
+        if (n_classes.find((float)data_val) == n_classes.end()) n_classes[(float)data_val] = n_classes.size();
+        label_data.push_back(n_classes[(float)data_val]);
+      }
+    }  // for
+    n_read++;
+  }  // while
+
+  if (old_map) tmp_restore_column_map(table->read_set, old_map);
+
+  sec_tb_handler->ha_rnd_end();
+  sec_tb_handler->ha_external_lock(thd, F_UNLCK);
+  // to close the secondary engine table.
+  sec_tb_handler->ha_close();
+
+  n_class = n_classes.size();
+  return n_read;
 }
 
 Json_object *Utils::build_up_model_metadata(
@@ -594,8 +721,10 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
                                        &train_dataset_handler);
   // clang-format on
   // to set label data
-  ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
-  if (ret) goto cleanup_dataset;
+  if (label_data) {
+    ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
+    if (ret) goto cleanup_dataset;
+  }
 
   ret = LGBM_DatasetSetFeatureNames(train_dataset_handler, features_name, n_feature);
   if (ret) goto cleanup_dataset;
@@ -729,7 +858,7 @@ double Utils::model_score(std::string &model_handle_name, int metric_type, size_
   // calculate the balanced accuracy.
   double balanced_accuracy{0.0};
   switch (metric_type){
-    case 0:  // balanced_accuracy
+    case (int) ML_classification::SCORE_METRIC_T::BALANCED_ACCURACY:
       balanced_accuracy = Utils::calculate_balanced_accuracy(n_samples, predictions, label_data);
       break;
     case 1: {

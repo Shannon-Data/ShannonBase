@@ -45,6 +45,8 @@ namespace ShannonBase {
 namespace ML {
 class Utils {
  public:
+  static int check_table_available(std::string &sch_tb_name);
+
   // open a table via schema name and table name.
   static TABLE *open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type mode);
 
@@ -171,6 +173,10 @@ class Utils {
   static int splitString(const std::string &str, char delimiter, std::vector<std::string> &output);
 
   static std::string read_file(std::string &file_path);
+
+  static int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
+                       std::string &label_name, std::vector<float> &label_data, int &n_class,
+                       txt2numeric_map_t &txt2numeric_dict);
 
  private:
   static double calculate_balanced_accuracy(size_t n_samples, std::vector<double> &predictions,

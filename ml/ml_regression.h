@@ -53,7 +53,6 @@ class ML_regression : public ML_algorithm {
   ML_regression();
   virtual ~ML_regression() override;
   int train() override;
-  int predict() override;
   int load(std::string &model_content) override;
   int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;

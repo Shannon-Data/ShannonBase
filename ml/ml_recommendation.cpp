@@ -49,8 +49,6 @@ ML_TASK_TYPE_T ML_recommendation::type() { return ML_TASK_TYPE_T::RECOMMENDATION
 
 int ML_recommendation::train() { return 0; }
 
-int ML_recommendation::predict() { return 0; }
-
 int ML_recommendation::load(std::string &model_content) {
   assert(model_content.length() && m_handler_name.length());
 
@@ -76,9 +74,9 @@ int ML_recommendation::unload(std::string &model_handle_name) {
   return 0;
 }
 
-int ML_recommendation::import(Json_wrapper &model_object [[maybe_unused]],
-                              Json_wrapper &model_metadata [[maybe_unused]],
-                              std::string &model_handle_name [[maybe_unused]]) {
+int ML_recommendation::import(Json_wrapper &, Json_wrapper &, std::string &) {
+  // all logical done in ml_model_import stored procedure.
+  assert(false);
   return 0;
 }
 
@@ -88,19 +86,26 @@ double ML_recommendation::score(std::string &sch_tb_name [[maybe_unused]], std::
   return 0;
 }
 
-int ML_recommendation::explain(std::string &sch_tb_name [[maybe_unused]],
-                               std::string &target_column_name [[maybe_unused]],
-                               std::string &model_handle_name [[maybe_unused]],
-                               Json_wrapper &exp_options [[maybe_unused]]) {
+int ML_recommendation::explain(std::string &, std::string &, std::string &, Json_wrapper &) {
   std::ostringstream err;
   err << "recommendation does not soupport explain operation";
   my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
   return HA_ERR_GENERIC;
 }
 
-int ML_recommendation::explain_row() { return 0; }
+int ML_recommendation::explain_row() {
+  std::ostringstream err;
+  err << "recommendation does not soupport explain operation";
+  my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  return HA_ERR_GENERIC;
+}
 
-int ML_recommendation::explain_table() { return 0; }
+int ML_recommendation::explain_table() {
+  std::ostringstream err;
+  err << "recommendation does not soupport explain operation";
+  my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  return HA_ERR_GENERIC;
+}
 
 int ML_recommendation::predict_row(Json_wrapper &input_data [[maybe_unused]],
                                    std::string &model_handle_name [[maybe_unused]],

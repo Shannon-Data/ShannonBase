@@ -115,14 +115,32 @@ void Auto_ML::build_task(std::string task_str) {
     case ML_TASK_TYPE_T::FORECASTING:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::FORECASTING)
         m_ml_task.reset(new ML_forecasting());
+
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     case ML_TASK_TYPE_T::ANOMALY_DETECTION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::ANOMALY_DETECTION)
         m_ml_task.reset(new ML_anomaly_detection());
+
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     case ML_TASK_TYPE_T::RECOMMENDATION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::RECOMMENDATION)
         m_ml_task.reset(new ML_recommendation());
+
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     default:
       break;
@@ -169,7 +187,12 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
 }
 
 int Auto_ML::train() {
-  auto ret = m_ml_task ? m_ml_task->train() : 1;
+  std::string sch_tb_name{m_schema_name};
+  sch_tb_name.append(".");
+  sch_tb_name.append(m_table_name);
+  if (Utils::check_table_available(sch_tb_name)) return HA_ERR_GENERIC;
+
+  auto ret = m_ml_task ? m_ml_task->train() : HA_ERR_GENERIC;
   return ret;
 }
 
@@ -199,15 +222,17 @@ double Auto_ML::score(String *sch_table_name, String *target_column_name, String
                       Json_wrapper options) {
   assert(sch_table_name && target_column_name && model_handle_name);
 
+  std::string sch_tb_name_str(sch_table_name->c_ptr_safe());
+  if (Utils::check_table_available(sch_tb_name_str)) return HA_ERR_GENERIC;
+
   std::string model_handler_name_str(model_handle_name->c_ptr_safe());
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
-  std::string sch_table_name_str(sch_table_name->c_ptr_safe());
   std::string target_column_name_str(target_column_name->c_ptr_safe());
   std::string metric_str(metric->c_ptr_safe());
   return m_ml_task
-             ? m_ml_task->score(sch_table_name_str, target_column_name_str, model_handler_name_str, metric_str, options)
+             ? m_ml_task->score(sch_tb_name_str, target_column_name_str, model_handler_name_str, metric_str, options)
              : 0;
 }
 
@@ -223,8 +248,12 @@ int Auto_ML::predict_row(Json_wrapper &input, String *model_handler_name, Json_w
 // predict a table.
 int Auto_ML::predict_table(String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name,
                            Json_wrapper &options) {
-  std::string model_handler_name_str(model_handler_name->c_ptr_safe());
   std::string in_sch_tb_name_str(in_sch_tb_name->c_ptr_safe());
+  std::ostringstream err;
+  std::string sch_tb_name_str(in_sch_tb_name->c_ptr_safe());
+  if (Utils::check_table_available(sch_tb_name_str)) return HA_ERR_GENERIC;
+
+  std::string model_handler_name_str(model_handler_name->c_ptr_safe());
   std::string out_sch_tb_name_str(out_sch_tb_name->c_ptr_safe());
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
