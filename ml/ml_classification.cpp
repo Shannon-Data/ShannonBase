@@ -28,7 +28,6 @@
 
 #include <iostream>
 #include <memory>
-#include <set>
 
 #include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"  //LightGBM
 
@@ -77,6 +76,8 @@ std::map<std::string, ML_classification::SCORE_METRIC_T> ML_classification::scor
 
 ML_classification::ML_classification() {}
 ML_classification::~ML_classification() {}
+
+ML_TASK_TYPE_T ML_classification::type() { return ML_TASK_TYPE_T::CLASSIFICATION; }
 
 // returuns the # of record read successfully, otherwise 0 read failed.
 int ML_classification::read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
@@ -211,6 +212,27 @@ MODEL_PREDICTION_EXP_T ML_classification::parse_option(Json_wrapper &options) {
   return explainer_type;
 }
 
+int ML_classification::get_txt2num_dict(Json_wrapper&input, std::string& key, txt2numeric_map_t& txt2num_dict) {
+  MYSQL_LEX_CSTRING lex_key;
+  lex_key.str = key.c_str();
+  lex_key.length = key.length();
+  auto result = input.lookup(lex_key);
+  assert(!result.empty());
+  if (result.type() != enum_json_type::J_OBJECT) return HA_ERR_GENERIC;
+
+  OPTION_VALUE_T dict_opt;
+  std::string strkey;
+  if (Utils::parse_json(result, dict_opt, strkey, 0)) return HA_ERR_GENERIC;
+  for (auto& it : dict_opt) {
+    auto name = it.first;
+    std::set<std::string> val_set;
+    for (auto val_str : it.second) {
+      val_set.insert(val_str);
+    }
+    txt2num_dict.insert({name, val_set});
+  }
+  return 0;
+}
 int ML_classification::train() {
   THD *thd = current_thd;
   std::string user_name(thd->security_context()->user().str);
@@ -342,8 +364,12 @@ int ML_classification::load(std::string &model_content) {
   return 0;
 }
 
-int ML_classification::load_from_file(std::string &modle_file_full_path [[maybe_unused]],
-                                      std::string &model_handle_name [[maybe_unused]]) {
+int ML_classification::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+  if (!model_file_full_path.length() || !model_handle_name.length()) {
+    return HA_ERR_GENERIC;
+  }
+
+  Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
   return 0;
 }
 
@@ -397,7 +423,7 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   auto share = ShannonBase::shannon_loaded_tables->get(schema_name.c_str(), table_name.c_str());
   if (!share) {
     std::ostringstream err;
-    err << schema_name.c_str() << "." << table_name.c_str() << " NOT loaded into rapid engine for ML";
+    err << sch_tb_name << " NOT loaded into rapid engine for ML";
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
@@ -406,7 +432,7 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   auto source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
   if (!source_table_ptr) {
     std::ostringstream err;
-    err << schema_name.c_str() << "." << table_name.c_str() << " open failed for ML";
+    err << schema_name << " open failed for ML";
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
@@ -483,82 +509,59 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
     return HA_ERR_GENERIC;
   }
 
-  txt2numeric_map_t txt2numeric;
   std::string keystr;
   Json_wrapper model_meta;
   if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
 
-  OPTION_VALUE_T meta_feature_names, input_data_col_names;
-  if (Utils::parse_json(input_data, input_data_col_names, keystr, 0) ||
-      Utils::parse_json(model_meta, meta_feature_names, keystr, 0)) {
+  OPTION_VALUE_T meta_feature_names, input_values;
+  if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
+      (!model_meta.empty() && Utils::parse_json(model_meta, meta_feature_names, keystr, 0))) {
     err << "invalid input data or model meta info.";
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
-  auto feature_names = meta_feature_names["column_names"];
-  if (feature_names.size() != input_data_col_names.size()) {
+  auto feature_names = meta_feature_names[ML_KEYWORDS::column_names];
+  if (feature_names.size() != input_values.size()) {
     err << "input data columns size does not match the model feature columns size.";
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
   for (auto &feature_name : feature_names) {
-    if (input_data_col_names.find(feature_name) == input_data_col_names.end()) {
+    if (input_values.find(feature_name) == input_values.end()) {
       err << "input data columns does not contain the model feature column: " << feature_name;
       my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
       return HA_ERR_GENERIC;
     }
   }
 
-  std::string model_content = Loaded_models[model_handle_name];
-  assert(model_content.length());
-  BoosterHandle booster = nullptr;
-  booster = Utils::load_trained_model_from_string(model_content);
-  if (!booster) return HA_ERR_GENERIC;
+  txt2numeric_map_t txt2numeric;
+  std::string key(ML_KEYWORDS::txt2num_dict);
+  if (get_txt2num_dict(model_meta, key, txt2numeric)) return HA_ERR_GENERIC;
 
-  auto n_feature = feature_names.size();
-  int64 num_results = n_feature + 1;  // contri value + bias
-  std::vector<double> sample_data, predictions(num_results, 0.0);
   Json_object *root_obj = new (std::nothrow) Json_object();
   if (root_obj == nullptr) {
     return HA_ERR_GENERIC;
   }
 
+  std::vector<ml_record_type_t> sample_data;
   for (auto &feature_name : feature_names) {
-    auto value = 0.0;
-    if (meta_feature_names.find(feature_name) == meta_feature_names.end()) {  // not a txt field.
-      value = std::stod(input_data_col_names[feature_name][0]);
-      root_obj->add_alias(feature_name, new (std::nothrow) Json_string(input_data_col_names[feature_name][0]));
-    } else {  // find in txt2num_dict.
-      auto txt2num = meta_feature_names[feature_name];
-      auto input_val = input_data_col_names[feature_name][0];
-      root_obj->add_alias(feature_name, new (std::nothrow) Json_string(input_val));
-      value = std::distance(txt2num.begin(), std::find(txt2num.begin(), txt2num.end(), input_val));
-    }
-    sample_data.push_back(value);
-  }
-
-  // clang-format off
-  auto ret = LGBM_BoosterPredictForMat(booster,
-                                       sample_data.data(),
-                                       C_API_DTYPE_FLOAT64,
-                                       1,                   // # of row
-                                       n_feature,           // # of col
-                                       1,                    // row oriented
-                                       C_API_PREDICT_CONTRIB,
-                                       0,                    // start iter
-                                       -1,                   // stop iter
-                                       "",                   // contribution params
-                                       &num_results,         // # of results
-                                       predictions.data());
-  // clang-format on
-  LGBM_BoosterFree(booster);
-  if (ret) {
-    return HA_ERR_GENERIC;
+    std::string value{"0"};
+    if (input_values.find(feature_name) != input_values.end()) value = input_values[feature_name][0];
+    sample_data.push_back({feature_name, value});
+    root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
   }
 
   // prediction
-  root_obj->add_alias("Prediction", new (std::nothrow) Json_string(meta_feature_names["train_table_name"][0]));
+  std::vector<double> predictions;
+  root_obj->add_alias(ML_KEYWORDS::Prediction,
+                      new (std::nothrow) Json_string(meta_feature_names[ML_KEYWORDS::train_table_name][0]));
+  auto ret = Utils::ML_predict_row(model_handle_name, sample_data, txt2numeric, predictions);
+  if (ret) {
+    err << "call ML_PREDICT_ROW failed";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
 
   // ml_results
   Json_object *ml_results_obj = new (std::nothrow) Json_object();
@@ -570,8 +573,9 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   if (predictions_obj == nullptr) {
     return HA_ERR_GENERIC;
   }
-  predictions_obj->add_alias("class", new (std::nothrow) Json_string(meta_feature_names["train_table_name"][0]));
-  ml_results_obj->add_alias("predictions", predictions_obj);
+  predictions_obj->add_alias(ML_KEYWORDS::kclass,
+                             new (std::nothrow) Json_string(meta_feature_names[ML_KEYWORDS::train_table_name][0]));
+  ml_results_obj->add_alias(ML_KEYWORDS::predictions, predictions_obj);
 
   Json_object *probabilities_obj = new (std::nothrow) Json_object();
   if (probabilities_obj == nullptr) {
@@ -582,16 +586,92 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
     probabilities_obj->add_alias(feat_name, new (std::nothrow) Json_double(predictions[index]));
     index++;
   }
-  ml_results_obj->add_alias("probabilities", probabilities_obj);
+  ml_results_obj->add_alias(ML_KEYWORDS::probabilities, probabilities_obj);
 
-  root_obj->add_alias("ml_results", ml_results_obj);
+  root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results_obj);
   result = Json_wrapper(root_obj);
   return ret;
 }
 
-int ML_classification::predict_table() { return 0; }
+int ML_classification::predict_table_row(TABLE *in_table, std::vector<std::string> &feature_names,
+                                         std::string &label_name, txt2numeric_map_t &txt2numeric_dict) {
+  assert(in_table && label_name.length() && feature_names.size() && txt2numeric_dict.size());
+  auto thd = current_thd;
+  auto n_read{0u};
+  const dd::Table *table_obj{nullptr};
+  const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+  if (!table_obj && in_table->s->table_category != TABLE_UNKNOWN_CATEGORY) {
+    if (thd->dd_client()->acquire(in_table->s->db.str, in_table->s->table_name.str, &table_obj)) {
+      return n_read;
+    }
+  }
+  return 0;
+}
+int ML_classification::predict_table(std::string &sch_tb_name, std::string &model_handle_name,
+                                     std::string &out_sch_tb_name, Json_wrapper &options) {
+  std::ostringstream err;
+  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
+  std::string schema_name(sch_tb_name.c_str(), pos);
+  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+  auto share = ShannonBase::shannon_loaded_tables->get(schema_name.c_str(), table_name.c_str());
+  if (!share) {
+    err << sch_tb_name << " NOT loaded into rapid engine for ML";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
 
-ML_TASK_TYPE_T ML_classification::type() { return ML_TASK_TYPE_T::CLASSIFICATION; }
+  std::string model_content = Loaded_models[model_handle_name];
+  assert(model_content.length());
+  BoosterHandle booster = nullptr;
+  booster = Utils::load_trained_model_from_string(model_content);
+  if (!booster) return HA_ERR_GENERIC;
+
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
+
+  OPTION_VALUE_T option_values, model_meta_option;
+  std::string keystr;
+  if (!options.empty() && Utils::parse_json(options, option_values, keystr, 0)) return HA_ERR_GENERIC;
+  if (!model_meta.empty() && Utils::parse_json(model_meta, model_meta_option, keystr, 0)) return HA_ERR_GENERIC;
+
+  // the thresholds of the prediction. pls refer to `ML_PREDICT_TABLE of heatwave`
+  auto remove_seen_str =
+      (option_values[ML_KEYWORDS::remove_seen].size()) ? option_values[ML_KEYWORDS::remove_seen][0] : "true";
+  std::transform(remove_seen_str.begin(), remove_seen_str.end(), remove_seen_str.begin(), ::toupper);
+  auto remove_seen = (remove_seen_str == "TRUE") ? true : false;
+  auto batch_size =
+      (option_values[ML_KEYWORDS::batch_size].size()) ? std::stoi(option_values[ML_KEYWORDS::batch_size][0]) : 1000;
+  auto additional_details_str = (option_values[ML_KEYWORDS::additional_details].size())
+                                    ? option_values[ML_KEYWORDS::additional_details][0]
+                                    : "true";
+  auto prediction_interval = (option_values[ML_KEYWORDS::additional_details].size())
+                                 ? std::stof(option_values[ML_KEYWORDS::additional_details][0])
+                                 : 0.95f;
+  if ((batch_size < 1 || batch_size > 1000) && (prediction_interval <= 0 || prediction_interval >= 1)) {
+    err << sch_tb_name << "wrong the params of options";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  auto in_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
+  if (!in_table_ptr) {
+    err << sch_tb_name << " open failed for ML";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  if (remove_seen) {
+    // TODO: remove the intersection of the input table and the train table.
+  } else {
+  }
+  Utils::close_table(in_table_ptr);
+
+  pos = std::strstr(out_sch_tb_name.c_str(), ".") - out_sch_tb_name.c_str();
+  std::string out_schema_name(out_sch_tb_name.c_str(), pos);
+  std::string out_table_name(out_sch_tb_name.c_str() + pos + 1, out_sch_tb_name.length() - pos);
+
+  return 0;
+}
 
 }  // namespace ML
 }  // namespace ShannonBase

@@ -78,33 +78,27 @@ int ML_regression::predict() { return 0; }
 
 int ML_regression::load(std::string &model_content) {
   // the definition of this table, ref: `ml_train.sql`
-  BoosterHandle bt_handler;
-  int out_num_iterations;
-  if (LGBM_BoosterLoadModelFromString(model_content.c_str(), &out_num_iterations, &bt_handler) == -1)
-    return HA_ERR_GENERIC;
+  assert(model_content.length() && m_handler_name.length());
 
-  m_handler = bt_handler;
+  // insert the model content into the loaded map.
+  Loaded_models[m_handler_name] = model_content;
   return 0;
 }
 
-int ML_regression::load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) {
-  // to update the `MODEL_CATALOG.MODEL_OBJECT`
-  if (check_valid_path(modle_file_full_path.c_str(), modle_file_full_path.length()) || !model_handle_name.length())
+int ML_regression::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+  if (!model_file_full_path.length() || !model_handle_name.length()) {
     return HA_ERR_GENERIC;
+  }
 
+  Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
   return 0;
 }
 
 int ML_regression::unload(std::string &model_handle_name) {
-  if (!model_handle_name.length()) {
-    return HA_ERR_GENERIC;
-  }
+  assert(!Loaded_models.empty());
 
-  if (m_handler) {
-    BoosterHandle bt_handler = m_handler;
-    LGBM_BoosterFree(bt_handler);
-    m_handler = nullptr;
-  }
+  auto cnt = Loaded_models.erase(model_handle_name);
+  assert(cnt == 1);
   return 0;
 }
 
@@ -135,7 +129,12 @@ int ML_regression::predict_row(Json_wrapper &input_data [[maybe_unused]],
   return 0;
 }
 
-int ML_regression::predict_table() { return 0; }
+int ML_regression::predict_table(std::string &sch_tb_name [[maybe_unused]],
+                                 std::string &model_handle_name [[maybe_unused]],
+                                 std::string &out_sch_tb_name [[maybe_unused]],
+                                 Json_wrapper &options [[maybe_unused]]) {
+  return 0;
+}
 
 ML_TASK_TYPE_T ML_regression::type() { return ML_TASK_TYPE_T::REGRESSION; }
 

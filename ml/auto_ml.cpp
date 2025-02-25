@@ -81,7 +81,8 @@ void Auto_ML::init_task_map() {
   std::string keystr;
   Utils::parse_json(m_options, opt_values, keystr, 0);
   assert(opt_values.size());
-  m_task_type_str = opt_values["task"].size() ? opt_values["task"][0] : "classification";
+  m_task_type_str =
+      opt_values[ML_KEYWORDS::task].size() ? opt_values[ML_KEYWORDS::task][0] : ML_KEYWORDS::classification;
   std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
   build_task(m_task_type_str);
 }
@@ -151,7 +152,7 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
 
   Json_object *json_obj = down_cast<Json_object *>(dom_ptr.get());
   Json_dom *value_dom_ptr{nullptr};
-  value_dom_ptr = json_obj->get("task");
+  value_dom_ptr = json_obj->get(ML_KEYWORDS::task);
   if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
     m_task_type_str = down_cast<Json_string *>(value_dom_ptr)->value();
     std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
@@ -216,42 +217,22 @@ int Auto_ML::predict_row(Json_wrapper &input, String *model_handler_name, Json_w
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
-  // start to check validity of input options.
-  std::ostringstream err;
-  int ret{0};
-  if (!options.empty()) {
-    OPTION_VALUE_T opt_values;
-    std::string keystr;
-    Utils::parse_json(options, opt_values, keystr, 0);
+  return m_ml_task ? m_ml_task->predict_row(input, model_handler_name_str, options, result) : HA_ERR_GENERIC;
+}
 
-    auto opt_value = opt_values["remove_seen"];
-    assert(opt_value.size() == 1);
-    if (opt_value[0] != "true" && opt_value[0] != "false") {
-      err << "wrong remove_seen value in optin you specified: " << opt_value[0];
-      ret = HA_ERR_GENERIC;
-      goto error;
-    }
-    opt_value = opt_values["additional_details"];
-    assert(opt_value.size() == 1);
-    if (opt_value[0] != "true" && opt_value[0] != "false") {
-      err << "wrong additional_details value in optin you specified: " << opt_value[0];
-      ret = HA_ERR_GENERIC;
-      goto error;
-    }
-    opt_value = opt_values["recommend"];  // for recommendation option.
-    if (opt_value.size() && (opt_value[0] != "ratings" && opt_value[0] != "items" && opt_value[0] != "users" &&
-                             opt_value[0] != "users_to_items" && opt_value[0] != "items_to_users" &&
-                             opt_value[0] != "items_to_items" && opt_value[0] != "users_to_users")) {
-      err << "wrong additional_details value in optin you specified: " << opt_value[0];
-      ret = HA_ERR_GENERIC;
-      goto error;
-    }
-  }
-  ret = m_ml_task ? m_ml_task->predict_row(input, model_handler_name_str, options, result) : HA_ERR_GENERIC;
-error:
-  if (ret) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
-  }
+// predict a table.
+int Auto_ML::predict_table(String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name,
+                           Json_wrapper &options) {
+  std::string model_handler_name_str(model_handler_name->c_ptr_safe());
+  std::string in_sch_tb_name_str(in_sch_tb_name->c_ptr_safe());
+  std::string out_sch_tb_name_str(out_sch_tb_name->c_ptr_safe());
+  std::string model_content_str;
+  if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
+
+  auto ret = m_ml_task
+                 ? m_ml_task->predict_table(in_sch_tb_name_str, model_handler_name_str, out_sch_tb_name_str, options)
+                 : HA_ERR_GENERIC;
+
   return ret;
 }
 

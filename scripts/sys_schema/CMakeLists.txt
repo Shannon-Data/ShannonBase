@@ -59,7 +59,6 @@ SET(SYS_SCHEMA_SOURCES
   functions/version_minor.sql
   functions/version_patch.sql
   functions/ml_predict_row.sql
-  functions/ml_predict_table.sql
   
   views/i_s/innodb_buffer_stats_by_schema.sql
   views/i_s/x_innodb_buffer_stats_by_schema.sql
@@ -196,7 +195,7 @@ SET(SYS_SCHEMA_SOURCES
   procedures/ml_model_unload.sql
   procedures/ml_score.sql
   procedures/ml_train.sql
-
+  procedures/ml_predict_table.sql
   after_setup.sql
   )
 

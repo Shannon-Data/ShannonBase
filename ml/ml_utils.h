@@ -85,6 +85,18 @@ class Utils {
    */
   static double model_score(std::string &model_handle_name, int metric_type, size_t n_samples, size_t n_features,
                             std::vector<double> &testing_data, std::vector<float> &label_data);
+
+  /**
+   * to predict the result of a model.
+   * @param[in] model_handle_name, the name of loaded model name.
+   * @param[in] input_data, the input data.
+   * @param[in] txt2numeric_dict, the txt2numeric dict.
+   * @param[out] result, the result of prediction.
+   * @retval 0 success, otherwise failed.
+   */
+  static int ML_predict_row(std::string &model_handle_name, std::vector<ml_record_type_t> &input_data,
+                            txt2numeric_map_t &txt2numeric_dict, std::vector<double> &predictions);
+
   /**
    * to build up a json format model metadata.
    * params defintion ref to: https://dev.mysql.com/doc/heatwave/en/mys-hwaml-ml-model-metadata.html
@@ -98,7 +110,7 @@ class Utils {
       std::string &optimization_metric, std::vector<std::string> &selected_column_names, double contamination,
       Json_wrapper *train_options, std::string &training_params, Json_object *onnx_inputs_info,
       Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks,
-      std::map<std::string, std::set<std::string>> &txt2num_dict);
+      txt2numeric_map_t &txt2num_dict);
 
   /** to store the trained model into ML_SCHEMA_xxx.MODEL_CATALOG.
    *  @param[in] model_content, the trainned model in string formation.
@@ -157,6 +169,8 @@ class Utils {
    *
    * */
   static int splitString(const std::string &str, char delimiter, std::vector<std::string> &output);
+
+  static std::string read_file(std::string &file_path);
 
  private:
   static double calculate_balanced_accuracy(size_t n_samples, std::vector<double> &predictions,

@@ -29,7 +29,8 @@
 #include <sstream>
 #include <string>
 
-#include "my_base.h"
+#include "include/my_base.h"
+#include "ml_utils.h"
 #include "mysqld_error.h"
 
 namespace ShannonBase {
@@ -44,18 +45,36 @@ ML_recommendation::ML_recommendation() {}
 
 ML_recommendation::~ML_recommendation() {}
 
+ML_TASK_TYPE_T ML_recommendation::type() { return ML_TASK_TYPE_T::RECOMMENDATION; }
+
 int ML_recommendation::train() { return 0; }
 
 int ML_recommendation::predict() { return 0; }
 
-int ML_recommendation::load(std::string &model_content [[maybe_unused]]) { return 0; }
+int ML_recommendation::load(std::string &model_content) {
+  assert(model_content.length() && m_handler_name.length());
 
-int ML_recommendation::load_from_file(std::string &modle_file_full_path [[maybe_unused]],
-                                      std::string &model_handle_name [[maybe_unused]]) {
+  // insert the model content into the loaded map.
+  Loaded_models[m_handler_name] = model_content;
   return 0;
 }
 
-int ML_recommendation::unload(std::string &model_handle_name [[maybe_unused]]) { return 0; }
+int ML_recommendation::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+  if (!model_file_full_path.length() || !model_handle_name.length()) {
+    return HA_ERR_GENERIC;
+  }
+
+  Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
+  return 0;
+}
+
+int ML_recommendation::unload(std::string &model_handle_name) {
+  assert(!Loaded_models.empty());
+
+  auto cnt = Loaded_models.erase(model_handle_name);
+  assert(cnt == 1);
+  return 0;
+}
 
 int ML_recommendation::import(Json_wrapper &model_object [[maybe_unused]],
                               Json_wrapper &model_metadata [[maybe_unused]],
@@ -89,9 +108,12 @@ int ML_recommendation::predict_row(Json_wrapper &input_data [[maybe_unused]],
   return 0;
 }
 
-int ML_recommendation::predict_table() { return 0; }
-
-ML_TASK_TYPE_T ML_recommendation::type() { return ML_TASK_TYPE_T::RECOMMENDATION; }
+int ML_recommendation::predict_table(std::string &sch_tb_name [[maybe_unused]],
+                                     std::string &model_handle_name [[maybe_unused]],
+                                     std::string &out_sch_tb_name [[maybe_unused]],
+                                     Json_wrapper &options [[maybe_unused]]) {
+  return 0;
+}
 
 }  // namespace ML
 }  // namespace ShannonBase

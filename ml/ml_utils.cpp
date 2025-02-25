@@ -26,6 +26,10 @@
 
 #include "ml_utils.h"
 
+#include <fstream>
+#include <iostream>
+#include <sstream>
+
 #include "include/my_inttypes.h"
 
 #include "decimal.h"
@@ -86,6 +90,20 @@ int Utils::splitString(const std::string &str, char delimiter, std::vector<std::
   }
 
   return 0;
+}
+std::string Utils::read_file(std::string &file_path) {
+  if (check_valid_path(file_path.c_str(), file_path.length())) {
+    return "";
+  }
+
+  std::ifstream file(file_path.c_str(), std::ios::binary);
+  if (!file) {
+    return "";
+  }
+
+  std::ostringstream ss;
+  ss << file.rdbuf();
+  return ss.str();
 }
 
 int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth) {
@@ -254,7 +272,7 @@ Json_object *Utils::build_up_model_metadata(
     std::string &optimization_metric, std::vector<std::string> &selected_column_names, double contamination,
     Json_wrapper *train_options, std::string &training_params, Json_object *onnx_inputs_info,
     Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks,
-    std::map<std::string, std::set<std::string>> &txt2num_dict) {
+    txt2numeric_map_t &txt2num_dict) {
   auto now = std::chrono::system_clock::now();
   auto now_seconds = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
 
@@ -263,48 +281,48 @@ Json_object *Utils::build_up_model_metadata(
 
   if (training_params.empty()) training_params = "{}";
 
-  model_obj->add_clone("options", train_options->clone_dom().get());
-  model_obj->add_clone("training_params", new (std::nothrow) Json_string(training_params));
-  model_obj->add_clone("onnx_inputs_info", onnx_inputs_info);
-  model_obj->add_clone("onnx_outputs_info", onnx_outputs_info);
-  model_obj->add_clone("training_drift_metric", training_drift_metric);
+  model_obj->add_clone(ML_KEYWORDS::options, train_options->clone_dom().get());
+  model_obj->add_clone(ML_KEYWORDS::training_params, new (std::nothrow) Json_string(training_params));
+  model_obj->add_clone(ML_KEYWORDS::onnx_inputs_info, onnx_inputs_info);
+  model_obj->add_clone(ML_KEYWORDS::onnx_outputs_info, onnx_outputs_info);
+  model_obj->add_clone(ML_KEYWORDS::training_drift_metric, training_drift_metric);
 
-  model_obj->add_clone("task", new (std::nothrow) Json_string(task));
-  model_obj->add_clone("build_timestamp", new (std::nothrow) Json_double(now_seconds));
-  model_obj->add_clone("target_column_name", new (std::nothrow) Json_string(target_column_name));
-  model_obj->add_clone("train_table_name", new (std::nothrow) Json_string(tain_table_name));
+  model_obj->add_clone(ML_KEYWORDS::task, new (std::nothrow) Json_string(task));
+  model_obj->add_clone(ML_KEYWORDS::build_timestamp, new (std::nothrow) Json_double(now_seconds));
+  model_obj->add_clone(ML_KEYWORDS::target_column_name, new (std::nothrow) Json_string(target_column_name));
+  model_obj->add_clone(ML_KEYWORDS::train_table_name, new (std::nothrow) Json_string(tain_table_name));
 
   Json_array *column_names_arr = new (std::nothrow) Json_array();
   for (auto &feature_name : featurs_name) {
     column_names_arr->append_clone(new (std::nothrow) Json_string(feature_name));
   }
-  model_obj->add_clone("column_names", column_names_arr);
+  model_obj->add_clone(ML_KEYWORDS::column_names, column_names_arr);
 
-  model_obj->add_clone("model_explanation", model_explanation);
+  model_obj->add_clone(ML_KEYWORDS::model_explanation, model_explanation);
 
-  model_obj->add_clone("notes", new (std::nothrow) Json_string(notes));
-  model_obj->add_clone("format", new (std::nothrow) Json_string(format));
-  model_obj->add_clone("status", new (std::nothrow) Json_string(status));
+  model_obj->add_clone(ML_KEYWORDS::notes, new (std::nothrow) Json_string(notes));
+  model_obj->add_clone(ML_KEYWORDS::format, new (std::nothrow) Json_string(format));
+  model_obj->add_clone(ML_KEYWORDS::status, new (std::nothrow) Json_string(status));
 
-  model_obj->add_clone("model_quality", new (std::nothrow) Json_string(model_quality));
-  model_obj->add_clone("training_time", new (std::nothrow) Json_double(training_time));
-  model_obj->add_clone("algorithm_name", new (std::nothrow) Json_string(algorithm_name));
-  model_obj->add_clone("training_score", new (std::nothrow) Json_double(training_score));
-  model_obj->add_clone("n_rows", new (std::nothrow) Json_double(n_rows));
-  model_obj->add_clone("n_columns", new (std::nothrow) Json_double(n_columns));
-  model_obj->add_clone("n_selected_rows", new (std::nothrow) Json_double(n_selected_rows));
-  model_obj->add_clone("n_selected_columns", new (std::nothrow) Json_double(n_selected_columns));
-  model_obj->add_clone("optimization_metric", new (std::nothrow) Json_string(optimization_metric));
+  model_obj->add_clone(ML_KEYWORDS::model_quality, new (std::nothrow) Json_string(model_quality));
+  model_obj->add_clone(ML_KEYWORDS::training_time, new (std::nothrow) Json_double(training_time));
+  model_obj->add_clone(ML_KEYWORDS::algorithm_name, new (std::nothrow) Json_string(algorithm_name));
+  model_obj->add_clone(ML_KEYWORDS::training_score, new (std::nothrow) Json_double(training_score));
+  model_obj->add_clone(ML_KEYWORDS::n_rows, new (std::nothrow) Json_double(n_rows));
+  model_obj->add_clone(ML_KEYWORDS::n_columns, new (std::nothrow) Json_double(n_columns));
+  model_obj->add_clone(ML_KEYWORDS::n_selected_rows, new (std::nothrow) Json_double(n_selected_rows));
+  model_obj->add_clone(ML_KEYWORDS::n_selected_columns, new (std::nothrow) Json_double(n_selected_columns));
+  model_obj->add_clone(ML_KEYWORDS::optimization_metric, new (std::nothrow) Json_string(optimization_metric));
 
   Json_array *selected_column_names_arr = new (std::nothrow) Json_array();
   for (auto &sel_col_name : selected_column_names) {
     selected_column_names_arr->append_clone(new (std::nothrow) Json_string(sel_col_name));
   }
-  model_obj->add_clone("selected_column_names", selected_column_names_arr);
+  model_obj->add_clone(ML_KEYWORDS::selected_column_names, selected_column_names_arr);
 
-  model_obj->add_clone("contamination", new (std::nothrow) Json_double(contamination));
+  model_obj->add_clone(ML_KEYWORDS::contamination, new (std::nothrow) Json_double(contamination));
 
-  model_obj->add_clone("chunks", new (std::nothrow) Json_double(chunks));
+  model_obj->add_clone(ML_KEYWORDS::chunks, new (std::nothrow) Json_double(chunks));
 
   if (txt2num_dict.size()) {
     Json_object *txt2num_dict_obj = new (std::nothrow) Json_object();
@@ -317,7 +335,7 @@ Json_object *Utils::build_up_model_metadata(
       }
       txt2num_dict_obj->add_clone(key.c_str(), value_arr);
     }
-    model_obj->add_clone("txt2num_dict", txt2num_dict_obj);
+    model_obj->add_clone(ML_KEYWORDS::txt2num_dict, txt2num_dict_obj);
   }
   return model_obj;
 }
@@ -541,8 +559,8 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
       std::string keystr;
       OPTION_VALUE_T option_value;
       Utils::parse_json(json_content, option_value, keystr, 0);
-      assert(option_value["SHANNON_LIGHTGBM_CONTENT"].size() == 1);
-      model_content = option_value["SHANNON_LIGHTGBM_CONTENT"][0];
+      assert(option_value[ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT].size() == 1);
+      model_content = option_value[ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT][0];
 #endif
       break;
     }
@@ -638,7 +656,7 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
   { //start to assemble the model object json file.
     Json_object *model_obj = new (std::nothrow) Json_object();
     if (model_obj == nullptr) return -1;
-    model_obj->add_clone("SHANNON_LIGHTGBM_CONTENT", new (std::nothrow) Json_string(model_content));
+    model_obj->add_clone(ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT, new (std::nothrow) Json_string(model_content));
     Json_wrapper model_content_json(model_obj);
     String json_format_content;
     model_content_json.to_string(&json_format_content, false, "ML_train", [] { assert(false); });
@@ -721,6 +739,53 @@ double Utils::model_score(std::string &model_handle_name, int metric_type, size_
      break;
   }
   return balanced_accuracy;
+}
+
+int Utils::ML_predict_row(std::string &model_handle_name, std::vector<ml_record_type_t> &input_data, txt2numeric_map_t& txt2numeric_dict, std::vector<double> &predictions) {
+
+  std::string model_content = Loaded_models[model_handle_name];
+  assert(model_content.length());
+  BoosterHandle booster = nullptr;
+  booster = Utils::load_trained_model_from_string(model_content);
+  if (!booster) return HA_ERR_GENERIC;
+
+  auto n_feature = input_data.size();
+  int64 num_results = n_feature + 1;  // contri value + bias
+  predictions.resize(num_results);
+
+  std::vector<double> sample_data;
+  for (auto &field : input_data) {
+    auto value = 0.0;
+    if (txt2numeric_dict.find(field.first) == txt2numeric_dict.end()) {  // not a txt field.
+      value = std::stod(field.second);
+    } else {  // find in txt2num_dict.
+      auto txt2num = txt2numeric_dict[field.first];
+      if (txt2num.size())
+        value = std::distance(txt2num.begin(), std::find(txt2num.begin(), txt2num.end(), field.second));
+      else value = 0.0;   
+    }
+    sample_data.push_back(value);
+  }
+
+  // clang-format off
+  auto ret = LGBM_BoosterPredictForMat(booster,
+                                       sample_data.data(),
+                                       C_API_DTYPE_FLOAT64,
+                                       1,                   // # of row
+                                       n_feature,           // # of col
+                                       1,                    // row oriented
+                                       C_API_PREDICT_CONTRIB,
+                                       0,                    // start iter
+                                       -1,                   // stop iter
+                                       "",                   // contribution params
+                                       &num_results,         // # of results
+                                       predictions.data());
+  // clang-format on
+  LGBM_BoosterFree(booster);
+  if (ret) {
+    return HA_ERR_GENERIC;
+  }
+  return 0;
 }
 
 }  // namespace ML

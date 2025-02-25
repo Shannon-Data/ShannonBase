@@ -1,0 +1,47 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+SET GLOBAL local_infile = 1;
+DROP DATABASE IF EXISTS shannon_ml;
+CREATE DATABASE shannon_ml;
+ALTER DATABASE shannon_ml CHARACTER SET ascii COLLATE ascii_bin;
+USE shannon_ml;
+CREATE TABLE census_train ( age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
+CREATE TABLE census_test LIKE census_train;
+SET @census_model = 'census_test_score';
+ALTER TABLE census_train SECONDARY_LOAD;
+CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
+CALL sys.ML_MODEL_LOAD(@census_model, NULL);
+SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
+JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+FROM ML_SCHEMA_root.MODEL_CATALOG;
+MODEL_ID	MODEL_HANDLE	MODEL_OBJECT	MODEL_OWNER	task	feature_names
+1	census_test_score	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
+SELECT CHUNK_ID, MODEL_HANDLE from ML_SCHEMA_root.MODEL_OBJECT_CATALOG;
+CHUNK_ID	MODEL_HANDLE
+1	census_test_score
+SELECT MODEL_ID, ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE, ML_SCHEMA_root.MODEL_CATALOG.MODEL_OBJECT, MODEL_OWNER, 
+JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+FROM  ML_SCHEMA_root.MODEL_CATALOG, ML_SCHEMA_root.MODEL_OBJECT_CATALOG
+WHERE ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE = ML_SCHEMA_root.MODEL_OBJECT_CATALOG.MODEL_HANDLE;
+MODEL_ID	MODEL_HANDLE	MODEL_OBJECT	MODEL_OWNER	task	feature_names
+1	census_test_score	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
+SET @row_input = JSON_OBJECT( 
+"age", 25, 
+"workclass", "Private", 
+"fnlwgt", 226802, 
+"education", "11th", 
+"education-num", 7, 
+"marital-status", "Never-married", 
+"occupation", "Machine-op-inspct", 
+"relationship", "Own-child", 
+"race", "Black", 
+"sex", "Male", 
+"capital-gain", 0, 
+"capital-loss", 0, 
+"hours-per-week", 40, 
+"native-country", "United-States");
+SELECT sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
+sys.ML_PREDICT_ROW(@row_input, @census_model, NULL)
+{"age": "25", "sex": "Male", "race": "Black", "fnlwgt": "226802", "education": "11th", "workclass": "Private", "Prediction": "shannon_ml.census_train", "ml_results": {"predictions": {"class": "shannon_ml.census_train"}, "probabilities": {"age": -0.6211061268145668, "sex": 0.12168122022962528, "race": -0.20345111684587078, "fnlwgt": -0.12171546681389314, "education": -0.23166314677855082, "workclass": -0.0392296227346186, "occupation": -0.4941690515586141, "capital-gain": -0.26934655079797437, "capital-loss": -0.06866286549018068, "relationship": -0.7030884704349845, "education-num": -0.5572686575043835, "hours-per-week": -0.0395619328451832, "marital-status": -0.9880741575771561, "native-country": -0.017124746740565282}}, "occupation": "Machine-op-inspct", "capital-gain": "0", "capital-loss": "0", "relationship": "Own-child", "education-num": "7", "hours-per-week": "40", "marital-status": "Never-married", "native-country": "United-States"}
+CALL sys.ML_MODEL_UNLOAD(@census_model);
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+ALTER TABLE census_train SECONDARY_UNLOAD;

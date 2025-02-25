@@ -56,7 +56,7 @@ class ML_classification : public ML_algorithm {
   int train() override;
   int predict() override;
   int load(std::string &model_content) override;
-  int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
+  int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;
   int import(Json_wrapper &model_object, Json_wrapper &model_metadata, std::string &model_handle_name) override;
   double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle, std::string &metric_str,
@@ -68,7 +68,8 @@ class ML_classification : public ML_algorithm {
   int explain_table() override;
   int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                   Json_wrapper &result) override;
-  int predict_table() override;
+  int predict_table(std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
+                    Json_wrapper &options) override;
   ML_TASK_TYPE_T type() override;
 
   void set_schema(std::string &schema_name) { m_sch_name = schema_name; }
@@ -105,13 +106,16 @@ class ML_classification : public ML_algorithm {
   };
 
   static std::map<std::string, SCORE_METRIC_T> score_metrics;
-  using txt2numeric_map_t = std::map<std::string, std::set<std::string>>;
 
  private:
   int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
                 std::string &label_name, std::vector<float> &label_data, int &n_class,
                 txt2numeric_map_t &txt2numeric_dict);
   MODEL_PREDICTION_EXP_T parse_option(Json_wrapper &options);
+  int predict_table_row(TABLE *in_table, std::vector<std::string> &feature_names, std::string &label_name,
+                        txt2numeric_map_t &txt2numeric_dict);
+
+  int get_txt2num_dict(Json_wrapper &input, std::string &key, txt2numeric_map_t &txt2num_dict);
 
  private:
   // source data schema name.
