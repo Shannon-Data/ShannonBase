@@ -26,7 +26,12 @@
 
 #include "ml_forecasting.h"
 
+#include <sstream>
+
 #include "include/my_base.h"
+#include "include/mysqld_error.h"
+
+#include "ml_info.h"
 #include "ml_utils.h"
 
 namespace ShannonBase {
@@ -41,9 +46,9 @@ ML_forecasting::ML_forecasting() {}
 
 ML_forecasting::~ML_forecasting() {}
 
-int ML_forecasting::train() { return 0; }
+ML_TASK_TYPE_T ML_forecasting::type() { return ML_TASK_TYPE_T::FORECASTING; }
 
-int ML_forecasting::predict() { return 0; }
+int ML_forecasting::train() { return 0; }
 
 int ML_forecasting::load(std::string &model_content) {
   assert(model_content.length() && m_handler_name.length());
@@ -70,14 +75,23 @@ int ML_forecasting::unload(std::string &model_handle_name) {
   return 0;
 }
 
-int ML_forecasting::import(Json_wrapper &model_object [[maybe_unused]], Json_wrapper &model_metadata [[maybe_unused]],
-                           std::string &model_handle_name [[maybe_unused]]) {
+int ML_forecasting::import(Json_wrapper &, Json_wrapper &, std::string &) {
+  // all logical done in ml_model_import stored procedure.
+  assert(false);
   return 0;
 }
 
-double ML_forecasting::score(std::string &sch_tb_name [[maybe_unused]], std::string &target_name [[maybe_unused]],
-                             std::string &model_handle [[maybe_unused]], std::string &metric_str [[maybe_unused]],
-                             Json_wrapper &option [[maybe_unused]]) {
+double ML_forecasting::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+                             std::string &metric_str, Json_wrapper &option) {
+  assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
+
+  if (!option.empty()) {
+    std::ostringstream err;
+    err << "option params should be null for forecasting";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
   return 0;
 }
 
@@ -102,8 +116,6 @@ int ML_forecasting::predict_table(std::string &sch_tb_name [[maybe_unused]],
                                   Json_wrapper &options [[maybe_unused]]) {
   return 0;
 }
-
-ML_TASK_TYPE_T ML_forecasting::type() { return ML_TASK_TYPE_T::FORECASTING; }
 
 }  // namespace ML
 }  // namespace ShannonBase

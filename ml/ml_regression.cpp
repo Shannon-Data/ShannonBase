@@ -74,8 +74,6 @@ int ML_regression::train() {
   return 0;
 }
 
-int ML_regression::predict() { return 0; }
-
 int ML_regression::load(std::string &model_content) {
   // the definition of this table, ref: `ml_train.sql`
   assert(model_content.length() && m_handler_name.length());
@@ -102,14 +100,22 @@ int ML_regression::unload(std::string &model_handle_name) {
   return 0;
 }
 
-int ML_regression::import(Json_wrapper &model_object [[maybe_unused]], Json_wrapper &model_metadata [[maybe_unused]],
-                          std::string &model_handle_name [[maybe_unused]]) {
-  return 0;
+int ML_regression::import(Json_wrapper &, Json_wrapper &, std::string &) {
+  // all logical done in ml_model_import stored procedure.
+  assert(false);
 }
 
-double ML_regression::score(std::string &sch_tb_name [[maybe_unused]], std::string &target_name [[maybe_unused]],
-                            std::string &model_handle [[maybe_unused]], std::string &metric_str [[maybe_unused]],
-                            Json_wrapper &option [[maybe_unused]]) {
+double ML_regression::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+                            std::string &metric_str, Json_wrapper &option) {
+  assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
+
+  if (!option.empty()) {
+    std::ostringstream err;
+    err << "option params should be null for regression";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
   return 0;
 }
 

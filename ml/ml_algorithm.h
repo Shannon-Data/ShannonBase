@@ -51,7 +51,6 @@ class ML_algorithm {
   virtual ~ML_algorithm() = default;
 
   virtual int train() = 0;
-  virtual int predict() = 0;
   virtual int load(std::string &model_content) = 0;
   virtual int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) = 0;
   virtual int unload(std::string &model_handle_name) = 0;

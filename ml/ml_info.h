@@ -129,6 +129,11 @@ using txt2numeric_map_t = std::map<std::string, std::set<std::string>>;
 // pair of a <key_name, value>.
 using ml_record_type_t = std::pair<std::string, std::string>;
 
+constexpr int ANONOALY_METRIC_START = 0;
+constexpr int CLASS_METRIC_START = 100;
+constexpr int FORCAST_METRIC_START = 200;
+constexpr int RECOMMEND_METRIC_START = 300;
+constexpr int REGRESSION_METRIC_START = 400;
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_AUTO_ML_INFO_H__

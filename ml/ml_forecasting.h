@@ -42,7 +42,6 @@ class ML_forecasting : public ML_algorithm {
   ML_forecasting();
   virtual ~ML_forecasting() override;
   int train() override;
-  int predict() override;
   int load(std::string &model_content) override;
   int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;
@@ -58,6 +57,17 @@ class ML_forecasting : public ML_algorithm {
   int predict_table(std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
                     Json_wrapper &options) override;
   ML_TASK_TYPE_T type() override;
+
+  void set_schema(std::string &schema_name) { m_sch_name = schema_name; }
+  std::string get_schema() const { return m_sch_name; }
+  void set_table(std::string &table_name) { m_table_name = table_name; }
+  std::string get_table() const { return m_table_name; }
+  void set_target(std::string &target_name) { m_target_name = target_name; }
+  std::string get_target() const { return m_target_name; }
+  void set_handle_name(std::string &handle_name) { m_handler_name = handle_name; }
+  std::string get_handle_name() const { return m_handler_name; }
+  void set_options(Json_wrapper &options) { m_options = options; }
+  const Json_wrapper &get_options() const { return m_options; }
 
   static const std::vector<std::string> metrics;
 

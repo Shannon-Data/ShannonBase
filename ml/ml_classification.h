@@ -54,7 +54,6 @@ class ML_classification : public ML_algorithm {
   ML_classification();
   virtual ~ML_classification() override;
   int train() override;
-  int predict() override;
   int load(std::string &model_content) override;
   int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;
@@ -84,33 +83,30 @@ class ML_classification : public ML_algorithm {
   const Json_wrapper &get_options() const { return m_options; }
 
   enum class SCORE_METRIC_T {
+    ACCURACY = CLASS_METRIC_START,
     BALANCED_ACCURACY,
-    F1_SAMPLES,
-    PRECISION_SAMPLES,
-    RECALL_SAMPLES,
     F1,
-    PRECISION,
-    RECALL,
-    ROC_AUC,
-    ACCURACY,
     F1_MACRO,
     F1_MICRO,
+    F1_SAMPLES,
     F1_WEIGTHED,
     NEG_LOG_LOSS,
+    PRECISION,
     PRECISION_MACRO,
     PRECISION_MICRO,
+    PRECISION_SAMPLES,
     PRECISION_WEIGHTED,
+    RECALL,
     RECALL_MACRO,
     RECALL_MICRO,
-    RECALL_WEIGHTED
+    RECALL_SAMPLES,
+    RECALL_WEIGHTED,
+    ROC_AUC
   };
 
   static std::map<std::string, SCORE_METRIC_T> score_metrics;
 
  private:
-  int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
-                std::string &label_name, std::vector<float> &label_data, int &n_class,
-                txt2numeric_map_t &txt2numeric_dict);
   MODEL_PREDICTION_EXP_T parse_option(Json_wrapper &options);
   int predict_table_row(TABLE *in_table, std::vector<std::string> &feature_names, std::string &label_name,
                         txt2numeric_map_t &txt2numeric_dict);

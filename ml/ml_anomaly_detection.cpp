@@ -27,23 +27,149 @@
 #include "ml_anomaly_detection.h"
 
 #include "include/my_base.h"
+#include "sql/current_thd.h"
+#include "sql/sql_class.h"
+
 #include "ml_utils.h"
+#include "storage/rapid_engine/include/rapid_status.h"
 
 namespace ShannonBase {
 namespace ML {
 
-const std::vector<std::string> ML_anomaly_detection::non_thr_topk_metrics = {"roc_auc"};
-const std::vector<std::string> ML_anomaly_detection::threshold_metrics = {
-    "accuracy", "balanced_accuracy", "f1", "neg_log_loss", "precision", "recall"};
-const std::vector<std::string> ML_anomaly_detection::topk_metrics = {"precision_k"};
+// clang-format off
+std::map<std::string, ML_anomaly_detection::SCORE_METRIC_T> ML_anomaly_detection::score_metrics = {
+  {"ACCURACY", ML_anomaly_detection::SCORE_METRIC_T::ACCURACY},
+  {"BALANCED_ACCURACY", ML_anomaly_detection::SCORE_METRIC_T::BALANCED_ACCURACY},
+  {"F1", ML_anomaly_detection::SCORE_METRIC_T::F1},
+  {"NEG_LOG_LOSS", ML_anomaly_detection::SCORE_METRIC_T::NEG_LOG_LOSS},
+  {"PRECISION", ML_anomaly_detection::SCORE_METRIC_T::PRECISION},
+  {"PRECISION_K", ML_anomaly_detection::SCORE_METRIC_T::PRECISION_K},
+  {"RECALL", ML_anomaly_detection::SCORE_METRIC_T::RECALL},
+  {"ROC_AUC", ML_anomaly_detection::SCORE_METRIC_T::ROC_AUC}
+};
+// clang-format on
 
 ML_anomaly_detection::ML_anomaly_detection() {}
 
 ML_anomaly_detection::~ML_anomaly_detection() {}
 
-int ML_anomaly_detection::train() { return 0; }
+int ML_anomaly_detection::train() {
+  if (m_target_name.length()) {
+    std::ostringstream err;
+    err << "anomaly detection does not support target column, must be set to NULL";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
 
-int ML_anomaly_detection::predict() { return 0; }
+  OPTION_VALUE_T options;
+  if (!m_options.empty()) {
+    std::string keystr;
+    Utils::parse_json(m_options, options, keystr, 0);
+  }
+  auto contamination [[maybe_unused]] = 0.01f;
+  if (options.find(ML_KEYWORDS::contamination) != options.end())
+    contamination = std::stof(options[ML_KEYWORDS::contamination][0]);
+
+  auto source_table_ptr = Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ);
+  if (!source_table_ptr) {
+    std::ostringstream err;
+    err << m_sch_name << "." << m_table_name << " open failed for ML";
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  std::vector<double> train_data;
+  std::vector<float> label_data;
+  std::vector<std::string> features_name;
+  int n_class{0};
+  txt2numeric_map_t txt2num_dict;
+  std::string unsuppervised_target{""};
+  auto n_sample = Utils::read_data(source_table_ptr, train_data, features_name,
+                                   unsuppervised_target /*unsupervised mode*/, label_data, n_class, txt2num_dict);
+  Utils::close_table(source_table_ptr);
+
+  // if it's a multi-target, then minus the size of target columns.
+  auto n_feature = features_name.size();
+  std::ostringstream oss;
+  oss << "task=train boosting_type=gbdt objective=regression metric=l2 metric_freq=1"
+      << " is_training_metric=true max_bin=255 num_trees=100 learning_rate=0.05"
+      << " num_leaves=31 tree_learner=serial";
+  std::string model_content, mode_params(oss.str().c_str());
+
+  std::vector<const char *> feature_names_cstr;
+  for (const auto &name : features_name) {
+    feature_names_cstr.push_back(name.c_str());
+  }
+  // clang-format off
+  auto start = std::chrono::steady_clock::now();
+  if (Utils::ML_train(mode_params,
+                      C_API_DTYPE_FLOAT64,
+                      train_data.data(),
+                      n_sample,
+                      feature_names_cstr.data(),
+                      n_feature,
+                      C_API_DTYPE_FLOAT32,
+                      label_data.data(),
+                      model_content))
+    return HA_ERR_GENERIC;
+  auto end = std::chrono::steady_clock::now();
+  auto train_duration =
+    std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0f;
+
+  // the definition of this table, ref: `ml_train.sql`
+  oss.clear();
+  oss.str("");
+  oss << m_sch_name <<  "."  << m_table_name;
+  std::string sch_tb_name (oss.str().c_str()), notes, opt_metrics;
+
+  auto content_dom = Json_dom::parse(model_content.c_str(),
+                             model_content.length(),
+                             [](const char *, size_t) { assert(false); },
+                             [] { assert(false); });
+  if (!content_dom.get()) return HA_ERR_GENERIC;
+  Json_wrapper content_json(content_dom.get(), true);
+
+  auto meta_json = Utils::build_up_model_metadata(TASK_NAMES_MAP[type()],  /* task */
+                                                m_target_name,  /*labelled col name */
+                                                sch_tb_name,    /* trained table */
+                                                features_name,  /* feature columns*/
+                                                nullptr,        /* model explanation*/
+                                                notes,          /* notes*/
+                                                MODEL_FORMATS_MAP[MODEL_FORMAT_T::VER_1],   /* model format*/
+                                                MODEL_STATUS_MAP[MODEL_STATUS_T::READY],   /* model_status */
+                                                MODEL_QUALITIES_MAP[MODEL_QUALITY_T::HIGH],  /* model_qulity */
+                                                train_duration,  /*the time in seconds taken to train the model.*/
+                                                TASK_NAMES_MAP[type()], /**task algo name */
+                                                0,              /*train score*/
+                                                n_sample,       /*# of rows in training tbl*/
+                                                n_feature + 1,  /*# of columns in training tbl*/
+                                                n_sample,       /*# of rows selected by adaptive sampling*/
+                                                n_feature,      /*# of columns selected by feature selection.*/
+                                                opt_metrics,    /* optimization metric */
+                                                features_name,  /* names of the columns selected by feature selection*/
+                                                0,              /*contamination*/
+                                                &m_options,     /*options of ml_train*/
+                                                mode_params,    /**training_params */
+                                                nullptr,        /**onnx_inputs_info */
+                                                nullptr,        /*onnx_outputs_info*/
+                                                nullptr,        /*training_drift_metric*/
+                                                1               /* chunks */,
+                                                txt2num_dict   /* txt2numeric dict */
+                                              );
+
+  if (!meta_json)
+    return HA_ERR_GENERIC;
+  Json_wrapper model_meta(meta_json);
+  if (Utils::store_model_catalog(model_content.length(),
+                                 &model_meta,
+                                 m_handler_name))
+    return HA_ERR_GENERIC;
+
+  if (Utils::store_model_object_catalog(m_handler_name, &content_json))
+    return HA_ERR_GENERIC;
+  // clang-format on
+  return 0;
+}
 
 int ML_anomaly_detection::load(std::string &model_content) {
   assert(model_content.length() && m_handler_name.length());
@@ -70,27 +196,54 @@ int ML_anomaly_detection::unload(std::string &model_handle_name) {
   return 0;
 }
 
-int ML_anomaly_detection::import(Json_wrapper &model_object [[maybe_unused]],
-                                 Json_wrapper &model_metadata [[maybe_unused]],
-                                 std::string &model_handle_name [[maybe_unused]]) {
+int ML_anomaly_detection::import(Json_wrapper &, Json_wrapper &, std::string &) {
+  // all logical done in ml_model_import stored procedure.
+  assert(false);
   return 0;
 }
 
-double ML_anomaly_detection::score(std::string &sch_tb_name [[maybe_unused]], std::string &target_name [[maybe_unused]],
-                                   std::string &model_handle [[maybe_unused]], std::string &metric_str [[maybe_unused]],
-                                   Json_wrapper &option [[maybe_unused]]) {
+double ML_anomaly_detection::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+                                   std::string &metric_str, Json_wrapper &option) {
+  assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
+
+  std::transform(metric_str.begin(), metric_str.end(), metric_str.begin(), ::toupper);
+  std::vector<std::string> metrics;
+  Utils::splitString(metric_str, ',', metrics);
+  for (auto &metric : metrics) {
+    if (score_metrics.find(metric) == score_metrics.end()) {
+      std::ostringstream err;
+      err << metric_str << " is invalid for classification scoring";
+      my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+  }
+  OPTION_VALUE_T option_keys;
+  std::string strkey;
+  Utils::parse_json(option, option_keys, strkey, 0);
+
   return 0;
 }
 
-int ML_anomaly_detection::explain(std::string &sch_tb_name [[maybe_unused]],
-                                  std::string &target_column_name [[maybe_unused]],
-                                  std::string &model_handle_name [[maybe_unused]],
-                                  Json_wrapper &exp_options [[maybe_unused]]) {
-  return 0;
+int ML_anomaly_detection::explain(std::string &, std::string &, std::string &, Json_wrapper &) {
+  std::ostringstream err;
+  err << "anomaly_detection does not soupport explain operation";
+  my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  return HA_ERR_GENERIC;
 }
-int ML_anomaly_detection::explain_row() { return 0; }
 
-int ML_anomaly_detection::explain_table() { return 0; }
+int ML_anomaly_detection::explain_row() {
+  std::ostringstream err;
+  err << "anomaly_detection does not soupport explain operation";
+  my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  return HA_ERR_GENERIC;
+}
+
+int ML_anomaly_detection::explain_table() {
+  std::ostringstream err;
+  err << "anomaly_detection does not soupport explain operation";
+  my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  return HA_ERR_GENERIC;
+}
 
 int ML_anomaly_detection::predict_row(Json_wrapper &input_data [[maybe_unused]],
                                       std::string &model_handle_name [[maybe_unused]],
