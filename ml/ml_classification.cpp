@@ -664,7 +664,6 @@ int ML_classification::predict_table(std::string &sch_tb_name, std::string &mode
     // TODO: remove the intersection of the input table and the train table.
   } else {
   }
-
   Utils::close_table(in_table_ptr);
 
   pos = std::strstr(out_sch_tb_name.c_str(), ".") - out_sch_tb_name.c_str();
