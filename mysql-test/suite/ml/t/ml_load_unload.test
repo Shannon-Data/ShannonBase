@@ -27,16 +27,16 @@ ALTER TABLE census_train SECONDARY_LOAD;
 #NULL OPTIONS
 CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', NULL, @census_model);
 
---ERROR 3889
+--ERROR ER_ML_FAIL
 CALL sys.ML_MODEL_UNLOAD(@census_model);
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
---ERROR 3889
+--ERROR ER_ML_FAIL
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
 
 --ERROR 1318
 CALL sys.ML_MODEL_UNLOAD(@census_model, NULL);
 CALL sys.ML_MODEL_UNLOAD(@census_model);
---ERROR 3889
+--ERROR ER_ML_FAIL
 CALL sys.ML_MODEL_UNLOAD(@census_model);
 
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 

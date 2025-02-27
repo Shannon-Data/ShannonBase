@@ -57,15 +57,14 @@ int ML_anomaly_detection::train() {
   if (m_target_name.length()) {
     std::ostringstream err;
     err << "anomaly detection does not support target column, must be set to NULL";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
   OPTION_VALUE_T options;
-  if (!m_options.empty()) {
-    std::string keystr;
-    Utils::parse_json(m_options, options, keystr, 0);
-  }
+  std::string keystr;
+  if (!m_options.empty() && Utils::parse_json(m_options, options, keystr, 0)) return HA_ERR_GENERIC;
+
   auto contamination [[maybe_unused]] = 0.01f;
   if (options.find(ML_KEYWORDS::contamination) != options.end())
     contamination = std::stof(options[ML_KEYWORDS::contamination][0]);
@@ -74,7 +73,7 @@ int ML_anomaly_detection::train() {
   if (!source_table_ptr) {
     std::ostringstream err;
     err << m_sch_name << "." << m_table_name << " open failed for ML";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -91,7 +90,7 @@ int ML_anomaly_detection::train() {
   // if it's a multi-target, then minus the size of target columns.
   auto n_feature = features_name.size();
   std::ostringstream oss;
-  oss << "task=train boosting_type=gbdt objective=regression metric=l2 metric_freq=1"
+  oss << "task=train boosting_type=gbdt objective=regression metric_freq=1"
       << " is_training_metric=true max_bin=255 num_trees=100 learning_rate=0.05"
       << " num_leaves=31 tree_learner=serial";
   std::string model_content, mode_params(oss.str().c_str());
@@ -212,36 +211,83 @@ double ML_anomaly_detection::score(std::string &sch_tb_name, std::string &target
   for (auto &metric : metrics) {
     if (score_metrics.find(metric) == score_metrics.end()) {
       std::ostringstream err;
-      err << metric_str << " is invalid for classification scoring";
-      my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
+      err << metric_str << " is invalid for anomaly detection scoring";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return 0.0;
     }
   }
   OPTION_VALUE_T option_keys;
   std::string strkey;
-  Utils::parse_json(option, option_keys, strkey, 0);
+  if (Utils::parse_json(option, option_keys, strkey, 0)) return 0.0;
 
-  return 0;
+  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
+  std::string schema_name(sch_tb_name.c_str(), pos);
+  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+
+  // load the test data from rapid engine.
+  auto source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
+  if (!source_table_ptr) {
+    std::ostringstream err;
+    err << sch_tb_name << " open failed for ML";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return 0.0;
+  }
+  std::vector<double> test_data;
+  std::vector<float> label_data;
+  std::vector<std::string> features_name;
+  int n_class{0};
+  txt2numeric_map_t txt2numeric;
+  auto n_sample =
+      Utils::read_data(source_table_ptr, test_data, features_name, target_name, label_data, n_class, txt2numeric);
+  Utils::close_table(source_table_ptr);
+  if (!n_sample) return 0.0;
+
+  // gets the prediction values.
+  std::vector<double> predictions;
+  if (Utils::model_score(model_handle, n_sample, features_name.size(), test_data, predictions)) return 0.0;
+  double score{0.0};
+  switch ((int)ML_anomaly_detection::score_metrics[metrics[0]]) {
+    case (int)SCORE_METRIC_T::ACCURACY:
+      break;
+    case (int)SCORE_METRIC_T::BALANCED_ACCURACY:
+      break;
+    case (int)SCORE_METRIC_T::F1:
+      break;
+    case (int)SCORE_METRIC_T::NEG_LOG_LOSS:
+      break;
+    case (int)SCORE_METRIC_T::PRECISION:
+      break;
+    case (int)SCORE_METRIC_T::PRECISION_K:
+      break;
+    case (int)SCORE_METRIC_T::RECALL:
+      break;
+    case (int)SCORE_METRIC_T::ROC_AUC:
+      break;
+    default:
+      break;
+  }
+
+  return score;
 }
 
 int ML_anomaly_detection::explain(std::string &, std::string &, std::string &, Json_wrapper &) {
   std::ostringstream err;
   err << "anomaly_detection does not soupport explain operation";
-  my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
   return HA_ERR_GENERIC;
 }
 
 int ML_anomaly_detection::explain_row() {
   std::ostringstream err;
   err << "anomaly_detection does not soupport explain operation";
-  my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
   return HA_ERR_GENERIC;
 }
 
 int ML_anomaly_detection::explain_table() {
   std::ostringstream err;
   err << "anomaly_detection does not soupport explain operation";
-  my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+  my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
   return HA_ERR_GENERIC;
 }
 

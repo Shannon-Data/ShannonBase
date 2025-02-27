@@ -94,10 +94,15 @@ class ML_KEYWORDS {
    static constexpr const char* chunks = "chunks";
    static constexpr const char* column_names = "column_names";
    static constexpr const char* contamination = "contamination";
+   static constexpr const char* datetime_index = "datetime_index";
+   static constexpr const char* endogenous_variables = "endogenous_variables";
+   static constexpr const char* exogenous_variables = "exogenous_variables";
    static constexpr const char* format = "format";
+   static constexpr const char* include_column_list = "include_column_list";
    static constexpr const char* kclass = "class";
    static constexpr const char* ml_results = "ml_results";
    static constexpr const char* model_explanation = "model_explanation";
+   static constexpr const char* model_list = "model_list";
    static constexpr const char* model_quality = "model_quality";
    static constexpr const char* n_columns = "n_columns";
    static constexpr const char* n_rows = "n_rows";

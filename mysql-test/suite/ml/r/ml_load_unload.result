@@ -10,15 +10,15 @@ SET @census_model = 'census_test_load';
 ALTER TABLE census_train SECONDARY_LOAD;
 CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', NULL, @census_model);
 CALL sys.ML_MODEL_UNLOAD(@census_model);
-ERROR HY000: Secondary engine operation failed. census_test_load has not been loaded.
+ERROR HY000: ML operation failed. census_test_load has not been loaded.
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
-ERROR HY000: Secondary engine operation failed. census_test_load has been loaded.
+ERROR HY000: ML operation failed. census_test_load has been loaded.
 CALL sys.ML_MODEL_UNLOAD(@census_model, NULL);
 ERROR 42000: Incorrect number of arguments for PROCEDURE sys.ML_MODEL_UNLOAD; expected 1, got 2
 CALL sys.ML_MODEL_UNLOAD(@census_model);
 CALL sys.ML_MODEL_UNLOAD(@census_model);
-ERROR HY000: Secondary engine operation failed. census_test_load has not been loaded.
+ERROR HY000: ML operation failed. census_test_load has not been loaded.
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
 JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
 FROM ML_SCHEMA_root.MODEL_CATALOG;

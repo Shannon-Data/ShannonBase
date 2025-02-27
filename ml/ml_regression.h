@@ -80,7 +80,15 @@ class ML_regression : public ML_algorithm {
   void set_options(Json_wrapper &options) { m_options = options; }
   Json_wrapper &get_options() { return m_options; }
 
-  static const std::vector<std::string> metrics;
+  enum class SCORE_METRIC_T {
+    NEG_MEAN_ABSOLUTE_ERROR = REGRESSION_METRIC_START,
+    NEG_MEAN_SQUARED_ERROR,
+    NEG_MEAN_SQUARED_LOG_ERROR,
+    NEG_MEDIAN_ABSOLUTE_ERROR,
+    R2
+  };
+
+  static std::map<std::string, SCORE_METRIC_T> score_metrics;
 
  private:
   std::string m_sch_name;

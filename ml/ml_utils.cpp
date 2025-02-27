@@ -45,7 +45,6 @@
 #include "sql/table.h"
 
 #include "ml_algorithm.h"
-#include "ml_classification.h"
 #include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
 
 namespace ShannonBase {
@@ -206,7 +205,7 @@ int Utils::check_table_available(std::string &sch_tb_name) {
   auto share = ShannonBase::shannon_loaded_tables->get(schema_name.c_str(), table_name.c_str());
   if (!share) {
     err << sch_tb_name << " NOT loaded into rapid engine for ML";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
   return 0;
@@ -277,7 +276,7 @@ handler *Utils::get_secondary_handler(TABLE *source_table_ptr) {
   // The engine must support being used as a secondary engine.
   handlerton *hton = plugin_data<handlerton *>(plugin);
   if (!(hton->flags & HTON_IS_SECONDARY_ENGINE)) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), "Unsupported secondary storage engine");
+    my_error(ER_ML_FAIL, MYF(0), "Unsupported secondary storage engine");
     return nullptr;
   }
 
@@ -484,7 +483,7 @@ int Utils::store_model_catalog(size_t model_obj_size, const Json_wrapper *model_
   if (!cat_table_ptr) {
     std::ostringstream err;
     err << catalog_schema_name.c_str() << "." << cat_table_name.c_str() << " open failed for ML";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -558,7 +557,7 @@ int Utils::store_model_object_catalog(std::string &model_handle_name, Json_wrapp
   if (!cat_table_ptr) {
     std::ostringstream err;
     err << catalog_schema_name.c_str() << "." << cat_table_name.c_str() << " open failed for ML";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -801,11 +800,26 @@ cleanup_dataset:
   return ret;
 }
 
-double Utils::calculate_balanced_accuracy(size_t n_samples, std::vector<double> &predictions,
+double Utils::calculate_accuracy(size_t n_sample, std::vector<double> &predictions, std::vector<float> &label_data) {
+  // calculate the accuracy.
+  int TP = 0, TN = 0;
+  for (size_t i = 0; i < n_sample; i++) {
+    int predicted = (predictions[i] >= 0.5) ? 1 : 0;
+    auto actual = (int)label_data[i];
+
+    if (predicted == 1 && actual == 1) TP++;  // true positive
+    if (predicted == 0 && actual == 0) TN++;  // true negtive
+  }
+
+  auto accuracy = (TP + TN) * 1.0 / n_sample;
+  return accuracy;
+}
+
+double Utils::calculate_balanced_accuracy(size_t n_sample, std::vector<double> &predictions,
                                           std::vector<float> &label_data) {
   // calculate the balanced accuracy.
   int TP = 0, TN = 0, FP = 0, FN = 0;
-  for (size_t i = 0; i < n_samples; i++) {
+  for (size_t i = 0; i < n_sample; i++) {
     int predicted = (predictions[i] >= 0.5) ? 1 : 0;
     auto actual = (int)label_data[i];
 
@@ -821,24 +835,25 @@ double Utils::calculate_balanced_accuracy(size_t n_samples, std::vector<double> 
 
   return balanced_accuracy;
 }
-double Utils::model_score(std::string &model_handle_name, int metric_type, size_t n_samples, size_t n_features,
-                          std::vector<double> &testing_data, std::vector<float> &label_data) {
+
+int Utils::model_score(std::string &model_handle_name, size_t n_samples, size_t n_features,
+                       std::vector<double> &testing_data, std::vector<double> &predictions) {
   std::string score_params;
   BoosterHandle handler = Utils::load_trained_model_from_string(Loaded_models[model_handle_name]);
   if (!handler) {
     std::ostringstream err;
     err << model_handle_name << " can not load model from content string";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
-  auto data_type = sizeof(double) == 8 ? C_API_DTYPE_FLOAT64 : C_API_DTYPE_FLOAT32;
-  std::vector<double> predictions(n_samples);
+  assert(sizeof(double) == 8);
+  predictions.resize(n_samples, 0.0);
   int64_t out_len;
   // clang-format off
   auto ret = LGBM_BoosterPredictForMat(handler,               /* model handler */
                             testing_data.data(),   /* test data */
-                            data_type,             /* testing data type */
+                            C_API_DTYPE_FLOAT64,             /* testing data type */
                             n_samples,             /* # of testing data */
                             n_features,            /* # of features of testing data */
                             1,                     /* row-based format */
@@ -851,23 +866,11 @@ double Utils::model_score(std::string &model_handle_name, int metric_type, size_
   //clang-format on
   if (ret) {
     LGBM_BoosterFree(handler);
-    return 0.0f;
+    return HA_ERR_GENERIC;
   }
+
   LGBM_BoosterFree(handler);
-
-  // calculate the balanced accuracy.
-  double balanced_accuracy{0.0};
-  switch (metric_type){
-    case (int) ML_classification::SCORE_METRIC_T::BALANCED_ACCURACY:
-      balanced_accuracy = Utils::calculate_balanced_accuracy(n_samples, predictions, label_data);
-      break;
-    case 1: {
-
-    } break;
-    default:
-     break;
-  }
-  return balanced_accuracy;
+  return 0;
 }
 
 int Utils::ML_predict_row(std::string &model_handle_name, std::vector<ml_record_type_t> &input_data, txt2numeric_map_t& txt2numeric_dict, std::vector<double> &predictions) {

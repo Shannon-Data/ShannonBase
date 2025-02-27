@@ -78,15 +78,14 @@ class Utils {
   /**
    * to calcl the quality and reliability of a trained model.
    * @param[in] model_handle_name, the name of loaded model name.
-   * @param[in] metrics, metrics name string.
    * @param[in] testing_data, the test data.
    * @param[in] features, feature names array.
    * @param[in] lable_col_name, label column name.
-   * @param[in] label_data, the label data of testing data.
-   * @retval value of trained model.
+   * @param[out] predictions, the prediction values.
+   * @retval 0 success, otherwise failed.
    */
-  static double model_score(std::string &model_handle_name, int metric_type, size_t n_samples, size_t n_features,
-                            std::vector<double> &testing_data, std::vector<float> &label_data);
+  static int model_score(std::string &model_handle_name, size_t n_samples, size_t n_features,
+                         std::vector<double> &testing_data, std::vector<double> &predictions);
 
   /**
    * to predict the result of a model.
@@ -178,9 +177,12 @@ class Utils {
                        std::string &label_name, std::vector<float> &label_data, int &n_class,
                        txt2numeric_map_t &txt2numeric_dict);
 
- private:
-  static double calculate_balanced_accuracy(size_t n_samples, std::vector<double> &predictions,
+  static double calculate_accuracy(size_t n_sample, std::vector<double> &predictions, std::vector<float> &label_data);
+
+  static double calculate_balanced_accuracy(size_t n_sample, std::vector<double> &predictions,
                                             std::vector<float> &label_data);
+
+ private:
   Utils() = delete;
   virtual ~Utils() = delete;
   // disable copy ctor, operator=, etc.
