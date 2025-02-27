@@ -83,6 +83,7 @@ class ML_anomaly_detection : public ML_algorithm {
   };
 
   static std::map<std::string, SCORE_METRIC_T> score_metrics;
+  static constexpr float default_contamination = 0.1f;
 
  private:
   // source data schema name.

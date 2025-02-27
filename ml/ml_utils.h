@@ -76,7 +76,8 @@ class Utils {
                       std::string &model_content);
 
   /**
-   * to calcl the quality and reliability of a trained model.
+   * to calcl the pobilities of a trained model with mutl-rows data.
+   * @param[in] type, prediction type used.
    * @param[in] model_handle_name, the name of loaded model name.
    * @param[in] testing_data, the test data.
    * @param[in] features, feature names array.
@@ -84,18 +85,20 @@ class Utils {
    * @param[out] predictions, the prediction values.
    * @retval 0 success, otherwise failed.
    */
-  static int model_score(std::string &model_handle_name, size_t n_samples, size_t n_features,
-                         std::vector<double> &testing_data, std::vector<double> &predictions);
+  static int model_predict(int type, std::string &model_handle_name, size_t n_samples, size_t n_features,
+                           std::vector<double> &testing_data, std::vector<double> &predictions);
 
   /**
-   * to predict the result of a model.
+   * to predict the result of a model with one user input data row, do normailization with
+   * the dictionary before do prediction.
+   * @param[in] type, which type of prediction used.
    * @param[in] model_handle_name, the name of loaded model name.
    * @param[in] input_data, the input data.
    * @param[in] txt2numeric_dict, the txt2numeric dict.
    * @param[out] result, the result of prediction.
    * @retval 0 success, otherwise failed.
    */
-  static int ML_predict_row(std::string &model_handle_name, std::vector<ml_record_type_t> &input_data,
+  static int ML_predict_row(int type, std::string &model_handle_name, std::vector<ml_record_type_t> &input_data,
                             txt2numeric_map_t &txt2numeric_dict, std::vector<double> &predictions);
 
   /**
@@ -172,6 +175,8 @@ class Utils {
   static int splitString(const std::string &str, char delimiter, std::vector<std::string> &output);
 
   static std::string read_file(std::string &file_path);
+
+  static int get_txt2num_dict(Json_wrapper &model_meta, txt2numeric_map_t &txt2num_dict);
 
   static int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
                        std::string &label_name, std::vector<float> &label_data, int &n_class,

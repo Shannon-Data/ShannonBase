@@ -156,7 +156,8 @@ double ML_regression::score(std::string &sch_tb_name, std::string &target_name, 
 
   // gets the prediction values.
   std::vector<double> predictions;
-  if (Utils::model_score(model_handle, n_sample, features_name.size(), test_data, predictions)) return 0.0;
+  if (Utils::model_predict(C_API_PREDICT_NORMAL, model_handle, n_sample, features_name.size(), test_data, predictions))
+    return 0.0;
   double score{0.0};
   switch ((int)ML_regression::score_metrics[metrics[0]]) {
     case (int)ML_regression::SCORE_METRIC_T::NEG_MEAN_ABSOLUTE_ERROR:
@@ -185,10 +186,82 @@ int ML_regression::explain_row() { return 0; }
 
 int ML_regression::explain_table() { return 0; }
 
-int ML_regression::predict_row(Json_wrapper &input_data [[maybe_unused]],
-                               std::string &model_handle_name [[maybe_unused]], Json_wrapper &option [[maybe_unused]],
-                               Json_wrapper &result [[maybe_unused]]) {
-  return 0;
+int ML_regression::predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+                               Json_wrapper &result) {
+  assert(result.empty());
+  std::ostringstream err;
+
+  std::string keystr;
+  OPTION_VALUE_T meta_feature_names, input_values, options;
+  if (!option.empty() && Utils::parse_json(option, options, keystr, 0)) return HA_ERR_GENERIC;
+
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
+
+  if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
+      (!model_meta.empty() && Utils::parse_json(model_meta, meta_feature_names, keystr, 0))) {
+    err << "invalid input data or model meta info.";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  auto feature_names = meta_feature_names[ML_KEYWORDS::column_names];
+  if (feature_names.size() != input_values.size()) {
+    err << "input data columns size does not match the model feature columns size.";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  for (auto &feature_name : feature_names) {
+    if (input_values.find(feature_name) == input_values.end()) {
+      err << "input data columns does not contain the model feature column: " << feature_name;
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  txt2numeric_map_t txt2numeric;
+  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) return HA_ERR_GENERIC;
+
+  Json_object *root_obj = new (std::nothrow) Json_object();
+  if (root_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+
+  std::vector<ml_record_type_t> sample_data;
+  for (auto &feature_name : feature_names) {
+    std::string value{"0"};
+    if (input_values.find(feature_name) != input_values.end()) value = input_values[feature_name][0];
+    sample_data.push_back({feature_name, value});
+    root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
+  }
+
+  // prediction
+  std::vector<double> predictions;
+  root_obj->add_alias(ML_KEYWORDS::Prediction,
+                      new (std::nothrow) Json_string(meta_feature_names[ML_KEYWORDS::train_table_name][0]));
+  auto ret = Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, predictions);
+  if (ret) {
+    err << "call ML_PREDICT_ROW failed";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  auto rating{0};
+  // ml_results
+  Json_object *ml_results_obj = new (std::nothrow) Json_object();
+  if (ml_results_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+  // ml_results: prediction
+  Json_object *predictions_obj = new (std::nothrow) Json_object();
+  if (predictions_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+  predictions_obj->add_alias(ML_KEYWORDS::rating, new (std::nothrow) Json_double(rating));
+  ml_results_obj->add_alias(ML_KEYWORDS::predictions, predictions_obj);
+
+  root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results_obj);
+  result = Json_wrapper(root_obj);
+  return ret;
 }
 
 int ML_regression::predict_table(std::string &sch_tb_name [[maybe_unused]],

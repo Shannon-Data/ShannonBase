@@ -248,7 +248,8 @@ double ML_forecasting::score(std::string &sch_tb_name, std::string &target_name,
 
   // gets the prediction values.
   std::vector<double> predictions;
-  if (Utils::model_score(model_handle, n_sample, features_name.size(), test_data, predictions)) return 0.0;
+  if (Utils::model_predict(C_API_PREDICT_NORMAL, model_handle, n_sample, features_name.size(), test_data, predictions))
+    return 0.0;
   double score{0.0};
   switch ((int)ML_forecasting::score_metrics[metrics[0]]) {
     case (int)ML_forecasting::SCORE_METRIC_T::NEG_MAX_ABSOLUTE_ERROR:
@@ -280,10 +281,11 @@ int ML_forecasting::explain_row() { return 0; }
 
 int ML_forecasting::explain_table() { return 0; }
 
-int ML_forecasting::predict_row(Json_wrapper &input_data [[maybe_unused]],
-                                std::string &model_handle_name [[maybe_unused]], Json_wrapper &option [[maybe_unused]],
-                                Json_wrapper &result [[maybe_unused]]) {
-  return 0;
+int ML_forecasting::predict_row(Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) {
+  std::ostringstream err;
+  err << "forecasting does not support predict_row.";
+  my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+  return HA_ERR_GENERIC;
 }
 
 int ML_forecasting::predict_table(std::string &sch_tb_name [[maybe_unused]],
