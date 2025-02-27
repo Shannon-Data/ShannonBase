@@ -106,28 +106,6 @@ MODEL_PREDICTION_EXP_T ML_classification::parse_option(Json_wrapper &options) {
   return explainer_type;
 }
 
-int ML_classification::get_txt2num_dict(Json_wrapper&input, std::string& key, txt2numeric_map_t& txt2num_dict) {
-  MYSQL_LEX_CSTRING lex_key;
-  lex_key.str = key.c_str();
-  lex_key.length = key.length();
-  auto result = input.lookup(lex_key);
-  assert(!result.empty());
-  if (result.type() != enum_json_type::J_OBJECT) return HA_ERR_GENERIC;
-
-  OPTION_VALUE_T dict_opt;
-  std::string strkey;
-  if (Utils::parse_json(result, dict_opt, strkey, 0)) return HA_ERR_GENERIC;
-  for (auto& it : dict_opt) {
-    auto name = it.first;
-    std::set<std::string> val_set;
-    for (auto val_str : it.second) {
-      val_set.insert(val_str);
-    }
-    txt2num_dict.insert({name, val_set});
-  }
-  return 0;
-}
-
 int ML_classification::train() {
   auto source_table_ptr = Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ);
   if (!source_table_ptr) {
@@ -317,7 +295,8 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   if (!n_sample) return 0.0;
 
   std::vector<double> predictions;
-  if (Utils::model_score(model_handle, n_sample, features_name.size(), test_data, predictions)) return 0.0;
+  if (Utils::model_predict(C_API_PREDICT_NORMAL, model_handle, n_sample, features_name.size(), test_data, predictions))
+    return 0.0;
   double score{0.0};
   switch ((int)ML_classification::score_metrics[metrics[0]]) {
     case (int)ML_classification::SCORE_METRIC_T::ACCURACY:
@@ -420,7 +399,7 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   assert(result.empty());
   std::ostringstream err;
   if (!option.empty()) {
-    err << "classification does not support option.";
+    err << "classification does not support option, set to null";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
@@ -429,15 +408,15 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   Json_wrapper model_meta;
   if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
 
-  OPTION_VALUE_T meta_feature_names, input_values;
+  OPTION_VALUE_T meta_infos_names, input_values;
   if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
-      (!model_meta.empty() && Utils::parse_json(model_meta, meta_feature_names, keystr, 0))) {
+      (!model_meta.empty() && Utils::parse_json(model_meta, meta_infos_names, keystr, 0))) {
     err << "invalid input data or model meta info.";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
-  auto feature_names = meta_feature_names[ML_KEYWORDS::column_names];
+  auto feature_names = meta_infos_names[ML_KEYWORDS::column_names];
   if (feature_names.size() != input_values.size()) {
     err << "input data columns size does not match the model feature columns size.";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
@@ -452,8 +431,7 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   }
 
   txt2numeric_map_t txt2numeric;
-  std::string key(ML_KEYWORDS::txt2num_dict);
-  if (get_txt2num_dict(model_meta, key, txt2numeric)) return HA_ERR_GENERIC;
+  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) return HA_ERR_GENERIC;
 
   Json_object *root_obj = new (std::nothrow) Json_object();
   if (root_obj == nullptr) {
@@ -471,8 +449,8 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   // prediction
   std::vector<double> predictions;
   root_obj->add_alias(ML_KEYWORDS::Prediction,
-                      new (std::nothrow) Json_string(meta_feature_names[ML_KEYWORDS::train_table_name][0]));
-  auto ret = Utils::ML_predict_row(model_handle_name, sample_data, txt2numeric, predictions);
+                      new (std::nothrow) Json_string(meta_infos_names[ML_KEYWORDS::train_table_name][0]));
+  auto ret = Utils::ML_predict_row(C_API_PREDICT_CONTRIB, model_handle_name, sample_data, txt2numeric, predictions);
   if (ret) {
     err << "call ML_PREDICT_ROW failed";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
@@ -490,7 +468,7 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
     return HA_ERR_GENERIC;
   }
   predictions_obj->add_alias(ML_KEYWORDS::kclass,
-                             new (std::nothrow) Json_string(meta_feature_names[ML_KEYWORDS::train_table_name][0]));
+                             new (std::nothrow) Json_string(meta_infos_names[ML_KEYWORDS::train_table_name][0]));
   ml_results_obj->add_alias(ML_KEYWORDS::predictions, predictions_obj);
 
   Json_object *probabilities_obj = new (std::nothrow) Json_object();

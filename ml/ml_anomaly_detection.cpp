@@ -65,7 +65,7 @@ int ML_anomaly_detection::train() {
   std::string keystr;
   if (!m_options.empty() && Utils::parse_json(m_options, options, keystr, 0)) return HA_ERR_GENERIC;
 
-  auto contamination [[maybe_unused]] = 0.01f;
+  auto contamination [[maybe_unused]] = ML_anomaly_detection::default_contamination;
   if (options.find(ML_KEYWORDS::contamination) != options.end())
     contamination = std::stof(options[ML_KEYWORDS::contamination][0]);
 
@@ -87,11 +87,10 @@ int ML_anomaly_detection::train() {
                                    unsuppervised_target /*unsupervised mode*/, label_data, n_class, txt2num_dict);
   Utils::close_table(source_table_ptr);
 
-  // if it's a multi-target, then minus the size of target columns.
   auto n_feature = features_name.size();
   std::ostringstream oss;
-  oss << "task=train boosting_type=gbdt objective=regression metric_freq=1"
-      << " is_training_metric=true max_bin=255 num_trees=100 learning_rate=0.05"
+  oss << "task=train boosting_type=gbdt objective=regression"
+      << " max_bin=255 num_trees=100 learning_rate=0.05"
       << " num_leaves=31 tree_learner=serial";
   std::string model_content, mode_params(oss.str().c_str());
 
@@ -242,9 +241,22 @@ double ML_anomaly_detection::score(std::string &sch_tb_name, std::string &target
   Utils::close_table(source_table_ptr);
   if (!n_sample) return 0.0;
 
+  // For ML_SCORE the target_column_name column must only contain the anomaly scores as an integer:
+  // 1: an anomaly or 0 normal.
+  auto it = std::find_if(label_data.begin(), label_data.end(), [](float value) {
+    return static_cast<int>(value) != 0 && static_cast<int>(value) != 1;  // values other than 0 or 1
+  });
+  if (it != label_data.end()) {
+    std::ostringstream err;
+    err << sch_tb_name << "the " << target_name << " contains a value other than 0 or 1";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return 0.0;
+  }
+
   // gets the prediction values.
   std::vector<double> predictions;
-  if (Utils::model_score(model_handle, n_sample, features_name.size(), test_data, predictions)) return 0.0;
+  if (Utils::model_predict(C_API_PREDICT_NORMAL, model_handle, n_sample, features_name.size(), test_data, predictions))
+    return 0.0;
   double score{0.0};
   switch ((int)ML_anomaly_detection::score_metrics[metrics[0]]) {
     case (int)SCORE_METRIC_T::ACCURACY:
@@ -291,10 +303,99 @@ int ML_anomaly_detection::explain_table() {
   return HA_ERR_GENERIC;
 }
 
-int ML_anomaly_detection::predict_row(Json_wrapper &input_data [[maybe_unused]],
-                                      std::string &model_handle_name [[maybe_unused]],
-                                      Json_wrapper &option [[maybe_unused]], Json_wrapper &result [[maybe_unused]]) {
-  return 0;
+int ML_anomaly_detection::predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+                                      Json_wrapper &result) {
+  assert(result.empty());
+  std::ostringstream err;
+  if (!option.empty()) {
+    err << "classification does not support option, set to null";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  std::string keystr;
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
+
+  OPTION_VALUE_T meta_infos_model, input_values, options;
+  if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
+      (!model_meta.empty() && Utils::parse_json(model_meta, meta_infos_model, keystr, 0))) {
+    err << "invalid input data or model meta info.";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  auto feature_names = meta_infos_model[ML_KEYWORDS::column_names];
+  if (feature_names.size() != input_values.size()) {
+    err << "input data columns size does not match the model feature columns size.";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  for (auto &feature_name : feature_names) {
+    if (input_values.find(feature_name) == input_values.end()) {
+      err << "input data columns does not contain the model feature column: " << feature_name;
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  txt2numeric_map_t txt2numeric;
+  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) return HA_ERR_GENERIC;
+
+  if (!option.empty() && Utils::parse_json(option, options, keystr, 0)) return HA_ERR_GENERIC;
+  auto threshold [[maybe_unused]] = (options[ML_KEYWORDS::threshold].size())
+                                        ? std::stod(options[ML_KEYWORDS::threshold][0])
+                                        : (1 - ML_anomaly_detection::default_contamination);
+
+  Json_object *root_obj = new (std::nothrow) Json_object();
+  if (root_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+
+  std::vector<ml_record_type_t> sample_data;
+  for (auto &feature_name : feature_names) {
+    std::string value{"0"};
+    if (input_values.find(feature_name) != input_values.end()) value = input_values[feature_name][0];
+    sample_data.push_back({feature_name, value});
+    root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
+  }
+
+  std::vector<double> predictions;
+  auto ret = Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, predictions);
+  if (ret) {
+    err << "call ML_PREDICT_ROW failed";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  // here, stat to calc the prob of normal and anomaly probabilities.
+  auto normal_prob{0.0}, anomaly_prob{0.0}, anomaly_threshold{0.0};
+  auto is_anomaly = (anomaly_prob > anomaly_threshold) ? 1 : 0;
+
+  // ml_results
+  Json_object *ml_results_obj = new (std::nothrow) Json_object();
+  if (ml_results_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+
+  Json_object *probabilities_obj = new (std::nothrow) Json_object();
+  if (probabilities_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+  probabilities_obj->add_alias(ML_KEYWORDS::normal, new (std::nothrow) Json_double(normal_prob));
+  probabilities_obj->add_alias(ML_KEYWORDS::anomaly, new (std::nothrow) Json_double(anomaly_prob));
+  ml_results_obj->add_alias(ML_KEYWORDS::probabilities, probabilities_obj);
+
+  Json_object *prediction_obj = new (std::nothrow) Json_object();
+  if (prediction_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+  prediction_obj->add_alias(ML_KEYWORDS::is_anomaly, new (std::nothrow) Json_int(is_anomaly));
+  ml_results_obj->add_alias(ML_KEYWORDS::predictions, prediction_obj);
+
+  root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results_obj);
+  result = Json_wrapper(root_obj);
+  return ret;
 }
 
 int ML_anomaly_detection::predict_table(std::string &sch_tb_name [[maybe_unused]],

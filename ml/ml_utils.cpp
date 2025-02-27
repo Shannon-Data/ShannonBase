@@ -285,7 +285,30 @@ handler *Utils::get_secondary_handler(TABLE *source_table_ptr) {
   return get_new_handler(source_table_ptr->s, is_partitioned, thd->mem_root, hton);
 }
 
+int Utils::get_txt2num_dict(Json_wrapper &model_meta, txt2numeric_map_t &txt2num_dict) {
+  MYSQL_LEX_CSTRING lex_key;
+  lex_key.str = ML_KEYWORDS::txt2num_dict;
+  lex_key.length = strlen(lex_key.str);
+  auto result = model_meta.lookup(lex_key);
+  assert(!result.empty());
+  if (result.type() != enum_json_type::J_OBJECT) return HA_ERR_GENERIC;
+
+  OPTION_VALUE_T dict_opt;
+  std::string strkey;
+  if (Utils::parse_json(result, dict_opt, strkey, 0)) return HA_ERR_GENERIC;
+  for (auto &it : dict_opt) {
+    auto name = it.first;
+    std::set<std::string> val_set;
+    for (auto val_str : it.second) {
+      val_set.insert(val_str);
+    }
+    txt2num_dict.insert({name, val_set});
+  }
+  return 0;
+}
 // return the # of rows read from table successfully. otherwise, 0.
+// a new param, check_condition needed? std::function<void(double)> ? to check the data must
+// satisfy the the condition.
 int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
                      std::string &label_name, std::vector<float> &label_data, int &n_class,
                      txt2numeric_map_t &txt2numeric_dict) {
@@ -836,8 +859,10 @@ double Utils::calculate_balanced_accuracy(size_t n_sample, std::vector<double> &
   return balanced_accuracy;
 }
 
-int Utils::model_score(std::string &model_handle_name, size_t n_samples, size_t n_features,
-                       std::vector<double> &testing_data, std::vector<double> &predictions) {
+int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samples, size_t n_features,
+                         std::vector<double> &testing_data, std::vector<double> &predictions) {
+  assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE || type == C_API_PREDICT_LEAF_INDEX ||
+         type == C_API_PREDICT_CONTRIB);
   std::string score_params;
   BoosterHandle handler = Utils::load_trained_model_from_string(Loaded_models[model_handle_name]);
   if (!handler) {
@@ -857,7 +882,7 @@ int Utils::model_score(std::string &model_handle_name, size_t n_samples, size_t 
                             n_samples,             /* # of testing data */
                             n_features,            /* # of features of testing data */
                             1,                     /* row-based format */
-                            C_API_PREDICT_NORMAL,  /* What should be predicted */
+                            type,                  /* What should be predicted */
                             0,                     /* Start index of the iteration */ 
                             -1,                    /* # of iteration for prediction, <= 0 no limit*/
                             score_params.c_str(),  /* params */
@@ -873,8 +898,10 @@ int Utils::model_score(std::string &model_handle_name, size_t n_samples, size_t 
   return 0;
 }
 
-int Utils::ML_predict_row(std::string &model_handle_name, std::vector<ml_record_type_t> &input_data, txt2numeric_map_t& txt2numeric_dict, std::vector<double> &predictions) {
+int Utils::ML_predict_row(int type, std::string &model_handle_name, std::vector<ml_record_type_t> &input_data, txt2numeric_map_t& txt2numeric_dict, std::vector<double> &predictions) {
 
+  assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE ||
+         type == C_API_PREDICT_LEAF_INDEX || type == C_API_PREDICT_CONTRIB);
   std::string model_content = Loaded_models[model_handle_name];
   assert(model_content.length());
   BoosterHandle booster = nullptr;
@@ -882,8 +909,8 @@ int Utils::ML_predict_row(std::string &model_handle_name, std::vector<ml_record_
   if (!booster) return HA_ERR_GENERIC;
 
   auto n_feature = input_data.size();
-  int64 num_results = n_feature + 1;  // contri value + bias
-  predictions.resize(num_results);
+  int64 num_results;
+  predictions.resize(n_feature);
 
   std::vector<double> sample_data;
   for (auto &field : input_data) {
@@ -906,7 +933,7 @@ int Utils::ML_predict_row(std::string &model_handle_name, std::vector<ml_record_
                                        1,                   // # of row
                                        n_feature,           // # of col
                                        1,                    // row oriented
-                                       C_API_PREDICT_CONTRIB,
+                                       type,                 // prediction type
                                        0,                    // start iter
                                        -1,                   // stop iter
                                        "",                   // contribution params
