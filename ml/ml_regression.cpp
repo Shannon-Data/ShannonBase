@@ -25,6 +25,7 @@
 */
 #include "ml_regression.h"
 
+#include <chrono>
 #include <string>
 
 #include "include/my_inttypes.h"
@@ -38,10 +39,11 @@
 #include "sql/sql_class.h"  //THD
 #include "sql/table.h"
 
+#include "ml_info.h"
 #include "ml_utils.h"                         //ml utils
 #include "storage/innobase/include/ut0dbg.h"  //for ut_a
 
-#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
+//#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
 #include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
 
 // clang-format off
@@ -49,9 +51,15 @@
 namespace ShannonBase {
 namespace ML {
 
-const std::vector<std::string> ML_regression::metrics = {"neg_mean_absolute_error", "neg_mean_squared_error",
-                                                         "neg_mean_squared_log_error", "neg_median_absolute_error",
-                                                         "r2"};
+// clang-format off
+std::map<std::string, ML_regression::SCORE_METRIC_T> ML_regression::score_metrics = {
+  {"NEG_MEAN_ABSOLUTE_ERROR", ML_regression::SCORE_METRIC_T::NEG_MEAN_ABSOLUTE_ERROR},
+  {"NEG_MEAN_SQUARED_ERROR", ML_regression::SCORE_METRIC_T::NEG_MEAN_SQUARED_ERROR},
+  {"NEG_MEAN_SQUARED_LOG_ERROR", ML_regression::SCORE_METRIC_T::NEG_MEAN_SQUARED_LOG_ERROR},
+  {"NEG_MEDIAN_ABSOLUTE_ERROR", ML_regression::SCORE_METRIC_T::NEG_MEDIAN_ABSOLUTE_ERROR},
+  {"R2", ML_regression::SCORE_METRIC_T::R2}
+};
+// clang-format on
 
 ML_regression::ML_regression() {}
 ML_regression::~ML_regression() {}
@@ -64,7 +72,7 @@ int ML_regression::train() {
   if (!share) {
     std::ostringstream err;
     err << m_sch_name.c_str() << "." << m_table_name.c_str() << " NOT loaded into rapid engine";
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -109,14 +117,62 @@ double ML_regression::score(std::string &sch_tb_name, std::string &target_name, 
                             std::string &metric_str, Json_wrapper &option) {
   assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
 
-  if (!option.empty()) {
-    std::ostringstream err;
-    err << "option params should be null for regression";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
+  std::transform(metric_str.begin(), metric_str.end(), metric_str.begin(), ::toupper);
+  std::vector<std::string> metrics;
+  Utils::splitString(metric_str, ',', metrics);
+  for (auto &metric : metrics) {
+    if (score_metrics.find(metric) == score_metrics.end()) {
+      std::ostringstream err;
+      err << metric_str << " is invalid for regression scoring";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return 0.0;
+    }
   }
+  OPTION_VALUE_T option_keys;
+  std::string strkey;
+  if (Utils::parse_json(option, option_keys, strkey, 0)) return 0.0;
 
-  return 0;
+  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
+  std::string schema_name(sch_tb_name.c_str(), pos);
+  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+
+  // load the test data from rapid engine.
+  auto source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
+  if (!source_table_ptr) {
+    std::ostringstream err;
+    err << sch_tb_name << " open failed for ML";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return 0.0;
+  }
+  std::vector<double> test_data;
+  std::vector<float> label_data;
+  std::vector<std::string> features_name;
+  int n_class{0};
+  txt2numeric_map_t txt2numeric;
+  auto n_sample =
+      Utils::read_data(source_table_ptr, test_data, features_name, target_name, label_data, n_class, txt2numeric);
+  Utils::close_table(source_table_ptr);
+  if (!n_sample) return 0.0;
+
+  // gets the prediction values.
+  std::vector<double> predictions;
+  if (Utils::model_score(model_handle, n_sample, features_name.size(), test_data, predictions)) return 0.0;
+  double score{0.0};
+  switch ((int)ML_regression::score_metrics[metrics[0]]) {
+    case (int)ML_regression::SCORE_METRIC_T::NEG_MEAN_ABSOLUTE_ERROR:
+      break;
+    case (int)ML_regression::SCORE_METRIC_T::NEG_MEAN_SQUARED_ERROR:
+      break;
+    case (int)ML_regression::SCORE_METRIC_T::NEG_MEAN_SQUARED_LOG_ERROR:
+      break;
+    case (int)ML_regression::SCORE_METRIC_T::NEG_MEDIAN_ABSOLUTE_ERROR:
+      break;
+    case (int)ML_regression::SCORE_METRIC_T::R2:
+      break;
+    default:
+      break;
+  }
+  return score;
 }
 
 int ML_regression::explain(std::string &sch_tb_name [[maybe_unused]], std::string &target_column_name [[maybe_unused]],

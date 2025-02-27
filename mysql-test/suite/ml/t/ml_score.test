@@ -30,11 +30,11 @@ CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'cla
 --ERROR 1054
 CALL sys.ML_SCORE('heatwaveml_bench.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 
---ERROR 3889
+--ERROR ER_ML_FAIL
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
 
---ERROR 3889
+--ERROR ER_ML_FAIL
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 ALTER TABLE shannon_ml.census_test SECONDARY_LOAD;
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);

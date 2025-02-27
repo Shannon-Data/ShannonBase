@@ -29,6 +29,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "sql-common/json_dom.h"  //Json_wrapper.
 

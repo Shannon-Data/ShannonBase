@@ -32,6 +32,7 @@
 #include "sql-common/json_dom.h"  //Json_wrapper.
 
 #include "ml_algorithm.h"
+#include "ml_info.h"
 
 class Json_wrapper;
 namespace ShannonBase {
@@ -68,9 +69,18 @@ class ML_recommendation : public ML_algorithm {
   void set_options(Json_wrapper &options) { m_options = options; }
   Json_wrapper &get_options() { return m_options; }
 
-  static const std::vector<std::string> explicit_metrics;
-  static const std::vector<std::string> implicit_metrics;
-  static const std::vector<std::string> both_metrics;
+  enum class SCORE_METRIC_T {
+    HIT_RATIO_AT_K = RECOMMEND_METRIC_START,
+    NDCG_AT_K,
+    NEG_MEAN_ABSOLUTE_ERROR,
+    NEG_MEAN_SQUARED_ERROR,
+    NEG_ROOT_MEAN_SQUARED_ERROR,
+    PRECISION_AT_K,
+    R2,
+    RECALL_AT_K
+  };
+
+  static std::map<std::string, SCORE_METRIC_T> score_metrics;
 
  private:
   // source data schema name.

@@ -29,7 +29,7 @@
 #include <iostream>
 #include <memory>
 
-#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"  //LightGBM
+//#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"  //LightGBM
 
 #include "include/my_inttypes.h"
 #include "include/thr_lock.h"  //TL_READ
@@ -127,12 +127,13 @@ int ML_classification::get_txt2num_dict(Json_wrapper&input, std::string& key, tx
   }
   return 0;
 }
+
 int ML_classification::train() {
   auto source_table_ptr = Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ);
   if (!source_table_ptr) {
     std::ostringstream err;
     err << m_sch_name << "." << m_table_name << " open failed for ML";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -151,12 +152,12 @@ int ML_classification::train() {
   auto n_feature = features_name.size();
   std::ostringstream oss;
   if (n_class <= 2) { // binary-classification. pay attention to the format of params
-    oss << "task=train boosting_type=gbdt objective=binary metric=binary_logloss,auc metric_freq=1" <<
+    oss << "task=train boosting_type=gbdt objective=binary metric_freq=1" <<
             " is_training_metric=true num_trees=100 learning_rate=0.1 num_leaves=63 tree_learner=serial"<<
             " feature_fraction=0.8 max_bin=255 bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=50" <<
             " min_sum_hessian_in_leaf=5.0 is_enable_sparse=true use_two_round_loading=false";
   } else { //multi classification
-    oss << "task=train boosting_type=gbdt objective=multiclass metric=multi_logloss,auc_mu" <<
+    oss << "task=train boosting_type=gbdt objective=multiclass" <<
            " num_class=" << n_class << " metric_freq=1 is_training_metric=true max_bin=255" <<
            " early_stopping=10 num_trees=100 learning_rate=0.05 num_leaves=31";
   }
@@ -276,8 +277,8 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   if (!option.empty()) {
     std::ostringstream err;
     err << "option params should be null for classification";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return 0.0;
   }
 
   std::transform(metric_str.begin(), metric_str.end(), metric_str.begin(), ::toupper);
@@ -287,8 +288,8 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
     if (score_metrics.find(metric) == score_metrics.end()) {
       std::ostringstream err;
       err << metric_str << " is invalid for classification scoring";
-      my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return 0.0;
     }
   }
 
@@ -301,22 +302,68 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   if (!source_table_ptr) {
     std::ostringstream err;
     err << sch_tb_name << " open failed for ML";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return 0.0;
   }
 
   std::vector<double> test_data;
   std::vector<float> label_data;
   std::vector<std::string> features_name;
-  int n_class;
+  int n_class{0};
   txt2numeric_map_t txt2numeric;
   auto n_sample =
       Utils::read_data(source_table_ptr, test_data, features_name, target_name, label_data, n_class, txt2numeric);
   Utils::close_table(source_table_ptr);
-  if (!n_sample) return 0.0f;
+  if (!n_sample) return 0.0;
 
-  return Utils::model_score(model_handle, (int)score_metrics[metrics[0]], n_sample, features_name.size(), test_data,
-                            label_data);
+  std::vector<double> predictions;
+  if (Utils::model_score(model_handle, n_sample, features_name.size(), test_data, predictions)) return 0.0;
+  double score{0.0};
+  switch ((int)ML_classification::score_metrics[metrics[0]]) {
+    case (int)ML_classification::SCORE_METRIC_T::ACCURACY:
+      score = Utils::calculate_accuracy(n_sample, predictions, label_data);
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::BALANCED_ACCURACY:
+      score = Utils::calculate_balanced_accuracy(n_sample, predictions, label_data);
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::F1:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::F1_MACRO:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::F1_MICRO:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::F1_SAMPLES:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::F1_WEIGTHED:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::NEG_LOG_LOSS:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::PRECISION:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::PRECISION_MACRO:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::PRECISION_MICRO:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::PRECISION_SAMPLES:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::PRECISION_WEIGHTED:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::RECALL:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::RECALL_MACRO:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::RECALL_MICRO:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::RECALL_SAMPLES:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::RECALL_WEIGHTED:
+      break;
+    case (int)ML_classification::SCORE_METRIC_T::ROC_AUC:
+      break;
+    default:
+      break;
+  }
+  return score;
 }
 
 int ML_classification::explain(std::string &sch_tb_name, std::string &target_name, std::string &model_handle_name,
@@ -374,7 +421,7 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   std::ostringstream err;
   if (!option.empty()) {
     err << "classification does not support option.";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -386,20 +433,20 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
       (!model_meta.empty() && Utils::parse_json(model_meta, meta_feature_names, keystr, 0))) {
     err << "invalid input data or model meta info.";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
   auto feature_names = meta_feature_names[ML_KEYWORDS::column_names];
   if (feature_names.size() != input_values.size()) {
     err << "input data columns size does not match the model feature columns size.";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
   for (auto &feature_name : feature_names) {
     if (input_values.find(feature_name) == input_values.end()) {
       err << "input data columns does not contain the model feature column: " << feature_name;
-      my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
       return HA_ERR_GENERIC;
     }
   }
@@ -428,7 +475,7 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   auto ret = Utils::ML_predict_row(model_handle_name, sample_data, txt2numeric, predictions);
   if (ret) {
     err << "call ML_PREDICT_ROW failed";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -508,7 +555,7 @@ int ML_classification::predict_table(std::string &sch_tb_name, std::string &mode
                                  : 0.95f;
   if ((batch_size < 1 || batch_size > 1000) && (prediction_interval <= 0 || prediction_interval >= 1)) {
     err << sch_tb_name << "wrong the params of options";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -519,7 +566,7 @@ int ML_classification::predict_table(std::string &sch_tb_name, std::string &mode
   auto in_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
   if (!in_table_ptr) {
     err << sch_tb_name << " open failed for ML";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 

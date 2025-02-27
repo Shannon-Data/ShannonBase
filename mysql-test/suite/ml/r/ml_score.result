@@ -12,10 +12,10 @@ CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'cla
 CALL sys.ML_SCORE('heatwaveml_bench.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 ERROR 42S22: Unknown column 'in_table_name' in 'field list'
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-ERROR HY000: Secondary engine operation failed. shannon_ml.census_test NOT loaded into rapid engine for ML.
+ERROR HY000: ML operation failed. shannon_ml.census_test NOT loaded into rapid engine for ML.
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-ERROR HY000: Secondary engine operation failed. shannon_ml.census_test NOT loaded into rapid engine for ML.
+ERROR HY000: ML operation failed. shannon_ml.census_test NOT loaded into rapid engine for ML.
 ALTER TABLE shannon_ml.census_test SECONDARY_LOAD;
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 SELECT @score_census;

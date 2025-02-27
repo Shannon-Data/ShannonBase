@@ -154,13 +154,13 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
     // should been loaded, but not loaded.
     std::ostringstream err;
     err << model_hanle_name << " has not been loaded";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   } else if (!should_loaded && (Loaded_models.find(model_hanle_name) != Loaded_models.end())) {
     // should not been loaded, but loaded.
     std::ostringstream err;
     err << model_hanle_name << " has been loaded";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
