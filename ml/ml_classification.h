@@ -106,6 +106,7 @@ class ML_classification : public ML_algorithm {
   };
 
   static std::map<std::string, SCORE_METRIC_T> score_metrics;
+  using txt2numeric_map_t = std::map<std::string, std::set<std::string>>;
 
  private:
   MODEL_PREDICTION_EXP_T parse_option(Json_wrapper &options);
