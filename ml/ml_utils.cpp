@@ -26,12 +26,17 @@
 
 #include "ml_utils.h"
 
+#include <fstream>
+#include <iostream>
+#include <sstream>
+
 #include "include/my_inttypes.h"
 
 #include "decimal.h"
 #include "sql-common/json_dom.h"
 #include "sql/binlog.h"
 #include "sql/current_thd.h"
+#include "sql/dd/cache/dictionary_client.h"
 #include "sql/derror.h"  //ER_TH
 #include "sql/field.h"
 #include "sql/handler.h"
@@ -40,6 +45,7 @@
 #include "sql/table.h"
 
 #include "ml_algorithm.h"
+#include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
 
 namespace ShannonBase {
 namespace ML {
@@ -86,6 +92,20 @@ int Utils::splitString(const std::string &str, char delimiter, std::vector<std::
   }
 
   return 0;
+}
+std::string Utils::read_file(std::string &file_path) {
+  if (check_valid_path(file_path.c_str(), file_path.length())) {
+    return "";
+  }
+
+  std::ifstream file(file_path.c_str(), std::ios::binary);
+  if (!file) {
+    return "";
+  }
+
+  std::ostringstream ss;
+  ss << file.rdbuf();
+  return ss.str();
 }
 
 int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth) {
@@ -171,6 +191,25 @@ int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::
   return 0;
 }
 
+int Utils::check_table_available(std::string &sch_tb_name) {
+  std::string schema_name, table_name;
+  std::ostringstream err;
+
+  auto pos = sch_tb_name.find('.');
+  if (pos != std::string::npos) {
+    schema_name = sch_tb_name.substr(0, pos);
+    table_name = sch_tb_name.substr(pos + 1);
+  } else
+    return HA_ERR_GENERIC;
+
+  auto share = ShannonBase::shannon_loaded_tables->get(schema_name.c_str(), table_name.c_str());
+  if (!share) {
+    err << sch_tb_name << " NOT loaded into rapid engine for ML";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  return 0;
+}
 // open table by name. return table ptr, otherwise return nullptr.
 TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
   THD *thd = current_thd;
@@ -237,13 +276,141 @@ handler *Utils::get_secondary_handler(TABLE *source_table_ptr) {
   // The engine must support being used as a secondary engine.
   handlerton *hton = plugin_data<handlerton *>(plugin);
   if (!(hton->flags & HTON_IS_SECONDARY_ENGINE)) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), "Unsupported secondary storage engine");
+    my_error(ER_ML_FAIL, MYF(0), "Unsupported secondary storage engine");
     return nullptr;
   }
 
   // Get handler to the secondary engine into which the table will be loaded.
   const bool is_partitioned = source_table_ptr->s->m_part_info != nullptr;
   return get_new_handler(source_table_ptr->s, is_partitioned, thd->mem_root, hton);
+}
+
+int Utils::get_txt2num_dict(Json_wrapper &model_meta, txt2numeric_map_t &txt2num_dict) {
+  MYSQL_LEX_CSTRING lex_key;
+  lex_key.str = ML_KEYWORDS::txt2num_dict;
+  lex_key.length = strlen(lex_key.str);
+  auto result = model_meta.lookup(lex_key);
+  assert(!result.empty());
+  if (result.type() != enum_json_type::J_OBJECT) return HA_ERR_GENERIC;
+
+  OPTION_VALUE_T dict_opt;
+  std::string strkey;
+  if (Utils::parse_json(result, dict_opt, strkey, 0)) return HA_ERR_GENERIC;
+  for (auto &it : dict_opt) {
+    auto name = it.first;
+    std::set<std::string> val_set;
+    for (auto val_str : it.second) {
+      val_set.insert(val_str);
+    }
+    txt2num_dict.insert({name, val_set});
+  }
+  return 0;
+}
+// return the # of rows read from table successfully. otherwise, 0.
+// a new param, check_condition needed? std::function<void(double)> ? to check the data must
+// satisfy the the condition.
+int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
+                     std::string &label_name, std::vector<float> &label_data, int &n_class,
+                     txt2numeric_map_t &txt2numeric_dict) {
+  THD *thd = current_thd;
+  auto n_read{0u};
+
+  txt2numeric_map_t txt2numeric;
+  // read the training data from target table.
+  for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
+    Field *field_ptr = *(table->field + field_id);
+    txt2numeric[field_ptr->field_name];
+
+    if (likely(!strcmp(field_ptr->field_name, label_name.c_str()))) continue;
+    features_name.push_back(field_ptr->field_name);
+  }
+
+  const dd::Table *table_obj{nullptr};
+  const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+  if (!table_obj && table->s->table_category != TABLE_UNKNOWN_CATEGORY) {
+    if (thd->dd_client()->acquire(table->s->db.str, table->s->table_name.str, &table_obj)) {
+      return n_read;
+    }
+  }
+
+  // must read from secondary engine.
+  unique_ptr_destroy_only<handler> sec_tb_handler(Utils::get_secondary_handler(table));
+  /* Read the traning data into train_data vector from rapid engine. here, we use training data
+  as lablels too */
+  my_bitmap_map *old_map = tmp_use_all_columns(table, table->read_set);
+  sec_tb_handler->ha_open(table, table->s->normalized_path.str, O_RDONLY, HA_OPEN_IGNORE_IF_LOCKED, table_obj);
+  if (sec_tb_handler && sec_tb_handler->ha_external_lock(thd, F_RDLCK)) {
+    sec_tb_handler->ha_close();
+    return n_read;
+  }
+
+  if (sec_tb_handler->ha_rnd_init(true)) {
+    sec_tb_handler->ha_external_lock(thd, F_UNLCK);
+    sec_tb_handler->ha_close();
+    return n_read;
+  }
+
+  std::map<float, int> n_classes;
+  while (sec_tb_handler->ha_rnd_next(table->record[0]) == 0) {
+    for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
+      Field *field_ptr = *(table->field + field_id);
+
+      auto data_val{0.0};
+      switch (field_ptr->type()) {
+        case MYSQL_TYPE_INT24:
+        case MYSQL_TYPE_LONG:
+        case MYSQL_TYPE_LONGLONG:
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DOUBLE: {
+          data_val = field_ptr->val_real();
+        } break;
+        case MYSQL_TYPE_DECIMAL:
+        case MYSQL_TYPE_NEWDECIMAL: {
+          my_decimal dval;
+          field_ptr->val_decimal(&dval);
+          my_decimal2double(10, &dval, &data_val);
+        } break;
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING:
+        case MYSQL_TYPE_STRING: {  // convert txt string to numeric
+          String buf;
+          buf.set_charset(field_ptr->charset());
+          field_ptr->val_str(&buf);
+          txt2numeric[field_ptr->field_name].insert(buf.c_ptr_safe());
+          assert(txt2numeric[field_ptr->field_name].find(buf.c_ptr_safe()) != txt2numeric[field_ptr->field_name].end());
+          data_val = std::distance(txt2numeric[field_ptr->field_name].begin(),
+                                   txt2numeric[field_ptr->field_name].find(buf.c_ptr_safe()));
+          txt2numeric_dict[field_ptr->field_name].insert(buf.c_ptr_safe());
+        } break;
+        case MYSQL_TYPE_DATE:
+        case MYSQL_TYPE_DATETIME:
+        case MYSQL_TYPE_TIME: {
+          data_val = field_ptr->val_real();
+        } break;
+        default:
+          assert(false);
+          break;
+      }
+
+      if (likely(strcmp(field_ptr->field_name, label_name.c_str()))) {
+        train_data.push_back(data_val);
+      } else {  // is label data.
+        if (n_classes.find((float)data_val) == n_classes.end()) n_classes[(float)data_val] = n_classes.size();
+        label_data.push_back(n_classes[(float)data_val]);
+      }
+    }  // for
+    n_read++;
+  }  // while
+
+  if (old_map) tmp_restore_column_map(table->read_set, old_map);
+
+  sec_tb_handler->ha_rnd_end();
+  sec_tb_handler->ha_external_lock(thd, F_UNLCK);
+  // to close the secondary engine table.
+  sec_tb_handler->ha_close();
+
+  n_class = n_classes.size();
+  return n_read;
 }
 
 Json_object *Utils::build_up_model_metadata(
@@ -254,7 +421,7 @@ Json_object *Utils::build_up_model_metadata(
     std::string &optimization_metric, std::vector<std::string> &selected_column_names, double contamination,
     Json_wrapper *train_options, std::string &training_params, Json_object *onnx_inputs_info,
     Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks,
-    std::map<std::string, std::set<std::string>> &txt2num_dict) {
+    txt2numeric_map_t &txt2num_dict) {
   auto now = std::chrono::system_clock::now();
   auto now_seconds = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
 
@@ -263,48 +430,48 @@ Json_object *Utils::build_up_model_metadata(
 
   if (training_params.empty()) training_params = "{}";
 
-  model_obj->add_clone("options", train_options->clone_dom().get());
-  model_obj->add_clone("training_params", new (std::nothrow) Json_string(training_params));
-  model_obj->add_clone("onnx_inputs_info", onnx_inputs_info);
-  model_obj->add_clone("onnx_outputs_info", onnx_outputs_info);
-  model_obj->add_clone("training_drift_metric", training_drift_metric);
+  model_obj->add_clone(ML_KEYWORDS::options, train_options->clone_dom().get());
+  model_obj->add_clone(ML_KEYWORDS::training_params, new (std::nothrow) Json_string(training_params));
+  model_obj->add_clone(ML_KEYWORDS::onnx_inputs_info, onnx_inputs_info);
+  model_obj->add_clone(ML_KEYWORDS::onnx_outputs_info, onnx_outputs_info);
+  model_obj->add_clone(ML_KEYWORDS::training_drift_metric, training_drift_metric);
 
-  model_obj->add_clone("task", new (std::nothrow) Json_string(task));
-  model_obj->add_clone("build_timestamp", new (std::nothrow) Json_double(now_seconds));
-  model_obj->add_clone("target_column_name", new (std::nothrow) Json_string(target_column_name));
-  model_obj->add_clone("train_table_name", new (std::nothrow) Json_string(tain_table_name));
+  model_obj->add_clone(ML_KEYWORDS::task, new (std::nothrow) Json_string(task));
+  model_obj->add_clone(ML_KEYWORDS::build_timestamp, new (std::nothrow) Json_double(now_seconds));
+  model_obj->add_clone(ML_KEYWORDS::target_column_name, new (std::nothrow) Json_string(target_column_name));
+  model_obj->add_clone(ML_KEYWORDS::train_table_name, new (std::nothrow) Json_string(tain_table_name));
 
   Json_array *column_names_arr = new (std::nothrow) Json_array();
   for (auto &feature_name : featurs_name) {
     column_names_arr->append_clone(new (std::nothrow) Json_string(feature_name));
   }
-  model_obj->add_clone("column_names", column_names_arr);
+  model_obj->add_clone(ML_KEYWORDS::column_names, column_names_arr);
 
-  model_obj->add_clone("model_explanation", model_explanation);
+  model_obj->add_clone(ML_KEYWORDS::model_explanation, model_explanation);
 
-  model_obj->add_clone("notes", new (std::nothrow) Json_string(notes));
-  model_obj->add_clone("format", new (std::nothrow) Json_string(format));
-  model_obj->add_clone("status", new (std::nothrow) Json_string(status));
+  model_obj->add_clone(ML_KEYWORDS::notes, new (std::nothrow) Json_string(notes));
+  model_obj->add_clone(ML_KEYWORDS::format, new (std::nothrow) Json_string(format));
+  model_obj->add_clone(ML_KEYWORDS::status, new (std::nothrow) Json_string(status));
 
-  model_obj->add_clone("model_quality", new (std::nothrow) Json_string(model_quality));
-  model_obj->add_clone("training_time", new (std::nothrow) Json_double(training_time));
-  model_obj->add_clone("algorithm_name", new (std::nothrow) Json_string(algorithm_name));
-  model_obj->add_clone("training_score", new (std::nothrow) Json_double(training_score));
-  model_obj->add_clone("n_rows", new (std::nothrow) Json_double(n_rows));
-  model_obj->add_clone("n_columns", new (std::nothrow) Json_double(n_columns));
-  model_obj->add_clone("n_selected_rows", new (std::nothrow) Json_double(n_selected_rows));
-  model_obj->add_clone("n_selected_columns", new (std::nothrow) Json_double(n_selected_columns));
-  model_obj->add_clone("optimization_metric", new (std::nothrow) Json_string(optimization_metric));
+  model_obj->add_clone(ML_KEYWORDS::model_quality, new (std::nothrow) Json_string(model_quality));
+  model_obj->add_clone(ML_KEYWORDS::training_time, new (std::nothrow) Json_double(training_time));
+  model_obj->add_clone(ML_KEYWORDS::algorithm_name, new (std::nothrow) Json_string(algorithm_name));
+  model_obj->add_clone(ML_KEYWORDS::training_score, new (std::nothrow) Json_double(training_score));
+  model_obj->add_clone(ML_KEYWORDS::n_rows, new (std::nothrow) Json_double(n_rows));
+  model_obj->add_clone(ML_KEYWORDS::n_columns, new (std::nothrow) Json_double(n_columns));
+  model_obj->add_clone(ML_KEYWORDS::n_selected_rows, new (std::nothrow) Json_double(n_selected_rows));
+  model_obj->add_clone(ML_KEYWORDS::n_selected_columns, new (std::nothrow) Json_double(n_selected_columns));
+  model_obj->add_clone(ML_KEYWORDS::optimization_metric, new (std::nothrow) Json_string(optimization_metric));
 
   Json_array *selected_column_names_arr = new (std::nothrow) Json_array();
   for (auto &sel_col_name : selected_column_names) {
     selected_column_names_arr->append_clone(new (std::nothrow) Json_string(sel_col_name));
   }
-  model_obj->add_clone("selected_column_names", selected_column_names_arr);
+  model_obj->add_clone(ML_KEYWORDS::selected_column_names, selected_column_names_arr);
 
-  model_obj->add_clone("contamination", new (std::nothrow) Json_double(contamination));
+  model_obj->add_clone(ML_KEYWORDS::contamination, new (std::nothrow) Json_double(contamination));
 
-  model_obj->add_clone("chunks", new (std::nothrow) Json_double(chunks));
+  model_obj->add_clone(ML_KEYWORDS::chunks, new (std::nothrow) Json_double(chunks));
 
   if (txt2num_dict.size()) {
     Json_object *txt2num_dict_obj = new (std::nothrow) Json_object();
@@ -317,7 +484,7 @@ Json_object *Utils::build_up_model_metadata(
       }
       txt2num_dict_obj->add_clone(key.c_str(), value_arr);
     }
-    model_obj->add_clone("txt2num_dict", txt2num_dict_obj);
+    model_obj->add_clone(ML_KEYWORDS::txt2num_dict, txt2num_dict_obj);
   }
   return model_obj;
 }
@@ -339,7 +506,7 @@ int Utils::store_model_catalog(size_t model_obj_size, const Json_wrapper *model_
   if (!cat_table_ptr) {
     std::ostringstream err;
     err << catalog_schema_name.c_str() << "." << cat_table_name.c_str() << " open failed for ML";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -413,7 +580,7 @@ int Utils::store_model_object_catalog(std::string &model_handle_name, Json_wrapp
   if (!cat_table_ptr) {
     std::ostringstream err;
     err << catalog_schema_name.c_str() << "." << cat_table_name.c_str() << " open failed for ML";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -541,8 +708,8 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
       std::string keystr;
       OPTION_VALUE_T option_value;
       Utils::parse_json(json_content, option_value, keystr, 0);
-      assert(option_value["SHANNON_LIGHTGBM_CONTENT"].size() == 1);
-      model_content = option_value["SHANNON_LIGHTGBM_CONTENT"][0];
+      assert(option_value[ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT].size() == 1);
+      model_content = option_value[ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT][0];
 #endif
       break;
     }
@@ -576,8 +743,10 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
                                        &train_dataset_handler);
   // clang-format on
   // to set label data
-  ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
-  if (ret) goto cleanup_dataset;
+  if (label_data) {
+    ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
+    if (ret) goto cleanup_dataset;
+  }
 
   ret = LGBM_DatasetSetFeatureNames(train_dataset_handler, features_name, n_feature);
   if (ret) goto cleanup_dataset;
@@ -638,7 +807,7 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
   { //start to assemble the model object json file.
     Json_object *model_obj = new (std::nothrow) Json_object();
     if (model_obj == nullptr) return -1;
-    model_obj->add_clone("SHANNON_LIGHTGBM_CONTENT", new (std::nothrow) Json_string(model_content));
+    model_obj->add_clone(ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT, new (std::nothrow) Json_string(model_content));
     Json_wrapper model_content_json(model_obj);
     String json_format_content;
     model_content_json.to_string(&json_format_content, false, "ML_train", [] { assert(false); });
@@ -654,11 +823,26 @@ cleanup_dataset:
   return ret;
 }
 
-double Utils::calculate_balanced_accuracy(size_t n_samples, std::vector<double> &predictions,
+double Utils::calculate_accuracy(size_t n_sample, std::vector<double> &predictions, std::vector<float> &label_data) {
+  // calculate the accuracy.
+  int TP = 0, TN = 0;
+  for (size_t i = 0; i < n_sample; i++) {
+    int predicted = (predictions[i] >= 0.5) ? 1 : 0;
+    auto actual = (int)label_data[i];
+
+    if (predicted == 1 && actual == 1) TP++;  // true positive
+    if (predicted == 0 && actual == 0) TN++;  // true negtive
+  }
+
+  auto accuracy = (TP + TN) * 1.0 / n_sample;
+  return accuracy;
+}
+
+double Utils::calculate_balanced_accuracy(size_t n_sample, std::vector<double> &predictions,
                                           std::vector<float> &label_data) {
   // calculate the balanced accuracy.
   int TP = 0, TN = 0, FP = 0, FN = 0;
-  for (size_t i = 0; i < n_samples; i++) {
+  for (size_t i = 0; i < n_sample; i++) {
     int predicted = (predictions[i] >= 0.5) ? 1 : 0;
     auto actual = (int)label_data[i];
 
@@ -674,28 +858,31 @@ double Utils::calculate_balanced_accuracy(size_t n_samples, std::vector<double> 
 
   return balanced_accuracy;
 }
-double Utils::model_score(std::string &model_handle_name, int metric_type, size_t n_samples, size_t n_features,
-                          std::vector<double> &testing_data, std::vector<float> &label_data) {
+
+int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samples, size_t n_features,
+                         std::vector<double> &testing_data, std::vector<double> &predictions) {
+  assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE || type == C_API_PREDICT_LEAF_INDEX ||
+         type == C_API_PREDICT_CONTRIB);
   std::string score_params;
   BoosterHandle handler = Utils::load_trained_model_from_string(Loaded_models[model_handle_name]);
   if (!handler) {
     std::ostringstream err;
     err << model_handle_name << " can not load model from content string";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
-  auto data_type = sizeof(double) == 8 ? C_API_DTYPE_FLOAT64 : C_API_DTYPE_FLOAT32;
-  std::vector<double> predictions(n_samples);
+  assert(sizeof(double) == 8);
+  predictions.resize(n_samples, 0.0);
   int64_t out_len;
   // clang-format off
   auto ret = LGBM_BoosterPredictForMat(handler,               /* model handler */
                             testing_data.data(),   /* test data */
-                            data_type,             /* testing data type */
+                            C_API_DTYPE_FLOAT64,             /* testing data type */
                             n_samples,             /* # of testing data */
                             n_features,            /* # of features of testing data */
                             1,                     /* row-based format */
-                            C_API_PREDICT_NORMAL,  /* What should be predicted */
+                            type,                  /* What should be predicted */
                             0,                     /* Start index of the iteration */ 
                             -1,                    /* # of iteration for prediction, <= 0 no limit*/
                             score_params.c_str(),  /* params */
@@ -704,23 +891,60 @@ double Utils::model_score(std::string &model_handle_name, int metric_type, size_
   //clang-format on
   if (ret) {
     LGBM_BoosterFree(handler);
-    return 0.0f;
+    return HA_ERR_GENERIC;
   }
+
   LGBM_BoosterFree(handler);
+  return 0;
+}
 
-  // calculate the balanced accuracy.
-  double balanced_accuracy{0.0};
-  switch (metric_type){
-    case 0:  // balanced_accuracy
-      balanced_accuracy = Utils::calculate_balanced_accuracy(n_samples, predictions, label_data);
-      break;
-    case 1: {
+int Utils::ML_predict_row(int type, std::string &model_handle_name, std::vector<ml_record_type_t> &input_data, txt2numeric_map_t& txt2numeric_dict, std::vector<double> &predictions) {
 
-    } break;
-    default:
-     break;
+  assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE ||
+         type == C_API_PREDICT_LEAF_INDEX || type == C_API_PREDICT_CONTRIB);
+  std::string model_content = Loaded_models[model_handle_name];
+  assert(model_content.length());
+  BoosterHandle booster = nullptr;
+  booster = Utils::load_trained_model_from_string(model_content);
+  if (!booster) return HA_ERR_GENERIC;
+
+  auto n_feature = input_data.size();
+  int64 num_results;
+  predictions.resize(n_feature);
+
+  std::vector<double> sample_data;
+  for (auto &field : input_data) {
+    auto value = 0.0;
+    if (txt2numeric_dict.find(field.first) == txt2numeric_dict.end()) {  // not a txt field.
+      value = std::stod(field.second);
+    } else {  // find in txt2num_dict.
+      auto txt2num = txt2numeric_dict[field.first];
+      if (txt2num.size())
+        value = std::distance(txt2num.begin(), std::find(txt2num.begin(), txt2num.end(), field.second));
+      else value = 0.0;   
+    }
+    sample_data.push_back(value);
   }
-  return balanced_accuracy;
+
+  // clang-format off
+  auto ret = LGBM_BoosterPredictForMat(booster,
+                                       sample_data.data(),
+                                       C_API_DTYPE_FLOAT64,
+                                       1,                   // # of row
+                                       n_feature,           // # of col
+                                       1,                    // row oriented
+                                       type,                 // prediction type
+                                       0,                    // start iter
+                                       -1,                   // stop iter
+                                       "",                   // contribution params
+                                       &num_results,         // # of results
+                                       predictions.data());
+  // clang-format on
+  LGBM_BoosterFree(booster);
+  if (ret) {
+    return HA_ERR_GENERIC;
+  }
+  return 0;
 }
 
 }  // namespace ML

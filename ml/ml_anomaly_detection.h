@@ -42,9 +42,8 @@ class ML_anomaly_detection : public ML_algorithm {
   ML_anomaly_detection();
   virtual ~ML_anomaly_detection() override;
   int train() override;
-  int predict() override;
   int load(std::string &model_content) override;
-  int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
+  int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;
   int import(Json_wrapper &model_object, Json_wrapper &model_metadata, std::string &model_handle_name) override;
   double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle, std::string &metric_str,
@@ -55,14 +54,36 @@ class ML_anomaly_detection : public ML_algorithm {
   int explain_table() override;
   int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                   Json_wrapper &result) override;
-  int predict_table() override;
+  int predict_table(std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
+                    Json_wrapper &options) override;
   ML_TASK_TYPE_T type() override;
+
+  void set_schema(std::string &schema_name) { m_sch_name = schema_name; }
+  std::string get_schema() const { return m_sch_name; }
+  void set_table(std::string &table_name) { m_table_name = table_name; }
+  std::string get_table() const { return m_table_name; }
+  void set_target(std::string &target_name) { m_target_name = target_name; }
+  std::string get_target() const { return m_target_name; }
+  void set_handle_name(std::string &handle_name) { m_handler_name = handle_name; }
+  std::string get_handle_name() const { return m_handler_name; }
+  void set_options(Json_wrapper &options) { m_options = options; }
+  const Json_wrapper &get_options() const { return m_options; }
 
   // Metrics for anomaly detection can only be used with the ML_SCORE routine.
   // They cannot be used with the ML_TRAIN routine.
-  static const std::vector<std::string> non_thr_topk_metrics;
-  static const std::vector<std::string> threshold_metrics;
-  static const std::vector<std::string> topk_metrics;
+  enum class SCORE_METRIC_T {
+    ACCURACY = ANONOALY_METRIC_START,
+    BALANCED_ACCURACY,
+    F1,
+    NEG_LOG_LOSS,
+    PRECISION,
+    PRECISION_K,
+    RECALL,
+    ROC_AUC
+  };
+
+  static std::map<std::string, SCORE_METRIC_T> score_metrics;
+  static constexpr float default_contamination = 0.1f;
 
  private:
   // source data schema name.

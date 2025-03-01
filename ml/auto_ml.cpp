@@ -81,7 +81,8 @@ void Auto_ML::init_task_map() {
   std::string keystr;
   Utils::parse_json(m_options, opt_values, keystr, 0);
   assert(opt_values.size());
-  m_task_type_str = opt_values["task"].size() ? opt_values["task"][0] : "classification";
+  m_task_type_str =
+      opt_values[ML_KEYWORDS::task].size() ? opt_values[ML_KEYWORDS::task][0] : ML_KEYWORDS::classification;
   std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
   build_task(m_task_type_str);
 }
@@ -114,14 +115,32 @@ void Auto_ML::build_task(std::string task_str) {
     case ML_TASK_TYPE_T::FORECASTING:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::FORECASTING)
         m_ml_task.reset(new ML_forecasting());
+
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_forecasting *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     case ML_TASK_TYPE_T::ANOMALY_DETECTION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::ANOMALY_DETECTION)
         m_ml_task.reset(new ML_anomaly_detection());
+
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     case ML_TASK_TYPE_T::RECOMMENDATION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::RECOMMENDATION)
         m_ml_task.reset(new ML_recommendation());
+
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_schema(m_schema_name);
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_table(m_table_name);
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_target(m_target_name);
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_options(m_options);
+      down_cast<ML_recommendation *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     default:
       break;
@@ -135,13 +154,13 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
     // should been loaded, but not loaded.
     std::ostringstream err;
     err << model_hanle_name << " has not been loaded";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   } else if (!should_loaded && (Loaded_models.find(model_hanle_name) != Loaded_models.end())) {
     // should not been loaded, but loaded.
     std::ostringstream err;
     err << model_hanle_name << " has been loaded";
-    my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -151,7 +170,7 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
 
   Json_object *json_obj = down_cast<Json_object *>(dom_ptr.get());
   Json_dom *value_dom_ptr{nullptr};
-  value_dom_ptr = json_obj->get("task");
+  value_dom_ptr = json_obj->get(ML_KEYWORDS::task);
   if (value_dom_ptr && value_dom_ptr->json_type() == enum_json_type::J_STRING) {
     m_task_type_str = down_cast<Json_string *>(value_dom_ptr)->value();
     std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
@@ -168,7 +187,12 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
 }
 
 int Auto_ML::train() {
-  auto ret = m_ml_task ? m_ml_task->train() : 1;
+  std::string sch_tb_name{m_schema_name};
+  sch_tb_name.append(".");
+  sch_tb_name.append(m_table_name);
+  if (Utils::check_table_available(sch_tb_name)) return HA_ERR_GENERIC;
+
+  auto ret = m_ml_task ? m_ml_task->train() : HA_ERR_GENERIC;
   return ret;
 }
 
@@ -198,15 +222,17 @@ double Auto_ML::score(String *sch_table_name, String *target_column_name, String
                       Json_wrapper options) {
   assert(sch_table_name && target_column_name && model_handle_name);
 
+  std::string sch_tb_name_str(sch_table_name->c_ptr_safe());
+  if (Utils::check_table_available(sch_tb_name_str)) return HA_ERR_GENERIC;
+
   std::string model_handler_name_str(model_handle_name->c_ptr_safe());
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
-  std::string sch_table_name_str(sch_table_name->c_ptr_safe());
   std::string target_column_name_str(target_column_name->c_ptr_safe());
   std::string metric_str(metric->c_ptr_safe());
   return m_ml_task
-             ? m_ml_task->score(sch_table_name_str, target_column_name_str, model_handler_name_str, metric_str, options)
+             ? m_ml_task->score(sch_tb_name_str, target_column_name_str, model_handler_name_str, metric_str, options)
              : 0;
 }
 
@@ -252,6 +278,26 @@ error:
   if (ret) {
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
   }
+  return ret;
+}
+
+// predict a table.
+int Auto_ML::predict_table(String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name,
+                           Json_wrapper &options) {
+  std::string in_sch_tb_name_str(in_sch_tb_name->c_ptr_safe());
+  std::ostringstream err;
+  std::string sch_tb_name_str(in_sch_tb_name->c_ptr_safe());
+  if (Utils::check_table_available(sch_tb_name_str)) return HA_ERR_GENERIC;
+
+  std::string model_handler_name_str(model_handler_name->c_ptr_safe());
+  std::string out_sch_tb_name_str(out_sch_tb_name->c_ptr_safe());
+  std::string model_content_str;
+  if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
+
+  auto ret = m_ml_task
+                 ? m_ml_task->predict_table(in_sch_tb_name_str, model_handler_name_str, out_sch_tb_name_str, options)
+                 : HA_ERR_GENERIC;
+
   return ret;
 }
 

@@ -45,6 +45,8 @@ namespace ShannonBase {
 namespace ML {
 class Utils {
  public:
+  static int check_table_available(std::string &sch_tb_name);
+
   // open a table via schema name and table name.
   static TABLE *open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type mode);
 
@@ -74,17 +76,31 @@ class Utils {
                       std::string &model_content);
 
   /**
-   * to calcl the quality and reliability of a trained model.
+   * to calcl the pobilities of a trained model with mutl-rows data.
+   * @param[in] type, prediction type used.
    * @param[in] model_handle_name, the name of loaded model name.
-   * @param[in] metrics, metrics name string.
    * @param[in] testing_data, the test data.
    * @param[in] features, feature names array.
    * @param[in] lable_col_name, label column name.
-   * @param[in] label_data, the label data of testing data.
-   * @retval value of trained model.
+   * @param[out] predictions, the prediction values.
+   * @retval 0 success, otherwise failed.
    */
-  static double model_score(std::string &model_handle_name, int metric_type, size_t n_samples, size_t n_features,
-                            std::vector<double> &testing_data, std::vector<float> &label_data);
+  static int model_predict(int type, std::string &model_handle_name, size_t n_samples, size_t n_features,
+                           std::vector<double> &testing_data, std::vector<double> &predictions);
+
+  /**
+   * to predict the result of a model with one user input data row, do normailization with
+   * the dictionary before do prediction.
+   * @param[in] type, which type of prediction used.
+   * @param[in] model_handle_name, the name of loaded model name.
+   * @param[in] input_data, the input data.
+   * @param[in] txt2numeric_dict, the txt2numeric dict.
+   * @param[out] result, the result of prediction.
+   * @retval 0 success, otherwise failed.
+   */
+  static int ML_predict_row(int type, std::string &model_handle_name, std::vector<ml_record_type_t> &input_data,
+                            txt2numeric_map_t &txt2numeric_dict, std::vector<double> &predictions);
+
   /**
    * to build up a json format model metadata.
    * params defintion ref to: https://dev.mysql.com/doc/heatwave/en/mys-hwaml-ml-model-metadata.html
@@ -98,7 +114,7 @@ class Utils {
       std::string &optimization_metric, std::vector<std::string> &selected_column_names, double contamination,
       Json_wrapper *train_options, std::string &training_params, Json_object *onnx_inputs_info,
       Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks,
-      std::map<std::string, std::set<std::string>> &txt2num_dict);
+      txt2numeric_map_t &txt2num_dict);
 
   /** to store the trained model into ML_SCHEMA_xxx.MODEL_CATALOG.
    *  @param[in] model_content, the trainned model in string formation.
@@ -158,9 +174,20 @@ class Utils {
    * */
   static int splitString(const std::string &str, char delimiter, std::vector<std::string> &output);
 
- private:
-  static double calculate_balanced_accuracy(size_t n_samples, std::vector<double> &predictions,
+  static std::string read_file(std::string &file_path);
+
+  static int get_txt2num_dict(Json_wrapper &model_meta, txt2numeric_map_t &txt2num_dict);
+
+  static int read_data(TABLE *table, std::vector<double> &train_data, std::vector<std::string> &features_name,
+                       std::string &label_name, std::vector<float> &label_data, int &n_class,
+                       txt2numeric_map_t &txt2numeric_dict);
+
+  static double calculate_accuracy(size_t n_sample, std::vector<double> &predictions, std::vector<float> &label_data);
+
+  static double calculate_balanced_accuracy(size_t n_sample, std::vector<double> &predictions,
                                             std::vector<float> &label_data);
+
+ private:
   Utils() = delete;
   virtual ~Utils() = delete;
   // disable copy ctor, operator=, etc.

@@ -31,6 +31,7 @@ ml_explain_table
 ml_model_import
 ml_model_load
 ml_model_unload
+ml_predict_table
 ml_score
 ml_train
 ps_setup_disable_background_threads
@@ -68,7 +69,6 @@ format_time
 list_add
 list_drop
 ml_predict_row
-ml_predict_table
 ps_is_account_enabled
 ps_is_consumer_enabled
 ps_is_instrument_default_enabled

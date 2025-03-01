@@ -27,7 +27,9 @@
 #define __SHANNONBASE_AUTO_ML_INFO_H__
 
 #include <map>
+#include <set>
 #include <string>
+#include <utility>
 
 namespace ShannonBase {
 namespace ML {
@@ -81,9 +83,73 @@ extern std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP;
 extern std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP;
 extern std::map<std::string, MODEL_PREDICTION_EXP_T> MODEL_EXPLAINERS_MAP;
 
-
+class ML_KEYWORDS {
+   public:
+   static constexpr const char* SHANNON_LIGHTGBM_CONTENT = "SHANNON_LIGHTGBM_CONTENT";
+   static constexpr const char* additional_details = "additional_details";
+   static constexpr const char* anomaly = "anomaly";
+   static constexpr const char* algorithm_name = "algorithm_name";
+   static constexpr const char* batch_size = "batch_size";
+   static constexpr const char* build_timestamp = "build_timestamp";
+   static constexpr const char* classification = "classification";
+   static constexpr const char* chunks = "chunks";
+   static constexpr const char* column_names = "column_names";
+   static constexpr const char* contamination = "contamination";
+   static constexpr const char* datetime_index = "datetime_index";
+   static constexpr const char* endogenous_variables = "endogenous_variables";
+   static constexpr const char* exogenous_variables = "exogenous_variables";
+   static constexpr const char* feedback = "feedback";
+   static constexpr const char* feedback_threshold = "feedback_threshold";
+   static constexpr const char* format = "format";
+   static constexpr const char* include_column_list = "include_column_list";
+   static constexpr const char* is_anomaly = "is_anomaly";
+   static constexpr const char* items = "items";
+   static constexpr const char* item_metadata = "item_metadata";
+   static constexpr const char* kclass = "class";
+   static constexpr const char* ml_results = "ml_results";
+   static constexpr const char* model_explanation = "model_explanation";
+   static constexpr const char* model_list = "model_list";
+   static constexpr const char* model_quality = "model_quality";
+   static constexpr const char* n_columns = "n_columns";
+   static constexpr const char* n_rows = "n_rows";
+   static constexpr const char* n_selected_columns = "n_selected_columns";
+   static constexpr const char* n_selected_rows = "n_selected_rows";
+   static constexpr const char* normal = "normal";
+   static constexpr const char* notes = "notes";
+   static constexpr const char* onnx_inputs_info = "onnx_inputs_info";
+   static constexpr const char* onnx_outputs_info = "onnx_outputs_info";
+   static constexpr const char* optimization_metric = "optimization_metric";
+   static constexpr const char* options = "options";
+   static constexpr const char* Prediction = "Prediction";
+   static constexpr const char* predictions = "predictions";
+   static constexpr const char* probabilities = "probabilities";
+   static constexpr const char* rating = "rating";
+   static constexpr const char* remove_seen = "remove_seen";
+   static constexpr const char* selected_column_names = "selected_column_names";
+   static constexpr const char* status = "status";
+   static constexpr const char* target_column_name = "target_column_name";
+   static constexpr const char* task = "task";
+   static constexpr const char* threshold = "threshold";
+   static constexpr const char* train_table_name = "train_table_name";
+   static constexpr const char* training_drift_metric = "training_drift_metric";
+   static constexpr const char* training_params = "training_params";
+   static constexpr const char* training_score = "training_score";
+   static constexpr const char* training_time = "training_time";
+   static constexpr const char* topk = "topk";
+   static constexpr const char* txt2num_dict = "txt2num_dict";
+   static constexpr const char* users = "users";
+ };
+ 
 using OPTION_VALUE_T = std::map<std::string, std::vector<std::string>>;
+using txt2numeric_map_t = std::map<std::string, std::set<std::string>>;
+// pair of a <key_name, value>.
+using ml_record_type_t = std::pair<std::string, std::string>;
 
+constexpr int ANONOALY_METRIC_START = 0;
+constexpr int CLASS_METRIC_START = 100;
+constexpr int FORCAST_METRIC_START = 200;
+constexpr int RECOMMEND_METRIC_START = 300;
+constexpr int REGRESSION_METRIC_START = 400;
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_AUTO_ML_INFO_H__

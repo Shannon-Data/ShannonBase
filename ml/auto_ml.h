@@ -62,6 +62,8 @@ class Auto_ML {
   int explain(String *sch_tb_name, String *target_column_name, String *model_handler_name, Json_wrapper exp_options);
   // predict the result with a row.
   int predict_row(Json_wrapper &input, String *model_handler_name, Json_wrapper options, Json_wrapper &result);
+  // predict a table.
+  int predict_table(String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name, Json_wrapper &options);
 
  private:
   /**check loaded or not, if yes, then get model meta info and model content.

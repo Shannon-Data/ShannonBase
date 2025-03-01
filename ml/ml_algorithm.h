@@ -51,9 +51,8 @@ class ML_algorithm {
   virtual ~ML_algorithm() = default;
 
   virtual int train() = 0;
-  virtual int predict() = 0;
   virtual int load(std::string &model_content) = 0;
-  virtual int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) = 0;
+  virtual int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) = 0;
   virtual int unload(std::string &model_handle_name) = 0;
   virtual int import(Json_wrapper &model_object, Json_wrapper &model_metadata, std::string &model_handle_name) = 0;
   virtual double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
@@ -65,7 +64,8 @@ class ML_algorithm {
   virtual int explain_table() = 0;
   virtual int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                           Json_wrapper &result) = 0;
-  virtual int predict_table() = 0;
+  virtual int predict_table(std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
+                            Json_wrapper &options) = 0;
   virtual ML_TASK_TYPE_T type() = 0;
 };
 

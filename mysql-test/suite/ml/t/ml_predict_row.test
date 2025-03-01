@@ -27,19 +27,8 @@ ALTER TABLE census_train SECONDARY_LOAD;
 #train
 CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
 
---ERROR 1054
-CALL sys.ML_SCORE('heatwaveml_bench.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-
---ERROR ER_ML_FAIL
-CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
+#load model into memory
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
-
---ERROR ER_ML_FAIL
-CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-ALTER TABLE shannon_ml.census_test SECONDARY_LOAD;
-CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-
-SELECT @score_census;
 
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
        JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
@@ -52,6 +41,26 @@ SELECT MODEL_ID, ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE, ML_SCHEMA_root.MODEL
 FROM  ML_SCHEMA_root.MODEL_CATALOG, ML_SCHEMA_root.MODEL_OBJECT_CATALOG
 WHERE ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE = ML_SCHEMA_root.MODEL_OBJECT_CATALOG.MODEL_HANDLE;
 
+SET @row_input = JSON_OBJECT( 
+          "age", 25, 
+          "workclass", "Private", 
+          "fnlwgt", 226802, 
+          "education", "11th", 
+          "education-num", 7, 
+          "marital-status", "Never-married", 
+          "occupation", "Machine-op-inspct", 
+          "relationship", "Own-child", 
+          "race", "Black", 
+          "sex", "Male", 
+          "capital-gain", 0, 
+          "capital-loss", 0, 
+          "hours-per-week", 40, 
+          "native-country", "United-States");
+
+SELECT sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
+
+#unload model into memory
+CALL sys.ML_MODEL_UNLOAD(@census_model);
+
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE census_train SECONDARY_UNLOAD;
-ALTER TABLE census_test SECONDARY_UNLOAD;

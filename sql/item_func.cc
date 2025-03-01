@@ -10205,12 +10205,16 @@ longlong Item_func_ml_train::val_int() {
    * is `schema_name.table_name`  */
   String sch_tb_name;
   auto sch_tb_name_cptr = args[0]->val_str(&sch_tb_name)->c_ptr_safe();
-  auto pos = std::strstr(sch_tb_name_cptr, ".") - sch_tb_name_cptr;
-  std::string schema_name(sch_tb_name_cptr, pos);
-  std::string table_name(sch_tb_name_cptr + pos +1, strlen(sch_tb_name_cptr) - pos);
+  std::string sch_tb_name_str(sch_tb_name_cptr), schema_name, table_name;
+  auto pos = sch_tb_name_str.find('.');
+  if (pos != std::string::npos) {
+    schema_name = sch_tb_name_str.substr(0, pos);
+    table_name = sch_tb_name_str.substr(pos + 1);
+  }
 
   String target_col_name;
-  auto target_col_name_ptr = args[1]->val_str(&target_col_name)->c_ptr_safe();
+  auto target_col_name_ptr = args[1]->val_str(&target_col_name) ?
+                             args[1]->val_str(&target_col_name)->c_ptr_safe() : nullptr;
 
   String handle_name;
   const char* handle_name_ptr{nullptr};
@@ -10230,10 +10234,11 @@ longlong Item_func_ml_train::val_int() {
   }
 
   auto handler_name = handle_name_ptr ? std::string(handle_name_ptr) : std::string("");
+  auto target_name = target_col_name_ptr ? std::string(target_col_name_ptr) : std::string("");
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>(schema_name,
                                                 table_name,
-                                                std::string(target_col_name_ptr),
+                                                target_name,
                                                 options,
                                                 handler_name);
   /**To invoke ML libs to train ML models*/
@@ -10322,8 +10327,25 @@ double Item_func_ml_score::val_real() {
 }
 
 longlong Item_func_ml_predicte_table::val_int() {
-  assert(fixed);
-  return 0;
+  DBUG_TRACE;
+  assert(fixed && arg_count >= 3 && arg_count <= 4);
+  String sch_tb_name;
+  auto sch_tb_name_cptr = args[0]->val_str(&sch_tb_name);
+
+  String handle_name;
+  auto handle_name_cptr = args[1]->val_str(&handle_name);
+
+  String out_sch_tb_name;
+  auto out_sch_tb_name_cptr = args[2]->val_str(&out_sch_tb_name);
+
+  Json_wrapper predict_table_options;
+  args[3]->val_json(&predict_table_options);
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  auto ret = auto_ml->predict_table(sch_tb_name_cptr, handle_name_cptr, out_sch_tb_name_cptr,
+                                    predict_table_options);
+  return ret;
 }
 
 longlong Item_func_ml_explain::val_int() {

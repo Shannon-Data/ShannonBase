@@ -25,6 +25,7 @@
 */
 #include "ml_regression.h"
 
+#include <chrono>
 #include <string>
 
 #include "include/my_inttypes.h"
@@ -38,10 +39,11 @@
 #include "sql/sql_class.h"  //THD
 #include "sql/table.h"
 
+#include "ml_info.h"
 #include "ml_utils.h"                         //ml utils
 #include "storage/innobase/include/ut0dbg.h"  //for ut_a
 
-#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
+//#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
 #include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
 
 // clang-format off
@@ -49,9 +51,15 @@
 namespace ShannonBase {
 namespace ML {
 
-const std::vector<std::string> ML_regression::metrics = {"neg_mean_absolute_error", "neg_mean_squared_error",
-                                                         "neg_mean_squared_log_error", "neg_median_absolute_error",
-                                                         "r2"};
+// clang-format off
+std::map<std::string, ML_regression::SCORE_METRIC_T> ML_regression::score_metrics = {
+  {"NEG_MEAN_ABSOLUTE_ERROR", ML_regression::SCORE_METRIC_T::NEG_MEAN_ABSOLUTE_ERROR},
+  {"NEG_MEAN_SQUARED_ERROR", ML_regression::SCORE_METRIC_T::NEG_MEAN_SQUARED_ERROR},
+  {"NEG_MEAN_SQUARED_LOG_ERROR", ML_regression::SCORE_METRIC_T::NEG_MEAN_SQUARED_LOG_ERROR},
+  {"NEG_MEDIAN_ABSOLUTE_ERROR", ML_regression::SCORE_METRIC_T::NEG_MEDIAN_ABSOLUTE_ERROR},
+  {"R2", ML_regression::SCORE_METRIC_T::R2}
+};
+// clang-format on
 
 ML_regression::ML_regression() {}
 ML_regression::~ML_regression() {}
@@ -64,7 +72,7 @@ int ML_regression::train() {
   if (!share) {
     std::ostringstream err;
     err << m_sch_name.c_str() << "." << m_table_name.c_str() << " NOT loaded into rapid engine";
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -74,49 +82,98 @@ int ML_regression::train() {
   return 0;
 }
 
-int ML_regression::predict() { return 0; }
-
 int ML_regression::load(std::string &model_content) {
   // the definition of this table, ref: `ml_train.sql`
-  BoosterHandle bt_handler;
-  int out_num_iterations;
-  if (LGBM_BoosterLoadModelFromString(model_content.c_str(), &out_num_iterations, &bt_handler) == -1)
-    return HA_ERR_GENERIC;
+  assert(model_content.length() && m_handler_name.length());
 
-  m_handler = bt_handler;
+  // insert the model content into the loaded map.
+  Loaded_models[m_handler_name] = model_content;
   return 0;
 }
 
-int ML_regression::load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) {
-  // to update the `MODEL_CATALOG.MODEL_OBJECT`
-  if (check_valid_path(modle_file_full_path.c_str(), modle_file_full_path.length()) || !model_handle_name.length())
+int ML_regression::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+  if (!model_file_full_path.length() || !model_handle_name.length()) {
     return HA_ERR_GENERIC;
+  }
 
+  Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
   return 0;
 }
 
 int ML_regression::unload(std::string &model_handle_name) {
-  if (!model_handle_name.length()) {
-    return HA_ERR_GENERIC;
-  }
+  assert(!Loaded_models.empty());
 
-  if (m_handler) {
-    BoosterHandle bt_handler = m_handler;
-    LGBM_BoosterFree(bt_handler);
-    m_handler = nullptr;
-  }
+  auto cnt = Loaded_models.erase(model_handle_name);
+  assert(cnt == 1);
   return 0;
 }
 
-int ML_regression::import(Json_wrapper &model_object [[maybe_unused]], Json_wrapper &model_metadata [[maybe_unused]],
-                          std::string &model_handle_name [[maybe_unused]]) {
-  return 0;
+int ML_regression::import(Json_wrapper &, Json_wrapper &, std::string &) {
+  // all logical done in ml_model_import stored procedure.
+  assert(false);
 }
 
-double ML_regression::score(std::string &sch_tb_name [[maybe_unused]], std::string &target_name [[maybe_unused]],
-                            std::string &model_handle [[maybe_unused]], std::string &metric_str [[maybe_unused]],
-                            Json_wrapper &option [[maybe_unused]]) {
-  return 0;
+double ML_regression::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+                            std::string &metric_str, Json_wrapper &option) {
+  assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
+
+  std::transform(metric_str.begin(), metric_str.end(), metric_str.begin(), ::toupper);
+  std::vector<std::string> metrics;
+  Utils::splitString(metric_str, ',', metrics);
+  for (auto &metric : metrics) {
+    if (score_metrics.find(metric) == score_metrics.end()) {
+      std::ostringstream err;
+      err << metric_str << " is invalid for regression scoring";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return 0.0;
+    }
+  }
+  OPTION_VALUE_T option_keys;
+  std::string strkey;
+  if (Utils::parse_json(option, option_keys, strkey, 0)) return 0.0;
+
+  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
+  std::string schema_name(sch_tb_name.c_str(), pos);
+  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+
+  // load the test data from rapid engine.
+  auto source_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
+  if (!source_table_ptr) {
+    std::ostringstream err;
+    err << sch_tb_name << " open failed for ML";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return 0.0;
+  }
+  std::vector<double> test_data;
+  std::vector<float> label_data;
+  std::vector<std::string> features_name;
+  int n_class{0};
+  txt2numeric_map_t txt2numeric;
+  auto n_sample =
+      Utils::read_data(source_table_ptr, test_data, features_name, target_name, label_data, n_class, txt2numeric);
+  Utils::close_table(source_table_ptr);
+  if (!n_sample) return 0.0;
+
+  // gets the prediction values.
+  std::vector<double> predictions;
+  if (Utils::model_predict(C_API_PREDICT_NORMAL, model_handle, n_sample, features_name.size(), test_data, predictions))
+    return 0.0;
+  double score{0.0};
+  switch ((int)ML_regression::score_metrics[metrics[0]]) {
+    case (int)ML_regression::SCORE_METRIC_T::NEG_MEAN_ABSOLUTE_ERROR:
+      break;
+    case (int)ML_regression::SCORE_METRIC_T::NEG_MEAN_SQUARED_ERROR:
+      break;
+    case (int)ML_regression::SCORE_METRIC_T::NEG_MEAN_SQUARED_LOG_ERROR:
+      break;
+    case (int)ML_regression::SCORE_METRIC_T::NEG_MEDIAN_ABSOLUTE_ERROR:
+      break;
+    case (int)ML_regression::SCORE_METRIC_T::R2:
+      break;
+    default:
+      break;
+  }
+  return score;
 }
 
 int ML_regression::explain(std::string &sch_tb_name [[maybe_unused]], std::string &target_column_name [[maybe_unused]],
@@ -129,13 +186,90 @@ int ML_regression::explain_row() { return 0; }
 
 int ML_regression::explain_table() { return 0; }
 
-int ML_regression::predict_row(Json_wrapper &input_data [[maybe_unused]],
-                               std::string &model_handle_name [[maybe_unused]], Json_wrapper &option [[maybe_unused]],
-                               Json_wrapper &result [[maybe_unused]]) {
-  return 0;
+int ML_regression::predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+                               Json_wrapper &result) {
+  assert(result.empty());
+  std::ostringstream err;
+
+  std::string keystr;
+  OPTION_VALUE_T meta_feature_names, input_values, options;
+  if (!option.empty() && Utils::parse_json(option, options, keystr, 0)) return HA_ERR_GENERIC;
+
+  Json_wrapper model_meta;
+  if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
+
+  if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
+      (!model_meta.empty() && Utils::parse_json(model_meta, meta_feature_names, keystr, 0))) {
+    err << "invalid input data or model meta info.";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  auto feature_names = meta_feature_names[ML_KEYWORDS::column_names];
+  if (feature_names.size() != input_values.size()) {
+    err << "input data columns size does not match the model feature columns size.";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  for (auto &feature_name : feature_names) {
+    if (input_values.find(feature_name) == input_values.end()) {
+      err << "input data columns does not contain the model feature column: " << feature_name;
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  txt2numeric_map_t txt2numeric;
+  if (Utils::get_txt2num_dict(model_meta, txt2numeric)) return HA_ERR_GENERIC;
+
+  Json_object *root_obj = new (std::nothrow) Json_object();
+  if (root_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+
+  std::vector<ml_record_type_t> sample_data;
+  for (auto &feature_name : feature_names) {
+    std::string value{"0"};
+    if (input_values.find(feature_name) != input_values.end()) value = input_values[feature_name][0];
+    sample_data.push_back({feature_name, value});
+    root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
+  }
+
+  // prediction
+  std::vector<double> predictions;
+  root_obj->add_alias(ML_KEYWORDS::Prediction,
+                      new (std::nothrow) Json_string(meta_feature_names[ML_KEYWORDS::train_table_name][0]));
+  auto ret = Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, predictions);
+  if (ret) {
+    err << "call ML_PREDICT_ROW failed";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+  auto rating{0};
+  // ml_results
+  Json_object *ml_results_obj = new (std::nothrow) Json_object();
+  if (ml_results_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+  // ml_results: prediction
+  Json_object *predictions_obj = new (std::nothrow) Json_object();
+  if (predictions_obj == nullptr) {
+    return HA_ERR_GENERIC;
+  }
+  predictions_obj->add_alias(ML_KEYWORDS::rating, new (std::nothrow) Json_double(rating));
+  ml_results_obj->add_alias(ML_KEYWORDS::predictions, predictions_obj);
+
+  root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results_obj);
+  result = Json_wrapper(root_obj);
+  return ret;
 }
 
-int ML_regression::predict_table() { return 0; }
+int ML_regression::predict_table(std::string &sch_tb_name [[maybe_unused]],
+                                 std::string &model_handle_name [[maybe_unused]],
+                                 std::string &out_sch_tb_name [[maybe_unused]],
+                                 Json_wrapper &options [[maybe_unused]]) {
+  return 0;
+}
 
 ML_TASK_TYPE_T ML_regression::type() { return ML_TASK_TYPE_T::REGRESSION; }
 

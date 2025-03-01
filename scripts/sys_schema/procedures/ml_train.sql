@@ -63,9 +63,40 @@ BEGIN
     DECLARE v_train_table_name VARCHAR(64);
     DECLARE v_model_name VARCHAR(255);
 
+    DECLARE table_size_gb DECIMAL(10, 2);
+    DECLARE table_rows BIGINT;
+    DECLARE column_count INT;
+
     IF in_table_name NOT REGEXP '^[^.]+\.[^.]+$' THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Invalid schema.table format, please using fully qualified name of the table.';
+    END IF;
+
+    SELECT SUBSTRING_INDEX(in_table_name, '.', 1) INTO v_train_schema_name;
+    SELECT SUBSTRING_INDEX(in_table_name, '.', -1) INTO v_train_table_name;
+
+    SELECT ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024 / 1024, 2) INTO table_size_gb
+    FROM information_schema.TABLES  WHERE TABLE_SCHEMA = v_train_schema_name  AND TABLE_NAME = v_train_table_name;
+
+    SELECT TABLE_ROWS  INTO table_rows FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = v_train_schema_name AND TABLE_NAME = v_train_table_name;
+
+    SELECT COUNT(*) INTO column_count FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = v_train_schema_name AND TABLE_NAME = v_train_table_name;
+
+    IF table_size_gb > 10 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'The table cannot exceed 10 GB';
+    END IF;
+
+    IF table_rows > 100000000 THEN
+        SIGNAL SQLSTATE '45001'
+        SET MESSAGE_TEXT = 'The table cannot exceed 100 million rows';
+    END IF;
+
+    IF column_count > 1017 THEN
+        SIGNAL SQLSTATE '45002'
+        SET MESSAGE_TEXT = 'The table cannot exceed 1017 columns';
     END IF;
 
     SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;  
@@ -111,9 +142,6 @@ BEGIN
         DEALLOCATE PREPARE add_fk_tb_stmt;
         COMMIT;
     END IF;
-
-    SELECT SUBSTRING_INDEX(in_table_name, '.', 1) INTO v_train_schema_name;
-    SELECT SUBSTRING_INDEX(in_table_name, '.', -1) INTO v_train_table_name;
     
     SELECT COUNT(*) INTO v_train_obj_check
     FROM INFORMATION_SCHEMA.TABLES
@@ -140,13 +168,15 @@ BEGIN
       SET in_model_handle = CONCAT(in_table_name, '_', v_user_name, '_', SUBSTRING(MD5(RAND()), 1, 10));
     END IF;
 
-    SELECT COUNT(COLUMN_NAME) INTO v_train_obj_check
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = v_train_schema_name AND TABLE_NAME = v_train_table_name AND COLUMN_NAME = in_target_name;
-    IF v_train_obj_check = 0 THEN
-        SET v_db_err_msg = CONCAT('column ', in_target_name, ' labelled does not exists in ', v_train_table_name);
-        SIGNAL SQLSTATE 'HY000'
-            SET MESSAGE_TEXT = v_db_err_msg;
+    IF in_target_name IS NOT NULL THEN
+      SELECT COUNT(COLUMN_NAME) INTO v_train_obj_check
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = v_train_schema_name AND TABLE_NAME = v_train_table_name AND COLUMN_NAME = in_target_name;
+      IF v_train_obj_check = 0 THEN
+          SET v_db_err_msg = CONCAT('column ', in_target_name, ' labelled does not exists in ', v_train_table_name);
+          SIGNAL SQLSTATE 'HY000'
+              SET MESSAGE_TEXT = v_db_err_msg;
+      END IF;
     END IF;
 
     -- DN NOT REMOVE STAART TRANSACTION AND COMMIT STATEMENTS. THEY ARE REQUIRED FOR THE TRANSACTIONAL CONSISTENCY

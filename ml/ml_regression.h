@@ -53,9 +53,8 @@ class ML_regression : public ML_algorithm {
   ML_regression();
   virtual ~ML_regression() override;
   int train() override;
-  int predict() override;
   int load(std::string &model_content) override;
-  int load_from_file(std::string &modle_file_full_path, std::string &model_handle_name) override;
+  int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) override;
   int unload(std::string &model_handle_name) override;
   int import(Json_wrapper &model_object, Json_wrapper &model_metadata, std::string &model_handle_name) override;
   double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle, std::string &metric_str,
@@ -66,7 +65,8 @@ class ML_regression : public ML_algorithm {
   int explain_table() override;
   int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                   Json_wrapper &result) override;
-  int predict_table() override;
+  int predict_table(std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
+                    Json_wrapper &options) override;
   ML_TASK_TYPE_T type() override;
 
   void set_schema(std::string &schema_name) { m_sch_name = schema_name; }
@@ -80,7 +80,15 @@ class ML_regression : public ML_algorithm {
   void set_options(Json_wrapper &options) { m_options = options; }
   Json_wrapper &get_options() { return m_options; }
 
-  static const std::vector<std::string> metrics;
+  enum class SCORE_METRIC_T {
+    NEG_MEAN_ABSOLUTE_ERROR = REGRESSION_METRIC_START,
+    NEG_MEAN_SQUARED_ERROR,
+    NEG_MEAN_SQUARED_LOG_ERROR,
+    NEG_MEDIAN_ABSOLUTE_ERROR,
+    R2
+  };
+
+  static std::map<std::string, SCORE_METRIC_T> score_metrics;
 
  private:
   std::string m_sch_name;

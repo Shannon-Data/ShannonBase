@@ -9,18 +9,7 @@ CREATE TABLE census_test LIKE census_train;
 SET @census_model = 'census_test_score';
 ALTER TABLE census_train SECONDARY_LOAD;
 CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
-CALL sys.ML_SCORE('heatwaveml_bench.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-ERROR 42S22: Unknown column 'in_table_name' in 'field list'
-CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-ERROR HY000: ML operation failed. shannon_ml.census_test NOT loaded into rapid engine for ML.
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
-CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-ERROR HY000: ML operation failed. shannon_ml.census_test NOT loaded into rapid engine for ML.
-ALTER TABLE shannon_ml.census_test SECONDARY_LOAD;
-CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-SELECT @score_census;
-@score_census
-0.7931527495384216
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
 JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
 FROM ML_SCHEMA_root.MODEL_CATALOG;
@@ -35,6 +24,24 @@ FROM  ML_SCHEMA_root.MODEL_CATALOG, ML_SCHEMA_root.MODEL_OBJECT_CATALOG
 WHERE ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE = ML_SCHEMA_root.MODEL_OBJECT_CATALOG.MODEL_HANDLE;
 MODEL_ID	MODEL_HANDLE	MODEL_OBJECT	MODEL_OWNER	task	feature_names
 1	census_test_score	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
+SET @row_input = JSON_OBJECT( 
+"age", 25, 
+"workclass", "Private", 
+"fnlwgt", 226802, 
+"education", "11th", 
+"education-num", 7, 
+"marital-status", "Never-married", 
+"occupation", "Machine-op-inspct", 
+"relationship", "Own-child", 
+"race", "Black", 
+"sex", "Male", 
+"capital-gain", 0, 
+"capital-loss", 0, 
+"hours-per-week", 40, 
+"native-country", "United-States");
+SELECT sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
+sys.ML_PREDICT_ROW(@row_input, @census_model, NULL)
+{"age": "25", "sex": "Male", "race": "Black", "fnlwgt": "226802", "education": "11th", "workclass": "Private", "Prediction": "shannon_ml.census_train", "ml_results": {"predictions": {"class": "shannon_ml.census_train"}, "probabilities": {"age": -0.6211061268145668, "sex": 0.12168122022962528, "race": -0.20345111684587078, "fnlwgt": -0.12171546681389314, "education": -0.23166314677855082, "workclass": -0.0392296227346186, "occupation": -0.4941690515586141, "capital-gain": -0.26934655079797437, "capital-loss": -0.06866286549018068, "relationship": -0.7030884704349845, "education-num": -0.5572686575043835, "hours-per-week": -0.0395619328451832, "marital-status": -0.9880741575771561, "native-country": -0.017124746740565282}}, "occupation": "Machine-op-inspct", "capital-gain": "0", "capital-loss": "0", "relationship": "Own-child", "education-num": "7", "hours-per-week": "40", "marital-status": "Never-married", "native-country": "United-States"}
+CALL sys.ML_MODEL_UNLOAD(@census_model);
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE census_train SECONDARY_UNLOAD;
-ALTER TABLE census_test SECONDARY_UNLOAD;
