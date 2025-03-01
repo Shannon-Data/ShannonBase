@@ -177,6 +177,7 @@ int ML_forecasting::train() {
 int ML_forecasting::load(std::string &model_content) {
   assert(model_content.length() && m_handler_name.length());
 
+  std::lock_guard<std::mutex> lock(models_mutex);
   // insert the model content into the loaded map.
   Loaded_models[m_handler_name] = model_content;
   return 0;
@@ -187,11 +188,13 @@ int ML_forecasting::load_from_file(std::string &model_file_full_path, std::strin
     return HA_ERR_GENERIC;
   }
 
+  std::lock_guard<std::mutex> lock(models_mutex);
   Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
   return 0;
 }
 
 int ML_forecasting::unload(std::string &model_handle_name) {
+  std::lock_guard<std::mutex> lock(models_mutex);
   assert(!Loaded_models.empty());
 
   auto cnt = Loaded_models.erase(model_handle_name);

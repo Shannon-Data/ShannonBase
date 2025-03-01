@@ -79,7 +79,7 @@ class Auto_ML {
   // init task job map, get an instance by type.
   void init_task_map();
   // build the a ML task, such as regress, classification, etc.
-  void build_task(std::string task_str);
+  void build_task(std::string_view task_str);
 
  private:
   // the source schema name.

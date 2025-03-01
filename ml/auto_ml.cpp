@@ -49,6 +49,7 @@
 namespace ShannonBase {
 namespace ML {
 
+std::mutex models_mutex;
 std::map<std::string, std::string> Loaded_models;
 
 Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_name, Json_wrapper options,
@@ -87,7 +88,7 @@ void Auto_ML::init_task_map() {
   build_task(m_task_type_str);
 }
 
-void Auto_ML::build_task(std::string task_str) {
+void Auto_ML::build_task(std::string_view task_str) {
   if (!task_str.length()) return;
 
   auto option_obj = m_options.clone_dom();
@@ -95,7 +96,7 @@ void Auto_ML::build_task(std::string task_str) {
     // if we have already had an instance of cf task, then do nothing, using the old instance.
     case ML_TASK_TYPE_T::CLASSIFICATION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::CLASSIFICATION)
-        m_ml_task.reset(new ML_classification());
+        m_ml_task = std::make_unique<ML_classification>();
 
       down_cast<ML_classification *>(m_ml_task.get())->set_schema(m_schema_name);
       down_cast<ML_classification *>(m_ml_task.get())->set_table(m_table_name);
@@ -104,7 +105,8 @@ void Auto_ML::build_task(std::string task_str) {
       down_cast<ML_classification *>(m_ml_task.get())->set_handle_name(m_handler);
       break;
     case ML_TASK_TYPE_T::REGRESSION:
-      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::REGRESSION) m_ml_task.reset(new ML_regression());
+      if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::REGRESSION)
+        m_ml_task = std::make_unique<ML_regression>();
 
       down_cast<ML_regression *>(m_ml_task.get())->set_schema(m_schema_name);
       down_cast<ML_regression *>(m_ml_task.get())->set_table(m_table_name);
@@ -114,7 +116,7 @@ void Auto_ML::build_task(std::string task_str) {
       break;
     case ML_TASK_TYPE_T::FORECASTING:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::FORECASTING)
-        m_ml_task.reset(new ML_forecasting());
+        m_ml_task = std::make_unique<ML_forecasting>();
 
       down_cast<ML_forecasting *>(m_ml_task.get())->set_schema(m_schema_name);
       down_cast<ML_forecasting *>(m_ml_task.get())->set_table(m_table_name);
@@ -124,7 +126,7 @@ void Auto_ML::build_task(std::string task_str) {
       break;
     case ML_TASK_TYPE_T::ANOMALY_DETECTION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::ANOMALY_DETECTION)
-        m_ml_task.reset(new ML_anomaly_detection());
+        m_ml_task = std::make_unique<ML_anomaly_detection>();
 
       down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_schema(m_schema_name);
       down_cast<ML_anomaly_detection *>(m_ml_task.get())->set_table(m_table_name);
@@ -134,7 +136,7 @@ void Auto_ML::build_task(std::string task_str) {
       break;
     case ML_TASK_TYPE_T::RECOMMENDATION:
       if (m_ml_task == nullptr || m_ml_task->type() != ML_TASK_TYPE_T::RECOMMENDATION)
-        m_ml_task.reset(new ML_recommendation());
+        m_ml_task = std::make_unique<ML_recommendation>();
 
       down_cast<ML_recommendation *>(m_ml_task.get())->set_schema(m_schema_name);
       down_cast<ML_recommendation *>(m_ml_task.get())->set_table(m_table_name);
@@ -150,18 +152,24 @@ void Auto_ML::build_task(std::string task_str) {
 
 int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::string &model_content,
                                             bool should_loaded) {
-  if (should_loaded && (Loaded_models.find(model_hanle_name) == Loaded_models.end())) {
-    // should been loaded, but not loaded.
-    std::ostringstream err;
-    err << model_hanle_name << " has not been loaded";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
-  } else if (!should_loaded && (Loaded_models.find(model_hanle_name) != Loaded_models.end())) {
-    // should not been loaded, but loaded.
-    std::ostringstream err;
-    err << model_hanle_name << " has been loaded";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
+  if (model_hanle_name.length() == 0) return HA_ERR_GENERIC;
+
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    if (should_loaded && (Loaded_models.find(model_hanle_name) == Loaded_models.end())) {
+      // should been loaded, but not loaded.
+      std::ostringstream err;
+      err << model_hanle_name << " has not been loaded";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      models_mutex.unlock();
+      return HA_ERR_GENERIC;
+    } else if (!should_loaded && (Loaded_models.find(model_hanle_name) != Loaded_models.end())) {
+      // should not been loaded, but loaded.
+      std::ostringstream err;
+      err << model_hanle_name << " has been loaded";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
   }
 
   if (Utils::read_model_content(model_hanle_name, m_options)) return HA_ERR_GENERIC;
@@ -223,7 +231,7 @@ double Auto_ML::score(String *sch_table_name, String *target_column_name, String
   assert(sch_table_name && target_column_name && model_handle_name);
 
   std::string sch_tb_name_str(sch_table_name->c_ptr_safe());
-  if (Utils::check_table_available(sch_tb_name_str)) return HA_ERR_GENERIC;
+  if (Utils::check_table_available(sch_tb_name_str)) return 0;
 
   std::string model_handler_name_str(model_handle_name->c_ptr_safe());
   std::string model_content_str;

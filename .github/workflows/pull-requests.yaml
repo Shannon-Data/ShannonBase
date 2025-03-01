@@ -94,7 +94,7 @@ jobs:
         sudo make install
     - name: clean_up_shannonbase_build
       run: |
-        sudo rm /home/ShannonBase/ -rf
+        sudo find ${{ github.workspace }} -mindepth 1 -delete
     - name: run_mtr_test
       run: |
         sudo mkdir -p /home/shannon-bin/log

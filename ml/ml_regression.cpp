@@ -84,6 +84,7 @@ int ML_regression::train() {
 
 int ML_regression::load(std::string &model_content) {
   // the definition of this table, ref: `ml_train.sql`
+  std::lock_guard<std::mutex> lock(models_mutex);
   assert(model_content.length() && m_handler_name.length());
 
   // insert the model content into the loaded map.
@@ -92,6 +93,7 @@ int ML_regression::load(std::string &model_content) {
 }
 
 int ML_regression::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+  std::lock_guard<std::mutex> lock(models_mutex);
   if (!model_file_full_path.length() || !model_handle_name.length()) {
     return HA_ERR_GENERIC;
   }
@@ -101,6 +103,7 @@ int ML_regression::load_from_file(std::string &model_file_full_path, std::string
 }
 
 int ML_regression::unload(std::string &model_handle_name) {
+  std::lock_guard<std::mutex> lock(models_mutex);
   assert(!Loaded_models.empty());
 
   auto cnt = Loaded_models.erase(model_handle_name);

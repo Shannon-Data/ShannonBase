@@ -27,8 +27,10 @@
 #define __SHANNONBASE_AUTO_ML_INFO_H__
 
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace ShannonBase {
@@ -39,6 +41,7 @@ namespace ML {
     RETURN HA_ERR_GENERIC; \
   }
 
+extern std::mutex models_mutex;
 extern std::map<std::string, std::string> Loaded_models;
 
 // clang-format off
@@ -76,12 +79,13 @@ enum class MODEL_PREDICTION_EXP_T {
 };
 // clang-format off
 
-extern std::map<std::string, ML_TASK_TYPE_T> OPT_TASKS_MAP;
+extern std::map<std::string_view, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP;
+extern std::map<std::string, MODEL_PREDICTION_EXP_T, std::less<>> MODEL_EXPLAINERS_MAP;
+
 extern std::map<ML_TASK_TYPE_T, std::string> TASK_NAMES_MAP;
 extern std::map<MODEL_STATUS_T, std::string> MODEL_STATUS_MAP;
 extern std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP;
 extern std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP;
-extern std::map<std::string, MODEL_PREDICTION_EXP_T> MODEL_EXPLAINERS_MAP;
 
 class ML_KEYWORDS {
    public:
@@ -140,8 +144,8 @@ class ML_KEYWORDS {
    static constexpr const char* users = "users";
  };
  
-using OPTION_VALUE_T = std::map<std::string, std::vector<std::string>>;
-using txt2numeric_map_t = std::map<std::string, std::set<std::string>>;
+using OPTION_VALUE_T = std::unordered_map<std::string, std::vector<std::string>>;
+using txt2numeric_map_t = std::unordered_map<std::string, std::set<std::string>>;
 // pair of a <key_name, value>.
 using ml_record_type_t = std::pair<std::string, std::string>;
 
