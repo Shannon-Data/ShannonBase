@@ -218,6 +218,7 @@ int ML_classification::train() {
 
 // load the model from model_content.
 int ML_classification::load(std::string &model_content) {
+  std::lock_guard<std::mutex> lock(models_mutex);
   assert(model_content.length() && m_handler_name.length());
 
   // insert the model content into the loaded map.
@@ -226,6 +227,7 @@ int ML_classification::load(std::string &model_content) {
 }
 
 int ML_classification::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+  std::lock_guard<std::mutex> lock(models_mutex);
   if (!model_file_full_path.length() || !model_handle_name.length()) {
     return HA_ERR_GENERIC;
   }
@@ -235,6 +237,7 @@ int ML_classification::load_from_file(std::string &model_file_full_path, std::st
 }
 
 int ML_classification::unload(std::string &model_handle_name) {
+  std::lock_guard<std::mutex> lock(models_mutex);
   assert(!Loaded_models.empty());
 
   auto cnt = Loaded_models.erase(model_handle_name);
@@ -355,8 +358,12 @@ int ML_classification::explain(std::string &sch_tb_name, std::string &target_nam
   assert(explaination_values.size());
   auto model_prediction_type = explaination_values["columns_to_explain"];
 
-  std::string model_content = Loaded_models[model_handle_name];
-  assert(model_content.length());
+  std::string model_content;
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    model_content = Loaded_models[model_handle_name];
+    assert(model_content.length());
+  }
 
   int importance_type{0};
   MODEL_PREDICTION_EXP_T model_predict_type = MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE;
@@ -504,8 +511,13 @@ int ML_classification::predict_table_row(TABLE *in_table, std::vector<std::strin
 int ML_classification::predict_table(std::string &sch_tb_name, std::string &model_handle_name,
                                      std::string &out_sch_tb_name, Json_wrapper &options) {
   std::ostringstream err;
-  std::string model_content = Loaded_models[model_handle_name];
-  assert(model_content.length());
+  std::string model_content;
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    model_content = Loaded_models[model_handle_name];
+    assert(model_content.length());
+  }
+
   BoosterHandle booster = nullptr;
   booster = Utils::load_trained_model_from_string(model_content);
   if (!booster) return HA_ERR_GENERIC;

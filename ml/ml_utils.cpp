@@ -50,12 +50,13 @@
 namespace ShannonBase {
 namespace ML {
 
-std::map<std::string, ML_TASK_TYPE_T> OPT_TASKS_MAP = {{"", ML_TASK_TYPE_T::UNKNOWN},
-                                                       {"CLASSIFICATION", ML_TASK_TYPE_T::CLASSIFICATION},
-                                                       {"REGRESSION", ML_TASK_TYPE_T::REGRESSION},
-                                                       {"FORECASTING", ML_TASK_TYPE_T::FORECASTING},
-                                                       {"ANOMALY_DETECTION", ML_TASK_TYPE_T::ANOMALY_DETECTION},
-                                                       {"RECOMMENDATION", ML_TASK_TYPE_T::RECOMMENDATION}};
+std::map<std::string_view, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP = {
+    {"", ML_TASK_TYPE_T::UNKNOWN},
+    {"CLASSIFICATION", ML_TASK_TYPE_T::CLASSIFICATION},
+    {"REGRESSION", ML_TASK_TYPE_T::REGRESSION},
+    {"FORECASTING", ML_TASK_TYPE_T::FORECASTING},
+    {"ANOMALY_DETECTION", ML_TASK_TYPE_T::ANOMALY_DETECTION},
+    {"RECOMMENDATION", ML_TASK_TYPE_T::RECOMMENDATION}};
 
 std::map<ML_TASK_TYPE_T, std::string> TASK_NAMES_MAP = {{ML_TASK_TYPE_T::CLASSIFICATION, "CLASSIFICATION"},
                                                         {ML_TASK_TYPE_T::REGRESSION, "REGRESSION"},
@@ -63,7 +64,7 @@ std::map<ML_TASK_TYPE_T, std::string> TASK_NAMES_MAP = {{ML_TASK_TYPE_T::CLASSIF
                                                         {ML_TASK_TYPE_T::ANOMALY_DETECTION, "ANOMALY_DETECTION"},
                                                         {ML_TASK_TYPE_T::RECOMMENDATION, "RECOMMENDATION"}};
 
-std::map<std::string, MODEL_PREDICTION_EXP_T> MODEL_EXPLAINERS_MAP = {
+std::map<std::string, MODEL_PREDICTION_EXP_T, std::less<>> MODEL_EXPLAINERS_MAP = {
     {"MODEL_PERMUTATION_IMPORTANCE", MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE},
     {"MODEL_SHAP", MODEL_PREDICTION_EXP_T::MODEL_SHAP},
     {"MODEL_FAST_SHAP", MODEL_PREDICTION_EXP_T::MODEL_FAST_SHAP},
@@ -864,12 +865,17 @@ int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samp
   assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE || type == C_API_PREDICT_LEAF_INDEX ||
          type == C_API_PREDICT_CONTRIB);
   std::string score_params;
-  BoosterHandle handler = Utils::load_trained_model_from_string(Loaded_models[model_handle_name]);
-  if (!handler) {
-    std::ostringstream err;
-    err << model_handle_name << " can not load model from content string";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
+  BoosterHandle handler{nullptr};
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    handler = Utils::load_trained_model_from_string(Loaded_models[model_handle_name]);
+
+    if (!handler) {
+      std::ostringstream err;
+      err << model_handle_name << " can not load model from content string";
+      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+      return HA_ERR_GENERIC;
+    }
   }
 
   assert(sizeof(double) == 8);
@@ -902,10 +908,14 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name, std::vector<
 
   assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE ||
          type == C_API_PREDICT_LEAF_INDEX || type == C_API_PREDICT_CONTRIB);
-  std::string model_content = Loaded_models[model_handle_name];
-  assert(model_content.length());
-  BoosterHandle booster = nullptr;
-  booster = Utils::load_trained_model_from_string(model_content);
+  std::string model_content;
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    model_content = Loaded_models[model_handle_name];
+    assert(model_content.length());
+  }
+
+  auto booster = Utils::load_trained_model_from_string(model_content);
   if (!booster) return HA_ERR_GENERIC;
 
   auto n_feature = input_data.size();

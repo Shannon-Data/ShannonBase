@@ -195,6 +195,7 @@ int ML_recommendation::train() {
 }
 
 int ML_recommendation::load(std::string &model_content) {
+  std::lock_guard<std::mutex> lock(models_mutex);
   assert(model_content.length() && m_handler_name.length());
 
   // insert the model content into the loaded map.
@@ -203,6 +204,7 @@ int ML_recommendation::load(std::string &model_content) {
 }
 
 int ML_recommendation::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+  std::lock_guard<std::mutex> lock(models_mutex);
   if (!model_file_full_path.length() || !model_handle_name.length()) {
     return HA_ERR_GENERIC;
   }
@@ -212,6 +214,7 @@ int ML_recommendation::load_from_file(std::string &model_file_full_path, std::st
 }
 
 int ML_recommendation::unload(std::string &model_handle_name) {
+  std::lock_guard<std::mutex> lock(models_mutex);
   assert(!Loaded_models.empty());
 
   auto cnt = Loaded_models.erase(model_handle_name);
