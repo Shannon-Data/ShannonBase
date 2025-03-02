@@ -108,12 +108,13 @@ int ML_regression::unload(std::string &model_handle_name) {
 
   auto cnt = Loaded_models.erase(model_handle_name);
   assert(cnt == 1);
-  return 0;
+  return (cnt == 1) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_regression::import(Json_wrapper &, Json_wrapper &, std::string &) {
   // all logical done in ml_model_import stored procedure.
   assert(false);
+  return 0;
 }
 
 double ML_regression::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,

@@ -242,7 +242,7 @@ int ML_classification::unload(std::string &model_handle_name) {
 
   auto cnt = Loaded_models.erase(model_handle_name);
   assert(cnt == 1);
-  return 0;
+  return (cnt == 1) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_classification::import(Json_wrapper &, Json_wrapper &, std::string &) {
@@ -351,6 +351,27 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
 int ML_classification::explain(std::string &sch_tb_name, std::string &target_name, std::string &model_handle_name,
                                Json_wrapper &exp_options) {
   assert(sch_tb_name.length() && target_name.length());
+  std::ostringstream err;
+  auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
+  std::string schema_name(sch_tb_name.c_str(), pos);
+  std::string table_name(sch_tb_name.c_str() + pos + 1, sch_tb_name.length() - pos);
+  auto in_table_ptr = Utils::open_table_by_name(schema_name, table_name, TL_READ);
+  if (!in_table_ptr) {
+    err << sch_tb_name << " open failed for ML";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  std::vector<double> train_data;
+  std::vector<float> label_data;
+  std::vector<std::string> features_name, target_names;
+  Utils::splitString(target_name, ',', target_names);
+  assert(target_names.size() == 1);
+  int n_class{0};
+  txt2numeric_map_t txt2num_dict;
+  auto n_sample [[maybe_unused]] =
+      Utils::read_data(in_table_ptr, train_data, features_name, target_names[0], label_data, n_class, txt2num_dict);
+  Utils::close_table(in_table_ptr);
 
   OPTION_VALUE_T explaination_values;
   std::string keystr;
@@ -494,20 +515,6 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   return ret;
 }
 
-int ML_classification::predict_table_row(TABLE *in_table, std::vector<std::string> &feature_names,
-                                         std::string &label_name, txt2numeric_map_t &txt2numeric_dict) {
-  assert(in_table && label_name.length() && feature_names.size() && txt2numeric_dict.size());
-  auto thd = current_thd;
-  auto n_read{0u};
-  const dd::Table *table_obj{nullptr};
-  const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
-  if (!table_obj && in_table->s->table_category != TABLE_UNKNOWN_CATEGORY) {
-    if (thd->dd_client()->acquire(in_table->s->db.str, in_table->s->table_name.str, &table_obj)) {
-      return n_read;
-    }
-  }
-  return 0;
-}
 int ML_classification::predict_table(std::string &sch_tb_name, std::string &model_handle_name,
                                      std::string &out_sch_tb_name, Json_wrapper &options) {
   std::ostringstream err;

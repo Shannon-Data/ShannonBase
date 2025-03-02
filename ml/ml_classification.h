@@ -109,8 +109,6 @@ class ML_classification : public ML_algorithm {
 
  private:
   MODEL_PREDICTION_EXP_T parse_option(Json_wrapper &options);
-  int predict_table_row(TABLE *in_table, std::vector<std::string> &feature_names, std::string &label_name,
-                        txt2numeric_map_t &txt2numeric_dict);
 
   int get_txt2num_dict(Json_wrapper &input, std::string &key, txt2numeric_map_t &txt2num_dict);
 
