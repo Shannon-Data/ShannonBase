@@ -199,7 +199,7 @@ int ML_forecasting::unload(std::string &model_handle_name) {
 
   auto cnt = Loaded_models.erase(model_handle_name);
   assert(cnt == 1);
-  return 0;
+  return (cnt == 1) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_forecasting::import(Json_wrapper &, Json_wrapper &, std::string &) {
