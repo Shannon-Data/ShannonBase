@@ -50,6 +50,7 @@
 namespace ShannonBase {
 namespace ML {
 
+// clang-format off
 std::map<std::string_view, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP = {
     {"", ML_TASK_TYPE_T::UNKNOWN},
     {"CLASSIFICATION", ML_TASK_TYPE_T::CLASSIFICATION},
@@ -58,11 +59,12 @@ std::map<std::string_view, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP = {
     {"ANOMALY_DETECTION", ML_TASK_TYPE_T::ANOMALY_DETECTION},
     {"RECOMMENDATION", ML_TASK_TYPE_T::RECOMMENDATION}};
 
-std::map<ML_TASK_TYPE_T, std::string> TASK_NAMES_MAP = {{ML_TASK_TYPE_T::CLASSIFICATION, "CLASSIFICATION"},
-                                                        {ML_TASK_TYPE_T::REGRESSION, "REGRESSION"},
-                                                        {ML_TASK_TYPE_T::FORECASTING, "FORECASTING"},
-                                                        {ML_TASK_TYPE_T::ANOMALY_DETECTION, "ANOMALY_DETECTION"},
-                                                        {ML_TASK_TYPE_T::RECOMMENDATION, "RECOMMENDATION"}};
+std::map<ML_TASK_TYPE_T, std::string> TASK_NAMES_MAP = {
+    {ML_TASK_TYPE_T::CLASSIFICATION, "CLASSIFICATION"},
+    {ML_TASK_TYPE_T::REGRESSION, "REGRESSION"},
+    {ML_TASK_TYPE_T::FORECASTING, "FORECASTING"},
+    {ML_TASK_TYPE_T::ANOMALY_DETECTION, "ANOMALY_DETECTION"},
+    {ML_TASK_TYPE_T::RECOMMENDATION, "RECOMMENDATION"}};
 
 std::map<std::string, MODEL_PREDICTION_EXP_T, std::less<>> MODEL_EXPLAINERS_MAP = {
     {"MODEL_PERMUTATION_IMPORTANCE", MODEL_PREDICTION_EXP_T::MODEL_PERMUTATION_IMPORTANCE},
@@ -73,13 +75,18 @@ std::map<std::string, MODEL_PREDICTION_EXP_T, std::less<>> MODEL_EXPLAINERS_MAP 
     {"PREDICT_SHAP", MODEL_PREDICTION_EXP_T::PREDICT_SHAP}};
 
 std::map<MODEL_STATUS_T, std::string> MODEL_STATUS_MAP = {
-    {MODEL_STATUS_T::CREATING, "CREATEING"}, {MODEL_STATUS_T::READY, "READY"}, {MODEL_STATUS_T::ERROR, "ERROR"}};
+    {MODEL_STATUS_T::CREATING, "CREATEING"},
+    {MODEL_STATUS_T::READY, "READY"},
+    {MODEL_STATUS_T::ERROR, "ERROR"}};
 
-std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP = {{MODEL_FORMAT_T::VER_1, "HWMLv1.0"},
-                                                           {MODEL_FORMAT_T::ONNX, "ONNX"}};
+std::map<MODEL_FORMAT_T, std::string> MODEL_FORMATS_MAP = {
+    {MODEL_FORMAT_T::VER_1, "HWMLv1.0"},
+    {MODEL_FORMAT_T::ONNX, "ONNX"}};
 
-std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP = {{MODEL_QUALITY_T::LOW, "LOW"},
-                                                              {MODEL_QUALITY_T::HIGH, "HIGH"}};
+std::map<MODEL_QUALITY_T, std::string> MODEL_QUALITIES_MAP = {
+    {MODEL_QUALITY_T::LOW, "LOW"},
+    {MODEL_QUALITY_T::HIGH, "HIGH"}};
+// clang-format on
 
 int Utils::splitString(const std::string &str, char delimiter, std::vector<std::string> &result) {
   std::stringstream ss(str);
