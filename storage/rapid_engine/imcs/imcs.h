@@ -36,7 +36,6 @@
 #include "my_inttypes.h"
 #include "sql/field.h"
 #include "sql/handler.h"
-
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -69,7 +68,10 @@ class Imcs : public MemoryObject {
 
   inline std::unordered_map<std::string, std::unique_ptr<Cu>> &get_cus() { return m_cus; }
   // get cu pointer by its key.
-  Cu *get_cu(const char *key);
+  Cu *get_cu(std::string_view key);
+
+  // get cu at Nth index key
+  Cu *at(size_t indexx);
 
   /**create all cus needed by source table, and ready to write the data into.*/
   int create_table_mem(const Rapid_load_context *context, const TABLE *source);

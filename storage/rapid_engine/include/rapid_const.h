@@ -125,6 +125,7 @@ enum class RPD_NODE_ROLE {
 };
 
 enum class OPER_TYPE : uint8 { OPER_INSERT, OPER_UPDATE, OPER_DELETE };
+constexpr int PREFETCH_AHEAD = 2;
 
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CONST_H__

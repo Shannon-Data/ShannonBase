@@ -32,7 +32,6 @@
 #include <regex>
 
 #include "sql/field.h"  //Field
-
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -43,8 +42,11 @@ Cu::Cu(const Field *field) {
   ut_a(field && !field->is_flag_set(NOT_SECONDARY_FLAG));
   {
     std::scoped_lock lk(m_header_mutex);
-    m_header = std::make_unique<Cu_header>();
-    if (!m_header.get()) return;
+    m_header.reset(new (std::nothrow) Cu_header());
+    if (!m_header) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Cu header allocation failed");
+      return;
+    }
 
     // TODO: be aware of freeing the cloned object here.
     m_header->m_source_fld = field->clone(&rapid_mem_root);
@@ -65,17 +67,27 @@ Cu::Cu(const Field *field) {
   } else
     m_header->m_encoding_type = Compress::Encoding_type::NONE;
 
-  m_header->m_local_dict = std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
-
+  m_header->m_local_dict.reset(new (std::nothrow) Compress::Dictionary(m_header->m_encoding_type));
+  if (!m_header->m_local_dict) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Cu dictionary allocation failed");
+    return;
+  }
   // the initial one chunk built.
-  m_chunks.emplace_back(std::make_unique<Chunk>(const_cast<Field *>(field)));
+  auto chunk = new (std::nothrow) Chunk(const_cast<Field *>(field));
+  if (!chunk) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
+    return;
+  }
+  m_chunks.emplace_back(chunk);
 
   m_current_chunk.store(0);
 
   m_name = field->field_name;
 }
 
-Cu::~Cu() { m_chunks.clear(); }
+Cu::~Cu() {
+  if (m_chunks.size()) m_chunks.clear();
+}
 
 row_id_t Cu::prows() {
 #ifndef NDEBUG

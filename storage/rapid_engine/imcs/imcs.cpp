@@ -36,7 +36,6 @@
 #include "include/my_dbug.h"                  //DBUG_EXECUTE_IF
 #include "storage/innobase/include/univ.i"    //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
-
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
@@ -72,7 +71,15 @@ int Imcs::create_table_mem(const Rapid_load_context *context, const TABLE *sourc
   return 0;
 }
 
-Cu *Imcs::get_cu(const char *key) {
+Cu *Imcs::at(size_t index) {
+  if (index >= m_cus.size()) return m_cus.end()->second.get();
+
+  auto it = m_cus.begin();
+  std::advance(it, index);
+  return (it->second).get();
+}
+
+Cu *Imcs::get_cu(std::string_view key) {
   std::string key_str(key);
 
   if (m_cus.find(key_str) == m_cus.end()) return nullptr;

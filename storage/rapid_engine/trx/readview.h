@@ -33,6 +33,8 @@
 #include "storage/rapid_engine/trx/transaction.h"
 
 namespace ShannonBase {
+class Rapid_load_context;
+namespace ReadView {
 
 // in chunk, the latest veresion data always is in. the old version of data moves to
 // SMU. So if a trx can see the latest version data, it should travers the version
@@ -68,7 +70,35 @@ struct SHANNON_ALIGNAS smu_item_t {
   }
 };
 
-using smu_item_vec = std::vector<smu_item_t>;
+struct smu_item_vec_t {
+  std::mutex vec_mutex;
+  std::vector<smu_item_t> items;
+  smu_item_vec_t() = default;
 
+  smu_item_vec_t(const smu_item_vec_t &) = delete;
+  smu_item_vec_t &operator=(const smu_item_vec_t &) = delete;
+
+  smu_item_vec_t(smu_item_vec_t &&other) noexcept {
+    std::lock_guard<std::mutex> lock(other.vec_mutex);
+    items = std::move(other.items);
+  }
+
+  smu_item_vec_t &operator=(smu_item_vec_t &&other) noexcept {
+    if (this != &other) {
+      std::lock_guard<std::mutex> lock(other.vec_mutex);
+      items = std::move(other.items);
+    }
+    return *this;
+  }
+
+  void add(smu_item_t &&item) {
+    std::lock_guard<std::mutex> lock(vec_mutex);
+    items.emplace_back(std::move(item));
+  }
+  // gets the first met visibility data in this version link.
+  uchar *get_data(Rapid_load_context *context);
+};
+
+}  // namespace ReadView
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_READVIEW_H__

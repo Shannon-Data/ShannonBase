@@ -80,7 +80,7 @@ class Transaction : public MemoryObject {
 
   virtual void set_read_only(bool read_only);
 
-  virtual ReadView *acquire_snapshot();
+  virtual ::ReadView *acquire_snapshot();
 
   virtual int release_snapshot();
 
@@ -108,6 +108,21 @@ class Transaction : public MemoryObject {
   trx_t *m_trx_impl{nullptr};
 
   ISOLATION_LEVEL m_iso_level{ISOLATION_LEVEL::READ_REPEATABLE};
+};
+
+class TransactionGuard {
+ public:
+  TransactionGuard(Transaction *trx) : m_trx(trx) {}
+  ~TransactionGuard() {
+    if (m_trx && m_trx->is_active()) m_trx->rollback();
+  }
+  void commit() {
+    m_trx->commit();
+    m_trx = nullptr;
+  }
+
+ private:
+  Transaction *m_trx;
 };
 
 }  // namespace ShannonBase

@@ -239,7 +239,7 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 int ha_rapid::records(ha_rows *num_rows) {
   Rapid_load_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
-  *num_rows = Imcs::Imcs::instance()->get_cu((uint)0)->rows(&context);
+  *num_rows = Imcs::Imcs::instance()->at(0)->rows(&context);
   return 0;
 }
 

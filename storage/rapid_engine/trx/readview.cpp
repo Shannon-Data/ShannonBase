@@ -27,4 +27,22 @@
    for our visibility check.
 */
 #include "storage/rapid_engine/trx/readview.h"
-namespace ShannonBase {}  // namespace ShannonBase
+
+#include "include/my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_context.h"
+
+namespace ShannonBase {
+namespace ReadView {
+uchar *smu_item_vec_t::get_data(Rapid_load_context *context) {
+  std::lock_guard<std::mutex> lock(vec_mutex);
+  for (auto it = items.rbegin(); it < items.rend(); it++) {
+    if (!context->m_trx->changes_visible(it->trxid, context->m_table_name)) {
+      return it->data.get();
+    }
+  }
+
+  return nullptr;
+}
+
+}  // namespace ReadView
+}  // namespace ShannonBase

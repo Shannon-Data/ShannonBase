@@ -25,14 +25,14 @@
 */
 #include "storage/rapid_engine/imcs/chunk.h"
 
-#include <stddef.h>
 #include <chrono>
+#include <cstddef>
 #include <memory>
+#include <new>
 #include <typeinfo>
 
 #include "storage/innobase/include/univ.i"
 #include "storage/innobase/include/ut0new.h"
-
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"  //status inf
@@ -42,54 +42,53 @@ namespace ShannonBase {
 namespace Imcs {
 
 uchar *Chunk::Snapshot_meta_unit::build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid) {
-  for (auto it = m_version_info[rowid].rbegin(); it < m_version_info[rowid].rend(); it++) {
-    if (!context->m_trx->changes_visible(it->trxid, context->m_table_name)) {
-      return it->data.get();
-    }
-  }
-  return nullptr;
+  auto ver_it = m_version_info.find(rowid);
+  if (ver_it == m_version_info.end()) return nullptr;
+
+  return m_version_info[rowid].get_data(context);
 }
 
 /**
- * every chunks has a fixed num of rows: SHANNON_ROWS_IN_CHUNK. we can calcuate
+ * every chunks has a fixed num of rows: SHANNON_ROWS_IN_CHUN
+ * K. we can calcuate
  * the row offset easily by using 'm_data / m_source_fld->pack_length' to get
  * which chunk we are in now, and 'm_data % m_source_fld->pack_length' to get
  * where we are in this chunk.
  */
-static unsigned long rapid_allocated_mem_size{0};
-Chunk::Chunk(const Field *field) {
-  m_header = std::make_unique<Chunk_header>();
-  ut_a(m_header);
-  m_header->m_pack_length = field->pack_length();
+static std::atomic<size_t> rapid_allocated_mem_size{0};
 
-  auto normalized_pack_length = field->pack_length();
-  switch (field->type()) {
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_VAR_STRING:
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_TINY_BLOB:
-    case MYSQL_TYPE_MEDIUM_BLOB:
-    case MYSQL_TYPE_LONG_BLOB:
-      /**if this is a string type, it will be use local dictionary encoding, therefore,
-       * using stringid as field value. */
-      normalized_pack_length = sizeof(uint32);
-      break;
-    default:
-      break;
+Chunk::Chunk(const Field *field) {
+  m_header.reset(new (std::nothrow) Chunk_header());
+  if (!m_header) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header allocation failed");
+    return;  // allocated faile.
   }
-  m_header->m_normalized_pack_length = normalized_pack_length;
+
+  m_header->m_pack_length = field->pack_length();
+  if (Utils::Util::is_blob(field->type()) || Utils::Util::is_varstring(field->type()) ||
+      Utils::Util::is_string(field->type()))
+    m_header->m_normalized_pack_length = sizeof(uint32);
+  else
+    m_header->m_normalized_pack_length = field->pack_length();
 
   /** there's null values in, therefore, alloc the null bitmap, and del bit map will
    * lazy allocated.*/
   if (field->is_nullable()) {
-    m_header->m_null_mask = std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
+    m_header->m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(SHANNON_ROWS_IN_CHUNK));
+    if (!m_header->m_null_mask) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header bit map allocation failed");
+      return;  // allocated faile.
+    }
   }
 
   // the SMU ptr. just like rollback ptr.
-  m_header->m_smu = std::make_unique<Snapshot_meta_unit>();
+  m_header->m_smu.reset(new (std::nothrow) Snapshot_meta_unit());
+  if (!m_header->m_smu) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header SMU allocation failed");
+    return;  // allocated faile.
+  }
 
-  auto chunk_size = SHANNON_ROWS_IN_CHUNK * m_header->m_normalized_pack_length;
+  size_t chunk_size = SHANNON_ROWS_IN_CHUNK * m_header->m_normalized_pack_length;
   ut_ad(field && chunk_size < ShannonBase::rpd_mem_sz_max);
 
   /**m_data_base，here, we use the same psi key with buffer pool which used in
@@ -102,13 +101,16 @@ Chunk::Chunk(const Field *field) {
     m_base = static_cast<uchar *>(ut::aligned_alloc(chunk_size, CACHE_LINE_SIZE));
     if (unlikely(!m_base)) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
+      return;
     }
+
     m_data.store(m_base);
     m_rdata.store(m_base);
-    m_end = m_base + static_cast<ptrdiff_t>(chunk_size);
-    rapid_allocated_mem_size += chunk_size;
+    m_end.store(m_base + static_cast<ptrdiff_t>(chunk_size));
+    rapid_allocated_mem_size.fetch_add(chunk_size);
   } else {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
+    return;
   }
 
   m_header->m_source_fld = field->clone(&rapid_mem_root);
@@ -120,7 +122,7 @@ Chunk::~Chunk() {
   if (m_base) {
     ut::aligned_free(m_base);
     m_base = m_data = nullptr;
-    rapid_allocated_mem_size -= (m_header->m_normalized_pack_length * SHANNON_ROWS_IN_CHUNK);
+    rapid_allocated_mem_size.fetch_sub(m_header->m_normalized_pack_length * SHANNON_ROWS_IN_CHUNK);
   }
 }
 
@@ -216,7 +218,7 @@ int Chunk::is_deleted(const Rapid_load_context *context, row_id_t pos) {
 
 bool Chunk::build_version(row_id_t rowid, Transaction::ID trxid, const uchar *data, size_t len) {
   assert(trxid);
-  smu_item_t si(m_header->m_normalized_pack_length);
+  ShannonBase::ReadView::smu_item_t si(m_header->m_normalized_pack_length);
   if (len == UNIV_SQL_NULL) {
     si.data = nullptr;
   } else
@@ -226,10 +228,10 @@ bool Chunk::build_version(row_id_t rowid, Transaction::ID trxid, const uchar *da
   si.tm_stamp = std::chrono::high_resolution_clock::now();
 
   if (m_header->m_smu->m_version_info.find(rowid) != m_header->m_smu->m_version_info.end()) {
-    m_header->m_smu->m_version_info[rowid].emplace_back(std::move(si));
+    m_header->m_smu->m_version_info[rowid].add(std::move(si));
   } else {
-    smu_item_vec iv;
-    iv.emplace_back(std::move(si));
+    ShannonBase::ReadView::smu_item_vec_t iv;
+    iv.add(std::move(si));
     m_header->m_smu->m_version_info.emplace(rowid, std::move(iv));
   }
 
