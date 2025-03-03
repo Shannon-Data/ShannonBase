@@ -33,7 +33,6 @@
 #include "field_types.h"  //for MYSQL_TYPE_XXX
 #include "sql/field.h"    //Field
 #include "sql/sql_class.h"
-
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_object.h"    // SHANNON_ALIGNAS
 #include "storage/rapid_engine/trx/readview.h"
@@ -72,8 +71,9 @@ class Chunk : public MemoryObject {
      *   |__|<-----/|\
      *   |__|
      */
-    std::unordered_map<row_id_t, smu_item_vec> m_version_info;
     uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid);
+
+    std::unordered_map<row_id_t, ReadView::smu_item_vec_t> m_version_info;
   };
 
   using Chunk_header = struct SHANNON_ALIGNAS Chunk_header_t {

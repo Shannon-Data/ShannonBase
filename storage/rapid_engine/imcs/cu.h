@@ -33,13 +33,11 @@
 #include "field_types.h"  //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"  //uintxxx
 #include "storage/innobase/include/ut0dbg.h"
-
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/imcs/chunk.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_object.h"
-
-#include "storage/rapid_engine/imcs/chunk.h"
 class Field;
 namespace ShannonBase {
 class ShannonBaseContext;

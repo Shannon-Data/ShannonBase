@@ -30,21 +30,19 @@
  * table.
  */
 #include "storage/rapid_engine/imcs/data_table.h"
+
 #include <sstream>
 
 #include "include/ut0dbg.h"  //ut_a
 #include "sql/table.h"       //TABLE
-
 #include "storage/innobase/include/mach0data.h"
-
-#include "storage/rapid_engine/imcs/chunk.h"   //CHUNK
-#include "storage/rapid_engine/imcs/cu.h"      //CU
-#include "storage/rapid_engine/imcs/imcs.h"    //IMCS
-#include "storage/rapid_engine/utils/utils.h"  //Blob
-
+#include "storage/rapid_engine/imcs/chunk.h"  //CHUNK
+#include "storage/rapid_engine/imcs/cu.h"     //CU
+#include "storage/rapid_engine/imcs/imcs.h"   //IMCS
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/populate.h"  //sys_pop_buff
 #include "storage/rapid_engine/trx/transaction.h"    //Transaction
+#include "storage/rapid_engine/utils/utils.h"        //Blob
 
 namespace ShannonBase {
 namespace Imcs {
@@ -52,19 +50,24 @@ namespace Imcs {
 DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(source_table) {
   ut_a(m_data_source);
 
-  std::ostringstream key_part, key;
-  key_part << m_data_source->s->db.str << ":" << m_data_source->s->table_name.str << ":";
+  std::string key_part, key;
+  // key_part << m_data_source->s->db.str << ":" << m_data_source->s->table_name.str << ":";
+  thread_local std::string key_buffer;
+  key_buffer.reserve(256);
   for (auto index = 0u; index < m_data_source->s->fields; index++) {
+    key_buffer.clear();
     auto fld = *(m_data_source->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    key << key_part.str() << fld->field_name;
-    auto key_str = key.str();
-
-    m_field_cus.push_back(Imcs::instance()->get_cu(key_str.c_str()));
-    key.str("");
+    key_buffer.append(m_data_source->s->db.str)
+        .append(":")
+        .append(m_data_source->s->table_name.str)
+        .append(":")
+        .append(fld->field_name);
+    m_field_cus.emplace_back(Imcs::instance()->get_cu(key_buffer));
   }
-  key.str("");
+
+  key_buffer.clear();
   m_rowid.store(0);
 }
 
@@ -150,8 +153,8 @@ start:
       }
     } else {
       data_ptr = cu->chunk(current_chunk)->base() + offset_in_chunk * normalized_length;
-      if ((data_ptr - cu->chunk(current_chunk)->base()) % CACHE_LINE_SIZE == 0)
-        SHANNON_PREFETCH_R(data_ptr + CACHE_LINE_SIZE);
+      if ((uintptr_t(data_ptr) & (CACHE_LINE_SIZE - 1)) == 0)
+        SHANNON_PREFETCH_R(data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
     }
 
     auto source_fld = *(m_data_source->field + cu->header()->m_source_fld->field_index());
