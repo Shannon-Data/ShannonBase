@@ -90,10 +90,13 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
   return 0;
 }
 
-uint32 Dictionary::get(uint64 strid, String &ret_val) {
+int32 Dictionary::get(uint64 strid, String &ret_val) {
   auto compressed_str = get(strid);
+  if (compressed_str.length()) return -1;
+
   String strs(compressed_str.c_str(), compressed_str.length(), ret_val.charset());
   copy_if_not_alloced(&ret_val, &strs, strs.length());
+
   return 0;
 }
 
@@ -125,5 +128,12 @@ std::string Dictionary::get(uint64 strid) {
   return std::string("");
 }
 
+int64 Dictionary::get(const std::string &str) {
+  std::scoped_lock lk(m_content_mtx);
+  auto content_pos = m_content.find(str);
+  if (content_pos != m_content.end()) return content_pos->second;
+
+  return -1;
+}
 }  // namespace Compress
 }  // namespace ShannonBase

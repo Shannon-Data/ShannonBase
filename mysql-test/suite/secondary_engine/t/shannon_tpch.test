@@ -3,6 +3,7 @@
 # ShannonBase copyright 2023-
 ##############################################################################
 
+--disable_warnings
 create database tpch_1024;
 alter database tpch_1024 CHARACTER SET ascii COLLATE ascii_bin; 
 use tpch_1024;
@@ -164,6 +165,8 @@ alter table ORDERS secondary_load;
 alter table CUSTOMER secondary_load;
 alter table PART secondary_load;
 alter table PARTSUPP secondary_load;
+
+--enable_warnings
 
 select * from NATION LIMIT 100;
 select * from REGION LIMIT 100;

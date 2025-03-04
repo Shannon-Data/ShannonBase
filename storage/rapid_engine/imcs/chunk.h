@@ -34,7 +34,8 @@
 #include "sql/field.h"    //Field
 #include "sql/sql_class.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
-#include "storage/rapid_engine/include/rapid_object.h"    // SHANNON_ALIGNAS
+#include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_object.h"  // SHANNON_ALIGNAS
 #include "storage/rapid_engine/trx/readview.h"
 #include "storage/rapid_engine/trx/transaction.h"  //Transaction
 
@@ -59,23 +60,6 @@ class Chunk : public MemoryObject {
  public:
   /**TODO: A Snapshot Metadata Unit (SMU) contains metadata and transactional
    * information for an associated IMCU.*/
-
-  class Snapshot_meta_unit {
-   public:
-    /** an item of SMU. consist of <trxid, new_data>. pair of row_id_t and sum_item indicates
-     * that each row data has a version link. If this row data not been modified, it does not
-     * have any old version.
-     *   |__|
-     *   |__|<----->rowidN: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
-     *   |__|       rowidM: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
-     *   |__|<-----/|\
-     *   |__|
-     */
-    uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid);
-
-    std::unordered_map<row_id_t, ReadView::smu_item_vec_t> m_version_info;
-  };
-
   using Chunk_header = struct SHANNON_ALIGNAS Chunk_header_t {
    public:
     // a copy of source field info, only use its meta info. do NOT use it
@@ -101,15 +85,15 @@ class Chunk : public MemoryObject {
     std::unique_ptr<ShannonBase::bit_array_t> m_del_mask{nullptr};
 
     // the snapshot meta unit pointer, which contains all trx info.
-    std::unique_ptr<Snapshot_meta_unit> m_smu;
+    std::unique_ptr<ShannonBase::ReadView::Snapshot_meta_unit> m_smu;
 
     // the min trx id and max trxid of this chunk.
     Transaction::ID m_trx_min;
     Transaction::ID m_trx_max;
 
     // statistics data of this chunk.
-    std::atomic<double> m_max{0};
-    std::atomic<double> m_min{0};
+    std::atomic<double> m_max{SHANNON_MIN_DOUBLE};
+    std::atomic<double> m_min{SHANNON_MAX_DOUBLE};
     std::atomic<double> m_median{0};
     std::atomic<double> m_middle{0};
     std::atomic<double> m_avg{0};
@@ -127,7 +111,7 @@ class Chunk : public MemoryObject {
   Chunk(Chunk &&) = delete;
   Chunk &operator=(Chunk &&) = delete;
 
-  inline Chunk_header *get_header() {
+  inline Chunk_header *header() {
     std::scoped_lock lk(m_header_mutex);
     return m_header.get();
   }
@@ -205,15 +189,25 @@ class Chunk : public MemoryObject {
   // get the real pack legnth, m_source_fld->pack_length
   inline size_t pack_length() { return m_header->m_source_fld->pack_length(); }
 
-  uchar *seek(row_id_t rowid);
+  inline uchar *seek(row_id_t rowid) {
+    auto real_row = (m_data - m_base) / m_header->m_normalized_pack_length;
+
+    if (rowid >= real_row)
+      return m_data;
+    else
+      return m_base + rowid * m_header->m_normalized_pack_length;
+  }
 
   // gets the physical row count.
-  row_id_t prows();
+  inline row_id_t prows() { return m_header->m_prows; }
 
   // gets
   row_id_t rows(Rapid_load_context *context);
 
  private:
+  // the key string of this chunk.
+  std::string m_chunk_key;
+
   std::mutex m_header_mutex;
   std::unique_ptr<Chunk_header> m_header{nullptr};
 
@@ -243,13 +237,13 @@ class Chunk : public MemoryObject {
   // void update_meta_info(OPER_TYPE type, const Field *fld);
 
   // to update the meta info of this chunk, val is input param.
-  void update_meta_info(OPER_TYPE type, uchar *data);
+  void update_meta_info(OPER_TYPE type, uchar *data, uchar *old);
 
   // check the data type is leagal or not.
   void check_data_type(size_t type_size);
 
   // build up an old version.
-  inline bool build_version(row_id_t rowid, Transaction::ID trxid, const uchar *data, size_t len);
+  inline bool build_version(row_id_t rowid, Transaction::ID trxid, const uchar *data, size_t len, OPER_TYPE oper);
 };
 
 }  // namespace Imcs

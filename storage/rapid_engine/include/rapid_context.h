@@ -42,8 +42,10 @@ class THD;
 namespace ShannonBase {
 class Transaction;
 namespace Imcs {
+class Imcs;
 class Cu;
-}
+extern thread_local ShannonBase::Imcs::Imcs *current_imcs_instance;
+}  // namespace Imcs
 
 /**
   Statement context class for the Shannon Rapid engine.

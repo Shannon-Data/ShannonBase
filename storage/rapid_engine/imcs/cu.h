@@ -78,7 +78,8 @@ class Cu : public MemoryObject {
     const CHARSET_INFO *m_charset;
 
     // statistics info.
-    std::atomic<double> m_max{0}, m_min{0}, m_middle{0}, m_median{0}, m_avg{0}, m_sum{0};
+    std::atomic<double> m_max{SHANNON_MIN_DOUBLE}, m_min{SHANNON_MAX_DOUBLE}, m_middle{0}, m_median{0}, m_avg{0},
+        m_sum{0};
   };
 
   explicit Cu(const Field *field);
@@ -100,16 +101,8 @@ class Cu : public MemoryObject {
   where m_r_ptr locates. */
   uchar *read_row(const Rapid_load_context *context, uchar *data, size_t len);
 
-  /** delete the data from this Cu, traverse all chunks in cu to delete the data
-  from where m_r_ptr locates. */
-  uchar *delete_row(const Rapid_load_context *context, uchar *data, size_t len);
-
   // delete the row by rowid.
   uchar *delete_row(const Rapid_load_context *context, row_id_t rowid);
-
-  // delete the data from this cu. all the records equal to data will be
-  // removed.
-  uchar *delete_row_from_log(const Rapid_load_context *context, uchar *data, size_t len);
 
   // delete all the data from this cu.
   uchar *delete_row_all(const Rapid_load_context *context);
@@ -166,13 +159,15 @@ class Cu : public MemoryObject {
     return m_chunks[0]->pack_length();
   }
 
+  inline std::string &keystr() { return m_cu_key; }
+
  private:
   // get the field value. if field is string/text then return its stringid.
   // or, do nothing.
   uchar *get_field_value(uchar *&data, size_t &len, bool need_pack = false);
 
   // upda the header info, such as row count, sum, avg, etc.
-  void update_meta_info(OPER_TYPE type, uchar *data);
+  void update_meta_info(OPER_TYPE type, uchar *data, uchar *old);
 
  private:
   // proctect header.
@@ -186,8 +181,8 @@ class Cu : public MemoryObject {
   // reader pointer.
   std::atomic<uint32> m_current_chunk{0};
 
-  // name of this cu.
-  std::string m_name;
+  // key name of this cu.
+  std::string m_cu_key;
 
   // magic number for CU.
   const char *m_magic = "SHANNON_CU";

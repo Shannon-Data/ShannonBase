@@ -41,6 +41,8 @@ namespace ReadView {
 // link to check whether there's some visible data or not. if yes, return the old ver
 // data or otherwise, go to check the next item.
 struct SHANNON_ALIGNAS smu_item_t {
+  OPER_TYPE oper_type;
+
   // trxid of old version value.
   Transaction::ID trxid;
 
@@ -91,12 +93,28 @@ struct smu_item_vec_t {
     return *this;
   }
 
-  void add(smu_item_t &&item) {
+  inline void add(smu_item_t &&item) {
     std::lock_guard<std::mutex> lock(vec_mutex);
-    items.emplace_back(std::move(item));
+    items.emplace(items.begin(), std::move(item));
   }
   // gets the first met visibility data in this version link.
   uchar *get_data(Rapid_load_context *context);
+};
+
+class Snapshot_meta_unit {
+ public:
+  /** an item of SMU. consist of <trxid, new_data>. pair of row_id_t and sum_item indicates
+   * that each row data has a version link. If this row data not been modified, it does not
+   * have any old version.
+   *   |__|
+   *   |__|<----->rowidN: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
+   *   |__|       rowidM: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
+   *   |__|<-----/|\
+   *   |__|
+   */
+  uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid);
+
+  std::unordered_map<row_id_t, ReadView::smu_item_vec_t> m_version_info;
 };
 
 }  // namespace ReadView
