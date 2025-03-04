@@ -59,23 +59,6 @@ class Chunk : public MemoryObject {
  public:
   /**TODO: A Snapshot Metadata Unit (SMU) contains metadata and transactional
    * information for an associated IMCU.*/
-
-  class Snapshot_meta_unit {
-   public:
-    /** an item of SMU. consist of <trxid, new_data>. pair of row_id_t and sum_item indicates
-     * that each row data has a version link. If this row data not been modified, it does not
-     * have any old version.
-     *   |__|
-     *   |__|<----->rowidN: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
-     *   |__|       rowidM: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
-     *   |__|<-----/|\
-     *   |__|
-     */
-    uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid);
-
-    std::unordered_map<row_id_t, ReadView::smu_item_vec_t> m_version_info;
-  };
-
   using Chunk_header = struct SHANNON_ALIGNAS Chunk_header_t {
    public:
     // a copy of source field info, only use its meta info. do NOT use it
@@ -101,7 +84,7 @@ class Chunk : public MemoryObject {
     std::unique_ptr<ShannonBase::bit_array_t> m_del_mask{nullptr};
 
     // the snapshot meta unit pointer, which contains all trx info.
-    std::unique_ptr<Snapshot_meta_unit> m_smu;
+    std::unique_ptr<ShannonBase::ReadView::Snapshot_meta_unit> m_smu;
 
     // the min trx id and max trxid of this chunk.
     Transaction::ID m_trx_min;

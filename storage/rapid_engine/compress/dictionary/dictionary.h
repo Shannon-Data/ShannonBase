@@ -49,11 +49,26 @@ class Dictionary {
   }
   Dictionary() = delete;
   virtual ~Dictionary() = default;
+
+  // store the string into dictionary, and return the string id.
   virtual uint32 store(const uchar *, size_t, Encoding_type type = Encoding_type::NONE);
-  virtual uint32 get(uint64 strid, String &ret_val);
+
+  // get the string by string id. surcess return 0 and string, otherwise not found return -1.;
+  virtual int32 get(uint64 strid, String &ret_val);
+
+  // get the string id by string. if not found, return empty string.
   virtual std::string get(uint64 strid);
+
+  // get the string id by string. if not found, return -1.
+  virtual int64 get(const std::string &str);
+
+  // set the algorithm type.
   virtual void set_algo(Encoding_type type) { m_encoding_type = type; }
+
+  // get the algorithm type.
   virtual inline Encoding_type get_algo() const { return m_encoding_type; }
+
+  // get the content size.
   virtual inline uint32 content_size() const { return m_content.size(); }
 
  private:
