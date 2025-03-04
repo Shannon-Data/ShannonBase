@@ -26,12 +26,30 @@
 #ifndef __SHANNONBASE_RPD_OBJECT_H__
 #define __SHANNONBASE_RPD_OBJECT_H__
 #include <cstring>
-
 #include "include/my_alloc.h"     // MEM_ROOT
 #include "include/my_inttypes.h"  //uint8_t
+#include "sql/field.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase {
+
+// used for SHANNON_DB_TRX_ID FIELD.
+class Mock_field_trxid : public Field_longlong {
+ public:
+  Mock_field_trxid()
+      : Field_longlong(nullptr,                    // ptr_arg
+                       8,                          // len_arg
+                       &Field::dummy_null_buffer,  // null_ptr_arg
+                       1,                          // null_bit_arg
+                       Field::NONE,                // auto_flags_arg
+                       SHANNON_DB_TRX_ID,          // field_name_arg
+                       false,                      // zero_arg
+                       true)                       // unsigned_arg
+  {}
+
+  void make_writable() { bitmap_set_bit(table->write_set, field_index()); }
+  void make_readable() { bitmap_set_bit(table->read_set, field_index()); }
+};
 
 extern MEM_ROOT rapid_mem_root;
 // the memor object for all rapid engine.

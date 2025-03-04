@@ -31,12 +31,9 @@
 #include "sql/sql_class.h"     //Secondary_engine_statement_context
 #include "sql/sql_executor.h"  //QEP_TBA
 #include "sql/sql_lex.h"
-#include "sql/sql_optimizer.h"  //JOIN
-#include "sql/table.h"          //TABLE
-
+#include "sql/sql_optimizer.h"                //JOIN
+#include "sql/table.h"                        //TABLE
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
-
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -63,113 +60,29 @@ bool Util::is_support_type(enum_field_types type) {
   return false;
 }
 
-double Util::get_field_value(Field *&field, Compress::Dictionary *&dictionary) {
-  ut_ad(field && dictionary);
-  double data_val{0};
-  if (!field->is_real_null()) {  // not null
-    switch (field->type()) {
-      case MYSQL_TYPE_BLOB:
-      case MYSQL_TYPE_STRING:
-      case MYSQL_TYPE_VARCHAR: {
-        String buf;
-        buf.set_charset(field->charset());
-        field->val_str(&buf);
-        data_val = dictionary->store((uchar *)buf.c_ptr(), buf.length());
-      } break;
-      case MYSQL_TYPE_INT24:
-      case MYSQL_TYPE_LONG:
-      case MYSQL_TYPE_LONGLONG:
-      case MYSQL_TYPE_FLOAT:
-      case MYSQL_TYPE_DOUBLE: {
-        data_val = field->val_real();
-      } break;
-      case MYSQL_TYPE_DECIMAL:
-      case MYSQL_TYPE_NEWDECIMAL: {
-        my_decimal dval;
-        field->val_decimal(&dval);
-        my_decimal2double(10, &dval, &data_val);
-      } break;
-      case MYSQL_TYPE_DATE:
-      case MYSQL_TYPE_DATETIME:
-      case MYSQL_TYPE_TIME: {
-        data_val = field->val_real();
-      } break;
-      default:
-        data_val = field->val_real();
-    }
-  }
-  return data_val;
-}
-
-double Util::get_field_value(enum_field_types type, const uchar *buf, uint len, Compress::Dictionary *dictionary,
-                             CHARSET_INFO *charset) {
-  ut_ad(buf && dictionary);
-  double data_val{0};
-  switch (type) {
-    case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_VARCHAR: {
-      data_val = dictionary->store(buf, len);
-    } break;
-    case MYSQL_TYPE_SHORT:
-    case MYSQL_TYPE_INT24:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG:
-      data_val = *(int *)buf;
-      break;
-    case MYSQL_TYPE_FLOAT:
-      data_val = *(float *)buf;
-      break;
-    case MYSQL_TYPE_DOUBLE:
-      data_val = *(double *)buf;
-      break;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-      const int prec = 60;
-      const int scale = 0;
-      my_decimal dv;
-      auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, buf, &dv, prec, scale);
-      if (!ret) {
-        my_decimal2double(0, &dv, &data_val);
-      }
-    } break;
-    case MYSQL_TYPE_DATE:
-    case MYSQL_TYPE_DATETIME:
-    case MYSQL_TYPE_TIME: {
-      MYSQL_TIME ltime;
-      TIME_from_longlong_datetime_packed(&ltime, my_datetime_packed_from_binary(buf, 0));
-      data_val = TIME_to_ulonglong_datetime(ltime);
-    } break;
-    default:
-      ut_a(false);
-  }
-
-  return data_val;
-}
-
-int Util::get_range_value(enum_field_types type, Compress::Dictionary *&dictionary, key_range *min_key,
-                          key_range *max_key, double &minkey, double &maxkey) {
+int Util::get_range_value(enum_field_types type, const Compress::Dictionary *dictionary, const key_range *min_key,
+                          const key_range *max_key, double &minkey, double &maxkey) {
   switch (type) {
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT: {
-      minkey = min_key ? *(int *)min_key->key : SHANNON_LOWEST_DOUBLE;
-      maxkey = max_key ? *(int *)max_key->key : SHANNON_LOWEST_DOUBLE;
+      minkey = min_key ? *(int *)min_key->key : SHANNON_MIN_DOUBLE;
+      maxkey = max_key ? *(int *)max_key->key : SHANNON_MIN_DOUBLE;
     } break;
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG: {
-      minkey = min_key ? *(int *)min_key->key : SHANNON_LOWEST_DOUBLE;
-      maxkey = max_key ? *(int *)max_key->key : SHANNON_LOWEST_DOUBLE;
+      minkey = min_key ? *(int *)min_key->key : SHANNON_MIN_DOUBLE;
+      maxkey = max_key ? *(int *)max_key->key : SHANNON_MAX_DOUBLE;
     } break;
     case MYSQL_TYPE_DOUBLE:
     case MYSQL_TYPE_FLOAT: {
-      minkey = min_key ? *(double *)min_key->key : SHANNON_LOWEST_DOUBLE;
-      maxkey = max_key ? *(double *)max_key->key : SHANNON_LOWEST_DOUBLE;
+      minkey = min_key ? *(double *)min_key->key : SHANNON_MIN_DOUBLE;
+      maxkey = max_key ? *(double *)max_key->key : SHANNON_MAX_DOUBLE;
     } break;
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL: {
-      minkey = min_key ? *(double *)min_key->key : SHANNON_LOWEST_DOUBLE;
-      maxkey = max_key ? *(double *)max_key->key : SHANNON_LOWEST_DOUBLE;
+      minkey = min_key ? *(double *)min_key->key : SHANNON_MIN_DOUBLE;
+      maxkey = max_key ? *(double *)max_key->key : SHANNON_MAX_DOUBLE;
     } break;
     case MYSQL_TYPE_DATE:
     case MYSQL_TYPE_TIME:
@@ -178,7 +91,7 @@ int Util::get_range_value(enum_field_types type, Compress::Dictionary *&dictiona
     case MYSQL_TYPE_YEAR:
     case MYSQL_TYPE_TIMESTAMP:
     case MYSQL_TYPE_TIME2: {
-      minkey = maxkey = SHANNON_LOWEST_DOUBLE;
+      minkey = maxkey = SHANNON_MIN_DOUBLE;
       if (min_key) {
         Field_datetimef datetime_min(const_cast<uchar *>(min_key->key), nullptr, 0, 0, "start_datetime", 6);
         minkey = datetime_min.val_real();

@@ -33,8 +33,10 @@
 
 #include "include/field_types.h"
 #include "include/my_inttypes.h"
-#include "sql/field.h"                                  //Field
-#include "storage/rapid_engine/include/rapid_object.h"  // bit_array_t
+#include "sql-common/my_decimal.h"
+#include "sql/field.h"                                            //Field
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
+#include "storage/rapid_engine/include/rapid_object.h"            // bit_array_t
 
 class THD;
 class TABLE;
@@ -53,11 +55,114 @@ class Util {
   static bool is_support_type(enum_field_types type);
 
   // get the data value.
-  static double get_field_value(Field *&, Compress::Dictionary *&);
+  template <typename T>
+  static T get_field_value(const Field *field, const Compress::Dictionary *dictionary) {
+    T data_val;
+    auto old_map = tmp_use_all_columns(field->table, field->table->read_set);
 
-  static double get_field_value(enum_field_types, const uchar *, uint, Compress::Dictionary *, CHARSET_INFO *charset);
+    if (!field->is_real_null()) {  // not null
+      switch (field->type()) {
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_STRING:
+        case MYSQL_TYPE_VARCHAR: {
+          String buf;
+          buf.set_charset(field->charset());
+          field->val_str(&buf);
+          std::string str(buf.ptr(), buf.length());
+          data_val = dictionary ? const_cast<Compress::Dictionary *>(dictionary)->get(str) : -1;
+        } break;
+        case MYSQL_TYPE_INT24:
+        case MYSQL_TYPE_LONG:
+        case MYSQL_TYPE_LONGLONG:
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DOUBLE: {
+          data_val = field->val_real();
+        } break;
+        case MYSQL_TYPE_DECIMAL:
+        case MYSQL_TYPE_NEWDECIMAL: {
+          my_decimal dval;
+          double v;
+          field->val_decimal(&dval);
+          my_decimal2double(10, &dval, &v);
+          data_val = v;
+        } break;
+        case MYSQL_TYPE_DATE:
+        case MYSQL_TYPE_DATETIME:
+        case MYSQL_TYPE_TIME: {
+          data_val = field->val_real();
+        } break;
+        default:
+          data_val = field->val_real();
+      }
+    }
+    if (old_map) tmp_restore_column_map(field->table->read_set, old_map);
+    return data_val;
+  }
 
-  static int get_range_value(enum_field_types, Compress::Dictionary *&, key_range *, key_range *, double &, double &);
+  template <typename T>
+  static T get_field_value(Field *field, const uchar *data_ptr, const Compress::Dictionary *dict) {
+    T data_val;
+    switch (field->type()) {
+      case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_STRING:
+      case MYSQL_TYPE_VARCHAR: {         // in LogParser::parse_rec_fields, the string field has been processed.
+        data_val = *(uint32 *)data_ptr;  // stored in dictionary, and represented by a string id.
+      } break;
+      case MYSQL_TYPE_INT24: {
+        const long j = field->is_unsigned() ? (long)uint3korr(data_ptr) : sint3korr(data_ptr);
+        data_val = (T)j;
+      } break;
+      case MYSQL_TYPE_LONG: {
+        long v;
+        memcpy(&v, data_ptr, sizeof(v));
+        data_val = v;
+      } break;
+      case MYSQL_TYPE_LONGLONG: {
+        longlong v;
+        memcpy(&v, data_ptr, sizeof(v));
+        data_val = v;
+      } break;
+      case MYSQL_TYPE_FLOAT: {
+        float v;
+        memcpy(&v, data_ptr, sizeof(v));
+        data_val = v;
+      } break;
+      case MYSQL_TYPE_DOUBLE: {
+        double v;
+        v = *(double *)data_ptr;
+        data_val = v;
+      } break;
+      case MYSQL_TYPE_DECIMAL: {
+        double v;
+        memcpy(&v, data_ptr, sizeof(v));
+        data_val = v;
+      } break;
+      case MYSQL_TYPE_NEWDECIMAL: {
+        auto new_filed = down_cast<Field_new_decimal *>(field);
+        int prec = new_filed->precision;
+        int scale = new_filed->decimals();
+        my_decimal dv;
+        auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, data_ptr, &dv, prec, scale);
+        if (!ret) {
+          my_decimal2double(0, &dv, &data_val);
+        }
+      } break;
+      case MYSQL_TYPE_DATE:
+      case MYSQL_TYPE_DATETIME:
+      case MYSQL_TYPE_TIME: {
+        MYSQL_TIME ltime;
+        TIME_from_longlong_datetime_packed(&ltime, my_datetime_packed_from_binary(data_ptr, 0));
+        auto v = TIME_to_ulonglong_datetime(ltime);
+        data_val = v;
+      } break;
+      default:
+        data_val = field->val_real();
+    }
+    return data_val;
+  }
+
+  static int get_range_value(enum_field_types, const Compress::Dictionary *, const key_range *, const key_range *,
+                             double &, double &);
   static int mem2string(uchar *buff, uint length, std::string &result);
 
   // convert a string padding format(with padding). if the length is less then

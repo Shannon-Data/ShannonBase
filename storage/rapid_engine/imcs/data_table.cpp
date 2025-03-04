@@ -51,7 +51,6 @@ DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(
   ut_a(m_data_source);
 
   std::string key_part, key;
-  // key_part << m_data_source->s->db.str << ":" << m_data_source->s->table_name.str << ":";
   thread_local std::string key_buffer;
   key_buffer.reserve(256);
   for (auto index = 0u; index < m_data_source->s->fields; index++) {
@@ -106,13 +105,6 @@ int DataTable::init() {
 
     m_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
     m_context->m_table_name = const_cast<char *>(m_data_source->s->table_name.str);
-
-#ifndef NDEBUG
-    auto first_num = m_field_cus[0]->prows();
-    for (auto &item : m_field_cus) {
-      ut_a(first_num == item->prows());
-    }
-#endif
   }
   return 0;
 }
@@ -132,6 +124,8 @@ start:
 
   for (auto idx = 0u; idx < m_field_cus.size(); idx++) {
     auto cu = m_field_cus[idx];
+    if (cu->keystr().find(SHANNON_DB_TRX_ID) != std::string::npos) continue;  // invisible col.
+
     auto normalized_length = cu->normalized_pack_length();
     auto is_text_value = Utils::Util::is_string(cu->header()->m_source_fld->type()) ||
                          Utils::Util::is_blob(cu->header()->m_source_fld->type());
@@ -145,7 +139,7 @@ start:
     auto is_deleted = cu->chunk(current_chunk)->is_deleted(m_context.get(), offset_in_chunk);
     auto is_null = cu->chunk(current_chunk)->is_null(m_context.get(), offset_in_chunk);
     if (is_deleted) {
-      auto smu = cu->chunk(current_chunk)->get_header()->m_smu.get();
+      auto smu = cu->chunk(current_chunk)->header()->m_smu.get();
       data_ptr = smu->build_prev_vers(m_context.get(), offset_in_chunk);
       if (!data_ptr && !is_null) {
         m_rowid.fetch_add(1);

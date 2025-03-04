@@ -387,11 +387,11 @@ std::string_view find_secondary_engine_fail_reason(const LEX *lex) {
   }
   if (hton == nullptr && get_eligible_secondary_engine_from(lex) != nullptr &&
       get_eligible_secondary_engine_from(lex)->length > 0 &&
-      (native_strncasecmp(get_eligible_secondary_engine_from(lex)->str, "MOCK",
+      (native_strncasecmp(get_eligible_secondary_engine_from(lex)->str, "RAPID",
                           4) == 0)) {
     // We don't support secondary storage engine execution,
-    // if it is a MOCK secondary engine.
-    return "Queries cannot be offloaded to a MOCK secondary engine";
+    // if it is a secondary engine.
+    return "Queries cannot be offloaded to a secondary engine";
   }
   // return a generic offload error if no specific reason is known
   return "All plans were rejected by the secondary storage engine";

@@ -44,5 +44,12 @@ uchar *smu_item_vec_t::get_data(Rapid_load_context *context) {
   return nullptr;
 }
 
+uchar *Snapshot_meta_unit::build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid) {
+  auto ver_it = m_version_info.find(rowid);
+  if (ver_it == m_version_info.end()) return nullptr;
+
+  return m_version_info[rowid].get_data(context);
+}
+
 }  // namespace ReadView
 }  // namespace ShannonBase
