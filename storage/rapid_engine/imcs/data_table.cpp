@@ -51,7 +51,6 @@ DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(
   ut_a(m_data_source);
 
   std::string key_part, key;
-  // key_part << m_data_source->s->db.str << ":" << m_data_source->s->table_name.str << ":";
   thread_local std::string key_buffer;
   key_buffer.reserve(256);
   for (auto index = 0u; index < m_data_source->s->fields; index++) {

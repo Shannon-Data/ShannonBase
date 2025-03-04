@@ -41,13 +41,6 @@
 namespace ShannonBase {
 namespace Imcs {
 
-uchar *Chunk::Snapshot_meta_unit::build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid) {
-  auto ver_it = m_version_info.find(rowid);
-  if (ver_it == m_version_info.end()) return nullptr;
-
-  return m_version_info[rowid].get_data(context);
-}
-
 /**
  * every chunks has a fixed num of rows: SHANNON_ROWS_IN_CHUN
  * K. we can calcuate
@@ -82,7 +75,7 @@ Chunk::Chunk(const Field *field) {
   }
 
   // the SMU ptr. just like rollback ptr.
-  m_header->m_smu.reset(new (std::nothrow) Snapshot_meta_unit());
+  m_header->m_smu.reset(new (std::nothrow) ShannonBase::ReadView::Snapshot_meta_unit());
   if (!m_header->m_smu) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header SMU allocation failed");
     return;  // allocated faile.
@@ -128,24 +121,7 @@ Chunk::~Chunk() {
 
 void Chunk::update_meta_info(OPER_TYPE type, uchar *data) {
   ut_a(data);
-  double data_val{0};
-  switch (m_header->m_source_fld->type()) {
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-      data_val = *reinterpret_cast<double *>(data);
-    } break;
-    case MYSQL_TYPE_FLOAT:
-    case MYSQL_TYPE_DOUBLE: {
-      data_val = *reinterpret_cast<double *>(data);
-    } break;
-    case MYSQL_TYPE_INT24:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG: {
-      data_val = *reinterpret_cast<int *>(data);
-    } break;
-    default:
-      break;
-  }
+  double data_val = Utils::Util::get_field_value(m_header->m_source_fld, nullptr);
   /** TODO: due to the each data has its own version, and the data
    * here is committed. in fact, we support MV, which makes this problem
    *  become complex than before.*/
@@ -155,10 +131,41 @@ void Chunk::update_meta_info(OPER_TYPE type, uchar *data) {
       ut_a(m_header->m_prows.load() <= SHANNON_ROWS_IN_CHUNK);
       m_header->m_sum.store(m_header->m_sum + data_val);
       m_header->m_avg.store(m_header->m_sum / m_header->m_prows);
+
+      if (m_header->m_min.load(std::memory_order_relaxed) > data_val) m_header->m_min.store(data_val);
+      if (m_header->m_max.load(std::memory_order_relaxed) < data_val) m_header->m_max.store(data_val);
+
+      m_header->m_middle.store(
+          (m_header->m_min.load(std::memory_order_relaxed) + m_header->m_max.load(std::memory_order_relaxed)) / 2);
+      m_header->m_median.store(m_header->m_middle.load(std::memory_order_relaxed));
+
     } break;
     case ShannonBase::OPER_TYPE::OPER_DELETE: {
+      m_header->m_prows.fetch_sub(1);
+      ut_a(m_header->m_prows.load() <= SHANNON_ROWS_IN_CHUNK);
+
+      m_header->m_sum.fetch_sub(data_val);
+      m_header->m_avg.store(m_header->m_sum.load(std::memory_order_relaxed) /
+                            m_header->m_prows.load(std::memory_order_relaxed));
+
+      if (m_header->m_min.load(std::memory_order_relaxed) > data_val) m_header->m_min.store(data_val);
+      if (m_header->m_max.load(std::memory_order_relaxed) < data_val) m_header->m_max.store(data_val);
+
+      m_header->m_middle.store(
+          (m_header->m_min.load(std::memory_order_relaxed) + m_header->m_max.load(std::memory_order_relaxed)) / 2);
+      m_header->m_median.store(m_header->m_middle.load(std::memory_order_relaxed));
     } break;
     case ShannonBase::OPER_TYPE::OPER_UPDATE: {
+      m_header->m_sum.fetch_sub(data_val);
+      m_header->m_avg.store(m_header->m_sum.load(std::memory_order_relaxed) /
+                            m_header->m_prows.load(std::memory_order_relaxed));
+
+      if (m_header->m_min.load(std::memory_order_relaxed) > data_val) m_header->m_min.store(data_val);
+      if (m_header->m_max.load(std::memory_order_relaxed) < data_val) m_header->m_max.store(data_val);
+
+      m_header->m_middle.store(
+          (m_header->m_min.load(std::memory_order_relaxed) + m_header->m_max.load(std::memory_order_relaxed)) / 2);
+      m_header->m_median.store(m_header->m_middle.load(std::memory_order_relaxed));
     } break;
     default:
       break;
@@ -183,8 +190,7 @@ void Chunk::reset_meta_info() {
 void Chunk::check_data_type(size_t type_size) {
   if (type_size == UNIV_SQL_NULL) return;
   std::scoped_lock lk(m_header_mutex);
-  /** if the field is not text type, the data size read/write should be
-   * same as its type size. */
+  /** if the field is not text type, the data size read/write should be same as its type size. */
   switch (m_header->m_source_fld->type()) {
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL:
@@ -193,7 +199,10 @@ void Chunk::check_data_type(size_t type_size) {
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG: {
-      ut_a(type_size == m_header->m_source_fld->pack_length());
+      if (type_size != m_header->m_source_fld->pack_length()) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "column data type is illegal");
+        return;
+      }
     } break;
     default:
       break;
@@ -265,37 +274,42 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
-  if (unlikely((m_data.load() + ((len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len)) >
-               m_end.load())) {  // full
-    auto diff = m_data.load() - m_base.load();
+  auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
+  if (unlikely((m_data.load(std::memory_order_relaxed) + normal_len) >
+               m_end.load(std::memory_order_relaxed))) {  // this chunk is full.
+    auto diff = m_data.load(std::memory_order_relaxed) - m_base.load(std::memory_order_relaxed);
     ut_a(diff % m_header->m_normalized_pack_length == 0);
     ut_a(diff / m_header->m_normalized_pack_length == SHANNON_ROWS_IN_CHUNK);
 
-    m_data.store(m_base.load());
     return nullptr;
   }
 
-  if (len == UNIV_SQL_NULL) {
-    if (!m_header->m_null_mask)
-      m_header->m_null_mask = std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
+  if (len == UNIV_SQL_NULL) {      // to write a null value.
+    if (!m_header->m_null_mask) {  // allocate a null bitmap.
+      m_header->m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(SHANNON_ROWS_IN_CHUNK));
+      if (!m_header->m_null_mask) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header bit map allocation failed");
+        return nullptr;
+      }
+    }
+
     std::scoped_lock lk(m_header_mutex);
     /**Here, is trying to write a null value, first of all, we update the null bit
      * mask, then writting a placehold to chunk, we dont care about what read data
      * was written down.*/
     Utils::Util::bit_array_set(m_header->m_null_mask.get(), m_header->m_prows);
-
     len = m_header->m_normalized_pack_length;
-    data = const_cast<uchar *>(SHANNON_NULL_PLACEHOLDER);
   }
 
   std::scoped_lock data_guard(m_data_mutex);
   auto ret = static_cast<uchar *>(std::memcpy(m_data.load(), data, len));
   m_data.fetch_add(len);
-
   update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, data);
 
+#ifndef NDEBUG
   uint64 data_rows = static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load() - m_base.load()) / len);
   ut_a(data_rows == m_header->m_prows.load());
+#endif
   return ret;
 }
 
@@ -307,6 +321,10 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t where, uchar *n
 
   std::scoped_lock data_guard(m_data_mutex);
   auto where_ptr = m_base + where * m_header->m_normalized_pack_length;
+
+  // auto old_value =
+  //     Utils::Util::get_field_value(m_header->m_source_fld->type(), where_ptr, m_header->m_normalized_pack_length,
+  //     dict);
 
   if (build_version(where, context->m_extra_info.m_trxid, where_ptr, len)) {
     return where_ptr;

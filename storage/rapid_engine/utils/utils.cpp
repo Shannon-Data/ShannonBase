@@ -63,8 +63,8 @@ bool Util::is_support_type(enum_field_types type) {
   return false;
 }
 
-double Util::get_field_value(Field *&field, Compress::Dictionary *&dictionary) {
-  ut_ad(field && dictionary);
+double Util::get_field_value(const Field *field, const Compress::Dictionary *dictionary) {
+  ut_ad(field);
   double data_val{0};
   if (!field->is_real_null()) {  // not null
     switch (field->type()) {
@@ -74,7 +74,8 @@ double Util::get_field_value(Field *&field, Compress::Dictionary *&dictionary) {
         String buf;
         buf.set_charset(field->charset());
         field->val_str(&buf);
-        data_val = dictionary->store((uchar *)buf.c_ptr(), buf.length());
+        std::string str(buf.ptr(), buf.length());
+        data_val = dictionary ? const_cast<Compress::Dictionary *>(dictionary)->get(str) : -1;
       } break;
       case MYSQL_TYPE_INT24:
       case MYSQL_TYPE_LONG:
@@ -101,54 +102,8 @@ double Util::get_field_value(Field *&field, Compress::Dictionary *&dictionary) {
   return data_val;
 }
 
-double Util::get_field_value(enum_field_types type, const uchar *buf, uint len, Compress::Dictionary *dictionary,
-                             CHARSET_INFO *charset) {
-  ut_ad(buf && dictionary);
-  double data_val{0};
-  switch (type) {
-    case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_VARCHAR: {
-      data_val = dictionary->store(buf, len);
-    } break;
-    case MYSQL_TYPE_SHORT:
-    case MYSQL_TYPE_INT24:
-    case MYSQL_TYPE_LONG:
-    case MYSQL_TYPE_LONGLONG:
-      data_val = *(int *)buf;
-      break;
-    case MYSQL_TYPE_FLOAT:
-      data_val = *(float *)buf;
-      break;
-    case MYSQL_TYPE_DOUBLE:
-      data_val = *(double *)buf;
-      break;
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL: {
-      const int prec = 60;
-      const int scale = 0;
-      my_decimal dv;
-      auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, buf, &dv, prec, scale);
-      if (!ret) {
-        my_decimal2double(0, &dv, &data_val);
-      }
-    } break;
-    case MYSQL_TYPE_DATE:
-    case MYSQL_TYPE_DATETIME:
-    case MYSQL_TYPE_TIME: {
-      MYSQL_TIME ltime;
-      TIME_from_longlong_datetime_packed(&ltime, my_datetime_packed_from_binary(buf, 0));
-      data_val = TIME_to_ulonglong_datetime(ltime);
-    } break;
-    default:
-      ut_a(false);
-  }
-
-  return data_val;
-}
-
-int Util::get_range_value(enum_field_types type, Compress::Dictionary *&dictionary, key_range *min_key,
-                          key_range *max_key, double &minkey, double &maxkey) {
+int Util::get_range_value(enum_field_types type, const Compress::Dictionary *dictionary, const key_range *min_key,
+                          const key_range *max_key, double &minkey, double &maxkey) {
   switch (type) {
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_TINY:

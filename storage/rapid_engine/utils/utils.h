@@ -53,11 +53,11 @@ class Util {
   static bool is_support_type(enum_field_types type);
 
   // get the data value.
-  static double get_field_value(Field *&, Compress::Dictionary *&);
+  static double get_field_value(const Field *, const Compress::Dictionary *);
+  static double get_field_value(enum_field_types, const uchar *, size_t, const Compress::Dictionary *);
 
-  static double get_field_value(enum_field_types, const uchar *, uint, Compress::Dictionary *, CHARSET_INFO *charset);
-
-  static int get_range_value(enum_field_types, Compress::Dictionary *&, key_range *, key_range *, double &, double &);
+  static int get_range_value(enum_field_types, const Compress::Dictionary *, const key_range *, const key_range *,
+                             double &, double &);
   static int mem2string(uchar *buff, uint length, std::string &result);
 
   // convert a string padding format(with padding). if the length is less then

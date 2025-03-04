@@ -99,6 +99,22 @@ struct smu_item_vec_t {
   uchar *get_data(Rapid_load_context *context);
 };
 
+class Snapshot_meta_unit {
+ public:
+  /** an item of SMU. consist of <trxid, new_data>. pair of row_id_t and sum_item indicates
+   * that each row data has a version link. If this row data not been modified, it does not
+   * have any old version.
+   *   |__|
+   *   |__|<----->rowidN: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
+   *   |__|       rowidM: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
+   *   |__|<-----/|\
+   *   |__|
+   */
+  uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid);
+
+  std::unordered_map<row_id_t, ReadView::smu_item_vec_t> m_version_info;
+};
+
 }  // namespace ReadView
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_READVIEW_H__
