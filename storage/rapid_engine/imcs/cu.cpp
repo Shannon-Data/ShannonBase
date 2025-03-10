@@ -53,6 +53,7 @@ Cu::Cu(const Field *field) {
     m_header->m_source_fld = field->clone(&rapid_mem_root);
     m_header->m_type = field->type();
     m_header->m_charset = field->charset();
+    m_header->m_key_len = field->table->file->ref_length;
   }
 
   std::string comment(field->comment.str);
@@ -92,17 +93,6 @@ Cu::Cu(const Field *field) {
 
 Cu::~Cu() {
   if (m_chunks.size()) m_chunks.clear();
-}
-
-row_id_t Cu::prows() {
-#ifndef NDEBUG
-  auto total_rows_in_chunk{0u};
-  for (auto sz = 0u; sz < m_chunks.size(); sz++) {
-    total_rows_in_chunk += m_chunks[sz]->header()->m_prows.load();
-  }
-  ut_a(total_rows_in_chunk == m_header->m_prows.load());
-#endif
-  return m_header->m_prows.load(std::memory_order_seq_cst);
 }
 
 row_id_t Cu::rows(Rapid_load_context *context) {
@@ -346,7 +336,7 @@ uchar *Cu::update_row(const Rapid_load_context *context, row_id_t rowid, uchar *
   auto offset_in_chunk = rowid % SHANNON_ROWS_IN_CHUNK;
   ut_a(chunk_id < m_chunks.size());
   // auto is_null = Utils::Util::bit_array_get(m_chunks[chunk_id].get()->header()->m_null_mask.get(), rowid);
-  auto old = m_chunks[chunk_id].get()->seek((row_id_t)offset_in_chunk);
+  auto old = m_chunks[chunk_id].get()->seek((row_id_t)offset_in_chunk) + m_header->m_key_len;
 
   update_meta_info(ShannonBase::OPER_TYPE::OPER_UPDATE, data, old);
 

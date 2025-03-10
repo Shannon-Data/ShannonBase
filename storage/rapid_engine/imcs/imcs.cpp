@@ -33,7 +33,8 @@
 #include <string>
 
 #include "include/decimal.h"
-#include "include/my_dbug.h"                  //DBUG_EXECUTE_IF
+#include "include/my_dbug.h"  //DBUG_EXECUTE_IF
+#include "storage/innobase/include/mach0data.h"
 #include "storage/innobase/include/univ.i"    //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -58,10 +59,23 @@ int Imcs::deinitialize() {
   return 0;
 }
 
-int Imcs::create_table_mem(const Rapid_load_context *context, const TABLE *source) {
+int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
   std::string keypart, key;
   keypart.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
+
+  if (source->s->is_missing_primary_key()) {
+    std::string key;
+    key.append(keypart).append(SHANNON_DB_ROW_ID);
+    m_source_keys.emplace(keypart, std::vector<std::string>{key});
+  } else {
+    std::vector<std::string> key_parts_names;
+    KEY *key_info = source->key_info + source->s->primary_key;
+    for (uint i = 0; i < key_info->user_defined_key_parts; i++) {
+      key_parts_names.push_back(key_info->key_part[i].field->field_name);
+    }
+    m_source_keys.emplace(keypart, key_parts_names);
+  }
 
   for (auto index = 0u; index < source->s->fields; index++) {
     auto fld = *(source->field + index);
@@ -111,7 +125,7 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   }
 
   int tmp{HA_ERR_GENERIC};
-  if (create_table_mem(context, source)) return HA_ERR_GENERIC;
+  if (create_table_memo(context, source)) return HA_ERR_GENERIC;
 
   std::string key_part, key;
   key_part.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
@@ -127,6 +141,13 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
       return HA_ERR_GENERIC;
     });
 
+    // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
+    source->file->position(source->record[0]);
+    auto load_context = const_cast<Rapid_load_context *>(context);
+    load_context->m_extra_info.m_key_len = source->file->ref_length;
+    load_context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(source->file->ref_length);
+    memcpy(load_context->m_extra_info.m_key_buff.get(), source->file->ref, source->file->ref_length);
+
     /**
      * for VARCHAR type Data in field->ptr is stored as: 1 or 2 bytes length-prefix-header  (from
      * Field_varstring::length_bytes) data. the here we dont use var_xxx to get data, rather getting
@@ -139,11 +160,18 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
       key.append(key_part).append(fld->field_name);
       auto extra_offset = Utils::Util::is_varstring(fld->type()) ? (fld->field_length > 256 ? 2 : 1) : 0;
       auto data_ptr = fld->is_null() ? nullptr : fld->field_ptr() + extra_offset;
-      auto data_len = fld->is_null()
-                          ? UNIV_SQL_NULL
-                          : (Utils::Util::is_varstring(fld->type())
-                                 ? ((extra_offset > 1) ? *(uint16 *)fld->field_ptr() : *(uchar *)fld->field_ptr())
-                                 : fld->pack_length());
+      auto data_len{0u};
+      if (fld->is_null())
+        data_len = UNIV_SQL_NULL;
+      else {
+        if (extra_offset == 1)
+          data_len = mach_read_from_1(fld->field_ptr());
+        else if (extra_offset == 2)
+          data_len = mach_read_from_2_little_endian(fld->field_ptr());
+        else
+          data_len = fld->pack_length();
+      }
+
       if (Utils::Util::is_blob(fld->type())) {
         data_ptr = const_cast<uchar *>(fld->data_ptr());
         data_len = fld->data_length(0);
@@ -190,6 +218,14 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
       my_error(ER_NO_SUCH_TABLE, MYF(0), db_name, table_name);
       return HA_ERR_GENERIC;
     }
+  }
+
+  for (auto it = m_source_keys.begin(); it != m_source_keys.end();) {
+    if (it->first.find(keypart) != std::string::npos) {
+      it = m_source_keys.erase(it);
+      found = true;
+    } else
+      ++it;
   }
 
   return 0;

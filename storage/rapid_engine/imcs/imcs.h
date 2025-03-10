@@ -74,7 +74,7 @@ class Imcs : public MemoryObject {
   Cu *at(size_t indexx);
 
   /**create all cus needed by source table, and ready to write the data into.*/
-  int create_table_mem(const Rapid_load_context *context, const TABLE *source);
+  int create_table_memo(const Rapid_load_context *context, const TABLE *source);
 
   /** load the current table rows data into imcs. the caller's responsible
    for moving to next row */
@@ -103,6 +103,24 @@ class Imcs : public MemoryObject {
   int update_row(const Rapid_load_context *context, row_id_t row_id,
                  std::map<std::string, std::unique_ptr<uchar[]>> &upd_recs);
 
+  // get the source table by key string.
+  inline std::vector<std::string> source_key(std::string &sch_tb_name_key) {
+    if (m_source_keys.find(sch_tb_name_key) == m_source_keys.end()) return std::vector<std::string>();
+    return m_source_keys[sch_tb_name_key];
+  }
+
+  // get the key length by key string. key string is db_name + ":" + table_name.
+  inline size_t key_length(std::string &key) {
+    auto it =
+        std::find_if(m_cus.begin(), m_cus.end(), [&key](const auto &pair) { return pair.first.rfind(key, 0) == 0; });
+    if (it != m_cus.end()) {
+      return it->second.get()->header()->m_key_len;
+    } else {
+      return 0u;
+    }
+    return 0u;
+  }
+
  private:
   Imcs(Imcs &&) = delete;
   Imcs(Imcs &) = delete;
@@ -112,14 +130,19 @@ class Imcs : public MemoryObject {
   // imcs instance
   static Imcs *m_instance;
 
-  // initialization flag.
-  std::atomic<uint8> m_inited{0};
-
   // initialization flag, only once.
   static std::once_flag one;
 
-  // the loaded cus. key format: db + ':' + table_name + ':' + field_name.
+  // initialization flag.
+  std::atomic<uint8> m_inited{0};
+
+  // the loaded cus. key format: db + ':' + table_name + ':'
+  // + field_name + ":".
   std::unordered_map<std::string, std::unique_ptr<Cu>> m_cus;
+
+  // the loaded cus. key format: db + ':' + table_name.
+  // value format: park part1 name , key part2 name.
+  std::unordered_map<std::string, std::vector<std::string>> m_source_keys;
 
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};

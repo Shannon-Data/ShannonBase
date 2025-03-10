@@ -108,6 +108,12 @@ class Util {
       case MYSQL_TYPE_VARCHAR: {         // in LogParser::parse_rec_fields, the string field has been processed.
         data_val = *(uint32 *)data_ptr;  // stored in dictionary, and represented by a string id.
       } break;
+      case MYSQL_TYPE_TINY: {
+        data_val = *(int8 *)data_ptr;
+      } break;
+      case MYSQL_TYPE_SHORT: {
+        data_val = *(int16 *)data_ptr;
+      } break;
       case MYSQL_TYPE_INT24: {
         const long j = field->is_unsigned() ? (long)uint3korr(data_ptr) : sint3korr(data_ptr);
         data_val = (T)j;
@@ -142,9 +148,9 @@ class Util {
         int prec = new_filed->precision;
         int scale = new_filed->decimals();
         my_decimal dv;
-        auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, data_ptr, &dv, prec, scale);
-        if (!ret) {
-          my_decimal2double(0, &dv, &data_val);
+        auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, data_ptr, &dv, prec, scale, true);
+        if (ret == E_DEC_OK) {
+          my_decimal2double(E_DEC_FATAL_ERROR, &dv, &data_val);
         }
       } break;
       case MYSQL_TYPE_DATE:
@@ -153,6 +159,17 @@ class Util {
         MYSQL_TIME ltime;
         TIME_from_longlong_datetime_packed(&ltime, my_datetime_packed_from_binary(data_ptr, 0));
         auto v = TIME_to_ulonglong_datetime(ltime);
+        data_val = v;
+      } break;
+      case MYSQL_TYPE_YEAR: {
+        int tmp = (int)data_ptr[0];
+        if (tmp != 0) tmp += 1900;
+        data_val = (longlong)tmp;
+      } break;
+      case MYSQL_TYPE_TIMESTAMP:
+      case MYSQL_TYPE_TIMESTAMP2: {  // convert double value to timestamp, use `TIME_from_longlong_packed`.
+        double v;
+        memcpy(&v, data_ptr, sizeof(v));
         data_val = v;
       } break;
       default:

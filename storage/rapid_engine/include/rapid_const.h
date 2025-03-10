@@ -83,6 +83,7 @@ constexpr uint SHANNON_BATCH_NUM = 8;
 
 constexpr char SHANNON_DB_ROW_ID[] = "DB_ROW_ID";
 constexpr size_t SHANNON_DB_ROW_ID_LEN = 9;
+constexpr size_t SHANNON_DATA_DB_ROW_ID_LEN = 6;
 
 constexpr char SHANNON_DB_TRX_ID[] = "DB_TRX_ID";
 constexpr size_t SHANNON_DB_TRX_ID_LEN = 9;

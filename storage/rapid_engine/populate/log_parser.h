@@ -148,7 +148,7 @@ class LogParser {
 
   // get the field value from innodb format to mysql format. return 0 success.
   int store_field_in_mysql_format(const dict_index_t *index, const dict_col_t* col,
-                                  const byte *dest, const byte *src, ulint len);
+                                  const byte *dest, const byte *src, ulint mlen, ulint len);
 
   // only user's index be retrieved from dd_table.
   const dict_index_t *find_index(uint64 idx_id);
@@ -189,8 +189,8 @@ class LogParser {
                                                    ulint parsed_bytes,
                                                    bool parse_only);
   /** parse a rec and get all feidls data in mysql format and save these values
-   * into a vector. return the last field key name, all field values store in 
-   * 'feild_values'*/
+   * into a vector. all field values store in feild_values' and store key info
+   * into context*/
   int parse_rec_fields(Rapid_load_context* context,
                                    const rec_t *rec, const dict_index_t *index,
                                    const dict_index_t *real_index,
@@ -202,8 +202,8 @@ class LogParser {
    * key_name [in] main search column name in 'db:table_name:field_name' format.
    * field_values_to_find [in], the all fields values of a row to find
    * with_sys_col[in], sys col to do comparision or not. */
-  int find_matched_rows(Rapid_load_context* context, bool with_sys_col,
-                            std::map<std::string, std::unique_ptr<uchar[]>>& field_values_to_find,
+  int find_matched_rows(Rapid_load_context* context,
+                            std::map<std::string, std::unique_ptr<uchar[]>>&,
                             std::vector<row_id_t>& matched_rows);
 };
 
