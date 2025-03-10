@@ -37,6 +37,7 @@
 #include "sql/table.h"
 
 #include "storage/innobase/include/btr0pcur.h"  //for btr_pcur_t
+#include "storage/innobase/include/data0type.h"
 #include "storage/innobase/include/dict0dd.h"
 #include "storage/innobase/include/dict0dict.h"
 #include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
@@ -180,17 +181,23 @@ const dict_index_t *LogParser::find_index(uint64 idx_id) {
 }
 
 int LogParser::store_field_in_mysql_format(const dict_index_t *index, const dict_col_t *col, const byte *dest,
-                                           const byte *src, ulint len) {
+                                           const byte *src, ulint mlen, ulint plen) {
   mysql_row_templ_t templ;
-  templ.mysql_col_len = len;
+  templ.col_no = col->ind;
+  templ.rec_field_no = col->get_phy_pos();
+  templ.clust_rec_field_no = col->get_phy_pos();
+
+  dtype_t ctype;
+  col->copy_type(&ctype);
+  templ.mysql_col_len = mlen;
   templ.type = col->mtype;
-  templ.mysql_type = col->prtype;
+  templ.mysql_type = dtype_get_mysql_type(&ctype);
 
   templ.is_virtual = col->is_virtual();
   templ.is_multi_val = col->is_multi_value();
 
-  if (col->prtype & DATA_LONG_TRUE_VARCHAR) {
-    templ.mysql_length_bytes = (len > 255) ? 2 : 1;
+  if (templ.mysql_type == DATA_MYSQL_TRUE_VARCHAR) {
+    templ.mysql_length_bytes = (mlen > 255) ? 2 : 1;
   } else {
     templ.mysql_length_bytes = 1;
   }
@@ -198,13 +205,13 @@ int LogParser::store_field_in_mysql_format(const dict_index_t *index, const dict
   templ.is_unsigned = col->prtype & DATA_UNSIGNED;
 
   // here, we dont care about the mb length.
-  templ.mbminlen = 1;
-  templ.mbmaxlen = 1;
+  templ.mbminlen = col->get_mbminlen();
+  templ.mbmaxlen = col->get_mbmaxlen();
   /**
    * Here we dont use col->ind as the index pass into `row_sel_field_store_in_mysql_format`,
    * due to that seems col->ind dont correct. for exm, index of DB_TRX_ID should be 1, but
    * it's 6. so sad. * */
-  row_sel_field_store_in_mysql_format(const_cast<byte *>(dest), &templ, index, col->get_col_phy_pos(), src, len,
+  row_sel_field_store_in_mysql_format(const_cast<byte *>(dest), &templ, index, col->get_col_phy_pos(), src, plen,
                                       ULINT_UNDEFINED);
   return 0;
 }
@@ -472,10 +479,14 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
   ut_a(offsets);
   ut_a(rec == nullptr || rec_get_n_fields(rec, index) >= rec_offs_n_fields(offsets));
 
+  memset(context->m_extra_info.m_key_buff.get(), 0x0, context->m_extra_info.m_key_len);
+
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
   std::string keypart, key;
   keypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
+  auto keyname_vec = imcs_instance->source_key(keypart);
+  auto key_offset{0};
   for (auto idx = 0u; idx < index->n_fields; idx++) {
     /**
      * in mlog_parse_index_v1, we can found that it does not bring the true type of that col
@@ -485,43 +496,56 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
      * about `DB_TRX_ID`.
      */
     /**index parsed from mlog[name:DUMMY_LOG], is not consitent with real_index.*/
-    dtype_t type;
-    real_index->get_col(idx)->copy_type(&type);
+    dtype_t col_type;
+    real_index->get_col(idx)->copy_type(&col_type);
     dict_col_t *col = (dict_col_t *)index->get_col(idx);
     col->ind = real_index->get_col(idx)->ind;
     col->set_phy_pos(real_index->get_col(idx)->get_phy_pos());
-    col->mtype = type.mtype;
-    col->prtype = type.prtype;
-    col->len = type.len;
-    col->mbminmaxlen = type.mbminmaxlen;
+    col->mtype = col_type.mtype;
+    col->prtype = col_type.prtype;
+    col->len = col_type.len;
+    col->mbminmaxlen = col_type.mbminmaxlen;
 
     // due to innodb col has not NOT_SECONDARY property, so check it with IMCS.
     auto field_name = real_index->get_field(idx)->name();
     key.append(keypart).append(field_name);
-    if (!strncmp(field_name, SHANNON_DB_ROW_ID, SHANNON_DB_ROW_ID_LEN) || /*escape ROW ID or DB ROLL col*/
-        !strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN) ||
-        (strncmp(field_name, SHANNON_DB_TRX_ID,
-                 SHANNON_DB_TRX_ID_LEN) &&  // ESCPAE THE NORMAL COL WITH NOT_SECONDARY FALG.
+    //clang-format off
+    if (strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN) == 0 ||
+        (strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN) != 0 &&
+         strncmp(field_name, SHANNON_DB_ROW_ID, SHANNON_DB_ROW_ID_LEN) != 0 &&
+         std::find(keyname_vec.begin(), keyname_vec.end(), field_name) == keyname_vec.end() &&
          !imcs_instance->get_cu(key))) {
       key.clear();
       continue;
     }
+    //clang-format on
 
-    std::unique_ptr<uchar[]> field_data{nullptr};
-    auto len{0lu};
-    byte *data{nullptr};
+    auto mysql_fld_len{0u};
+    if (strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN) == 0) {
+      mysql_fld_len = SHANNON_DATA_DB_TRX_ID_LEN;
+    } else if (strncmp(field_name, SHANNON_DB_ROW_ID, SHANNON_DB_ROW_ID_LEN) == 0) {
+      mysql_fld_len = SHANNON_DATA_DB_ROW_ID_LEN;
+    } else {
+      mysql_fld_len = imcs_instance->get_cu(key)->header()->m_source_fld->pack_length();
+    }
+    std::unique_ptr<uchar[]> mysql_field_data = std::make_unique<uchar[]>(mysql_fld_len);
+    memset(mysql_field_data.get(), 0x0, mysql_fld_len);
 
+    auto physical_fld_len{0lu};
     auto mtype = real_index->get_col(idx)->mtype;
-    data = rec_get_nth_field(index, const_cast<rec_t *>(rec), offsets, idx, &len);
+    auto data = rec_get_nth_field_instant(const_cast<rec_t *>(rec), offsets, idx, index, &physical_fld_len);
+
     if (UNIV_UNLIKELY(rec_offs_nth_extern(index, offsets, idx))) {  // store external.
       // TODO: deal with off-page scenario. see comment at blob0blob.cc:385.
-      ut_a(len >= BTR_EXTERN_FIELD_REF_SIZE);
+      assert(strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN));
+
+      ut_a(physical_fld_len >= BTR_EXTERN_FIELD_REF_SIZE);
       ut_a(DATA_LARGE_MTYPE(index->get_col(idx)->mtype));
 
       rec_offs_make_valid(rec, index, const_cast<ulint *>(offsets));
       ut_ad(rec_offs_validate(rec, index, offsets));
 
-      ulint local_len = len;
+      ulint local_len = physical_fld_len;
       mem_heap_t *heap = mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE);
       auto real_offsets = rec_get_offsets(rec, real_index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
 
@@ -535,93 +559,86 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
                                                             &local_len, nullptr,
                                                             IF_DEBUG(dict_index_is_sdi(real_index), ) heap, true);
     } else {
-      if (UNIV_LIKELY(len != UNIV_SQL_NULL)) {  // Not null
-        field_data.reset(new uchar[len + 1]);
-        memset(field_data.get(), 0x0, len + 1);
+      if (UNIV_LIKELY(physical_fld_len != UNIV_SQL_NULL)) {  // Not null
         if (UNIV_LIKELY(mtype != DATA_BLOB))
-          store_field_in_mysql_format(index, col, field_data.get(), data, len);
-        else
-          memcpy(field_data.get(), data, len);
-        /**
-         * we use real_index mtype because that mtype of index is different to real_index's.
-         * in mlog_parase_index, the original types were changed.
-         * */
-        switch (mtype) {
-          case DATA_MYSQL:
-          case DATA_VARCHAR:
-          case DATA_CHAR:
-          case DATA_VARMYSQL:
-          case DATA_BLOB: {
-            auto header = imcs_instance->get_cu(key)->header();
-            auto field_length = (mtype == DATA_MYSQL) ? imcs_instance->get_cu(key)->pack_length() : len;
-            std::unique_ptr<uchar[]> packed_str = std::make_unique<uchar[]>(field_length + 1);
-            memset(packed_str.get(), 0x0, field_length + 1);
-
-            auto ret_str = ShannonBase::Utils::Util::pack_str(field_data.get(), len, header->m_charset,
-                                                              packed_str.get(), field_length, header->m_charset);
-            auto strid = header->m_local_dict->store(ret_str, field_length, header->m_encoding_type);
-            field_data.reset(new uchar[sizeof(uint32)]);
-            *reinterpret_cast<uint32 *>(field_data.get()) = strid;
-          } break;
-          default:
-            break;
+          store_field_in_mysql_format(index, col, mysql_field_data.get(), data, mysql_fld_len, physical_fld_len);
+        else if (UNIV_LIKELY(mtype == DATA_BLOB)) {
+          // if it's blob, it store data address, AKA. stores its ref. Here, we just get the data directly.
+          memcpy(mysql_field_data.get(), data, physical_fld_len);
+          mysql_fld_len = physical_fld_len;
         }
-      } else  // if value of this field is null, then set field_data to nullptr.
-        field_data.reset(nullptr);
+
+        if (strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN) == 0) {
+          context->m_extra_info.m_trxid = mach_read_from_6(mysql_field_data.get());
+          continue;
+        }
+        // store the key info.
+        if (keyname_vec.size() && keyname_vec[0] == key) {  // ref to postion(), and copy_key()
+          ut_a(dtype_get_mysql_type(&col_type) != DATA_BLOB);
+          if ((dtype_get_mysql_type(&col_type) == DATA_MYSQL_TRUE_VARCHAR) && (mysql_fld_len < 256)) {
+            // ref to copy_key, in loading data phase, the `copy_key` always stores length in 2 bytes.
+            // therefore, the key buffer is diff with var type with length less 256. it store the length in
+            // one byte. So, here we restore the length in 2 bytes.
+            auto length = *(uint8 *)mysql_field_data.get();
+            int2store(context->m_extra_info.m_key_buff.get() + key_offset, length);
+            key_offset += 2;
+            memcpy(context->m_extra_info.m_key_buff.get() + key_offset, mysql_field_data.get() + 1, mysql_fld_len - 1);
+          } else {
+            memcpy(context->m_extra_info.m_key_buff.get() + key_offset, mysql_field_data.get(), mysql_fld_len);
+            key_offset += mysql_fld_len;
+          }
+          keyname_vec.erase(keyname_vec.begin());
+        }
+
+        if (mtype == DATA_MYSQL || mtype == DATA_VARCHAR || mtype == DATA_CHAR || mtype == DATA_VARMYSQL ||
+            mtype == DATA_BLOB) {  // string or text type, then store the string id not the real content.
+          auto len_offset{0u};
+          if (dtype_get_mysql_type(&col_type) == DATA_MYSQL_TRUE_VARCHAR) {
+            len_offset = (mysql_fld_len < 256) ? 1 : 2;
+          }
+          auto header = imcs_instance->get_cu(key)->header();
+          auto strid = header->m_local_dict->store(mysql_field_data.get() + len_offset, mysql_fld_len - len_offset,
+                                                   header->m_encoding_type);
+          *reinterpret_cast<uint32 *>(mysql_field_data.get()) = strid;
+        }
+        field_values.emplace(key, std::move(mysql_field_data));
+
+        mysql_field_data.reset(new uchar[sizeof(uint32)]);
+      } else {  // if value of this field is null, then set field_data to nullptr.
+        mysql_field_data.reset(nullptr);
+        field_values.emplace(key, nullptr);
+      }
     }
 
-    field_values.emplace(key, std::move(field_data));
     key.clear();
   }
-
   return 0;
 }
 
-int LogParser::find_matched_rows(Rapid_load_context *context, bool with_sys_col,
-                                 std::map<std::string, std::unique_ptr<uchar[]>> &field_values_to_find,
+int LogParser::find_matched_rows(Rapid_load_context *context, std::map<std::string, std::unique_ptr<uchar[]>> &,
                                  std::vector<row_id_t> &matched_rows) {
+  // now that, it use sequentail scan all the chunks to find the match rows.
+  // in next, ART will be introduced to accelerate the row finding via index scan.
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
-  auto keystr = field_values_to_find.begin()->first;
-  auto total_nums = imcs_instance->get_cu(keystr)->chunks() * SHANNON_ROWS_IN_CHUNK;
+  std::string keystr = context->m_schema_name;
+  keystr.append(":").append(context->m_table_name).append(":");
+  auto current_cu = imcs_instance->at(0);
+  ut_a(current_cu && current_cu->header()->m_key_len == context->m_extra_info.m_key_len);
 
-  // assemble the row data to find.
-  std::unique_ptr<uchar[]> row_to_check_buff = std::make_unique<uchar[]>(field_values_to_find.size() * 8);
-  size_t row_size{0};
-  for (auto &field : field_values_to_find) {
-    auto field_normal_len = imcs_instance->get_cu(field.first)->normalized_pack_length();
-
-    if (field.second.get()) {
-      memcpy(row_to_check_buff.get() + row_size, field.second.get(), field_normal_len);
-      row_size += field_normal_len;
-    } else {
-      memset(row_to_check_buff.get() + row_size, 0x0, field_normal_len);
-      row_size += field_normal_len;
-    }
-  }
-  assert(row_size <= field_values_to_find.size() * 8);
-
-  std::unique_ptr<uchar[]> row_buffer = std::make_unique<uchar[]>(row_size);
-  auto chunk_size = imcs_instance->get_cu(field_values_to_find.begin()->first)->chunks();
-
-  for (row_id_t row_id = 0; row_id < total_nums; row_id++) {
+  // using the key_buffer to find the matched rows.
+  for (row_id_t row_id = 0; row_id < current_cu->prows(); row_id++) {
     auto current_chunk_id = (row_id / SHANNON_ROWS_IN_CHUNK);
     auto offset_in_chunk = (row_id % SHANNON_ROWS_IN_CHUNK);
-    auto matched{true};
-    if (current_chunk_id >= chunk_size ||
-        offset_in_chunk >= imcs_instance->get_cu(field_values_to_find.begin()->first)->chunk(current_chunk_id)->pos())
-      break;  // out of chunk range.
 
-    memset(row_buffer.get(), 0x0, row_size);
-    size_t offset{0};
-    for (auto &field : field_values_to_find) {
-      auto cu_name = field.first;
-      auto current_chunk = imcs_instance->get_cu(cu_name)->chunk(current_chunk_id);
-      memcpy(row_buffer.get() + offset, current_chunk->seek(offset_in_chunk), current_chunk->normalized_pack_length());
-      offset += current_chunk->normalized_pack_length();
+    auto base_ptr = current_cu->chunk(current_chunk_id)->base();
+    auto data_ptr =
+        base_ptr + offset_in_chunk * (current_cu->header()->m_key_len + current_cu->normalized_pack_length());
+    auto matched = (std::memcmp(context->m_extra_info.m_key_buff.get(), data_ptr, context->m_extra_info.m_key_len) == 0)
+                       ? true
+                       : false;
+    if (matched) {
+      matched_rows.push_back(row_id);
     }
-
-    matched = (memcmp(row_buffer.get(), row_to_check_buff.get(), row_size)) ? false : true;
-    if (matched) matched_rows.emplace_back(row_id);
   }
   return 0;
 }
@@ -652,24 +669,27 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
   }
 #endif /* UNIV_DEBUG_VALGRIND */
 
-  // no user defined index.
-  if (!strncmp(real_index->name(), innobase_index_reserve_name, strlen(innobase_index_reserve_name))) {
-    context->m_extra_info.m_key_buff = nullptr;
-    context->m_extra_info.m_key_len = 0;
-  } else {
-    context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(real_index->get_min_size() + 1);
-  }
-
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
 
+  // no user defined index.
+  if (!strncmp(real_index->name(), innobase_index_reserve_name, strlen(innobase_index_reserve_name))) {
+    context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(SHANNON_DATA_DB_ROW_ID_LEN);
+    context->m_extra_info.m_key_len = SHANNON_DATA_DB_ROW_ID_LEN;
+  } else {
+    std::string keypart;
+    keypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
+    auto key_len = imcs_instance->key_length(keypart);
+    context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key_len);
+    context->m_extra_info.m_key_len = key_len;
+  }
+
   int ret{0};
-  std::string trxid_key;
-  trxid_key.append(context->m_schema_name)
-      .append(":")
-      .append(context->m_table_name)
-      .append(":")
-      .append(SHANNON_DB_TRX_ID);
+  std::string keypart, trxid_key, rowid_key;
+  keypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
+  trxid_key.append(keypart).append(SHANNON_DB_TRX_ID);
+  rowid_key.append(keypart).append(SHANNON_DB_ROW_ID);
+
   switch (type) {
     case MLOG_REC_DELETE: {
       std::vector<row_id_t> row_ids;
@@ -678,11 +698,9 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       std::map<std::string, std::unique_ptr<uchar[]>> row_field_value;
       // step 1:to get all field data of deleting row.
       parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
-      context->m_extra_info.m_trxid = mach_read_from_6(row_field_value[trxid_key].get());
-      row_field_value.erase(trxid_key);
 
       // step 2: go throug all the data to find the matched rows.
-      if (find_matched_rows(context, false, row_field_value, row_ids)) {
+      if (find_matched_rows(context, row_field_value, row_ids)) {
         return HA_ERR_WRONG_IN_RECORD;
       }
 
@@ -693,8 +711,6 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       std::map<std::string, std::unique_ptr<uchar[]>> row_field_value;
       // step 1:to get all field data of inserting row.
       parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
-      context->m_extra_info.m_trxid = mach_read_from_6(row_field_value[trxid_key].get());
-      row_field_value.erase(trxid_key);
 
       // step 2: insert all field data into CUs.
       for (auto &field_val : row_field_value) {
@@ -710,37 +726,19 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     } break;
     case MLOG_REC_UPDATE_IN_PLACE: {
       ut_a(upd);
-      std::map<std::string, std::unique_ptr<uchar[]>> row_field_value, new_value;  // all in mysql format.
+      std::map<std::string, std::unique_ptr<uchar[]>> row_field_value;  // all in mysql format.
       // step 1:to get all field data of updating row.
       parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
-      context->m_extra_info.m_trxid = mach_read_from_6(row_field_value[trxid_key].get());
-      row_field_value.erase(trxid_key);
-
-      // step 2: get the update condtion cols.
-      std::set<std::string> ignore_field_names;
-      for (auto i = 0u; i < upd_get_n_fields(upd); i++) {
-        auto upd_field = upd_get_nth_field(upd, i);
-        /* No need to update virtual columns for non-virtual index */
-        if (upd_fld_is_virtual_col(upd_field) && !dict_index_has_virtual(index)) {
-          continue;
-        }
-
-        uint32_t field_no = upd_field->field_no;
-        auto key_name = Utils::Util::get_key_name(context->m_schema_name, context->m_table_name,
-                                                  real_index->get_field(field_no)->name);
-        new_value.emplace(key_name, std::move(row_field_value[key_name]));
-        row_field_value.erase(key_name);
-      }
 
       // step 3: find all matched rows according to rec.
       std::vector<row_id_t> row_ids;
-      if (find_matched_rows(context, false, row_field_value, row_ids)) {
+      if (find_matched_rows(context, row_field_value, row_ids)) {
         return HA_ERR_WRONG_IN_RECORD;
       }
 
       // step 4: to update rows.
       for (auto &rowid : row_ids) {
-        if (imcs_instance->update_row(context, rowid, new_value)) return HA_ERR_WRONG_IN_RECORD;
+        if (imcs_instance->update_row(context, rowid, row_field_value)) return HA_ERR_WRONG_IN_RECORD;
       }
     } break;
     default:

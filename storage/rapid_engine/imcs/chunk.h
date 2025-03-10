@@ -103,6 +103,9 @@ class Chunk : public MemoryObject {
     // MVCC to decide that whether this phyical row is visiable or not to this
     // transaction.
     std::atomic<uint64> m_prows{0};
+
+    // the length of key.
+    size_t m_key_len{0};
   };
 
   explicit Chunk(const Field *field);
@@ -116,19 +119,19 @@ class Chunk : public MemoryObject {
     return m_header.get();
   }
 
-  inline uchar *base() const { return m_base; }
-  inline uchar *end() const { return m_end; }
+  inline uchar *base() const { return m_base.load(std::memory_order_relaxed); }
+  inline uchar *end() const { return m_end.load(std::memory_order_relaxed); }
 
   // the data write to where in this chunk.
   inline uchar *where() {
-    assert(m_data < m_end);
-    return m_data.load();
+    assert(m_data.load(std::memory_order_relaxed) < m_end.load(std::memory_order_relaxed));
+    return m_data.load(std::memory_order_relaxed);
   }
 
   // return the real time chunk size.
   inline size_t chunk_size() {
-    assert(m_data < m_end);
-    return m_data - m_end;
+    assert(m_data.load(std::memory_order_relaxed) < m_end.load(std::memory_order_relaxed));
+    return m_data.load(std::memory_order_relaxed) - m_end.load(std::memory_order_relaxed);
   }
 
   /** start to read the data from the last pos to data.
@@ -145,17 +148,11 @@ class Chunk : public MemoryObject {
   uchar *write(const Rapid_load_context *context, uchar *data, size_t len);
 
   /**start to delete the data to chunk. just mark it down.
-   * [in] where, where the data to update.
+   * [in] rowid, where the data to update.
    * [in] new_dat, the data value to update.
    * [in] len, the data len.
    * return the address where the data update start from.*/
-  uchar *update(const Rapid_load_context *context, row_id_t where, uchar *new_data, size_t len);
-
-  /**start to delete the data to chunk. just mark it down.
-   * [in] data, the data to delete.
-   * [in] len, the data len.
-   * return the address where the data write to.*/
-  uchar *remove(const Rapid_load_context *context, uchar *data, size_t len);
+  uchar *update(const Rapid_load_context *context, row_id_t rowid, uchar *new_data, size_t len);
 
   // delete the data by rowid
   uchar *remove(const Rapid_load_context *context, row_id_t rowid);
@@ -188,6 +185,12 @@ class Chunk : public MemoryObject {
 
   // get the real pack legnth, m_source_fld->pack_length
   inline size_t pack_length() { return m_header->m_source_fld->pack_length(); }
+
+  // get the field length
+  inline size_t field_length() { return m_header->m_source_fld->data_length(); }
+
+  // get the field length bytes
+  inline size_t field_length_bytes() { return m_header->m_source_fld->get_length_bytes(); }
 
   inline uchar *seek(row_id_t rowid) {
     auto real_row = (m_data - m_base) / m_header->m_normalized_pack_length;

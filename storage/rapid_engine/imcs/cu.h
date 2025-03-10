@@ -80,6 +80,9 @@ class Cu : public MemoryObject {
     // statistics info.
     std::atomic<double> m_max{SHANNON_MIN_DOUBLE}, m_min{SHANNON_MAX_DOUBLE}, m_middle{0}, m_median{0}, m_avg{0},
         m_sum{0};
+
+    // key length of this cu.
+    size_t m_key_len{0};
   };
 
   explicit Cu(const Field *field);
@@ -142,7 +145,7 @@ class Cu : public MemoryObject {
 
   // get how many rows in this cu. Here, we dont care about MVCC. just physical
   // rows.
-  row_id_t prows();
+  inline row_id_t prows() { return m_header->m_prows.load(std::memory_order_seq_cst); }
 
   // the visiable row count to `trxid` transaction. The mvcc should be considered.
   row_id_t rows(Rapid_load_context *context);
@@ -157,6 +160,16 @@ class Cu : public MemoryObject {
   inline size_t pack_length() {
     ut_a(m_chunks.size());
     return m_chunks[0]->pack_length();
+  }
+
+  inline size_t field_length() {
+    ut_a(m_chunks.size());
+    return m_chunks[0]->field_length();
+  }
+
+  inline size_t field_length_bytes() {
+    ut_a(m_chunks.size());
+    return m_chunks[0]->field_length_bytes();
   }
 
   inline std::string &keystr() { return m_cu_key; }

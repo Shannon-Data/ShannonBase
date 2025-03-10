@@ -133,7 +133,10 @@ class Rapid_pop_context : public Secondary_engine_execution_context {
   // trx id.
   Transaction::ID m_trxid{0};
 
+  // key length, DATA_ROW_ID_LEN OR KEY LEN;
   uint8 m_key_len{0};
+
+  // key info. which is rowid or primary key/unique key.
   std::unique_ptr<uchar[]> m_key_buff{nullptr};
 };
 
