@@ -44,7 +44,7 @@ class Transaction;
 namespace Imcs {
 class Imcs;
 class Cu;
-extern thread_local ShannonBase::Imcs::Imcs *current_imcs_instance;
+extern SHANNON_THREAD_LOCAL ShannonBase::Imcs::Imcs *current_imcs_instance;
 }  // namespace Imcs
 
 /**
@@ -98,17 +98,11 @@ class Rapid_load_context : public Secondary_engine_execution_context {
     uint8 m_key_len{0};
     std::unique_ptr<uchar[]> m_key_buff{nullptr};
   };
-  Rapid_load_context()
-      : m_schema_name(nullptr),
-        m_table_name(nullptr),
-        m_trx(nullptr),
-        m_table(nullptr),
-        m_local_dict(nullptr),
-        m_thd{nullptr} {}
+  Rapid_load_context() : m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr), m_thd{nullptr} {}
   virtual ~Rapid_load_context() = default;
 
   // current schema name and table name.
-  char *m_schema_name{nullptr}, *m_table_name{nullptr};
+  std::string m_schema_name, m_table_name;
 
   // current transaction.
   Transaction *m_trx{nullptr};

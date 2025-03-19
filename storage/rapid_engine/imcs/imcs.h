@@ -71,7 +71,7 @@ class Imcs : public MemoryObject {
   Cu *get_cu(std::string_view key);
 
   // get cu at Nth index key
-  Cu *at(size_t indexx);
+  Cu *at(std::string_view schema, std::string_view table, size_t indexx);
 
   /**create all cus needed by source table, and ready to write the data into.*/
   int create_table_memo(const Rapid_load_context *context, const TABLE *source);

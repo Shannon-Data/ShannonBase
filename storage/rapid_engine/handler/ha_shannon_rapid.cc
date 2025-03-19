@@ -28,7 +28,6 @@
 #include <stddef.h>
 
 #include <algorithm>
-#include <cassert>
 #include <map>
 #include <memory>
 #include <string>
@@ -157,7 +156,7 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
   }
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
 
-  assert(!m_data_table.get());
+  ut_a(!m_data_table.get());
   m_data_table.reset(new ShannonBase::Imcs::DataTable(table));
   m_data_table->open();
   return 0;
@@ -239,7 +238,9 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 int ha_rapid::records(ha_rows *num_rows) {
   Rapid_load_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
-  *num_rows = Imcs::Imcs::instance()->at(0)->rows(&context);
+  std::string sch = table_share->db.str;
+  std::string tb = table_share->table_name.str;
+  *num_rows = Imcs::Imcs::instance()->at(sch, tb, 0)->rows(&context);
   return 0;
 }
 
@@ -262,7 +263,7 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to, thr_lock_type lo
 }
 
 int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[maybe_unused]]) {
-  assert(table_arg.file != nullptr);
+  ut_a(table_arg.file != nullptr);
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
     std::ostringstream err;
     err << table_arg.s->db.str << "." << table_arg.s->table_name.str << " already loaded";
@@ -332,7 +333,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
 */
 
 int ha_rapid::start_stmt(THD *const thd, thr_lock_type lock_type) {
-  assert(thd != nullptr);
+  ut_a(thd != nullptr);
 
   auto trx = ShannonBase::Transaction::get_or_create_trx(thd);
   rapid_register_tx(ShannonBase::shannon_rapid_hton_ptr, thd, trx);
@@ -391,7 +392,7 @@ static bool rpd_thd_trx_is_auto_commit(THD *thd) { /*!< in: thread handle, can b
 }
 
 static void rapid_register_tx(handlerton *const hton, THD *const thd, ShannonBase::Transaction *const trx) {
-  assert(trx != nullptr);
+  ut_a(trx != nullptr);
 
   trans_register_ha(thd, false, ShannonBase::shannon_rapid_hton_ptr, nullptr);
 
@@ -539,7 +540,7 @@ static int rapid_close_connection(handlerton *hton, /*!< in: handlerton */
                                   THD *thd) {       /*!< in: handle to the MySQL thread of the user
                                                    whose resources should be free'd */
   DBUG_TRACE;
-  assert(hton == ShannonBase::shannon_rapid_hton_ptr);
+  ut_a(hton == ShannonBase::shannon_rapid_hton_ptr);
   ShannonBase::Transaction::free_trx_from_thd(thd);
   return 0;
 }
@@ -559,7 +560,7 @@ static void rapid_kill_connection(handlerton *hton, /*!< in:  innobase handlerto
 }
 
 static inline bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::string_view msg) {
-  assert(thd);
+  ut_a(thd);
   std::string msg_str(msg);
   thd->lex->m_secondary_engine_offload_or_exec_failed_reason = msg_str;
 
@@ -568,7 +569,7 @@ static inline bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::st
 }
 
 std::string_view GetSecondaryEngineOffloadorExecFailedReason(const THD *thd) {
-  assert(thd);
+  ut_a(thd);
   return thd->lex->m_secondary_engine_offload_or_exec_failed_reason.c_str();
 }
 
@@ -647,7 +648,7 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
 // will retry with secondary engine, and therefore, be here. JOIN are available here,
 // and, we can get all optimzation information, then caches all these info.
 static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
-  assert(thd->secondary_engine_optimization() == Secondary_engine_optimization::PRIMARY_TENTATIVELY);
+  ut_a(thd->secondary_engine_optimization() == Secondary_engine_optimization::PRIMARY_TENTATIVELY);
   if (unlikely(thd->secondary_engine_statement_context() == nullptr)) {
     /* Prepare this query's specific statment context */
     std::unique_ptr<Secondary_engine_statement_context> ctx = std::make_unique<ShannonBase::Rapid_statement_context>();
@@ -684,7 +685,7 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
       return ShannonBase::Utils::Util::dynamic_feature_normalization(thd);
     }
   } else
-    assert(false);
+    ut_a(false);
 
   // go to innodb for execution.
   return false;
@@ -710,7 +711,7 @@ static void AssertSupportedPath(const AccessPath *path) {
     case AccessPath::ROWID_INTERSECTION:
     case AccessPath::ROWID_UNION:
     case AccessPath::DYNAMIC_INDEX_RANGE_SCAN:
-      assert(false); /* purecov: deadcode */
+      ut_a(false); /* purecov: deadcode */
       break;
     default:
       break;
@@ -718,7 +719,7 @@ static void AssertSupportedPath(const AccessPath *path) {
 
   // This secondary storage engine does not yet store anything in the auxiliary
   // data member of AccessPath.
-  assert(path->secondary_engine_data == nullptr);
+  ut_a(path->secondary_engine_data == nullptr);
 }
 
 //  In this function, Dynamic offload retrieves info from
@@ -760,7 +761,7 @@ static bool RapidOptimize(THD *thd, LEX *lex) {
 
 static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
   // The context should have been set by PrepareSecondaryEngine.
-  assert(lex->secondary_engine_execution_context() != nullptr);
+  ut_a(lex->secondary_engine_execution_context() != nullptr);
 
   DBUG_EXECUTE_IF("secondary_engine_rapid_optimize_error", {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "");
@@ -820,8 +821,8 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
 
 static bool ModifyAccessPathCost(THD *thd [[maybe_unused]], const JoinHypergraph &hypergraph [[maybe_unused]],
                                  AccessPath *path) {
-  assert(!thd->is_error());
-  assert(hypergraph.query_block()->join == hypergraph.join());
+  ut_a(!thd->is_error());
+  ut_a(hypergraph.query_block()->join == hypergraph.join());
   AssertSupportedPath(path);
   return false;
 }

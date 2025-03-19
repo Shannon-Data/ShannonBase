@@ -537,7 +537,7 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
 
     if (UNIV_UNLIKELY(rec_offs_nth_extern(index, offsets, idx))) {  // store external.
       // TODO: deal with off-page scenario. see comment at blob0blob.cc:385.
-      assert(strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN));
+      ut_a(strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN));
 
       ut_a(physical_fld_len >= BTR_EXTERN_FIELD_REF_SIZE);
       ut_a(DATA_LARGE_MTYPE(index->get_col(idx)->mtype));
@@ -620,9 +620,7 @@ int LogParser::find_matched_rows(Rapid_load_context *context, std::map<std::stri
   // now that, it use sequentail scan all the chunks to find the match rows.
   // in next, ART will be introduced to accelerate the row finding via index scan.
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
-  std::string keystr = context->m_schema_name;
-  keystr.append(":").append(context->m_table_name).append(":");
-  auto current_cu = imcs_instance->at(0);
+  auto current_cu = imcs_instance->at(context->m_schema_name, context->m_table_name, 0);
   ut_a(current_cu && current_cu->header()->m_key_len == context->m_extra_info.m_key_len);
 
   // using the key_buffer to find the matched rows.
@@ -804,21 +802,20 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
 
       std::string db_name, table_name;
       real_tb_index->table->get_table_name(db_name, table_name);
+      context->m_schema_name = db_name;
+      context->m_table_name = table_name;
+      context->m_extra_info.m_trxid = trx_id;
+
       // get field length from rapid
       auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
-      if (share) {  // was not loaded table and not leaf
-        auto context = std::make_unique<ShannonBase::Rapid_load_context>();
-        context->m_schema_name = const_cast<char *>(db_name.c_str());
-        context->m_table_name = const_cast<char *>(table_name.c_str());
-        context->m_extra_info.m_trxid = trx_id;
-
+      if (share) {
         /**
          * If all rows were deleted from a page, and those were not used by any other transaction.
          * This page will be purged, otherwise, it's there.
          */
         auto all = (page[PAGE_HEADER + PAGE_N_HEAP + 1] == PAGE_HEAP_NO_USER_LOW) ? true : false;
         auto offsets = rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
-        parse_cur_rec_change_apply_low(context.get(), rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
+        parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
                                        nullptr, trx_id);
       }
       if (UNIV_LIKELY_NULL(heap)) {

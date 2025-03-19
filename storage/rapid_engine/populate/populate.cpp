@@ -82,9 +82,9 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
 #else
   SetThreadDescription(GetCurrentThread(), L"rapid_log_wkr");
 #endif
-  LogParser parse_log;
+  SHANNON_THREAD_LOCAL LogParser parse_log;
+  SHANNON_THREAD_LOCAL Rapid_load_context context;
 
-  Rapid_load_context context;
   auto parsed_bytes = parse_log.parse_redo(&context, const_cast<byte *>(start), const_cast<byte *>(end));
   ut_a(parsed_bytes == sz);
 
@@ -178,7 +178,7 @@ void Populator::start() {
     srv_threads.m_change_pop_cordinator = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
     ShannonBase::Populate::sys_pop_started.store(true, std::memory_order_seq_cst);
     srv_threads.m_change_pop_cordinator.start();
-    assert(Populator::active());
+    ut_a(Populator::active());
   }
 }
 
@@ -189,7 +189,7 @@ void Populator::end() {
     srv_threads.m_change_pop_cordinator.join();
     sys_rapid_loop_count = 0;
 
-    assert(Populator::active() == false);
+    ut_a(Populator::active() == false);
   }
 }
 

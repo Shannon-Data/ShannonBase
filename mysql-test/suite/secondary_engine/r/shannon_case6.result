@@ -1,0 +1,730 @@
+create database sh_test6;
+use sh_test6;
+#connection_1 and cconnection_2
+CREATE TABLE t1 ( 
+score INT DEFAULT NULL,
+name CHAR(10) COLLATE utf8mb4_general_ci DEFAULT NULL,
+id INT NOT NULL,
+gender CHAR(1) COLLATE utf8mb4_general_ci DEFAULT NULL,
+PRIMARY KEY (id)
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+CREATE TABLE t2 (
+id INT NOT NULL AUTO_INCREMENT,
+email VARCHAR(255) NOT NULL,
+PRIMARY KEY (id),
+UNIQUE KEY (email)
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+CREATE TABLE t3 (
+order_id INT NOT NULL,
+product_id INT NOT NULL,
+quantity INT DEFAULT 0,
+PRIMARY KEY (order_id, product_id)
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+CREATE TABLE t4 (
+id INT NOT NULL AUTO_INCREMENT,
+username VARCHAR(50) NOT NULL,
+age INT DEFAULT NULL,
+PRIMARY KEY (id),
+INDEX idx_username (username)
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+CREATE TABLE t5 (
+id INT NOT NULL,
+first_name VARCHAR(50) NOT NULL,
+last_name VARCHAR(50) NOT NULL,
+birth_date DATE NOT NULL,
+INDEX idx_name_birth (first_name, last_name, birth_date)
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+CREATE TABLE t6 (
+id INT NOT NULL,
+user_id INT NOT NULL,
+order_total DECIMAL(10,2) NOT NULL,
+PRIMARY KEY (id),
+FOREIGN KEY (user_id) REFERENCES t2(id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+CREATE TABLE t7 (
+order_id INT NOT NULL,
+product_id INT NOT NULL,
+quantity INT DEFAULT 1,
+PRIMARY KEY (order_id, product_id),
+FOREIGN KEY (order_id, product_id) REFERENCES t3(order_id, product_id) ON DELETE CASCADE
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+CREATE TABLE t8 (
+id INT NOT NULL AUTO_INCREMENT,
+email VARCHAR(255) NOT NULL,
+phone VARCHAR(20) NOT NULL,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+PRIMARY KEY (id),
+UNIQUE KEY unique_email (email),
+INDEX idx_phone (phone),
+INDEX idx_created_at (created_at)
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+CREATE TABLE t9 (
+user_id INT NOT NULL,
+group_id INT NOT NULL,
+role VARCHAR(50) NOT NULL,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+PRIMARY KEY (user_id, group_id),
+UNIQUE KEY unique_role (user_id, role)
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+CREATE TABLE t10 (
+year INT NOT NULL,
+department_id INT NOT NULL,
+record_id INT NOT NULL ,
+data_value VARCHAR(255) NOT NULL,
+PRIMARY KEY (year, department_id, record_id)
+) ENGINE=InnoDB AUTO_INCREMENT=1 SECONDARY_ENGINE=RAPID;
+alter table t1 secondary_load;
+alter table t2 secondary_load;
+alter table t3 secondary_load;
+alter table t4 secondary_load;
+alter table t5 secondary_load;
+alter table t6 secondary_load;
+alter table t7 secondary_load;
+alter table t8 secondary_load;
+alter table t9 secondary_load;
+alter table t10 secondary_load;
+[conn1_nothing]
+set use_secondary_engine=forced;
+select * from t1;
+score	name	id	gender
+select * from t2;
+id	email
+select * from t3;
+order_id	product_id	quantity
+select * from t4;
+id	username	age
+select * from t5;
+id	first_name	last_name	birth_date
+select * from t6;
+id	user_id	order_total
+select * from t7;
+order_id	product_id	quantity
+select * from t8;
+id	email	phone	created_at
+select * from t9;
+user_id	group_id	role	created_at
+explain select * from t1;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	0	0.00	Using secondary engine Rapid
+explain select * from t8;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t8	NULL	ALL	NULL	NULL	NULL	NULL	0	0.00	Using secondary engine Rapid
+[conn2_insert]
+INSERT INTO t1 (score, name, id, gender) VALUES
+(85, 'Alice', 1, 'F'),
+(92, 'Bob', 2, 'M'),
+(78, 'Charlie', 3, 'M'),
+(88, 'Diana', 4, 'F'),
+(95, 'Eve', 5, 'F'),
+(67, 'Frank', 6, 'M'),
+(74, 'Grace', 7, 'F'),
+(89, 'Hank', 8, 'M'),
+(91, 'Ivy', 9, 'F'),
+(82, 'Jack', 10, 'M');
+select * from t1 order by id;
+score	name	id	gender
+85	Alice	1	F
+92	Bob	2	M
+78	Charlie	3	M
+88	Diana	4	F
+95	Eve	5	F
+67	Frank	6	M
+74	Grace	7	F
+89	Hank	8	M
+91	Ivy	9	F
+82	Jack	10	M
+explain select * from t1 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	PRIMARY	4	NULL	10	100.00	NULL
+INSERT INTO t2 (email) VALUES
+('alice@example.com'),
+('bob@example.com'),
+('charlie@example.com'),
+('diana@example.com'),
+('eve@example.com'),
+('frank@example.com'),
+('grace@example.com'),
+('hank@example.com'),
+('ivy@example.com'),
+('jack@example.com');
+select * from t2 order by id;
+id	email
+1	alice@example.com
+2	bob@example.com
+3	charlie@example.com
+4	diana@example.com
+5	eve@example.com
+6	frank@example.com
+7	grace@example.com
+8	hank@example.com
+9	ivy@example.com
+10	jack@example.com
+explain select * from t2 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	index	NULL	PRIMARY	4	NULL	10	100.00	NULL
+INSERT INTO t3 (order_id, product_id, quantity) VALUES
+(1, 101, 2),
+(1, 102, 1),
+(2, 101, 5),
+(2, 103, 3),
+(3, 104, 4),
+(3, 105, 2),
+(4, 106, 1),
+(5, 107, 6),
+(5, 108, 3),
+(6, 109, 2);
+select * from t3 order by order_id, product_id;
+order_id	product_id	quantity
+1	101	2
+1	102	1
+2	101	5
+2	103	3
+3	104	4
+3	105	2
+4	106	1
+5	107	6
+5	108	3
+6	109	2
+explain select * from t3 order by order_id, product_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t3	NULL	index	NULL	PRIMARY	8	NULL	10	100.00	NULL
+INSERT INTO t4 (username, age) VALUES
+('alice', 25),
+('bob', 30),
+('charlie', 22),
+('diana', 28),
+('eve', 35),
+('frank', 40),
+('grace', 27),
+('hank', 33),
+('ivy', 29),
+('jack', 26);
+select * from t4 order by id;
+id	username	age
+1	alice	25
+2	bob	30
+3	charlie	22
+4	diana	28
+5	eve	35
+6	frank	40
+7	grace	27
+8	hank	33
+9	ivy	29
+10	jack	26
+explain select * from t4 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t4	NULL	index	NULL	PRIMARY	4	NULL	10	100.00	NULL
+INSERT INTO t5 (id, first_name, last_name, birth_date) VALUES
+(1, 'Alice', 'Johnson', '1995-06-15'),
+(2, 'Bob', 'Smith', '1988-11-23'),
+(3, 'Charlie', 'Brown', '1992-03-10'),
+(4, 'Diana', 'Miller', '1990-07-05'),
+(5, 'Eve', 'Davis', '1985-09-17');
+select * from t5 order by id;
+id	first_name	last_name	birth_date
+1	Alice	Johnson	1995-06-15
+2	Bob	Smith	1988-11-23
+3	Charlie	Brown	1992-03-10
+4	Diana	Miller	1990-07-05
+5	Eve	Davis	1985-09-17
+explain select * from t5 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t5	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using filesort
+INSERT INTO t6 (id, user_id, order_total) VALUES
+(1, 1, 150.00),
+(2, 2, 299.99),
+(3, 3, 75.50);
+select * from t6 order by id;
+id	user_id	order_total
+1	1	150.00
+2	2	299.99
+3	3	75.50
+explain select * from t6 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t6	NULL	index	NULL	PRIMARY	4	NULL	3	100.00	NULL
+INSERT INTO t7 (order_id, product_id, quantity) VALUES
+(1, 101, 2),
+(1, 102, 1),
+(2, 101, 3),
+(2, 103, 4),
+(3, 104, 2),
+(3, 105, 5),
+(4, 106, 1),
+(5, 107, 6),
+(5, 108, 3),
+(6, 109, 2);
+select * from t7 order by order_id, product_id;
+order_id	product_id	quantity
+1	101	2
+1	102	1
+2	101	3
+2	103	4
+3	104	2
+3	105	5
+4	106	1
+5	107	6
+5	108	3
+6	109	2
+explain select * from t7 order by order_id, product_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t7	NULL	index	NULL	PRIMARY	8	NULL	10	100.00	NULL
+INSERT INTO t8 (email, phone) VALUES
+('alice@example.com', '123-456-7890'),
+('bob@example.com', '987-654-3210'),
+('charlie@example.com', '555-666-7777'),
+('diana@example.com', '111-222-3333'),
+('eve@example.com', '444-555-6666'),
+('frank@example.com', '777-888-9999'),
+('grace@example.com', '222-333-4444'),
+('hank@example.com', '666-777-8888'),
+('ivy@example.com', '333-444-5555'),
+('jack@example.com', '999-000-1111');
+select * from t8 order by id;
+id	email	phone	created_at
+1	alice@example.com	123-456-7890	IGNORE
+2	bob@example.com	987-654-3210	IGNORE
+3	charlie@example.com	555-666-7777	IGNORE
+4	diana@example.com	111-222-3333	IGNORE
+5	eve@example.com	444-555-6666	IGNORE
+6	frank@example.com	777-888-9999	IGNORE
+7	grace@example.com	222-333-4444	IGNORE
+8	hank@example.com	666-777-8888	IGNORE
+9	ivy@example.com	333-444-5555	IGNORE
+10	jack@example.com	999-000-1111	IGNORE
+explain select * from t8 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t8	NULL	index	NULL	PRIMARY	4	NULL	10	100.00	NULL
+INSERT INTO t9 (user_id, group_id, role) VALUES
+(1, 101, 'admin'),
+(2, 101, 'moderator'),
+(2, 103, 'member'),
+(3, 104, 'admin'),
+(4, 105, 'editor'),
+(5, 106, 'viewer'),
+(6, 107, 'admin'),
+(7, 108, 'member'),
+(8, 109, 'moderator');
+select * from t9 order by user_id, group_id;
+user_id	group_id	role	created_at
+1	101	admin	IGNORE
+2	101	moderator	IGNORE
+2	103	member	IGNORE
+3	104	admin	IGNORE
+4	105	editor	IGNORE
+5	106	viewer	IGNORE
+6	107	admin	IGNORE
+7	108	member	IGNORE
+8	109	moderator	IGNORE
+explain select * from t9 order by user_id, group_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t9	NULL	index	NULL	PRIMARY	8	NULL	9	100.00	NULL
+INSERT INTO t10 (year, department_id, record_id, data_value) VALUES
+(2024, 1, 1, 'Revenue: 500K'),
+(2024, 2, 2, 'Expenses: 300K'),
+(2024, 3, 3, 'Profit: 200K');
+select * from t10 order by department_id;
+year	department_id	record_id	data_value
+2024	1	1	Revenue: 500K
+2024	2	2	Expenses: 300K
+2024	3	3	Profit: 200K
+explain select * from t10 order by department_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t10	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using filesort
+#[conn_1_after_insert]
+explain select * from t1 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t1 order by id;
+score	name	id	gender
+85	Alice	1	F
+92	Bob	2	M
+78	Charlie	3	M
+88	Diana	4	F
+95	Eve	5	F
+67	Frank	6	M
+74	Grace	7	F
+89	Hank	8	M
+91	Ivy	9	F
+82	Jack	10	M
+explain select * from t2 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t2 order by id;
+id	email
+1	alice@example.com
+2	bob@example.com
+3	charlie@example.com
+4	diana@example.com
+5	eve@example.com
+6	frank@example.com
+7	grace@example.com
+8	hank@example.com
+9	ivy@example.com
+10	jack@example.com
+explain select * from t3 order by order_id, product_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t3	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t3 order by order_id, product_id;
+order_id	product_id	quantity
+1	101	2
+1	102	1
+2	101	5
+2	103	3
+3	104	4
+3	105	2
+4	106	1
+5	107	6
+5	108	3
+6	109	2
+explain select * from t4 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t4	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t4 order by id;
+id	username	age
+1	alice	25
+2	bob	30
+3	charlie	22
+4	diana	28
+5	eve	35
+6	frank	40
+7	grace	27
+8	hank	33
+9	ivy	29
+10	jack	26
+explain select * from t5 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t5	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using filesort; Using secondary engine Rapid
+select * from t5 order by id;
+id	first_name	last_name	birth_date
+1	Alice	Johnson	1995-06-15
+2	Bob	Smith	1988-11-23
+3	Charlie	Brown	1992-03-10
+4	Diana	Miller	1990-07-05
+5	Eve	Davis	1985-09-17
+explain select * from t6 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t6	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using filesort; Using secondary engine Rapid
+select * from t6 order by id;
+id	user_id	order_total
+1	1	150.00
+2	2	299.99
+3	3	75.50
+explain select * from t7 order by order_id, product_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t7	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t7 order by order_id, product_id;
+order_id	product_id	quantity
+1	101	2
+1	102	1
+2	101	3
+2	103	4
+3	104	2
+3	105	5
+4	106	1
+5	107	6
+5	108	3
+6	109	2
+explain select * from t8 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t8	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t8 order by id;
+id	email	phone	created_at
+1	alice@example.com	123-456-7890	IGNORE
+2	bob@example.com	987-654-3210	IGNORE
+3	charlie@example.com	555-666-7777	IGNORE
+4	diana@example.com	111-222-3333	IGNORE
+5	eve@example.com	444-555-6666	IGNORE
+6	frank@example.com	777-888-9999	IGNORE
+7	grace@example.com	222-333-4444	IGNORE
+8	hank@example.com	666-777-8888	IGNORE
+9	ivy@example.com	333-444-5555	IGNORE
+10	jack@example.com	999-000-1111	IGNORE
+explain select * from t9 order by user_id, group_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t9	NULL	ALL	NULL	NULL	NULL	NULL	9	100.00	Using filesort; Using secondary engine Rapid
+select * from t9 order by user_id, group_id;
+user_id	group_id	role	created_at
+1	101	admin	IGNORE
+2	101	moderator	IGNORE
+2	103	member	IGNORE
+3	104	admin	IGNORE
+4	105	editor	IGNORE
+5	106	viewer	IGNORE
+6	107	admin	IGNORE
+7	108	member	IGNORE
+8	109	moderator	IGNORE
+explain select * from t10 order by department_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t10	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using filesort; Using secondary engine Rapid
+select * from t10 order by department_id;
+year	department_id	record_id	data_value
+2024	1	1	Revenue: 500K
+2024	2	2	Expenses: 300K
+2024	3	3	Profit: 200K
+#[conn_2_DML]
+UPDATE t1 SET score = 95 WHERE id = 1;
+DELETE FROM t1 WHERE id = 3;
+explain select * from t1 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	index	NULL	PRIMARY	4	NULL	9	100.00	NULL
+select * from t1 order by id;
+score	name	id	gender
+95	Alice	1	F
+92	Bob	2	M
+88	Diana	4	F
+95	Eve	5	F
+67	Frank	6	M
+74	Grace	7	F
+89	Hank	8	M
+91	Ivy	9	F
+82	Jack	10	M
+UPDATE t2 SET email = 'alice_new@example.com' WHERE id = 1;
+DELETE FROM t2 WHERE id = 3;
+explain select * from t2 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	index	NULL	PRIMARY	4	NULL	9	100.00	NULL
+select * from t2 order by id;
+id	email
+1	alice_new@example.com
+2	bob@example.com
+4	diana@example.com
+5	eve@example.com
+6	frank@example.com
+7	grace@example.com
+8	hank@example.com
+9	ivy@example.com
+10	jack@example.com
+UPDATE t3 SET quantity = 10 WHERE order_id = 1001 AND product_id = 2001;
+DELETE FROM t3 WHERE order_id = 1003 AND product_id = 2003;
+explain select * from t3 order by order_id, product_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t3	NULL	index	NULL	PRIMARY	8	NULL	10	100.00	NULL
+select * from t3 order by order_id, product_id;
+order_id	product_id	quantity
+1	101	2
+1	102	1
+2	101	5
+2	103	3
+3	104	4
+3	105	2
+4	106	1
+5	107	6
+5	108	3
+6	109	2
+UPDATE t4 SET age = 26 WHERE username = 'alice';
+DELETE FROM t4 WHERE username = 'charlie';
+explain select * from t4 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t4	NULL	index	NULL	PRIMARY	4	NULL	9	100.00	NULL
+select * from t4 order by id;
+id	username	age
+1	alice	26
+2	bob	30
+4	diana	28
+5	eve	35
+6	frank	40
+7	grace	27
+8	hank	33
+9	ivy	29
+10	jack	26
+UPDATE t5 SET birth_date = '1997-12-31' WHERE id = 1;
+DELETE FROM t5 WHERE id = 3;
+explain select * from t5 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t5	NULL	ALL	NULL	NULL	NULL	NULL	4	100.00	Using filesort
+select * from t5 order by id;
+id	first_name	last_name	birth_date
+1	Alice	Johnson	1997-12-31
+2	Bob	Smith	1988-11-23
+4	Diana	Miller	1990-07-05
+5	Eve	Davis	1985-09-17
+UPDATE t6 SET order_total = 180.00 WHERE id = 1;
+DELETE FROM t6 WHERE id = 3;
+explain select * from t6 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t6	NULL	index	NULL	PRIMARY	4	NULL	2	100.00	NULL
+select * from t6 order by id;
+id	user_id	order_total
+1	1	180.00
+2	2	299.99
+UPDATE t7 SET quantity = 3 WHERE order_id = 1001 AND product_id = 2001;
+DELETE FROM t7 WHERE order_id = 1003 AND product_id = 2003;
+explain select * from t7 order by order_id, product_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t7	NULL	index	NULL	PRIMARY	8	NULL	10	100.00	NULL
+select * from t7 order by order_id, product_id;
+order_id	product_id	quantity
+1	101	2
+1	102	1
+2	101	3
+2	103	4
+3	104	2
+3	105	5
+4	106	1
+5	107	6
+5	108	3
+6	109	2
+UPDATE t8 SET phone = '1112223333' WHERE email = 'alice@example.com';
+DELETE FROM t8 WHERE email = 'charlie@example.com';
+explain select * from t8 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t8	NULL	index	NULL	PRIMARY	4	NULL	9	100.00	NULL
+select * from t8 order by id;
+id	email	phone	created_at
+1	alice@example.com	1112223333	IGNORE
+2	bob@example.com	987-654-3210	IGNORE
+4	diana@example.com	111-222-3333	IGNORE
+5	eve@example.com	444-555-6666	IGNORE
+6	frank@example.com	777-888-9999	IGNORE
+7	grace@example.com	222-333-4444	IGNORE
+8	hank@example.com	666-777-8888	IGNORE
+9	ivy@example.com	333-444-5555	IGNORE
+10	jack@example.com	999-000-1111	IGNORE
+UPDATE t9 SET role = 'Smember' WHERE user_id = 1;
+DELETE FROM t9 WHERE user_id = 3;
+explain select * from t9 order by user_id, group_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t9	NULL	index	NULL	PRIMARY	8	NULL	8	100.00	NULL
+select * from t9 order by user_id, group_id;
+user_id	group_id	role	created_at
+1	101	Smember	IGNORE
+2	101	moderator	IGNORE
+2	103	member	IGNORE
+4	105	editor	IGNORE
+5	106	viewer	IGNORE
+6	107	admin	IGNORE
+7	108	member	IGNORE
+8	109	moderator	IGNORE
+UPDATE t10 SET data_value = 'Revenue: 600K' WHERE year = 2024 AND department_id = 1;
+DELETE FROM t10 WHERE year = 2024 AND department_id = 3;
+explain select * from t10 order by department_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t10	NULL	ALL	NULL	NULL	NULL	NULL	2	100.00	Using filesort
+select * from t10 order by department_id;
+year	department_id	record_id	data_value
+2024	1	1	Revenue: 600K
+2024	2	2	Expenses: 300K
+#[conn_1_after_dml]
+explain select * from t1 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t1 order by id;
+score	name	id	gender
+95	Alice	1	F
+92	Bob	2	M
+88	Diana	4	F
+95	Eve	5	F
+67	Frank	6	M
+74	Grace	7	F
+89	Hank	8	M
+91	Ivy	9	F
+82	Jack	10	M
+explain select * from t2 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	11	100.00	Using filesort; Using secondary engine Rapid
+select * from t2 order by id;
+id	email
+1	alice_new@example.com
+2	bob@example.com
+4	diana@example.com
+5	eve@example.com
+6	frank@example.com
+7	grace@example.com
+8	hank@example.com
+9	ivy@example.com
+10	jack@example.com
+explain select * from t3 order by order_id, product_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t3	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t3 order by order_id, product_id;
+order_id	product_id	quantity
+1	101	2
+1	102	1
+2	101	5
+2	103	3
+3	104	4
+3	105	2
+4	106	1
+5	107	6
+5	108	3
+6	109	2
+explain select * from t4 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t4	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t4 order by id;
+id	username	age
+1	alice	26
+2	bob	30
+4	diana	28
+5	eve	35
+6	frank	40
+7	grace	27
+8	hank	33
+9	ivy	29
+10	jack	26
+explain select * from t5 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t5	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using filesort; Using secondary engine Rapid
+select * from t5 order by id;
+id	first_name	last_name	birth_date
+1	Alice	Johnson	1997-12-31
+2	Bob	Smith	1988-11-23
+4	Diana	Miller	1990-07-05
+5	Eve	Davis	1985-09-17
+explain select * from t6 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t6	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using filesort; Using secondary engine Rapid
+select * from t6 order by id;
+id	user_id	order_total
+1	1	180.00
+2	2	299.99
+explain select * from t7 order by order_id, product_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t7	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t7 order by order_id, product_id;
+order_id	product_id	quantity
+1	101	2
+1	102	1
+2	101	3
+2	103	4
+3	104	2
+3	105	5
+4	106	1
+5	107	6
+5	108	3
+6	109	2
+explain select * from t8 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t8	NULL	ALL	NULL	NULL	NULL	NULL	11	100.00	Using filesort; Using secondary engine Rapid
+select * from t8 order by id;
+id	email	phone	created_at
+1	alice@example.com	1112223333	IGNORE
+2	bob@example.com	987-654-3210	IGNORE
+4	diana@example.com	111-222-3333	IGNORE
+5	eve@example.com	444-555-6666	IGNORE
+6	frank@example.com	777-888-9999	IGNORE
+7	grace@example.com	222-333-4444	IGNORE
+8	hank@example.com	666-777-8888	IGNORE
+9	ivy@example.com	333-444-5555	IGNORE
+10	jack@example.com	999-000-1111	IGNORE
+explain select * from t9 order by user_id, group_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t9	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+select * from t9 order by user_id, group_id;
+user_id	group_id	role	created_at
+1	101	Smember	IGNORE
+2	101	moderator	IGNORE
+2	103	member	IGNORE
+4	105	editor	IGNORE
+5	106	viewer	IGNORE
+6	107	admin	IGNORE
+7	108	member	IGNORE
+8	109	moderator	IGNORE
+explain select * from t10 order by department_id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t10	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using filesort; Using secondary engine Rapid
+select * from t10 order by department_id;
+year	department_id	record_id	data_value
+2024	1	1	Revenue: 600K
+2024	2	2	Expenses: 300K
+drop database sh_test6;

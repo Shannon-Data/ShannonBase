@@ -52,7 +52,7 @@ DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(
   ut_a(m_data_source);
 
   std::string key_part, key;
-  thread_local std::string key_buffer;
+  std::string key_buffer;
   key_buffer.reserve(256);
   for (auto index = 0u; index < m_data_source->s->fields; index++) {
     key_buffer.clear();
@@ -168,11 +168,6 @@ start:
     if (is_text_value) {
       uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
       auto str_ptr = cu->header()->m_local_dict->get(str_id);
-      // auto len =
-      //     (Utils::Util::is_blob(cu->header()->m_type) ||
-      //     Utils::Util::is_varstring(cu->header()->m_source_fld->type()))
-      //         ? str_ptr.length()
-      //         : cu->pack_length();
       source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
     } else {
       source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
