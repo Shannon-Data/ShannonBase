@@ -47,7 +47,7 @@ namespace Imcs {
 Imcs *Imcs::m_instance{nullptr};
 std::once_flag Imcs::one;
 
-thread_local Imcs *current_imcs_instance = Imcs::instance();
+SHANNON_THREAD_LOCAL Imcs *current_imcs_instance = Imcs::instance();
 
 int Imcs::initialize() {
   m_inited.store(1);
@@ -72,7 +72,9 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
     std::vector<std::string> key_parts_names;
     KEY *key_info = source->key_info + source->s->primary_key;
     for (uint i = 0; i < key_info->user_defined_key_parts; i++) {
-      key_parts_names.push_back(key_info->key_part[i].field->field_name);
+      std::string key;
+      key.append(keypart).append(key_info->key_part[i].field->field_name);
+      key_parts_names.push_back(key);
     }
     m_source_keys.emplace(keypart, key_parts_names);
   }
@@ -100,12 +102,17 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   return 0;
 }
 
-Cu *Imcs::at(size_t index) {
-  if (index >= m_cus.size()) return m_cus.end()->second.get();
+Cu *Imcs::at(std::string_view schema, std::string_view table, size_t index) {
+  if (index >= m_cus.size()) return nullptr;
 
-  auto it = m_cus.begin();
-  std::advance(it, index);
-  return (it->second).get();
+  std::string keypart{schema};
+  keypart.append(":").append(table).append(":");
+  size_t count = 0;
+
+  auto it = std::find_if(m_cus.begin(), m_cus.end(),
+                         [&](const auto &pair) { return pair.first.find(keypart) == 0 && count++ == index; });
+
+  return (it != m_cus.end()) ? it->second.get() : nullptr;
 }
 
 Cu *Imcs::get_cu(std::string_view key) {

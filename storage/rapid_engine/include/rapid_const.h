@@ -129,5 +129,19 @@ enum class RPD_NODE_ROLE {
 enum class OPER_TYPE : uint8 { OPER_INSERT, OPER_UPDATE, OPER_DELETE };
 constexpr int PREFETCH_AHEAD = 2;
 
+#if !defined(__cplusplus) && (!defined(__STDC__) || (__STDC_VERSION__ < 201112L))
+/*! \brief Thread local specifier no-op in C using standards before C11. */
+#define SHANNON_THREAD_LOCAL
+#elif !defined(__cplusplus)
+/*! \brief Thread local specifier. */
+#define SHANNON_THREAD_LOCAL _Thread_local
+#elif defined(_MSC_VER)
+/*! \brief Thread local specifier. */
+#define SHANNON_THREAD_LOCAL __declspec(thread)
+#else
+/*! \brief Thread local specifier. */
+#define SHANNON_THREAD_LOCAL thread_local
+#endif
+
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CONST_H__
