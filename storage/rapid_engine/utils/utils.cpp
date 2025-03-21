@@ -26,7 +26,6 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "include/decimal.h"  //my_decimal
-#include "sql/join_optimizer/finalize_plan.h"
 #include "sql/opt_trace.h"
 #include "sql/sql_class.h"     //Secondary_engine_statement_context
 #include "sql/sql_executor.h"  //QEP_TBA
@@ -142,7 +141,7 @@ uchar *Util::pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, u
   return to;
 }
 
-static inline void write_trace_reason(THD *thd, const char *text, const char *reason) {
+void Util::write_trace_reason(THD *thd, const char *text, const char *reason) {
   Opt_trace_context *const trace = &thd->opt_trace;
   if (unlikely(trace->is_started())) {
     const Opt_trace_object wrapper(trace);
@@ -182,27 +181,21 @@ bool Util::standard_cost_threshold_classifier(THD *thd) {
 //  decision tree classifier for determining which engine should to go.
 // returns true goes to secondary engine, otherwise, false go to innodb.
 bool Util::decision_tree_classifier(THD *thd) {
-  std::ostringstream oss;
-  std::string text;
+  std::string text, reason;
   // here to use trained decision tree to classify the query.
-  if (is_very_fast_query(thd)) {
-    text = "secondary_engine_not_used";
-    oss << "The estimated query is a very fast query, goes to primary engine.";
-    write_trace_reason(thd, text.c_str(), oss.str().c_str());
-    return false;
-  }
 
   ShannonBase::ML::Query_arbitrator qa;
-  qa.load_model();
+  std::string mode_path = "./shannon_rapid_classifier.onnx";
+  qa.load_model(mode_path);
   auto where = qa.predict(thd->lex->unit->first_query_block()->join);
   if (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) {
     text = "secondary_engine_used";
-    oss << "The Query_arbitrator do the prediction, goes to secondary engine.";
+    reason = "The Query_arbitrator do the prediction, goes to secondary engine.";
   } else {
     text = "secondary_engine_not_used";
-    oss << "The Query_arbitrator do the prediction, goes to primary engine.";
+    reason = "The Query_arbitrator do the prediction, goes to primary engine.";
   }
-  write_trace_reason(thd, text.c_str(), oss.str().c_str());
+  write_trace_reason(thd, text.c_str(), reason.c_str());
 
   return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) ? true : false;
 }

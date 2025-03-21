@@ -241,6 +241,8 @@ class Util {
   static bool dynamic_feature_normalization(THD *thd);
 
   static bool check_dict_encoding_projection(THD *thd);
+
+  static void write_trace_reason(THD *thd, const char *text, const char *reason);
 };
 
 }  // namespace Utils
