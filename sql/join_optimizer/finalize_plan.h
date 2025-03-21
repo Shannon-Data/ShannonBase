@@ -47,7 +47,7 @@ void ReplaceOrderItemsWithTempTableFields(THD *thd, ORDER *order,
 
 // to test whether query is point select query or not.
 // returns true if a point select, otherwise, returns false.
-bool is_point_select (THD *thd [[maybe_unused]], Query_block *query_block);
+bool is_point_select (THD *, Query_block *query_block);
 
 // the query is fast query or not.
 bool is_very_fast_query(THD *thd);

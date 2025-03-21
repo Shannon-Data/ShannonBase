@@ -33,7 +33,7 @@
 namespace ShannonBase {
 namespace ML {
 
-void Query_arbitrator::load_model() {}
+void Query_arbitrator::load_model(const std::string &model_path) {}
 
 /**
  * Here, the features of model, can be:
@@ -47,30 +47,62 @@ void Query_arbitrator::load_model() {}
  */
 Query_arbitrator::WHERE2GO Query_arbitrator::predict(JOIN *join) {
   // to the all query plan info then use these features to do classification.
-  BoosterHandle booster;
+  DatasetHandle train_dataset_handler{nullptr};
   int out_num_iterations;
-  int status = LGBM_BoosterCreateFromModelfile(m_model_path.c_str(), &out_num_iterations, &booster);
+  int status = LGBM_BoosterCreateFromModelfile(m_model_path.c_str(), &out_num_iterations, &train_dataset_handler);
   if (status != 0) {
     return Query_arbitrator::WHERE2GO::TO_PRIMARY;
   }
 
-  std::vector<double> features;
+  std::vector<double> features, label;
+  std::vector<const char *> feature_names;
+  // list the avaliable features we used in this mode, therefore, you can your own
+  // mode to predict the result.
+  feature_names.push_back("table_count");
+  features.push_back(0.0);
+
+  feature_names.push_back("has_having");
+  features.push_back(0.0);
+
+  feature_names.push_back("has_group_by");
+  features.push_back(0.0);
+
+  feature_names.push_back("has_rollup");
+  features.push_back(0.0);
+
+  // to add more features below.
+
+  assert(features.size() == feature_names.size());
   int num_features = features.size();
   int num_samples = 1;
 
   std::vector<double> out_result(1);
   int64_t out_len;
   // predict[for an example]
-  status = LGBM_BoosterPredictForMat(booster, features.data(), C_API_DTYPE_FLOAT64, num_samples, num_features, 1, 0,
-                                     C_API_PREDICT_NORMAL, -1, "", &out_len, out_result.data());
+  // clang-format off
+  status = LGBM_BoosterPredictForMat(train_dataset_handler,
+                                     features.data(),
+                                     C_API_DTYPE_FLOAT64,
+                                     num_samples,
+                                     num_features,
+                                     1,
+                                     0,
+                                     C_API_PREDICT_NORMAL,
+                                     -1,
+                                     "",
+                                     &out_len, out_result.data());
+  // clang-format on
+
+  LGBM_DatasetSetField(train_dataset_handler, "label", label.data(), label.size(), C_API_DTYPE_FLOAT64);
+  LGBM_DatasetSetFeatureNames(train_dataset_handler, feature_names.data(), feature_names.size());
 
   if (status != 0) {
-    LGBM_BoosterFree(booster);
+    LGBM_BoosterFree(train_dataset_handler);
     return Query_arbitrator::WHERE2GO::TO_PRIMARY;
   }
 
   // std::cout << "Prediction result: " << out_result[0] << std::endl;
-  LGBM_BoosterFree(booster);
+  LGBM_BoosterFree(train_dataset_handler);
   return Query_arbitrator::WHERE2GO::TO_SECONDARY;
 }
 

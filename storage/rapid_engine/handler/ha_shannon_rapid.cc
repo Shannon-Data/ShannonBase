@@ -46,6 +46,7 @@
 #include "sql/debug_sync.h"
 #include "sql/handler.h"
 #include "sql/join_optimizer/access_path.h"
+#include "sql/join_optimizer/finalize_plan.h"
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/opt_trace.h"
@@ -664,18 +665,18 @@ static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
 // If dynamic offload is enabled and query is not "very fast":
 // This caches features from mysql plan in rapid_statement_context
 // to be used for dynamic offload.
-// If dynamic offload is disabled or the query is "very fast":
-// This function invokes standary mysql cost threshold classifier,
-// which decides if query needs further RAPID optimisation.
-//
+// If dynamic offload is disabled This function invokes standary mysql
+// cost threshold classifier, which decides if query needs further
+// RAPID optimisation. the query is "very fast" does not care about dynamic
+// offload flag.
 // returns true, goes to secondary engine, otherwise, goes to innodb.
 bool SecondaryEnginePrePrepareHook(THD *thd) {
   RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
 
-  if (unlikely(!thd->variables.rapid_use_dynamic_offload)) {
+  if (unlikely(!thd->variables.rapid_use_dynamic_offload || is_very_fast_query(thd))) {
     // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
     return ShannonBase::Utils::Util::standard_cost_threshold_classifier(thd);
-  } else if (likely(thd->variables.rapid_use_dynamic_offload)) {
+  } else if (likely(thd->variables.rapid_use_dynamic_offload && !is_very_fast_query(thd))) {
     // 1: static sceanrio.
     if (likely(!ShannonBase::Populate::Populator::active() ||
                (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::sys_pop_buff.empty()))) {
