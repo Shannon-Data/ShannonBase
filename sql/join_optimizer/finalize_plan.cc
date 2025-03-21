@@ -768,14 +768,31 @@ bool FinalizePlanForQueryBlock(THD *thd, Query_block *query_block) {
   return error;
 }
 
-bool is_point_select(THD *thd [[maybe_unused]], Query_block *query_block) {
+bool is_point_select(THD *, Query_block *query_block) {
+  if (query_block->leaf_table_count != 1) {
+    return false;
+  }
+
+  // check use primary key or unique key.
+  auto table = query_block->join->qep_tab->table();
+  if (table->const_table) return true;
+
+  uint keyno = table->s->primary_key;
+  // primary key does not exits, then to check whether unique key exists or not.
+  if (keyno == MAX_KEY) {
+    // find the first unique index (HA_NOSAME)
+    for (keyno = 0; keyno < table->s->keys; keyno++) {
+      if (table->key_info[keyno].flags & HA_NOSAME) break;
+    }
+    // not found, then false
+    if (keyno >= table->s->keys) return false;
+  }
+
   AccessPath *const root_path = query_block->join->root_access_path();
   assert(root_path != nullptr);
   if (root_path->type == AccessPath::EQ_REF ||
       root_path->type == AccessPath::FAKE_SINGLE_ROW) {
-    // None of the finalization below is relevant to point selects, so just
-    // return immediately.
-    return true;
+      return true;
   }
 
   return false;
