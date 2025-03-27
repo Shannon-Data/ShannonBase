@@ -239,9 +239,9 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
     written_to = m_chunks[m_chunks.size() - 1].get()->write(context, data, len);
   }
 
+  // insert the index info.
   update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, written_to, written_to);
 
-  // after that should check the size of all fields. they're be same
   return written_to;
 }
 
@@ -268,7 +268,6 @@ uchar *Cu::write_row_from_log(const Rapid_load_context *context, uchar *data, si
 
   update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, written_to, written_to);
 
-  // after that should check the size of all fields. they're be same.
   return written_to;
 }
 

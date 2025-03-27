@@ -202,9 +202,7 @@ class LogParser {
    * key_name [in] main search column name in 'db:table_name:field_name' format.
    * field_values_to_find [in], the all fields values of a row to find
    * with_sys_col[in], sys col to do comparision or not. */
-  int find_matched_rows(Rapid_load_context* context,
-                            std::map<std::string, std::unique_ptr<uchar[]>>&,
-                            std::vector<row_id_t>& matched_rows);
+  row_id_t find_matched_rows(Rapid_load_context* context);
 };
 
 }  // namespace Populate

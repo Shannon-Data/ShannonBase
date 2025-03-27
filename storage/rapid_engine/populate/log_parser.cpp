@@ -615,30 +615,17 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
   return 0;
 }
 
-int LogParser::find_matched_rows(Rapid_load_context *context, std::map<std::string, std::unique_ptr<uchar[]>> &,
-                                 std::vector<row_id_t> &matched_rows) {
+row_id_t LogParser::find_matched_rows(Rapid_load_context *context) {
   // now that, it use sequentail scan all the chunks to find the match rows.
   // in next, ART will be introduced to accelerate the row finding via index scan.
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   auto current_cu = imcs_instance->at(context->m_schema_name, context->m_table_name, 0);
   ut_a(current_cu && current_cu->header()->m_key_len == context->m_extra_info.m_key_len);
 
-  // using the key_buffer to find the matched rows.
-  for (row_id_t row_id = 0; row_id < current_cu->prows(); row_id++) {
-    auto current_chunk_id = (row_id / SHANNON_ROWS_IN_CHUNK);
-    auto offset_in_chunk = (row_id % SHANNON_ROWS_IN_CHUNK);
-
-    auto base_ptr = current_cu->chunk(current_chunk_id)->base();
-    auto data_ptr =
-        base_ptr + offset_in_chunk * (current_cu->header()->m_key_len + current_cu->normalized_pack_length());
-    auto matched = (std::memcmp(context->m_extra_info.m_key_buff.get(), data_ptr, context->m_extra_info.m_key_len) == 0)
-                       ? true
-                       : false;
-    if (matched) {
-      matched_rows.push_back(row_id);
-    }
-  }
-  return 0;
+  std::string keypart = context->m_schema_name + ":" + context->m_table_name + ":";
+  auto rowid = imcs_instance->get_index(keypart)->lookup(context->m_extra_info.m_key_buff.get(),
+                                                         context->m_extra_info.m_key_len);
+  return *rowid;
 }
 
 int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
@@ -698,9 +685,8 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
 
       // step 2: go throug all the data to find the matched rows.
-      if (find_matched_rows(context, row_field_value, row_ids)) {
-        return HA_ERR_WRONG_IN_RECORD;
-      }
+      auto found_rowid = find_matched_rows(context);
+      if (found_rowid != INVALID_ROW_ID) row_ids.push_back(found_rowid);
 
       // step 3: delete all matched rows.
       return row_ids.size() ? imcs_instance->delete_rows(context, row_ids) : 0;
@@ -711,8 +697,9 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
 
       // step 2: insert all field data into CUs.
+      std::string key_name;
       for (auto &field_val : row_field_value) {
-        auto key_name = field_val.first;
+        key_name = field_val.first;
         // escape the db_trx_id field and the filed is set to NOT_SECONDARY[not loaded int imcs]
         if (key_name == trxid_key || imcs_instance->get_cu(key_name) == nullptr) continue;
         // if data is nullptr, means it's 'NULL'.
@@ -721,6 +708,12 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
           ret = HA_ERR_WRONG_IN_RECORD;
         if (ret) return ret;
       }
+
+      // insert the index info.
+      auto rowid = imcs_instance->get_cu(key_name)->header()->m_prows.load(std::memory_order_relaxed) - 1;
+      imcs_instance->get_index(keypart)->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len,
+                                                &rowid, sizeof(rowid));
+
     } break;
     case MLOG_REC_UPDATE_IN_PLACE: {
       ut_a(upd);
@@ -730,9 +723,8 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
 
       // step 3: find all matched rows according to rec.
       std::vector<row_id_t> row_ids;
-      if (find_matched_rows(context, row_field_value, row_ids)) {
-        return HA_ERR_WRONG_IN_RECORD;
-      }
+      auto found_rowid = find_matched_rows(context);
+      if (found_rowid != INVALID_ROW_ID) row_ids.push_back(found_rowid);
 
       // step 4: to update rows.
       for (auto &rowid : row_ids) {

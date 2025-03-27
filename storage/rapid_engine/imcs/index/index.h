@@ -29,45 +29,108 @@
 #include <memory>
 #include <vector>
 
-#include "storage/rapid_engine/imcs/index/art.h"
+#include "storage/rapid_engine/imcs/index/art/art.h"
 
 namespace ShannonBase {
 namespace Imcs {
-class Art_index;
+namespace Index {
 
+class ART;
+
+template <typename key_t, typename value_t>
 class Index {
  public:
   enum class IndexType { ART = 0, B_TREE };
-  explicit Index(IndexType);
-  ~Index();
+
+  explicit Index() : m_inited(false), m_type(IndexType::ART) {
+    if (m_type != IndexType::ART) return;
+
+    m_impl = std::make_unique<ART>();
+
+    if (!m_inited) {
+      m_impl->ART_tree_init();
+      m_inited = m_impl->Art_initialized();
+    }
+  }
+
+  explicit Index(IndexType) : m_inited(false), m_type(type) {
+    if (m_type != IndexType::ART) return;
+    m_impl = std::make_unique<ART>();
+
+    if (!m_inited) {
+      m_impl->ART_tree_init();
+      m_inited = m_impl->Art_initialized();
+    }
+  }
+
+  ~Index() {
+    if (!m_impl.get()) return;
+    m_impl->ART_tree_destroy();
+    m_impl.reset(nullptr);
+  }
+
   Index(Index &&) = delete;
   Index &operator=(Index &&) = delete;
   inline bool initialized() { return m_inited; }
-  int insert(uchar *key, uint key_len, uchar *value);
-  int remove(uchar *key, uint key_len);
 
-  void *lookup(uchar *key, uint key_len);
+  // the root entry.
+  inline ART::Art_node *root() const { return m_impl->root(); }
 
-  void *first(uint key_offset, uchar *key, uint key_len);
-  void *next();
+  int insert(key_t *key, size_t key_len, value_t *value, size_t value_len) {
+    if (!initialized()) return 1;
 
-  void *read_index(Art_index::ART_Func2 &func);
+    m_impl->ART_insert(key, key_len, value, value_len);
+    return 0;
+  }
 
-  int maximum(uchar *value, uint value_len);
-  int minimum(uchar *value, uint value_len);
+  int remove(key_t *key, size_t key_len) {
+    if (!initialized()) return 1;
 
-  void reset_pos();
+    auto value_ptr = m_impl->ART_delete(key, key_len);
+    if (!value_ptr) return 1;
+    return 0;
+  }
+
+  value_t *lookup(key_t *key, size_t key_len) {
+    if (!initialized() || !key || !key_len) return nullptr;
+
+    return reinterpret_cast<value_t *>(m_impl->ART_search(key, key_len));
+  }
+
+  // gets the maximun value. return 0 success, 1 failed.
+  // the maximum value stores into value param.
+  int maximum(key_t *value, size_t value_len) {
+    if (!initialized()) return 1;
+
+    ART::Art_leaf *l = m_impl->ART_maximum();
+    if (!l->value) return 1;
+
+    memcpy(value, l->value, value_len);
+    return 0;
+  }
+
+  // gets the minimum value. return 0 success, 1 failed.
+  // the minimum value stores into value param.
+  int minimum(key_t *value, size_t value_len) {
+    if (!initialized()) return 1;
+
+    ART::Art_leaf *l = m_impl->ART_minimum();
+    if (!l->value) return 1;
+
+    memcpy(value, l->value, value_len);
+    return 0;
+  }
+
   IndexType type() { return m_type; }
 
  private:
   bool m_inited{false};
   IndexType m_type{IndexType::ART};
-  std::unique_ptr<Art_index> m_impl{nullptr};
+  std::unique_ptr<ART> m_impl{nullptr};
   bool m_start_scan{false};
-
-  std::vector<void *> m_values;
 };
 
+}  // namespace Index
 }  // namespace Imcs
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_INDEX_H__

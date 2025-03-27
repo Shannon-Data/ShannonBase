@@ -98,6 +98,24 @@ class ha_rapid : public handler {
 
   int info(unsigned int) override;
 
+  int index_init(uint keynr, bool sorted) override;
+
+  int index_end() override;
+
+  int index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) override;
+
+  int index_read_last(uchar *buf, const uchar *key, uint key_len) override;
+
+  int index_next(uchar *buf) override;
+
+  int index_next_same(uchar *buf, const uchar *key, uint keylen) override;
+
+  int index_prev(uchar *buf) override;
+
+  int index_first(uchar *buf) override;
+
+  int index_last(uchar *buf) override;
+
   ha_rows records_in_range(unsigned int index, key_range *min_key, key_range *max_key) override;
 
   void position(const unsigned char *) override {}

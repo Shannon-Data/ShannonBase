@@ -70,6 +70,9 @@ class Imcs : public MemoryObject {
   // get cu pointer by its key.
   Cu *get_cu(std::string_view key);
 
+  // get index
+  Index::Index<uchar, row_id_t> *get_index(std::string_view key);
+
   // get cu at Nth index key
   Cu *at(std::string_view schema, std::string_view table, size_t indexx);
 
@@ -144,6 +147,7 @@ class Imcs : public MemoryObject {
   // value format: park part1 name , key part2 name.
   std::unordered_map<std::string, std::vector<std::string>> m_source_keys;
 
+  std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};
 

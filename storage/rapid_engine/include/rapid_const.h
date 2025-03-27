@@ -100,6 +100,8 @@ constexpr double SHANNON_MIN_DOUBLE = std::numeric_limits<double>::min();
 constexpr double SHANNON_MAX_DOUBLE = std::numeric_limits<double>::max();
 constexpr int SHANNON_MIN_INT = std::numeric_limits<int>::min();
 constexpr int SHANNON_MAX_INT = std::numeric_limits<int>::max();
+constexpr row_id_t INVALID_ROW_ID = std::numeric_limits<size_t>::max();
+
 constexpr double SHANNON_EPSILON = 1e-10;
 inline bool are_equal(double a, double b, double epsilon = SHANNON_EPSILON) { return (std::fabs(a - b) < epsilon); }
 
