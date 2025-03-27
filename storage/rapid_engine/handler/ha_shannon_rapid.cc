@@ -171,13 +171,13 @@ int ha_rapid::close() {
 int ha_rapid::info(unsigned int flags) {
   ut_a(flags == (HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK));
 
-  std::ostringstream oss;
-  oss << table_share->db.str << ":" << table_share->table_name.str << ":";
+  std::string keypart;
+  keypart.append(table_share->db.str).append(":").append(table_share->table_name.str).append(":");
 
   Rapid_load_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   for (auto it = Imcs::Imcs::instance()->get_cus().begin(); it != Imcs::Imcs::instance()->get_cus().end(); it++) {
-    if (it->first.find(oss.str()) == std::string::npos || !it->second)
+    if (it->first.find(keypart) == std::string::npos || !it->second)
       continue;
     else {
       stats.records = it->second->rows(&context);
@@ -265,10 +265,12 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to, thr_lock_type lo
 
 int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[maybe_unused]]) {
   ut_a(table_arg.file != nullptr);
+  ut_ad(table_arg.s != nullptr);
+
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
-    std::ostringstream err;
-    err << table_arg.s->db.str << "." << table_arg.s->table_name.str << " already loaded";
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
+    std::string err;
+    err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" already loaded");
+    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
     return HA_ERR_KEY_NOT_FOUND;
   }
 
@@ -277,9 +279,9 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
     if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
-      std::ostringstream err;
-      err << fld->field_name << " type not allowed";
-      my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
+      std::string err;
+      err.append(table_arg.s->table_name.str).append(fld->field_name).append(" type not allowed");
+      my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
       return HA_ERR_GENERIC;
     }
   }
@@ -308,9 +310,9 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
   if (error_if_not_loaded && shannon_loaded_tables->get(db_name, table_name) == nullptr) {
-    std::ostringstream err;
-    err << db_name << "." << table_name << " table is not loaded into";
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.str().c_str());
+    std::string err(db_name);
+    err.append(".").append(table_name).append(" table is not loaded into");
+    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
 
     return HA_ERR_GENERIC;
   } else {
@@ -368,7 +370,7 @@ int ha_rapid::rnd_end(void) {
  in a table scan).
  @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::rnd_next(uchar *buf) {
-  int error;
+  int error{HA_ERR_END_OF_FILE};
 
   if (m_start_of_scan) {
     error = m_data_table->next(buf);  // index_first(buf);
@@ -385,6 +387,72 @@ int ha_rapid::rnd_next(uchar *buf) {
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return error;
 }
+
+int ha_rapid::index_init(uint keynr, bool sorted) {
+  DBUG_TRACE;
+  if (m_data_table->init()) return 0;
+
+  m_start_of_scan = true;
+  active_index = keynr;
+
+  inited = handler::INDEX;
+  return 0;
+}
+
+int ha_rapid::index_end() {
+  DBUG_TRACE;
+
+  active_index = MAX_KEY;
+  in_range_check_pushed_down = false;
+  inited = handler::NONE;
+  m_start_of_scan = false;
+
+  // to reset the cursor position.
+  std::string keypart{table->s->db.str};
+  keypart.append(":").append(table->s->table_name.str).append(":");
+
+  for (auto &cu : Imcs::Imcs::instance()->get_cus()) {
+    if (cu.first.find(keypart) == std::string::npos) continue;
+    // cu.second->header()->m_index->reset_pos();
+  }
+
+  return 0;
+}
+
+int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) {
+  DBUG_TRACE;
+  int err{HA_ERR_END_OF_FILE};
+  ut_ad(m_start_of_scan && inited == handler::INDEX);
+  if (pushed_idx_cond) {  // icp
+    // TODO: evaluate condition item, and do condtion eval in scan.
+  }
+
+  return err;
+}
+
+int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) { return 0; }
+
+int ha_rapid::index_next(uchar *buf) {
+  ut_ad(m_start_of_scan && inited == handler::INDEX);
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+
+  return HA_ERR_END_OF_FILE;
+}
+
+int ha_rapid::index_next_same(uchar *buf, const uchar *key, uint keylen) {
+  ut_ad(m_start_of_scan && inited == handler::INDEX);
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+
+  return HA_ERR_END_OF_FILE;
+}
+
+int ha_rapid::index_prev(uchar *buf) { return 0; }
+
+int ha_rapid::index_first(uchar *buf) { return 0; }
+
+int ha_rapid::index_last(uchar *buf) { return 0; }
 
 }  // namespace ShannonBase
 

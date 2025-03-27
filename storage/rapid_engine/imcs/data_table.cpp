@@ -147,13 +147,9 @@ start:
         goto start;
       }
     } else {
-      data_ptr =
-          current_chunk_ptr->base() + offset_in_chunk * (normalized_length + current_chunk_ptr->header()->m_key_len);
+      data_ptr = current_chunk_ptr->base() + offset_in_chunk * normalized_length;
       if ((uintptr_t(data_ptr) & (CACHE_LINE_SIZE - 1)) == 0)
         SHANNON_PREFETCH_R(data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
-
-      // advances to the payload(the real data addr).
-      data_ptr += current_chunk_ptr->header()->m_key_len;
     }
 
     auto source_fld = *(m_data_source->field + cu->header()->m_source_fld->field_index());

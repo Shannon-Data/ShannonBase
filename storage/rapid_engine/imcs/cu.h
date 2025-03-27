@@ -36,6 +36,7 @@
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/chunk.h"
+#include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_object.h"
 class Field;
@@ -44,7 +45,6 @@ class ShannonBaseContext;
 class Rapid_load_context;
 
 namespace Imcs {
-class Index;
 class Dictionary;
 class Chunk;
 class Cu : public MemoryObject {

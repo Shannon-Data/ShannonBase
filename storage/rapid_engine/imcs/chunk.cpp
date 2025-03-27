@@ -92,7 +92,7 @@ Chunk::Chunk(const Field *field) {
     return;  // allocated faile.
   }
 
-  size_t chunk_size = SHANNON_ROWS_IN_CHUNK * (m_header->m_key_len + m_header->m_normalized_pack_length);
+  size_t chunk_size = SHANNON_ROWS_IN_CHUNK * m_header->m_normalized_pack_length;
   ut_ad(field && chunk_size < ShannonBase::rpd_mem_sz_max);
 
   /**m_data_base，here, we use the same psi key with buffer pool which used in
@@ -321,25 +321,18 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
 
   auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
   auto diff = m_data.load(std::memory_order_relaxed) - m_base.load(std::memory_order_relaxed);
-  ut_a((diff % (context->m_extra_info.m_key_len + normal_len)) == 0);
+  ut_a((diff % normal_len) == 0);
 
   if (unlikely((m_data.load(std::memory_order_relaxed) + normal_len) >
                m_end.load(std::memory_order_relaxed))) {  // this chunk is full.
-    ut_a(diff / (m_header->m_normalized_pack_length + m_header->m_key_len) == SHANNON_ROWS_IN_CHUNK);
+    ut_a(diff / m_header->m_normalized_pack_length == SHANNON_ROWS_IN_CHUNK);
     return nullptr;
   }
 
-  row_id_t rowid = diff / (m_header->m_normalized_pack_length + m_header->m_key_len);
+  row_id_t rowid = diff / m_header->m_normalized_pack_length;
   ut_a(rowid < SHANNON_ROWS_IN_CHUNK);
 
   uchar *ret{m_data.load(std::memory_order_relaxed)};
-  {  // start to write keyinfo.
-    std::scoped_lock lk(m_header_mutex);
-    ret = static_cast<uchar *>(
-        std::memcpy(m_data.load(), context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len));
-    m_data.fetch_add(context->m_extra_info.m_key_len);
-  }
-
   if (len == UNIV_SQL_NULL) {      // to write a null value.
     if (!m_header->m_null_mask) {  // allocate a null bitmap.
       m_header->m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(SHANNON_ROWS_IN_CHUNK));
@@ -367,8 +360,8 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
   update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
 
 #ifndef NDEBUG
-  uint64 data_rows = static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load() - m_base.load()) /
-                                         (context->m_extra_info.m_key_len + m_header->m_normalized_pack_length));
+  uint64 data_rows =
+      static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load() - m_base.load()) / m_header->m_normalized_pack_length);
   ut_a(data_rows <= SHANNON_ROWS_IN_CHUNK);
 #endif
   return ret;
@@ -380,8 +373,8 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t rowid, uchar *n
 
   std::atomic<uchar *> where_ptr{m_base.load(std::memory_order_relaxed)};
   auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
-  where_ptr.fetch_add(rowid * (m_header->m_key_len + normal_len), std::memory_order_relaxed);
-  where_ptr.fetch_add(m_header->m_key_len, std::memory_order_relaxed);
+  where_ptr.fetch_add(rowid * normal_len, std::memory_order_relaxed);
+
   if (context->m_extra_info.m_trxid) {
     build_version(rowid, context->m_extra_info.m_trxid, where_ptr, normal_len, OPER_TYPE::OPER_UPDATE);
   }
@@ -411,8 +404,7 @@ uchar *Chunk::remove(const Rapid_load_context *context, row_id_t rowid) {
   Utils::Util::bit_array_set(m_header->m_del_mask.get(), rowid);
 
   del_from = m_base.load(std::memory_order_relaxed);
-  del_from += rowid * (m_header->m_key_len + m_header->m_normalized_pack_length);
-  del_from += m_header->m_key_len;
+  del_from += rowid * m_header->m_normalized_pack_length;
   ut_a(del_from <= m_data.load(std::memory_order_relaxed));
 
   // get the old data and insert smu ptr link.
@@ -429,10 +421,11 @@ void Chunk::truncate() {
   if (m_base) {
     ut::aligned_free(m_base);
     m_base = m_data = nullptr;
-    auto rec_length = m_header->m_normalized_pack_length + m_header->m_key_len;
+    auto rec_length = m_header->m_normalized_pack_length;
     rapid_allocated_mem_size -= (SHANNON_ROWS_IN_CHUNK * rec_length);
   }
 
+  // todo: remove all index record from index tree.
   reset_meta_info();
 }
 

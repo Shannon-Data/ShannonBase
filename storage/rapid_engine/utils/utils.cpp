@@ -159,21 +159,23 @@ bool Util::standard_cost_threshold_classifier(THD *thd) {
   assert(stmt_context);
 
   ShannonBase::ML::Query_arbitrator::WHERE2GO where{ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_PRIMARY};
-  std::ostringstream oss;
-  std::string text;
+  std::string text, reason, threshold_str(std::to_string(thd->variables.secondary_engine_cost_threshold));
+
   if (stmt_context->get_primary_cost() > thd->variables.secondary_engine_cost_threshold) {
-    oss << "The estimated query cost does exceed secondary_engine_cost_threshold, goes to secondary engine.";
-    oss << "cost: " << thd->m_current_query_cost << ", threshold: " << thd->variables.secondary_engine_cost_threshold;
+    reason = "The estimated query cost does exceed secondary_engine_cost_threshold, goes to secondary engine.";
+    reason.append("cost: ").append(std::to_string(thd->m_current_query_cost)).append(", threshold: ");
+    reason.append(threshold_str);
     text = "secondary_engine_used";
     where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY;
   } else {
-    oss << "The estimated query cost does not exceed secondary_engine_cost_threshold, goes to primary engine.";
-    oss << "cost: " << thd->m_current_query_cost << ", threshold: " << thd->variables.secondary_engine_cost_threshold;
+    reason = "The estimated query cost does not exceed secondary_engine_cost_threshold, goes to primary engine.";
+    reason.append("cost: ").append(std::to_string(thd->m_current_query_cost)).append(", threshold: ");
+    reason.append(threshold_str);
     text = "secondary_engine_not_used";
     where = ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_PRIMARY;
   }
 
-  write_trace_reason(thd, text.c_str(), oss.str().c_str());
+  write_trace_reason(thd, text.c_str(), reason.c_str());
 
   return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) ? true : false;
 }
@@ -236,10 +238,8 @@ bool Util::check_dict_encoding_projection(THD *thd) {
   for (; table_ref; table_ref = table_ref->next_leaf) {
     if (table_ref->is_view_or_derived()) continue;
 
-    key_part += table_ref->db;
-    key_part += ":";
-    key_part += table_ref->table_name;
-    key_part += ":";
+    key_part = table_ref->db;
+    key_part.append(":").append(table_ref->table_name).append(":");
 
     for (auto j = 0u; j < table_ref->table->s->fields; j++) {
       auto field_ptr = *(table_ref->table->field + j);

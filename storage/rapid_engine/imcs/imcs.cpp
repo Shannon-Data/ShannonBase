@@ -88,6 +88,9 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
     key.clear();
   }
 
+  // create an index instance.
+  m_indexes.emplace(keypart, std::make_unique<Index::Index<uchar, row_id_t>>());
+
   /* in secondary load phase, the table not loaded into imcs. therefore, it can be seen
      by any transactions. If this table has been loaded into imcs. A new data such as
      insert/update/delete will associated with a SMU items to trace its visibility. Therefore
@@ -122,6 +125,13 @@ Cu *Imcs::get_cu(std::string_view key) {
   return m_cus[key_str].get();
 }
 
+Index::Index<uchar, row_id_t> *Imcs::get_index(std::string_view key) {
+  std::string key_str(key);
+
+  if (m_indexes.find(key_str) == m_indexes.end()) return nullptr;
+  return m_indexes[key_str].get();
+}
+
 int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   auto m_thd = context->m_thd;
 
@@ -134,6 +144,7 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   int tmp{HA_ERR_GENERIC};
   if (create_table_memo(context, source)) return HA_ERR_GENERIC;
 
+  m_thd->set_sent_row_count(0);
   std::string key_part, key;
   key_part.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
   while ((tmp = source->file->ha_rnd_next(source->record[0])) != HA_ERR_END_OF_FILE) {
@@ -160,6 +171,7 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
      * Field_varstring::length_bytes) data. the here we dont use var_xxx to get data, rather getting
      * directly, due to we dont care what real it is. ref to: field.cc:6703
      */
+    row_id_t rowid{0};
     for (auto index = 0u; index < source->s->fields; index++) {
       auto fld = *(source->field + index);
       if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -195,10 +207,16 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
         source->file->ha_rnd_end();
         return HA_ERR_GENERIC;
       }
+      rowid = m_cus[key]->header()->m_prows.load(std::memory_order_relaxed) - 1;
       key.clear();
     }
 
     m_thd->inc_sent_row_count(1);
+
+    // insert the index info.
+    m_indexes[key_part]->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
+                                sizeof(rowid));
+
     if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
   }
   // end of load the data from innodb to imcs.
