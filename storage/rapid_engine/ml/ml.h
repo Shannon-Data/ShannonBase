@@ -44,7 +44,7 @@ class Query_arbitrator {
 
   void set_model_path(const std::string &model_path) { m_model_path = model_path; }
   // load the trainned model, which was based on query information-`JOIN`.
-  virtual void load_model();
+  virtual void load_model(const std::string &model_path);
   virtual WHERE2GO predict(JOIN *);
 
  private:

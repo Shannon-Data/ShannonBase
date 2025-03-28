@@ -1,13 +1,9 @@
 ![image](./Docs/shannon-logo.png)
 
-<<<<<<< Updated upstream
-ShannonBase is a HTAP database provided by Shannon Data AI, which is an infra for big data & AI. 
-=======
 ![nightly](https://github.com/Shannon-Data/ShannonBase/actions/workflows/nightly.yaml/badge.svg)
 ![weekly](https://github.com/Shannon-Data/ShannonBase/actions/workflows/weekly.yaml/badge.svg)
 
 ShannonBase: The Next-Gen Database for AI—an infrastructure designed for big data and AI. As the MySQL of the AI era, ShannonBase extends MySQL with native embedding support, machine learning capabilities, a JavaScript engine, and a columnar storage engine. These enhancements empower ShannonBase to serve as a powerful data processing and Generative AI infrastructure.
->>>>>>> Stashed changes
 
 Firstly, ShannonBase incorporates a columnar store, IMCS (In-Memory Column Store), named Rapid, to transform it into a MySQL HTAP (Hybrid Transactional/Analytical Processing) database. Transactional and analytical workloads are intelligently offloaded to either InnoDB or Rapid using a combination of cost-based and ML-based algorithms. Additionally, version linking is introduced in IMCS to support MVCC (Multi-Version Concurrency Control). Changes in InnoDB are automatically and synchronously propagated to Rapid by applying Redo logs.
 
