@@ -27,9 +27,11 @@
 #ifndef __SHANNONBASE_ART_ITERATOR_H__
 #define __SHANNONBASE_ART_ITERATOR_H__
 
+#include <cstring>
 #include <memory>
 #include <stack>
 #include <vector>
+
 #include "storage/rapid_engine/imcs/index/art/art.h"
 
 namespace ShannonBase {
@@ -39,8 +41,9 @@ namespace Index {
 template <typename key_t, typename value_t>
 class ARTIterator {
  public:
-  ARTIterator(ART::Art_tree *tree)
-      : m_tree(tree),
+  ARTIterator(ART *art)
+      : m_art(art),
+        m_tree(art->tree()),
         m_startkey(nullptr),
         m_startkey_len(0),
         m_start_inclusive(true),
@@ -50,7 +53,7 @@ class ARTIterator {
         m_current_leaf(nullptr) {}
 
   // initialize the scan.
-  void init_scan(const void *startkey, int startkey_len, bool start_inclusive, const void *endkey, int endkey_len,
+  void init_scan(const key_t *startkey, int startkey_len, bool start_inclusive, const key_t *endkey, int endkey_len,
                  bool end_inclusive) {
     m_startkey = startkey;
     m_startkey_len = startkey_len;
@@ -64,12 +67,11 @@ class ARTIterator {
     if (!m_tree) return;
 
     // Find the first matched node.
-    m_tree->ART_iter(
-        m_tree,
-        [](void *data, const void *key, uint32_t key_len, void *value, uint32_t value_len) {
+    m_art->ART_iter(
+        [](void *data, void *leaf, const key_t *key, uint32 key_len, void *value, uint32 value_len) {
           auto *iter = static_cast<ARTIterator *>(data);
           if (iter->is_within_range(key, key_len)) {
-            iter->m_current_leaf = static_cast<ART::Art_leaf *>(value);
+            iter->m_current_leaf = static_cast<ART::Art_leaf *>(leaf);
             return 1;  // found.
           }
           return 0;  // not found
@@ -78,21 +80,20 @@ class ARTIterator {
   }
 
   // get the next key-value pair.
-  bool next(const void *&key_out, uint32_t &key_len_out, void *&value_out) {
+  bool next(const key_t *key_out [[maybe_unused]], uint32_t *key_len_out [[maybe_unused]], value_t *value_out) {
     if (!m_current_leaf) return false;  // no more node, then end_of_file.
 
     key_out = m_current_leaf->key;
-    key_len_out = m_current_leaf->key_len;
-    value_out = m_current_leaf->value;
+    *key_len_out = m_current_leaf->key_len;
+    *value_out = *(value_t *)m_current_leaf->value;
 
     // go ahead to the next matched node.
     m_current_leaf = nullptr;
-    m_tree->ART_iter(
-        m_tree,
-        [](void *data, const void *key, uint32_t key_len, void *value, uint32_t value_len) {
+    m_art->ART_iter(
+        [](void *data, void *leaf, const key_t *key, uint32 key_len, void *value, uint32 value_len) {
           auto *iter = static_cast<ARTIterator *>(data);
           if (iter->is_within_range(key, key_len)) {
-            iter->m_current_leaf = static_cast<ART::Art_leaf *>(value);
+            iter->m_current_leaf = static_cast<ART::Art_leaf *>(leaf);
             return 1;  // found.
           }
           return 0;  // not found.
@@ -103,6 +104,7 @@ class ARTIterator {
   }
 
  private:
+  ART *m_art;
   ART::Art_tree *m_tree;
   const key_t *m_startkey;
   int m_startkey_len;

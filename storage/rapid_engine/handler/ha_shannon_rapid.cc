@@ -194,12 +194,10 @@ handler::Table_flags ha_rapid::table_flags() const {
   /** Orignal:Secondary engines do not support index access. Indexes are only
    *  used for cost estimates. But, here, we support index too.*/
 
-  // return HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE |
-  //               HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
-
-  // TODO:[remove when index supported] Secondary engines do not support index
-  // access. Indexes are only used for cost estimates.
-  return HA_NO_INDEX_ACCESS | HA_STATS_RECORDS_IS_EXACT | HA_COUNT_ROWS_INSTANT;
+  // return HA_NO_INDEX_ACCESS | HA_STATS_RECORDS_IS_EXACT | HA_COUNT_ROWS_INSTANT;
+  ulong flags =
+      HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE | HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
+  return ~HA_NO_INDEX_ACCESS || flags;
 }
 
 /** Returns the table type (storage engine name).
@@ -390,7 +388,6 @@ int ha_rapid::rnd_next(uchar *buf) {
 
 int ha_rapid::index_init(uint keynr, bool sorted) {
   DBUG_TRACE;
-  if (m_data_table->init()) return 0;
 
   m_start_of_scan = true;
   active_index = keynr;
@@ -423,10 +420,41 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fun
   DBUG_TRACE;
   int err{HA_ERR_END_OF_FILE};
   ut_ad(m_start_of_scan && inited == handler::INDEX);
-  if (pushed_idx_cond) {  // icp
-    // TODO: evaluate condition item, and do condtion eval in scan.
+
+  std::string keypart, errmsg;
+  keypart.append(table->s->db.str).append(":").append(table->s->table_name.str).append(":");
+  auto index = Imcs::Imcs::instance()->get_index(keypart);
+  if (index == nullptr) {
+    errmsg.append(table->s->db.str).append(".").append(table->s->table_name.str).append(" index not found");
+    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), errmsg.c_str());
+    return HA_ERR_KEY_NOT_FOUND;
   }
 
+  if (pushed_idx_cond) {  // icp
+    // TODO: evaluate condition item, and do condtion eval in scan.
+  } else {
+    switch (find_flag) {
+      case HA_READ_KEY_EXACT:
+        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
+        break;
+      case HA_READ_AFTER_KEY:
+        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
+        break;
+      case HA_READ_BEFORE_KEY:
+        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
+        break;
+      case HA_READ_KEY_OR_NEXT:
+        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
+        break;
+      case HA_READ_KEY_OR_PREV:
+        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
+        break;
+      default:
+        break;
+    }
+  }
+
+  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return err;
 }
 

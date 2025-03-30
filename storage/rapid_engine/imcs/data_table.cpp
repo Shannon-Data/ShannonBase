@@ -184,6 +184,31 @@ int DataTable::end() {
   return 0;
 }
 
+int DataTable::index_init(uint keynr, bool sorted) {
+  init();
+
+  auto imcs_instace = Imcs::Imcs::instance();
+  std::string keypart;
+  keypart.append(m_data_source->s->db.str).append(":").append(m_data_source->s->table_name.str).append(":");
+
+  auto index = imcs_instace->get_index(keypart);
+  if (index == nullptr) {
+    std::string err;
+    err.append(m_data_source->s->db.str)
+        .append(".")
+        .append(m_data_source->s->table_name.str)
+        .append(" index not found");
+    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
+    return HA_ERR_KEY_NOT_FOUND;
+  }
+
+  ut_a(index->initialized());
+  m_index_iter.reset(new Index::Art_Iterator(index->impl()));
+  m_index_iter->init_scan(nullptr, 0, true, nullptr, 0, true);
+
+  return 0;
+}
+
 row_id_t DataTable::find(uchar *buf) {
   row_id_t rowid{0u};
   return rowid;

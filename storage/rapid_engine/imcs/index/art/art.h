@@ -54,8 +54,8 @@ enum NodeType { UNKNOWN = 0, NODE4 = 1, NODE16, NODE48, NODE256 };
 class ART {
  public:
   static constexpr uint MAX_PREFIX_LEN = 10;
-  using ART_Func =
-      std::function<int(void *data, const unsigned char *key, uint32 key_len, void *value, uint32 value_len)>;
+  using ART_Func = std::function<int(void *data, void *leaf, const unsigned char *key, uint32 key_len, void *value,
+                                     uint32 value_len)>;
   typedef struct {
     uint32 partial_len{0};
     uint8 type{NodeType::UNKNOWN};
@@ -164,6 +164,7 @@ class ART {
   }
 
   inline bool Art_initialized() { return m_inited; }
+  inline Art_tree *tree() const { return m_tree; }
   inline Art_node *root() const { return (m_inited) ? m_tree->root : nullptr; }
 
   void *ART_insert(const unsigned char *key, int key_len, void *value, uint value_len);
@@ -175,7 +176,7 @@ class ART {
   Art_leaf *ART_maximum();
 
   int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, void *data, int data_len);
-  int ART_iter(ART_Func &cb, void *data);
+  int ART_iter(ART_Func cb, void *data);
 
  private:
   Art_tree *m_tree{nullptr};
