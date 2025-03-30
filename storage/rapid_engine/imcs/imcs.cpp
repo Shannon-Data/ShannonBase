@@ -34,6 +34,7 @@
 
 #include "include/decimal.h"
 #include "include/my_dbug.h"  //DBUG_EXECUTE_IF
+#include "storage/innobase/include/data0type.h"
 #include "storage/innobase/include/mach0data.h"
 #include "storage/innobase/include/univ.i"    //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
@@ -61,25 +62,10 @@ int Imcs::deinitialize() {
 
 int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
-  std::string keypart, key;
+  std::string keypart;
   keypart.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
-
-  if (source->s->is_missing_primary_key()) {
-    std::string key;
-    key.append(keypart).append(SHANNON_DB_ROW_ID);
-    m_source_keys.emplace(keypart, std::vector<std::string>{key});
-  } else {
-    std::vector<std::string> key_parts_names;
-    KEY *key_info = source->key_info + source->s->primary_key;
-    for (uint i = 0; i < key_info->user_defined_key_parts; i++) {
-      std::string key;
-      key.append(keypart).append(key_info->key_part[i].field->field_name);
-      key_parts_names.push_back(key);
-    }
-    m_source_keys.emplace(keypart, key_parts_names);
-  }
-
   for (auto index = 0u; index < source->s->fields; index++) {
+    std::string key;
     auto fld = *(source->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
@@ -88,9 +74,32 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
     key.clear();
   }
 
-  // create an index instance.
-  m_indexes.emplace(keypart, std::make_unique<Index::Index<uchar, row_id_t>>());
+  if (source->s->is_missing_primary_key()) {
+    std::string keykeypart, keyname;
+    keykeypart.append(keypart).append(ShannonBase::SHANNON_PRIMARY_KEY_NAME).append(":");
+    keyname.append(keykeypart).append(SHANNON_DB_ROW_ID);
 
+    std::vector<std::string> key_parts_names;
+    key_parts_names.push_back(keyname);
+
+    m_source_keys.emplace(keykeypart, std::make_pair(SHANNON_DATA_DB_ROW_ID_LEN, key_parts_names));
+    m_indexes.emplace(keykeypart, std::make_unique<Index::Index<uchar, row_id_t>>(keyname));
+  } else {
+    ut_a(source->s->keys);
+    for (auto ind = 0u; ind < source->s->keys; ind++) {
+      auto key_info = source->key_info + ind;
+      std::vector<std::string> key_parts_names;
+      std::string keykeypart(keypart);
+      keykeypart.append(key_info->name).append(":");
+      for (uint i = 0u; i < key_info->user_defined_key_parts /**actual_key_parts*/; i++) {
+        std::string key;
+        key.append(keykeypart).append(key_info->key_part[i].field->field_name);
+        key_parts_names.push_back(key);
+      }
+      m_source_keys.emplace(keykeypart, std::make_pair(key_info->key_length, key_parts_names));
+      m_indexes.emplace(keykeypart, std::make_unique<Index::Index<uchar, row_id_t>>(keykeypart));
+    }
+  }
   /* in secondary load phase, the table not loaded into imcs. therefore, it can be seen
      by any transactions. If this table has been loaded into imcs. A new data such as
      insert/update/delete will associated with a SMU items to trace its visibility. Therefore
@@ -132,6 +141,136 @@ Index::Index<uchar, row_id_t> *Imcs::get_index(std::string_view key) {
   return m_indexes[key_str].get();
 }
 
+int Imcs::build_index_impl(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid) {
+  // this is come from ha_innodb.cc postion(), when postion() changed, the part should be changed respondingly.
+  // why we dont not change the impl of postion() directly? because the postion() is impled in innodb engine.
+  // we want to decouple with innodb engine.
+  auto keypart = std::string(source->s->db.str);
+  keypart.append(":").append(source->s->table_name.str).append(":");
+
+  if (source->s->is_missing_primary_key()) {
+    /* No primary key was defined for the table and we
+    generated the clustered index from row id: the
+    row reference will be the row id, not any key value
+    that MySQL knows of */
+    ut_a(source->file->ref_length == ShannonBase::SHANNON_DATA_DB_ROW_ID_LEN);
+    ut_a(key == nullptr);
+
+    keypart.append(ShannonBase::SHANNON_PRIMARY_KEY_NAME).append(":");
+    ut_a(const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len == source->file->ref_length);
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = source->file->ref_length;
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff =
+        std::make_unique<uchar[]>(source->file->ref_length);
+    memcpy(context->m_extra_info.m_key_buff.get(), source->file->ref, source->file->ref_length);
+  } else {
+    keypart.append(key->name).append(":");
+    /* Copy primary key as the row reference */
+    auto from_record = source->record[0];
+
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = key->key_length;
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
+    auto to_key = context->m_extra_info.m_key_buff.get();
+
+    uint length{0u};
+    KEY_PART_INFO *key_part;
+    /* Copy the key parts */
+    auto key_length = key->key_length;
+    for (key_part = key->key_part; (int)key_length > 0; key_part++) {
+      if (key_part->null_bit) {
+        bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
+        *to_key++ = (key_is_null ? 1 : 0);
+        key_length--;
+      }
+
+      if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
+        key_length -= HA_KEY_BLOB_LENGTH;
+        length = std::min<uint>(key_length, key_part->length);
+        key_part->field->get_key_image(to_key, length, Field::itRAW);
+        to_key += HA_KEY_BLOB_LENGTH;
+      } else {
+        length = std::min<uint>(key_length, key_part->length);
+        Field *field = key_part->field;
+        const CHARSET_INFO *cs = field->charset();
+        if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
+            field->type() == MYSQL_TYPE_DECIMAL) {
+          ut_a(length == 8);
+          uchar encoding[8] = {0};
+          Utils::Util::encode_double_key(field->val_real(), encoding);
+          memcpy(to_key, encoding, length);
+        } else {
+          const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
+          if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
+        }
+      }
+      to_key += length;
+      key_length -= length;
+    }
+  }
+
+  m_indexes[keypart]->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
+                             sizeof(rowid));
+
+  return 0;
+}
+
+int Imcs::build_index(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid) {
+  auto ret = build_index_impl(context, source, key, rowid);
+  return ret;
+}
+
+int Imcs::build_indexes_from_log(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
+                                 row_id_t rowid) {
+  auto keypart = std::string(context->m_schema_name);
+  keypart.append(":").append(context->m_table_name).append(":");
+
+  auto macthed_keys = source_key(keypart);
+  ut_a(macthed_keys.size() > 0);
+
+  std::unique_ptr<uchar[]> key_buff{nullptr};
+
+  for (auto &key : macthed_keys) {
+    auto key_name = key.first;
+    auto key_info = key.second;
+    key_buff.reset(new uchar[key_info.first]);
+    memset(key_buff.get(), 0x0, key_info.first);
+    uint key_offset{0u};
+    for (auto &keykey : key_info.second) {
+      auto fldfld = keykey.substr(0, keykey.find(':', keykey.find(':') + 1)) +
+                    keykey.substr(keykey.find(':', keykey.find(':', keykey.find(':') + 1) + 1));
+
+      ut_a(field_values.find(fldfld) != field_values.end());
+      if (field_values[fldfld].has_nullbit) {
+        *key_buff.get() = (field_values[fldfld].is_null) ? 1 : 0;
+        key_offset++;
+      }
+      if (field_values[fldfld].mtype == DATA_BLOB || field_values[fldfld].mtype == DATA_VARCHAR ||
+          field_values[fldfld].mtype == DATA_VARMYSQL || field_values[fldfld].mtype == DATA_MYSQL) {
+      } else {
+        auto cs = Imcs::Imcs::instance()->get_cu(fldfld)->header()->m_charset;
+        if (field_values[fldfld].mtype == DATA_DOUBLE || field_values[fldfld].mtype == DATA_FLOAT ||
+            field_values[fldfld].mtype == DATA_DECIMAL) {
+          ut_a(field_values[fldfld].length == 8);
+          uchar encoding[8] = {0};
+          auto val = *(double *)field_values[fldfld].data.get();
+          Utils::Util::encode_double_key(val, encoding);
+          std::memcpy(key_buff.get() + key_offset, encoding, field_values[fldfld].length);
+          key_offset += field_values[fldfld].length;
+        } else {
+          std::memcpy(key_buff.get() + key_offset, field_values[fldfld].data.get(), field_values[fldfld].length);
+          key_offset += field_values[fldfld].length;
+          if (key_offset < key_info.first)
+            cs->cset->fill(cs, (char *)key_buff.get() + key_offset, key_info.first - key_offset, ' ');
+        }
+      }
+    }
+
+    ut_a(m_indexes.find(key_name) != m_indexes.end());
+    m_indexes[key_name].get()->insert(key_buff.get(), key_info.first, &rowid, sizeof(row_id_t));
+  }
+
+  return 0;
+}
+
 int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   auto m_thd = context->m_thd;
 
@@ -160,11 +299,8 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
     });
 
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
-    source->file->position(source->record[0]);
     auto load_context = const_cast<Rapid_load_context *>(context);
     load_context->m_extra_info.m_key_len = source->file->ref_length;
-    load_context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(source->file->ref_length);
-    memcpy(load_context->m_extra_info.m_key_buff.get(), source->file->ref, source->file->ref_length);
 
     /**
      * for VARCHAR type Data in field->ptr is stored as: 1 or 2 bytes length-prefix-header  (from
@@ -213,9 +349,14 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
 
     m_thd->inc_sent_row_count(1);
 
-    // insert the index info.
-    m_indexes[key_part]->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
-                                sizeof(rowid));
+    if (source->s->is_missing_primary_key()) {
+      if (build_index(context, source, nullptr, rowid)) return HA_ERR_GENERIC;
+    } else {
+      for (auto index = 0u; index < source->s->keys; index++) {
+        auto key_info = source->key_info + index;
+        if (build_index(context, source, key_info, rowid)) return HA_ERR_GENERIC;
+      }
+    }
 
     if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
   }
@@ -245,9 +386,19 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
     }
   }
 
+  found = false;
   for (auto it = m_source_keys.begin(); it != m_source_keys.end();) {
     if (it->first.find(keypart) != std::string::npos) {
       it = m_source_keys.erase(it);
+      found = true;
+    } else
+      ++it;
+  }
+
+  found = false;
+  for (auto it = m_indexes.begin(); it != m_indexes.end();) {
+    if (it->first.find(keypart) != std::string::npos) {
+      it = m_indexes.erase(it);
       found = true;
     } else
       ++it;

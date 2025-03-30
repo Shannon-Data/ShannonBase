@@ -82,11 +82,9 @@ void OptimzieAccessPath(AccessPath *path, JOIN *join) {
     // Index access is disabled in ha_rapid::table_flags(), so we should see
     // none of these access types.
     case AccessPath::INDEX_SCAN:
-    case AccessPath::REF:
     case AccessPath::REF_OR_NULL:
     case AccessPath::EQ_REF:
     case AccessPath::PUSHED_JOIN_REF:
-    case AccessPath::INDEX_RANGE_SCAN:
     case AccessPath::INDEX_SKIP_SCAN:
     case AccessPath::GROUP_INDEX_SKIP_SCAN:
     case AccessPath::ROWID_INTERSECTION:

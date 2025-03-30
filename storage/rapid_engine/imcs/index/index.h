@@ -53,7 +53,18 @@ class Index {
     }
   }
 
-  explicit Index(IndexType) : m_inited(false), m_type(type) {
+  explicit Index(std::string name) : m_inited(false), m_name(name), m_type(IndexType::ART) {
+    if (m_type != IndexType::ART) return;
+
+    m_impl = std::make_unique<ART>();
+
+    if (!m_inited) {
+      m_impl->ART_tree_init();
+      m_inited = m_impl->Art_initialized();
+    }
+  }
+
+  explicit Index(std::string name, IndexType type) : m_inited(false), m_name(name), m_type(type) {
     if (m_type != IndexType::ART) return;
     m_impl = std::make_unique<ART>();
 
@@ -63,7 +74,7 @@ class Index {
     }
   }
 
-  ~Index() {
+  virtual ~Index() {
     if (!m_impl.get()) return;
     m_impl->ART_tree_destroy();
     m_impl.reset(nullptr);
@@ -73,8 +84,13 @@ class Index {
   Index &operator=(Index &&) = delete;
   inline bool initialized() { return m_inited; }
 
+  inline void set_name(std::string &name) { m_name = name; }
+
   // the root entry.
   inline ART::Art_node *root() const { return m_impl->root(); }
+
+  // gets impl
+  inline ART *impl() const { return m_impl.get(); }
 
   int insert(key_t *key, size_t key_len, value_t *value, size_t value_len) {
     if (!initialized()) return 1;
@@ -125,6 +141,7 @@ class Index {
 
  private:
   bool m_inited{false};
+  std::string m_name;
   IndexType m_type{IndexType::ART};
   std::unique_ptr<ART> m_impl{nullptr};
   bool m_start_scan{false};

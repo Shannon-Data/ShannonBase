@@ -96,6 +96,7 @@ int DataTable::init() {
 
     m_context = std::make_unique<Rapid_load_context>();
     m_context->m_thd = current_thd;
+    m_context->m_extra_info.m_keynr = m_active_index;
 
     m_context->m_trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
     m_context->m_trx->set_read_only(true);
@@ -182,6 +183,102 @@ int DataTable::end() {
   m_rowid.store(0);
   m_initialized.store(false);
   return 0;
+}
+
+int DataTable::index_init(uint keynr, bool sorted) {
+  init();
+  m_active_index = keynr;
+
+  auto imcs_instace = Imcs::Imcs::instance();
+  std::string keypart;
+  keypart.append(m_data_source->s->db.str).append(":").append(m_data_source->s->table_name.str).append(":");
+
+  auto keykeypart = keypart;
+  keykeypart.append(m_data_source->s->key_info[keynr].name).append(":");
+
+  auto index = imcs_instace->get_index(keykeypart);
+  if (index == nullptr) {
+    std::string err;
+    err.append(m_data_source->s->db.str)
+        .append(".")
+        .append(m_data_source->s->table_name.str)
+        .append(" index not found");
+    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
+    return HA_ERR_KEY_NOT_FOUND;
+  }
+
+  ut_a(index->initialized());
+  m_index_iter.reset(new Index::Art_Iterator(index->impl()));
+
+  return 0;
+}
+
+int DataTable::index_end() {
+  m_active_index = MAX_KEY;
+  return end();
+}
+
+// index read.
+int DataTable::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) {
+  const uchar *keykey{nullptr};
+  uint32_t keykey_len{0};
+  row_id_t value;
+  int err{HA_ERR_KEY_NOT_FOUND};
+
+  ut_a(m_active_index != MAX_KEY);
+  auto key_info = m_data_source->s->key_info + m_active_index;
+  auto offset{0u};
+  for (auto part = 0u; part < actual_key_parts(key_info); part++) {
+    auto key_part_info = key_info->key_part + part;
+    if (key_part_info->field->type() >= MYSQL_TYPE_DOUBLE) {
+      offset += (key_part_info->null_bit) ? 1 : 0;
+      auto field = *(m_data_source->field + key_part_info->fieldnr - 1);
+      auto val = field->val_real();
+      uchar encoding[8] = {0};
+      Utils::Util::encode_double_key(val, encoding);
+      std::memcpy((void *)(key + offset), encoding, key_part_info->length);
+      offset += key_part_info->length;
+    }
+  }
+
+  switch (find_flag) {
+    case HA_READ_KEY_EXACT: {
+      if (!m_index_iter->initialized()) m_index_iter->init_scan(key, key_len, true, key, key_len, true);
+    } break;
+    case HA_READ_KEY_OR_NEXT:
+      if (!m_index_iter->initialized()) m_index_iter->init_scan(key, key_len, true, nullptr, 0, false);
+      break;
+    case HA_READ_KEY_OR_PREV:
+      m_index_iter->init_scan(key, key_len, true, nullptr, 0, true);
+      break;
+    case HA_READ_AFTER_KEY:
+      if (!m_index_iter->initialized()) m_index_iter->init_scan(key, key_len, false, nullptr, 0, false);
+      break;
+    default:
+      return HA_ERR_WRONG_COMMAND;
+  }
+
+  if (m_index_iter->next(keykey, &keykey_len, (void *)&value)) {
+    m_rowid.store(value);
+    next(buf);
+    err = 0;
+  }
+  return err;
+}
+
+int DataTable::index_next(uchar *buf) {
+  const uchar *keykey{nullptr};
+  uint32_t keykey_len{0};
+  row_id_t value;
+  int err{HA_ERR_KEY_NOT_FOUND};
+
+  if (m_index_iter->next(keykey, &keykey_len, (void *)&value)) {
+    m_rowid.store(value);
+    next(buf);
+    err = 0;
+  }
+
+  return err;
 }
 
 row_id_t DataTable::find(uchar *buf) {
