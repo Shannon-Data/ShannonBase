@@ -2510,7 +2510,7 @@ void row_sel_field_store_in_mysql_format_func(
   ulint prtype {DATA_ROW_ID};
   prtype = (templ->type != DATA_SYS && field) ? field->col->prtype : DATA_TRX_ID;
 
-  bool clust_templ_for_sec = (sec_field != ULINT_UNDEFINED);
+  bool clust_templ_for_sec [[maybe_unused]] = (sec_field != ULINT_UNDEFINED);
 //#endif /* UNIV_DEBUG */
 
   if (templ->is_multi_val) {

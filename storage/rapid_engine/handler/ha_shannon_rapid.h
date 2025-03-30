@@ -116,6 +116,10 @@ class ha_rapid : public handler {
 
   int index_last(uchar *buf) override;
 
+  int read_range_first(const key_range *start_key, const key_range *end_key, bool eq_range_arg, bool sorted) override;
+
+  int read_range_next() override;
+
   ha_rows records_in_range(unsigned int index, key_range *min_key, key_range *max_key) override;
 
   void position(const unsigned char *) override {}

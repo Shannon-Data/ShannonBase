@@ -29,6 +29,7 @@
 #include <atomic>
 #include <vector>
 
+#include "storage/rapid_engine/imcs/index/iterator.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/trx/readview.h"
 
@@ -39,6 +40,7 @@ class Rapid_load_context;
 namespace Imcs {
 class Imcs;
 class Cu;
+
 class DataTable : public MemoryObject {
  public:
   DataTable(TABLE *source_table);
@@ -62,6 +64,18 @@ class DataTable : public MemoryObject {
   // get the data pos.
   row_id_t find(uchar *buf);
 
+  // for index scan initialization.
+  int index_init(uint keynr, bool sorted);
+
+  // for index scan end.
+  int index_end();
+
+  // index read.
+  int index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag);
+
+  // index read next
+  int index_next(uchar *buf);
+
  private:
   std::atomic<bool> m_initialized{false};
 
@@ -76,6 +90,15 @@ class DataTable : public MemoryObject {
 
   // context
   std::unique_ptr<Rapid_load_context> m_context{nullptr};
+
+  // index iterator.
+  std::unique_ptr<Index::Iterator> m_index_iter{nullptr};
+
+  // active index no.
+  int8_t m_active_index{MAX_KEY};
+
+  // key
+  std::unique_ptr<uchar[]> m_key{nullptr};
 };
 
 }  // namespace Imcs
