@@ -647,7 +647,7 @@ void Secondary_engine_statement_context::cache_primary_plan_info(THD* thd, JOIN*
   m_query_type =
     (thd->lex->unit->first_query_block()->olap == ROLLUP_TYPE) ? QUERY_TYPE::OLAP : QUERY_TYPE::OLTP;
 
-  auto root_access_path = thd->lex->unit->root_access_path();
+  auto root_access_path [[maybe_unused]] = thd->lex->unit->root_access_path();
   assert (root_access_path);
   m_are_all_ts_index_ref = (m_count_ref_index_ts == m_count_all_base_tables) ? true : false;
 }

@@ -137,8 +137,8 @@ Chunk::~Chunk() {
 
 void Chunk::update_meta_info(OPER_TYPE type, uchar *data, uchar *old) {
   auto dict = current_imcs_instance->get_cu(m_chunk_key)->header()->m_local_dict.get();
-  double data_val = data ? Utils::Util::get_field_value<double>(m_header->m_source_fld, data, dict) : 0;
-  double old_val = old ? Utils::Util::get_field_value<double>(m_header->m_source_fld, old, dict) : 0;
+  double data_val = data ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, data, dict) : 0;
+  double old_val = old ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, old, dict) : 0;
   /** TODO: due to the each data has its own version, and the data
    * here is committed. in fact, we support MV, which makes this problem
    * become complex than before. Due the expensive to calc median value, so the first
@@ -367,7 +367,78 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
   return ret;
 }
 
+uchar *Chunk::write_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len) {
+  ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
+  assert(context->m_extra_info.m_key_len == m_header->m_key_len);
+
+  check_data_type(len);
+
+  auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
+  if (rowid >= SHANNON_ROWS_IN_CHUNK) {  // this chunk is full.
+    return nullptr;
+  }
+
+  auto row_addr = m_base.load() + rowid * normal_len;
+  uchar *ret{row_addr};
+  if (len == UNIV_SQL_NULL) {      // to write a null value.
+    if (!m_header->m_null_mask) {  // allocate a null bitmap.
+      m_header->m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(SHANNON_ROWS_IN_CHUNK));
+      if (!m_header->m_null_mask) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header bit map allocation failed");
+        return nullptr;
+      }
+    }
+
+    /**Here, is trying to write a null value, first of all, we update the null bit
+     * mask, then writting a placehold to chunk, we dont care about what read data
+     * was written down.*/
+    std::scoped_lock lk(m_header_mutex);
+    Utils::Util::bit_array_set(m_header->m_null_mask.get(), m_header->m_prows);
+    m_data.fetch_add(normal_len);
+  } else {
+    std::scoped_lock data_guard(m_data_mutex);
+    ret = static_cast<uchar *>(std::memcpy(row_addr, data, normal_len));
+    m_data.fetch_add(normal_len);
+  }
+
+  if (context->m_extra_info.m_trxid) {  // means not from secondary_load operation.
+    build_version(rowid, context->m_extra_info.m_trxid, data, normal_len, OPER_TYPE::OPER_INSERT);
+  }
+  update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
+
+#ifndef NDEBUG
+  uint64 data_rows =
+      static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load() - m_base.load()) / m_header->m_normalized_pack_length);
+  ut_a(data_rows <= SHANNON_ROWS_IN_CHUNK);
+#endif
+  return ret;
+}
+
 uchar *Chunk::update(const Rapid_load_context *context, row_id_t rowid, uchar *new_data, size_t len) {
+  ut_a((!new_data && len == UNIV_SQL_NULL) || (new_data && len != UNIV_SQL_NULL));
+  check_data_type(len);
+
+  std::atomic<uchar *> where_ptr{m_base.load(std::memory_order_relaxed)};
+  auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
+  where_ptr.fetch_add(rowid * normal_len, std::memory_order_relaxed);
+
+  if (context->m_extra_info.m_trxid) {
+    build_version(rowid, context->m_extra_info.m_trxid, where_ptr, normal_len, OPER_TYPE::OPER_UPDATE);
+  }
+
+  if (len == UNIV_SQL_NULL) {
+    Utils::Util::bit_array_set(m_header->m_null_mask.get(), rowid);
+    // std::memcpy(where_ptr, static_cast<void *>(const_cast<uchar *>(SHANNON_BLANK_PLACEHOLDER)), len);
+  } else {
+    std::memcpy(where_ptr, new_data, normal_len);
+  }
+
+  update_meta_info(ShannonBase::OPER_TYPE::OPER_UPDATE, new_data, where_ptr);
+
+  return where_ptr;
+}
+
+uchar *Chunk::update_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *new_data, size_t len) {
   ut_a((!new_data && len == UNIV_SQL_NULL) || (new_data && len != UNIV_SQL_NULL));
   check_data_type(len);
 

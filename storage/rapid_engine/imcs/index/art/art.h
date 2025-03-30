@@ -49,13 +49,13 @@ namespace Index {
 #define SET_LEAF(x) ((void *)((uintptr_t)x | 1))
 #define LEAF_RAW(x) ((ART::Art_leaf *)((void *)((uintptr_t)x & ~1)))
 
-enum NodeType { UNKNOWN = 0, NODE4 = 1, NODE16, NODE48, NODE256 };
-
 class ART {
  public:
-  static constexpr uint MAX_PREFIX_LEN = 10;
-  using ART_Func =
-      std::function<int(void *data, const unsigned char *key, uint32 key_len, void *value, uint32 value_len)>;
+  enum NodeType { UNKNOWN = 0, NODE4 = 1, NODE16, NODE48, NODE256 };
+  static constexpr uint MAX_PREFIX_LEN = 512;
+  static constexpr uint initial_capacity = 16;
+  using ART_Func = std::function<int(void *data, void *leaf, const unsigned char *key, uint32 key_len, void *value,
+                                     uint32 value_len)>;
   typedef struct {
     uint32 partial_len{0};
     uint8 type{NodeType::UNKNOWN};
@@ -87,9 +87,11 @@ class ART {
   } Art_node256;
 
   typedef struct {
-    void *value;
-    uint32 value_len;
-    uint32 key_len;
+    void **values;
+    uint32_t value_len;
+    uint32_t vcount;
+    uint32_t capacity;
+    uint32_t key_len;
     unsigned char key[];
   } Art_leaf;
 
@@ -109,11 +111,12 @@ class ART {
   Art_node *Alloc_node(NodeType type);
   void Destroy_node(Art_node *n);
 
- private:
-  // 0 sucess.
-  Art_node **Find_child(Art_node *n, unsigned char c);
-  void Find_children(Art_node *n, unsigned char c, std::vector<Art_node *> &children);
   int Check_prefix(const Art_node *n, const unsigned char *key, int key_len, int depth);
+  Art_node **Find_child(Art_node *n, unsigned char c);
+
+ private:
+  void Find_children(Art_node *n, unsigned char c, std::vector<Art_node *> &children);
+
   int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
   int Leaf_partial_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
   inline uint64 art_size() { return m_tree->size; }
@@ -164,18 +167,20 @@ class ART {
   }
 
   inline bool Art_initialized() { return m_inited; }
+  inline Art_tree *tree() const { return m_tree; }
   inline Art_node *root() const { return (m_inited) ? m_tree->root : nullptr; }
 
   void *ART_insert(const unsigned char *key, int key_len, void *value, uint value_len);
   void *ART_insert_with_replace(const unsigned char *key, int key_len, void *value, uint value_len);
   void *ART_delete(const unsigned char *key, int key_len);
   void *ART_search(const unsigned char *key, int key_len);
+  std::vector<void *> ART_search_all(const unsigned char *key, int key_len);
 
   Art_leaf *ART_minimum();
   Art_leaf *ART_maximum();
 
   int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, void *data, int data_len);
-  int ART_iter(ART_Func &cb, void *data);
+  int ART_iter(ART_Func cb, void *data);
 
  private:
   Art_tree *m_tree{nullptr};
