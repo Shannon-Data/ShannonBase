@@ -76,5 +76,25 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
 
 using bit_array_t = BitArray_t;
 
+using mysql_field_t = struct mysql_field_info {
+  // whether field nullable or not.
+  bool has_nullbit{false};
+  // if is nullable, true is null, or none-null.
+  bool is_null{false};
+
+  // type in mysql type. DATA_MISSING = 0.
+  uint mtype{0u};
+
+  // mysql field lenght.
+  size_t mlength{0};
+
+  // physical length(innodb).
+  size_t plength{0};
+  // field data.
+  std::unique_ptr<uchar[]> data{nullptr};
+};
+
+using key_info_t = std::pair<uint, std::unique_ptr<uchar[]>>;
+
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RPD_OBJECT_H__

@@ -102,7 +102,7 @@ class Chunk : public MemoryObject {
     // physical row count. If you want to get logical rows, you should consider
     // MVCC to decide that whether this phyical row is visiable or not to this
     // transaction.
-    std::atomic<uint64> m_prows{0};
+    std::atomic<row_id_t> m_prows{0};
 
     // the length of key.
     size_t m_key_len{0};
@@ -147,12 +147,25 @@ class Chunk : public MemoryObject {
    * return the address where the data write to.*/
   uchar *write(const Rapid_load_context *context, uchar *data, size_t len);
 
+  /**start to write the data to chunk.
+   * [in] data, the data to write in.
+   * [in] len, the data len.
+   * return the address where the data write to.*/
+  uchar *write_from_log(const Rapid_load_context *context, row_id_t, uchar *data, size_t len);
+
   /**start to delete the data to chunk. just mark it down.
    * [in] rowid, where the data to update.
    * [in] new_dat, the data value to update.
    * [in] len, the data len.
    * return the address where the data update start from.*/
   uchar *update(const Rapid_load_context *context, row_id_t rowid, uchar *new_data, size_t len);
+
+  /**start to delete the data to chunk. just mark it down.
+   * [in] rowid, where the data to update.
+   * [in] new_dat, the data value to update.
+   * [in] len, the data len.
+   * return the address where the data update start from.*/
+  uchar *update_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *new_data, size_t len);
 
   // delete the data by rowid
   uchar *remove(const Rapid_load_context *context, row_id_t rowid);

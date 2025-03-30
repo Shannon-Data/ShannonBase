@@ -308,7 +308,7 @@ void *ART::ART_search(const unsigned char *key, int key_len) {
       n = (Art_node *)LEAF_RAW(n);
       // Check if the expanded path matches
       if (!Leaf_matches((Art_leaf *)n, key, key_len, depth)) {
-        return ((Art_leaf *)n)->value;
+        return ((Art_leaf *)n)->values[0];
       }
       return nullptr;
     }
@@ -327,6 +327,38 @@ void *ART::ART_search(const unsigned char *key, int key_len) {
     depth++;
   }
   return nullptr;
+}
+
+std::vector<void *> ART::ART_search_all(const unsigned char *key, int key_len) {
+  std::vector<void *> results;
+  Art_node **child;
+  Art_node *n = m_tree->root;
+  uint prefix_len, depth = 0;
+
+  while (n) {
+    if (IS_LEAF(n)) {
+      Art_leaf *l = LEAF_RAW(n);
+      if (!Leaf_matches(l, key, key_len, depth)) {
+        for (uint32_t i = 0; i < l->vcount; ++i) {
+          results.push_back(l->values[i]);
+        }
+      }
+      return results;
+    }
+
+    if (n->partial_len) {
+      prefix_len = Check_prefix(n, key, key_len, depth);
+      if (prefix_len != std::min(MAX_PREFIX_LEN, n->partial_len)) {
+        return results;
+      }
+      depth += n->partial_len;
+    }
+
+    child = Find_child(n, key[depth]);
+    n = child ? *child : nullptr;
+    depth++;
+  }
+  return results;
 }
 
 ART::Art_leaf *ART::Minimum(const Art_node *n) {
@@ -386,19 +418,15 @@ ART::Art_leaf *ART::ART_maximum() { return Maximum((Art_node *)m_tree->root); }
 
 ART::Art_leaf *ART::Make_leaf(const unsigned char *key, int key_len, void *value, uint value_len) {
   Art_leaf *l = (Art_leaf *)calloc(1, sizeof(Art_leaf) + key_len);
-  if (!l) return nullptr;
-
-  l->value = calloc(1, value_len);
-  if (!l->value) {
-    free(l);
-    return nullptr;
-  }
-
+  l->values = (void **)calloc(initial_capacity, sizeof(void *));
+  l->value_len = value_len;
+  l->capacity = initial_capacity;
+  l->vcount = 1;
   l->key_len = key_len;
   memcpy(l->key, key, key_len);
 
-  l->value_len = value_len;
-  memcpy(l->value, value, value_len);
+  l->values[0] = calloc(1, value_len);
+  memcpy(l->values[0], value, value_len);
   return l;
 }
 
@@ -582,12 +610,16 @@ void *ART::Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *ke
     Art_leaf *l = LEAF_RAW(n);
     // Check if we are updating an existing value
     if (!Leaf_matches(l, key, key_len, depth)) {
-      *old = 1;
-      void *old_val = l->value;
-      if (replace) {
-        std::memcpy(l->value, value, value_len);
+      // key exits, then add new value.
+      if (l->vcount == l->capacity) {
+        // extend capacity.
+        l->capacity *= 2;
+        l->values = (void **)realloc(l->values, l->capacity * sizeof(void *));
       }
-      return old_val;
+      l->values[l->vcount] = calloc(1, value_len);
+      memcpy(l->values[l->vcount], value, value_len);
+      l->vcount++;
+      return nullptr;
     }
 
     // New value, we must split the leaf into a node4
@@ -825,7 +857,11 @@ void *ART::ART_delete(const unsigned char *key, int key_len) {
   Art_leaf *l = Recursive_delete(m_tree->root, &m_tree->root, key, key_len, 0);
   if (l) {
     m_tree->size--;
-    void *old = l->value;
+    void *old = l->values[0];
+    for (uint32_t i = 0; i < l->vcount; ++i) {
+      free(l->values[i]);
+    }
+
     free(l);
     return old;
   }
@@ -837,7 +873,7 @@ int ART::Recursive_iter(Art_node *n, ART_Func &cb, void *data) {
   if (!n) return 0;
   if (IS_LEAF(n)) {
     Art_leaf *l = LEAF_RAW(n);
-    return cb(data, (const unsigned char *)l->key, l->key_len, l->value, 0);
+    return cb(data, l, (const unsigned char *)l->key, l->key_len, l->values[0], 0);
   }
 
   int idx, res;
@@ -972,7 +1008,7 @@ int ART::ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, vo
       // Check if the expanded path matches
       if (!Leaf_prefix_matches((Art_leaf *)n, key, key_len)) {
         Art_leaf *l = (Art_leaf *)n;
-        return cb(data, (const unsigned char *)l->key, l->key_len, l->value, data_len);
+        return cb(data, l, (const unsigned char *)l->key, l->key_len, l->values[0], data_len);
       }
       return 0;
     }
@@ -1014,7 +1050,7 @@ int ART::ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, vo
   return 0;
 }
 
-int ART::ART_iter(ART_Func &cb, void *data) { return Recursive_iter(m_tree->root, cb, data); }
+int ART::ART_iter(ART_Func cb, void *data) { return Recursive_iter(m_tree->root, cb, data); }
 
 }  // namespace Index
 }  // namespace Imcs
