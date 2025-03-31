@@ -483,9 +483,11 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
 
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
-  std::string keypart, key;
+  std::string keypart, key, primary_keypart;
   keypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
-  auto keyname_vec = imcs_instance->source_key(keypart);
+  primary_keypart = keypart;
+  primary_keypart.append(std::string(ShannonBase::SHANNON_PRIMARY_KEY_NAME)).append(":");
+  auto keyname_vec = imcs_instance->source_key(primary_keypart);
   auto key_offset{0};
   for (auto idx = 0u; idx < index->n_fields; idx++) {
     /**

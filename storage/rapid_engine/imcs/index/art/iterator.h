@@ -66,17 +66,21 @@ class ARTIterator {
 
     if (!m_tree) return;
 
-    // Find the first matched node.
-    m_art->ART_iter(
-        [](void *data, void *leaf, const key_t *key, uint32 key_len, void *value, uint32 value_len) {
-          auto *iter = static_cast<ARTIterator *>(data);
-          if (iter->is_within_range(key, key_len)) {
-            iter->m_current_leaf = static_cast<ART::Art_leaf *>(leaf);
-            return 1;  // found.
-          }
-          return 0;  // not found
-        },
-        this);
+    if (startkey) {
+      // Find the first matched node. find the  `>= startkey` the min leaf node.
+      m_art->ART_iter(
+          [](void *data, void *leaf, const key_t *key, uint32 key_len, void *value, uint32 value_len) {
+            auto *iter = static_cast<ARTIterator *>(data);
+            if (iter->is_within_range(key, key_len)) {
+              iter->m_current_leaf = static_cast<ART::Art_leaf *>(leaf);
+              return 1;  // found.
+            }
+            return 0;  // not found
+          },
+          this);
+    } else {
+      m_current_leaf = find_first_leaf(m_tree);
+    }
   }
 
   // get the next key-value pair.
@@ -87,19 +91,7 @@ class ARTIterator {
     *key_len_out = m_current_leaf->key_len;
     *value_out = *(value_t *)m_current_leaf->value;
 
-    // go ahead to the next matched node.
-    m_current_leaf = nullptr;
-    m_art->ART_iter(
-        [](void *data, void *leaf, const key_t *key, uint32 key_len, void *value, uint32 value_len) {
-          auto *iter = static_cast<ARTIterator *>(data);
-          if (iter->is_within_range(key, key_len)) {
-            iter->m_current_leaf = static_cast<ART::Art_leaf *>(leaf);
-            return 1;  // found.
-          }
-          return 0;  // not found.
-        },
-        this);
-
+    m_current_leaf = find_min_greater(m_tree, m_current_leaf->key, m_current_leaf->key_len);
     return true;
   }
 
@@ -126,6 +118,61 @@ class ARTIterator {
       if (cmp > 0 || (cmp == 0 && !m_end_inclusive)) return false;
     }
     return true;
+  }
+
+  ART::Art_leaf *find_min_greater(ART::Art_tree *tree, const key_t *key, uint32 key_len) {
+    struct Context {
+      const void *key;
+      uint32 key_len;
+      ART::Art_leaf *result;
+    } ctx = {key, key_len, nullptr};
+
+    m_art->ART_iter(
+        [](void *data, void *leaf, const key_t *k, uint32 k_len, void *val, uint32 val_len) {
+          auto *ctx = static_cast<Context *>(data);
+          if (std::memcmp(k, ctx->key, std::min(ctx->key_len, (uint32)k_len)) > 0) {
+            ctx->result = static_cast<ART::Art_leaf *>(leaf);
+            return 1;  // found
+          }
+          return 0;  // not found.
+        },
+        &ctx);
+
+    return ctx.result;
+  }
+
+  ART::Art_leaf *find_first_leaf(ART::Art_tree *tree) {
+    if (!tree || !tree->root) return nullptr;
+    ART::Art_node *node = tree->root;
+    while (node && !IS_LEAF(node)) {
+      switch (node->type) {
+        case NODE4:
+          node = ((ART::Art_node4 *)node)->children[0];
+          break;
+        case NODE16:
+          node = ((ART::Art_node16 *)node)->children[0];
+          break;
+        case NODE48:
+          for (int i = 0; i < 256; i++) {
+            if (((ART::Art_node48 *)node)->keys[i]) {
+              node = ((ART::Art_node48 *)node)->children[((ART::Art_node48 *)node)->keys[i] - 1];
+              break;
+            }
+          }
+          break;
+        case NODE256:
+          for (int i = 0; i < 256; i++) {
+            if (((ART::Art_node256 *)node)->children[i]) {
+              node = ((ART::Art_node256 *)node)->children[i];
+              break;
+            }
+          }
+          break;
+        default:
+          return nullptr;
+      }
+    }
+    return node ? LEAF_RAW(node) : nullptr;
   }
 };
 

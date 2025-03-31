@@ -243,6 +243,86 @@ class Util {
   static bool check_dict_encoding_projection(THD *thd);
 
   static void write_trace_reason(THD *thd, const char *text, const char *reason);
+
+  static inline void encode_float_key(float value, unsigned char *buf) {
+    uint32_t n;
+    memcpy(&n, &value, sizeof(value));
+
+    if (n & 0x80000000) {
+      n = ~n;
+    } else {
+      n ^= 0x80000000;
+    }
+    buf[0] = (n >> 24) & 0xFF;
+    buf[1] = (n >> 16) & 0xFF;
+    buf[2] = (n >> 8) & 0xFF;
+    buf[3] = n & 0xFF;
+  }
+
+  static inline void encode_double_key(double value, unsigned char *buf) {
+    uint64_t n;
+    memcpy(&n, &value, sizeof(value));
+
+    if (n & 0x8000000000000000ULL) {
+      n = ~n;
+    } else {
+      n ^= 0x8000000000000000ULL;
+    }
+
+    // tranfer to big-endian
+    buf[0] = (n >> 56) & 0xFF;
+    buf[1] = (n >> 48) & 0xFF;
+    buf[2] = (n >> 40) & 0xFF;
+    buf[3] = (n >> 32) & 0xFF;
+    buf[4] = (n >> 24) & 0xFF;
+    buf[5] = (n >> 16) & 0xFF;
+    buf[6] = (n >> 8) & 0xFF;
+    buf[7] = n & 0xFF;
+  }
+
+  double decode_double_key(const unsigned char *buf) {
+    uint64_t n = 0;
+
+    // from big-endian to little-endian
+    n |= (uint64_t)buf[0] << 56;
+    n |= (uint64_t)buf[1] << 48;
+    n |= (uint64_t)buf[2] << 40;
+    n |= (uint64_t)buf[3] << 32;
+    n |= (uint64_t)buf[4] << 24;
+    n |= (uint64_t)buf[5] << 16;
+    n |= (uint64_t)buf[6] << 8;
+    n |= (uint64_t)buf[7];
+
+    if (n & 0x8000000000000000ULL) {
+      n ^= 0x8000000000000000ULL;
+    } else {
+      n = ~n;
+    }
+
+    double result;
+    memcpy(&result, &n, sizeof(result));
+    return result;
+  }
+
+  float decode_float_key(const unsigned char *buf) {
+    uint32_t n = 0;
+
+    // from big-endian to little-endian
+    n |= (uint32_t)buf[0] << 24;
+    n |= (uint32_t)buf[1] << 16;
+    n |= (uint32_t)buf[2] << 8;
+    n |= (uint32_t)buf[3];
+
+    if (n & 0x80000000) {
+      n ^= 0x80000000;
+    } else {
+      n = ~n;
+    }
+
+    float result;
+    memcpy(&result, &n, sizeof(result));
+    return result;
+  }
 };
 
 }  // namespace Utils

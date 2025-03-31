@@ -60,6 +60,8 @@ class Iterator {
 
   // get the next key-value pair.
   virtual bool next(const uchar *key_out, uint32_t *key_len_out, void *value_out) = 0;
+
+  virtual bool initialized() = 0;
 };
 
 class Art_Iterator : public Iterator {
@@ -72,14 +74,18 @@ class Art_Iterator : public Iterator {
   void init_scan(const uchar *startkey, int startkey_len, bool start_inclusive, const uchar *endkey, int endkey_len,
                  bool end_inclusive) override {
     m_art_iter->init_scan(startkey, startkey_len, start_inclusive, endkey, endkey_len, end_inclusive);
+    m_initialized = true;
   }
 
   bool next(const uchar *key_out, uint32_t *key_len_out, void *value_out) override {
     return m_art_iter->next(key_out, key_len_out, (row_id_t *)value_out);
   }
 
+  bool initialized() override { return m_initialized; }
+
  private:
   ART::Art_tree *m_tree;
+  bool m_initialized{false};
   std::unique_ptr<ARTIterator<uchar, row_id_t>> m_art_iter;
 };
 

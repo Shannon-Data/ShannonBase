@@ -289,6 +289,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   ShannonBase::Rapid_load_context context;
   context.m_table = const_cast<TABLE *>(&table_arg);
   context.m_thd = m_thd;
+  context.m_extra_info.m_keynr = active_index;
 
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
     my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
@@ -353,6 +354,7 @@ int ha_rapid::rnd_init(bool scan) {
   }
 
   m_start_of_scan = true;
+  inited = handler::RND;
   return 0;
 }
 
@@ -361,6 +363,7 @@ int ha_rapid::rnd_init(bool scan) {
 
 int ha_rapid::rnd_end(void) {
   m_start_of_scan = false;
+  inited = handler::NONE;
   return m_data_table->end();
 }
 
@@ -370,16 +373,12 @@ int ha_rapid::rnd_end(void) {
 int ha_rapid::rnd_next(uchar *buf) {
   int error{HA_ERR_END_OF_FILE};
 
-  if (m_start_of_scan) {
+  if (inited == handler::RND && m_start_of_scan) {
     error = m_data_table->next(buf);  // index_first(buf);
 
     if (error == HA_ERR_KEY_NOT_FOUND) {
       error = HA_ERR_END_OF_FILE;
     }
-
-    m_start_of_scan = false;
-  } else {  // general fetch.
-    error = m_data_table->next(buf);
   }
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
@@ -389,9 +388,13 @@ int ha_rapid::rnd_next(uchar *buf) {
 int ha_rapid::index_init(uint keynr, bool sorted) {
   DBUG_TRACE;
 
+  if (m_data_table->index_init(keynr, sorted)) {
+    m_start_of_scan = false;
+    return HA_ERR_GENERIC;
+  }
+
   m_start_of_scan = true;
   active_index = keynr;
-
   inited = handler::INDEX;
   return 0;
 }
@@ -400,20 +403,10 @@ int ha_rapid::index_end() {
   DBUG_TRACE;
 
   active_index = MAX_KEY;
-  in_range_check_pushed_down = false;
   inited = handler::NONE;
   m_start_of_scan = false;
 
-  // to reset the cursor position.
-  std::string keypart{table->s->db.str};
-  keypart.append(":").append(table->s->table_name.str).append(":");
-
-  for (auto &cu : Imcs::Imcs::instance()->get_cus()) {
-    if (cu.first.find(keypart) == std::string::npos) continue;
-    // cu.second->header()->m_index->reset_pos();
-  }
-
-  return 0;
+  return m_data_table->index_end();
 }
 
 int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) {
@@ -421,66 +414,73 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fun
   int err{HA_ERR_END_OF_FILE};
   ut_ad(m_start_of_scan && inited == handler::INDEX);
 
-  std::string keypart, errmsg;
-  keypart.append(table->s->db.str).append(":").append(table->s->table_name.str).append(":");
-  auto index = Imcs::Imcs::instance()->get_index(keypart);
-  if (index == nullptr) {
-    errmsg.append(table->s->db.str).append(".").append(table->s->table_name.str).append(" index not found");
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), errmsg.c_str());
-    return HA_ERR_KEY_NOT_FOUND;
-  }
-
-  if (pushed_idx_cond) {  // icp
-    // TODO: evaluate condition item, and do condtion eval in scan.
-  } else {
-    switch (find_flag) {
-      case HA_READ_KEY_EXACT:
-        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
-        break;
-      case HA_READ_AFTER_KEY:
-        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
-        break;
-      case HA_READ_BEFORE_KEY:
-        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
-        break;
-      case HA_READ_KEY_OR_NEXT:
-        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
-        break;
-      case HA_READ_KEY_OR_PREV:
-        if (err == HA_ERR_KEY_NOT_FOUND) err = HA_ERR_END_OF_FILE;
-        break;
-      default:
-        break;
-    }
-  }
-
+  err = m_data_table->index_read(buf, key, key_len, find_flag);
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+
   return err;
 }
 
-int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) { return 0; }
+int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
+  return (m_data_table->index_read(buf, key, key_len, HA_READ_PREFIX_LAST));
+}
 
 int ha_rapid::index_next(uchar *buf) {
   ut_ad(m_start_of_scan && inited == handler::INDEX);
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-
-  return HA_ERR_END_OF_FILE;
+  return m_data_table->index_next(buf);
 }
 
-int ha_rapid::index_next_same(uchar *buf, const uchar *key, uint keylen) {
+int ha_rapid::index_next_same(uchar *buf, const uchar *, uint) {
   ut_ad(m_start_of_scan && inited == handler::INDEX);
 
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
 
-  return HA_ERR_END_OF_FILE;
+  return m_data_table->index_next(buf);
 }
 
-int ha_rapid::index_prev(uchar *buf) { return 0; }
+int ha_rapid::index_first(uchar *buf) {
+  DBUG_TRACE;
 
-int ha_rapid::index_first(uchar *buf) { return 0; }
+  ha_statistic_increment(&System_status_var::ha_read_first_count);
 
-int ha_rapid::index_last(uchar *buf) { return 0; }
+  int error = m_data_table->index_read(buf, nullptr, 0, HA_READ_AFTER_KEY);
+
+  /* MySQL does not seem to allow this to return HA_ERR_KEY_NOT_FOUND */
+
+  if (error == HA_ERR_KEY_NOT_FOUND) {
+    error = HA_ERR_END_OF_FILE;
+  }
+
+  return error;
+}
+
+int ha_rapid::index_prev(uchar *buf) {
+  ut_a(false);  // not supported now.
+  return 0;
+}
+
+int ha_rapid::index_last(uchar *buf) {
+  DBUG_TRACE;
+
+  ha_statistic_increment(&System_status_var::ha_read_last_count);
+
+  int error = m_data_table->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
+
+  /* MySQL does not seem to allow this to return HA_ERR_KEY_NOT_FOUND */
+
+  if (error == HA_ERR_KEY_NOT_FOUND) {
+    error = HA_ERR_END_OF_FILE;
+  }
+
+  return error;
+}
+
+int ha_rapid::read_range_first(const key_range *start_key, const key_range *end_key, bool eq_range_arg, bool sorted) {
+  return handler::read_range_first(start_key, end_key, eq_range_arg, sorted);
+}
+
+int ha_rapid::read_range_next() { return (handler::read_range_next()); }
 
 }  // namespace ShannonBase
 

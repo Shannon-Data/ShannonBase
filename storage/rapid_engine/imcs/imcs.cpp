@@ -61,25 +61,10 @@ int Imcs::deinitialize() {
 
 int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
-  std::string keypart, key;
+  std::string primary_keypart, keypart;
   keypart.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
-
-  if (source->s->is_missing_primary_key()) {
-    std::string key;
-    key.append(keypart).append(SHANNON_DB_ROW_ID);
-    m_source_keys.emplace(keypart, std::vector<std::string>{key});
-  } else {
-    std::vector<std::string> key_parts_names;
-    KEY *key_info = source->key_info + source->s->primary_key;
-    for (uint i = 0; i < key_info->user_defined_key_parts; i++) {
-      std::string key;
-      key.append(keypart).append(key_info->key_part[i].field->field_name);
-      key_parts_names.push_back(key);
-    }
-    m_source_keys.emplace(keypart, key_parts_names);
-  }
-
   for (auto index = 0u; index < source->s->fields; index++) {
+    std::string key;
     auto fld = *(source->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
@@ -88,9 +73,43 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
     key.clear();
   }
 
-  // create an index instance.
-  m_indexes.emplace(keypart, std::make_unique<Index::Index<uchar, row_id_t>>());
+  primary_keypart = keypart;
+  primary_keypart.append(std::string(ShannonBase::SHANNON_PRIMARY_KEY_NAME)).append(":");
 
+  if (source->s->is_missing_primary_key()) {
+    std::string key;
+    key.append(primary_keypart).append(SHANNON_DB_ROW_ID);
+    m_source_keys.emplace(primary_keypart, std::vector<std::string>{key});
+  } else {
+    std::vector<std::string> key_parts_names;
+    KEY *key_info = source->key_info + source->s->primary_key;
+    ut_a(strcmp(ShannonBase::SHANNON_PRIMARY_KEY_NAME, key_info->name) == 0);
+
+    for (uint i = 0; i < key_info->user_defined_key_parts; i++) {
+      std::string key;
+      key.append(primary_keypart).append(key_info->key_part[i].field->field_name);
+      key_parts_names.push_back(key);
+    }
+    m_source_keys.emplace(primary_keypart, key_parts_names);
+  }
+  // create an index instance.
+  m_indexes.emplace(primary_keypart, std::make_unique<Index::Index<uchar, row_id_t>>());
+
+  // the rest of the indexes.
+  for (auto index = (source->s->primary_key + 1); index < source->s->keys; index++) {
+    std::vector<std::string> key_parts_names;
+    KEY *key_info = source->key_info + index;
+    std::string keykeypart(keypart);
+    keykeypart.append(key_info->name).append(":");
+
+    for (uint i = 0; i < key_info->user_defined_key_parts; i++) {
+      std::string key;
+      key.append(keykeypart).append(key_info->key_part[i].field->field_name);
+      key_parts_names.push_back(key);
+    }
+    m_source_keys.emplace(keykeypart, key_parts_names);
+    m_indexes.emplace(keykeypart, std::make_unique<Index::Index<uchar, row_id_t>>());
+  }
   /* in secondary load phase, the table not loaded into imcs. therefore, it can be seen
      by any transactions. If this table has been loaded into imcs. A new data such as
      insert/update/delete will associated with a SMU items to trace its visibility. Therefore
@@ -214,8 +233,10 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
     m_thd->inc_sent_row_count(1);
 
     // insert the index info.
-    m_indexes[key_part]->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
-                                sizeof(rowid));
+    auto primary_keypart = key_part;
+    primary_keypart.append(ShannonBase::SHANNON_PRIMARY_KEY_NAME).append(":");
+    m_indexes[primary_keypart]->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
+                                       sizeof(rowid));
 
     if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
   }
@@ -252,6 +273,17 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
     } else
       ++it;
   }
+  ut_a(found);
+
+  found = false;
+  for (auto it = m_indexes.begin(); it != m_indexes.end();) {
+    if (it->first.find(keypart) != std::string::npos) {
+      it = m_indexes.erase(it);
+      found = true;
+    } else
+      ++it;
+  }
+  ut_a(found);
 
   return 0;
 }

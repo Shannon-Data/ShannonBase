@@ -93,6 +93,9 @@ class DataTable : public MemoryObject {
 
   // index iterator.
   std::unique_ptr<Index::Iterator> m_index_iter{nullptr};
+
+  // active index no.
+  int8_t m_active_index{MAX_KEY};
 };
 
 }  // namespace Imcs
