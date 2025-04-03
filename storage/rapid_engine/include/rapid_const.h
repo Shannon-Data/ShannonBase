@@ -92,8 +92,11 @@ constexpr size_t SHANNON_DATA_DB_TRX_ID_LEN = 6;
 constexpr char SHANNON_DB_ROLL_PTR[] = "DB_ROLL_PTR";
 constexpr size_t SHANNON_DB_ROLL_PTR_LEN = 11;
 
-constexpr uchar SHANNON_NULL_PLACEHOLDER[] = "NULL";
-constexpr uchar SHANNON_BLANK_PLACEHOLDER[] = "BLNK";
+constexpr char SHANNON_NULL_PLACEHOLDER[] = "NULL";
+constexpr char SHANNON_BLANK_PLACEHOLDER[] = "BLNK";
+
+constexpr char SHANNON_PRIMARY_KEY_NAME[] = "PRIMARY";
+constexpr size_t SHANNON_PRIMARY_KEY_LEN = 7;
 // The lowest value, here, which means it's a invalid value. to describe its
 // validity.
 constexpr double SHANNON_MIN_DOUBLE = std::numeric_limits<double>::min();

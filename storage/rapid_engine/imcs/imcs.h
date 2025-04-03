@@ -147,7 +147,9 @@ class Imcs : public MemoryObject {
   // value format: park part1 name , key part2 name.
   std::unordered_map<std::string, std::vector<std::string>> m_source_keys;
 
+  // key format: db + ":" + table_name.
   std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
+
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};
 
