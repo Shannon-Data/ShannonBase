@@ -257,7 +257,13 @@ uchar *Cu::write_row_from_log(const Rapid_load_context *context, uchar *data, si
   auto chunk_ptr = m_chunks[m_chunks.size() - 1].get();
   ut_a(chunk_ptr);
 
-  // data = (len == UNIV_SQL_NULL) ? nullptr : get_field_value(data, len, true);
+  if (data && (Utils::Util::is_string(m_header->m_type) || Utils::Util::is_varstring(m_header->m_type))) {
+    len = std::min(len, strlen((const char *)data));
+    auto strid = m_header->m_local_dict->store(data, len, m_header->m_encoding_type);
+    *reinterpret_cast<uint32 *>(data) = strid;
+    len = sizeof(uint32);
+  }
+
   if (!(written_to = chunk_ptr->write(context, data, len))) {  // current chunk is full.
     // then build a new one, and re-try to write the data.
     m_chunks.emplace_back(std::make_unique<Chunk>(m_header->m_source_fld));

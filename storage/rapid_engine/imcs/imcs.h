@@ -106,10 +106,28 @@ class Imcs : public MemoryObject {
   int update_row(const Rapid_load_context *context, row_id_t row_id,
                  std::map<std::string, std::unique_ptr<uchar[]>> &upd_recs);
 
-  // get the source table by key string.
-  inline std::vector<std::string> source_key(std::string &sch_tb_name_key) {
-    if (m_source_keys.find(sch_tb_name_key) == m_source_keys.end()) return std::vector<std::string>();
-    return m_source_keys[sch_tb_name_key];
+  int build_indexes_from_log(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
+                             row_id_t rowid);
+
+  // get the source table by key string. key string is db_name + ":" +
+  // table_name + ":" + key_name + ":".
+  inline key_meta_t source_keykey(std::string &sch_tb_key) {
+    if (m_source_keys.find(sch_tb_key) == m_source_keys.end()) return std::make_pair(0, std::vector<std::string>());
+    return m_source_keys[sch_tb_key];
+  }
+
+  // get the source table by key string. key string is db_name + ":" +
+  // table_name + ":".
+  std::unordered_map<std::string, key_meta_t> source_key(std::string &sch_tb) {
+    std::unordered_map<std::string, key_meta_t> keys;
+
+    std::for_each(m_source_keys.begin(), m_source_keys.end(), [&](const auto &pair) {
+      if (pair.first.find(sch_tb) == 0) {
+        keys.emplace(pair.first, pair.second);
+      }
+    });
+
+    return keys;
   }
 
   // get the key length by key string. key string is db_name + ":" + table_name.
@@ -130,6 +148,11 @@ class Imcs : public MemoryObject {
   Imcs &operator=(const Imcs &) = delete;
   Imcs &operator=(const Imcs &&) = delete;
 
+  // build the index for imcs.
+  int build_index(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid);
+  int build_index_impl(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid);
+
+ private:
   // imcs instance
   static Imcs *m_instance;
 
@@ -145,9 +168,11 @@ class Imcs : public MemoryObject {
 
   // the loaded cus. key format: db + ':' + table_name.
   // value format: park part1 name , key part2 name.
-  std::unordered_map<std::string, std::vector<std::string>> m_source_keys;
+  std::unordered_map<std::string, key_meta_t> m_source_keys;
 
+  // key format: db + ":" + table_name + ":" + key_name.
   std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
+
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};
 

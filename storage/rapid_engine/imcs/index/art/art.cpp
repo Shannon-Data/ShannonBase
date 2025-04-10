@@ -837,7 +837,7 @@ int ART::Recursive_iter(Art_node *n, ART_Func &cb, void *data) {
   if (!n) return 0;
   if (IS_LEAF(n)) {
     Art_leaf *l = LEAF_RAW(n);
-    return cb(data, (const unsigned char *)l->key, l->key_len, l->value, 0);
+    return cb(data, l, (const unsigned char *)l->key, l->key_len, l->value, 0);
   }
 
   int idx, res;
@@ -972,7 +972,7 @@ int ART::ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, vo
       // Check if the expanded path matches
       if (!Leaf_prefix_matches((Art_leaf *)n, key, key_len)) {
         Art_leaf *l = (Art_leaf *)n;
-        return cb(data, (const unsigned char *)l->key, l->key_len, l->value, data_len);
+        return cb(data, l, (const unsigned char *)l->key, l->key_len, l->value, data_len);
       }
       return 0;
     }
@@ -1014,7 +1014,7 @@ int ART::ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, vo
   return 0;
 }
 
-int ART::ART_iter(ART_Func &cb, void *data) { return Recursive_iter(m_tree->root, cb, data); }
+int ART::ART_iter(ART_Func cb, void *data) { return Recursive_iter(m_tree->root, cb, data); }
 
 }  // namespace Index
 }  // namespace Imcs
