@@ -90,14 +90,25 @@ class Rapid_load_context : public Secondary_engine_execution_context {
     ~extra_info_t() {}
     // trxid of this innodb rows.
     Transaction::ID m_trxid{0};
+
     Compress::Encoding_type m_algo{Compress::Encoding_type::SORTED};
 
-    // index scan info
+    // index scan info.
+    // the active key no.
     ushort m_keynr{MAX_FIELDS};
+
+    // the active index name.
+    std::string m_key_name;
+
     ha_rkey_function m_find_flag{HA_READ_INVALID};
-    uint8 m_key_len{0};
+
+    // the active key length.
+    uint m_key_len{0};
+
+    // the active key memo.
     std::unique_ptr<uchar[]> m_key_buff{nullptr};
   };
+
   Rapid_load_context() : m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr), m_thd{nullptr} {}
   virtual ~Rapid_load_context() = default;
 

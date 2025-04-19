@@ -73,7 +73,7 @@ void OptimzieAccessPath(AccessPath *path, JOIN *join) {
       }
     } break;
     case AccessPath::HASH_JOIN: {
-      auto hash_iter = reinterpret_cast<HashJoinIterator *>(path->iterator);
+      auto hash_iter [[maybe_unused]] = reinterpret_cast<HashJoinIterator *>(path->iterator);
       assert(hash_iter);
     } break;
     case AccessPath::NESTED_LOOP_JOIN: /* purecov: deadcode */
@@ -82,17 +82,14 @@ void OptimzieAccessPath(AccessPath *path, JOIN *join) {
     // Index access is disabled in ha_rapid::table_flags(), so we should see
     // none of these access types.
     case AccessPath::INDEX_SCAN:
-    case AccessPath::REF:
     case AccessPath::REF_OR_NULL:
     case AccessPath::EQ_REF:
     case AccessPath::PUSHED_JOIN_REF:
-    case AccessPath::INDEX_RANGE_SCAN:
     case AccessPath::INDEX_SKIP_SCAN:
     case AccessPath::GROUP_INDEX_SKIP_SCAN:
     case AccessPath::ROWID_INTERSECTION:
     case AccessPath::ROWID_UNION:
     case AccessPath::DYNAMIC_INDEX_RANGE_SCAN:
-      assert(false); /* purecov: deadcode */
       break;
     default:
       break;

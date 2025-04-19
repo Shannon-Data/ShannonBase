@@ -35,6 +35,7 @@
 #include "include/my_inttypes.h"
 #include "sql-common/my_decimal.h"
 #include "sql/field.h"                                            //Field
+#include "sql/tztime.h"                                           //timzone
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
 #include "storage/rapid_engine/include/rapid_object.h"            // bit_array_t
 
@@ -56,7 +57,7 @@ class Util {
 
   // get the data value.
   template <typename T>
-  static T get_field_value(const Field *field, const Compress::Dictionary *dictionary) {
+  static T get_field_numeric(const Field *field, const Compress::Dictionary *dictionary) {
     T data_val;
     auto old_map = tmp_use_all_columns(field->table, field->table->read_set);
 
@@ -69,14 +70,16 @@ class Util {
           buf.set_charset(field->charset());
           field->val_str(&buf);
           std::string str(buf.ptr(), buf.length());
-          data_val = dictionary ? const_cast<Compress::Dictionary *>(dictionary)->get(str) : -1;
+          auto vdata_val = dictionary ? const_cast<Compress::Dictionary *>(dictionary)->get(str) : -1;
+          data_val = static_cast<T>(vdata_val);
         } break;
         case MYSQL_TYPE_INT24:
         case MYSQL_TYPE_LONG:
         case MYSQL_TYPE_LONGLONG:
         case MYSQL_TYPE_FLOAT:
         case MYSQL_TYPE_DOUBLE: {
-          data_val = field->val_real();
+          auto vdata_val = field->val_real();
+          data_val = static_cast<T>(vdata_val);
         } break;
         case MYSQL_TYPE_DECIMAL:
         case MYSQL_TYPE_NEWDECIMAL: {
@@ -84,15 +87,18 @@ class Util {
           double v;
           field->val_decimal(&dval);
           my_decimal2double(10, &dval, &v);
-          data_val = v;
+          data_val = static_cast<T>(v);
         } break;
         case MYSQL_TYPE_DATE:
         case MYSQL_TYPE_DATETIME:
         case MYSQL_TYPE_TIME: {
-          data_val = field->val_real();
+          auto vdata_val = field->val_real();
+          data_val = static_cast<T>(vdata_val);
         } break;
-        default:
-          data_val = field->val_real();
+        default: {
+          auto vdata_val = field->val_real();
+          data_val = static_cast<T>(vdata_val);
+        }
       }
     }
     if (old_map) tmp_restore_column_map(field->table->read_set, old_map);
@@ -100,80 +106,91 @@ class Util {
   }
 
   template <typename T>
-  static T get_field_value(Field *field, const uchar *data_ptr, const Compress::Dictionary *dict) {
-    T data_val;
+  static T get_field_numeric(Field *field, const uchar *data_ptr, const Compress::Dictionary *dict) {
+    T data_val{};
     switch (field->type()) {
       case MYSQL_TYPE_BLOB:
       case MYSQL_TYPE_STRING:
-      case MYSQL_TYPE_VARCHAR: {         // in LogParser::parse_rec_fields, the string field has been processed.
-        data_val = *(uint32 *)data_ptr;  // stored in dictionary, and represented by a string id.
+      case MYSQL_TYPE_VARCHAR: {       // in LogParser::parse_rec_fields, the string field has been processed.
+        data_val = static_cast<T>(0);  // stored in dictionary, and represented by a string id.
       } break;
       case MYSQL_TYPE_TINY: {
-        data_val = *(int8 *)data_ptr;
+        data_val = static_cast<T>(*(int8 *)data_ptr);
       } break;
       case MYSQL_TYPE_SHORT: {
-        data_val = *(int16 *)data_ptr;
+        data_val = static_cast<T>(*(int16 *)data_ptr);
       } break;
       case MYSQL_TYPE_INT24: {
         const long j = field->is_unsigned() ? (long)uint3korr(data_ptr) : sint3korr(data_ptr);
-        data_val = (T)j;
+        data_val = static_cast<T>(j);
       } break;
       case MYSQL_TYPE_LONG: {
-        long v;
+        int32 v;
         memcpy(&v, data_ptr, sizeof(v));
-        data_val = v;
+        data_val = (field->is_unsigned()) ? static_cast<T>((uint32)v) : static_cast<T>(v);
       } break;
       case MYSQL_TYPE_LONGLONG: {
         longlong v;
         memcpy(&v, data_ptr, sizeof(v));
-        data_val = v;
+        data_val =
+            (field->is_unsigned()) ? static_cast<T>(ulonglong2double(static_cast<ulonglong>(v))) : static_cast<T>(v);
       } break;
       case MYSQL_TYPE_FLOAT: {
+        // in fact, same with impl of float4get, floatget
         float v;
         memcpy(&v, data_ptr, sizeof(v));
-        data_val = v;
+        data_val = static_cast<T>(v);
       } break;
       case MYSQL_TYPE_DOUBLE: {
-        double v;
-        v = *(double *)data_ptr;
-        data_val = v;
+        data_val = static_cast<T>(*(double *)data_ptr);
       } break;
       case MYSQL_TYPE_DECIMAL: {
         double v;
         memcpy(&v, data_ptr, sizeof(v));
-        data_val = v;
+        data_val = static_cast<T>(v);
       } break;
       case MYSQL_TYPE_NEWDECIMAL: {
         auto new_filed = down_cast<Field_new_decimal *>(field);
         int prec = new_filed->precision;
         int scale = new_filed->decimals();
         my_decimal dv;
+        double tdata_val;
         auto ret = binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, data_ptr, &dv, prec, scale, true);
         if (ret == E_DEC_OK) {
-          my_decimal2double(E_DEC_FATAL_ERROR, &dv, &data_val);
+          my_decimal2double(E_DEC_FATAL_ERROR, &dv, &tdata_val);
         }
+        data_val = static_cast<T>(tdata_val);
       } break;
       case MYSQL_TYPE_DATE:
       case MYSQL_TYPE_DATETIME:
+      case MYSQL_TYPE_NEWDATE: {
+        if (field->real_type() == MYSQL_TYPE_NEWDATE) {
+          ulong j = uint3korr(data_ptr);
+          j = (j % 32L) + (j / 32L % 16L) * 100L + (j / (16L * 32L)) * 10000L;
+          data_val = static_cast<T>(j);
+        } else {  // TODO: impl it.
+        }
+      } break;
       case MYSQL_TYPE_TIME: {
+        auto dec = down_cast<Field_timef *>(field)->decimals();
         MYSQL_TIME ltime;
-        TIME_from_longlong_datetime_packed(&ltime, my_datetime_packed_from_binary(data_ptr, 0));
-        auto v = TIME_to_ulonglong_datetime(ltime);
-        data_val = v;
+        const longlong tmpl = my_time_packed_from_binary(data_ptr, dec);
+        TIME_from_longlong_time_packed(&ltime, tmpl);
+
+        const double tmp = TIME_to_double_time(ltime);
+        data_val = static_cast<T>(ltime.neg ? -tmp : tmp);
       } break;
       case MYSQL_TYPE_YEAR: {
         int tmp = (int)data_ptr[0];
         if (tmp != 0) tmp += 1900;
-        data_val = (longlong)tmp;
+        data_val = static_cast<T>((longlong)tmp);
       } break;
       case MYSQL_TYPE_TIMESTAMP:
-      case MYSQL_TYPE_TIMESTAMP2: {  // convert double value to timestamp, use `TIME_from_longlong_packed`.
-        double v;
-        memcpy(&v, data_ptr, sizeof(v));
-        data_val = v;
+      case MYSQL_TYPE_TIMESTAMP2: {  // convert double value to timestamp. TODO: impl it.
+        data_val = static_cast<T>(0);
       } break;
       default:
-        data_val = field->val_real();
+        data_val = static_cast<T>(field->val_real());
     }
     return data_val;
   }
@@ -243,6 +260,16 @@ class Util {
   static bool check_dict_encoding_projection(THD *thd);
 
   static void write_trace_reason(THD *thd, const char *text, const char *reason);
+
+  static std::vector<std::string> split(const std::string &str, char delimiter);
+};
+
+template <typename T>
+class Encoder {
+ public:
+  static void EncodeFloat(T value, unsigned char *key);
+
+  static T DecodeFloat(const unsigned char *key);
 };
 
 }  // namespace Utils

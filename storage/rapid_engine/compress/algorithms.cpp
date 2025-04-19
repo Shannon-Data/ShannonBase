@@ -173,7 +173,7 @@ std::unique_ptr<Compress_algorithm> CompressFactory::get_instance(compress_algos
   else if (algo == compress_algos::ZSTD)
     return std::move(std::make_unique<zstd_compress>());
   else
-    assert(false);
+    return std::move(std::make_unique<zstd_compress>());
 }
 
 }  // namespace Compress
