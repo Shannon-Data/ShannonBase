@@ -70,6 +70,9 @@ class Imcs : public MemoryObject {
   // get cu pointer by its key.
   Cu *get_cu(std::string_view key);
 
+  // get index
+  Index::Index<uchar, row_id_t> *get_index(std::string_view key);
+
   // get cu at Nth index key
   Cu *at(std::string_view schema, std::string_view table, size_t indexx);
 
@@ -87,11 +90,15 @@ class Imcs : public MemoryObject {
   // insert a row into IMCS, where located at 'rowid'.
   int insert_row(const Rapid_load_context *context, row_id_t rowid, uchar *buf);
 
+  // insert a row into IMCS to specific address from log_parser thread.
+  int write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
+                         std::map<std::string, mysql_field_t> &fields);
+
   // delete a row in IMCS by using its rowid.
   int delete_row(const Rapid_load_context *context, row_id_t rowid);
 
   // delete a row in IMCS by using its rowid. if vector is empty that means delete all rows.
-  int delete_rows(const Rapid_load_context *context, std::vector<row_id_t> &rowids);
+  int delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids);
 
   // update a cu in IMCS by using its rowid.
   int update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key, const uchar *new_field_data,
@@ -100,13 +107,34 @@ class Imcs : public MemoryObject {
   /** row_id[in], which row will be updated.
    *  upd_recs[in], new values of updating row at row_id.
    */
-  int update_row(const Rapid_load_context *context, row_id_t row_id,
-                 std::map<std::string, std::unique_ptr<uchar[]>> &upd_recs);
+  int update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
+                          std::map<std::string, mysql_field_t> &upd_recs);
 
-  // get the source table by key string.
-  inline std::vector<std::string> source_key(std::string &sch_tb_name_key) {
-    if (m_source_keys.find(sch_tb_name_key) == m_source_keys.end()) return std::vector<std::string>();
-    return m_source_keys[sch_tb_name_key];
+  int build_indexes_from_keys(const Rapid_load_context *context, std::map<std::string, key_info_t> &keys,
+                              row_id_t rowid);
+
+  int build_indexes_from_log(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
+                             row_id_t rowid);
+
+  // get the source table by key string. key string is db_name + ":" +
+  // table_name + ":" + key_name + ":".
+  inline key_meta_t source_keykey(std::string &sch_tb_key) {
+    if (m_source_keys.find(sch_tb_key) == m_source_keys.end()) return std::make_pair(0, std::vector<std::string>());
+    return m_source_keys[sch_tb_key];
+  }
+
+  // get the source table by key string. key string is db_name + ":" +
+  // table_name + ":".
+  std::unordered_map<std::string, key_meta_t> source_key(std::string &sch_tb) {
+    std::unordered_map<std::string, key_meta_t> keys;
+
+    std::for_each(m_source_keys.begin(), m_source_keys.end(), [&](const auto &pair) {
+      if (pair.first.find(sch_tb) == 0) {
+        keys.emplace(pair.first, pair.second);
+      }
+    });
+
+    return keys;
   }
 
   // get the key length by key string. key string is db_name + ":" + table_name.
@@ -116,9 +144,22 @@ class Imcs : public MemoryObject {
     if (it != m_cus.end()) {
       return it->second.get()->header()->m_key_len;
     } else {
-      return 0u;
+      return MAX_KEY_LENGTH;
     }
-    return 0u;
+    return MAX_KEY_LENGTH;
+  }
+  // reserve a row_id by given schema name and table name in 'sch:table:’ format.
+  inline row_id_t reserve_row_id(std::string &sch_table) {
+    if (m_cus.size() == 0) return INVALID_ROW_ID;
+
+    auto next_row_id{INVALID_ROW_ID};
+    std::for_each(m_cus.begin(), m_cus.end(), [&](auto &pair) {
+      if (pair.first.rfind(sch_table, 0) == 0) {
+        next_row_id = pair.second->header()->m_prows.fetch_add(1);
+      }
+    });
+
+    return next_row_id;
   }
 
  private:
@@ -127,6 +168,11 @@ class Imcs : public MemoryObject {
   Imcs &operator=(const Imcs &) = delete;
   Imcs &operator=(const Imcs &&) = delete;
 
+  // build the index for imcs.
+  int build_index(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid);
+  int build_index_impl(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid);
+
+ private:
   // imcs instance
   static Imcs *m_instance;
 
@@ -142,7 +188,10 @@ class Imcs : public MemoryObject {
 
   // the loaded cus. key format: db + ':' + table_name.
   // value format: park part1 name , key part2 name.
-  std::unordered_map<std::string, std::vector<std::string>> m_source_keys;
+  std::unordered_map<std::string, key_meta_t> m_source_keys;
+
+  // key format: db + ":" + table_name + ":" + key_name.
+  std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
 
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};

@@ -1,0 +1,228 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+create database sh_index;
+use sh_index;
+--disable_warnings
+
+SET USE_SECONDARY_ENGINE=FORCED;
+
+# test for no use defined key
+CREATE TABLE employees (
+    id INT,
+    name VARCHAR(100),
+    department VARCHAR(100),
+    salary DECIMAL(10,2)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO employees (id, name, department, salary) VALUES
+(1001, 'Alice', 'HR', 6000.00),
+(1002, 'Bob', 'Engineering', 8000.00),
+(1003, 'Charlie', 'Sales', 7000.00),
+(1004, 'David', 'Engineering', 9000.00),
+(1005, 'Eve', 'HR', 6500.00);
+
+ALTER TABLE employees SECONDARY_LOAD;
+
+EXPLAIN SELECT * FROM employees;
+SELECT * FROM employees;
+
+EXPLAIN SELECT * FROM employees WHERE id = 1002;
+SELECT * FROM employees WHERE id = 1002;
+
+EXPLAIN SELECT * FROM employees WHERE name ='Charlie';
+SELECT * FROM employees WHERE name ='Charlie';
+DROP TABLE employees;
+
+# test for int primary key
+CREATE TABLE employees (
+    id INT PRIMARY KEY,
+    name VARCHAR(100),
+    department VARCHAR(100),
+    salary DECIMAL(10,2),
+    INDEX idx_name (name),
+    INDEX idx_dep (department),
+    INDEX idx_salary(salary)
+) SECONDARY_ENGINE=RAPID;
+
+ALTER TABLE employees SECONDARY_LOAD;
+
+INSERT INTO employees (id, name, department, salary) VALUES
+(1001, 'Alice', 'HR', 6000.00),
+(1002, 'Bob', 'Engineering', 8000.00),
+(1003, 'Charlie', 'Sales', 7000.00),
+(1004, 'David', 'Engineering', 9000.00),
+(1005, 'Eve', 'HR', 6500.00);
+
+--SLEEP 5
+
+EXPLAIN SELECT * FROM employees order by id;
+SELECT * FROM employees order by id;
+
+# TEST FOR INT TYPE INDEX
+EXPLAIN SELECT * FROM employees WHERE id = 1002;
+SELECT * FROM employees WHERE id = 1002;
+
+SELECT * FROM employees WHERE id = 1001;
+SELECT * FROM employees WHERE id = 1005;
+SELECT * FROM employees WHERE id = 1007;
+
+EXPLAIN SELECT * FROM employees WHERE id <= 1005 and id > 1002 order by id;
+SELECT * FROM employees WHERE id <= 1005 and id > 1002 order by id;
+SELECT * FROM employees WHERE id <= 1005 and id >= 1002 order by id;
+SELECT * FROM employees WHERE id < 1005 and id >= 1002 order by id;
+SELECT * FROM employees WHERE id < 1005 and id > 1002 order by id;
+
+EXPLAIN SELECT * FROM employees WHERE id <= 1005 order by id;
+SELECT * FROM employees WHERE id <= 10005 order by id;
+
+EXPLAIN SELECT * FROM employees WHERE id < 1005 order by id;
+SELECT * FROM employees WHERE id < 1005 order by id;
+
+EXPLAIN SELECT * FROM employees WHERE id > 1002 order by id;
+SELECT * FROM employees WHERE id > 1002 order by id;
+
+EXPLAIN SELECT * FROM employees WHERE id >= 1002 order by id;
+SELECT * FROM employees WHERE id >= 1002 order by id;
+
+# TEST FOR CHAR AND VARCHAR TYPE INDEX
+EXPLAIN SELECT * FROM employees WHERE name ='Bob';
+SELECT * FROM employees WHERE name ='Bob';
+SELECT * FROM employees WHERE name ='BobB';
+
+EXPLAIN SELECT * FROM employees WHERE department ='Engineering' order by id;
+SELECT * FROM employees WHERE department ='Engineering' order by id;
+SELECT * FROM employees WHERE department ='HRBP' order by id;
+
+# TEST FOR DECIMAL TYPE INDEX
+EXPLAIN SELECT * FROM employees WHERE salary = 7000.00;
+SELECT * FROM employees WHERE salary = 7000.00;
+
+EXPLAIN SELECT * FROM employees WHERE salary >= 7000.00 order by id;
+SELECT * FROM employees WHERE salary <= 7000.00 order by id;
+SELECT * FROM employees WHERE salary >= 3000.00 AND salary <= 7000.00 order by id;
+
+DROP TABLE employees;
+
+# test dobule type primary key
+CREATE TABLE ttt (
+  `score` double NOT NULL,
+  `name` char(10) ,
+  `id` int DEFAULT NULL,
+  `gender` char(1),
+  PRIMARY KEY (`score`)
+) SECONDARY_ENGINE=rapid;
+
+INSERT INTO ttt VALUES (1.1, 'n1',1, 'm'),(2.2, 'n2',2,'f'),(3.3,'n3',3,'s');
+ALTER TABLE ttt SECONDARY_LOAD;
+EXPLAIN SELECT * FROM ttt WHERE score < 2.3 AND id < 4 ORDER BY id;
+SELECT * FROM ttt WHERE score < 2.3 AND id < 4 ORDER BY id;
+DROP TABLE ttt;
+
+# TEST FOR COMPSITE INDEX, (VARCHAR, DEMCIAL) COMPSITE TYPE
+CREATE TABLE employees (
+    id INT PRIMARY KEY,
+    name VARCHAR(100),
+    department VARCHAR(100),
+    salary DECIMAL(10,2),
+    INDEX idx_dept_salary (department, salary)  -- COM INDEX(A, B)
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO employees (id, name, department, salary) VALUES
+(1001, 'Alice', 'HR', 6000.00),
+(1002, 'Bob', 'Engineering', 8000.00),
+(1003, 'Charlie', 'Sales', 7000.00),
+(1004, 'David', 'Engineering', 9000.00),
+(1005, 'Eve', 'HR', 6500.00);
+ALTER TABLE employees SECONDARY_LOAD;
+
+# PRIMARY KEY SCAN
+EXPLAIN SELECT * FROM employees WHERE id = 1002 order by id;
+SELECT * FROM employees WHERE id = 1002 order by id;
+
+EXPLAIN SELECT * FROM employees WHERE id BETWEEN 1002 AND 1004 order by id;
+SELECT * FROM employees WHERE id BETWEEN 1002 AND 1004 order by id;
+
+EXPLAIN SELECT * FROM employees WHERE salary = 9000.00;
+SELECT * FROM employees WHERE salary = 9000.00;
+
+EXPLAIN SELECT * FROM employees WHERE department = 'HR' AND salary = 6500.00;
+SELECT * FROM employees WHERE department = 'HR' AND salary = 6500.00;
+
+EXPLAIN SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id;
+SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id;
+
+EXPLAIN SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id;
+SELECT * FROM employees WHERE department = 'HR' AND salary <= 9000.00 order by id;
+
+EXPLAIN SELECT * FROM employees WHERE department <= 'HR' order by id;
+SELECT * FROM employees WHERE department <= 'HR' order by id;
+
+EXPLAIN SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
+SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
+DROP TABLE employees;
+
+# (DOUBLE, DOUBLE) COMPSITE INDEX, SAME TYPE
+CREATE TABLE test_composite_index2 (
+  `id` int NOT NULL,
+  `part1` double DEFAULT NULL,
+  `part2` double DEFAULT NULL,
+  `data` varchar(100) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  KEY `index1` (`part1`,`part2`)
+) SECONDARY_ENGINE=rapid ;
+
+INSERT INTO `test_composite_index2` (`id`, `part1`, `part2`, `data`) VALUES
+(1, 10.5, 20.5, 'Data for 10.5, 20.5'),
+(2, 10.5, 30.5, 'Data for 10.5, 30.5'),
+(3, 10.5, 40.5, 'Data for 10.5, 40.5'),
+(4, 20.5, 20.5, 'Data for 20.5, 20.5'),
+(5, 20.5, 30.5, 'Data for 20.5, 30.5'),
+(6, 30.5, 10.5, 'Data for 30.5, 10.5'),
+(7, 30.5, 20.5, 'Data for 30.5, 20.5'),
+(8, 40.5, 40.5, 'Data for 40.5, 40.5'),
+(9, 41.4, 41.2, 'Data for 41.4, 41.2'),
+(10, 41.4, 41.2, 'Data for 41.4, 41.2'),
+(11, 41.4, 41.2, 'Data for 41.4, 41.2'),
+(12, 41.4, 41.2, 'Data for 41.4, 41.2'),
+(13, 41.4, 41.2, 'Data for 41.4, 41.2'),
+(14, 40.4, 41.2, 'Data for 40.4, 41.2'),
+(15, 40.4, 41.2, 'Data for 40.4, 41.2'),
+(16, 40.4, 41.2, 'Data for 40.4, 41.2'),
+(17, 40.4, 41.2, 'Data for 40.4, 41.2'),
+(18, 40.4, 41.2, 'Data for 40.4, 41.2'),
+(19, 40.4, 41.2, 'Data for 40.4, 41.2'),
+(20, 40.4, 41.2, 'Data for 40.4, 41.2'),
+(21, 40.4, 41.2, 'Data for 40.4, 41.2'),
+(22, 40.4, 41.2, 'Data for 40.4, 41.2');
+
+ALTER TABLE test_composite_index2 SECONDARY_LOAD;
+
+explain select * from test_composite_index2 where part1 =40.4 and part2=41.2 order by id;
+select * from test_composite_index2 where part1 =40.4 and part2=41.2 order by id;
+
+explain select * from test_composite_index2 where part1 > 40.4 and part2=41.2 order by id;
+select * from test_composite_index2 where part1 > 40.4 and part2=41.2 order by id;
+
+explain select * from test_composite_index2 where id = 10;
+select * from test_composite_index2 where id = 10;
+
+explain select * from test_composite_index2 where id > 10 order by id;
+select * from test_composite_index2 where id > 10 order by id;
+
+explain select * from test_composite_index2 where id >= 10 order by id;
+select * from test_composite_index2 where id >= 10 order by id;
+
+explain select * from test_composite_index2 where id < 10 order by id;
+select * from test_composite_index2 where id < 10 order by id;
+
+explain select * from test_composite_index2 where id <= 10;
+select * from test_composite_index2 where id <= 10;
+
+explain select * from test_composite_index2 where id >= 3 and id <= 10 order by id;
+select * from test_composite_index2 where id >= 3 and id <= 10 order by id;
+DROP TABLE test_composite_index2;
+--enable_warnings
+
+DROP DATABASE sh_index;

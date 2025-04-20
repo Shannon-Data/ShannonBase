@@ -36,6 +36,10 @@
 #include "storage/innobase/include/mtr0types.h"
 #include "storage/innobase/include/trx0types.h"
 #include "storage/innobase/include/univ.i"
+
+#include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_object.h"
+
 // clang-format off
 class Field;
 class TABLE;
@@ -48,6 +52,7 @@ namespace Populate {
  */
 class LogParser {
  public:
+   //store the field infor in mysql format.
   uint parse_redo(Rapid_load_context* context, byte *ptr, byte *end_ptr);
 
  private:
@@ -169,6 +174,16 @@ class LogParser {
   //is a valid data record.
   inline bool is_data_rec(rec_t* rec);
 
+  inline bool check_key_field(std::unordered_map<std::string, ShannonBase::key_meta_t>& keys,
+                              const char* field_name);
+
+  // build the keys from field values.
+  // @param field_values[in] , the map of field values. <field_name, field data>
+  // @param key_values[in/out], the map of key data, <key_name, key data>.
+  // @return 0 success, otherwise failed.
+  int build_key(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
+                 std::map<std::string, key_info_t>& keys);
+
   byte *advance_parseMetadataLog(table_id_t id, uint64_t version, byte *ptr,
                                  byte *end);
 
@@ -190,21 +205,19 @@ class LogParser {
                                                    bool parse_only);
   /** parse a rec and get all feidls data in mysql format and save these values
    * into a vector. all field values store in feild_values' and store key info
-   * into context*/
+   * into context. [field_name, field_value] and [key_name, key_value]*/
   int parse_rec_fields(Rapid_load_context* context,
                                    const rec_t *rec, const dict_index_t *index,
                                    const dict_index_t *real_index,
                                    const ulint *offsets,
-                                   std::map<std::string, std::unique_ptr<uchar[]>>& feild_values);
+                                   std::map<std::string, mysql_field_t>& feild_values);
 
-  /**to find a row in imcs. a row divids into fields, and store int a map.
+  /**to find a row in imcs via PK. a row divids into fields, and store int a map.
    * return position of first matched row.
    * key_name [in] main search column name in 'db:table_name:field_name' format.
    * field_values_to_find [in], the all fields values of a row to find
    * with_sys_col[in], sys col to do comparision or not. */
-  int find_matched_rows(Rapid_load_context* context,
-                            std::map<std::string, std::unique_ptr<uchar[]>>&,
-                            std::vector<row_id_t>& matched_rows);
+  row_id_t find_matched_row(Rapid_load_context* context, std::map<std::string, key_info_t>& keys);
 };
 
 }  // namespace Populate

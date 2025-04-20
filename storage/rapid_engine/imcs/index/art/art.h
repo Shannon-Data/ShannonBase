@@ -24,7 +24,8 @@
    The fundmental code for imcs.
 */
 /** Adaptive Radix Tree from https://github.com/armon/libart, which's in c.
- *  re-impl in c++. In future we can import new impl of ART in DuckDB.
+ *  re-impl in c++. But from source code of DuckDB, it does not use mmx
+ *  instructions to accelerate the performance.
  */
 
 #ifndef __SHANNONBASE_ART_H__
@@ -38,21 +39,28 @@
 #include <vector>
 
 #include "my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_const.h"
+
 namespace ShannonBase {
 namespace Imcs {
+namespace Index {
 
-enum NodeType { UNKNOWN = 0, NODE4 = 1, NODE16, NODE48, NODE256 };
+#define IS_LEAF(x) (((uintptr_t)x & 1))
+#define SET_LEAF(x) ((void *)((uintptr_t)x | 1))
+#define LEAF_RAW(x) ((ART::Art_leaf *)((void *)((uintptr_t)x & ~1)))
 
-class Art_index {
+class ART {
  public:
-  static constexpr uint MAX_PREFIX_LEN = 10;
-  using ART_Func =
-      std::function<int(void *data, const unsigned char *key, uint32 key_len, void *value, uint32 value_len)>;
+  enum NodeType { UNKNOWN = 0, NODE4 = 1, NODE16, NODE48, NODE256 };
+  static constexpr uint MAX_PREFIX_LEN = 512;
+  static constexpr uint initial_capacity = 16;
+  using ART_Func = std::function<int(void *data, void *leaf, const unsigned char *key, uint32 key_len, void *value,
+                                     uint32 value_len)>;
   typedef struct {
     uint32 partial_len{0};
     uint8 type{NodeType::UNKNOWN};
     uint8 num_children{0};
-    unsigned char partial[Art_index::MAX_PREFIX_LEN];
+    unsigned char partial[ART::MAX_PREFIX_LEN];
   } Art_node;
 
   typedef struct {
@@ -79,8 +87,11 @@ class Art_index {
   } Art_node256;
 
   typedef struct {
-    void *value;
-    uint32 key_len;
+    void **values;
+    uint32_t value_len;
+    uint32_t vcount;
+    uint32_t capacity;
+    uint32_t key_len;
     unsigned char key[];
   } Art_leaf;
 
@@ -89,23 +100,30 @@ class Art_index {
     uint64 size;
   } Art_tree;
 
+  typedef struct {
+    const Art_node *node;  // current node
+    int child_idx;         // current sub node idx
+    const unsigned char *key;
+    size_t key_len;
+    void *value;  // value（if node is leaf node）
+  } Art_iterator;
+
   Art_node *Alloc_node(NodeType type);
   void Destroy_node(Art_node *n);
 
-  using ART_Func2 = std::function<int(Art_leaf *l, std::vector<Art_leaf *> &results)>;
+  int Check_prefix(const Art_node *n, const unsigned char *key, int key_len, int depth);
+  Art_node **Find_child(Art_node *n, unsigned char c);
 
  private:
-  // 0 sucess.
-  Art_node **Find_child(Art_node *n, unsigned char c);
   void Find_children(Art_node *n, unsigned char c, std::vector<Art_node *> &children);
-  int Check_prefix(const Art_node *n, const unsigned char *key, int key_len, int depth);
+
   int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
   int Leaf_partial_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
   inline uint64 art_size() { return m_tree->size; }
 
   Art_leaf *Minimum(const Art_node *n);
   Art_leaf *Maximum(const Art_node *n);
-  Art_leaf *Make_leaf(const unsigned char *key, int key_len, void *value);
+  Art_leaf *Make_leaf(const unsigned char *key, int key_len, void *value, uint value_len);
   int Longest_common_prefix(Art_leaf *l1, Art_leaf *l2, int depth);
   void Copy_header(Art_node *dest, Art_node *src);
   void Add_child256(Art_node256 *n, Art_node **ref, unsigned char c, void *child);
@@ -114,25 +132,18 @@ class Art_index {
   void Add_child4(Art_node4 *n, Art_node **ref, unsigned char c, void *child);
   void Add_child(Art_node *n, Art_node **ref, unsigned char c, void *child);
   int Prefix_mismatch(const Art_node *n, const unsigned char *key, int key_len, int depth);
-  void *Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, void *value, int depth,
-                         int *old, int replace);
+  void *Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, void *value, int value_len,
+                         int depth, int *old, int replace);
   void Remove_child256(Art_node256 *n, Art_node **ref, unsigned char c);
   void Remove_child48(Art_node48 *n, Art_node **ref, unsigned char c);
   void Remove_child16(Art_node16 *n, Art_node **ref, Art_node **l);
   void Remove_child4(Art_node4 *n, Art_node **ref, Art_node **l);
   void Remove_child(Art_node *n, Art_node **ref, unsigned char c, Art_node **l);
   Art_leaf *Recursive_delete(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, int depth);
-  int Recursive_iter(Art_node *n, ART_Func &cb, void *data, int data_len);
-  int Recursive_iter2(Art_node *n, ART_Func2 &cb);
-  int Recursive_iter_ex(Art_node *n, const unsigned char *key, int key_len);
-  int Cruise_fast(uint key_offset, unsigned char *key, int key_len);
+  int Recursive_iter(Art_node *n, ART_Func &cb, void *data);
+  int Recursive_iter_with_key(Art_node *n, const unsigned char *key, int key_len);
   int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
-  int Leaf_prefix_matches2(const Art_leaf *n, const unsigned char *prefix, int prefix_len, uint offset);
-
- private:
-  Art_tree *m_tree{nullptr};
-  bool m_inited{false};
-  std::vector<Art_leaf *> m_current_values;
+  int Leaf_prefix_matches2(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
 
  public:
   inline int ART_tree_init() {
@@ -142,8 +153,6 @@ class Art_index {
     m_tree->root = nullptr;
     m_tree->size = 0;
     m_inited = true;
-
-    ART_reset_cursor();
     return 0;
   }
 
@@ -158,22 +167,28 @@ class Art_index {
   }
 
   inline bool Art_initialized() { return m_inited; }
+  inline Art_tree *tree() const { return m_tree; }
+  inline Art_node *root() const { return (m_inited) ? m_tree->root : nullptr; }
 
-  void *ART_insert(const unsigned char *key, int key_len, void *value);
-  void *ART_insert_with_replace(const unsigned char *key, int key_len, void *value);
+  void *ART_insert(const unsigned char *key, int key_len, void *value, uint value_len);
+  void *ART_insert_with_replace(const unsigned char *key, int key_len, void *value, uint value_len);
   void *ART_delete(const unsigned char *key, int key_len);
   void *ART_search(const unsigned char *key, int key_len);
-  inline void ART_reset_cursor() { m_current_values.clear(); }
+  std::vector<void *> ART_search_all(const unsigned char *key, int key_len);
 
   Art_leaf *ART_minimum();
   Art_leaf *ART_maximum();
 
-  void *ART_iter_next();
-  void *ART_iter(ART_Func2 &cb);
-  void *ART_iter_first(uint key_offset, unsigned char *key, int key_len);
   int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, void *data, int data_len);
+  int ART_iter(ART_Func cb, void *data);
+
+ private:
+  Art_tree *m_tree{nullptr};
+  bool m_inited{false};
+  std::vector<Art_leaf *> m_current_values;
 };
 
+}  // namespace Index
 }  // namespace Imcs
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ART_H__

@@ -36,6 +36,7 @@
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/chunk.h"
+#include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_object.h"
 class Field;
@@ -44,7 +45,6 @@ class ShannonBaseContext;
 class Rapid_load_context;
 
 namespace Imcs {
-class Index;
 class Dictionary;
 class Chunk;
 class Cu : public MemoryObject {
@@ -59,6 +59,9 @@ class Cu : public MemoryObject {
     // a copy of source field info, only use its meta info. do NOT use it
     // directly.
     Field *m_source_fld{nullptr};
+
+    // width size of this cu.
+    size_t m_width{0};
 
     // field type of this cu.
     enum_field_types m_type{MYSQL_TYPE_NULL};
@@ -98,7 +101,7 @@ class Cu : public MemoryObject {
   /** write the data to a cu. `data` the data will be written. returns the
    address where the data wrote. the data append to tail of Cu. returns nullptr
    if failed. otherwise, return addr of where the data written.*/
-  uchar *write_row_from_log(const Rapid_load_context *context, uchar *data, size_t len);
+  uchar *write_row_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
 
   /** read the data from this Cu, traverse all chunks in cu to get the data from
   where m_r_ptr locates. */
@@ -112,6 +115,9 @@ class Cu : public MemoryObject {
 
   // update the data located at rowid with new value-'data'.
   uchar *update_row(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
+
+  // update the data located at rowid with new value-'data'.
+  uchar *update_row_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
 
   // gets the base address of CU.
   inline uchar *base() {
@@ -177,10 +183,11 @@ class Cu : public MemoryObject {
  private:
   // get the field value. if field is string/text then return its stringid.
   // or, do nothing.
-  uchar *get_field_value(uchar *&data, size_t &len, bool need_pack = false);
+  uchar *get_vfield_value(uchar *&data, size_t &len, bool need_pack = false);
 
   // upda the header info, such as row count, sum, avg, etc.
-  void update_meta_info(OPER_TYPE type, uchar *data, uchar *old);
+  // if row_reserved = true, means the prows has been added.
+  void update_meta_info(OPER_TYPE type, uchar *data, uchar *old, bool row_reserved = false);
 
  private:
   // proctect header.

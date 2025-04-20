@@ -26,7 +26,7 @@
 #ifndef __SHANNONBASE_CONST_H__
 #define __SHANNONBASE_CONST_H__
 #include <cmath>
-
+#include <vector>
 #include "my_inttypes.h"
 #include "rapid_arch_inf.h"
 
@@ -92,14 +92,19 @@ constexpr size_t SHANNON_DATA_DB_TRX_ID_LEN = 6;
 constexpr char SHANNON_DB_ROLL_PTR[] = "DB_ROLL_PTR";
 constexpr size_t SHANNON_DB_ROLL_PTR_LEN = 11;
 
-constexpr uchar SHANNON_NULL_PLACEHOLDER[] = "NULL";
-constexpr uchar SHANNON_BLANK_PLACEHOLDER[] = "BLNK";
+constexpr char SHANNON_NULL_PLACEHOLDER[] = "NULL";
+constexpr char SHANNON_BLANK_PLACEHOLDER[] = "BLNK";
+
+constexpr char SHANNON_PRIMARY_KEY_NAME[] = "PRIMARY";
+constexpr size_t SHANNON_PRIMARY_KEY_LEN = 7;
 // The lowest value, here, which means it's a invalid value. to describe its
 // validity.
 constexpr double SHANNON_MIN_DOUBLE = std::numeric_limits<double>::min();
 constexpr double SHANNON_MAX_DOUBLE = std::numeric_limits<double>::max();
 constexpr int SHANNON_MIN_INT = std::numeric_limits<int>::min();
 constexpr int SHANNON_MAX_INT = std::numeric_limits<int>::max();
+constexpr row_id_t INVALID_ROW_ID = std::numeric_limits<size_t>::max();
+
 constexpr double SHANNON_EPSILON = 1e-10;
 inline bool are_equal(double a, double b, double epsilon = SHANNON_EPSILON) { return (std::fabs(a - b) < epsilon); }
 
@@ -142,6 +147,8 @@ constexpr int PREFETCH_AHEAD = 2;
 /*! \brief Thread local specifier. */
 #define SHANNON_THREAD_LOCAL thread_local
 #endif
+
+using key_meta_t = std::pair<uint, std::vector<std::string>>;
 
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CONST_H__
