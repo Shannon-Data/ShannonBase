@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cmake_minimum_required (VERSION 2.8.12)
+cmake_minimum_required(VERSION 2.8.12...3.26)
 project (Jerry C)
 
 if(NOT DEFINED PYTHON)
   set(PYTHON "python")
 endif()
 # Determining version
-execute_process(COMMAND ${PYTHON} ${CMAKE_SOURCE_DIR}/tools/version.py
+execute_process(COMMAND ${PYTHON} ${CMAKE_SOURCE_DIR}/extra/jerryscript/tools/version.py
                 OUTPUT_VARIABLE JERRY_VERSION
                 OUTPUT_STRIP_TRAILING_WHITESPACE)
 
