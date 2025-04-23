@@ -169,9 +169,10 @@ int Transaction::rollback_to_savepoint(void *const savepoint) { return 0; }
 void Transaction::set_read_only(bool read_only) { m_read_only = read_only; }
 
 ::ReadView *Transaction::acquire_snapshot() {
-  if (m_trx_impl->isolation_level > TRX_ISO_READ_UNCOMMITTED) {
+  if (!MVCC::is_view_active(m_trx_impl->read_view) && (m_trx_impl->isolation_level > TRX_ISO_READ_UNCOMMITTED)) {
     trx_assign_read_view(m_trx_impl);
   }
+
   return m_trx_impl->read_view;
 }
 
@@ -182,6 +183,8 @@ int Transaction::release_snapshot() {
 
   return 0;
 }
+
+::ReadView *Transaction::get_snapshot() const { return m_trx_impl->read_view; }
 
 bool Transaction::has_snapshot() const { return MVCC::is_view_active(m_trx_impl->read_view); }
 

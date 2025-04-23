@@ -57,11 +57,11 @@ SET(SHANNON_IMCS_SOURCES
    imcs/chunk.cpp
    imcs/index/art/art.cpp
    utils/utils.cpp
+   imcs/purge/purge.cpp
 )
 SET(SHANNON_POPULATE_SOURCES
    populate/log_parser.cpp
    populate/populate.cpp
-   populate/purge.cpp
 )
 SET (SHANNON_TRX_SOURCES
     trx/transaction.cpp

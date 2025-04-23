@@ -106,6 +106,9 @@ class Chunk : public MemoryObject {
 
     // the length of key.
     size_t m_key_len{0};
+
+    // the last GC timestamp
+    std::chrono::time_point<std::chrono::steady_clock> m_last_gc_tm;
   };
 
   explicit Chunk(const Field *field);
@@ -172,6 +175,9 @@ class Chunk : public MemoryObject {
 
   // free all the data and reset the meta info.
   void truncate();
+
+  // to do GC
+  int GC();
 
   // return the data postion of this chunk.
   inline uchar *tell() {

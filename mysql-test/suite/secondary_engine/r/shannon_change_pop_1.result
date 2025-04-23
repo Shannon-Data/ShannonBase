@@ -30,6 +30,9 @@ select @@use_secondary_engine;
 @@use_secondary_engine
 ON
 [conn3]
+explain select * from tt2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	NULL
 select * from tt2;
 name	gender
 n1	m
@@ -37,12 +40,24 @@ n2	NULL
 n3	m
 [conn2]
 delete from tt2;
+explain select * from tt2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt2	NULL	ALL	NULL	NULL	NULL	NULL	1	100.00	NULL
 select * from tt2;
 name	gender
 [conn1]
 explain select * from tt2;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	tt2	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using secondary engine Rapid
+select * from tt2;
+name	gender
+n1	m
+n2	NULL
+n3	m
+[conn3]
+explain select * from tt2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt2	NULL	ALL	NULL	NULL	NULL	NULL	1	100.00	NULL
 select * from tt2;
 name	gender
 n1	m

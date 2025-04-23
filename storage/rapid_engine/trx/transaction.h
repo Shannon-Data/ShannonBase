@@ -42,6 +42,9 @@ use any transaction impl to replace innobase's trx used here.
 
 class Transaction : public MemoryObject {
  public:
+  Transaction(THD *thd = current_thd);
+  virtual ~Transaction();
+
   // here, we use innodb's trx_id_t as ours. the defined in innodb is: typedef ib_id_t trx_id_t;
   using ID = uint64_t;
   // same order with trx_t::isolation_level_t::
@@ -94,10 +97,9 @@ class Transaction : public MemoryObject {
 
   virtual Transaction::ID get_id();
 
- private:
-  Transaction(THD *thd = current_thd);
-  virtual ~Transaction();
+  virtual ::ReadView *get_snapshot() const;
 
+ private:
   THD *m_thd;
 
   // read only trx.

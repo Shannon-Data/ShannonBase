@@ -30,7 +30,6 @@ select * from tt2;
 begin;
 select @@use_secondary_engine;
 
-
 --connection connection_3
 --echo [conn3]
 begin;
@@ -38,16 +37,23 @@ select @@use_secondary_engine;
 
 --connection connection_3
 --echo [conn3]
+explain select * from tt2;
 select * from tt2;
 
 --connection connection_2
 --echo [conn2]
 delete from tt2;
+explain select * from tt2;
 select * from tt2;
 
 --connection connection_1
 --echo [conn1]
 --sleep 18
+explain select * from tt2;
+select * from tt2;
+
+--connection connection_3
+--echo [conn3]
 explain select * from tt2;
 select * from tt2;
 

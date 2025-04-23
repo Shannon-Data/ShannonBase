@@ -103,7 +103,7 @@ int DataTable::init() {
     if (!m_context->m_trx->is_active())
       m_context->m_trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(current_thd));
 
-    if (!m_context->m_trx->has_snapshot()) m_context->m_trx->acquire_snapshot();
+    m_context->m_trx->acquire_snapshot();
 
     m_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
     m_context->m_table_name = const_cast<char *>(m_data_source->s->table_name.str);

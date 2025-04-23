@@ -102,6 +102,12 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
  * is coming, then it starts a new worker to dealing with this mtr_log_rec_t.
  */
 static void parse_log_func_main(log_t *log_ptr) {
+#if !defined(_WIN32)  // here we
+  pthread_setname_np(pthread_self(), "rapid_log_coordinator");
+#else
+  SetThreadDescription(GetCurrentThread(), L"rapid_log_coordinator");
+#endif
+
   // here we have a notifiyer, start pop. ref: https://dev.mysql.com/doc/heatwave/en/mys-hw-change-propagation.html
   while (srv_shutdown_state.load(std::memory_order_acquire) == SRV_SHUTDOWN_NONE &&
          sys_pop_started.load(std::memory_order_acquire)) {

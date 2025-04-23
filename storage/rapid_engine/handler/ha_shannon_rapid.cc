@@ -176,6 +176,7 @@ int ha_rapid::info(unsigned int flags) {
 
   Rapid_load_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
+  context.m_trx->begin();
   for (auto it = Imcs::Imcs::instance()->get_cus().begin(); it != Imcs::Imcs::instance()->get_cus().end(); it++) {
     if (it->first.find(keypart) == std::string::npos || !it->second)
       continue;
@@ -184,6 +185,7 @@ int ha_rapid::info(unsigned int flags) {
       break;
     }
   }
+  context.m_trx->commit();
 
   return 0;
 }

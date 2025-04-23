@@ -200,6 +200,7 @@
 #include "typelib.h"
 
 #include "storage/rapid_engine/populate/populate.h"
+#include "storage/rapid_engine/imcs/purge/purge.h"
 #include "storage/rapid_engine/include/rapid_status.h" //rpd_columns_info
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/cu.h"
@@ -11888,6 +11889,9 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
 
     //start population thread if table loaded successfully.
     ShannonBase::Populate::Populator::start();
+
+    //start imcs purger thread to purge dead tuples.
+    //ShannonBase::Purge::Purger::start();
   } else {
     if (table_list->partition_names != nullptr) {
       skip_metadata_update = true;
@@ -11900,6 +11904,9 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
 
     //at first, stop the main pop monitor thread.
     ShannonBase::Populate::Populator::end();
+
+    //then stop the purge thread.
+    ShannonBase::Purge::Purger::end();
 
     se_operation_start = std::chrono::steady_clock::now();
     auto retval = secondary_engine_unload_table(
