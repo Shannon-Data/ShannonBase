@@ -29,25 +29,71 @@
 */
 #ifndef __SHANNONBASE_PURGE_H__
 #define __SHANNONBASE_PURGE_H__
+#include <atomic>
+#include <cstdio>
+#include <functional>
+#include <mutex>
+#include <string>
+
+#include "storage/innobase/include/os0thread.h"  //IBThread
 namespace ShannonBase {
 namespace Purge {
 
+/** Default value of spin delay (in spin rounds)
+ * 1000 spin round takes 4us,  25000 takes 1ms for busy waiting. therefore, 200ms means
+ * 5000000 spin rounds. for the more detail infor ref to : comment of
+ * `innodb_log_writer_spin_delay`.
+ */
+constexpr uint64_t MAX_PURGER_SPINS = 5000000;
+constexpr uint64_t MAX_PURGER_TIMEOUT = 10000;
+
 extern std::atomic<bool> sys_purge_started;
+using purge_func_t = std::function<void(void)>;
+
+enum class purge_state_t {
+  PURGE_STATE_INIT,    /*!< Purge instance created */
+  PURGE_STATE_RUN,     /*!< Purge should be running */
+  PURGE_STATE_STOP,    /*!< Purge should be stopped */
+  PURGE_STATE_EXIT,    /*!< Purge has been shutdown */
+  PURGE_STATE_DISABLED /*!< Purge was never started */
+};
 
 class Purger {
  public:
   // whether the log pop main thread is active or not. true is alive, false dead.
   static bool active();
+
   // to launch log pop main thread.
   static void start();
+
   // to stop lop pop main thread.
   static void end();
+
   // to print thread infos.
   static void print_info(FILE *file);
+
   // to check whether the specific table are still do populating.
-  static bool check_status(std::string &table_name);
+  static bool check_pop_status(std::string &table_name);
+
   // to send notify to populator main thread to start do propagation.
   static void send_notify();
+
+  static void wait_for_notify();
+
+  static void set_status(purge_state_t stat);
+
+  static purge_state_t get_status();
+
+  static std::mutex m_notify_mutex;
+  static std::condition_variable m_notify_cv;
+  static std::atomic<bool> m_notify_flag;
+
+ private:
+  static std::mutex m_state_mutex;
+  static purge_state_t m_state;
+
+  // purge workers.
+  IB_thread *m_purge_workers;
 };
 
 }  // namespace Purge

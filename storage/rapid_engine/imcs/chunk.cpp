@@ -31,8 +31,11 @@
 #include <new>
 #include <typeinfo>
 
+#include "storage/innobase/include/read0types.h"
+#include "storage/innobase/include/trx0sys.h"
 #include "storage/innobase/include/univ.i"
 #include "storage/innobase/include/ut0new.h"
+
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -211,9 +214,9 @@ void Chunk::update_meta_info(OPER_TYPE type, uchar *data, uchar *old) {
 
 void Chunk::reset_meta_info() {
   std::scoped_lock lk(m_header_mutex);
-  m_header->m_avg = 0;
-  m_header->m_sum = 0;
-  m_header->m_prows = 0;
+  m_header->m_avg.store(0);
+  m_header->m_sum.store(0);
+  m_header->m_prows.store(0);
 
   m_header->m_max = std::numeric_limits<long long>::lowest();
   m_header->m_min = std::numeric_limits<long long>::max();
@@ -280,10 +283,10 @@ bool Chunk::build_version(row_id_t rowid, Transaction::ID trxid, const uchar *da
 
   if (m_header->m_smu->m_version_info.find(rowid) != m_header->m_smu->m_version_info.end()) {
     // has old versions, then add
-    m_header->m_smu->m_version_info[rowid].add(std::move(si));
+    m_header->m_smu->m_version_info[rowid].add(si);
   } else {  // this is the first version, then build up the SMU, and add a new one.
     ShannonBase::ReadView::smu_item_vec_t iv;
-    iv.add(std::move(si));
+    iv.add(si);
     m_header->m_smu->m_version_info.emplace(rowid, std::move(iv));
   }
 
@@ -498,6 +501,49 @@ void Chunk::truncate() {
 
   // todo: remove all index record from index tree.
   reset_meta_info();
+}
+
+int Chunk::GC() {
+  auto &version_map = m_header->m_smu->m_version_info;
+  ::ReadView oldest_view;
+  trx_sys->mvcc->clone_oldest_view(&oldest_view);
+  trx_id_t min_visible_trxid = oldest_view.low_limit_no();
+
+  for (auto it = version_map.begin(); it != version_map.end();) {
+    auto &vec = it->second;
+
+    std::lock_guard<std::mutex> vec_lock(vec.vec_mutex);
+    auto &items = vec.items;
+
+    if (items.empty()) {
+      it = version_map.erase(it);
+      continue;
+    }
+
+    // find the first trxid of less than min_visible_trxid
+    size_t retain_idx = items.size();  // if not, remove all.
+    for (size_t i = 0; i < items.size(); ++i) {
+      if (items[i].trxid < min_visible_trxid) {
+        retain_idx = i;
+        break;
+      }
+    }
+
+    if (retain_idx == items.size()) {
+      // not visible, safe clean.
+      items.clear();
+      it = version_map.erase(it);
+    } else {
+      // keep [0, retain_idx]，remove all trx id is greater than retain_idx+1
+      if (retain_idx + 1 < items.size()) {
+        items.erase(items.begin() + retain_idx + 1, items.end());
+      }
+      ++it;
+    }
+  }
+
+  m_header->m_last_gc_tm = std::chrono::steady_clock::now();
+  return 0;
 }
 
 row_id_t Chunk::rows(Rapid_load_context *context) {

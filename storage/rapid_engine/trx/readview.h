@@ -27,9 +27,9 @@
 #define __SHANNONBASE_READVIEW_H__
 
 #include <chrono>
+#include <deque>
 #include <tuple>
 #include <unordered_map>
-
 #include "storage/rapid_engine/trx/transaction.h"
 
 namespace ShannonBase {
@@ -50,23 +50,42 @@ struct SHANNON_ALIGNAS smu_item_t {
   std::chrono::time_point<std::chrono::high_resolution_clock> tm_stamp;
 
   // the old version of data. all var data types were encoded.
+  size_t sz{0};
   std::unique_ptr<uchar[]> data;
 
-  smu_item_t(size_t size) : data(new uchar[size]) { tm_stamp = std::chrono::high_resolution_clock::now(); }
+  smu_item_t(size_t size) : sz(size), data(new uchar[size]) { tm_stamp = std::chrono::high_resolution_clock::now(); }
   smu_item_t() = delete;
   // Disable copying
   smu_item_t(const smu_item_t &) = delete;
   smu_item_t &operator=(const smu_item_t &) = delete;
 
   // Define a move constructor
-  smu_item_t(smu_item_t &&other) noexcept : trxid(other.trxid), tm_stamp(other.tm_stamp), data(std::move(other.data)) {}
+  smu_item_t(smu_item_t &&other) noexcept {
+    oper_type = other.oper_type;
+    trxid = other.trxid;
+
+    tm_stamp = other.tm_stamp;
+
+    data = std::move(other.data);
+    sz = other.sz;
+
+    other.sz = 0;
+    other.data = nullptr;
+  }
 
   // Define a move assignment operator
   smu_item_t &operator=(smu_item_t &&other) noexcept {
     if (this != &other) {
+      oper_type = other.oper_type;
       trxid = other.trxid;
+
       tm_stamp = other.tm_stamp;
+
       data = std::move(other.data);
+      sz = other.sz;
+
+      other.sz = 0;
+      other.data = nullptr;
     }
     return *this;
   }
@@ -74,7 +93,7 @@ struct SHANNON_ALIGNAS smu_item_t {
 
 struct smu_item_vec_t {
   std::mutex vec_mutex;
-  std::vector<smu_item_t> items;
+  std::deque<smu_item_t> items;
   smu_item_vec_t() = default;
 
   smu_item_vec_t(const smu_item_vec_t &) = delete;
@@ -93,9 +112,9 @@ struct smu_item_vec_t {
     return *this;
   }
 
-  inline void add(smu_item_t &&item) {
+  inline void add(smu_item_t &item) {
     std::lock_guard<std::mutex> lock(vec_mutex);
-    items.emplace(items.begin(), std::move(item));
+    items.push_front(std::move(item));
   }
   // gets the first met visibility data in this version link.
   uchar *get_data(Rapid_load_context *context);
