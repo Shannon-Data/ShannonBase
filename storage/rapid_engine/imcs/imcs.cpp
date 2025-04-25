@@ -558,5 +558,26 @@ int Imcs::update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
   return 0;
 }
 
+int Imcs::rollback_changes_by_trxid(Transaction::ID trxid) {
+  for (auto &cu : m_cus) {
+    auto chunk_sz = cu.second.get()->chunks();
+    for (auto index = 0u; index < chunk_sz; index++) {
+      auto &version_infos = cu.second.get()->chunk(index)->header()->m_smu->version_info();
+      if (!version_infos.size()) continue;
+
+      for (auto &ver : version_infos) {
+        std::lock_guard<std::mutex> lock(ver.second.vec_mutex);
+        std::for_each(ver.second.items.begin(), ver.second.items.end(), [trxid](ReadView::SMU_item &item) {
+          if (item.trxid == trxid) {
+            item.tm_committed = ShannonBase::SHANNON_MAX_STMP;  // reset commit timestamp to max, mean it rollbacked.
+                                                                // has been rollbacked, invisible to all readview.
+          }
+        });
+      }
+    }
+  }
+  return 0;
+}
+
 }  // namespace Imcs
 }  // namespace ShannonBase

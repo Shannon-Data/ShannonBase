@@ -42,8 +42,9 @@
 #include "storage/rapid_engine/imcs/imcs.h"   //IMCS
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/populate.h"  //sys_pop_buff
-#include "storage/rapid_engine/trx/transaction.h"    //Transaction
-#include "storage/rapid_engine/utils/utils.h"        //Blob
+#include "storage/rapid_engine/trx/readview.h"
+#include "storage/rapid_engine/trx/transaction.h"  //Transaction
+#include "storage/rapid_engine/utils/utils.h"      //Blob
 
 namespace ShannonBase {
 namespace Imcs {
@@ -72,7 +73,7 @@ DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(
 }
 
 DataTable::~DataTable() {
-  if (m_context) {
+  if (m_context && m_context->m_trx) {
     m_context->m_trx->release_snapshot();
     m_context->m_trx->commit();
   }
@@ -125,49 +126,50 @@ start:
   auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
 
   for (auto idx = 0u; idx < m_field_cus.size(); idx++) {
-    auto cu = m_field_cus[idx];
-    // if (cu->keystr().find(SHANNON_DB_TRX_ID) != std::string::npos) continue;  // invisible col.
+    ut_a(m_field_cus[idx]);
 
-    auto normalized_length = cu->normalized_pack_length();
-    auto is_text_value = Utils::Util::is_string(cu->header()->m_source_fld->type()) ||
-                         Utils::Util::is_blob(cu->header()->m_source_fld->type());
+    auto normalized_length = m_field_cus[idx]->normalized_pack_length();
     DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
-      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "");
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "secondary_engine_rapid_next_error");
       return HA_ERR_GENERIC;
     });
 
-    // to check version link to check its old value.
-    uchar *data_ptr{nullptr};
-    auto current_chunk_ptr = cu->chunk(current_chunk);
-    auto is_null = current_chunk_ptr->is_null(m_context.get(), offset_in_chunk);
-    if (current_chunk_ptr->is_deleted(m_context.get(), offset_in_chunk)) {
-      auto smu = current_chunk_ptr->header()->m_smu.get();
-      data_ptr = smu->build_prev_vers(m_context.get(), offset_in_chunk);
-      if (!data_ptr && !is_null) {
-        m_rowid.fetch_add(1);
-        goto start;
-      }
-    } else {
-      data_ptr = current_chunk_ptr->base() + offset_in_chunk * normalized_length;
-      if ((uintptr_t(data_ptr) & (CACHE_LINE_SIZE - 1)) == 0)
-        SHANNON_PREFETCH_R(data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
-    }
-
-    auto source_fld = *(m_data_source->field + cu->header()->m_source_fld->field_index());
+    auto source_fld = *(m_data_source->field + m_field_cus[idx]->header()->m_source_fld->field_index());
     auto old_map = tmp_use_all_columns(m_data_source, m_data_source->write_set);
-    if (is_null) {
+
+    // to check version link to check its old value.
+    auto current_chunk_ptr = m_field_cus[idx]->chunk(current_chunk);
+    auto current_data_ptr = current_chunk_ptr->base() + offset_in_chunk * normalized_length;
+    if ((uintptr_t(current_data_ptr) & (CACHE_LINE_SIZE - 1)) == 0)
+      SHANNON_PREFETCH_R(current_data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
+
+    auto data_len = normalized_length;
+    auto data_ptr = std::make_unique<uchar[]>(data_len);
+    std::memcpy(data_ptr.get(), current_data_ptr, data_len);
+
+    uint8 status{0};
+    auto versioned_ptr [[maybe_unused]] = current_chunk_ptr->header()->m_smu->build_prev_vers(
+        m_context.get(), offset_in_chunk, data_ptr.get(), data_len, status);
+    if (status &
+        static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_NULL)) {  // the original value is null.
       source_fld->set_null();
       if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
       continue;
     }
-    source_fld->set_notnull();
+    if (status & static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_DELETED)) {
+      m_rowid.fetch_add(1);
+      if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
+      goto start;
+    }
 
-    if (is_text_value) {
-      uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
-      auto str_ptr = cu->header()->m_local_dict->get(str_id);
+    source_fld->set_notnull();
+    if (Utils::Util::is_string(m_field_cus[idx]->header()->m_source_fld->type()) ||
+        Utils::Util::is_blob(m_field_cus[idx]->header()->m_source_fld->type())) {
+      uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr.get());
+      auto str_ptr = m_field_cus[idx]->header()->m_local_dict->get(str_id);
       source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
     } else {
-      source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
+      source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr.get(), normalized_length);
     }
     if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
   }

@@ -116,6 +116,7 @@ class Imcs : public MemoryObject {
   int build_indexes_from_log(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
                              row_id_t rowid);
 
+  int rollback_changes_by_trxid(Transaction::ID trxid);
   // get the source table by key string. key string is db_name + ":" +
   // table_name + ":" + key_name + ":".
   inline key_meta_t source_keykey(std::string &sch_tb_key) {

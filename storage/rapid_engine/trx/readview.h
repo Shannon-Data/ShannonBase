@@ -26,7 +26,6 @@
 #ifndef __SHANNONBASE_READVIEW_H__
 #define __SHANNONBASE_READVIEW_H__
 
-#include <chrono>
 #include <deque>
 #include <tuple>
 #include <unordered_map>
@@ -34,26 +33,34 @@
 
 namespace ShannonBase {
 class Rapid_load_context;
+namespace Imcs {
+class Chunk;
+}
+
 namespace ReadView {
+enum class RECONSTRUCTED_STATUS : uint8 { STAT_NORMAL = 0, STAT_NULL, STAT_DELETED };
 
 // in chunk, the latest veresion data always is in. the old version of data moves to
 // SMU. So if a trx can see the latest version data, it should travers the version
 // link to check whether there's some visible data or not. if yes, return the old ver
 // data or otherwise, go to check the next item.
-struct SHANNON_ALIGNAS smu_item_t {
+using SMU_item = struct SHANNON_ALIGNAS smu_item_t {
   OPER_TYPE oper_type;
 
   // trxid of old version value.
-  Transaction::ID trxid;
+  Transaction::ID trxid{ShannonBase::SHANNON_MAX_TRX_ID};
 
   // timestamp of the modification.
-  std::chrono::time_point<std::chrono::high_resolution_clock> tm_stamp;
+  std::chrono::time_point<std::chrono::high_resolution_clock> tm_stamp{ShannonBase::SHANNON_MAX_STMP};
+
+  // commit timestamp, initail value is invalid tm, update to valid tm, when it be committed.
+  std::chrono::time_point<std::chrono::high_resolution_clock> tm_committed{ShannonBase::SHANNON_MAX_STMP};
 
   // the old version of data. all var data types were encoded.
   size_t sz{0};
-  std::unique_ptr<uchar[]> data;
+  std::unique_ptr<uchar[]> data{nullptr};
 
-  smu_item_t(size_t size) : sz(size), data(new uchar[size]) { tm_stamp = std::chrono::high_resolution_clock::now(); }
+  smu_item_t(size_t size);
   smu_item_t() = delete;
   // Disable copying
   smu_item_t(const smu_item_t &) = delete;
@@ -65,8 +72,13 @@ struct SHANNON_ALIGNAS smu_item_t {
     trxid = other.trxid;
 
     tm_stamp = other.tm_stamp;
+    tm_committed = other.tm_committed;
 
-    data = std::move(other.data);
+    if (other.data)
+      data = std::move(other.data);
+    else
+      data = nullptr;
+
     sz = other.sz;
 
     other.sz = 0;
@@ -80,8 +92,13 @@ struct SHANNON_ALIGNAS smu_item_t {
       trxid = other.trxid;
 
       tm_stamp = other.tm_stamp;
+      tm_committed = other.tm_committed;
 
-      data = std::move(other.data);
+      if (other.data)
+        data = std::move(other.data);
+      else
+        data = nullptr;
+
       sz = other.sz;
 
       other.sz = 0;
@@ -91,11 +108,8 @@ struct SHANNON_ALIGNAS smu_item_t {
   }
 };
 
-struct smu_item_vec_t {
-  std::mutex vec_mutex;
-  std::deque<smu_item_t> items;
+using SMU_items = struct smu_item_vec_t {
   smu_item_vec_t() = default;
-
   smu_item_vec_t(const smu_item_vec_t &) = delete;
   smu_item_vec_t &operator=(const smu_item_vec_t &) = delete;
 
@@ -112,28 +126,58 @@ struct smu_item_vec_t {
     return *this;
   }
 
-  inline void add(smu_item_t &item) {
+  inline void add(SMU_item &item) {
     std::lock_guard<std::mutex> lock(vec_mutex);
     items.push_front(std::move(item));
   }
-  // gets the first met visibility data in this version link.
-  uchar *get_data(Rapid_load_context *context);
+
+  /**  re-construts the first met visibility data in this version link.
+   * if in_place_len == UNIV_SQL_NULL, means in_place value is null. flag is to indicate flag bit
+   * of the data, such as deleted, null, etc.
+   **/
+  uchar *reconstruct_data(Rapid_load_context *context, uchar *in_place, size_t &in_place_len, uint8 &status);
+
+  std::mutex vec_mutex;
+  std::deque<SMU_item> items;
 };
 
 class Snapshot_meta_unit {
  public:
+  Snapshot_meta_unit() = default;
+  virtual ~Snapshot_meta_unit() = default;
+
+  void set_owner(ShannonBase::Imcs::Chunk *owner);
   /** an item of SMU. consist of <trxid, new_data>. pair of row_id_t and sum_item indicates
    * that each row data has a version link. If this row data not been modified, it does not
-   * have any old version.
+   * have any old version. [newest<---->oldest]
    *   |__|
    *   |__|<----->rowidN: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
    *   |__|       rowidM: {[{trxid:value1} | {trxid:value2} | {trxid:value3} | ...| {trxid:valueN}]}
    *   |__|<-----/|\
    *   |__|
    */
-  uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid);
+  // in_place, means the current version. flag indicates the flag of reconstructed data.
+  // such as is null or not, is deleted marked or not.
+  uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid, uchar *in_place,
+                         size_t &in_plance_len, uint8 &status);
 
-  std::unordered_map<row_id_t, ReadView::smu_item_vec_t> m_version_info;
+  // gets the rowid's versions.
+  inline SMU_items &versions(ShannonBase::row_id_t rowid) {
+    if (m_version_info.find(rowid) != m_version_info.end())
+      return m_version_info[rowid];
+    else  // not found, insert a empty vect in.
+      return m_version_info[rowid];
+  }
+
+  inline void add_version(ShannonBase::row_id_t rowid, SMU_items &siv) {
+    m_version_info.emplace(rowid, std::move(siv));
+  }
+
+  inline std::unordered_map<row_id_t, ReadView::SMU_items> &version_info() { return m_version_info; }
+
+ private:
+  std::unordered_map<row_id_t, ReadView::SMU_items> m_version_info;
+  ShannonBase::Imcs::Chunk *m_owner;
 };
 
 }  // namespace ReadView

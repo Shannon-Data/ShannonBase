@@ -76,7 +76,7 @@ static uint64_t purger_purge_worker(ShannonBase::Imcs::Cu *cu_ptr) {
   if (!cu_ptr || (cu_ptr && !cu_ptr->chunks())) return 0;
   for (auto idx = 0u; idx < cu_ptr->chunks(); idx++) {
     auto chunk_ptr = cu_ptr->chunk(idx);
-    chunk_ptr->GC();
+    chunk_ptr->purge();
   }
 
   return 0;
@@ -168,7 +168,7 @@ void Purger::end() {
     sys_purge_started.store(false, std::memory_order_seq_cst);
     srv_threads.m_rapid_purg_cordinator.join();
     Purge::Purger::set_status(purge_state_t::PURGE_STATE_STOP);
-    assert(Purger::active() == false);
+    ut_a(Purger::active() == false);
   }
 }
 
