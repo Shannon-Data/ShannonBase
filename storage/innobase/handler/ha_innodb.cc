@@ -216,6 +216,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <string>
 #include <vector>
 #include "../rapid_engine/include/rapid_status.h"
+#include "../rapid_engine/imcs/imcs.h"
 
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -6173,6 +6174,7 @@ static int innobase_rollback(handlerton *hton, /*!< in: InnoDB handlerton */
 
   TrxInInnoDB trx_in_innodb(trx);
 
+  auto trxid = trx->id;
   ut_ad(trx_in_innodb.is_aborted() ||
         (trx->dict_operation_lock_mode == 0 &&
          trx->dict_operation == TRX_DICT_OP_NONE));
@@ -6219,6 +6221,8 @@ static int innobase_rollback(handlerton *hton, /*!< in: InnoDB handlerton */
   } else {
     error = trx_rollback_last_sql_stat_for_mysql(trx);
   }
+
+  ShannonBase::Imcs::Imcs::instance()->rollback_changes_by_trxid(trxid);
 
   return convert_error_code_to_mysql(error, 0, trx->mysql_thd);
 }

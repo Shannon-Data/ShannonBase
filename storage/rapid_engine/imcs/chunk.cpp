@@ -94,7 +94,7 @@ Chunk::Chunk(const Field *field) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header SMU allocation failed");
     return;  // allocated faile.
   }
-
+  m_header->m_smu.get()->set_owner(this);
   size_t chunk_size = SHANNON_ROWS_IN_CHUNK * m_header->m_normalized_pack_length;
   ut_ad(field && chunk_size < ShannonBase::rpd_mem_sz_max);
 
@@ -138,7 +138,7 @@ Chunk::~Chunk() {
   }
 }
 
-void Chunk::update_meta_info(OPER_TYPE type, uchar *data, uchar *old) {
+void Chunk::update_meta_info(const Rapid_load_context *context, OPER_TYPE type, uchar *data, uchar *old) {
   auto dict = current_imcs_instance->get_cu(m_chunk_key)->header()->m_local_dict.get();
   double data_val = data ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, data, dict) : 0;
   double old_val = old ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, old, dict) : 0;
@@ -147,6 +147,10 @@ void Chunk::update_meta_info(OPER_TYPE type, uchar *data, uchar *old) {
    * become complex than before. Due the expensive to calc median value, so the first
    * vauel is set to middle.
    * */
+  auto trxid = context->m_trx ? context->m_trx->get_id() : 0;
+  m_header->m_trx_min = std::min(m_header->m_trx_min, trxid);
+  m_header->m_trx_max = std::max(m_header->m_trx_max, trxid);
+
   switch (type) {
     case ShannonBase::OPER_TYPE::OPER_INSERT: {
       m_header->m_prows.fetch_add(1);
@@ -259,45 +263,32 @@ int Chunk::is_null(const Rapid_load_context *context, row_id_t pos) {
 int Chunk::is_deleted(const Rapid_load_context *context, row_id_t pos) {
   std::scoped_lock lk(m_header_mutex);
   if (!m_header->m_del_mask.get())
-    return 0;
+    return SHANNON_SUCCESS;
   else
     return Utils::Util::bit_array_get(m_header->m_del_mask.get(), pos);
 }
 
-bool Chunk::build_version(row_id_t rowid, Transaction::ID trxid, const uchar *data, size_t len, OPER_TYPE oper) {
+int Chunk::build_version(row_id_t rowid, Transaction::ID trxid, const uchar *data, size_t len, OPER_TYPE oper) {
   assert(trxid);
-  ShannonBase::ReadView::smu_item_t si(m_header->m_normalized_pack_length);
+  ShannonBase::ReadView::smu_item_t si(len);
 
   si.oper_type = oper;
 
   // if is null. in version link, we set the data to nullptr. otherwise, we set the data to the real data.
   if (data == nullptr) {
     si.data.reset(nullptr);
+    si.sz = UNIV_SQL_NULL;
   } else {
     si.data.reset(new uchar[len]);
     std::memcpy(si.data.get(), data, len);
   }
 
+  auto now = std::chrono::high_resolution_clock::now();
   si.trxid = trxid;
-  si.tm_stamp = std::chrono::high_resolution_clock::now();
+  si.tm_stamp = si.tm_committed = now;
+  m_header->m_smu->versions(rowid).add(si);
 
-  if (m_header->m_smu->m_version_info.find(rowid) != m_header->m_smu->m_version_info.end()) {
-    // has old versions, then add
-    m_header->m_smu->m_version_info[rowid].add(si);
-  } else {  // this is the first version, then build up the SMU, and add a new one.
-    ShannonBase::ReadView::smu_item_vec_t iv;
-    iv.add(si);
-    m_header->m_smu->m_version_info.emplace(rowid, std::move(iv));
-  }
-
-  if (trxid < m_header->m_trx_min) {
-    m_header->m_trx_min = trxid;
-  }
-
-  if (trxid > m_header->m_trx_max) {
-    m_header->m_trx_max = trxid;
-  }
-  return false;
+  return SHANNON_SUCCESS;
 }
 
 uchar *Chunk::read(const Rapid_load_context *context, uchar *data, size_t len) {
@@ -360,7 +351,8 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
   if (context->m_extra_info.m_trxid) {  // means not from secondary_load operation.
     build_version(rowid, context->m_extra_info.m_trxid, data, normal_len, OPER_TYPE::OPER_INSERT);
   }
-  update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
+
+  update_meta_info(context, ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
 
 #ifndef NDEBUG
   uint64 data_rows =
@@ -407,7 +399,8 @@ uchar *Chunk::write_from_log(const Rapid_load_context *context, row_id_t rowid, 
   if (context->m_extra_info.m_trxid) {  // means not from secondary_load operation.
     build_version(rowid, context->m_extra_info.m_trxid, data, normal_len, OPER_TYPE::OPER_INSERT);
   }
-  update_meta_info(ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
+
+  update_meta_info(context, ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
 
 #ifndef NDEBUG
   uint64 data_rows =
@@ -436,7 +429,7 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t rowid, uchar *n
     std::memcpy(where_ptr, new_data, normal_len);
   }
 
-  update_meta_info(ShannonBase::OPER_TYPE::OPER_UPDATE, new_data, where_ptr);
+  update_meta_info(context, ShannonBase::OPER_TYPE::OPER_UPDATE, new_data, where_ptr);
 
   return where_ptr;
 }
@@ -460,7 +453,7 @@ uchar *Chunk::update_from_log(const Rapid_load_context *context, row_id_t rowid,
     std::memcpy(where_ptr, new_data, normal_len);
   }
 
-  update_meta_info(ShannonBase::OPER_TYPE::OPER_UPDATE, new_data, where_ptr);
+  update_meta_info(context, ShannonBase::OPER_TYPE::OPER_UPDATE, new_data, where_ptr);
 
   return where_ptr;
 }
@@ -477,6 +470,8 @@ uchar *Chunk::remove(const Rapid_load_context *context, row_id_t rowid) {
   }
   Utils::Util::bit_array_set(m_header->m_del_mask.get(), rowid);
 
+  bool is_null = (m_header->m_null_mask.get()) ? Utils::Util::bit_array_get(m_header->m_null_mask.get(), rowid) : false;
+
   del_from = m_base.load(std::memory_order_relaxed);
   del_from += rowid * m_header->m_normalized_pack_length;
   ut_a(del_from <= m_data.load(std::memory_order_relaxed));
@@ -484,9 +479,11 @@ uchar *Chunk::remove(const Rapid_load_context *context, row_id_t rowid) {
   // get the old data and insert smu ptr link.
   auto data_len = m_header->m_normalized_pack_length;
   if (context->m_extra_info.m_trxid) {
-    build_version(rowid, context->m_extra_info.m_trxid, del_from, data_len, OPER_TYPE::OPER_DELETE);
+    build_version(rowid, context->m_extra_info.m_trxid, is_null ? nullptr : del_from,
+                  is_null ? UNIV_SQL_NULL : data_len, OPER_TYPE::OPER_DELETE);
   }
-  update_meta_info(ShannonBase::OPER_TYPE::OPER_DELETE, del_from, del_from);
+
+  update_meta_info(context, ShannonBase::OPER_TYPE::OPER_DELETE, del_from, del_from);
   return del_from;
 }
 
@@ -503,48 +500,59 @@ void Chunk::truncate() {
   reset_meta_info();
 }
 
-int Chunk::GC() {
-  auto &version_map = m_header->m_smu->m_version_info;
-  ::ReadView oldest_view;
-  trx_sys->mvcc->clone_oldest_view(&oldest_view);
-  trx_id_t min_visible_trxid = oldest_view.low_limit_no();
+int Chunk::purge() {
+  auto ret{SHANNON_SUCCESS};
+  auto &version_map = m_header->m_smu->version_info();
 
-  for (auto it = version_map.begin(); it != version_map.end();) {
-    auto &vec = it->second;
+  auto ratio = version_map.size() * 1.0 / m_header->m_prows.load();
+  if (ShannonBase::is_greater_than_or_eq(ratio, ShannonBase::SHANNON_GC_RATIO_THRESHOLD)) {
+    // need to do fully GC.
+    ret = GC();
+  } else {  // do purge the undo buffer.
+    ::ReadView oldest_view;
+    trx_sys->mvcc->clone_oldest_view(&oldest_view);
+    trx_id_t min_visible_trxid = oldest_view.low_limit_no();
 
-    std::lock_guard<std::mutex> vec_lock(vec.vec_mutex);
-    auto &items = vec.items;
+    for (auto it = version_map.begin(); it != version_map.end();) {
+      auto &vec = it->second;
 
-    if (items.empty()) {
-      it = version_map.erase(it);
-      continue;
-    }
+      std::lock_guard<std::mutex> vec_lock(vec.vec_mutex);
+      auto &items = vec.items;
 
-    // find the first trxid of less than min_visible_trxid
-    size_t retain_idx = items.size();  // if not, remove all.
-    for (size_t i = 0; i < items.size(); ++i) {
-      if (items[i].trxid < min_visible_trxid) {
-        retain_idx = i;
-        break;
+      if (items.empty()) {
+        it = version_map.erase(it);
+        continue;
+      }
+
+      // find the first trxid of less than min_visible_trxid
+      size_t retain_idx = items.size();  // if not, remove all.
+      for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i].trxid < min_visible_trxid) {
+          retain_idx = i;
+          break;
+        }
+      }
+
+      if (retain_idx == items.size()) {
+        // not visible, safe clean.
+        items.clear();
+        it = version_map.erase(it);
+      } else {
+        // keep [0, retain_idx]，remove all trx id is greater than retain_idx+1
+        if (retain_idx + 1 < items.size()) {
+          items.erase(items.begin() + retain_idx + 1, items.end());
+        }
+        ++it;
       }
     }
 
-    if (retain_idx == items.size()) {
-      // not visible, safe clean.
-      items.clear();
-      it = version_map.erase(it);
-    } else {
-      // keep [0, retain_idx]，remove all trx id is greater than retain_idx+1
-      if (retain_idx + 1 < items.size()) {
-        items.erase(items.begin() + retain_idx + 1, items.end());
-      }
-      ++it;
-    }
+    m_header->m_last_gc_tm = std::chrono::steady_clock::now();
   }
 
-  m_header->m_last_gc_tm = std::chrono::steady_clock::now();
-  return 0;
+  return ret;
 }
+
+int Chunk::GC() { return SHANNON_SUCCESS; }
 
 row_id_t Chunk::rows(Rapid_load_context *context) {
   // in furture, we get the rows with visibility check. Now, just return the prows.

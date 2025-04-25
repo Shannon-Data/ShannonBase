@@ -25,6 +25,7 @@
 */
 #ifndef __SHANNONBASE_CONST_H__
 #define __SHANNONBASE_CONST_H__
+#include <chrono>
 #include <cmath>
 #include <vector>
 #include "my_inttypes.h"
@@ -56,6 +57,8 @@
 namespace ShannonBase {
 using row_id_t = size_t;
 /** Handler name for rapid */
+constexpr auto SHANNON_SUCCESS = 0;
+
 static constexpr char handler_name[] = "Rapid";
 static constexpr char rapid_hton_name[] = "Rapid";
 
@@ -104,6 +107,10 @@ constexpr double SHANNON_MAX_DOUBLE = std::numeric_limits<double>::max();
 constexpr int SHANNON_MIN_INT = std::numeric_limits<int>::min();
 constexpr int SHANNON_MAX_INT = std::numeric_limits<int>::max();
 constexpr row_id_t INVALID_ROW_ID = std::numeric_limits<size_t>::max();
+
+constexpr auto SHANNON_MAX_STMP = std::chrono::time_point<std::chrono::high_resolution_clock>::max();
+constexpr auto SHANNON_MAX_TRX_ID = std::numeric_limits<uint64_t>::max();
+constexpr auto SHANNON_GC_RATIO_THRESHOLD = 0.8;
 
 constexpr double SHANNON_EPSILON = 1e-10;
 inline bool are_equal(double a, double b, double epsilon = SHANNON_EPSILON) { return (std::fabs(a - b) < epsilon); }

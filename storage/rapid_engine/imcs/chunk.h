@@ -176,7 +176,10 @@ class Chunk : public MemoryObject {
   // free all the data and reset the meta info.
   void truncate();
 
-  // to do GC
+  // to do purge unused undo buffer.
+  int purge();
+
+  // to do garbage collection.
   int GC();
 
   // return the data postion of this chunk.
@@ -259,13 +262,13 @@ class Chunk : public MemoryObject {
   // void update_meta_info(OPER_TYPE type, const Field *fld);
 
   // to update the meta info of this chunk, val is input param.
-  void update_meta_info(OPER_TYPE type, uchar *data, uchar *old);
+  void update_meta_info(const Rapid_load_context *context, OPER_TYPE type, uchar *data, uchar *old);
 
   // check the data type is leagal or not.
   void check_data_type(size_t type_size);
 
   // build up an old version.
-  inline bool build_version(row_id_t rowid, Transaction::ID trxid, const uchar *data, size_t len, OPER_TYPE oper);
+  inline int build_version(row_id_t rowid, Transaction::ID trxid, const uchar *data, size_t len, OPER_TYPE oper);
 };
 
 }  // namespace Imcs
