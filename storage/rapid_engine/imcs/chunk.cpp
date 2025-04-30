@@ -255,7 +255,7 @@ void Chunk::check_data_type(size_t type_size) {
 int Chunk::is_null(const Rapid_load_context *context, row_id_t pos) {
   std::scoped_lock lk(m_header_mutex);
   if (!m_header->m_null_mask.get())
-    return 0;
+    return static_cast<int>(false);
   else
     return Utils::Util::bit_array_get(m_header->m_null_mask.get(), pos);
 }

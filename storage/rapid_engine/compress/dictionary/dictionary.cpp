@@ -48,7 +48,7 @@ namespace Compress {
 uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
   DBUG_TRACE;
   // returns dictionary id. //encoding alg pls ref to: heatwave document.
-  if (!str || !len) return 0;
+  if (!str || !len) return Dictionary::DEFAULT_STRID;
 
   compress_algos alg{compress_algos::NONE};
   switch (m_encoding_type) {
@@ -87,7 +87,7 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
     return id;
   }
 
-  return 0;
+  return Dictionary::DEFAULT_STRID;
 }
 
 int32 Dictionary::get(uint64 strid, String &ret_val) {
@@ -97,7 +97,7 @@ int32 Dictionary::get(uint64 strid, String &ret_val) {
   String strs(compressed_str.c_str(), compressed_str.length(), ret_val.charset());
   copy_if_not_alloced(&ret_val, &strs, strs.length());
 
-  return 0;
+  return Dictionary::DEFAULT_STRID;
 }
 
 std::string Dictionary::get(uint64 strid) {
@@ -133,7 +133,7 @@ int64 Dictionary::get(const std::string &str) {
   auto content_pos = m_content.find(str);
   if (content_pos != m_content.end()) return content_pos->second;
 
-  return -1;
+  return Dictionary::INVALID_STRID;
 }
 }  // namespace Compress
 }  // namespace ShannonBase

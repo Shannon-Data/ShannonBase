@@ -43,6 +43,9 @@ enum class Encoding_type : uint8 { NONE, SORTED, VARLEN };
 // Dictionary, which store all the dictionary data.
 class Dictionary {
  public:
+  static constexpr auto DEFAULT_STRID = 0;
+  static constexpr auto INVALID_STRID = -1;
+
   Dictionary(Encoding_type type) : m_encoding_type(type) {
     m_content.emplace("unknown", 0);
     m_id2content.emplace(0, "unknown");
