@@ -81,12 +81,12 @@ DataTable::~DataTable() {
 
 int DataTable::open() {
   m_rowid.store(0);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int DataTable::close() {
   m_rowid.store(0);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int DataTable::init() {
@@ -109,7 +109,7 @@ int DataTable::init() {
     m_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
     m_context->m_table_name = const_cast<char *>(m_data_source->s->table_name.str);
   }
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int DataTable::next(uchar *buf) {
@@ -175,7 +175,7 @@ start:
   }
 
   m_rowid.fetch_add(1);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int DataTable::end() {
@@ -184,7 +184,7 @@ int DataTable::end() {
 
   m_rowid.store(0);
   m_initialized.store(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int DataTable::index_init(uint keynr, bool sorted) {
@@ -212,7 +212,7 @@ int DataTable::index_init(uint keynr, bool sorted) {
   ut_a(index->initialized());
   m_index_iter.reset(new Index::Art_Iterator(index->impl()));
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int DataTable::index_end() {
@@ -277,7 +277,7 @@ int DataTable::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fu
     if (ret) {
       return ret;
     }
-    err = 0;
+    err = ShannonBase::SHANNON_SUCCESS;
   }
 
   return err;
@@ -295,7 +295,7 @@ int DataTable::index_next(uchar *buf) {
     if (ret) {
       return ret;
     }
-    err = 0;
+    err = ShannonBase::SHANNON_SUCCESS;
   }
 
   return err;

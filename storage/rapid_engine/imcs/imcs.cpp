@@ -52,12 +52,12 @@ SHANNON_THREAD_LOCAL Imcs *current_imcs_instance = Imcs::instance();
 
 int Imcs::initialize() {
   m_inited.store(1);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::deinitialize() {
   m_inited.store(0);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
@@ -125,7 +125,7 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   m_cus.emplace(key, std::make_unique<Cu>(trx_fld.get()));
   */
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 Cu *Imcs::at(std::string_view schema, std::string_view table, size_t index) {
@@ -225,7 +225,7 @@ int Imcs::build_index_impl(const Rapid_load_context *context, const TABLE *sourc
                              sizeof(rowid));
   const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = 0;
   const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff.reset(nullptr);
-  return 0;
+  return SHANNON_SUCCESS;
 }
 
 int Imcs::build_index(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid) {
@@ -243,7 +243,7 @@ int Imcs::build_indexes_from_keys(const Rapid_load_context *context, std::map<st
     m_indexes[key_name].get()->insert(key_buff, key_len, &rowid, sizeof(row_id_t));
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::build_indexes_from_log(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
@@ -304,7 +304,7 @@ int Imcs::build_indexes_from_log(const Rapid_load_context *context, std::map<std
     m_indexes[key_name].get()->insert(key_buff.get(), key_info.first, &rowid, sizeof(row_id_t));
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
@@ -405,7 +405,7 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   }
   // end of load the data from innodb to imcs.
   source->file->ha_rnd_end();
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
@@ -447,13 +447,13 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
       ++it;
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::insert_row(const Rapid_load_context *context, row_id_t rowid, uchar *buf) {
   ut_a(context && buf);
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
@@ -473,12 +473,12 @@ int Imcs::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
     if (!this->get_cu(key_name)->write_row_from_log(context, rowid, field_val.second.data.get(), len))
       return HA_ERR_WRONG_IN_RECORD;
   }
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   ut_a(context);
-  if (!m_cus.size()) return 0;
+  if (!m_cus.size()) return SHANNON_SUCCESS;
 
   std::string keypart;
   keypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
@@ -493,13 +493,13 @@ int Imcs::delete_row(const Rapid_load_context *context, row_id_t rowid) {
     }
     ++it;
   }
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) {
   ut_a(context);
 
-  if (!m_cus.size()) return 0;
+  if (!m_cus.size()) return SHANNON_SUCCESS;
 
   std::string keypart;
   keypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
@@ -511,7 +511,7 @@ int Imcs::delete_rows(const Rapid_load_context *context, const std::vector<row_i
       if (!cu.second->delete_row_all(context)) return HA_ERR_GENERIC;
     }
 
-    return 0;
+    return ShannonBase::SHANNON_SUCCESS;
   }
 
   for (auto &rowid : rowids) {
@@ -522,7 +522,7 @@ int Imcs::delete_rows(const Rapid_load_context *context, const std::vector<row_i
       if (!cu.second->delete_row(context, rowid)) return HA_ERR_GENERIC;
     }
   }
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
@@ -532,7 +532,7 @@ int Imcs::update_row(const Rapid_load_context *context, row_id_t rowid, std::str
   ut_a(m_cus[field_key]);
   auto ret = m_cus[field_key]->update_row(context, rowid, const_cast<uchar *>(new_field_data), nlen);
   if (!ret) return HA_ERR_GENERIC;
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
@@ -555,7 +555,7 @@ int Imcs::update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
       return HA_ERR_WRONG_IN_RECORD;
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::rollback_changes_by_trxid(Transaction::ID trxid) {
@@ -576,7 +576,7 @@ int Imcs::rollback_changes_by_trxid(Transaction::ID trxid) {
       }
     }
   }
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 }  // namespace Imcs

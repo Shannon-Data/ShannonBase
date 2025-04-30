@@ -73,13 +73,13 @@ static uint64_t purger_purge_worker(ShannonBase::Imcs::Cu *cu_ptr) {
   SetThreadDescription(GetCurrentThread(), L"rapid_purge_wkr");
 #endif
 
-  if (!cu_ptr || (cu_ptr && !cu_ptr->chunks())) return 0;
+  if (!cu_ptr || (cu_ptr && !cu_ptr->chunks())) return ShannonBase::SHANNON_SUCCESS;
   for (auto idx = 0u; idx < cu_ptr->chunks(); idx++) {
     auto chunk_ptr = cu_ptr->chunk(idx);
     chunk_ptr->purge();
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 // purge coordinator main func entry.

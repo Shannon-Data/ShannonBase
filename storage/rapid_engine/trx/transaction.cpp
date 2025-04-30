@@ -141,17 +141,17 @@ int Transaction::begin(ISOLATION_LEVEL iso_level) {
       m_thd != nullptr && !thd_test_options(m_thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN) && thd_is_query_block(m_thd);
 
   trx_start_if_not_started(m_trx_impl, (m_read_only ? false : true), UT_LOCATION_HERE);
-  return 0;
+  return SHANNON_SUCCESS;
 }
 
-int Transaction::begin_stmt(ISOLATION_LEVEL iso_level) { return 0; }
+int Transaction::begin_stmt(ISOLATION_LEVEL iso_level) { return SHANNON_SUCCESS; }
 
 int Transaction::commit() {
   dberr_t error{DB_SUCCESS};
   if (trx_is_started(m_trx_impl)) {
     error = trx_commit_for_mysql(m_trx_impl);
   }
-  return (error != DB_SUCCESS) ? HA_ERR_GENERIC : 0;
+  return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
 }
 
 int Transaction::rollback() {
@@ -159,12 +159,12 @@ int Transaction::rollback() {
   if (trx_is_started(m_trx_impl)) {
     error = trx_rollback_for_mysql(m_trx_impl);
   }
-  return (error != DB_SUCCESS) ? HA_ERR_GENERIC : 0;
+  return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
 }
 
-int Transaction::rollback_stmt() { return 0; }
+int Transaction::rollback_stmt() { return SHANNON_SUCCESS; }
 
-int Transaction::rollback_to_savepoint(void *const savepoint) { return 0; }
+int Transaction::rollback_to_savepoint(void *const savepoint) { return SHANNON_SUCCESS; }
 
 void Transaction::set_read_only(bool read_only) { m_read_only = read_only; }
 
@@ -181,7 +181,7 @@ int Transaction::release_snapshot() {
     trx_sys->mvcc->view_close(m_trx_impl->read_view, false);
   }
 
-  return 0;
+  return SHANNON_SUCCESS;
 }
 
 ::ReadView *Transaction::get_snapshot() const { return m_trx_impl->read_view; }

@@ -160,12 +160,12 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
   ut_a(!m_data_table.get());
   m_data_table.reset(new ShannonBase::Imcs::DataTable(table));
   m_data_table->open();
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::close() {
   m_data_table->close();
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::info(unsigned int flags) {
@@ -187,7 +187,7 @@ int ha_rapid::info(unsigned int flags) {
   }
   context.m_trx->commit();
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /** Returns the operations supported for indexes.
@@ -242,7 +242,8 @@ int ha_rapid::records(ha_rows *num_rows) {
   std::string sch = table_share->db.str;
   std::string tb = table_share->table_name.str;
   *num_rows = Imcs::Imcs::instance()->at(sch, tb, 0)->rows(&context);
-  return 0;
+
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key, key_range *max_key) {
@@ -306,7 +307,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
   }
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
@@ -319,7 +320,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   } else {
     Imcs::Imcs::instance()->unload_table(nullptr, db_name, table_name, false);
     shannon_loaded_tables->erase(db_name, table_name);
-    return 0;
+    return ShannonBase::SHANNON_SUCCESS;
   }
 }
 
@@ -342,7 +343,7 @@ int ha_rapid::start_stmt(THD *const thd, thr_lock_type lock_type) {
   auto trx = ShannonBase::Transaction::get_or_create_trx(thd);
   rapid_register_tx(ShannonBase::shannon_rapid_hton_ptr, thd, trx);
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /** Initialize a table scan.
@@ -357,7 +358,7 @@ int ha_rapid::rnd_init(bool scan) {
 
   m_start_of_scan = true;
   inited = handler::RND;
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /** Ends a table scan.
@@ -368,7 +369,7 @@ int ha_rapid::rnd_end(void) {
 
   m_start_of_scan = false;
   inited = handler::NONE;
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /** Reads the next row in a table scan (also used to read the FIRST row
@@ -400,7 +401,7 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
   m_start_of_scan = true;
   active_index = keynr;
   inited = handler::INDEX;
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::index_end() {
@@ -412,7 +413,7 @@ int ha_rapid::index_end() {
   inited = handler::NONE;
   m_start_of_scan = false;
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) {
@@ -457,7 +458,7 @@ int ha_rapid::index_first(uchar *buf) {
 
 int ha_rapid::index_prev(uchar *buf) {
   ut_a(false);  // not supported now.
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::index_last(uchar *buf) {
@@ -535,7 +536,7 @@ static int rapid_commit(handlerton *hton,  /*!< in: handlerton */
     }
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /** Rolls back a transaction or the latest SQL statement.
@@ -576,7 +577,7 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
     }
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /** Creates an Rapid transaction struct for the thd if it does not yet have
@@ -614,7 +615,7 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
                           "been taken.");
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /* Dummy SAVEPOINT support. This is needed for long running transactions
@@ -639,7 +640,7 @@ static int rapid_close_connection(handlerton *hton, /*!< in: handlerton */
   DBUG_TRACE;
   ut_a(hton == ShannonBase::shannon_rapid_hton_ptr);
   ShannonBase::Transaction::free_trx_from_thd(thd);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /** Cancel any pending lock request associated with the current THD. */
@@ -662,7 +663,7 @@ static inline bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::st
   thd->lex->m_secondary_engine_offload_or_exec_failed_reason = msg_str;
 
   my_error(ER_SECONDARY_ENGINE, MYF(0), msg_str.c_str());
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 std::string_view GetSecondaryEngineOffloadorExecFailedReason(const THD *thd) {
@@ -943,7 +944,7 @@ static int show_rapid_vars(THD *, SHOW_VAR *var, char *) {
   var->value = (char *)&rapid_status_variables;
   var->scope = SHOW_SCOPE_GLOBAL;
 
-  return (0);
+  return (ShannonBase::SHANNON_SUCCESS);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -956,7 +957,7 @@ static int rpd_mem_size_max_validate(THD *,                          /*!< in: th
                                                                      for update function */
                                      struct st_mysql_value *value) { /*!< in: incoming string */
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /** Update the system variable rapid_memory_size_max.
@@ -975,7 +976,7 @@ static int rpd_pop_buff_size_max_validate(THD *,                          /*!< i
                                           void *save,                     /*!< out: immediate result
                                                                           for update function */
                                           struct st_mysql_value *value) { /*!< in: incoming string */
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /** Update the system variable rapid_pop_buffer_size_max.

@@ -109,7 +109,7 @@ int Util::get_range_value(enum_field_types type, const Compress::Dictionary *dic
     default:
       break;
   }
-  return 0;
+  return SHANNON_SUCCESS;
 }
 
 int Util::mem2string(uchar *buff, uint length, std::string &result) {
@@ -121,7 +121,7 @@ int Util::mem2string(uchar *buff, uint length, std::string &result) {
     oss << std::setw(2) << static_cast<unsigned>(static_cast<unsigned char>(data[i]));
   }
   result = oss.str();
-  return 0;
+  return SHANNON_SUCCESS;
 }
 
 uchar *Util::pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, uchar *to, size_t to_length,

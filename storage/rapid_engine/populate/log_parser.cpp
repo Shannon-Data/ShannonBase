@@ -186,7 +186,7 @@ int LogParser::build_key(const Rapid_load_context *context, std::map<std::string
     keys.emplace(key_name, std::move(key_meta));
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 const dict_index_t *LogParser::find_index(uint64 idx_id) {
@@ -289,7 +289,7 @@ int LogParser::store_field_in_mysql_format(const dict_index_t *index, const dict
    * it's 6. so sad. * */
   row_sel_field_store_in_mysql_format(const_cast<byte *>(dest), &templ, index, col->get_col_phy_pos(), src, plen,
                                       ULINT_UNDEFINED);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 byte *LogParser::advance_parseMetadataLog(table_id_t id, uint64_t version, byte *ptr, byte *end) {
@@ -689,7 +689,7 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
       }
     }
   }
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 row_id_t LogParser::find_matched_row(Rapid_load_context *context, std::map<std::string, key_info_t> &keys) {
@@ -724,7 +724,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
   ut_a(rec == nullptr || rec_get_n_fields(rec, index) >= rec_offs_n_fields(offsets));
 
   // only leave nodes.
-  if (rec_get_status(rec) == REC_STATUS_NODE_PTR) return 0;
+  if (rec_get_status(rec) == REC_STATUS_NODE_PTR) return ShannonBase::SHANNON_SUCCESS;
 #ifdef UNIV_DEBUG_VALGRIND
   {
     const void *rec_start = rec - rec_offs_extra_size(offsets);
@@ -810,7 +810,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       break;
   }
 
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context, byte *ptr, /*!< in: buffer */
@@ -1970,7 +1970,7 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
   UNIV_MEM_INVALID(body, sizeof *body);
 
   if (ptr == end_ptr) {
-    return 0;
+    return std::ptrdiff_t(end_ptr - ptr);
   }
   switch (*ptr) {
 #ifdef UNIV_LOG_LSN_DEBUG
@@ -1996,9 +1996,9 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
 
     case MLOG_MULTI_REC_END | MLOG_SINGLE_REC_FLAG:
     case MLOG_DUMMY_RECORD | MLOG_SINGLE_REC_FLAG:
-      // found_corrupt_log;
+      // found_corrupt_log; then, now, we skip this mlogs.
       ut_a(false);
-      return 0;
+      return std::ptrdiff_t(end_ptr - ptr);
 
     case MLOG_TABLE_DYNAMIC_META:
     case MLOG_TABLE_DYNAMIC_META | MLOG_SINGLE_REC_FLAG:
@@ -2013,14 +2013,14 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
       if (new_ptr != nullptr) {
         new_ptr = advance_parseMetadataLog(id, version, new_ptr, end_ptr);
       }
-      return new_ptr == nullptr ? 0 : new_ptr - ptr;
+      return new_ptr == nullptr ? (std::ptrdiff_t(end_ptr - ptr)) /*skip it*/ : std::ptrdiff_t(new_ptr - ptr);
   }
 
   new_ptr = const_cast<byte *>(mlog_parse_initial_log_record(ptr, end_ptr, type, space_id, page_no));
   *body = new_ptr;
 
-  if (new_ptr == nullptr) {
-    return 0;
+  if (new_ptr == nullptr) {  // skip it, go to next.
+    return (std::ptrdiff_t(end_ptr - ptr));
   }
 
   /**
@@ -2031,8 +2031,8 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
    */
   new_ptr = parse_or_apply_log_rec_body(context, *type, new_ptr, end_ptr, *space_id, *page_no, nullptr, nullptr, 0);
 
-  if (new_ptr == nullptr) {
-    return 0;
+  if (new_ptr == nullptr) {  // skip the current mlog, go to next. means this corruption.
+    return (end_ptr - ptr);
   }
 
   return new_ptr - ptr;
@@ -2063,11 +2063,11 @@ ulint LogParser::parse_multi_rec(Rapid_load_context *context, byte *ptr, byte *e
     ulint len = parse_log_rec(context, &type, ptr, end_ptr, &space_id, &page_no, &body);
     if (len == 0) {
       ut_a(false);
-      return 0;
+      return parsed_bytes;
     } else if ((*ptr & MLOG_SINGLE_REC_FLAG)) {
       ut_a(false);
       // report_corrupt_log(ptr, type, space_id, page_no);
-      return 0;
+      return parsed_bytes;
     }
 
     parsed_bytes += len;
@@ -2112,7 +2112,7 @@ uint LogParser::parse_redo(Rapid_load_context *context, byte *ptr, byte *end_ptr
    * to data file.
    */
   if (ptr == end_ptr) {
-    return 0;
+    return std::ptrdiff_t(end_ptr - ptr);
   }
 
   bool single_rec;
