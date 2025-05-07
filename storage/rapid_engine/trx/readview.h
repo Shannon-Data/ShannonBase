@@ -38,7 +38,8 @@ class Chunk;
 }
 
 namespace ReadView {
-enum class RECONSTRUCTED_STATUS : uint8 { STAT_NORMAL = 0, STAT_NULL, STAT_DELETED };
+// a bit to describe one status.
+enum class RECONSTRUCTED_STATUS : uint8 { STAT_NORMAL = 0, STAT_NULL = 1, STAT_DELETED = 2, STAT_ROLLBACKED = 4 };
 
 // in chunk, the latest veresion data always is in. the old version of data moves to
 // SMU. So if a trx can see the latest version data, it should travers the version
@@ -159,7 +160,7 @@ class Snapshot_meta_unit {
   // in_place, means the current version. flag indicates the flag of reconstructed data.
   // such as is null or not, is deleted marked or not.
   uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid, uchar *in_place,
-                         size_t &in_plance_len, uint8 &status);
+                         size_t &in_place_len, uint8 &status);
 
   // gets the rowid's versions.
   inline SMU_items &versions(ShannonBase::row_id_t rowid) {

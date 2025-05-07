@@ -59,7 +59,7 @@ uchar *smu_item_vec_t::reconstruct_data(Rapid_load_context *context, uchar *in_p
       switch (oper_type) {
         case OPER_TYPE::OPER_INSERT: {
           ut_a(it.sz == in_place_len);
-          ret = nullptr;
+          ret = in_place;
           in_place_len = it.sz;
           status |= static_cast<uint8>(RECONSTRUCTED_STATUS::STAT_DELETED);
         } break;
@@ -94,6 +94,7 @@ uchar *smu_item_vec_t::reconstruct_data(Rapid_load_context *context, uchar *in_p
       }
     } else if (context->m_trx->changes_visible(it.trxid, context->m_table_name.c_str()) &&
                it.tm_committed == ShannonBase::SHANNON_MAX_STMP) {  // means it has been rollback.
+      status = static_cast<uint8>(RECONSTRUCTED_STATUS::STAT_ROLLBACKED);
       return nullptr;
     }
   }
@@ -104,14 +105,16 @@ uchar *smu_item_vec_t::reconstruct_data(Rapid_load_context *context, uchar *in_p
 void Snapshot_meta_unit::set_owner(ShannonBase::Imcs::Chunk *owner) { m_owner = owner; }
 
 uchar *Snapshot_meta_unit::build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid, uchar *in_place,
-                                           size_t &in_plance_len, uint8 &status) {
+                                           size_t &in_place_len, uint8 &status) {
   if (m_owner->is_deleted(context, rowid)) status |= static_cast<uint8>(RECONSTRUCTED_STATUS::STAT_DELETED);
-  if (m_owner->is_null(context, rowid)) status |= static_cast<uint8>(RECONSTRUCTED_STATUS::STAT_NULL);
-
+  if (m_owner->is_null(context, rowid)) {
+    status |= static_cast<uint8>(RECONSTRUCTED_STATUS::STAT_NULL);
+    in_place_len = UNIV_SQL_NULL;
+  }
   ////if it has not version data, just return itself.
   return (m_version_info.find(rowid) == m_version_info.end())
              ? in_place
-             : m_version_info[rowid].reconstruct_data(context, in_place, in_plance_len, status);
+             : m_version_info[rowid].reconstruct_data(context, in_place, in_place_len, status);
 }
 
 }  // namespace ReadView
