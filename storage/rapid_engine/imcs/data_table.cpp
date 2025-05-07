@@ -148,15 +148,18 @@ start:
     std::memcpy(data_ptr.get(), current_data_ptr, data_len);
 
     uint8 status{0};
-    auto versioned_ptr [[maybe_unused]] = current_chunk_ptr->header()->m_smu->build_prev_vers(
-        m_context.get(), offset_in_chunk, data_ptr.get(), data_len, status);
-    if (versioned_ptr == nullptr) {  // means rollbacked rows.
+    auto versioned_ptr = current_chunk_ptr->header()->m_smu->build_prev_vers(m_context.get(), offset_in_chunk,
+                                                                             data_ptr.get(), data_len, status);
+    if (!versioned_ptr &&
+        (status &
+         static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_ROLLBACKED))) {  // means rollbacked rows.
       m_rowid.fetch_add(1);
       if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
       goto start;
     }
     if (status &
         static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_NULL)) {  // the original value is null.
+      ut_a(data_len == UNIV_SQL_NULL);
       source_fld->set_null();
       if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
       continue;
