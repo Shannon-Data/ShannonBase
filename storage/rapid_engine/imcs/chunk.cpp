@@ -61,6 +61,9 @@ Chunk::Chunk(const Field *field) {
     return;  // allocated faile.
   }
 
+  m_header->m_db = field->table->s->db.str;
+  m_header->m_table_name = field->table->s->table_name.str;
+
   m_header->m_pack_length = field->pack_length();
   if (Utils::Util::is_blob(field->type()) || Utils::Util::is_varstring(field->type()) ||
       Utils::Util::is_string(field->type()))
@@ -502,53 +505,17 @@ void Chunk::truncate() {
 
 int Chunk::purge() {
   auto ret{SHANNON_SUCCESS};
-  auto &version_map = m_header->m_smu->version_info();
 
-  auto ratio = version_map.size() * 1.0 / m_header->m_prows.load();
-  if (ShannonBase::is_greater_than_or_eq(ratio, ShannonBase::SHANNON_GC_RATIO_THRESHOLD)) {
+  if (ShannonBase::is_greater_than_or_eq((m_header->m_smu->version_info().size() * 1.0 / m_header->m_prows.load()),
+                                         ShannonBase::SHANNON_GC_RATIO_THRESHOLD)) {
     // need to do fully GC.
-    ret = GC();
-  } else {  // do purge the undo buffer.
+    ret = this->GC();
+  } else {
     ::ReadView oldest_view;
     trx_sys->mvcc->clone_oldest_view(&oldest_view);
-    trx_id_t min_visible_trxid = oldest_view.low_limit_no();
-
-    for (auto it = version_map.begin(); it != version_map.end();) {
-      auto &vec = it->second;
-
-      std::lock_guard<std::mutex> vec_lock(vec.vec_mutex);
-      auto &items = vec.items;
-
-      if (items.empty()) {
-        it = version_map.erase(it);
-        continue;
-      }
-
-      // find the first trxid of less than min_visible_trxid
-      size_t retain_idx = items.size();  // if not, remove all.
-      for (size_t i = 0; i < items.size(); ++i) {
-        if (items[i].trxid < min_visible_trxid) {
-          retain_idx = i;
-          break;
-        }
-      }
-
-      if (retain_idx == items.size()) {
-        // not visible, safe clean.
-        items.clear();
-        it = version_map.erase(it);
-      } else {
-        // keep [0, retain_idx]，remove all trx id is greater than retain_idx+1
-        if (retain_idx + 1 < items.size()) {
-          items.erase(items.begin() + retain_idx + 1, items.end());
-        }
-        ++it;
-      }
-    }
-
+    ret = m_header->m_smu->purge(m_header->m_table_name.c_str(), &oldest_view);
     m_header->m_last_gc_tm = std::chrono::steady_clock::now();
   }
-
   return ret;
 }
 

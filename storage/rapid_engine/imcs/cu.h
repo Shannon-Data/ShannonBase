@@ -86,6 +86,12 @@ class Cu : public MemoryObject {
 
     // key length of this cu.
     size_t m_key_len{0};
+
+    // source table name str.
+    std::string m_table_name;
+
+    // source db name str.
+    std::string m_db;
   };
 
   explicit Cu(const Field *field);

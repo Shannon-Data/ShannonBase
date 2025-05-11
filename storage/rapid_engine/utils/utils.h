@@ -232,6 +232,13 @@ class Util {
     ba->data[byte_index] |= (1 << bit_index);
   }
 
+  // reset Nth is 0.
+  static inline void bit_array_reset(bit_array_t *ba, size_t n) {
+    size_t byte_index = n / 8;
+    size_t bit_index = n % 8;
+    ba->data[byte_index] &= ~(1 << bit_index);
+  }
+
   static inline bool is_blob(enum_field_types type) {
     return (type == MYSQL_TYPE_BLOB || type == MYSQL_TYPE_TINY_BLOB || type == MYSQL_TYPE_MEDIUM_BLOB ||
             type == MYSQL_TYPE_LONG_BLOB)

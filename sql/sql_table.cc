@@ -11887,11 +11887,11 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
     se_operation_end = std::chrono::steady_clock::now();
     if (retval) return true;
 
+    //start imcs purger thread to purge dead tuples.
+    ShannonBase::Purge::Purger::start();
+
     //start population thread if table loaded successfully.
     ShannonBase::Populate::Populator::start();
-
-    //start imcs purger thread to purge dead tuples.
-    //ShannonBase::Purge::Purger::start();
   } else {
     if (table_list->partition_names != nullptr) {
       skip_metadata_update = true;

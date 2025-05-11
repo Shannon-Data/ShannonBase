@@ -58,24 +58,23 @@ mysql_pfs_key_t rapid_purge_thread_key;
 namespace ShannonBase {
 namespace Purge {
 
-std::atomic<bool> sys_purge_started{false};
-std::mutex Purger::m_state_mutex;
-purge_state_t Purger::m_state{Purge::purge_state_t::PURGE_STATE_EXIT};
-
+std::atomic<purge_state_t> Purger::m_state{Purge::purge_state_t::PURGE_STATE_EXIT};
 std::mutex Purger::m_notify_mutex;
 std::condition_variable Purger::m_notify_cv;
-std::atomic<bool> Purger::m_notify_flag{false};
 
-static uint64_t purger_purge_worker(ShannonBase::Imcs::Cu *cu_ptr) {
+static int purger_purge_worker(ShannonBase::Imcs::Cu *cu_ptr) {
 #if !defined(_WIN32)  // here we
   pthread_setname_np(pthread_self(), "rapid_purge_wkr");
 #else
   SetThreadDescription(GetCurrentThread(), L"rapid_purge_wkr");
 #endif
 
-  if (!cu_ptr || (cu_ptr && !cu_ptr->chunks())) return ShannonBase::SHANNON_SUCCESS;
+  if (!cu_ptr || (cu_ptr && !cu_ptr->chunks()))  // empty cu.
+    return ShannonBase::SHANNON_SUCCESS;
+
   for (auto idx = 0u; idx < cu_ptr->chunks(); idx++) {
     auto chunk_ptr = cu_ptr->chunk(idx);
+    if (!chunk_ptr) continue;
     chunk_ptr->purge();
   }
 
@@ -91,85 +90,58 @@ static void purge_func_main() {
 #endif
 
   while (srv_shutdown_state.load(std::memory_order_acquire) == SRV_SHUTDOWN_NONE &&
-         sys_purge_started.load(std::memory_order_acquire)) {
-    {  // wait for event or timeout.
-      std::unique_lock<std::mutex> lock(Purger::m_notify_mutex);
-      Purger::m_notify_cv.wait_for(lock, std::chrono::milliseconds(MAX_PURGER_TIMEOUT),
-                                   [] { return Purger::m_notify_flag.load(std::memory_order_acquire); });
-      Purger::m_notify_flag.store(false, std::memory_order_release);
-    }
+         ShannonBase::Purge::Purger::get_status() == purge_state_t::PURGE_STATE_RUN) {
+    std::unique_lock<std::mutex> lk(Purger::m_notify_mutex);
+    Purger::m_notify_cv.wait_for(lk, std::chrono::milliseconds(MAX_PURGER_TIMEOUT));
+    if (ShannonBase::Purge::Purger::get_status() == purge_state_t::PURGE_STATE_STOP) return;
 
     auto start = std::chrono::steady_clock::now();
     auto loaded_cu_sz = ShannonBase::Imcs::Imcs::instance()->get_cus().size();
 
-    // we only use a half of threads to do propagation.
-    std::vector<std::future<uint64_t>> results;
-    size_t thread_num = std::thread::hardware_concurrency() / 2;
+    // we only use a third of threads to do purge opers.
+    std::vector<std::future<int>> results;
+    size_t thread_num = std::thread::hardware_concurrency() / 3;
     thread_num = std::min(thread_num, loaded_cu_sz);
 
-    auto cit = ShannonBase::Imcs::Imcs::instance()->get_cus().begin();
-    while (cit != ShannonBase::Imcs::Imcs::instance()->get_cus().end()) {
-      std::vector<std::future<uint64_t>> results;
+    size_t thr_cnt = 0;
+    for (auto &cu : ShannonBase::Imcs::Imcs::instance()->get_cus()) {
+      results.emplace_back(std::async(std::launch::async, purger_purge_worker, cu.second.get()));
+      thr_cnt++;
 
-      for (size_t thr_ind = 0; thr_ind < thread_num && cit != ShannonBase::Imcs::Imcs::instance()->get_cus().end();
-           ++thr_ind, ++cit) {
-        results.emplace_back(std::async(std::launch::async, purger_purge_worker, cit->second.get()));
-      }
-
-      for (auto &res : results) {
-        if (srv_shutdown_state.load(std::memory_order_acquire) != SRV_SHUTDOWN_NONE) break;
-        res.get();
+      if (thr_cnt % thread_num == 0) {
+        for (auto &fut : results) fut.get();
+        results.clear();
       }
     }
+    for (auto &fut : results) fut.get();
 
     // in duration, we finish the GC operations.
     auto duration [[maybe_unused]] =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-
-    // thread stopped.
-    if (unlikely(!sys_purge_started.load(std::memory_order_acquire))) break;
   }
 
-  sys_purge_started.store(false, std::memory_order_seq_cst);
-}
-
-void Purger::set_status(purge_state_t stat) {
-  std::scoped_lock lk(Purger::m_state_mutex);
-  Purger::m_state = stat;
-}
-
-purge_state_t Purger::get_status() {
-  std::scoped_lock lk(Purger::m_state_mutex);
-  return Purger::m_state;
+  ut_a(ShannonBase::Purge::Purger::get_status() == purge_state_t::PURGE_STATE_STOP);
 }
 
 bool Purger::active() { return thread_is_active(srv_threads.m_rapid_purg_cordinator); }
 
-void Purger::send_notify() {
-  {
-    std::lock_guard<std::mutex> lock(m_notify_mutex);
-    m_notify_flag.store(true, std::memory_order_release);
-  }
-  m_notify_cv.notify_one();
-}
-
 void Purger::start() {
-  if (!Purger::active() && shannon_loaded_tables->size()) {
-    srv_threads.m_rapid_purg_cordinator = os_thread_create(rapid_purge_thread_key, 0, purge_func_main);
-    ShannonBase::Purge::sys_purge_started.store(true, std::memory_order_seq_cst);
-    srv_threads.m_rapid_purg_cordinator.start();
-    Purger::set_status(purge_state_t::PURGE_STATE_RUN);
-    ut_a(Purger::active());
-  }
+  if (Purger::active() || !shannon_loaded_tables->size()) return;
+
+  Purger::set_status(purge_state_t::PURGE_STATE_RUN);
+  srv_threads.m_rapid_purg_cordinator = os_thread_create(rapid_purge_thread_key, 0, purge_func_main);
+
+  srv_threads.m_rapid_purg_cordinator.start();
+  ut_a(Purger::active());
 }
 
 void Purger::end() {
-  if (Purger::active() && shannon_loaded_tables->size()) {
-    sys_purge_started.store(false, std::memory_order_seq_cst);
-    srv_threads.m_rapid_purg_cordinator.join();
-    Purge::Purger::set_status(purge_state_t::PURGE_STATE_STOP);
-    ut_a(Purger::active() == false);
-  }
+  if (!Purger::active() || !shannon_loaded_tables->size()) return;
+
+  Purge::Purger::set_status(purge_state_t::PURGE_STATE_STOP);
+  Purger::m_notify_cv.notify_all();
+  srv_threads.m_rapid_purg_cordinator.join();
+  ut_a(Purger::active() == false);
 }
 
 void Purger::print_info(FILE *file) { /* in: output stream */
