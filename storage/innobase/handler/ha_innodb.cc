@@ -6179,6 +6179,8 @@ static int innobase_rollback(handlerton *hton, /*!< in: InnoDB handlerton */
         (trx->dict_operation_lock_mode == 0 &&
          trx->dict_operation == TRX_DICT_OP_NONE));
 
+  ShannonBase::Imcs::Imcs::instance()->rollback_changes_by_trxid(trxid);
+
   innobase_srv_conc_force_exit_innodb(trx);
 
   /* Reset the number AUTO-INC rows required */
@@ -6221,8 +6223,6 @@ static int innobase_rollback(handlerton *hton, /*!< in: InnoDB handlerton */
   } else {
     error = trx_rollback_last_sql_stat_for_mysql(trx);
   }
-
-  ShannonBase::Imcs::Imcs::instance()->rollback_changes_by_trxid(trxid);
 
   return convert_error_code_to_mysql(error, 0, trx->mysql_thd);
 }

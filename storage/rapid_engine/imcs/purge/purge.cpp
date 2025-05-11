@@ -73,7 +73,9 @@ static uint64_t purger_purge_worker(ShannonBase::Imcs::Cu *cu_ptr) {
   SetThreadDescription(GetCurrentThread(), L"rapid_purge_wkr");
 #endif
 
-  if (!cu_ptr || (cu_ptr && !cu_ptr->chunks())) return ShannonBase::SHANNON_SUCCESS;
+  if (!cu_ptr || (cu_ptr && !cu_ptr->chunks()))  // empty cu.
+    return ShannonBase::SHANNON_SUCCESS;
+
   for (auto idx = 0u; idx < cu_ptr->chunks(); idx++) {
     auto chunk_ptr = cu_ptr->chunk(idx);
     chunk_ptr->purge();
@@ -102,9 +104,9 @@ static void purge_func_main() {
     auto start = std::chrono::steady_clock::now();
     auto loaded_cu_sz = ShannonBase::Imcs::Imcs::instance()->get_cus().size();
 
-    // we only use a half of threads to do propagation.
+    // we only use a third of threads to do purge opers.
     std::vector<std::future<uint64_t>> results;
-    size_t thread_num = std::thread::hardware_concurrency() / 2;
+    size_t thread_num = std::thread::hardware_concurrency() / 3;
     thread_num = std::min(thread_num, loaded_cu_sz);
 
     auto cit = ShannonBase::Imcs::Imcs::instance()->get_cus().begin();

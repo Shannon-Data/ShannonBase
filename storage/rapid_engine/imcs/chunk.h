@@ -109,6 +109,12 @@ class Chunk : public MemoryObject {
 
     // the last GC timestamp
     std::chrono::time_point<std::chrono::steady_clock> m_last_gc_tm;
+
+    // source table name str.
+    std::string m_table_name;
+
+    // source db name str.
+    std::string m_db;
   };
 
   explicit Chunk(const Field *field);
