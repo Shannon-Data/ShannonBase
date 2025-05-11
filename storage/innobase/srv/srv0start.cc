@@ -2606,7 +2606,7 @@ static void srv_shutdown_pop_stop() {
   }
 
   while (ShannonBase::Purge::Purger::active()) {
-    ShannonBase::Purge::sys_purge_started.store(false);
+    ShannonBase::Purge::Purger::set_status(ShannonBase::Purge::purge_state_t::PURGE_STATE_STOP);
     std::this_thread::sleep_for(
         std::chrono::microseconds(SHUTDOWN_SLEEP_TIME_US));
   }

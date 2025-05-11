@@ -239,6 +239,4 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 
 SELECT * FROM   NATION, REGION  WHERE  n_regionkey = r_regionkey ORDER BY N_NATIONKEY;
 
-#to wait pop thread to process all mlogs
---sleep 10
 drop database tpch_1024;

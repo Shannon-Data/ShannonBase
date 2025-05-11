@@ -37,6 +37,7 @@ select @@use_secondary_engine;
 
 --connection connection_3
 --echo [conn3]
+--replace_column 10 IGNORE
 explain select * from tt2;
 select * from tt2;
 

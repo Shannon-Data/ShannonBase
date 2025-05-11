@@ -47,7 +47,6 @@ namespace Purge {
 constexpr uint64_t MAX_PURGER_SPINS = 5000000;
 constexpr uint64_t MAX_PURGER_TIMEOUT = 10000;
 
-extern std::atomic<bool> sys_purge_started;
 using purge_func_t = std::function<void(void)>;
 
 enum class purge_state_t {
@@ -60,14 +59,14 @@ enum class purge_state_t {
 
 class Purger {
  public:
-  // whether the log pop main thread is active or not. true is alive, false dead.
-  static bool active();
-
   // to launch log pop main thread.
   static void start();
 
   // to stop lop pop main thread.
   static void end();
+
+  // whether the log pop main thread is active or not. true is alive, false dead.
+  static bool active();
 
   // to print thread infos.
   static void print_info(FILE *file);
@@ -75,23 +74,15 @@ class Purger {
   // to check whether the specific table are still do populating.
   static bool check_pop_status(std::string &table_name);
 
-  // to send notify to populator main thread to start do propagation.
-  static void send_notify();
+  static inline void set_status(purge_state_t stat) { Purger::m_state.store(stat, std::memory_order_relaxed); }
 
-  static void wait_for_notify();
-
-  static void set_status(purge_state_t stat);
-
-  static purge_state_t get_status();
+  static inline purge_state_t get_status() { return Purger::m_state.load(std::memory_order_relaxed); }
 
   static std::mutex m_notify_mutex;
   static std::condition_variable m_notify_cv;
-  static std::atomic<bool> m_notify_flag;
 
  private:
-  static std::mutex m_state_mutex;
-  static purge_state_t m_state;
-
+  static std::atomic<purge_state_t> m_state;
   // purge workers.
   IB_thread *m_purge_workers;
 };

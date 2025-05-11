@@ -48,6 +48,8 @@ Cu::Cu(const Field *field) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Cu header allocation failed");
       return;
     }
+    m_header->m_db = field->table->s->db.str;
+    m_header->m_table_name = field->table->s->table_name.str;
 
     // TODO: be aware of freeing the cloned object here.
     m_header->m_source_fld = field->clone(&rapid_mem_root);

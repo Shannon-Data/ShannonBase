@@ -30,6 +30,9 @@
 */
 #include "storage/rapid_engine/trx/readview.h"
 
+#include "storage/innobase/include/dict0mem.h"
+#include "storage/innobase/include/read0types.h"
+
 #include "include/my_inttypes.h"
 #include "storage/rapid_engine/imcs/chunk.h"
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -115,6 +118,42 @@ uchar *Snapshot_meta_unit::build_prev_vers(Rapid_load_context *context, ShannonB
   return (m_version_info.find(rowid) == m_version_info.end())
              ? in_place
              : m_version_info[rowid].reconstruct_data(context, in_place, in_place_len, status);
+}
+
+int Snapshot_meta_unit::purge(const char *tname, ::ReadView *rv) {
+  if (m_version_info.empty()) return SHANNON_SUCCESS;
+
+  int ret{SHANNON_SUCCESS};
+  table_name_t name{const_cast<char *>(tname)};
+  std::scoped_lock lk(m_version_mutex);
+  for (auto it = m_version_info.begin(); it != m_version_info.end(); /* no ++ here */) {
+    auto &smu_items = it->second;
+    {
+      auto &items = smu_items.items;
+
+      if (items.empty()) {
+        it = m_version_info.erase(it);
+        continue;
+      }
+
+      // check every smu_items condition.
+      items.erase(
+          std::remove_if(items.begin(), items.end(),
+                         [&](ShannonBase::ReadView::SMU_item &smu_it) {
+                           return (rv->changes_visible(smu_it.trxid, name) && smu_it.tm_committed == SHANNON_MAX_STMP);
+                         }),
+          items.end());
+
+      // after that.
+      if (items.empty()) {
+        it = m_version_info.erase(it);
+        continue;
+      }
+    }
+    ++it;
+  }
+
+  return ret;
 }
 
 }  // namespace ReadView
