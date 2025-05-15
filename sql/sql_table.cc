@@ -11891,7 +11891,7 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
     ShannonBase::Populate::Populator::start();
 
     //start imcs purger thread to purge dead tuples.
-    //ShannonBase::Purge::Purger::start();
+    ShannonBase::Purge::Purger::start();
   } else {
     if (table_list->partition_names != nullptr) {
       skip_metadata_update = true;
