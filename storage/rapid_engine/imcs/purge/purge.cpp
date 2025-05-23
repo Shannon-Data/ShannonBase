@@ -105,6 +105,7 @@ static void purge_func_main() {
 
     size_t thr_cnt = 0;
     for (auto &cu : ShannonBase::Imcs::Imcs::instance()->get_cus()) {
+      std::scoped_lock lk(cu.second.get()->get_mutex());
       results.emplace_back(std::async(std::launch::async, purger_purge_worker, cu.second.get()));
       thr_cnt++;
 
@@ -126,22 +127,22 @@ static void purge_func_main() {
 bool Purger::active() { return thread_is_active(srv_threads.m_rapid_purg_cordinator); }
 
 void Purger::start() {
-  if (Purger::active() || !shannon_loaded_tables->size()) return;
+  if (!Purger::active() && shannon_loaded_tables->size()) {
+    srv_threads.m_rapid_purg_cordinator = os_thread_create(rapid_purge_thread_key, 0, purge_func_main);
+    Purger::set_status(purge_state_t::PURGE_STATE_RUN);
+    srv_threads.m_rapid_purg_cordinator.start();
 
-  Purger::set_status(purge_state_t::PURGE_STATE_RUN);
-  srv_threads.m_rapid_purg_cordinator = os_thread_create(rapid_purge_thread_key, 0, purge_func_main);
-
-  srv_threads.m_rapid_purg_cordinator.start();
-  ut_a(Purger::active());
+    ut_a(Purger::active());
+  }
 }
 
 void Purger::end() {
-  if (!Purger::active() || !shannon_loaded_tables->size()) return;
-
-  Purge::Purger::set_status(purge_state_t::PURGE_STATE_STOP);
-  Purger::m_notify_cv.notify_all();
-  srv_threads.m_rapid_purg_cordinator.join();
-  ut_a(Purger::active() == false);
+  if (Purger::active() && !shannon_loaded_tables->size()) {
+    Purge::Purger::set_status(purge_state_t::PURGE_STATE_STOP);
+    Purger::m_notify_cv.notify_all();
+    srv_threads.m_rapid_purg_cordinator.join();
+    ut_a(Purger::active() == false);
+  }
 }
 
 void Purger::print_info(FILE *file) { /* in: output stream */

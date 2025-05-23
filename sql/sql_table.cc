@@ -2806,6 +2806,14 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table,
     row_rpd_columns.ndv = 0;
     ShannonBase::rpd_columns_info.push_back(row_rpd_columns);
   }
+
+
+  //start imcs purger thread to purge dead tuples.
+  ShannonBase::Purge::Purger::start();
+
+  //start population thread if table loaded successfully.
+  ShannonBase::Populate::Populator::start();
+
   return false;
 }
 
@@ -2887,6 +2895,12 @@ static bool secondary_engine_unload_table(THD *thd, const char *db_name,
         else
             ++it;
   }
+
+  //at first, stop the main pop monitor thread.
+  ShannonBase::Populate::Populator::end();
+
+  //then stop the purge thread.
+  ShannonBase::Purge::Purger::end();
   return false;
 }
 
@@ -11886,12 +11900,6 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
                                               &skip_metadata_update);
     se_operation_end = std::chrono::steady_clock::now();
     if (retval) return true;
-
-    //start imcs purger thread to purge dead tuples.
-    ShannonBase::Purge::Purger::start();
-
-    //start population thread if table loaded successfully.
-    ShannonBase::Populate::Populator::start();
   } else {
     if (table_list->partition_names != nullptr) {
       skip_metadata_update = true;
@@ -11901,12 +11909,6 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
                "Simulated failure of secondary_unload()");
       return true;
     }
-
-    //at first, stop the main pop monitor thread.
-    ShannonBase::Populate::Populator::end();
-
-    //then stop the purge thread.
-    ShannonBase::Purge::Purger::end();
 
     se_operation_start = std::chrono::steady_clock::now();
     auto retval = secondary_engine_unload_table(

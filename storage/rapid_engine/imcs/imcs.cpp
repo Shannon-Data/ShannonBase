@@ -418,6 +418,8 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
   keypart.append(db_name).append(":").append(table_name).append(":");
   for (auto it = m_cus.begin(); it != m_cus.end();) {
     if (it->first.find(keypart) != std::string::npos) {
+      { std::scoped_lock lk(it->second.get()->get_mutex()); }
+
       it = m_cus.erase(it);
       found = true;
     } else

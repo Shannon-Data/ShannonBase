@@ -42,7 +42,6 @@ namespace Imcs {
 Cu::Cu(const Field *field) {
   ut_a(field && !field->is_flag_set(NOT_SECONDARY_FLAG));
   {
-    std::scoped_lock lk(m_header_mutex);
     m_header.reset(new (std::nothrow) Cu_header());
     if (!m_header) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Cu header allocation failed");
@@ -56,7 +55,7 @@ Cu::Cu(const Field *field) {
     m_header->m_type = field->type();
     m_header->m_width = field->pack_length();
     m_header->m_charset = field->charset();
-    m_header->m_key_len = field->table->file->ref_length;
+    m_header->m_key_len.store(field->table->file->ref_length);
   }
 
   std::string comment(field->comment.str);

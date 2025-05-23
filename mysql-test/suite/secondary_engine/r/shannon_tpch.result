@@ -328,7 +328,7 @@ PS_PARTKEY	PS_SUPPKEY	PS_AVAILQTY	PS_SUPPLYCOST	PS_COMMENT
 800000	20039	83	637.55	 slyly to the ironic packages. carefully ironic deposits wake. slyly final deposits breach carefully even asymptotes. even accounts haggle. slyly ironic asymptotes wak
 800000	30058	2012	227.34	ial packages. pending packages wake after the requests. furiously permanent dependencies thrash after the special, ironic hockey players. carefull
 set use_secondary_engine=forced;
-SELECT  
+EXPLAIN SELECT  
 PS_PARTKEY, SUM(PS_SUPPLYCOST * PS_AVAILQTY) AS VALUE
 FROM
 PARTSUPP,
@@ -350,8 +350,48 @@ PS_SUPPKEY = S_SUPPKEY
 AND S_NATIONKEY = N_NATIONKEY
 AND N_NAME = 'GERMANY')
 ORDER BY VALUE DESC;
-PS_PARTKEY	VALUE
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	PRIMARY	PARTSUPP	NULL	ALL	PRIMARY	NULL	NULL	NULL	10	100.00	Using temporary; Using filesort; Using secondary engine Rapid
+1	PRIMARY	SUPPLIER	NULL	eq_ref	PRIMARY	PRIMARY	4	tpch_1024.PARTSUPP.PS_SUPPKEY	1	100.00	Using secondary engine Rapid
+1	PRIMARY	NATION	NULL	eq_ref	PRIMARY	PRIMARY	4	tpch_1024.SUPPLIER.S_NATIONKEY	1	10.00	Using where; Using secondary engine Rapid
+1	PRIMARY	<derived2>	NULL	ALL	NULL	NULL	NULL	NULL	1	100.00	Using where; Using join buffer (hash join)
+2	DERIVED	PARTSUPP	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using secondary engine Rapid
+2	DERIVED	SUPPLIER	NULL	eq_ref	PRIMARY	PRIMARY	4	tpch_1024.PARTSUPP.PS_SUPPKEY	1	100.00	Using secondary engine Rapid
+2	DERIVED	NATION	NULL	eq_ref	PRIMARY	PRIMARY	4	tpch_1024.SUPPLIER.S_NATIONKEY	1	10.00	Using where; Using secondary engine Rapid
+Warnings:
+Note	1003	/* select#1 */ select `tpch_1024`.`PARTSUPP`.`PS_PARTKEY` AS `PS_PARTKEY`,sum((`tpch_1024`.`PARTSUPP`.`PS_SUPPLYCOST` * `tpch_1024`.`PARTSUPP`.`PS_AVAILQTY`)) AS `VALUE` from `tpch_1024`.`PARTSUPP` join `tpch_1024`.`SUPPLIER` join `tpch_1024`.`NATION` left join (/* select#2 */ select (sum((`tpch_1024`.`PARTSUPP`.`PS_SUPPLYCOST` * `tpch_1024`.`PARTSUPP`.`PS_AVAILQTY`)) * 0.0001) AS `SUM(PS_SUPPLYCOST * PS_AVAILQTY) * 0.0001` from `tpch_1024`.`PARTSUPP` join `tpch_1024`.`SUPPLIER` join `tpch_1024`.`NATION` where ((`tpch_1024`.`NATION`.`N_NAME` = 'GERMANY') and (`tpch_1024`.`NATION`.`N_NATIONKEY` = `tpch_1024`.`SUPPLIER`.`S_NATIONKEY`) and (`tpch_1024`.`SUPPLIER`.`S_SUPPKEY` = `tpch_1024`.`PARTSUPP`.`PS_SUPPKEY`))) `derived_1_2` on(true) where ((`tpch_1024`.`NATION`.`N_NAME` = 'GERMANY') and (`tpch_1024`.`NATION`.`N_NATIONKEY` = `tpch_1024`.`SUPPLIER`.`S_NATIONKEY`) and (`tpch_1024`.`SUPPLIER`.`S_SUPPKEY` = `tpch_1024`.`PARTSUPP`.`PS_SUPPKEY`)) group by `tpch_1024`.`PARTSUPP`.`PS_PARTKEY` having (sum((`tpch_1024`.`PARTSUPP`.`PS_SUPPLYCOST` * `tpch_1024`.`PARTSUPP`.`PS_AVAILQTY`)) > `derived_1_2`.`SUM(PS_SUPPLYCOST * PS_AVAILQTY) * 0.0001`) order by `VALUE` desc
 set use_secondary_engine=off;
+EXPLAIN SELECT  
+PS_PARTKEY, SUM(PS_SUPPLYCOST * PS_AVAILQTY) AS VALUE
+FROM
+PARTSUPP,
+SUPPLIER,
+NATION
+WHERE
+PS_SUPPKEY = S_SUPPKEY
+AND S_NATIONKEY = N_NATIONKEY
+AND N_NAME = 'GERMANY'
+GROUP BY PS_PARTKEY
+HAVING SUM(PS_SUPPLYCOST * PS_AVAILQTY) > (SELECT 
+SUM(PS_SUPPLYCOST * PS_AVAILQTY) * 0.0001
+FROM
+PARTSUPP,
+SUPPLIER,
+NATION
+WHERE
+PS_SUPPKEY = S_SUPPKEY
+AND S_NATIONKEY = N_NATIONKEY
+AND N_NAME = 'GERMANY')
+ORDER BY VALUE DESC;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	PRIMARY	PARTSUPP	NULL	index	PRIMARY	PRIMARY	8	NULL	10	100.00	Using temporary; Using filesort
+1	PRIMARY	SUPPLIER	NULL	eq_ref	PRIMARY	PRIMARY	4	tpch_1024.PARTSUPP.PS_SUPPKEY	1	100.00	NULL
+1	PRIMARY	NATION	NULL	eq_ref	PRIMARY	PRIMARY	4	tpch_1024.SUPPLIER.S_NATIONKEY	1	10.00	Using where
+2	SUBQUERY	PARTSUPP	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	NULL
+2	SUBQUERY	SUPPLIER	NULL	eq_ref	PRIMARY	PRIMARY	4	tpch_1024.PARTSUPP.PS_SUPPKEY	1	100.00	NULL
+2	SUBQUERY	NATION	NULL	eq_ref	PRIMARY	PRIMARY	4	tpch_1024.SUPPLIER.S_NATIONKEY	1	10.00	Using where
+Warnings:
+Note	1003	/* select#1 */ select `tpch_1024`.`PARTSUPP`.`PS_PARTKEY` AS `PS_PARTKEY`,sum((`tpch_1024`.`PARTSUPP`.`PS_SUPPLYCOST` * `tpch_1024`.`PARTSUPP`.`PS_AVAILQTY`)) AS `VALUE` from `tpch_1024`.`PARTSUPP` join `tpch_1024`.`SUPPLIER` join `tpch_1024`.`NATION` where ((`tpch_1024`.`NATION`.`N_NAME` = 'GERMANY') and (`tpch_1024`.`NATION`.`N_NATIONKEY` = `tpch_1024`.`SUPPLIER`.`S_NATIONKEY`) and (`tpch_1024`.`SUPPLIER`.`S_SUPPKEY` = `tpch_1024`.`PARTSUPP`.`PS_SUPPKEY`)) group by `tpch_1024`.`PARTSUPP`.`PS_PARTKEY` having (sum((`tpch_1024`.`PARTSUPP`.`PS_SUPPLYCOST` * `tpch_1024`.`PARTSUPP`.`PS_AVAILQTY`)) > (/* select#2 */ select (sum((`tpch_1024`.`PARTSUPP`.`PS_SUPPLYCOST` * `tpch_1024`.`PARTSUPP`.`PS_AVAILQTY`)) * 0.0001) from `tpch_1024`.`PARTSUPP` join `tpch_1024`.`SUPPLIER` join `tpch_1024`.`NATION` where ((`tpch_1024`.`NATION`.`N_NAME` = 'GERMANY') and (`tpch_1024`.`NATION`.`N_NATIONKEY` = `tpch_1024`.`SUPPLIER`.`S_NATIONKEY`) and (`tpch_1024`.`SUPPLIER`.`S_SUPPKEY` = `tpch_1024`.`PARTSUPP`.`PS_SUPPKEY`)))) order by `VALUE` desc
 SELECT  
 PS_PARTKEY, SUM(PS_SUPPLYCOST * PS_AVAILQTY) AS VALUE
 FROM
