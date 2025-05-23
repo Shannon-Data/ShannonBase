@@ -44,8 +44,7 @@ namespace Purge {
  * 5000000 spin rounds. for the more detail infor ref to : comment of
  * `innodb_log_writer_spin_delay`.
  */
-constexpr uint64_t MAX_PURGER_SPINS = 5000000;
-constexpr uint64_t MAX_PURGER_TIMEOUT = 10000;
+constexpr uint64_t MAX_PURGER_TIMEOUT = 1000;
 
 using purge_func_t = std::function<void(void)>;
 
@@ -74,9 +73,9 @@ class Purger {
   // to check whether the specific table are still do populating.
   static bool check_pop_status(std::string &table_name);
 
-  static inline void set_status(purge_state_t stat) { Purger::m_state.store(stat, std::memory_order_relaxed); }
+  static inline void set_status(purge_state_t stat) { Purger::m_state.store(stat, std::memory_order_seq_cst); }
 
-  static inline purge_state_t get_status() { return Purger::m_state.load(std::memory_order_relaxed); }
+  static inline purge_state_t get_status() { return Purger::m_state.load(std::memory_order_seq_cst); }
 
   static std::mutex m_notify_mutex;
   static std::condition_variable m_notify_cv;

@@ -189,7 +189,7 @@ void Populator::start() {
 }
 
 void Populator::end() {
-  if (Populator::active() && shannon_loaded_tables->size()) {
+  if (Populator::active() && !shannon_loaded_tables->size()) {
     sys_pop_started.store(false, std::memory_order_seq_cst);
     os_event_set(log_sys->rapid_events[0]);
     srv_threads.m_change_pop_cordinator.join();
