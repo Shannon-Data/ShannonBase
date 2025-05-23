@@ -66,9 +66,6 @@ class Cu : public MemoryObject {
     // field type of this cu.
     enum_field_types m_type{MYSQL_TYPE_NULL};
 
-    // whether the is not null or not.
-    bool m_nullable{false};
-
     // encoding type. pls ref to:
     // https://dev.mysql.com/doc/heatwave/en/mys-hw-varlen-encoding.html
     // https://dev.mysql.com/doc/heatwave/en/mys-hw-dictionary-encoding.html
@@ -85,7 +82,7 @@ class Cu : public MemoryObject {
         m_sum{0};
 
     // key length of this cu.
-    size_t m_key_len{0};
+    std::atomic<size_t> m_key_len{0};
 
     // source table name str.
     std::string m_table_name;
@@ -138,10 +135,7 @@ class Cu : public MemoryObject {
   }
 
   // get the chunk header.
-  inline Cu_header *header() {
-    std::scoped_lock lk(m_header_mutex);
-    return m_header.get();
-  }
+  inline Cu_header *header() { return m_header.get(); }
 
   // get the pointer of chunk with its id.
   inline Chunk *chunk(uint id) {
@@ -186,6 +180,8 @@ class Cu : public MemoryObject {
 
   inline std::string &keystr() { return m_cu_key; }
 
+  inline std::mutex &get_mutex() { return m_mutex; }
+
  private:
   // get the field value. if field is string/text then return its stringid.
   // or, do nothing.
@@ -196,8 +192,9 @@ class Cu : public MemoryObject {
   void update_meta_info(OPER_TYPE type, uchar *data, uchar *old, bool row_reserved = false);
 
  private:
-  // proctect header.
-  std::mutex m_header_mutex;
+  // mutex of cu
+  std::mutex m_mutex;
+
   // header info of this Cu.
   std::unique_ptr<Cu_header> m_header{nullptr};
 
