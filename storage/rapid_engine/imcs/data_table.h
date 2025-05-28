@@ -76,6 +76,14 @@ class DataTable : public MemoryObject {
   // index read next
   int index_next(uchar *buf);
 
+  inline uchar *ensure_buffer_size(size_t needed_size) {
+    if (needed_size > m_buffer_size) {
+      m_row_buffer = std::make_unique<uchar[]>(needed_size);
+      m_buffer_size = needed_size;
+    }
+    return m_row_buffer.get();
+  }
+
  private:
   std::atomic<bool> m_initialized{false};
 
@@ -99,6 +107,10 @@ class DataTable : public MemoryObject {
 
   // key
   std::unique_ptr<uchar[]> m_key{nullptr};
+
+  // Reusable buffer
+  std::unique_ptr<uchar[]> m_row_buffer;
+  size_t m_buffer_size = 0;
 };
 
 }  // namespace Imcs

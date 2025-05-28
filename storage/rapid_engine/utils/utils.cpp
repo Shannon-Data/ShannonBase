@@ -26,6 +26,8 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "include/decimal.h"  //my_decimal
+#include "include/my_bitmap.h"
+
 #include "sql/opt_trace.h"
 #include "sql/sql_class.h"     //Secondary_engine_statement_context
 #include "sql/sql_executor.h"  //QEP_TBA
@@ -350,6 +352,12 @@ double Encoder<double>::DecodeFloat(const unsigned char *key) {
   double result;
   memcpy(&result, &val, sizeof(double));
   return result;
+}
+
+ColumnMapGuard::ColumnMapGuard(TABLE *t) : table(t) { old_map = tmp_use_all_columns(table, table->write_set); }
+
+ColumnMapGuard::~ColumnMapGuard() {
+  if (old_map) tmp_restore_column_map(table->write_set, old_map);
 }
 
 }  // namespace Utils

@@ -40,6 +40,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "row0mysql.h"
 #include "ut0bitset.h"
 
+#include "storage/rapid_engine/imcs/imcs.h"
 /* Forward declarations */
 class Altered_partitions;
 class partition_info;
@@ -223,6 +224,7 @@ class ha_innopart : public ha_innobase,
                     public Partition_helper,
                     public Partition_handler {
  public:
+ friend ShannonBase::Imcs::Imcs;
   ha_innopart(handlerton *hton, TABLE_SHARE *table_arg);
 
   ~ha_innopart() override = default;
