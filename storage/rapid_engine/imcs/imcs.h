@@ -41,6 +41,8 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 
+class ha_innobase;
+class ha_innopart;
 namespace ShannonBase {
 class Rapid_load_context;
 namespace Imcs {
@@ -172,6 +174,20 @@ class Imcs : public MemoryObject {
   // build the index for imcs.
   int build_index(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid);
   int build_index_impl(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid);
+
+  int load_innodb(const Rapid_load_context *context, ha_innobase *file);
+  int load_innodbpart(const Rapid_load_context *context, ha_innopart *file);
+
+  int fill_record(const Rapid_load_context *context, std::string &current_key, handler *file);
+
+  int create_index_memo(const Rapid_load_context *context, const TABLE *source);
+
+  // for user-defined key memo, including: uer-defined primary key, secondary key, unique key, all indexes defined by
+  // user.
+  int create_user_index_memo(const Rapid_load_context *context, const TABLE *source);
+
+  // for the sys primary key memo.
+  int create_sys_index_memo(const Rapid_load_context *context, const TABLE *source);
 
  private:
   // imcs instance

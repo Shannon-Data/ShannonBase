@@ -107,6 +107,9 @@ class Rapid_load_context : public Secondary_engine_execution_context {
 
     // the active key memo.
     std::unique_ptr<uchar[]> m_key_buff{nullptr};
+
+    // partition info.
+    std::unordered_map<std::string, uint> m_partition_infos;
   };
 
   Rapid_load_context() : m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr), m_thd{nullptr} {}

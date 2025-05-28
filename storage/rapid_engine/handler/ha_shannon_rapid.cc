@@ -146,7 +146,7 @@ void LoadedTables::table_infos(uint index, ulonglong &tid, std::string &schema, 
 }
 
 ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
-    : handler(hton, table_share_arg), m_share(nullptr), m_thd(ha_thd()) {}
+    : handler(hton, table_share_arg), Partition_helper(this), m_share(nullptr), m_thd(ha_thd()) {}
 
 int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *table_def) {
   RapidShare *share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
@@ -155,6 +155,34 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Table has not been loaded");
     return HA_ERR_GENERIC;
   }
+
+  if (table->part_info) {
+    /* Get the RapidPartShare from the TABLE_SHARE. */
+    lock_shared_ha_data();
+    auto part_share = static_cast<RapidPartShare *>(get_ha_share_ptr());
+    if (part_share == nullptr) {
+      m_part_share = new RapidPartShare(share);
+      if (m_part_share == nullptr) {
+        unlock_shared_ha_data();
+        return HA_ERR_INTERNAL_ERROR;
+      }
+      set_ha_share_ptr(static_cast<Handler_share *>(m_part_share));
+    }
+    unlock_shared_ha_data();
+
+    /* Now acquire TABLE_SHARE::LOCK_ha_data again and assign table
+    and index information. set_table_parts_and_indexes() will check
+    if some other thread already has managed to do this concurrently,
+    while lock was released. */
+    lock_shared_ha_data();
+
+    if (m_part_share->populate_partition_name_hash(table->part_info)) {
+      unlock_shared_ha_data();
+      return HA_ERR_INTERNAL_ERROR;
+    }
+    unlock_shared_ha_data();
+  }
+
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
 
   ut_a(!m_data_table.get());
@@ -293,6 +321,22 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_table = const_cast<TABLE *>(&table_arg);
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
+  context.m_schema_name = table_arg.s->db.str;
+  context.m_table_name = table_arg.s->table_name.str;
+
+  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
+  Partition_handler *part_handler = table_arg.file->get_partition_handler();
+  if (table_list->partition_names && part_handler) {
+    partition_info *part_info = table_list->table->part_info;
+    List_iterator_fast<String> it(*table_list->partition_names);
+    String *str{nullptr};
+    while ((str = it++)) {
+      uint part_id;
+      if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
+        context.m_extra_info.m_partition_infos.emplace(std::make_pair(str->c_ptr(), part_id));
+      }
+    }
+  }
 
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
     my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
@@ -655,6 +699,11 @@ static void rapid_kill_connection(handlerton *hton, /*!< in:  innobase handlerto
     /* Cancel a pending lock request if there are any */
     lock_cancel_if_waiting_and_release({trx});
   }
+}
+
+/** Return partitioning flags. */
+static uint rapid_partition_flags() {
+  return (HA_CAN_EXCHANGE_PARTITION | HA_CANNOT_PARTITION_FK | HA_TRUNCATE_PARTITION_PRECLOSE);
 }
 
 static inline bool SetSecondaryEngineOffloadFailedReason(const THD *thd, std::string_view msg) {
@@ -1037,6 +1086,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->savepoint_rollback_can_release_mdl = rapid_rollback_to_savepoint_can_release_mdl;
   shannon_rapid_hton->close_connection = rapid_close_connection;
   shannon_rapid_hton->kill_connection = rapid_kill_connection;
+  shannon_rapid_hton->partition_flags = rapid_partition_flags;
 
   auto instance_ = ShannonBase::Imcs::Imcs::instance();
   if (!instance_) {

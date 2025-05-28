@@ -52,23 +52,43 @@ namespace Imcs {
 DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(source_table) {
   ut_a(m_data_source);
 
+  Table_ref *table_list = current_thd->lex->query_block->get_table_list();
+  Partition_handler *part_handler = source_table->file->get_partition_handler();
+  std::unordered_map<std::string, uint> partition_infos;
+  if (table_list->partition_names && part_handler) {
+    partition_info *part_info = source_table->part_info;
+    List_iterator_fast<String> it(*table_list->partition_names);
+
+    String *str{nullptr};
+    while ((str = it++)) {
+      uint part_id;
+      if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
+        partition_infos.emplace(std::make_pair(str->c_ptr(), part_id));
+      }
+    }
+  }
+
   std::string key_part, key;
-  std::string key_buffer;
-  key_buffer.reserve(256);
+  key_part.append(m_data_source->s->db.str).append(":").append(m_data_source->s->table_name.str).append(":");
   for (auto index = 0u; index < m_data_source->s->fields; index++) {
-    key_buffer.clear();
     auto fld = *(m_data_source->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    key_buffer.append(m_data_source->s->db.str)
-        .append(":")
-        .append(m_data_source->s->table_name.str)
-        .append(":")
-        .append(fld->field_name);
-    m_field_cus.emplace_back(Imcs::instance()->get_cu(key_buffer));
+    if (partition_infos.size()) {
+      for (auto &part : partition_infos) {
+        key.append(key_part).append(part.first).append("-").append(std::to_string(part.second)).append(":");
+        key.append(fld->field_name);
+        m_field_cus.emplace_back(Imcs::instance()->get_cu(key));
+        key.clear();
+      }
+    } else {
+      key.append(key_part).append(fld->field_name);
+      m_field_cus.emplace_back(Imcs::instance()->get_cu(key));
+      key.clear();
+    }
   }
 
-  key_buffer.clear();
+  key.clear();
   m_rowid.store(0);
 }
 
@@ -135,7 +155,7 @@ start:
     });
 
     auto source_fld = *(m_data_source->field + m_field_cus[idx]->header()->m_source_fld->field_index());
-    auto old_map = tmp_use_all_columns(m_data_source, m_data_source->write_set);
+    Utils::ColumnMapGuard guard(m_data_source);
 
     // to check version link to check its old value.
     auto current_chunk_ptr = m_field_cus[idx]->chunk(current_chunk);
@@ -144,42 +164,38 @@ start:
       SHANNON_PREFETCH_R(current_data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
 
     auto data_len = normalized_length;
-    auto data_ptr = std::make_unique<uchar[]>(data_len);
-    std::memcpy(data_ptr.get(), current_data_ptr, data_len);
+    auto data_ptr = ensure_buffer_size(data_len);
+    std::memcpy(data_ptr, current_data_ptr, data_len);
 
     uint8 status{0};
-    auto versioned_ptr = current_chunk_ptr->header()->m_smu->build_prev_vers(m_context.get(), offset_in_chunk,
-                                                                             data_ptr.get(), data_len, status);
+    auto versioned_ptr = current_chunk_ptr->header()->m_smu->build_prev_vers(m_context.get(), offset_in_chunk, data_ptr,
+                                                                             data_len, status);
     if (!versioned_ptr &&
         (status &
          static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_ROLLBACKED))) {  // means rollbacked rows.
       m_rowid.fetch_add(1);
-      if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
       goto start;
     }
     if (status &
         static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_NULL)) {  // the original value is null.
       ut_a(data_len == UNIV_SQL_NULL);
       source_fld->set_null();
-      if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
       continue;
     }
     if (status & static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_DELETED)) {
       m_rowid.fetch_add(1);
-      if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
       goto start;
     }
 
     source_fld->set_notnull();
     if (Utils::Util::is_string(m_field_cus[idx]->header()->m_source_fld->type()) ||
         Utils::Util::is_blob(m_field_cus[idx]->header()->m_source_fld->type())) {
-      uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr.get());
+      uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
       auto str_ptr = m_field_cus[idx]->header()->m_local_dict->get(str_id);
       source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
     } else {
-      source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr.get(), normalized_length);
+      source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
     }
-    if (old_map) tmp_restore_column_map(m_data_source->write_set, old_map);
   }
 
   m_rowid.fetch_add(1);
