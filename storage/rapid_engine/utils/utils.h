@@ -279,6 +279,15 @@ class Encoder {
   static T DecodeFloat(const unsigned char *key);
 };
 
+class ColumnMapGuard {
+  TABLE *table;
+  my_bitmap_map *old_map;
+
+ public:
+  ColumnMapGuard(TABLE *t);
+  ~ColumnMapGuard();
+};
+
 }  // namespace Utils
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_UTILS_H__
