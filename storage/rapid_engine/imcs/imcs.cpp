@@ -33,7 +33,10 @@
 #include <string>
 
 #include "include/decimal.h"
-#include "include/my_dbug.h"  //DBUG_EXECUTE_IF
+#include "include/my_dbug.h"                     //DBUG_EXECUTE_IF
+#include "sql/partitioning/partition_handler.h"  //partition handler
+
+#include "storage/innobase/handler/ha_innopart.h"
 #include "storage/innobase/include/data0type.h"
 #include "storage/innobase/include/mach0data.h"
 #include "storage/innobase/include/univ.i"    //UNIV_SQL_NULL
@@ -60,60 +63,121 @@ int Imcs::deinitialize() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+int Imcs::create_user_index_memo(const Rapid_load_context *context, const TABLE *source) {
+  ut_a(source);
+  std::string keypart, keyname;
+  keypart.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
+
+  if (context->m_extra_info.m_partition_infos.size()) {
+    for (auto &part : context->m_extra_info.m_partition_infos) {
+      auto partkey = part.first;
+      partkey.append("-").append(std::to_string(part.second)).append(":");
+      keyname.append(keypart).append(partkey);
+
+      for (auto ind = 0u; ind < source->s->keys; ind++) {
+        auto key_info = source->key_info + ind;
+        std::vector<std::string> key_parts_names;
+        keyname.append(key_info->name).append(":");
+
+        for (uint i = 0u; i < key_info->user_defined_key_parts /**actual_key_parts*/; i++) {
+          std::string key;
+          key.append(keyname).append(key_info->key_part[i].field->field_name);
+          key_parts_names.push_back(key);
+        }
+        m_source_keys.emplace(keyname, std::make_pair(key_info->key_length, key_parts_names));
+        m_indexes.emplace(keyname, std::make_unique<Index::Index<uchar, row_id_t>>(keyname));
+      }
+      keyname.clear();
+    }
+  } else {
+    for (auto ind = 0u; ind < source->s->keys; ind++) {
+      auto key_info = source->key_info + ind;
+      std::vector<std::string> key_parts_names;
+      std::string keykeypart(keypart);
+      keykeypart.append(key_info->name).append(":");
+      for (uint i = 0u; i < key_info->user_defined_key_parts /**actual_key_parts*/; i++) {
+        std::string key;
+        key.append(keykeypart).append(key_info->key_part[i].field->field_name);
+        key_parts_names.push_back(key);
+      }
+      m_source_keys.emplace(keykeypart, std::make_pair(key_info->key_length, key_parts_names));
+      m_indexes.emplace(keykeypart, std::make_unique<Index::Index<uchar, row_id_t>>(keykeypart));
+    }
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::create_sys_index_memo(const Rapid_load_context *context, const TABLE *source) {
+  ut_a(source);
+  std::string keypart;
+  keypart.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
+
+  std::string keykeypart, keyname;
+  if (context->m_extra_info.m_partition_infos.size()) {
+    for (auto &part : context->m_extra_info.m_partition_infos) {
+      auto partkey = part.first;
+      partkey.append("-").append(std::to_string(part.second)).append(":");
+      keykeypart.append(keypart).append(partkey);
+      keykeypart.append(ShannonBase::SHANNON_PRIMARY_KEY_NAME).append(":");
+      keyname.append(keykeypart).append(SHANNON_DB_ROW_ID);
+
+      m_source_keys.emplace(keykeypart, std::make_pair(SHANNON_DATA_DB_ROW_ID_LEN, std::vector<std::string>{keyname}));
+      m_indexes.emplace(keykeypart, std::make_unique<Index::Index<uchar, row_id_t>>(keyname));
+      keykeypart.clear();
+    }
+  } else {  // no partitioned table.
+    keykeypart.append(keypart).append(ShannonBase::SHANNON_PRIMARY_KEY_NAME).append(":");
+    keyname.append(keykeypart).append(SHANNON_DB_ROW_ID);
+    m_source_keys.emplace(keykeypart, std::make_pair(SHANNON_DATA_DB_ROW_ID_LEN, std::vector<std::string>{keyname}));
+    m_indexes.emplace(keykeypart, std::make_unique<Index::Index<uchar, row_id_t>>(keyname));
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::create_index_memo(const Rapid_load_context *context, const TABLE *source) {
+  ut_a(source);
+  std::string keypart;
+  keypart.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
+
+  // build index info for every Cus.
+  // no.1: primary key. using row_id as the primary key when missing user-defined pk.
+  if (source->s->is_missing_primary_key()) create_sys_index_memo(context, source);
+
+  // no.2: user-defined indexes.
+  create_user_index_memo(context, source);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
 int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
   std::string keypart;
   keypart.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
+
+  // step 1: build the Cus meta info for every column.
   for (auto index = 0u; index < source->s->fields; index++) {
     std::string key;
     auto fld = *(source->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    key.append(keypart).append(fld->field_name);
-    m_cus.emplace(key, std::make_unique<Cu>(fld));
-    key.clear();
-  }
-
-  if (source->s->is_missing_primary_key()) {
-    std::string keykeypart, keyname;
-    keykeypart.append(keypart).append(ShannonBase::SHANNON_PRIMARY_KEY_NAME).append(":");
-    keyname.append(keykeypart).append(SHANNON_DB_ROW_ID);
-
-    std::vector<std::string> key_parts_names;
-    key_parts_names.push_back(keyname);
-
-    m_source_keys.emplace(keykeypart, std::make_pair(SHANNON_DATA_DB_ROW_ID_LEN, key_parts_names));
-    m_indexes.emplace(keykeypart, std::make_unique<Index::Index<uchar, row_id_t>>(keyname));
-
-    for (auto ind = 0u; ind < source->s->keys; ind++) {
-      auto key_info = source->key_info + ind;
-      std::vector<std::string> key_parts_names;
-      std::string keykeypart(keypart);
-      keykeypart.append(key_info->name).append(":");
-      for (uint i = 0u; i < key_info->user_defined_key_parts /**actual_key_parts*/; i++) {
-        std::string key;
-        key.append(keykeypart).append(key_info->key_part[i].field->field_name);
-        key_parts_names.push_back(key);
+    if (context->m_extra_info.m_partition_infos.size()) {
+      for (auto &part : context->m_extra_info.m_partition_infos) {
+        auto part_name = part.first;
+        part_name.append("-").append(std::to_string(part.second)).append(":");
+        key.append(keypart).append(part_name).append(fld->field_name);
+        m_cus.emplace(key, std::make_unique<Cu>(fld));
+        key.clear();
       }
-      m_source_keys.emplace(keykeypart, std::make_pair(key_info->key_length, key_parts_names));
-      m_indexes.emplace(keykeypart, std::make_unique<Index::Index<uchar, row_id_t>>(keykeypart));
-    }
-  } else {
-    ut_a(source->s->keys);
-    for (auto ind = 0u; ind < source->s->keys; ind++) {
-      auto key_info = source->key_info + ind;
-      std::vector<std::string> key_parts_names;
-      std::string keykeypart(keypart);
-      keykeypart.append(key_info->name).append(":");
-      for (uint i = 0u; i < key_info->user_defined_key_parts /**actual_key_parts*/; i++) {
-        std::string key;
-        key.append(keykeypart).append(key_info->key_part[i].field->field_name);
-        key_parts_names.push_back(key);
-      }
-      m_source_keys.emplace(keykeypart, std::make_pair(key_info->key_length, key_parts_names));
-      m_indexes.emplace(keykeypart, std::make_unique<Index::Index<uchar, row_id_t>>(keykeypart));
+    } else {
+      key.append(keypart).append(fld->field_name);
+      m_cus.emplace(key, std::make_unique<Cu>(fld));
+      key.clear();
     }
   }
+
+  // step 2: build indexes.
+  return create_index_memo(context, source);
   /* in secondary load phase, the table not loaded into imcs. therefore, it can be seen
      by any transactions. If this table has been loaded into imcs. A new data such as
      insert/update/delete will associated with a SMU items to trace its visibility. Therefore
@@ -124,8 +188,6 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   key.append(keypart).append(SHANNON_DB_TRX_ID);
   m_cus.emplace(key, std::make_unique<Cu>(trx_fld.get()));
   */
-
-  return ShannonBase::SHANNON_SUCCESS;
 }
 
 Cu *Imcs::at(std::string_view schema, std::string_view table, size_t index) {
@@ -307,105 +369,180 @@ int Imcs::build_indexes_from_log(const Rapid_load_context *context, std::map<std
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
-  auto m_thd = context->m_thd;
+int Imcs::fill_record(const Rapid_load_context *context, std::string &current_key, handler *file) {
+  /**
+   * for VARCHAR type Data in field->ptr is stored as: 1 or 2 bytes length-prefix-header  (from
+   * Field_varstring::length_bytes) data. the here we dont use var_xxx to get data, rather getting
+   * directly, due to we dont care what real it is. ref to: field.cc:6703
+   */
+  std::string key;
+  row_id_t rowid{0};
+  for (auto index = 0u; index < context->m_table->s->fields; index++) {
+    auto fld = *(context->m_table->field + index);
+    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
+    key.append(current_key).append(fld->field_name);
+    auto data_len{0u}, extra_offset{0u};
+    uchar *data_ptr{nullptr};
+    if (Utils::Util::is_blob(fld->type())) {
+      data_ptr = const_cast<uchar *>(fld->data_ptr());
+      data_len = down_cast<Field_blob *>(fld)->get_length();
+    } else {
+      extra_offset = Utils::Util::is_varstring(fld->type()) ? (fld->field_length > 256 ? 2 : 1) : 0;
+      data_ptr = fld->is_null() ? nullptr : fld->field_ptr() + extra_offset;
+      if (fld->is_null()) {
+        data_len = UNIV_SQL_NULL;
+        data_ptr = nullptr;
+      } else {
+        if (extra_offset == 1)
+          data_len = mach_read_from_1(fld->field_ptr());
+        else if (extra_offset == 2)
+          data_len = mach_read_from_2_little_endian(fld->field_ptr());
+        else
+          data_len = fld->pack_length();
+      }
+    }
+
+    if (!m_cus[key]->write_row(context, data_ptr, data_len)) {
+      return HA_ERR_GENERIC;
+    }
+    rowid = m_cus[key]->header()->m_prows.load(std::memory_order_relaxed) - 1;
+    key.clear();
+  }
+
+  if (context->m_table->s->is_missing_primary_key()) {
+    file->position((const uchar *)context->m_table->record[0]);  // to set DB_ROW_ID.
+    if (build_index(context, context->m_table, nullptr, rowid)) return HA_ERR_GENERIC;
+
+    for (auto index = 0u; index < context->m_table->s->keys; index++) {
+      auto key_info = context->m_table->key_info + index;
+      if (build_index(context, context->m_table, key_info, rowid)) return HA_ERR_GENERIC;
+    }
+  } else {
+    for (auto index = 0u; index < context->m_table->s->keys; index++) {
+      auto key_info = context->m_table->key_info + index;
+      if (build_index(context, context->m_table, key_info, rowid)) return HA_ERR_GENERIC;
+    }
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
+  auto m_thd = context->m_thd;
+  auto sch_name = context->m_schema_name.c_str();
+  auto table_name = context->m_table_name.c_str();
   // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
-  if (source->file->inited == handler::NONE && source->file->ha_rnd_init(true)) {
-    my_error(ER_NO_SUCH_TABLE, MYF(0), source->s->db.str, source->s->table_name.str);
+  if (file->inited == handler::NONE && file->ha_rnd_init(true)) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), sch_name, table_name);
     return HA_ERR_GENERIC;
   }
 
   int tmp{HA_ERR_GENERIC};
-  if (create_table_memo(context, source)) return HA_ERR_GENERIC;
-
   m_thd->set_sent_row_count(0);
-  std::string key_part, key;
-  key_part.append(source->s->db.str).append(":").append(source->s->table_name.str).append(":");
-  while ((tmp = source->file->ha_rnd_next(source->record[0])) != HA_ERR_END_OF_FILE) {
+  std::string key_part;
+  key_part.append(sch_name).append(":").append(table_name).append(":");
+  while ((tmp = file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
     /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
      without locks. Now, do full scan, but multi-thread scan will impl in future. */
-    key.clear();
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
     DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
-      my_error(ER_SECONDARY_ENGINE, MYF(0), source->s->db.str, source->s->table_name.str);
-      source->file->ha_rnd_end();
+      my_error(ER_SECONDARY_ENGINE, MYF(0), sch_name, table_name);
+      file->ha_rnd_end();
       return HA_ERR_GENERIC;
     });
 
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     auto load_context = const_cast<Rapid_load_context *>(context);
-    load_context->m_extra_info.m_key_len = source->file->ref_length;
-
-    /**
-     * for VARCHAR type Data in field->ptr is stored as: 1 or 2 bytes length-prefix-header  (from
-     * Field_varstring::length_bytes) data. the here we dont use var_xxx to get data, rather getting
-     * directly, due to we dont care what real it is. ref to: field.cc:6703
-     */
-    row_id_t rowid{0};
-    for (auto index = 0u; index < source->s->fields; index++) {
-      auto fld = *(source->field + index);
-      if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-      key.append(key_part).append(fld->field_name);
-      auto data_len{0u}, extra_offset{0u};
-      uchar *data_ptr{nullptr};
-      if (Utils::Util::is_blob(fld->type())) {
-        data_ptr = const_cast<uchar *>(fld->data_ptr());
-        data_len = down_cast<Field_blob *>(fld)->get_length();
-      } else {
-        extra_offset = Utils::Util::is_varstring(fld->type()) ? (fld->field_length > 256 ? 2 : 1) : 0;
-        data_ptr = fld->is_null() ? nullptr : fld->field_ptr() + extra_offset;
-        if (fld->is_null()) {
-          data_len = UNIV_SQL_NULL;
-          data_ptr = nullptr;
-        } else {
-          if (extra_offset == 1)
-            data_len = mach_read_from_1(fld->field_ptr());
-          else if (extra_offset == 2)
-            data_len = mach_read_from_2_little_endian(fld->field_ptr());
-          else
-            data_len = fld->pack_length();
-        }
-      }
-
-      if (!m_cus[key]->write_row(context, data_ptr, data_len)) {
-        std::string errmsg;
-        errmsg.append("load data from ")
-            .append(source->s->db.str)
-            .append(".")
-            .append(source->s->table_name.str)
-            .append(" to imcs failed.");
-        my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
-        source->file->ha_rnd_end();
-        return HA_ERR_GENERIC;
-      }
-      rowid = m_cus[key]->header()->m_prows.load(std::memory_order_relaxed) - 1;
-      key.clear();
+    load_context->m_extra_info.m_key_len = file->ref_length;
+    if (fill_record(context, key_part, file)) {
+      file->ha_rnd_end();
+      std::string errmsg;
+      errmsg.append("load data from ").append(sch_name).append(".").append(table_name).append(" to imcs failed.");
+      my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
     }
+
     m_thd->inc_sent_row_count(1);
-
-    if (source->s->is_missing_primary_key()) {
-      source->file->position(source->record[0]);  // to set DB_ROW_ID.
-      if (build_index(context, source, nullptr, rowid)) return HA_ERR_GENERIC;
-
-      for (auto index = 0u; index < source->s->keys; index++) {
-        auto key_info = source->key_info + index;
-        if (build_index(context, source, key_info, rowid)) return HA_ERR_GENERIC;
-      }
-    } else {
-      for (auto index = 0u; index < source->s->keys; index++) {
-        auto key_info = source->key_info + index;
-        if (build_index(context, source, key_info, rowid)) return HA_ERR_GENERIC;
-      }
-    }
 
     if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
   }
   // end of load the data from innodb to imcs.
-  source->file->ha_rnd_end();
+  file->ha_rnd_end();
+
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) {
+  auto m_thd = context->m_thd;
+
+  auto sch_name = context->m_schema_name.c_str();
+  auto table_name = context->m_table_name.c_str();
+  std::string key_part;
+  key_part.append(sch_name).append(":").append(table_name).append(":");
+
+  for (auto &part : context->m_extra_info.m_partition_infos) {
+    m_thd->set_sent_row_count(0);
+    auto partkey = key_part;
+    partkey.append(part.first).append("-").append(std::to_string(part.second)).append(":");
+    // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
+    if (file->inited == handler::NONE && file->rnd_init_in_part(part.second, true)) {
+      my_error(ER_NO_SUCH_TABLE, MYF(0), sch_name, table_name);
+      return HA_ERR_GENERIC;
+    }
+
+    int tmp{HA_ERR_GENERIC};
+    while ((tmp = file->rnd_next_in_part(part.second, context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
+      /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
+       without locks. Now, do full scan, but multi-thread scan will impl in future. */
+      if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+
+      DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
+        my_error(ER_SECONDARY_ENGINE, MYF(0), sch_name, table_name);
+        file->rnd_end_in_part(part.second, true);
+        return HA_ERR_GENERIC;
+      });
+
+      // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
+      auto load_context = const_cast<Rapid_load_context *>(context);
+      load_context->m_extra_info.m_key_len = file->ref_length;
+      if (fill_record(context, partkey, file)) {
+        file->rnd_end_in_part(part.second, true);
+        std::string errmsg;
+        errmsg.append("load data from ").append(sch_name).append(".").append(table_name).append(" to imcs failed.");
+        my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+      }
+      if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
+    }
+    // end of load the data from innodb to imcs.
+    file->rnd_end_in_part(part.second, true);
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
+  if (create_table_memo(context, source)) {
+    std::string errmsg;
+    errmsg.append("create table memo for ")
+        .append(context->m_schema_name)
+        .append(".")
+        .append(context->m_table_name)
+        .append(" failed.");
+    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  auto ret{ShannonBase::SHANNON_SUCCESS};
+  if (context->m_thd->lex->query_block->get_table_list()->partition_names && source->file->get_partition_handler()) {
+    if (load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file))) {
+      // if load partition table failed, then do normal load mode, therefore clear partition info.
+      const_cast<Rapid_load_context *>(context)->m_extra_info.m_partition_infos.clear();
+      ret = load_innodb(context, dynamic_cast<ha_innobase *>(source->file));
+    }
+  } else
+    ret = load_innodb(context, dynamic_cast<ha_innobase *>(source->file));
+  return ret;
 }
 
 int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,

@@ -155,6 +155,8 @@ constexpr int PREFETCH_AHEAD = 2;
 #define SHANNON_THREAD_LOCAL thread_local
 #endif
 
+// key_part_len, part name of key. such as composite index <keypart1, keypart2, ..., keypartn>
+// key_part_len, the field length of that key part. and the field name of that key part.
 using key_meta_t = std::pair<uint, std::vector<std::string>>;
 
 }  // namespace ShannonBase

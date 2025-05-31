@@ -769,12 +769,17 @@ bool FinalizePlanForQueryBlock(THD *thd, Query_block *query_block) {
 }
 
 bool is_point_select(THD *, Query_block *query_block) {
+  assert(query_block);
+
   if (query_block->leaf_table_count != 1) {
     return false;
   }
 
   // check use primary key or unique key.
-  auto table = query_block->join->qep_tab->table();
+  auto qep_table = query_block->join->qep_tab;
+  if (!qep_table) return true;
+
+  auto table = qep_table->table();
   if (table->const_table) return true;
 
   uint keyno = table->s->primary_key;
