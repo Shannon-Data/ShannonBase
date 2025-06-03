@@ -166,12 +166,12 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
         auto part_name = part.first;
         part_name.append("-").append(std::to_string(part.second)).append(":");
         key.append(keypart).append(part_name).append(fld->field_name);
-        m_cus.emplace(key, std::make_unique<Cu>(fld));
+        m_cus.emplace(key, std::make_unique<Cu>(fld, key));
         key.clear();
       }
     } else {
       key.append(keypart).append(fld->field_name);
-      m_cus.emplace(key, std::make_unique<Cu>(fld));
+      m_cus.emplace(key, std::make_unique<Cu>(fld, key));
       key.clear();
     }
   }
@@ -204,8 +204,8 @@ Cu *Imcs::at(std::string_view schema, std::string_view table, size_t index) {
 }
 
 Cu *Imcs::get_cu(std::string_view key) {
+  std::shared_lock<std::shared_mutex> lk(m_cus_mutex);
   std::string key_str(key);
-
   if (m_cus.find(key_str) == m_cus.end()) return nullptr;
   return m_cus[key_str].get();
 }
@@ -545,48 +545,102 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   return ret;
 }
 
-int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
-                       bool error_if_not_loaded) {
-  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
-   *  removed*/
-  // TODO: need to wait all wrk threads finish.
-  std::string keypart;
+int Imcs::unload_cus(const Rapid_load_context *context, std::string &keyname, bool error_if_not_loaded) {
   auto found{false};
-  keypart.append(db_name).append(":").append(table_name).append(":");
+  // step 1: unload CUs.
+  std::unique_lock<std::shared_mutex> lk(m_cus_mutex);
   for (auto it = m_cus.begin(); it != m_cus.end();) {
-    if (it->first.find(keypart) != std::string::npos) {
-      { std::scoped_lock lk(it->second.get()->get_mutex()); }
-
+    if (it->first.find(keyname) != std::string::npos) {
       it = m_cus.erase(it);
       found = true;
     } else
       ++it;
-
-    if (error_if_not_loaded && !found) {
-      my_error(ER_NO_SUCH_TABLE, MYF(0), db_name, table_name);
-      return HA_ERR_GENERIC;
-    }
+  }
+  if (error_if_not_loaded && !found) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
+    return HA_ERR_GENERIC;
   }
 
-  found = false;
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::unload_indexes(const Rapid_load_context *context, std::string &keyname, bool error_if_not_loaded) {
+  // step 1: unload source key meta infos.
+  bool found{false};
   for (auto it = m_source_keys.begin(); it != m_source_keys.end();) {
-    if (it->first.find(keypart) != std::string::npos) {
+    if (it->first.find(keyname) != std::string::npos) {
       it = m_source_keys.erase(it);
       found = true;
     } else
       ++it;
   }
 
+  if (error_if_not_loaded && !found) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
+    return HA_ERR_GENERIC;
+  }
+
+  // step 2: unload the keys.
   found = false;
   for (auto it = m_indexes.begin(); it != m_indexes.end();) {
-    if (it->first.find(keypart) != std::string::npos) {
+    if (it->first.find(keyname) != std::string::npos) {
       it = m_indexes.erase(it);
       found = true;
     } else
       ++it;
   }
 
+  if (error_if_not_loaded && !found) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
+    return HA_ERR_GENERIC;
+  }
+
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::unload_innodb(const Rapid_load_context *context, const char *db_name, const char *table_name,
+                        bool error_if_not_loaded) {
+  std::string keypart;
+  keypart.append(db_name).append(":").append(table_name).append(":");
+  // step 1: unload CUs.
+  unload_cus(context, keypart, error_if_not_loaded);
+
+  // step 2: unload source key meta infos and indexes.
+  unload_indexes(context, keypart, error_if_not_loaded);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::unload_innodbpart(const Rapid_load_context *context, const char *db_name, const char *table_name,
+                            bool error_if_not_loaded) {
+  std::string keypart(db_name);
+  keypart.append(":").append(table_name).append(":");
+  for (auto &part : context->m_extra_info.m_partition_infos) {
+    auto key_name(keypart);
+    key_name.append(part.first).append("-").append(std::to_string(part.second)).append(":");
+
+    // step 1: unload CUs.
+    unload_cus(context, key_name, error_if_not_loaded);
+
+    // step 2: unload source key meta infos and indexes.
+    unload_indexes(context, key_name, error_if_not_loaded);
+  }
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
+                       bool error_if_not_loaded) {
+  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
+   *  removed*/
+  int ret{ShannonBase::SHANNON_SUCCESS};
+  auto partition_hanlder = context->m_table ? context->m_table->file->get_partition_handler() : nullptr;
+  auto partition_names = context->m_thd->lex->query_block->get_table_list()
+                             ? context->m_thd->lex->query_block->get_table_list()->partition_names
+                             : nullptr;
+  if (partition_names && partition_hanlder) {
+    ret = unload_innodbpart(context, db_name, table_name, error_if_not_loaded);
+  } else
+    ret = unload_innodb(context, db_name, table_name, error_if_not_loaded);
+  return ret;
 }
 
 int Imcs::insert_row(const Rapid_load_context *context, row_id_t rowid, uchar *buf) {

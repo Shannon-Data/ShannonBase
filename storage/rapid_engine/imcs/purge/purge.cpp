@@ -104,8 +104,8 @@ static void purge_func_main() {
     thread_num = std::min(thread_num, loaded_cu_sz);
 
     size_t thr_cnt = 0;
+    std::shared_lock<std::shared_mutex> lk_cu(ShannonBase::Imcs::Imcs::instance()->get_cu_mutex());
     for (auto &cu : ShannonBase::Imcs::Imcs::instance()->get_cus()) {
-      std::scoped_lock lk(cu.second.get()->get_mutex());
       results.emplace_back(std::async(std::launch::async, purger_purge_worker, cu.second.get()));
       thr_cnt++;
 

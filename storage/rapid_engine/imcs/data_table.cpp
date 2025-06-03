@@ -82,9 +82,13 @@ DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(
         key.clear();
       }
     } else {
-      key.append(key_part).append(fld->field_name);
-      m_field_cus.emplace_back(Imcs::instance()->get_cu(key));
-      key.clear();
+      std::shared_lock<std::shared_mutex> lk(Imcs::instance()->get_cu_mutex());
+      const auto &cus = Imcs::instance()->get_cus();
+      std::for_each(cus.begin(), cus.end(), [&](const auto &cu) {
+        if (cu.first.find(key_part) != std::string::npos && cu.first.rfind(fld->field_name) != std::string::npos) {
+          m_field_cus.emplace_back(cu.second.get());
+        }
+      });
     }
   }
 
