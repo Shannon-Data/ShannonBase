@@ -93,6 +93,8 @@ Cu::Cu(const Field *field) {
       .append(field->field_name);
 }
 
+Cu::Cu(const Field *field, std::string &name) : Cu(field) { m_cu_key = name; }
+
 Cu::~Cu() {
   if (m_chunks.size()) m_chunks.clear();
 }

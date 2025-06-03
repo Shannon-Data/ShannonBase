@@ -355,17 +355,54 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 }
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
-  if (error_if_not_loaded && shannon_loaded_tables->get(db_name, table_name) == nullptr) {
+  RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
+  if (error_if_not_loaded && !share) {
     std::string err(db_name);
-    err.append(".").append(table_name).append(" table is not loaded into");
+    err.append(".").append(table_name).append(" table is not loaded into rapid yet");
     my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
-
     return HA_ERR_GENERIC;
-  } else {
-    Imcs::Imcs::instance()->unload_table(nullptr, db_name, table_name, false);
-    shannon_loaded_tables->erase(db_name, table_name);
-    return ShannonBase::SHANNON_SUCCESS;
   }
+
+  ShannonBase::Rapid_load_context context;
+  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
+  context.m_table = table_list ? table_list->table : nullptr;
+  context.m_thd = m_thd;
+  context.m_extra_info.m_keynr = active_index;
+  context.m_schema_name = db_name;
+  context.m_table_name = table_name;
+
+  auto part_handler = context.m_table ? context.m_table->file->get_partition_handler() : nullptr;
+  auto partition_names = table_list ? table_list->partition_names : nullptr;
+  if (partition_names && part_handler) {
+    partition_info *part_info = table_list->table->part_info;
+    List_iterator_fast<String> it(*table_list->partition_names);
+    String *str{nullptr};
+    while ((str = it++)) {
+      uint part_id;
+      if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
+        context.m_extra_info.m_partition_infos.emplace(std::make_pair(str->c_ptr(), part_id));
+      }
+    }
+  }
+
+  Imcs::Imcs::instance()->unload_table(&context, db_name, table_name, false);
+
+  // if all cus has been unloaded, then we can remove the meta info. Considering the following
+  // scenario: alter table xxx secondary_load partion(p0, p1, xxx, pN), then unload a part of
+  // partitions, not all alter table xxx secondary_unload partition(p0, p10). Under this stage,
+  // we think that the table is still in loading status.
+  std::string keypart(db_name);
+  keypart.append(":").append(table_name).append(":");
+  auto found{false};
+  for (auto &cu : Imcs::Imcs::instance()->get_cus()) {  // find the cus with db_name and table_name
+    if (cu.first.find(keypart) != std::string::npos) {
+      found = true;
+      break;
+    }
+  }
+  if (!found) shannon_loaded_tables->erase(db_name, table_name);
+
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 /**

@@ -4,9 +4,9 @@
 ##############################################################################
 
 --disable_warnings
-create database tpch_1024;
-alter database tpch_1024 CHARACTER SET ascii COLLATE ascii_bin; 
-use tpch_1024;
+create database test_partition;
+alter database test_partition CHARACTER SET ascii COLLATE ascii_bin; 
+use test_partition;
 
 CREATE TABLE LINEITEM ( L_ORDERKEY    BIGINT NOT NULL,
                         L_PARTKEY     INTEGER NOT NULL,
@@ -53,9 +53,14 @@ explain select * from LINEITEM;
 select * from LINEITEM;
 alter table LINEITEM secondary_unload;
 
-alter table LINEITEM secondary_load;
-explain select * from LINEITEM;
-select * from LINEITEM;
+alter table LINEITEM secondary_load PARTITION(p0, p1, p10);
+alter table LINEITEM secondary_unload;
+
+alter table LINEITEM secondary_load PARTITION(p0, p1, p10);
+alter table LINEITEM secondary_unload PARTITION(p0, p10, p1);
+
+alter table LINEITEM secondary_load PARTITION(p0, p1, p10);
+alter table LINEITEM secondary_unload PARTITION(p0, p10);
 alter table LINEITEM secondary_unload;
 --enable_warnings
 
@@ -67,4 +72,4 @@ set rapid_use_dynamic_offload=1;
 SET optimizer_trace = 'enabled=on';
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 
-drop database tpch_1024;
+drop database test_partition;

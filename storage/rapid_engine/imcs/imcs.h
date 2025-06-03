@@ -30,6 +30,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <tuple>
 #include <unordered_map>
 
@@ -165,6 +166,8 @@ class Imcs : public MemoryObject {
     return next_row_id;
   }
 
+  inline std::shared_mutex &get_cu_mutex() { return m_cus_mutex; }
+
  private:
   Imcs(Imcs &&) = delete;
   Imcs(Imcs &) = delete;
@@ -177,6 +180,16 @@ class Imcs : public MemoryObject {
 
   int load_innodb(const Rapid_load_context *context, ha_innobase *file);
   int load_innodbpart(const Rapid_load_context *context, ha_innopart *file);
+
+  int unload_innodb(const Rapid_load_context *context, const char *db_name, const char *table_name,
+                    bool error_if_not_loaded);
+
+  int unload_innodbpart(const Rapid_load_context *context, const char *db_name, const char *table_name,
+                        bool error_if_not_loaded);
+
+  int unload_cus(const Rapid_load_context *context, std::string &keyname, bool error_if_not_loaded);
+
+  int unload_indexes(const Rapid_load_context *context, std::string &keyname, bool error_if_not_loaded);
 
   int fill_record(const Rapid_load_context *context, std::string &current_key, handler *file);
 
@@ -198,6 +211,9 @@ class Imcs : public MemoryObject {
 
   // initialization flag.
   std::atomic<uint8> m_inited{0};
+
+  // to protect the all cus
+  std::shared_mutex m_cus_mutex;
 
   // the loaded cus. key format: db + ':' + table_name + ':'
   // + field_name + ":".
