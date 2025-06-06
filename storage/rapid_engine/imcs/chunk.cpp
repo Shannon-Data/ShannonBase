@@ -52,25 +52,48 @@ namespace Imcs {
  * which chunk we are in now, and 'm_data % m_source_fld->pack_length' to get
  * where we are in this chunk.
  */
-static std::atomic<size_t> rapid_allocated_mem_size{0};
 
 Chunk::Chunk(const Field *field) {
+  m_chunk_key.append(field->table->s->db.str)
+      .append(":")
+      .append(field->table->s->table_name.str)
+      .append(":")
+      .append(field->field_name);
+
+  init_header(field);
+  init_body(field);
+}
+
+Chunk::Chunk(const Field *field, std::string &keyname) {
+  m_chunk_key = keyname;
+  init_header(field);
+  init_body(field);
+}
+
+Chunk::~Chunk() {
+  if (m_base) {
+    ut::aligned_free(m_base);
+    m_base = m_data = nullptr;
+    rapid_allocated_mem_size.fetch_sub(m_header->m_normalized_pack_length * SHANNON_ROWS_IN_CHUNK);
+  }
+}
+
+void Chunk::init_header(const Field *field) {
   m_header.reset(new (std::nothrow) Chunk_header());
   if (!m_header) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header allocation failed");
     return;  // allocated faile.
   }
 
+  m_header->m_source_fld = field->clone(&rapid_mem_root);
+  assert(m_header->m_source_fld);
+  m_header->m_type = field->type();
+
   m_header->m_db = field->table->s->db.str;
   m_header->m_table_name = field->table->s->table_name.str;
 
   m_header->m_pack_length = field->pack_length();
-  if (Utils::Util::is_blob(field->type()) || Utils::Util::is_varstring(field->type()) ||
-      Utils::Util::is_string(field->type()))
-    m_header->m_normalized_pack_length = sizeof(uint32);
-  else
-    m_header->m_normalized_pack_length = field->pack_length();
-
+  m_header->m_normalized_pack_length = Utils::Util::normalized_length(field);
   m_header->m_key_len = field->table->file->ref_length;
 
   m_header->m_prows.store(0);
@@ -98,6 +121,9 @@ Chunk::Chunk(const Field *field) {
     return;  // allocated faile.
   }
   m_header->m_smu.get()->set_owner(this);
+}
+
+void Chunk::init_body(const Field *field) {
   size_t chunk_size = SHANNON_ROWS_IN_CHUNK * m_header->m_normalized_pack_length;
   ut_ad(field && chunk_size < ShannonBase::rpd_mem_sz_max);
 
@@ -121,23 +147,6 @@ Chunk::Chunk(const Field *field) {
   } else {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
     return;
-  }
-
-  m_chunk_key.append(field->table->s->db.str)
-      .append(":")
-      .append(field->table->s->table_name.str)
-      .append(":")
-      .append(field->field_name);
-  m_header->m_source_fld = field->clone(&rapid_mem_root);
-  assert(m_header->m_source_fld);
-  m_header->m_type = field->type();
-}
-
-Chunk::~Chunk() {
-  if (m_base) {
-    ut::aligned_free(m_base);
-    m_base = m_data = nullptr;
-    rapid_allocated_mem_size.fetch_sub(m_header->m_normalized_pack_length * SHANNON_ROWS_IN_CHUNK);
   }
 }
 

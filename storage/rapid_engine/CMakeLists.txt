@@ -30,8 +30,9 @@ ADD_DEFINITIONS(-DLOG_SUBSYSTEM_TAG="Rapid")
 # TODO: Fix up all non-canonical include paths and remove this.
 INCLUDE_DIRECTORIES(
   ${CMAKE_SOURCE_DIR}/sql
-  ${CMAKE_SOURCE_DIR}/include 
- 
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/storage/innobase
+  ${CMAKE_SOURCE_DIR}/storage/rapid_engine
 )
 
 #FOR AUTO-ML MODELS
@@ -87,6 +88,7 @@ set (SHANNON_ML
 )
 SET(SHANNON_RAPID_SOURCES
     handler/ha_shannon_rapid.cc
+    handler/ha_shannon_rapidpart.cc
     ${SHANNON_IMCS_SOURCES}
     ${SHANNON_TRX_SOURCES}
     ${SHANNON_ITERATOR_SOURCES}
