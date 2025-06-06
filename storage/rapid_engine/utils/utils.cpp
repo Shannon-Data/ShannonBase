@@ -272,6 +272,13 @@ std::vector<std::string> Util::split(const std::string &str, char delimiter) {
   return tokens;
 }
 
+uint Util::normalized_length(const Field *field) {
+  return (Utils::Util::is_blob(field->type()) || Utils::Util::is_varstring(field->type()) ||
+          Utils::Util::is_string(field->type()))
+             ? sizeof(uint32)
+             : field->pack_length();
+}
+
 template <>
 void Encoder<float>::EncodeFloat(float value, unsigned char *key) {
   uint32_t val;

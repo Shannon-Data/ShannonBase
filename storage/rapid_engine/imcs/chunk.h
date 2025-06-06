@@ -118,6 +118,7 @@ class Chunk : public MemoryObject {
   };
 
   explicit Chunk(const Field *field);
+  explicit Chunk(const Field *field, std::string &keyname);
   virtual ~Chunk();
 
   Chunk(Chunk &&) = delete;
@@ -262,6 +263,10 @@ class Chunk : public MemoryObject {
 
   // maigic num of chunk.
   const char *m_magic = "SHANNON_CHUNK";
+
+  void init_header(const Field *field);
+
+  void init_body(const Field *field);
 
   void reset_meta_info();
 
