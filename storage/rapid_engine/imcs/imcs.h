@@ -86,6 +86,10 @@ class Imcs : public MemoryObject {
    for moving to next row */
   int load_table(const Rapid_load_context *context, const TABLE *source);
 
+  /** load the current partition table rows data into imcs. the caller's responsible
+   for moving to next row */
+  int load_parttable(const Rapid_load_context *context, const TABLE *source);
+
   // unload the table rows data from imcs.
   int unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
                    bool error_if_not_loaded);
@@ -167,6 +171,12 @@ class Imcs : public MemoryObject {
   }
 
   inline std::shared_mutex &get_cu_mutex() { return m_cus_mutex; }
+
+  inline void cleanup() {
+    m_cus.clear();
+    m_source_keys.clear();
+    m_indexes.clear();
+  }
 
  private:
   Imcs(Imcs &&) = delete;

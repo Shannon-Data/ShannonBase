@@ -90,5 +90,7 @@ extern rpd_columns_container rpd_columns_info;
 
 // the max memory size of rpd engine, initialized in xx_rapid.cc
 extern uint64 rpd_mem_sz_max;
+
+extern std::atomic<size_t> rapid_allocated_mem_size;
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RPD_STATS_H__

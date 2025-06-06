@@ -184,6 +184,10 @@ class Cu : public MemoryObject {
   inline std::mutex &get_mutex() { return m_mutex; }
 
  private:
+  // init chunks.
+  void init_header(const Field *field);
+  void init_body(const Field *field);
+
   // get the field value. if field is string/text then return its stringid.
   // or, do nothing.
   uchar *get_vfield_value(uchar *&data, size_t &len, bool need_pack = false);

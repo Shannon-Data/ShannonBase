@@ -19,7 +19,10 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+    */
 
 #ifndef __PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H__
 #define __PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H__
@@ -27,7 +30,6 @@
 
 #include "my_base.h"
 #include "sql/handler.h"
-#include "sql/partitioning/partition_handler.h"
 #include "thr_lock.h"
 
 class THD;
@@ -43,6 +45,8 @@ class Transaction;
 namespace Imcs {
 class DataTable;
 }
+
+class ha_rapidpart;
 
 struct RapidShare {
   THR_LOCK lock;
@@ -64,15 +68,6 @@ struct RapidShare {
   const TABLE *m_source_table;
 };
 
-class RapidPartShare : public Partition_share {
- public:
-  RapidPartShare(RapidShare *rapid) : m_rapid_share(rapid) {}
-  virtual ~RapidPartShare() = default;
-
- private:
-  RapidShare *m_rapid_share;
-};
-
 /**
  * The SB storage engine is used for testing MySQL server functionality
  * related to secondary storage engines.
@@ -87,7 +82,7 @@ class RapidPartShare : public Partition_share {
  * @note This shannon storage engine does not support being set as a primary
  * storage engine.
  */
-class ha_rapid : public handler, public Partition_helper, public Partition_handler {
+class ha_rapid : public handler {
  public:
   ha_rapid(handlerton *hton, TABLE_SHARE *table_share);
 
@@ -170,152 +165,9 @@ class ha_rapid : public handler, public Partition_helper, public Partition_handl
 
   int start_stmt(THD *const thd, thr_lock_type lock_type) override MY_ATTRIBUTE((__warn_unused_result__));
 
-  // needed by partioin helper abstract function. THIS SHOULD BE AS ha_innopart，but here we dont
-  // do as that does, only put all these parts in ha_rapid. if we implement partitioned rapid engine
-  // in furture, it SHOULD be put into a seperated class as ha_innopart does.
-
-  Partition_handler *get_partition_handler() override { return (static_cast<Partition_handler *>(this)); }
-
-  THD *get_thd() const override {
-    assert(false);
-    return ha_thd();
-  }
-
-  TABLE *get_table() const override {
-    assert(false);
-    return table;
-  }
-
-  bool get_eq_range() const override {
-    assert(false);
-    return eq_range;
-  }
-
-  void set_eq_range(bool eq_range_arg) override {
-    assert(false);
-    eq_range = eq_range_arg;
-  }
-
-  void set_range_key_part(KEY_PART_INFO *key_part) override {
-    assert(false);
-    range_key_part = key_part;
-  }
-
-  int write_row_in_part(uint, uchar *) override {
-    assert(false);
-    return 0;
-  }
-
-  int update_row_in_part(uint, const uchar *, uchar *) override {
-    assert(false);
-    return 0;
-  }
-
-  int delete_row_in_part(uint, const uchar *) override {
-    assert(false);
-    return 0;
-  }
-
-  int initialize_auto_increment(bool) override {
-    assert(false);
-    return 0;
-  }
-
-  int rnd_init_in_part(uint, bool) override {
-    assert(false);
-    return 0;
-  }
-
-  int rnd_next_in_part(uint, uchar *) override {
-    assert(false);
-    return 0;
-  }
-
-  int rnd_end_in_part(uint, bool) override {
-    assert(false);
-    return 0;
-  }
-
-  void position_in_last_part(uchar *, const uchar *) override { assert(false); }
-
-  int index_first_in_part(uint, uchar *) override {
-    assert(false);
-    return 0;
-  }
-
-  int index_last_in_part(uint, uchar *) override {
-    assert(false);
-    return 0;
-  }
-
-  int index_prev_in_part(uint, uchar *) override {
-    assert(false);
-    return 0;
-  }
-
-  int index_next_in_part(uint, uchar *) override {
-    assert(false);
-    return 0;
-  }
-
-  int index_next_same_in_part(uint, uchar *, const uchar *, uint) override {
-    assert(false);
-    return 0;
-  }
-
-  int index_read_map_in_part(uint, uchar *, const uchar *, key_part_map, ha_rkey_function) override {
-    assert(false);
-    return 0;
-  }
-
-  int index_read_last_map_in_part(uint, uchar *, const uchar *, key_part_map) override {
-    assert(false);
-    return 0;
-  }
-
-  int read_range_first_in_part(uint, uchar *, const key_range *, const key_range *, bool) override {
-    assert(false);
-    return 0;
-  }
-
-  int read_range_next_in_part(uint, uchar *) override {
-    assert(false);
-    return 0;
-  }
-
-  int index_read_idx_map_in_part(uint, uchar *, uint, const uchar *, key_part_map, ha_rkey_function) override {
-    assert(false);
-    return 0;
-  }
-
-  int write_row_in_new_part(uint) override {
-    assert(false);
-    return 0;
-  }
-
-  void get_dynamic_partition_info(ha_statistics *, ha_checksum *, uint) override { assert(false); }
-
-  void set_part_info(partition_info *part_info, bool early) override {
-    Partition_helper::set_part_info_low(part_info, early);
-  }
-
-  void initialize_partitioning(partition_info *part_info, bool early) {
-    Partition_helper::set_part_info_low(part_info, early);
-  }
-
-  row_type get_partition_row_type(const dd::Table *, uint) override {
-    assert(false);
-    row_type ret;
-    return ret;
-  }
-
-  handler *get_handler() override { return (static_cast<handler *>(this)); }
-
   THR_LOCK_DATA m_lock;
 
   RapidShare *m_share{nullptr};
-
-  RapidPartShare *m_part_share{nullptr};
 
   THD *m_thd{nullptr};
 
@@ -325,6 +177,8 @@ class ha_rapid : public handler, public Partition_helper, public Partition_handl
 
   std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;
   std::string m_failed_reason;
+
+  ha_rapidpart *m_part_handler{nullptr};
 };
 
 }  // namespace ShannonBase

@@ -269,6 +269,8 @@ class Util {
   static void write_trace_reason(THD *thd, const char *text, const char *reason);
 
   static std::vector<std::string> split(const std::string &str, char delimiter);
+
+  static uint normalized_length(const Field *field);
 };
 
 template <typename T>

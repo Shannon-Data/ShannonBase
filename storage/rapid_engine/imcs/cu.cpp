@@ -41,6 +41,26 @@ namespace Imcs {
 
 Cu::Cu(const Field *field) {
   ut_a(field && !field->is_flag_set(NOT_SECONDARY_FLAG));
+  m_cu_key.append(field->table->s->db.str)
+      .append(":")
+      .append(field->table->s->table_name.str)
+      .append(":")
+      .append(field->field_name);
+  init_header(field);
+  init_body(field);
+}
+
+Cu::Cu(const Field *field, std::string &name) {
+  m_cu_key = name;
+  init_header(field);
+  init_body(field);
+}
+
+Cu::~Cu() {
+  if (m_chunks.size()) m_chunks.clear();
+}
+
+void Cu::init_header(const Field *field) {
   {
     m_header.reset(new (std::nothrow) Cu_header());
     if (!m_header) {
@@ -76,8 +96,11 @@ Cu::Cu(const Field *field) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Cu dictionary allocation failed");
     return;
   }
+}
+
+void Cu::init_body(const Field *field) {
   // the initial one chunk built.
-  auto chunk = new (std::nothrow) Chunk(const_cast<Field *>(field));
+  auto chunk = new (std::nothrow) Chunk(const_cast<Field *>(field), m_cu_key);
   if (!chunk) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
     return;
@@ -85,18 +108,6 @@ Cu::Cu(const Field *field) {
   m_chunks.emplace_back(chunk);
 
   m_current_chunk.store(0);
-
-  m_cu_key.append(field->table->s->db.str)
-      .append(":")
-      .append(field->table->s->table_name.str)
-      .append(":")
-      .append(field->field_name);
-}
-
-Cu::Cu(const Field *field, std::string &name) : Cu(field) { m_cu_key = name; }
-
-Cu::~Cu() {
-  if (m_chunks.size()) m_chunks.clear();
 }
 
 row_id_t Cu::rows(Rapid_load_context *context) {
@@ -235,7 +246,7 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
   auto wdata = (len == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, wlen, false);
   if (!(written_to = chunk_ptr->write(context, wdata, wlen))) {  // current chunk is full.
     // then build a new one, and re-try to write the data.
-    auto chunk = new (std::nothrow) Chunk(const_cast<Field *>(m_header->m_source_fld));
+    auto chunk = new (std::nothrow) Chunk(const_cast<Field *>(m_header->m_source_fld), m_cu_key);
     if (!chunk) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
       return nullptr;
