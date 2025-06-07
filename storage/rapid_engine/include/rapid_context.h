@@ -110,6 +110,9 @@ class Rapid_load_context : public Secondary_engine_execution_context {
 
     // partition info.
     std::unordered_map<std::string, uint> m_partition_infos;
+
+    // active partitio info.
+    std::string m_active_part_key;
   };
 
   Rapid_load_context() : m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr), m_thd{nullptr} {}

@@ -48,9 +48,9 @@ alter table LINEITEM change L_ORDERKEY L_ORDERKEY BIGINT NOT NULL COMMENT 'RAPID
 set use_secondary_engine=forced;
 alter table LINEITEM secondary_engine RAPID;
 
+--error 3877
 alter table LINEITEM secondary_load;
-explain select * from LINEITEM;
-select * from LINEITEM;
+--error 3890
 alter table LINEITEM secondary_unload;
 
 alter table LINEITEM secondary_load PARTITION(p0, p1, p10);
@@ -64,6 +64,51 @@ alter table LINEITEM secondary_unload PARTITION(p0, p10);
 alter table LINEITEM secondary_unload;
 --enable_warnings
 
+drop table LINEITEM;
+
+CREATE TABLE LINEITEM ( L_ORDERKEY    BIGINT NOT NULL,
+                        L_PARTKEY     INTEGER NOT NULL,
+                        L_SUPPKEY     INTEGER NOT NULL,
+                        L_LINENUMBER  INTEGER NOT NULL,
+                        L_QUANTITY    DECIMAL(15,2) NOT NULL,
+                        L_EXTENDEDPRICE  DECIMAL(15,2) NOT NULL,
+                        L_DISCOUNT    DECIMAL(15,2) NOT NULL,
+                        L_TAX         DECIMAL(15,2) NOT NULL,
+                        L_RETURNFLAG  CHAR(1) NOT NULL,
+                        L_LINESTATUS  CHAR(1) NOT NULL,
+                        L_SHIPDATE    DATE NOT NULL,
+                        L_COMMITDATE  DATE NOT NULL,
+                        L_RECEIPTDATE DATE NOT NULL,
+                        L_SHIPINSTRUCT CHAR(25) NOT NULL,
+                        L_SHIPMODE     CHAR(10) NOT NULL,
+                        L_COMMENT      VARCHAR(44) NOT NULL,
+                        PRIMARY KEY (L_ORDERKEY, L_LINENUMBER))
+                        PARTITION BY KEY()
+                        PARTITIONS 18;
+
+alter table LINEITEM secondary_engine NULL;
+
+#-- optimal encodings
+alter table LINEITEM change L_RETURNFLAG L_RETURNFLAG CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM change L_LINESTATUS L_LINESTATUS CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM change L_SHIPINSTRUCT L_SHIPINSTRUCT CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM change L_COMMENT L_COMMENT VARCHAR(44) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM change L_SHIPMODE L_SHIPMODE CHAR(10) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+
+#-- optimal data placement
+alter table LINEITEM change L_ORDERKEY L_ORDERKEY BIGINT NOT NULL COMMENT 'RAPID_COLUMN=DATA_PLACEMENT_KEY=1';
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/lineitem.tbl' INTO TABLE LINEITEM FIELDS TERMINATED BY '|' ;
+--enable_query_log
+
+alter table LINEITEM secondary_engine RAPID;
+
+alter table LINEITEM secondary_load;
+explain select * from LINEITEM;
+select * from LINEITEM;
+alter table LINEITEM secondary_unload;
+
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 set use_secondary_engine=1;
 set secondary_engine_cost_threshold =1.5;
@@ -71,5 +116,6 @@ set rapid_use_dynamic_offload=1;
 
 SET optimizer_trace = 'enabled=on';
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
+
 
 drop database test_partition;

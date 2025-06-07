@@ -57,6 +57,7 @@
 #include "sql/table.h"
 #include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
 #include "storage/rapid_engine/cost/cost.h"
+#include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
 #include "storage/rapid_engine/imcs/data_table.h"      //DataTable
 #include "storage/rapid_engine/imcs/imcs.h"            // IMCS
 #include "storage/rapid_engine/include/rapid_const.h"  //const
@@ -84,6 +85,7 @@ handlerton *shannon_rapid_hton_ptr{nullptr};
 LoadedTables *shannon_loaded_tables = nullptr;
 uint64 rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
 ulonglong rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
+std::atomic<size_t> rapid_allocated_mem_size = 0;
 rpd_columns_container rpd_columns_info;
 
 bool Rapid_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
@@ -146,7 +148,7 @@ void LoadedTables::table_infos(uint index, ulonglong &tid, std::string &schema, 
 }
 
 ha_rapid::ha_rapid(handlerton *hton, TABLE_SHARE *table_share_arg)
-    : handler(hton, table_share_arg), Partition_helper(this), m_share(nullptr), m_thd(ha_thd()) {}
+    : handler(hton, table_share_arg), m_share(nullptr), m_thd(ha_thd()) {}
 
 int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *table_def) {
   RapidShare *share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
@@ -154,33 +156,6 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
     // The table has not been loaded into the secondary storage engine yet.
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Table has not been loaded");
     return HA_ERR_GENERIC;
-  }
-
-  if (table->part_info) {
-    /* Get the RapidPartShare from the TABLE_SHARE. */
-    lock_shared_ha_data();
-    auto part_share = static_cast<RapidPartShare *>(get_ha_share_ptr());
-    if (part_share == nullptr) {
-      m_part_share = new RapidPartShare(share);
-      if (m_part_share == nullptr) {
-        unlock_shared_ha_data();
-        return HA_ERR_INTERNAL_ERROR;
-      }
-      set_ha_share_ptr(static_cast<Handler_share *>(m_part_share));
-    }
-    unlock_shared_ha_data();
-
-    /* Now acquire TABLE_SHARE::LOCK_ha_data again and assign table
-    and index information. set_table_parts_and_indexes() will check
-    if some other thread already has managed to do this concurrently,
-    while lock was released. */
-    lock_shared_ha_data();
-
-    if (m_part_share->populate_partition_name_hash(table->part_info)) {
-      unlock_shared_ha_data();
-      return HA_ERR_INTERNAL_ERROR;
-    }
-    unlock_shared_ha_data();
   }
 
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
@@ -1011,7 +986,15 @@ static bool ModifyAccessPathCost(THD *thd [[maybe_unused]], const JoinHypergraph
   return false;
 }
 
-static handler *Create(handlerton *hton, TABLE_SHARE *table_share, bool, MEM_ROOT *mem_root) {
+static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share, bool partition, MEM_ROOT *mem_root) {
+  if (partition) {
+    ShannonBase::ha_rapidpart *file = new (mem_root) ShannonBase::ha_rapidpart(hton, table_share);
+    if (file && file->init_partitioning(mem_root)) {
+      ::destroy_at(file);
+      return (nullptr);
+    }
+    return (file);
+  }
   return new (mem_root) ShannonBase::ha_rapid(hton, table_share);
 }
 
@@ -1101,7 +1084,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);
   ShannonBase::shannon_rapid_hton_ptr = shannon_rapid_hton;
-  shannon_rapid_hton->create = Create;
+  shannon_rapid_hton->create = rapid_create_handler;
   shannon_rapid_hton->state = SHOW_OPTION_YES;
   shannon_rapid_hton->flags = HTON_IS_SECONDARY_ENGINE;
   shannon_rapid_hton->db_type = DB_TYPE_RAPID;

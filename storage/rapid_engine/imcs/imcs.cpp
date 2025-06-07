@@ -42,6 +42,7 @@
 #include "storage/innobase/include/univ.i"    //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
@@ -163,6 +164,11 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
 
     if (context->m_extra_info.m_partition_infos.size()) {
       for (auto &part : context->m_extra_info.m_partition_infos) {
+        size_t chunk_size = SHANNON_ROWS_IN_CHUNK * Utils::Util::normalized_length(fld);
+        if (likely(ShannonBase::rapid_allocated_mem_size + chunk_size > ShannonBase::rpd_mem_sz_max)) {
+          my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
+          return HA_ERR_GENERIC;
+        }
         auto part_name = part.first;
         part_name.append("-").append(std::to_string(part.second)).append(":");
         key.append(keypart).append(part_name).append(fld->field_name);
@@ -221,8 +227,9 @@ int Imcs::build_index_impl(const Rapid_load_context *context, const TABLE *sourc
   // this is come from ha_innodb.cc postion(), when postion() changed, the part should be changed respondingly.
   // why we dont not change the impl of postion() directly? because the postion() is impled in innodb engine.
   // we want to decouple with innodb engine.
-  auto keypart = std::string(source->s->db.str);
-  keypart.append(":").append(source->s->table_name.str).append(":");
+  // auto keypart = std::string(source->s->db.str);
+  // keypart.append(":").append(source->s->table_name.str).append(":");
+  auto keypart = context->m_extra_info.m_active_part_key;
 
   if (key == nullptr) {
     /* No primary key was defined for the table and we
@@ -375,6 +382,7 @@ int Imcs::fill_record(const Rapid_load_context *context, std::string &current_ke
    * Field_varstring::length_bytes) data. the here we dont use var_xxx to get data, rather getting
    * directly, due to we dont care what real it is. ref to: field.cc:6703
    */
+  const_cast<Rapid_load_context *>(context)->m_extra_info.m_active_part_key = current_key;
   std::string key;
   row_id_t rowid{0};
   for (auto index = 0u; index < context->m_table->s->fields; index++) {
@@ -523,6 +531,23 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
 
 int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   if (create_table_memo(context, source)) {
+    cleanup();
+    std::string errmsg;
+    errmsg.append("create table memo for ")
+        .append(context->m_schema_name)
+        .append(".")
+        .append(context->m_table_name)
+        .append(" failed.");
+    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  return load_innodb(context, dynamic_cast<ha_innobase *>(source->file));
+}
+
+int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
+  if (create_table_memo(context, source)) {
+    cleanup();
     std::string errmsg;
     errmsg.append("create table memo for ")
         .append(context->m_schema_name)
@@ -534,14 +559,11 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   }
 
   auto ret{ShannonBase::SHANNON_SUCCESS};
-  if (context->m_thd->lex->query_block->get_table_list()->partition_names && source->file->get_partition_handler()) {
-    if (load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file))) {
-      // if load partition table failed, then do normal load mode, therefore clear partition info.
-      const_cast<Rapid_load_context *>(context)->m_extra_info.m_partition_infos.clear();
-      ret = load_innodb(context, dynamic_cast<ha_innobase *>(source->file));
-    }
-  } else
+  if ((ret = load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file)))) {
+    // if load partition table failed, then do normal load mode, therefore clear partition info.
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_partition_infos.clear();
     ret = load_innodb(context, dynamic_cast<ha_innobase *>(source->file));
+  }
   return ret;
 }
 

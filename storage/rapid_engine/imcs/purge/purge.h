@@ -44,7 +44,7 @@ namespace Purge {
  * 5000000 spin rounds. for the more detail infor ref to : comment of
  * `innodb_log_writer_spin_delay`.
  */
-constexpr uint64_t MAX_PURGER_TIMEOUT = 1000;
+constexpr uint64_t MAX_PURGER_TIMEOUT = 10000;
 
 using purge_func_t = std::function<void(void)>;
 
