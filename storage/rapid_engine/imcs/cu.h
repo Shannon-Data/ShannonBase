@@ -92,7 +92,7 @@ class Cu : public MemoryObject {
   };
 
   explicit Cu(const Field *field);
-  Cu(const Field *field, std::string &name);
+  Cu(const Field *field, std::string name);
   virtual ~Cu();
   Cu(Cu &&) = delete;
   Cu &operator=(Cu &&) = delete;

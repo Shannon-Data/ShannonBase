@@ -242,13 +242,13 @@ bool Util::check_dict_encoding_projection(THD *thd) {
 
     key_part = table_ref->db;
     key_part.append(":").append(table_ref->table_name).append(":");
-
+    auto rpd_tb = imcs_instance->get_table(key_part);
     for (auto j = 0u; j < table_ref->table->s->fields; j++) {
       auto field_ptr = *(table_ref->table->field + j);
       if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
       std::string key = key_part + field_ptr->field_name;
-      auto cu_header [[maybe_unused]] = imcs_instance->get_cus()[key]->header();
+      auto cu_header [[maybe_unused]] = rpd_tb->get_field(key)->header();
       assert(cu_header);
       // to test all cu infos.
     }

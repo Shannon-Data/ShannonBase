@@ -42,6 +42,7 @@
 namespace ShannonBase {
 class Rapid_load_context;
 namespace Imcs {
+class Cu;
 /**
  * The chunk is an memory pool area, where the data writes here.
  * The format of rows is following: (ref to:
@@ -236,7 +237,12 @@ class Chunk : public MemoryObject {
   // gets
   row_id_t rows(Rapid_load_context *context);
 
+  inline void set_owner(Cu *owner) { m_owner = owner; }
+  inline Cu *onwer() const { return m_owner; }
+
  private:
+  Cu *m_owner;
+
   // the key string of this chunk.
   std::string m_chunk_key;
 

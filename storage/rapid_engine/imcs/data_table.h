@@ -40,10 +40,11 @@ class Rapid_load_context;
 namespace Imcs {
 class Imcs;
 class Cu;
+class RapidTable;
 
 class DataTable : public MemoryObject {
  public:
-  DataTable(TABLE *source_table);
+  DataTable(TABLE *source_table, RapidTable *rpd);
   virtual ~DataTable();
 
   // open a cursor on db_table to read/write.
@@ -90,8 +91,8 @@ class DataTable : public MemoryObject {
   // the data source, an IMCS.
   TABLE *m_data_source{nullptr};
 
-  // all Cu ptr of all feilds.
-  std::vector<Cu *> m_field_cus;
+  // rapid table.
+  RapidTable *m_rapid;
 
   // start from where.
   std::atomic<row_id_t> m_rowid{0};

@@ -51,6 +51,7 @@
 
 #include "storage/rapid_engine/imcs/chunk.h"             //chunk
 #include "storage/rapid_engine/imcs/cu.h"                //cu
+#include "storage/rapid_engine/imcs/data_table.h"        //RapidTable
 #include "storage/rapid_engine/imcs/imcs.h"              //imcs
 #include "storage/rapid_engine/include/rapid_context.h"  //Rapid_load_context
 #include "storage/rapid_engine/include/rapid_status.h"   //LoaedTables
@@ -131,59 +132,54 @@ bool LogParser::check_key_field(std::unordered_map<std::string, ShannonBase::key
 
 int LogParser::build_key(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
                          std::map<std::string, key_info_t> &keys) {
-  auto keypart = std::string(context->m_schema_name);
-  keypart.append(":").append(context->m_table_name).append(":");
-
-  auto matched_keys = Imcs::Imcs::instance()->source_key(keypart);
+  auto sch_tb = std::string(context->m_schema_name);
+  sch_tb.append(":").append(context->m_table_name);
+  auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
+  auto matched_keys = rpd_tb->m_source_keys;
   ut_a(matched_keys.size() > 0);
 
   std::unique_ptr<uchar[]> key_buff{nullptr};
 
   for (auto &key : matched_keys) {
     auto key_name = key.first;
-    auto key_info = key.second;
-    key_buff.reset(new uchar[key_info.first]);
-    memset(key_buff.get(), 0x0, key_info.first);
+    auto key_meta = key.second;
+    key_buff.reset(new uchar[key_meta.first]);
+    memset(key_buff.get(), 0x0, key_meta.first);
     uint key_offset{0u};
-    for (auto &keykey : key_info.second) {
-      auto parts = ShannonBase::Utils::Util::split(keykey, ':');
-      ut_a(parts.size() >= 4);
-      auto fldfld = parts[0] + ":" + parts[1] + ":" + parts[3];
-
-      ut_a(field_values.find(fldfld) != field_values.end());
-      if (field_values[fldfld].has_nullbit) {
-        *key_buff.get() = (field_values[fldfld].is_null) ? 1 : 0;
+    for (auto &key_field : key_meta.second) {
+      ut_a(field_values.find(key_field) != field_values.end());
+      if (field_values[key_field].has_nullbit) {
+        *key_buff.get() = (field_values[key_field].is_null) ? 1 : 0;
         key_offset++;
       }
 
-      auto cs = Imcs::Imcs::instance()->get_cu(fldfld) ? Imcs::Imcs::instance()->get_cu(fldfld)->header()->m_charset
-                                                       : nullptr;
-      if (field_values[fldfld].mtype == DATA_BLOB || field_values[fldfld].mtype == DATA_VARCHAR ||
-          field_values[fldfld].mtype == DATA_VARMYSQL) {
-        int2store(key_buff.get() + key_offset, field_values[fldfld].plength);
+      auto cs = rpd_tb->get_field(key_field) ? rpd_tb->get_field(key_field)->header()->m_charset : nullptr;
+      if (field_values[key_field].mtype == DATA_BLOB || field_values[key_field].mtype == DATA_VARCHAR ||
+          field_values[key_field].mtype == DATA_VARMYSQL) {
+        int2store(key_buff.get() + key_offset, field_values[key_field].plength);
         key_offset += HA_KEY_BLOB_LENGTH;
-        std::memcpy(key_buff.get() + key_offset, field_values[fldfld].data.get(), field_values[fldfld].mlength);
-        key_offset += field_values[fldfld].mlength;
+        std::memcpy(key_buff.get() + key_offset, field_values[key_field].data.get(), field_values[key_field].mlength);
+        key_offset += field_values[key_field].mlength;
       } else {
-        ut_a(field_values[fldfld].mlength == field_values[fldfld].plength);
-        if (field_values[fldfld].mtype == DATA_DOUBLE || field_values[fldfld].mtype == DATA_FLOAT ||
-            field_values[fldfld].mtype == DATA_DECIMAL || field_values[fldfld].mtype == DATA_FIXBINARY) {
-          auto field_ptr = Imcs::Imcs::instance()->get_cu(fldfld)->header()->m_source_fld;
+        ut_a(field_values[key_field].mlength == field_values[key_field].plength);
+        if (field_values[key_field].mtype == DATA_DOUBLE || field_values[key_field].mtype == DATA_FLOAT ||
+            field_values[key_field].mtype == DATA_DECIMAL || field_values[key_field].mtype == DATA_FIXBINARY) {
+          auto field_ptr = rpd_tb->get_field(key_field)->header()->m_source_fld;
           uchar encoding[8] = {0};
-          auto val = Utils::Util::get_field_numeric<double>(field_ptr, field_values[fldfld].data.get(), nullptr);
+          auto val = Utils::Util::get_field_numeric<double>(field_ptr, field_values[key_field].data.get(), nullptr);
           Utils::Encoder<double>::EncodeFloat(val, encoding);
-          std::memcpy(key_buff.get() + key_offset, encoding, field_values[fldfld].mlength);
-          key_offset += field_values[fldfld].mlength;
+          std::memcpy(key_buff.get() + key_offset, encoding, field_values[key_field].mlength);
+          key_offset += field_values[key_field].mlength;
         } else {
-          std::memcpy(key_buff.get() + key_offset, field_values[fldfld].data.get(), field_values[fldfld].mlength);
-          key_offset += field_values[fldfld].mlength;
-          if (key_offset < key_info.first && cs)
-            cs->cset->fill(cs, (char *)key_buff.get() + key_offset, key_info.first - key_offset, ' ');
+          std::memcpy(key_buff.get() + key_offset, field_values[key_field].data.get(), field_values[key_field].mlength);
+          key_offset += field_values[key_field].mlength;
+          if (key_offset < key_meta.first && cs)
+            cs->cset->fill(cs, (char *)key_buff.get() + key_offset, key_meta.first - key_offset, ' ');
         }
       }
     }
-    key_info_t key_meta = {key_info.first, std::move(key_buff)};
-    keys.emplace(key_name, std::move(key_meta));
+    key_info_t key_info = {key_meta.first, std::move(key_buff)};
+    keys.emplace(key_name, std::move(key_info));
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -560,9 +556,10 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
 
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
-  std::string keypart;
-  keypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
-  auto keys = imcs_instance->source_key(keypart);
+  std::string sch_tb;
+  sch_tb.append(context->m_schema_name).append(":").append(context->m_table_name);
+  auto rpd_table = imcs_instance->get_table(sch_tb);
+  auto keys = rpd_table->m_source_keys;
 
   for (auto idx = 0u; idx < index->n_fields; idx++) {
     /**
@@ -589,18 +586,13 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
     field_value.mtype = col->mtype;
 
     // due to innodb col has not NOT_SECONDARY property, so check it with IMCS.
-    std::string name_field{keypart};
     auto field_name = real_index->get_field(idx)->name();
-    ut_a(field_name);
-
-    name_field.append(field_name);
     // clang-format off
     if (strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN) == 0 ||
         (strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN) != 0 &&
          strncmp(field_name, SHANNON_DB_ROW_ID, SHANNON_DB_ROW_ID_LEN) != 0 &&
          !check_key_field(keys, field_name) &&
-         !imcs_instance->get_cu(name_field))) {
-      name_field.clear();
+         !rpd_table->get_field(field_name))) {
       continue;
     }
     // clang-format on
@@ -612,7 +604,7 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
       mysql_fld_len = SHANNON_DATA_DB_ROW_ID_LEN;
     } else {
       ut_a(strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN));
-      mysql_fld_len = imcs_instance->get_cu(name_field)->header()->m_width;
+      mysql_fld_len = rpd_table->get_field(field_name)->header()->m_width;
     }
     std::unique_ptr<uchar[]> mysql_field_data = std::make_unique<uchar[]>(mysql_fld_len);
     memset(mysql_field_data.get(), 0x0, mysql_fld_len);
@@ -679,13 +671,13 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
         field_value.mlength = mysql_fld_len;
         field_value.plength = physical_fld_len;
         field_value.data = std::move(mysql_field_data);
-        field_values.emplace(name_field, std::move(field_value));
+        field_values.emplace(field_name, std::move(field_value));
       } else {  // if value of this field is null, then set field_data to nullptr.
         mysql_field_data.reset(nullptr);
 
         field_value.mlength = UNIV_SQL_NULL;
         field_value.data = nullptr;
-        field_values.emplace(name_field, std::move(field_value));
+        field_values.emplace(field_name, std::move(field_value));
       }
     }
   }
@@ -696,17 +688,18 @@ row_id_t LogParser::find_matched_row(Rapid_load_context *context, std::map<std::
   // now that, it use sequentail scan all the chunks to find the match rows.
   // in next, ART will be introduced to accelerate the row finding via index scan.
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
-  auto current_cu = imcs_instance->at(context->m_schema_name, context->m_table_name, 0);
-  ut_a(current_cu && current_cu->header()->m_key_len == context->m_extra_info.m_key_len);
+  std::string sch_tb(context->m_schema_name);
+  sch_tb.append(":").append(context->m_table_name);
+  auto rpd_tb = imcs_instance->get_table(sch_tb);
 
-  std::string pkeypart;
-  pkeypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
-  pkeypart.append(ShannonBase::SHANNON_PRIMARY_KEY_NAME).append(":");
-  if (keys.find(pkeypart) != keys.end()) {
-    ut_a(context->m_extra_info.m_key_len == keys[pkeypart].first);
-    std::memcpy(context->m_extra_info.m_key_buff.get(), keys[pkeypart].second.get(), context->m_extra_info.m_key_len);
-    auto rowid = imcs_instance->get_index(pkeypart)->lookup(context->m_extra_info.m_key_buff.get(),
-                                                            context->m_extra_info.m_key_len);
+  ut_a(rpd_tb->first_field() && rpd_tb->first_field()->header()->m_key_len == context->m_extra_info.m_key_len);
+
+  if (keys.find(ShannonBase::SHANNON_PRIMARY_KEY_NAME) != keys.end()) {
+    ut_a(context->m_extra_info.m_key_len == keys[ShannonBase::SHANNON_PRIMARY_KEY_NAME].first);
+    std::memcpy(context->m_extra_info.m_key_buff.get(), keys[ShannonBase::SHANNON_PRIMARY_KEY_NAME].second.get(),
+                context->m_extra_info.m_key_len);
+    auto rowid = rpd_tb->m_indexes[ShannonBase::SHANNON_PRIMARY_KEY_NAME]->lookup(
+        context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len);
     return rowid ? *rowid : INVALID_ROW_ID;
   } else
     return INVALID_ROW_ID;
@@ -740,23 +733,19 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
 
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
+  std::string sch_tb(context->m_schema_name);
+  sch_tb.append(":").append(context->m_table_name);
+  auto rpd_tb = imcs_instance->get_table(sch_tb);
 
   // no user defined index.
   if (!strncmp(real_index->name(), innobase_index_reserve_name, strlen(innobase_index_reserve_name))) {
     context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(SHANNON_DATA_DB_ROW_ID_LEN);
     context->m_extra_info.m_key_len = SHANNON_DATA_DB_ROW_ID_LEN;
   } else {
-    std::string keypart;
-    keypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
-    auto key_len = imcs_instance->key_length(keypart);
+    auto key_len = rpd_tb->first_field()->header()->m_key_len.load();
     context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key_len);
     context->m_extra_info.m_key_len = key_len;
   }
-
-  std::string keypart, trxid_key, rowid_key;
-  keypart.append(context->m_schema_name).append(":").append(context->m_table_name).append(":");
-  trxid_key.append(keypart).append(SHANNON_DB_TRX_ID);
-  rowid_key.append(keypart).append(SHANNON_DB_ROW_ID);
 
   switch (type) {
     case MLOG_REC_DELETE: {
@@ -782,7 +771,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
 
       // step 2: insert all field data into CUs.
-      auto rowid = imcs_instance->reserve_row_id(keypart);
+      auto rowid = imcs_instance->reserve_row_id(sch_tb);
       if (imcs_instance->write_row_from_log(context, rowid, row_field_value)) return HA_ERR_WRONG_IN_RECORD;
 
       // step3: insert the index info.

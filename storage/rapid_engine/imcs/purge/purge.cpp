@@ -96,26 +96,25 @@ static void purge_func_main() {
     if (ShannonBase::Purge::Purger::get_status() == purge_state_t::PURGE_STATE_STOP) return;
 
     auto start = std::chrono::steady_clock::now();
-    auto loaded_cu_sz = ShannonBase::Imcs::Imcs::instance()->get_cus().size();
+    for (auto &tb : ShannonBase::Imcs::Imcs::instance()->get_tables()) {
+      // we only use a third of threads to do purge opers.
+      std::vector<std::future<int>> results;
+      size_t thread_num = std::thread::hardware_concurrency() / 3;
+      thread_num = std::min(thread_num, tb.second.get()->m_fields.size());
 
-    // we only use a third of threads to do purge opers.
-    std::vector<std::future<int>> results;
-    size_t thread_num = std::thread::hardware_concurrency() / 3;
-    thread_num = std::min(thread_num, loaded_cu_sz);
+      size_t thr_cnt = 0;
 
-    size_t thr_cnt = 0;
-    std::shared_lock<std::shared_mutex> lk_cu(ShannonBase::Imcs::Imcs::instance()->get_cu_mutex());
-    for (auto &cu : ShannonBase::Imcs::Imcs::instance()->get_cus()) {
-      results.emplace_back(std::async(std::launch::async, purger_purge_worker, cu.second.get()));
-      thr_cnt++;
+      for (auto &cu : tb.second.get()->m_fields) {
+        results.emplace_back(std::async(std::launch::async, purger_purge_worker, cu.second.get()));
+        thr_cnt++;
 
-      if (thr_cnt % thread_num == 0) {
-        for (auto &fut : results) fut.get();
-        results.clear();
+        if (thr_cnt % thread_num == 0) {
+          for (auto &fut : results) fut.get();
+          results.clear();
+        }
       }
+      for (auto &fut : results) fut.get();
     }
-    for (auto &fut : results) fut.get();
-
     // in duration, we finish the GC operations.
     auto duration [[maybe_unused]] =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
