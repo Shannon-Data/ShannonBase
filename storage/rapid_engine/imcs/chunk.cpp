@@ -151,7 +151,7 @@ void Chunk::init_body(const Field *field) {
 }
 
 void Chunk::update_meta_info(const Rapid_load_context *context, OPER_TYPE type, uchar *data, uchar *old) {
-  auto dict = current_imcs_instance->get_cu(m_chunk_key)->header()->m_local_dict.get();
+  auto dict = m_owner->header()->m_local_dict.get();
   double data_val = data ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, data, dict) : 0;
   double old_val = old ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, old, dict) : 0;
   /** TODO: due to the each data has its own version, and the data

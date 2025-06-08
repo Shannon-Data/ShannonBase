@@ -40,6 +40,7 @@
 #include "storage/rapid_engine/imcs/chunk.h"  //CHUNK
 #include "storage/rapid_engine/imcs/cu.h"     //CU
 #include "storage/rapid_engine/imcs/imcs.h"   //IMCS
+#include "storage/rapid_engine/imcs/table.h"  //RapidTable
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/populate.h"  //sys_pop_buff
 #include "storage/rapid_engine/trx/readview.h"
@@ -49,50 +50,8 @@
 namespace ShannonBase {
 namespace Imcs {
 
-DataTable::DataTable(TABLE *source_table) : m_initialized{false}, m_data_source(source_table) {
-  ut_a(m_data_source);
-
-  Table_ref *table_list = current_thd->lex->query_block->get_table_list();
-  Partition_handler *part_handler = source_table->file->get_partition_handler();
-  std::unordered_map<std::string, uint> partition_infos;
-  if (table_list->partition_names && part_handler) {
-    partition_info *part_info = source_table->part_info;
-    List_iterator_fast<String> it(*table_list->partition_names);
-
-    String *str{nullptr};
-    while ((str = it++)) {
-      uint part_id;
-      if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
-        partition_infos.emplace(std::make_pair(str->c_ptr(), part_id));
-      }
-    }
-  }
-
-  std::string key_part, key;
-  key_part.append(m_data_source->s->db.str).append(":").append(m_data_source->s->table_name.str).append(":");
-  for (auto index = 0u; index < m_data_source->s->fields; index++) {
-    auto fld = *(m_data_source->field + index);
-    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-    if (partition_infos.size()) {
-      for (auto &part : partition_infos) {
-        key.append(key_part).append(part.first).append("-").append(std::to_string(part.second)).append(":");
-        key.append(fld->field_name);
-        m_field_cus.emplace_back(Imcs::instance()->get_cu(key));
-        key.clear();
-      }
-    } else {
-      std::shared_lock<std::shared_mutex> lk(Imcs::instance()->get_cu_mutex());
-      const auto &cus = Imcs::instance()->get_cus();
-      std::for_each(cus.begin(), cus.end(), [&](const auto &cu) {
-        if (cu.first.find(key_part) != std::string::npos && cu.first.rfind(fld->field_name) != std::string::npos) {
-          m_field_cus.emplace_back(cu.second.get());
-        }
-      });
-    }
-  }
-
-  key.clear();
+DataTable::DataTable(TABLE *source, RapidTable *rpd) : m_initialized{false}, m_data_source(source), m_rapid(rpd) {
+  ut_a(m_data_source && m_rapid);
   m_rowid.store(0);
 }
 
@@ -144,25 +103,27 @@ int DataTable::next(uchar *buf) {
 start:
   assert(m_initialized.load());
 
-  if (m_rowid >= m_field_cus[0]->prows()) return HA_ERR_END_OF_FILE;
+  if (m_rowid >= m_rapid->m_fields.begin()->second->prows()) return HA_ERR_END_OF_FILE;
 
   auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
   auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
 
-  for (auto idx = 0u; idx < m_field_cus.size(); idx++) {
-    ut_a(m_field_cus[idx]);
+  for (auto ind = 0u; ind < m_data_source->s->fields; ind++) {
+    auto source_fld = *(m_data_source->field + ind);
+    if (!bitmap_is_set(m_data_source->read_set, ind) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    auto normalized_length = m_field_cus[idx]->normalized_pack_length();
+    auto rpd_field = m_rapid->get_field(source_fld->field_name);
+    ut_a(rpd_field);
+
+    auto normalized_length = rpd_field->normalized_pack_length();
     DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "secondary_engine_rapid_next_error");
       return HA_ERR_GENERIC;
     });
 
-    auto source_fld = *(m_data_source->field + m_field_cus[idx]->header()->m_source_fld->field_index());
     Utils::ColumnMapGuard guard(m_data_source);
-
     // to check version link to check its old value.
-    auto current_chunk_ptr = m_field_cus[idx]->chunk(current_chunk);
+    auto current_chunk_ptr = rpd_field->chunk(current_chunk);
     auto current_data_ptr = current_chunk_ptr->base() + offset_in_chunk * normalized_length;
     if ((uintptr_t(current_data_ptr) & (CACHE_LINE_SIZE - 1)) == 0)
       SHANNON_PREFETCH_R(current_data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
@@ -192,10 +153,10 @@ start:
     }
 
     source_fld->set_notnull();
-    if (Utils::Util::is_string(m_field_cus[idx]->header()->m_source_fld->type()) ||
-        Utils::Util::is_blob(m_field_cus[idx]->header()->m_source_fld->type())) {
+    ut_a(source_fld->type() == rpd_field->header()->m_source_fld->type());
+    if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
       uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
-      auto str_ptr = m_field_cus[idx]->header()->m_local_dict->get(str_id);
+      auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
       source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
     } else {
       source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
@@ -218,15 +179,8 @@ int DataTable::end() {
 int DataTable::index_init(uint keynr, bool sorted) {
   init();
   m_active_index = keynr;
-
-  auto imcs_instace = Imcs::Imcs::instance();
-  std::string keypart;
-  keypart.append(m_data_source->s->db.str).append(":").append(m_data_source->s->table_name.str).append(":");
-
-  auto keykeypart = keypart;
-  keykeypart.append(m_data_source->s->key_info[keynr].name).append(":");
-
-  auto index = imcs_instace->get_index(keykeypart);
+  auto keyname = m_data_source->s->key_info[keynr].name;
+  auto index = m_rapid->m_indexes[keyname].get();
   if (index == nullptr) {
     std::string err;
     err.append(m_data_source->s->db.str)

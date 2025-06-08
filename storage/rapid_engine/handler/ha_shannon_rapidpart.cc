@@ -32,8 +32,10 @@ Code for native partitioning in rapid.
 Created jun 6, 2025 */
 
 #include "ha_shannon_rapidpart.h"
-
 #include "include/mysqld_error.h"
+#include "my_dbug.h"
+#include "storage/innobase/include/dict0dd.h"  //dd_is_partitioned
+
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
@@ -44,74 +46,83 @@ namespace ShannonBase {
 ha_rapidpart::ha_rapidpart(handlerton *hton, TABLE_SHARE *table)
     : ha_rapid(hton, table), Partition_helper(this), m_thd(ha_thd()), m_share(nullptr) {}
 
-int ha_rapidpart::rnd_init_in_part(uint, bool) {
-  assert(false);
-  return 0;
+int ha_rapidpart::records(ha_rows *num_rows) { return ShannonBase::SHANNON_SUCCESS; }
+
+int ha_rapidpart::rnd_pos(uchar *record, uchar *pos) { return ShannonBase::SHANNON_SUCCESS; }
+
+int ha_rapidpart::rnd_init_in_part(uint part_id, bool scan) {
+  // int err = change_active_index(part_id, table_share->primary_key);
+  /* Don't use semi-consistent read in random row reads (by position).
+  This means we must disable semi_consistent_read if scan is false. */
+
+  m_last_part = part_id;
+  m_start_of_scan = true;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
-int ha_rapidpart::rnd_next_in_part(uint, uchar *) {
+int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::rnd_end_in_part(uint, bool) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::index_first_in_part(uint, uchar *) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::index_last_in_part(uint, uchar *) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::index_prev_in_part(uint, uchar *) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::index_next_in_part(uint, uchar *) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::index_next_same_in_part(uint, uchar *, const uchar *, uint) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::index_read_map_in_part(uint, uchar *, const uchar *, key_part_map, ha_rkey_function) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::index_read_last_map_in_part(uint, uchar *, const uchar *, key_part_map) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::read_range_first_in_part(uint, uchar *, const key_range *, const key_range *, bool) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::read_range_next_in_part(uint, uchar *) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::index_read_idx_map_in_part(uint, uchar *, uint, const uchar *, key_part_map, ha_rkey_function) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::write_row_in_new_part(uint) {
   assert(false);
-  return 0;
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
@@ -218,16 +229,8 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   // scenario: alter table xxx secondary_load partion(p0, p1, xxx, pN), then unload a part of
   // partitions, not all alter table xxx secondary_unload partition(p0, p10). Under this stage,
   // we think that the table is still in loading status.
-  std::string keypart(db_name);
-  keypart.append(":").append(table_name).append(":");
-  auto found{false};
-  for (auto &cu : Imcs::Imcs::instance()->get_cus()) {  // find the cus with db_name and table_name
-    if (cu.first.find(keypart) != std::string::npos) {
-      found = true;
-      break;
-    }
-  }
-  if (!found) shannon_loaded_tables->erase(db_name, table_name);
+
+  shannon_loaded_tables->erase(db_name, table_name);
 
   return ShannonBase::SHANNON_SUCCESS;
 }

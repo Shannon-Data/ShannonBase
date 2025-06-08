@@ -157,9 +157,34 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
 
   Partition_handler *get_partition_handler() override { return (static_cast<Partition_handler *>(this)); }
 
+ protected:
+  int rnd_init(bool scan) override { return (Partition_helper::ph_rnd_init(scan)); }
+
+  int rnd_next(uchar *record) override { return (Partition_helper::ph_rnd_next(record)); }
+
+  int rnd_pos(uchar *record, uchar *pos) override;
+
+  int records(ha_rows *num_rows) override;
+
+  int index_next(uchar *record) override { return (Partition_helper::ph_index_next(record)); }
+
+  int index_next_same(uchar *record, const uchar *, uint keylen) override {
+    return (Partition_helper::ph_index_next_same(record, keylen));
+  }
+
+  int index_prev(uchar *record) override { return (Partition_helper::ph_index_prev(record)); }
+
+  int index_first(uchar *record) override { return (Partition_helper::ph_index_first(record)); }
+
+  int index_last(uchar *record) override { return (Partition_helper::ph_index_last(record)); }
+
  private:
   THD *m_thd{nullptr};
   RapidPartShare *m_share{nullptr};
+
+  /** this is set to 1 when we are starting a table scan but have
+  not yet fetched any row, else false */
+  bool m_start_of_scan{false};
 };
 
 }  // namespace ShannonBase
