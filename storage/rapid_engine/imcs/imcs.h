@@ -53,6 +53,44 @@ class DataTable;
  * has the read data. All chunks stored consecutively in a CU.  key format of a
  * CU is listed as following: `db_name_str` + ":" + `table_name_str` + ":" +
  * `field_index`. */
+class RapidTable : public MemoryObject {
+ public:
+  RapidTable() = default;
+  RapidTable(std::string &name) : m_name(name) {}
+  virtual ~RapidTable() = 0;
+
+  // name of this table.
+  std::string m_name;
+
+  // to protect the all cus
+  std::shared_mutex m_cus_mutex;
+
+  // the loaded cus. key format: db + ':' + table_name + ':'
+  // + field_name + ":".
+  std::unordered_map<std::string, std::unique_ptr<Cu>> m_cus;
+
+  // the loaded cus. key format: db + ':' + table_name.
+  // value format: park part1 name , key part2 name.
+  std::unordered_map<std::string, key_meta_t> m_source_keys;
+
+  // key format: db + ":" + table_name + ":" + key_name.
+  std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
+};
+
+class Table : public RapidTable {
+ public:
+  Table() = default;
+  Table(std::string &name) : RapidTable(name) {}
+  virtual ~Table() {}
+};
+
+class PartTable : public RapidTable {
+ public:
+  PartTable() = default;
+  PartTable(std::string &name) : RapidTable(name) {}
+  virtual ~PartTable() {}
+};
+
 class Imcs : public MemoryObject {
  public:
   // make ctor and dctor private.
@@ -222,19 +260,11 @@ class Imcs : public MemoryObject {
   // initialization flag.
   std::atomic<uint8> m_inited{0};
 
-  // to protect the all cus
-  std::shared_mutex m_cus_mutex;
+  // for loaded non-partitioned table.
+  std::unordered_map<std::string, std::unique_ptr<Table>> m_table;
 
-  // the loaded cus. key format: db + ':' + table_name + ':'
-  // + field_name + ":".
-  std::unordered_map<std::string, std::unique_ptr<Cu>> m_cus;
-
-  // the loaded cus. key format: db + ':' + table_name.
-  // value format: park part1 name , key part2 name.
-  std::unordered_map<std::string, key_meta_t> m_source_keys;
-
-  // key format: db + ":" + table_name + ":" + key_name.
-  std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
+  // for loaded partitioned table.
+  std::unordered_map<std::string, std::unique_ptr<PartTable>> m_parttable;
 
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};
