@@ -50,7 +50,7 @@ Cu::Cu(const Field *field) {
   init_body(field);
 }
 
-Cu::Cu(const Field *field, std::string &name) {
+Cu::Cu(const Field *field, std::string name) {
   m_cu_key = name;
   init_header(field);
   init_body(field);
@@ -105,6 +105,7 @@ void Cu::init_body(const Field *field) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
     return;
   }
+  chunk->set_owner(this);
   m_chunks.emplace_back(chunk);
 
   m_current_chunk.store(0);
@@ -151,9 +152,10 @@ uchar *Cu::get_vfield_value(uchar *&data, size_t &len, bool need_pack) {
 
 void Cu::update_meta_info(OPER_TYPE type, uchar *data, uchar *old, bool row_reserved) {
   // gets the data value.
-  auto dict = current_imcs_instance->get_cu(m_cu_key)->header()->m_local_dict.get();
-  double data_val = data ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, data, dict) : 0;
-  double old_val = old ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, old, dict) : 0;
+  double data_val =
+      data ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, data, m_header->m_local_dict.get()) : 0;
+  double old_val =
+      old ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, old, m_header->m_local_dict.get()) : 0;
 
   /** TODO: due to the each data has its own version, and the data
    * here is committed. in fact, we support MV, which makes this problem
@@ -251,6 +253,7 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
       return nullptr;
     }
+    chunk->set_owner(this);
     m_chunks.emplace_back(chunk);
 
     written_to = m_chunks[m_chunks.size() - 1].get()->write(context, wdata, wlen);
@@ -288,7 +291,9 @@ uchar *Cu::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
 
   if (!(written_to = chunk_ptr->write_from_log(context, rowid, wdata, wlen))) {  // current chunk is full.
     // then build a new one, and re-try to write the data.
-    m_chunks.emplace_back(std::make_unique<Chunk>(m_header->m_source_fld));
+    auto chunk = std::make_unique<Chunk>(m_header->m_source_fld);
+    chunk->set_owner(this);
+    m_chunks.emplace_back(std::move(chunk));
     if (!m_chunks[m_chunks.size() - 1].get()) return nullptr;  // runs out of mem.
 
     written_to = m_chunks[m_chunks.size() - 1].get()->write_from_log(context, rowid, wdata, wlen);

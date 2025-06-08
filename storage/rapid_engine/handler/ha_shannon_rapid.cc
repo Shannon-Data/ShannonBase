@@ -56,6 +56,7 @@
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
 #include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
+#include "storage/innobase/include/dict0dd.h"    //dd_is_partitioned
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
 #include "storage/rapid_engine/imcs/data_table.h"      //DataTable
@@ -160,9 +161,15 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
 
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
 
-  ut_a(!m_data_table.get());
-  m_data_table.reset(new ShannonBase::Imcs::DataTable(table));
+  std::string key(table_share->db.str);
+  key.append(":").append(table_share->table_name.str);
+  if (dd_table_is_partitioned(*table_def)) {
+    m_data_table.reset(new ShannonBase::Imcs::DataTable(table, Imcs::Imcs::instance()->get_parttable(key)));
+  } else {
+    m_data_table.reset(new ShannonBase::Imcs::DataTable(table, Imcs::Imcs::instance()->get_table(key)));
+  }
   m_data_table->open();
+
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -174,20 +181,21 @@ int ha_rapid::close() {
 int ha_rapid::info(unsigned int flags) {
   ut_a(flags == (HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK));
 
-  std::string keypart;
-  keypart.append(table_share->db.str).append(":").append(table_share->table_name.str).append(":");
+  std::string sch_tb;
+  sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
 
   Rapid_load_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   context.m_trx->begin();
-  for (auto it = Imcs::Imcs::instance()->get_cus().begin(); it != Imcs::Imcs::instance()->get_cus().end(); it++) {
-    if (it->first.find(keypart) == std::string::npos || !it->second)
-      continue;
-    else {
-      stats.records = it->second->rows(&context);
-      break;
-    }
+
+  if (table->part_info) {
+    auto rpd_tb = Imcs::Imcs::instance()->get_parttable(sch_tb);
+    stats.records = rpd_tb->first_field()->rows(&context);
+  } else {
+    auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
+    stats.records = rpd_tb->first_field()->rows(&context);
   }
+
   context.m_trx->commit();
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -242,9 +250,10 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 int ha_rapid::records(ha_rows *num_rows) {
   Rapid_load_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
-  std::string sch = table_share->db.str;
-  std::string tb = table_share->table_name.str;
-  *num_rows = Imcs::Imcs::instance()->at(sch, tb, 0)->rows(&context);
+  std::string sch_tb;
+  sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
+  auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
+  *num_rows = rpd_tb->first_field()->rows(&context);
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -274,7 +283,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
     std::string err;
     err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" already loaded");
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
     return HA_ERR_KEY_NOT_FOUND;
   }
 
@@ -285,7 +294,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
       std::string err;
       err.append(table_arg.s->table_name.str).append(fld->field_name).append(" type not allowed");
-      my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
       return HA_ERR_GENERIC;
     }
   }
@@ -299,22 +308,10 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_schema_name = table_arg.s->db.str;
   context.m_table_name = table_arg.s->table_name.str;
 
-  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
-  Partition_handler *part_handler = table_arg.file->get_partition_handler();
-  if (table_list->partition_names && part_handler) {
-    partition_info *part_info = table_list->table->part_info;
-    List_iterator_fast<String> it(*table_list->partition_names);
-    String *str{nullptr};
-    while ((str = it++)) {
-      uint part_id;
-      if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
-        context.m_extra_info.m_partition_infos.emplace(std::make_pair(str->c_ptr(), part_id));
-      }
-    }
-  }
-
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
+    std::string err;
+    err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" load failed.");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -334,7 +331,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   if (error_if_not_loaded && !share) {
     std::string err(db_name);
     err.append(".").append(table_name).append(" table is not loaded into rapid yet");
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
     return HA_ERR_GENERIC;
   }
 
@@ -361,21 +358,6 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   }
 
   Imcs::Imcs::instance()->unload_table(&context, db_name, table_name, false);
-
-  // if all cus has been unloaded, then we can remove the meta info. Considering the following
-  // scenario: alter table xxx secondary_load partion(p0, p1, xxx, pN), then unload a part of
-  // partitions, not all alter table xxx secondary_unload partition(p0, p10). Under this stage,
-  // we think that the table is still in loading status.
-  std::string keypart(db_name);
-  keypart.append(":").append(table_name).append(":");
-  auto found{false};
-  for (auto &cu : Imcs::Imcs::instance()->get_cus()) {  // find the cus with db_name and table_name
-    if (cu.first.find(keypart) != std::string::npos) {
-      found = true;
-      break;
-    }
-  }
-  if (!found) shannon_loaded_tables->erase(db_name, table_name);
 
   return ShannonBase::SHANNON_SUCCESS;
 }

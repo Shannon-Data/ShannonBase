@@ -37,8 +37,10 @@
 #include "my_inttypes.h"
 #include "sql/field.h"
 #include "sql/handler.h"
+
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 
@@ -69,15 +71,8 @@ class Imcs : public MemoryObject {
     return m_instance;
   }
 
-  inline std::unordered_map<std::string, std::unique_ptr<Cu>> &get_cus() { return m_cus; }
-  // get cu pointer by its key.
-  Cu *get_cu(std::string_view key);
-
-  // get index
-  Index::Index<uchar, row_id_t> *get_index(std::string_view key);
-
   // get cu at Nth index key
-  Cu *at(std::string_view schema, std::string_view table, size_t indexx);
+  // Cu *at(std::string_view schema, std::string_view table, size_t indexx);
 
   /**create all cus needed by source table, and ready to write the data into.*/
   int create_table_memo(const Rapid_load_context *context, const TABLE *source);
@@ -124,58 +119,34 @@ class Imcs : public MemoryObject {
                              row_id_t rowid);
 
   int rollback_changes_by_trxid(Transaction::ID trxid);
-  // get the source table by key string. key string is db_name + ":" +
-  // table_name + ":" + key_name + ":".
-  inline key_meta_t source_keykey(std::string &sch_tb_key) {
-    if (m_source_keys.find(sch_tb_key) == m_source_keys.end()) return std::make_pair(0, std::vector<std::string>());
-    return m_source_keys[sch_tb_key];
-  }
 
-  // get the source table by key string. key string is db_name + ":" +
-  // table_name + ":".
-  std::unordered_map<std::string, key_meta_t> source_key(std::string &sch_tb) {
-    std::unordered_map<std::string, key_meta_t> keys;
-
-    std::for_each(m_source_keys.begin(), m_source_keys.end(), [&](const auto &pair) {
-      if (pair.first.find(sch_tb) == 0) {
-        keys.emplace(pair.first, pair.second);
-      }
-    });
-
-    return keys;
-  }
-
-  // get the key length by key string. key string is db_name + ":" + table_name.
-  inline size_t key_length(std::string &key) {
-    auto it =
-        std::find_if(m_cus.begin(), m_cus.end(), [&key](const auto &pair) { return pair.first.rfind(key, 0) == 0; });
-    if (it != m_cus.end()) {
-      return it->second.get()->header()->m_key_len;
-    } else {
-      return MAX_KEY_LENGTH;
-    }
-    return MAX_KEY_LENGTH;
-  }
   // reserve a row_id by given schema name and table name in 'sch:table:’ format.
   inline row_id_t reserve_row_id(std::string &sch_table) {
-    if (m_cus.size() == 0) return INVALID_ROW_ID;
+    if (m_tables.size() == 0) return INVALID_ROW_ID;
 
     auto next_row_id{INVALID_ROW_ID};
-    std::for_each(m_cus.begin(), m_cus.end(), [&](auto &pair) {
-      if (pair.first.rfind(sch_table, 0) == 0) {
-        next_row_id = pair.second->header()->m_prows.fetch_add(1);
-      }
-    });
+    std::for_each(m_tables[sch_table]->m_fields.begin(), m_tables[sch_table]->m_fields.end(),
+                  [&](auto &pair) { next_row_id = pair.second->header()->m_prows.fetch_add(1); });
 
     return next_row_id;
   }
 
-  inline std::shared_mutex &get_cu_mutex() { return m_cus_mutex; }
+  void cleanup(std::string &sch_name, std::string &table_name);
 
-  inline void cleanup() {
-    m_cus.clear();
-    m_source_keys.clear();
-    m_indexes.clear();
+  inline RapidTable *get_table(std::string &sch_table) {
+    if (m_tables.find(sch_table) == m_tables.end())
+      return nullptr;
+    else
+      return m_tables[sch_table].get();
+  }
+
+  inline std::unordered_map<std::string, std::unique_ptr<RapidTable>> &get_tables() { return m_tables; }
+
+  inline RapidTable *get_parttable(std::string &sch_table) {
+    if (m_parttables.find(sch_table) == m_parttables.end())
+      return nullptr;
+    else
+      return m_parttables[sch_table].get();
   }
 
  private:
@@ -183,10 +154,6 @@ class Imcs : public MemoryObject {
   Imcs(Imcs &) = delete;
   Imcs &operator=(const Imcs &) = delete;
   Imcs &operator=(const Imcs &&) = delete;
-
-  // build the index for imcs.
-  int build_index(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid);
-  int build_index_impl(const Rapid_load_context *context, const TABLE *source, const KEY *key, row_id_t rowid);
 
   int load_innodb(const Rapid_load_context *context, ha_innobase *file);
   int load_innodbpart(const Rapid_load_context *context, ha_innopart *file);
@@ -197,20 +164,7 @@ class Imcs : public MemoryObject {
   int unload_innodbpart(const Rapid_load_context *context, const char *db_name, const char *table_name,
                         bool error_if_not_loaded);
 
-  int unload_cus(const Rapid_load_context *context, std::string &keyname, bool error_if_not_loaded);
-
-  int unload_indexes(const Rapid_load_context *context, std::string &keyname, bool error_if_not_loaded);
-
-  int fill_record(const Rapid_load_context *context, std::string &current_key, handler *file);
-
-  int create_index_memo(const Rapid_load_context *context, const TABLE *source);
-
-  // for user-defined key memo, including: uer-defined primary key, secondary key, unique key, all indexes defined by
-  // user.
-  int create_user_index_memo(const Rapid_load_context *context, const TABLE *source);
-
-  // for the sys primary key memo.
-  int create_sys_index_memo(const Rapid_load_context *context, const TABLE *source);
+  int create_index_memo(const Rapid_load_context *context, RapidTable *rapid);
 
  private:
   // imcs instance
@@ -222,19 +176,11 @@ class Imcs : public MemoryObject {
   // initialization flag.
   std::atomic<uint8> m_inited{0};
 
-  // to protect the all cus
-  std::shared_mutex m_cus_mutex;
+  // loaded tables. key format: schema_name + ":" + table_name.
+  std::unordered_map<std::string, std::unique_ptr<RapidTable>> m_tables;
 
-  // the loaded cus. key format: db + ':' + table_name + ':'
-  // + field_name + ":".
-  std::unordered_map<std::string, std::unique_ptr<Cu>> m_cus;
-
-  // the loaded cus. key format: db + ':' + table_name.
-  // value format: park part1 name , key part2 name.
-  std::unordered_map<std::string, key_meta_t> m_source_keys;
-
-  // key format: db + ":" + table_name + ":" + key_name.
-  std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
+  // loaded partitioned tables. key format: schema_name + ":" + table_name.
+  std::unordered_map<std::string, std::unique_ptr<RapidTable>> m_parttables;
 
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};

@@ -51,6 +51,7 @@ SET(SHANNON_RAPID_COMPRESS_SOURCES
   compress/dictionary/dictionary.cpp
 )
 SET(SHANNON_IMCS_SOURCES
+   imcs/table.cpp
    imcs/data_table.cpp
    imcs/imcs.cpp
    imcs/imcu.cpp
