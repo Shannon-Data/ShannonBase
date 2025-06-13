@@ -307,13 +307,17 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = table_arg.s->db.str;
   context.m_table_name = table_arg.s->table_name.str;
+  context.m_trx = Transaction::get_or_create_trx(m_thd);
+  context.m_trx->begin(ShannonBase::Transaction::ISOLATION_LEVEL::READ_COMMITTED);
 
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
+    context.m_trx->rollback();
     std::string err;
     err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" load failed.");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
     return HA_ERR_GENERIC;
   }
+  context.m_trx->commit();
 
   m_share = new RapidShare(table_arg);
   m_share->file = this;

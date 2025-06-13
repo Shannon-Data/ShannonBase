@@ -156,6 +156,8 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = table.s->db.str;
   context.m_table_name = table.s->table_name.str;
+  context.m_trx = Transaction::get_or_create_trx(m_thd);
+  context.m_trx->begin(ShannonBase::Transaction::ISOLATION_LEVEL::READ_COMMITTED);
 
   // use specific partion. such as partition(p1, p2, p10, ..., pn).
   Table_ref *table_list = m_thd->lex->query_block->get_table_list();
@@ -177,9 +179,13 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   }
 
   if (Imcs::Imcs::instance()->load_parttable(&context, const_cast<TABLE *>(&table))) {
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), table.s->db.str, table.s->table_name.str);
+    context.m_trx->rollback();
+    std::string err;
+    err.append(table.s->db.str).append(".").append(table.s->table_name.str).append(" load failed.");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
     return HA_ERR_GENERIC;
   }
+  context.m_trx->commit();
 
   m_share = new RapidPartShare(table);
   m_share->file = this;
