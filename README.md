@@ -22,16 +22,16 @@ At last, ShannonBase Multilingual Engine Component. ShannonBase includes a light
 ### Compilation, Installation and Start ShannonBase
 #### 1: Folk or clone the repo.
 ```
-git clone git@github.com:Shannon-Data/ShannonBase.git
+git clone --recursive git@github.com:Shannon-Data/ShannonBase.git
 ```
 PS: You should ensure that your prerequisite development environment is properly set up.
 
-#### 2: Mkes a directory where we build the source code from.
+#### 2: Make a directory where we build the source code from.
 ```
 cd ShannonBase && mkdir cmake_build && cd cmake_build
 ```
 
-#### 3: run cmake and start compilation and installation.
+#### 3: Run cmake and start compilation and installation.
 ```
  cmake ../ \
   -DWITH_BOOST=/path-to-boost-include-files/ \
@@ -61,7 +61,7 @@ make -j5 && make install
 ```
 PS: in `[]`, it's an optional compilation params, which is to enable coverage collection and ASAN check.
 
-#### 4: initialize the database and run ShannonBase
+#### 4: Initialize the database and run ShannonBase
 ```
  /path-to-shannbase-bin/bin/mysqld --defaults-file=/path-to-shannonbase-bin/my.cnf --initialize  --user=xxx
 
