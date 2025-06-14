@@ -36,7 +36,7 @@ INCLUDE_DIRECTORIES(
 )
 
 #FOR AUTO-ML MODELS
-INCLUDE_DIRECTORIES( ${CMAKE_SOURCE_DIR}/extra/lightgbm/LightGBM/include)
+INCLUDE_DIRECTORIES( ${CMAKE_SOURCE_DIR}/extra/lightgbm/include)
 #LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/lib/)
 
 # Conflicting YYSTYPE, because we have multiple Bison grammars.
