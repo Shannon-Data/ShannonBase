@@ -43,6 +43,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0    
     - name: Clean old build cache
       run: |
         cd ${{ github.workspace }}
@@ -58,6 +61,7 @@ jobs:
         sudo chown -R $USER:$USER /home/shannon-bin/
         git config --global --add safe.directory ${{ github.workspace }}
         git fetch --tags -f
+        git submodule update --init --recursive
         cmake ../ \
         -DCMAKE_BUILD_TYPE=Release  \
         -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \

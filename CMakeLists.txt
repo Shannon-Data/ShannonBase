@@ -24,8 +24,11 @@
 MESSAGE(STATUS "Running cmake version ${CMAKE_VERSION}")
 
 #for rapid engine.
-add_subdirectory(extra/lightgbm/LightGBM)
-add_subdirectory(extra/jerryscript)
+set(BUILD_STATIC_LIB ON CACHE BOOL "Build LightGBM static lib")
+add_subdirectory(extra/lightgbm/)
+unset(BUILD_STATIC_LIB CACHE)
+
+add_subdirectory(extra/jerryscript/)
 
 IF(WIN32)
   # Load policies. This is needed in order to parse the wmic version check.

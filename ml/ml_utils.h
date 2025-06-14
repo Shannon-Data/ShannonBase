@@ -30,7 +30,7 @@
 #include <set>
 #include <string>
 
-#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
+#include "extra/lightgbm/include/LightGBM/c_api.h"
 #include "include/thr_lock.h"  //TL_READ
 
 #include "ml_info.h"

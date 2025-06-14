@@ -1,0 +1,6 @@
+[submodule "extra/jerryscript"]
+	path = extra/jerryscript
+	url = git@github.com:jerryscript-project/jerryscript.git
+[submodule "extra/lightgbm"]
+	path = extra/lightgbm
+	url = git@github.com:microsoft/LightGBM.git
