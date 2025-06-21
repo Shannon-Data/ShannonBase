@@ -4056,6 +4056,22 @@ class Item_func_internal_is_enabled_role : public Item_int_func {
 /**
   Internal function used by sys implementation to train ML model.
 */
+
+class Item_func_ml_active final : public Item_int_func {
+ public:
+  Item_func_ml_active(const POS &pos, Item *a, Item *b)
+      : Item_int_func(pos, a, b) {}
+  longlong val_int() override;
+  bool resolve_type(THD *) override {
+    set_nullable(true);
+    null_on_null = false;
+    return false;
+  }
+  const char *func_name() const override {
+    return "ML_ACTIVE";
+  }
+};
+
 class Item_func_ml_train : public Item_int_func {
  public:
   Item_func_ml_train(const POS &pos, PT_item_list *list)
