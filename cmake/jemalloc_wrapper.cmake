@@ -1,24 +1,20 @@
-#keep same with ShannonBase Cmake version req.
-cmake_minimum_required(VERSION 3.5.1)
-
+#jemalloc wrapper cmake file. 
+set(JEMALLOC_SRC_DIR ${CMAKE_SOURCE_DIR}/extra/jemalloc)
 set(JEMALLOC_INSTALL_DIR ${CMAKE_BINARY_DIR}/jemalloc-bundled)
 file(MAKE_DIRECTORY ${JEMALLOC_INSTALL_DIR})
 
-#jemalloc static lib path
 set(JEMALLOC_LIB_PATH ${JEMALLOC_INSTALL_DIR}/lib/libjemalloc.a)
 
-#build up jemalloc： configure + make + make install
 add_custom_command(
   OUTPUT ${JEMALLOC_LIB_PATH}
-  COMMAND ./autogen.sh
-  COMMAND ./configure --with-pic --disable-shared --prefix=${JEMALLOC_INSTALL_DIR}
+  COMMAND ${CMAKE_SOURCE_DIR}/extra/jemalloc/autogen.sh
+  COMMAND ${CMAKE_SOURCE_DIR}/extra/jemalloc/configure --with-pic --disable-shared --prefix=${JEMALLOC_INSTALL_DIR}
   COMMAND make -j && make install
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-  COMMENT "Building jemalloc from source"
+  WORKING_DIRECTORY ${JEMALLOC_SRC_DIR}
+  COMMENT "Building jemalloc from submodule"
   VERBATIM
 )
 
-#build jemalloc_pic
 add_custom_target(build_jemalloc ALL DEPENDS ${JEMALLOC_LIB_PATH})
 
 add_library(jemalloc_pic STATIC IMPORTED GLOBAL)
@@ -28,4 +24,6 @@ set_target_properties(jemalloc_pic PROPERTIES
   IMPORTED_LOCATION ${JEMALLOC_LIB_PATH}
   INTERFACE_INCLUDE_DIRECTORIES ${JEMALLOC_INSTALL_DIR}/include
 )
+
+list(APPEND EXTRA_LIBS jemalloc_pic)
 

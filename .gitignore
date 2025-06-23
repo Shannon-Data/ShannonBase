@@ -1,6 +1,8 @@
 # emacs backup files
 *~
 
+#auto gen file
+storage/rapid_engine/include/rapid_arch_inf.h
 # Misc tags/ctags files
 tags
 TAGS
@@ -31,3 +33,9 @@ scalability_jobs_*
 .cproject
 .project
 .settings/
+
+# Ignore all submodule contents, except wrapper
+/extra/lightgbm/*
+/extra/jerryscript/*
+/extra/jemalloc/*
+!/extra/jemalloc/CMakeLists.txt

@@ -928,7 +928,10 @@ IF(WITH_TCMALLOC OR WITH_TCMALLOC_DEBUG)
 ENDIF()
 
 OPTION(WITH_JEMALLOC "Use jemalloc rather than builtin malloc/free etc." OFF)
-IF(WITH_JEMALLOC)
+IF (WITH_JEMALLOC STREQUAL "bundled")
+  message(STATUS "Using bundled jemalloc from source code")
+  include(cmake/jemalloc_wrapper.cmake)
+ELSEIF(WITH_JEMALLOC)
   FIND_MALLOC_LIBRARY(jemalloc)
 ENDIF()
 
