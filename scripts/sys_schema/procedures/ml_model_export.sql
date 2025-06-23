@@ -41,46 +41,82 @@ mysql> SET @iris_model = \'iris_manual\';
 mysql> CALL sys.ML_MODEL_EXPORT(@iris_model,\'ML_SCHEMA_user1.model_export\');
 ...
 '
-    SQL SECURITY INVOKER
-    NOT DETERMINISTIC
-    MODIFIES SQL DATA
+SQL SECURITY INVOKER
+NOT DETERMINISTIC
+MODIFIES SQL DATA
 BEGIN
     DECLARE v_user_name VARCHAR(64);
-    DECLARE v_sys_meta_catalog_name VARCHAR(64);
-    DECLARE v_sys_meta_catalog_obj_name VARCHAR(64);
-
-    DECLARE v_db_err_msg TEXT;
-    DECLARE v_import_obj_check INT;
+    DECLARE v_sys_meta_catalog_name VARCHAR(128);
     DECLARE v_schema  VARCHAR(64);
-    DECLARE v_table VARCHAR(64);
+    DECLARE v_table   VARCHAR(64);
     DECLARE v_model_cnt INT;
-    DECLARE v_model_meta JSON;
-    DECLARE v_model_object LONGTEXT;
-    DECLARE v_model_handle_name VARCHAR(64);
+    DECLARE v_import_obj_check INT;
 
+    -- Step 1: gets current username 
     SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
-    SET v_sys_meta_catalog_name = CONCAT('ML_SCHEMA_', v_user_name, '.MODEL_CATALOG');
-    SET v_sys_meta_catalog_obj_name = CONCAT('ML_SCHEMA_', v_user_name, '.MODEL_OBJECT_CATALOG');
 
-    IF in_metadata IS NULL THEN
-    SIGNAL SQLSTATE 'HY000'
-       SET MESSAGE_TEXT = "The options missed.";
+    -- Step 2: get ml_schema catalog name
+    SET v_sys_meta_catalog_name = CONCAT('ML_SCHEMA_', v_user_name, '.MODEL_CATALOG');
+
+    -- Step 3: check existence.
+    SET @check_sql = CONCAT(
+        'SELECT COUNT(*) INTO @cnt FROM ', v_sys_meta_catalog_name,
+        ' WHERE model_handle = ', '\"', in_model_handle_name , '\";'
+    );
+    PREPARE check_stmt FROM @check_sql;
+    EXECUTE check_stmt;
+    DEALLOCATE PREPARE check_stmt;
+
+    SELECT @cnt INTO v_model_cnt;
+    IF v_model_cnt = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'The model_handle your input does not exist in MODEL_CATALOG.';
     END IF;
 
-   IF in_model_handle_name IS NULL THEN
-      SET in_model_handle_name = CONCAT('ML_SCHEMA_', v_user_name, '_', SUBSTRING(MD5(RAND()), 1, 10));
-   END IF;
+    -- Step 4: gets schema and table name of output table
+    SELECT SUBSTRING_INDEX(in_output_table_name, '.', 1) INTO v_schema;
+    SELECT SUBSTRING_INDEX(in_output_table_name, '.', -1) INTO v_table;
 
-   SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_ID) INTO @MODEL_CNT FROM ',  v_sys_meta_catalog_name,
-                                  ' WHERE MODEL_HANDLE = \"', in_model_handle_name, '\";');
-   PREPARE select_model_stmt FROM @select_model_stm;
-   EXECUTE select_model_stmt;
-   SELECT @MODEL_CNT into v_model_cnt;
-   DEALLOCATE PREPARE select_model_stmt;
+    -- Step 5: check output table existence
+    SET @check_sql = CONCAT(
+        'SELECT COUNT(*) INTO @cnt FROM INFORMATION_SCHEMA.TABLES', 
+        ' WHERE TABLE_SCHEMA = "', v_schema , '\" AND TABLE_NAME = "', v_table, '\";'
+    );
+    PREPARE check_stmt FROM @check_sql;
+    EXECUTE check_stmt;
+    DEALLOCATE PREPARE check_stmt;
 
-   IF (v_model_cnt != 0) THEN
-     SIGNAL SQLSTATE 'HY000'
-        SET MESSAGE_TEXT = "The handle name you specify is already exists.";
-   END IF;
+    SELECT @cnt INTO v_import_obj_check;
+
+    IF v_import_obj_check = 0 THEN
+        -- create schema
+        SET @sql_create_db = CONCAT('CREATE DATABASE IF NOT EXISTS `', v_schema, '`;');
+        PREPARE stmt FROM @sql_create_db;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+
+        -- create table
+        SET @sql_create_table = CONCAT(
+            'CREATE TABLE IF NOT EXISTS `', v_schema, '`.`', v_table, '` (',
+            'chunk_id INT AUTO_INCREMENT PRIMARY KEY,',
+            'model_object LONGTEXT DEFAULT NULL,',
+            'model_metadata JSON',
+            ');'
+        );
+        PREPARE stmt FROM @sql_create_table;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+
+    -- Step 6: insert data.
+    SET @insert_sql = CONCAT(
+        'INSERT INTO `', v_schema, '`.`', v_table, '` (model_object, model_metadata) ',
+        'SELECT model_object, model_metadata FROM ', v_sys_meta_catalog_name,
+        ' WHERE model_handle = ', '\"', in_model_handle_name, '\";'
+    );
+    PREPARE stmt FROM @insert_sql;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
 END$$
+
 DELIMITER ;
