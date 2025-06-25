@@ -26,19 +26,44 @@
 /** The basic iterator class for IMCS. All specific iterators are all inherited
  * from this.
  */
-#ifndef __SHANNONBASE_ITERATOR_H__
-#define __SHANNONBASE_ITERATOR_H__
+#ifndef __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
+#define __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
 
 #include "sql/iterators/basic_row_iterators.h"
-#include "sql/iterators/row_iterator.h"
+
+#include "storage/rapid_engine/include/rapid_const.h"
+
+#include "storage/rapid_engine/imcs/data_table.h"
+#include "storage/rapid_engine/iterators/iterator.h"
 
 namespace ShannonBase {
 namespace Executor {
 
-class Iterator : public RowIterator {
+class BatchTableScanIterator final : public TableScanIterator {
  public:
+  BatchTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
+  // bool Init() override;
+  int Read() override;
+};
+
+class VectorizedTableScanIterator : public RowIterator {
+ private:
+  ShannonBase::Imcs::DataTable *m_data_table;
+  uchar *m_batch_buffer;
+  size_t m_batch_size;
+  size_t m_current_batch_pos;
+  size_t m_rows_in_current_batch;
+
+ public:
+  VectorizedTableScanIterator(THD *thd, TABLE *table, size_t batch_size = SHANNON_VECTOR_WIDTH);
+
+  bool Init() override;
+  int Read() override;
+  int ReadBatch(uchar **buffers, size_t max_rows, size_t *rows_read);
+  void SetNullRowFlag(bool is_null_row) override {}
+  void UnlockRow() override {}
 };
 
 }  // namespace Executor
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_ITERATOR_H__
+#endif  // __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
