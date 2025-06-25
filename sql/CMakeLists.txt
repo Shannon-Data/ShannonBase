@@ -1334,7 +1334,11 @@ IF(SOLARIS)
 ENDIF()
 
 IF(WITH_JEMALLOC STREQUAL "bundled")
-  TARGET_LINK_LIBRARIES(mysqld PRIVATE jemalloc_pic)
+  link_directories($<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/jemalloc-bundled/lib>)
+  target_link_libraries(mysqld PRIVATE jemalloc_pic)
+  target_include_directories(mysqld PRIVATE
+     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/jemalloc-bundled/include>
+  )
 ENDIF()
 
 # Remove transitive link dependencies when linking plugins

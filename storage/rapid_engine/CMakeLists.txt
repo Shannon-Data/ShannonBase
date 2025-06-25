@@ -80,6 +80,7 @@ SET (SHANNON_ITERATOR_SOURCES
 )
 set (SHANNON_OPTIMIZE
     optimizer/optimizer.cpp
+    optimizer/path/access_path.cpp
     optimizer/rules/const_fold_rule.cpp
     cost/cost.cpp
     statistics/statistics.cpp

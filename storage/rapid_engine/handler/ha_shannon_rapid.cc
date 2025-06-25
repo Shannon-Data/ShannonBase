@@ -65,6 +65,7 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"  //column stats
 #include "storage/rapid_engine/optimizer/optimizer.h"
+#include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/utils.h"
@@ -893,8 +894,9 @@ static bool RapidOptimize(THD *thd, LEX *lex) {
   // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`
   // AP workload. But, we will replace the itertor when we traverse iterator tree from root to leaves.
   lex->unit->release_root_iterator().reset();
-  auto new_root_iter =
-      CreateIteratorFromAccessPath(thd, lex->unit->root_access_path(), join, /*eligible_for_batch_mode=*/true);
+  auto new_root_iter = ShannonBase::Optimizer::PathGenerator::PathGenerator::CreateIteratorFromAccessPath(
+      thd, lex->unit->root_access_path(), join,
+      /*eligible_for_batch_mode=*/true);
 
   lex->unit->set_root_iterator(new_root_iter);
   return false;

@@ -1,29 +1,35 @@
 #jemalloc wrapper cmake file. 
-set(JEMALLOC_SRC_DIR ${CMAKE_SOURCE_DIR}/extra/jemalloc)
+# jemalloc_wrapper.cmake
+
+include(ExternalProject)
+
 set(JEMALLOC_INSTALL_DIR ${CMAKE_BINARY_DIR}/jemalloc-bundled)
-file(MAKE_DIRECTORY ${JEMALLOC_INSTALL_DIR})
-
 set(JEMALLOC_LIB_PATH ${JEMALLOC_INSTALL_DIR}/lib/libjemalloc.a)
+set(JEMALLOC_INCLUDE_DIR ${JEMALLOC_INSTALL_DIR}/include)
 
-add_custom_command(
-  OUTPUT ${JEMALLOC_LIB_PATH}
-  COMMAND ${CMAKE_SOURCE_DIR}/extra/jemalloc/autogen.sh
-  COMMAND ${CMAKE_SOURCE_DIR}/extra/jemalloc/configure --with-pic --disable-shared --prefix=${JEMALLOC_INSTALL_DIR}
-  COMMAND make -j && make install
+ExternalProject_Add(jemalloc_ext
+  PREFIX ${CMAKE_BINARY_DIR}/_deps/jemalloc
+  SOURCE_DIR ${CMAKE_SOURCE_DIR}/extra/jemalloc
+  PATCH_COMMAND ${CMAKE_SOURCE_DIR}/extra/jemalloc/autogen.sh
+  CONFIGURE_COMMAND ${CMAKE_SOURCE_DIR}/extra/jemalloc/configure --with-pic --disable-shared --prefix=${JEMALLOC_INSTALL_DIR}
+  BUILD_COMMAND make -j
+  INSTALL_COMMAND make install
+  BUILD_IN_SOURCE 1
   WORKING_DIRECTORY ${JEMALLOC_SRC_DIR}
-  COMMENT "Building jemalloc from submodule"
-  VERBATIM
+  BUILD_BYPRODUCTS ${JEMALLOC_LIB_PATH}
+  LOG_CONFIGURE ON
+  LOG_BUILD ON
+  LOG_INSTALL ON
 )
 
-add_custom_target(build_jemalloc ALL DEPENDS ${JEMALLOC_LIB_PATH})
-
 add_library(jemalloc_pic STATIC IMPORTED GLOBAL)
-add_dependencies(jemalloc_pic build_jemalloc)
+add_dependencies(jemalloc_pic jemalloc_ext)
 
 set_target_properties(jemalloc_pic PROPERTIES
   IMPORTED_LOCATION ${JEMALLOC_LIB_PATH}
-  INTERFACE_INCLUDE_DIRECTORIES ${JEMALLOC_INSTALL_DIR}/include
+  #INTERFACE_INCLUDE_DIRECTORIES ${JEMALLOC_INCLUDE_DIR}
 )
 
-list(APPEND EXTRA_LIBS jemalloc_pic)
+set(JEMALLOC_INCLUDE_HINT "${JEMALLOC_INSTALL_DIR}/include" CACHE INTERNAL "jemalloc include dir")
 
+list(APPEND EXTRA_LIBS jemalloc_pic)
