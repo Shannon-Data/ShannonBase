@@ -286,8 +286,8 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
     switch (path->type) {
       case AccessPath::TABLE_SCAN: {
         const auto &param = path->table_scan();
-        // iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(thd, mem_root, param.table,
-        // path->num_output_rows(), examined_rows);
+        // iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(
+        //     thd, mem_root, param.table, path->num_output_rows(), examined_rows);
         iterator = NewIterator<TableScanIterator>(thd, mem_root, param.table, path->num_output_rows(), examined_rows);
         break;
       }

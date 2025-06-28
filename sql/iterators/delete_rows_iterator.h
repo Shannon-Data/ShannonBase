@@ -52,6 +52,9 @@ class DeleteRowsIterator final : public RowIterator {
   void SetNullRowFlag(bool /*is_null_row*/) override { assert(false); }
   void UnlockRow() override { assert(false); }
 
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
+
  private:
   /// The iterator producing the rows to delete.
   unique_ptr_destroy_only<RowIterator> m_source;

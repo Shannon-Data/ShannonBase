@@ -114,6 +114,9 @@ class WindowIterator final : public RowIterator {
     // There's nothing we can do here.
   }
 
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
+
  private:
   /// The iterator we are reading from.
   unique_ptr_destroy_only<RowIterator> const m_source;
@@ -224,6 +227,9 @@ class BufferingWindowIterator final : public RowIterator {
   void UnlockRow() override {
     // There's nothing we can do here.
   }
+
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   int ReadBufferedRow(bool new_partition_or_eof);

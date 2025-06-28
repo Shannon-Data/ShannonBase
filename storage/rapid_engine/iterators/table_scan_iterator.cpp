@@ -29,81 +29,106 @@
  */
 #include "storage/rapid_engine/iterators/table_scan_iterator.h"
 
+#include "include/my_base.h"
+
+#include "sql/dd/cache/dictionary_client.h"
+#include "sql/sql_class.h"
+
+#include "storage/innobase/include/dict0dd.h"
+#include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/include/rapid_const.h"
+
 namespace ShannonBase {
 namespace Executor {
 
-BatchTableScanIterator::BatchTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows)
-    : TableScanIterator(thd, table, expected_rows, examined_rows) {}
+VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows,
+                                                         ha_rows *examined_rows)
+    : TableRowIterator(thd, table, RowIterator::Type::ROWITERATOR_VECTORIZED), m_table{table} {
+  m_batch_size = SHANNON_VECTOR_WIDTH;
 
-int BatchTableScanIterator::Read() {
-  int tmp;
-  if (table()->is_union_or_table()) {
-    while ((tmp = table()->file->ha_rnd_next(m_record))) {
-      /*
-       ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is
-       reading and another deleting without locks.
-       */
-      if (tmp == HA_ERR_RECORD_DELETED && !thd()->killed) continue;
-      return HandleError(tmp);
-    }
-    if (m_examined_rows != nullptr) {
-      ++*m_examined_rows;
-    }
-  } else {
-    while (true) {
-      if (m_remaining_dups == 0) {  // always initially
-        while ((tmp = table()->file->ha_rnd_next(m_record))) {
-          if (tmp == HA_ERR_RECORD_DELETED && !thd()->killed) continue;
-          return HandleError(tmp);
-        }
-        if (m_examined_rows != nullptr) {
-          ++*m_examined_rows;
-        }
+  std::string key(table->s->db.str);
+  key.append(":").append(table->s->table_name.str);
 
-        // Filter out rows not qualifying for INTERSECT, EXCEPT by reading
-        // the counter.
-        const ulonglong cnt = static_cast<ulonglong>(table()->set_counter()->val_int());
-        if (table()->is_except()) {
-          if (table()->is_distinct()) {
-            // EXCEPT DISTINCT: any counter value larger than one yields
-            // exactly one row
-            if (cnt >= 1) break;
-          } else {
-            // EXCEPT ALL: we use m_remaining_dups to yield as many rows
-            // as found in the counter.
-            m_remaining_dups = cnt;
-          }
-        } else {
-          // INTERSECT
-          if (table()->is_distinct()) {
-            if (cnt == 0) break;
-          } else {
-            HalfCounter c(cnt);
-            // Use min(left side counter, right side counter)
-            m_remaining_dups = std::min(c[0], c[1]);
-          }
-        }
-      } else {
-        --m_remaining_dups;  // return the same row once more.
-        break;
-      }
-      // Skipping this row
-    }
-    if (++m_stored_rows > m_limit_rows) {
-      return HandleError(HA_ERR_END_OF_FILE);
-    }
+  const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+  const dd::Table *table_def = nullptr;
+  if (thd->dd_client()->acquire(m_table->s->db.str, m_table->s->table_name.str, &table_def)) {
+    // Error is reported by the dictionary subsystem.
+    return;
   }
+  if (table_def == nullptr) return;
+
+  if (dd_table_is_partitioned(*table_def)) {
+    m_data_table.reset(
+        new ShannonBase::Imcs::DataTable(table, ShannonBase::Imcs::Imcs::instance()->get_parttable(key)));
+  } else {
+    m_data_table.reset(new ShannonBase::Imcs::DataTable(table, Imcs::Imcs::instance()->get_table(key)));
+  }
+}
+
+VectorizedTableScanIterator::~VectorizedTableScanIterator() {}
+
+bool VectorizedTableScanIterator::Init() {
+  // Initialize similar to ha_rapid::rnd_init()
+  if (m_data_table->init()) {
+    return true;
+  }
+
+  // Allocate row buffer for batch processing. to store data in mysql format in column format.
+  for (auto ind = 0u; ind < m_table->s->fields; ind++) {
+    auto field = *(m_table->field + ind);
+    if (field->is_flag_set(NOT_SECONDARY_FLAG)) {  // not secondary flaged, then not loaded into.
+      ColumnChunk placement(field, 0);
+      m_col_chunks.push_back(std::move(placement));
+      continue;
+    }
+
+    ColumnChunk colchk(field, ShannonBase::SHANNON_ROWS_IN_CHUNK / 8);
+    m_col_chunks.push_back(std::move(colchk));
+  }
+  return false;
+}
+
+int VectorizedTableScanIterator::Read() {
+  int result{ShannonBase::SHANNON_SUCCESS};
+  m_read_cnt = 0;
+  while ((result = m_data_table->next_batch(m_batch_size, m_col_chunks, m_read_cnt))) {
+    /*
+     next_batch can return RECORD_DELETED for MyISAM when one thread is
+     reading and another deleting without locks.
+     */
+    if (result == HA_ERR_RECORD_DELETED && !thd()->killed)
+      continue;
+    else if (result && m_read_cnt == 0)  // no more rows to read.
+      return HandleError(result);
+    if (m_read_cnt) break;
+  }
+
+  m_total_read += m_read_cnt;
   return 0;
 }
 
-VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table,
-                                                         size_t batch_size = SHANNON_VECTOR_WIDTH) {}
+uchar *VectorizedTableScanIterator::GetData(size_t rowid) {
+  if (rowid >= m_read_cnt) return nullptr;
 
-bool VectorizedTableScanIterator::Init() { return false; }
+  for (auto ind = 0u; ind < m_table->s->fields; ind++) {
+    auto field = *(m_table->field + ind);
+    if (!bitmap_is_set(m_table->read_set, ind) || field->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-int VectorizedTableScanIterator::Read() { return 0; }
-
-int VectorizedTableScanIterator::ReadBatch(uchar **buffers, size_t max_rows, size_t *rows_read) { return 0; }
+    auto col_chunk = m_col_chunks[ind];
+    Utils::ColumnMapGuard guard(m_table);
+    if (col_chunk.nullable(rowid)) {
+      field->set_null();
+    } else {
+      if (Utils::Util::is_string(field->type()) || Utils::Util::is_blob(field->type())) {
+        auto data_ptr = (const char *)col_chunk.data(rowid);
+        field->store(data_ptr, strlen(data_ptr), field->charset());
+      } else {
+        field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), col_chunk.width());
+      }
+    }
+  }
+  return nullptr;
+}
 
 }  // namespace Executor
 }  // namespace ShannonBase

@@ -33,5 +33,85 @@
 #include "sql/table.h"  // TABLE
 
 namespace ShannonBase {
-namespace Executor {}  // namespace Executor
+namespace Executor {
+
+ColumnChunk::ColumnChunk(Field *mysql_fld, size_t size)
+    : m_source_fld(mysql_fld), m_type(mysql_fld->type()), m_field_width(mysql_fld->pack_length()), m_chunk_size(size) {
+  m_cols_buffer.reset(new (std::nothrow) uchar[m_chunk_size * m_field_width]);
+  m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(m_chunk_size));
+}
+
+ColumnChunk::ColumnChunk(const ColumnChunk &other) {
+  this->m_chunk_size = other.m_chunk_size;
+  this->m_current_size.store(other.m_current_size);
+  this->m_field_width = other.m_field_width;
+  this->m_type = other.m_type;
+
+  m_cols_buffer.reset(new (std::nothrow) uchar[m_chunk_size * m_field_width]);
+  if (m_cols_buffer && other.m_cols_buffer) {
+    std::memcpy(m_cols_buffer.get(), other.m_cols_buffer.get(), m_chunk_size * m_field_width);
+  }
+
+  if (other.m_null_mask) {
+    m_null_mask.reset(new ShannonBase::bit_array_t(*other.m_null_mask));
+  } else {
+    m_null_mask = nullptr;
+  }
+}
+// Copy assignment operator
+ColumnChunk &ColumnChunk::operator=(const ColumnChunk &other) {
+  if (this == &other)  // smame one.
+    return *this;
+  this->m_chunk_size = other.m_chunk_size;
+  this->m_current_size.store(other.m_current_size);
+  this->m_field_width = other.m_field_width;
+  this->m_type = other.m_type;
+
+  m_cols_buffer.reset(new (std::nothrow) uchar[m_chunk_size * m_field_width]);
+  if (m_cols_buffer && other.m_cols_buffer) {
+    std::memcpy(m_cols_buffer.get(), other.m_cols_buffer.get(), m_chunk_size * m_field_width);
+  }
+
+  if (other.m_null_mask) {
+    this->m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(m_chunk_size));
+  } else {
+    m_null_mask = nullptr;
+  }
+
+  return *this;
+}
+
+ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
+    : m_type(other.m_type),
+      m_field_width(other.m_field_width),
+      m_chunk_size(other.m_chunk_size),
+      m_cols_buffer(std::move(other.m_cols_buffer)),
+      m_null_mask(std::move(other.m_null_mask)) {
+  m_current_size.store(other.m_current_size);
+  other.m_chunk_size = 0;
+  other.m_current_size = 0;
+  other.m_field_width = 0;
+  other.m_type = MYSQL_TYPE_NULL;
+}
+
+ColumnChunk &ColumnChunk::operator=(ColumnChunk &&other) noexcept {
+  if (this == &other) return *this;
+
+  m_type = other.m_type;
+  m_field_width = other.m_field_width;
+  m_current_size.store(other.m_current_size);
+  m_chunk_size = other.m_chunk_size;
+
+  m_cols_buffer = std::move(other.m_cols_buffer);
+  m_null_mask = std::move(other.m_null_mask);
+
+  other.m_chunk_size = 0;
+  other.m_current_size = 0;
+  other.m_field_width = 0;
+  other.m_type = MYSQL_TYPE_NULL;
+
+  return *this;
+}
+
+}  // namespace Executor
 }  // namespace ShannonBase
