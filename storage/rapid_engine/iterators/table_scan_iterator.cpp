@@ -29,81 +29,75 @@
  */
 #include "storage/rapid_engine/iterators/table_scan_iterator.h"
 
+#include "sql/dd/cache/dictionary_client.h"
+#include "sql/sql_class.h"
+
+#include "storage/innobase/include/dict0dd.h"
+#include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/include/rapid_const.h"
+
 namespace ShannonBase {
 namespace Executor {
 
-BatchTableScanIterator::BatchTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows)
-    : TableScanIterator(thd, table, expected_rows, examined_rows) {}
+VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows,
+                                                         ha_rows *examined_rows)
+    : TableRowIterator(thd, table, RowIterator::Type::ROWITERATOR_VECTORIZED), m_table{table} {
+  m_batch_size = SHANNON_VECTOR_WIDTH;
 
-int BatchTableScanIterator::Read() {
-  int tmp;
-  if (table()->is_union_or_table()) {
-    while ((tmp = table()->file->ha_rnd_next(m_record))) {
-      /*
-       ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is
-       reading and another deleting without locks.
-       */
-      if (tmp == HA_ERR_RECORD_DELETED && !thd()->killed) continue;
-      return HandleError(tmp);
-    }
-    if (m_examined_rows != nullptr) {
-      ++*m_examined_rows;
-    }
-  } else {
-    while (true) {
-      if (m_remaining_dups == 0) {  // always initially
-        while ((tmp = table()->file->ha_rnd_next(m_record))) {
-          if (tmp == HA_ERR_RECORD_DELETED && !thd()->killed) continue;
-          return HandleError(tmp);
-        }
-        if (m_examined_rows != nullptr) {
-          ++*m_examined_rows;
-        }
+  std::string key(table->s->db.str);
+  key.append(":").append(table->s->table_name.str);
 
-        // Filter out rows not qualifying for INTERSECT, EXCEPT by reading
-        // the counter.
-        const ulonglong cnt = static_cast<ulonglong>(table()->set_counter()->val_int());
-        if (table()->is_except()) {
-          if (table()->is_distinct()) {
-            // EXCEPT DISTINCT: any counter value larger than one yields
-            // exactly one row
-            if (cnt >= 1) break;
-          } else {
-            // EXCEPT ALL: we use m_remaining_dups to yield as many rows
-            // as found in the counter.
-            m_remaining_dups = cnt;
-          }
-        } else {
-          // INTERSECT
-          if (table()->is_distinct()) {
-            if (cnt == 0) break;
-          } else {
-            HalfCounter c(cnt);
-            // Use min(left side counter, right side counter)
-            m_remaining_dups = std::min(c[0], c[1]);
-          }
-        }
-      } else {
-        --m_remaining_dups;  // return the same row once more.
-        break;
-      }
-      // Skipping this row
-    }
-    if (++m_stored_rows > m_limit_rows) {
-      return HandleError(HA_ERR_END_OF_FILE);
-    }
+  const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+  const dd::Table *table_def = nullptr;
+  if (thd->dd_client()->acquire(m_table->s->db.str, m_table->s->table_name.str, &table_def)) {
+    // Error is reported by the dictionary subsystem.
+    return;
   }
-  return 0;
+  if (table_def == nullptr) return;
+
+  if (dd_table_is_partitioned(*table_def)) {
+    m_data_table.reset(
+        new ShannonBase::Imcs::DataTable(table, ShannonBase::Imcs::Imcs::instance()->get_parttable(key)));
+  } else {
+    m_data_table.reset(new ShannonBase::Imcs::DataTable(table, Imcs::Imcs::instance()->get_table(key)));
+  }
 }
 
-VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table,
-                                                         size_t batch_size = SHANNON_VECTOR_WIDTH) {}
+VectorizedTableScanIterator::~VectorizedTableScanIterator() {}
 
-bool VectorizedTableScanIterator::Init() { return false; }
+bool VectorizedTableScanIterator::Init() {
+  // Initialize similar to ha_rapid::rnd_init()
+  if (m_data_table->init()) {
+    return true;
+  }
 
-int VectorizedTableScanIterator::Read() { return 0; }
+  // Allocate row buffer for batch processing
+  auto fields{m_table->s->fields};
+  while (fields) {
+    m_row_buffer.push_back(std::move(std::make_unique<uchar[]>(m_table->s->rec_buff_length * m_batch_size)));
+    fields--;
+  }
 
-int VectorizedTableScanIterator::ReadBatch(uchar **buffers, size_t max_rows, size_t *rows_read) { return 0; }
+  return false;
+}
+
+int VectorizedTableScanIterator::Read() {
+  int result{ShannonBase::SHANNON_SUCCESS};
+  for (size_t i = 0; i < m_batch_size; i++) {
+#if 0
+    result = m_data_table->next(&m_row_buffer[i * m_table->s->rec_buff_length]);
+    if (result == HA_ERR_END_OF_FILE) {
+      break;
+    }
+
+    // Apply filter if present
+    if (m_filter && !m_filter(&m_row_buffer[i])) {
+      continue;  // Skip this row
+    }
+#endif
+  }
+  return (result != 0) ? HandleError(result) : 0;
+}
 
 }  // namespace Executor
 }  // namespace ShannonBase

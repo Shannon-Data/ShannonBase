@@ -30,38 +30,42 @@
 #define __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
 
 #include "sql/iterators/basic_row_iterators.h"
-
-#include "storage/rapid_engine/include/rapid_const.h"
+#include "sql/iterators/row_iterator.h"
+#include "sql/mem_root_array.h"
 
 #include "storage/rapid_engine/imcs/data_table.h"
+#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/iterators/iterator.h"
 
+class TABLE;
 namespace ShannonBase {
 namespace Executor {
 
-class BatchTableScanIterator final : public TableScanIterator {
+class VectorizedTableScanIterator : public TableRowIterator {
  public:
-  BatchTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
-  // bool Init() override;
-  int Read() override;
-};
-
-class VectorizedTableScanIterator : public RowIterator {
- private:
-  ShannonBase::Imcs::DataTable *m_data_table;
-  uchar *m_batch_buffer;
-  size_t m_batch_size;
-  size_t m_current_batch_pos;
-  size_t m_rows_in_current_batch;
-
- public:
-  VectorizedTableScanIterator(THD *thd, TABLE *table, size_t batch_size = SHANNON_VECTOR_WIDTH);
+  VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
+  virtual ~VectorizedTableScanIterator();
 
   bool Init() override;
   int Read() override;
-  int ReadBatch(uchar **buffers, size_t max_rows, size_t *rows_read);
-  void SetNullRowFlag(bool is_null_row) override {}
-  void UnlockRow() override {}
+
+  void set_filter(filter_func_t filter) { m_filter = filter; }
+
+ private:
+  TABLE *m_table{nullptr};
+
+  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table{nullptr};
+
+  // current rows number of this batch.
+  size_t m_row_count;
+
+  // to keep the every column data in VECTOR_WIDTH count. the order is same with field order.
+  std::vector<std::unique_ptr<uchar[]>> m_row_buffer;
+
+  // Optional filter for predicate pushdown
+  filter_func_t m_filter;
+
+  size_t m_batch_size{1};
 };
 
 }  // namespace Executor
