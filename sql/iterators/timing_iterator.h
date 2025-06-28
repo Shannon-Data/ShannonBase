@@ -182,6 +182,10 @@ class TimingIterator final : public RowIterator {
     m_iterator.SetNullRowFlag(is_null_row);
   }
   void UnlockRow() override { m_iterator.UnlockRow(); }
+
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
+
   void StartPSIBatchMode() override { m_iterator.StartPSIBatchMode(); }
   void EndPSIBatchModeIfStarted() override {
     m_iterator.EndPSIBatchModeIfStarted();

@@ -31,6 +31,7 @@
 
 #include "storage/rapid_engine/imcs/index/iterator.h"
 #include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/iterators/iterator.h"
 #include "storage/rapid_engine/trx/readview.h"
 
 class TABLE;
@@ -58,6 +59,9 @@ class DataTable : public MemoryObject {
 
   // to the next rows.
   int next(uchar *buf);
+
+  // read the data in data in batch mode.
+  int next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
   // end of scan.
   int end();
@@ -92,7 +96,7 @@ class DataTable : public MemoryObject {
   TABLE *m_data_source{nullptr};
 
   // rapid table.
-  RapidTable *m_rapid;
+  RapidTable *m_rapid_table;
 
   // start from where.
   std::atomic<row_id_t> m_rowid{0};

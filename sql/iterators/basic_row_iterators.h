@@ -195,6 +195,8 @@ class SortBufferIterator final : public RowIterator {
     assert(false);
   }
 
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
  private:
   // NOTE: No m_record -- unpacks directly into each Field's field->ptr.
   Filesort_info *const m_sort;
@@ -236,6 +238,9 @@ class SortBufferIndirectIterator final : public RowIterator {
   }
   void UnlockRow() override {}
 
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
+
  private:
   Sort_result *const m_sort_result;
   Mem_root_array<TABLE *> m_tables;
@@ -270,6 +275,9 @@ class SortFileIterator final : public RowIterator {
     // Handled by SortingIterator.
     assert(false);
   }
+
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   uchar *const m_rec_buf;
@@ -308,6 +316,9 @@ class SortFileIndirectIterator final : public RowIterator {
     assert(false);
   }
   void UnlockRow() override {}
+
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   IO_CACHE *m_io_cache = nullptr;
@@ -352,6 +363,9 @@ class FakeSingleRowIterator final : public RowIterator {
 
   void UnlockRow() override {}
 
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
+
  private:
   bool m_has_row;
   ha_rows *const m_examined_rows;
@@ -380,6 +394,9 @@ class UnqualifiedCountIterator final : public RowIterator {
 
   void UnlockRow() override {}
 
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
+
  private:
   bool m_has_row;
   JOIN *const m_join;
@@ -406,6 +423,9 @@ class ZeroRowsIterator final : public RowIterator {
   void SetNullRowFlag(bool is_null_row) override;
 
   void UnlockRow() override {}
+
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   const Mem_root_array<TABLE *> m_pruned_tables;
@@ -435,6 +455,9 @@ class ZeroRowsAggregatedIterator final : public RowIterator {
   void SetNullRowFlag(bool) override { assert(false); }
 
   void UnlockRow() override {}
+
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   bool m_has_row;
@@ -539,6 +562,9 @@ class TableValueConstructorIterator final : public RowIterator {
   void SetNullRowFlag(bool) override { assert(false); }
 
   void UnlockRow() override {}
+
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   ha_rows *const m_examined_rows{nullptr};

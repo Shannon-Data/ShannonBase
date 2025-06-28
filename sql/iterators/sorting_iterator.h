@@ -91,6 +91,9 @@ class SortingIterator final : public RowIterator {
 
   void UnlockRow() override { m_result_iterator->UnlockRow(); }
 
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
+
   /// Optional (when JOIN::destroy() runs, the iterator and its buffers
   /// will be cleaned up anyway); used to clean up the buffers a little
   /// bit earlier.

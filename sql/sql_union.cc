@@ -1775,28 +1775,63 @@ bool Query_expression::ExecuteIteratorQuery(THD *thd) {
     PFSBatchMode pfs_batch_mode(m_root_iterator.get());
 
     for (;;) {
-      int error = m_root_iterator->Read();
-      DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
+      int error;
+      if (m_root_iterator->GetType() == RowIterator::Type::ROWITERATOR_NORMAL) {
+        error = m_root_iterator->Read();
 
-      if (error > 0 || thd->is_error())  // Fatal error
-        return true;
-      else if (error < 0)
-        break;
-      else if (thd->killed)  // Aborted by user
-      {
-        thd->send_kill_message();
-        return true;
+        DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
+
+        if (error > 0 || thd->is_error())  // Fatal error
+          return true;
+        else if (error < 0)
+          break;
+        else if (thd->killed)  // Aborted by user
+        {
+          thd->send_kill_message();
+          return true;
+        }
+
+        ++*send_records_ptr;
+
+        if (query_result->send_data(thd, *fields)) {
+          return true;
+        }
+        thd->get_stmt_da()->inc_current_row_for_condition();
+
+        DBUG_EXECUTE_IF("simulate_partial_result_set_scenario",
+                        my_error(ER_UNKNOWN_ERROR, MYF(0)););
+      } else  { // using vectorized processing.
+        //all read rwos store in iterator buffer.
+        error = m_root_iterator->Read();
+        for (uint ind = 0; ind < m_root_iterator->ReadCount(); ind++) {
+          DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
+
+          if (thd->killed) { // Aborted by user
+            thd->send_kill_message();
+            return true;
+          }
+          m_root_iterator->GetData(ind);
+          ++*send_records_ptr;
+
+          if (query_result->send_data(thd, *fields)) {
+            return true;
+          }
+          thd->get_stmt_da()->inc_current_row_for_condition();
+
+          DBUG_EXECUTE_IF("simulate_partial_result_set_scenario",
+                          my_error(ER_UNKNOWN_ERROR, MYF(0)););
+        }
+
+        if (error > 0 || thd->is_error())  // Fatal error
+            return true;
+        else if (error < 0)
+            break;
+        else if (thd->killed)  // Aborted by user
+        {
+          thd->send_kill_message();
+          return true;
+        }
       }
-
-      ++*send_records_ptr;
-
-      if (query_result->send_data(thd, *fields)) {
-        return true;
-      }
-      thd->get_stmt_da()->inc_current_row_for_condition();
-
-      DBUG_EXECUTE_IF("simulate_partial_result_set_scenario",
-                      my_error(ER_UNKNOWN_ERROR, MYF(0)););
     }
 
     // NOTE: join_cleanup must be done before we send EOF, so that we get the

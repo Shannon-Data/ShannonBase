@@ -257,7 +257,7 @@ INSERT INTO t10 (year, department_id, record_id, data_value) VALUES
 select * from t10 order by department_id;
 explain select * from t10 order by department_id;
 
---sleep 30
+--sleep 35
 --connection connection_1
 --echo #[conn_1_after_insert]
 

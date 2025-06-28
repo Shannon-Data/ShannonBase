@@ -864,10 +864,9 @@ static void AssertSupportedPath(const AccessPath *path) {
   ut_a(path->secondary_engine_data == nullptr);
 }
 
-//  In this function, Dynamic offload retrieves info from
-//  rapid_statement_context and additionally looks at Change
-//  propagation lag to decide if query should be offloaded to rapid
-//  returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
+//  In this function, Dynamic offload retrieves info from rapid_statement_context and
+// additionally looks at Change  propagation lag to decide if query should be offloaded
+// to rapid returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
 static bool RapidOptimize(THD *thd, LEX *lex) {
   if (likely(thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)) {
     SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, set use_secondary_engine to false.");

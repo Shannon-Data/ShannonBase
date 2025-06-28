@@ -30,38 +30,49 @@
 #define __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
 
 #include "sql/iterators/basic_row_iterators.h"
-
-#include "storage/rapid_engine/include/rapid_const.h"
+#include "sql/iterators/row_iterator.h"
+#include "sql/mem_root_array.h"
 
 #include "storage/rapid_engine/imcs/data_table.h"
+#include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/iterators/iterator.h"
 
+class TABLE;
 namespace ShannonBase {
 namespace Executor {
 
-class BatchTableScanIterator final : public TableScanIterator {
+class VectorizedTableScanIterator : public TableRowIterator {
  public:
-  BatchTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
-  // bool Init() override;
-  int Read() override;
-};
-
-class VectorizedTableScanIterator : public RowIterator {
- private:
-  ShannonBase::Imcs::DataTable *m_data_table;
-  uchar *m_batch_buffer;
-  size_t m_batch_size;
-  size_t m_current_batch_pos;
-  size_t m_rows_in_current_batch;
-
- public:
-  VectorizedTableScanIterator(THD *thd, TABLE *table, size_t batch_size = SHANNON_VECTOR_WIDTH);
+  VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
+  virtual ~VectorizedTableScanIterator();
 
   bool Init() override;
   int Read() override;
-  int ReadBatch(uchar **buffers, size_t max_rows, size_t *rows_read);
-  void SetNullRowFlag(bool is_null_row) override {}
-  void UnlockRow() override {}
+
+  size_t ReadCount() override { return m_read_cnt; }
+
+  uchar *GetData(size_t rowid) override;
+
+  void set_filter(filter_func_t filter) { m_filter = filter; }
+
+ private:
+  TABLE *m_table{nullptr};
+
+  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table{nullptr};
+
+  std::vector<ColumnChunk> m_col_chunks;
+
+  // Optional filter for predicate pushdown
+  filter_func_t m_filter;
+
+  // the row read a chunk. chunk-a-time.
+  size_t m_read_cnt{0};
+
+  // total rows read since started.
+  size_t m_total_read{0};
+
+  size_t m_batch_size{1};
 };
 
 }  // namespace Executor
