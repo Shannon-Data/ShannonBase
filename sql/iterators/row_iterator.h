@@ -81,9 +81,15 @@ class IteratorProfiler {
  */
 class RowIterator {
  public:
+  enum class Type : uint{
+    ROWITERATOR_NORMAL,
+    ROWITERATOR_VECTORIZED
+  };
+
   // NOTE: Iterators should typically be instantiated using NewIterator,
   // in sql/iterators/timing_iterator.h.
-  explicit RowIterator(THD *thd) : m_thd(thd) {}
+  explicit RowIterator(THD *thd) : m_thd(thd), m_type(Type::ROWITERATOR_NORMAL) {}
+  explicit RowIterator(THD *thd, Type type) : m_thd(thd), m_type(type) {}
   virtual ~RowIterator() = default;
 
   RowIterator(const RowIterator &) = delete;
@@ -152,6 +158,7 @@ class RowIterator {
   // or just ignore it. The right behavior depends on the iterator.
   virtual void UnlockRow() = 0;
 
+  virtual Type GetType() { return m_type; }
   /** Get profiling data for this iterator (for 'EXPLAIN ANALYZE').*/
   virtual const IteratorProfiler *GetProfiler() const {
     /**
@@ -229,11 +236,13 @@ class RowIterator {
 
  private:
   THD *const m_thd;
+  Type m_type;
 };
 
 class TableRowIterator : public RowIterator {
  public:
   TableRowIterator(THD *thd, TABLE *table) : RowIterator(thd), m_table(table) {}
+  TableRowIterator(THD *thd, TABLE *table, RowIterator::Type type) : RowIterator(thd, type), m_table(table) {}
 
   void UnlockRow() override;
   void SetNullRowFlag(bool is_null_row) override;

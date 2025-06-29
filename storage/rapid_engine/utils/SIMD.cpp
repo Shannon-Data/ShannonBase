@@ -19,29 +19,17 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
-
    The fundmental code for imcs.
+
+   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
-/** The basic iterator class for IMCS. All specific iterators are all inherited
- * from this.
- */
-#ifndef __SHANNONBASE_ITERATOR_H__
-#define __SHANNONBASE_ITERATOR_H__
+#include "storage/rapid_engine/utils/SIMD.h"
 
-#include <functional>
-#include "include/my_inttypes.h"
-
-#include "sql/iterators/basic_row_iterators.h"
-#include "sql/iterators/row_iterator.h"
+#include "include/decimal.h"  //my_decimal
+#include "include/my_bitmap.h"
 
 namespace ShannonBase {
-namespace Executor {
-
-using filter_func_t = std::function<bool(const uchar *)>;
-
-class Iterator : public RowIterator {};
-
-}  // namespace Executor
+namespace Utils {
+namespace SIMD {}
+}  // namespace Utils
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_ITERATOR_H__
