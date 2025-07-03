@@ -53,6 +53,14 @@ class PathGenerator {
                                                                            bool eligible_for_batch_mode);
 };
 
+class AccessPathFactory {
+ public:
+  static AccessPath *CreateTableScan(TABLE *table, THD *thd = nullptr, bool vectorized = false);
+  static AccessPath *CreateHashJoin(AccessPath *outer, AccessPath *inner, bool vectorized = false);
+
+  // TOD: create more types access path.
+};
+
 }  // namespace Optimizer
 }  // namespace ShannonBase
 
