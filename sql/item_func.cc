@@ -10197,6 +10197,25 @@ longlong Item_func_internal_is_enabled_role::val_int() {
 }
 
 // for ML funcs libs impl.
+
+longlong Item_func_ml_active::val_int() {
+  DBUG_TRACE;
+  assert(arg_count == 2);
+  THD* thd [[maybe_unused]] = current_thd;
+
+  String handle_name;
+  String *handle_name_ptr = args[0]->val_str(&handle_name);
+  if (args[1]->data_type() != MYSQL_TYPE_JSON)  return HA_ERR_GENERIC;
+
+  std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
+     std::make_unique<ShannonBase::ML::Auto_ML>();
+  /**To invoke ML libs to load the trainned ML models into memory*/
+  Json_wrapper out_model;
+  auto result = auto_ml->model_active(handle_name_ptr, out_model);
+
+  return result;
+}
+
 longlong Item_func_ml_train::val_int() {
   DBUG_TRACE;
   //ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle)

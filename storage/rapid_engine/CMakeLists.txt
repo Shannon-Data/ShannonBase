@@ -59,6 +59,7 @@ SET(SHANNON_IMCS_SOURCES
    imcs/chunk.cpp
    imcs/index/art/art.cpp
    utils/utils.cpp
+   utils/SIMD.cpp
    imcs/purge/purge.cpp
 )
 SET(SHANNON_POPULATE_SOURCES
@@ -76,10 +77,12 @@ SET (SHANNON_READER_SOURCES
 SET (SHANNON_ITERATOR_SOURCES
     iterators/iterator.cpp
     iterators/hash_join_iterator.cpp
+    iterators/table_scan_iterator.cpp
     ${SHANNON_READER_SOURCES}
 )
 set (SHANNON_OPTIMIZE
     optimizer/optimizer.cpp
+    optimizer/path/access_path.cpp
     optimizer/rules/const_fold_rule.cpp
     cost/cost.cpp
     statistics/statistics.cpp

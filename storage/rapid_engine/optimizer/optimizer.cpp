@@ -66,7 +66,6 @@ void OptimzieAccessPath(AccessPath *path, JOIN *join) {
     case AccessPath::TABLE_SCAN: {
       auto table = path->table_scan().table;
       if (table->s->is_secondary_engine() && table->file->stats.records >= SHANNON_VECTOR_WIDTH) {
-        path->using_batch_instr = true;
         // this table is used by query and the table has been loaded into rapid engine. then start
         // a propagation.
         ShannonBase::Populate::Populator::send_notify();

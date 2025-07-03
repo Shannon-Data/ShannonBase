@@ -49,9 +49,8 @@
 
 namespace ShannonBase {
 namespace Imcs {
-
-DataTable::DataTable(TABLE *source, RapidTable *rpd) : m_initialized{false}, m_data_source(source), m_rapid(rpd) {
-  ut_a(m_data_source && m_rapid);
+DataTable::DataTable(TABLE *source, RapidTable *rpd) : m_initialized{false}, m_data_source(source), m_rapid_table(rpd) {
+  ut_a(m_data_source && m_rapid_table);
   m_rowid.store(0);
 }
 
@@ -103,7 +102,7 @@ int DataTable::next(uchar *buf) {
 start:
   assert(m_initialized.load());
 
-  if (m_rowid >= m_rapid->m_fields.begin()->second->prows()) return HA_ERR_END_OF_FILE;
+  if (m_rowid >= m_rapid_table->m_fields.begin()->second->prows()) return HA_ERR_END_OF_FILE;
 
   auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
   auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
@@ -112,7 +111,7 @@ start:
     auto source_fld = *(m_data_source->field + ind);
     if (!bitmap_is_set(m_data_source->read_set, ind) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    auto rpd_field = m_rapid->get_field(source_fld->field_name);
+    auto rpd_field = m_rapid_table->get_field(source_fld->field_name);
     ut_a(rpd_field);
 
     auto normalized_length = rpd_field->normalized_pack_length();
@@ -167,6 +166,105 @@ start:
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+/** TODO:
+ * 改为：先统一做可见性判断（一次 row-wise），再处理列数据
+改进示意：
+std::vector<rowid_t> visible_rows;
+std::vector<RowVersionInfo> row_versions;
+
+while (visible_rows.size() < batch_size) {
+    // 统一做可见性判断（只读一次 versioned_ptr）
+    auto status = ...;
+    if (status is visible) {
+        visible_rows.push_back(m_rowid);
+        row_versions.push_back(...);
+    }
+    m_rowid++;
+}
+
+// 然后对每列，批量处理 visible_rows
+for (col : cols) {
+    for (i = 0; i < visible_rows.size(); ++i) {
+        auto rid = visible_rows[i];
+        // 直接解码 rid 对应列数据，写入 col_chunk[i]
+    }
+}
+ */
+int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt) {
+start:
+  assert(m_initialized.load());
+  while (read_cnt < batch_size) {
+    if (m_rowid >= m_rapid_table->m_fields.begin()->second->prows()) return HA_ERR_END_OF_FILE;
+
+    auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
+    auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
+
+    for (auto ind = 0u; ind < m_data_source->s->fields; ind++) {
+      auto source_fld = *(m_data_source->field + ind);
+      if (!bitmap_is_set(m_data_source->read_set, ind) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+      auto rpd_field = m_rapid_table->get_field(source_fld->field_name);
+      ut_a(rpd_field);
+
+      auto &col_chunk = data[ind];
+      auto normalized_length = rpd_field->normalized_pack_length();
+      DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "secondary_engine_rapid_next_error");
+        return HA_ERR_GENERIC;
+      });
+
+      // to check version link to check its old value.
+      auto current_chunk_ptr = rpd_field->chunk(current_chunk);
+      auto current_data_ptr = current_chunk_ptr->base() + offset_in_chunk * normalized_length;
+      if ((uintptr_t(current_data_ptr) & (CACHE_LINE_SIZE - 1)) == 0)
+        SHANNON_PREFETCH_R(current_data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
+
+      auto data_len = normalized_length;
+      auto data_ptr = ensure_buffer_size(data_len);
+      std::memcpy(data_ptr, current_data_ptr, data_len);
+
+      uint8 status{0};
+      auto versioned_ptr = current_chunk_ptr->header()->m_smu->build_prev_vers(m_context.get(), offset_in_chunk,
+                                                                               data_ptr, data_len, status);
+      if (!versioned_ptr &&
+          (status & static_cast<uint8>(
+                        ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_ROLLBACKED))) {  // means rollbacked rows.
+        m_rowid.fetch_add(1);
+        goto start;
+      }
+      if (status &
+          static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_NULL)) {  // the original value is null.
+        ut_a(data_len == UNIV_SQL_NULL);
+        // source_fld->set_null();
+        col_chunk.set_null(read_cnt);
+        read_cnt++;
+        continue;
+      }
+      if (status & static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_DELETED)) {
+        m_rowid.fetch_add(1);
+        goto start;
+      }
+
+      // source_fld->set_notnull();
+      ut_a(source_fld->type() == rpd_field->header()->m_source_fld->type());
+      if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
+        uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
+        auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
+        col_chunk.add((uchar *)str_ptr.c_str(), strlen(str_ptr.c_str()), false);
+        // source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
+      } else {
+        // source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
+        col_chunk.add(data_ptr, normalized_length, false);
+      }
+    }
+
+    m_rowid.fetch_add(1);
+    read_cnt++;
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
 int DataTable::end() {
   m_context->m_trx->release_snapshot();
   m_context->m_trx->commit();
@@ -180,7 +278,7 @@ int DataTable::index_init(uint keynr, bool sorted) {
   init();
   m_active_index = keynr;
   auto keyname = m_data_source->s->key_info[keynr].name;
-  auto index = m_rapid->m_indexes[keyname].get();
+  auto index = m_rapid_table->m_indexes[keyname].get();
   if (index == nullptr) {
     std::string err;
     err.append(m_data_source->s->db.str)

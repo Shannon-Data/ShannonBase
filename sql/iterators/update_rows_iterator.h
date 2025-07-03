@@ -65,6 +65,9 @@ class UpdateRowsIterator final : public RowIterator {
     assert(false);
   }
   void UnlockRow() override { assert(false); }
+  size_t ReadCount() override { assert (false); return 0;}
+  uchar* GetData(size_t)  override { assert (false); return nullptr; }
+
   ha_rows found_rows() const { return m_found_rows; }
   ha_rows updated_rows() const { return m_updated_rows; }
 

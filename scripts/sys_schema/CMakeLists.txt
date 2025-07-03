@@ -190,12 +190,15 @@ SET(SYS_SCHEMA_SOURCES
   procedures/ml_explain_row.sql
   procedures/ml_explain_table.sql
   procedures/ml_explain.sql
+  procedures/ml_model_export.sql
   procedures/ml_model_import.sql
   procedures/ml_model_load.sql
   procedures/ml_model_unload.sql
+  procedures/ml_model_active.sql
   procedures/ml_score.sql
   procedures/ml_train.sql
   procedures/ml_predict_table.sql
+  procedures/ml_predict_row.sql
   after_setup.sql
   )
 

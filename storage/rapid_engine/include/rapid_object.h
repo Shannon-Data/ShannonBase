@@ -26,9 +26,12 @@
 #ifndef __SHANNONBASE_RPD_OBJECT_H__
 #define __SHANNONBASE_RPD_OBJECT_H__
 #include <cstring>
+
+#include "field_types.h"          //for MYSQL_TYPE_XXX
 #include "include/my_alloc.h"     // MEM_ROOT
 #include "include/my_inttypes.h"  //uint8_t
 #include "sql/field.h"
+
 #include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase {
@@ -61,6 +64,14 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     data = new uint8_t[size];
     std::memset(data, 0x0, size);
   }
+
+  BitArray(BitArray &&other) noexcept {
+    data = other.data;
+    size = other.size;
+    other.data = nullptr;
+    other.size = 0;
+  }
+
   ~BitArray() {
     if (data) {
       delete[] data;
@@ -68,6 +79,31 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
       size = 0;
     }
   }
+
+  BitArray &operator=(BitArray &&other) noexcept {
+    if (this != &other) {
+      delete[] data;  // release itself.
+      data = other.data;
+      size = other.size;
+      other.data = nullptr;
+      other.size = 0;
+    }
+    return *this;
+  }
+
+  BitArray(const BitArray &other) {
+    size = other.size;
+    data = new uint8_t[size];
+    std::memcpy(data, other.data, size);
+  }
+
+  BitArray &operator=(const BitArray &other) {
+    size = other.size;
+    data = new uint8_t[size];
+    std::memcpy(data, other.data, size);
+    return *this;
+  }
+
   // data of BA, where to store the real bitmap.
   uint8_t *data{nullptr};
   // size of BA.

@@ -35,68 +35,82 @@
 namespace ShannonBase {
 namespace Executor {
 
-BatchTableScanIterator::BatchTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows)
-    : TableScanIterator(thd, table, expected_rows, examined_rows) {}
+ColumnChunk::ColumnChunk(Field *mysql_fld, size_t size)
+    : m_source_fld(mysql_fld), m_type(mysql_fld->type()), m_field_width(mysql_fld->pack_length()), m_chunk_size(size) {
+  m_cols_buffer.reset(new (std::nothrow) uchar[m_chunk_size * m_field_width]);
+  m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(m_chunk_size));
+}
 
-int BatchTableScanIterator::Read() {
-  int tmp;
-  if (table()->is_union_or_table()) {
-    while ((tmp = table()->file->ha_rnd_next(m_record))) {
-      /*
-       ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is
-       reading and another deleting without locks.
-       */
-      if (tmp == HA_ERR_RECORD_DELETED && !thd()->killed) continue;
-      return HandleError(tmp);
-    }
-    if (m_examined_rows != nullptr) {
-      ++*m_examined_rows;
-    }
-  } else {
-    while (true) {
-      if (m_remaining_dups == 0) {  // always initially
-        while ((tmp = table()->file->ha_rnd_next(m_record))) {
-          if (tmp == HA_ERR_RECORD_DELETED && !thd()->killed) continue;
-          return HandleError(tmp);
-        }
-        if (m_examined_rows != nullptr) {
-          ++*m_examined_rows;
-        }
+ColumnChunk::ColumnChunk(const ColumnChunk &other) {
+  this->m_chunk_size = other.m_chunk_size;
+  this->m_current_size.store(other.m_current_size);
+  this->m_field_width = other.m_field_width;
+  this->m_type = other.m_type;
 
-        // Filter out rows not qualifying for INTERSECT, EXCEPT by reading
-        // the counter.
-        const ulonglong cnt = static_cast<ulonglong>(table()->set_counter()->val_int());
-        if (table()->is_except()) {
-          if (table()->is_distinct()) {
-            // EXCEPT DISTINCT: any counter value larger than one yields
-            // exactly one row
-            if (cnt >= 1) break;
-          } else {
-            // EXCEPT ALL: we use m_remaining_dups to yield as many rows
-            // as found in the counter.
-            m_remaining_dups = cnt;
-          }
-        } else {
-          // INTERSECT
-          if (table()->is_distinct()) {
-            if (cnt == 0) break;
-          } else {
-            HalfCounter c(cnt);
-            // Use min(left side counter, right side counter)
-            m_remaining_dups = std::min(c[0], c[1]);
-          }
-        }
-      } else {
-        --m_remaining_dups;  // return the same row once more.
-        break;
-      }
-      // Skipping this row
-    }
-    if (++m_stored_rows > m_limit_rows) {
-      return HandleError(HA_ERR_END_OF_FILE);
-    }
+  m_cols_buffer.reset(new (std::nothrow) uchar[m_chunk_size * m_field_width]);
+  if (m_cols_buffer && other.m_cols_buffer) {
+    std::memcpy(m_cols_buffer.get(), other.m_cols_buffer.get(), m_chunk_size * m_field_width);
   }
-  return 0;
+
+  if (other.m_null_mask) {
+    m_null_mask.reset(new ShannonBase::bit_array_t(*other.m_null_mask));
+  } else {
+    m_null_mask = nullptr;
+  }
+}
+// Copy assignment operator
+ColumnChunk &ColumnChunk::operator=(const ColumnChunk &other) {
+  if (this == &other)  // smame one.
+    return *this;
+  this->m_chunk_size = other.m_chunk_size;
+  this->m_current_size.store(other.m_current_size);
+  this->m_field_width = other.m_field_width;
+  this->m_type = other.m_type;
+
+  m_cols_buffer.reset(new (std::nothrow) uchar[m_chunk_size * m_field_width]);
+  if (m_cols_buffer && other.m_cols_buffer) {
+    std::memcpy(m_cols_buffer.get(), other.m_cols_buffer.get(), m_chunk_size * m_field_width);
+  }
+
+  if (other.m_null_mask) {
+    this->m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(m_chunk_size));
+  } else {
+    m_null_mask = nullptr;
+  }
+
+  return *this;
+}
+
+ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
+    : m_type(other.m_type),
+      m_field_width(other.m_field_width),
+      m_chunk_size(other.m_chunk_size),
+      m_cols_buffer(std::move(other.m_cols_buffer)),
+      m_null_mask(std::move(other.m_null_mask)) {
+  m_current_size.store(other.m_current_size);
+  other.m_chunk_size = 0;
+  other.m_current_size = 0;
+  other.m_field_width = 0;
+  other.m_type = MYSQL_TYPE_NULL;
+}
+
+ColumnChunk &ColumnChunk::operator=(ColumnChunk &&other) noexcept {
+  if (this == &other) return *this;
+
+  m_type = other.m_type;
+  m_field_width = other.m_field_width;
+  m_current_size.store(other.m_current_size);
+  m_chunk_size = other.m_chunk_size;
+
+  m_cols_buffer = std::move(other.m_cols_buffer);
+  m_null_mask = std::move(other.m_null_mask);
+
+  other.m_chunk_size = 0;
+  other.m_current_size = 0;
+  other.m_field_width = 0;
+  other.m_type = MYSQL_TYPE_NULL;
+
+  return *this;
 }
 
 }  // namespace Executor

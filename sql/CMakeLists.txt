@@ -1310,7 +1310,7 @@ IF(MSVC)
 ENDIF()
 
 SET_TARGET_PROPERTIES(mysqld PROPERTIES ENABLE_EXPORTS TRUE)
-TARGET_LINK_LIBRARIES(mysqld
+TARGET_LINK_LIBRARIES(mysqld PRIVATE
   sql_main sql_gis binlog rpl rpl_source rpl_replica sql_dd mysys
   minchassis mysql_binlog_event ext::icu)
 
@@ -1331,6 +1331,14 @@ ENDIF()
 
 IF(SOLARIS)
   TARGET_LINK_LIBRARIES(mysqld mtmalloc)
+ENDIF()
+
+IF(WITH_JEMALLOC STREQUAL "bundled")
+  link_directories($<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/jemalloc-bundled/lib>)
+  target_link_libraries(mysqld PRIVATE jemalloc_pic)
+  target_include_directories(mysqld PRIVATE
+     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/jemalloc-bundled/include>
+  )
 ENDIF()
 
 # Remove transitive link dependencies when linking plugins
