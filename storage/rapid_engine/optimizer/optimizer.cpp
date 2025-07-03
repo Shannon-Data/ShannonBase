@@ -39,6 +39,7 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/optimizer/rules/const_fold_rule.h"
 
+#include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/populate/populate.h"
 
 namespace ShannonBase {
@@ -97,6 +98,29 @@ void OptimzieAccessPath(AccessPath *path, JOIN *join) {
   // This secondary storage engine does not yet store anything in the auxiliary
   // data member of AccessPath.
   assert(path->secondary_engine_data == nullptr);
+}
+
+// To build the customerized access path（such as: Vectorized Table Scan、GPU Join, etc.）
+// For example: add a new AccessPath Type: VECTOR_TABLE_SCAN, then create a new AccessPath
+// for this type VectorizedTableSan, then in PathGenerator::CreateIteratorFromAccessPath
+// to create its corressponding iterator.
+AccessPath *OptimizeAndRewriteAccessPath(AccessPath *path, const JOIN *join) {
+  switch (path->type) {
+    case AccessPath::TABLE_SCAN: {
+      TABLE *table = path->table_scan().table;
+      auto secondary_engine = table->s->is_secondary_engine();
+      auto can_vectorized = (table->file->stats.records >= SHANNON_VECTOR_WIDTH) ? true : false;
+
+      // create vectorized table scan if it can.
+      return AccessPathFactory::CreateTableScan(table, nullptr, secondary_engine && can_vectorized);
+    } break;
+    case AccessPath::HASH_JOIN: {
+    } break;
+    default:
+      break;
+  }
+
+  return nullptr;
 }
 
 }  // namespace Optimizer
