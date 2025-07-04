@@ -31,7 +31,7 @@
 
 #include "sql/iterators/basic_row_iterators.h"
 
-#include "storage/rapid_engine/iterators/iterator.h"
+#include "storage/rapid_engine/executor/iterators/iterator.h"
 
 namespace ShannonBase {
 namespace Executor {}  // namespace Executor

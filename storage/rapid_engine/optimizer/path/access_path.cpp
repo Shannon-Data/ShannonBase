@@ -64,8 +64,8 @@
 #include "sql/range_optimizer/reverse_index_range_scan.h"
 #include "sql/range_optimizer/rowid_ordered_retrieval.h"
 
-#include "storage/rapid_engine/iterators/iterator.h"
-#include "storage/rapid_engine/iterators/table_scan_iterator.h"
+#include "storage/rapid_engine/executor/iterators/iterator.h"
+#include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 namespace ShannonBase {
 namespace Optimizer {
 

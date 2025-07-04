@@ -75,9 +75,9 @@ SET (SHANNON_READER_SOURCES
     reader/csv_reader.cpp
 )
 SET (SHANNON_ITERATOR_SOURCES
-    iterators/iterator.cpp
-    iterators/hash_join_iterator.cpp
-    iterators/table_scan_iterator.cpp
+    executor/iterators/iterator.cpp
+    executor/iterators/hash_join_iterator.cpp
+    executor/iterators/table_scan_iterator.cpp
     ${SHANNON_READER_SOURCES}
 )
 set (SHANNON_OPTIMIZE
