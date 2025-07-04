@@ -195,6 +195,9 @@ void Populator::end() {
     srv_threads.m_change_pop_cordinator.join();
     sys_rapid_loop_count = 0;
 
+    g_index_cache.clear();
+    g_index_names.clear();
+
     ut_a(Populator::active() == false);
   }
 }
