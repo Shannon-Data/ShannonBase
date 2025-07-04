@@ -58,8 +58,15 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
-
 namespace Populate {
+
+// to cache the found index_t usd by log parser, and used for next time.
+std::unordered_map<uint64, const dict_index_t *> g_index_cache;
+
+// if using dict_index_t->table->get_table_name, it seems to slow, using cache
+// to accelerate it.
+std::unordered_map<uint64, std::pair<std::string, std::string>> g_index_names;
+std::shared_mutex g_index_cache_mutex;
 
 uint LogParser::get_trxid(const rec_t *rec, const dict_index_t *index, const ulint *offsets, uchar *trx_id) {
   uint pk_len{0};
@@ -132,7 +139,7 @@ bool LogParser::check_key_field(std::unordered_map<std::string, ShannonBase::key
 
 int LogParser::build_key(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
                          std::map<std::string, key_info_t> &keys) {
-  auto sch_tb = std::string(context->m_schema_name);
+  auto sch_tb = context->m_schema_name;
   sch_tb.append(":").append(context->m_table_name);
   auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
   auto matched_keys = rpd_tb->m_source_keys;
@@ -185,71 +192,111 @@ int LogParser::build_key(const Rapid_load_context *context, std::map<std::string
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-const dict_index_t *LogParser::find_index(uint64 idx_id) {
-  btr_pcur_t pcur;
-  const rec_t *rec;
-  mem_heap_t *heap;
-  mtr_t mtr;
-  MDL_ticket *mdl = nullptr;
-  dict_table_t *dd_indexes;
-  THD *thd = current_thd;
-  const dict_index_t *index_rec{nullptr}, *ret_index_rec{nullptr};
+const dict_index_t *LogParser::find_index(uint64 idx_id, std::string &db_name, std::string &table_name) {
+  std::shared_lock slock(g_index_cache_mutex);
+  if (g_index_cache.find(idx_id) == g_index_cache.end()) {
+    slock.unlock();
+    std::unique_lock<std::shared_mutex> ex_lock(g_index_cache_mutex);
+    if (g_index_cache.find(idx_id) == g_index_cache.end()) {  // double check
+      btr_pcur_t pcur;
+      const rec_t *rec;
+      mem_heap_t *heap;
+      mtr_t mtr;
+      MDL_ticket *mdl = nullptr;
+      dict_table_t *dd_indexes;
+      THD *thd = current_thd;
+      const dict_index_t *index_rec{nullptr}, *ret_index_rec{nullptr};
 
-  DBUG_TRACE;
+      DBUG_TRACE;
 
-  heap = mem_heap_create(100, UT_LOCATION_HERE);
-  dict_sys_mutex_enter();
-  mtr_start(&mtr);
+      heap = mem_heap_create(100, UT_LOCATION_HERE);
+      dict_sys_mutex_enter();
+      mtr_start(&mtr);
 
-  /* Start scan the mysql.indexes */
-  rec = dd_startscan_system(thd, &mdl, &pcur, &mtr, dd_indexes_name.c_str(), &dd_indexes);
+      /* Start scan the mysql.indexes */
+      rec = dd_startscan_system(thd, &mdl, &pcur, &mtr, dd_indexes_name.c_str(), &dd_indexes);
+      /* Process each record in the table */
+      while (rec) {
+        MDL_ticket *mdl_on_tab = nullptr;
+        dict_table_t *parent = nullptr;
+        MDL_ticket *mdl_on_parent = nullptr;
 
-  /* Process each record in the table */
-  while (rec) {
-    MDL_ticket *mdl_on_tab = nullptr;
-    dict_table_t *parent = nullptr;
-    MDL_ticket *mdl_on_parent = nullptr;
+        /* Populate a dict_index_t structure with information from
+        a INNODB_INDEXES row */
+        auto ret =
+            dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent, &mdl_on_parent, dd_indexes, &mtr);
 
-    /* Populate a dict_index_t structure with information from
-    a INNODB_INDEXES row */
-    auto ret = dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent, &mdl_on_parent, dd_indexes, &mtr);
+        if (ret && index_rec->id == idx_id) {  // found.
 
-    dict_sys_mutex_exit();
+          ret_index_rec = index_rec;
 
-    if (ret && index_rec->id == idx_id) ret_index_rec = index_rec;
+          if (index_rec != nullptr) {
+            dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
 
-    mem_heap_empty(heap);
+            /* Close parent table if it's a fts aux table. */
+            if (index_rec->table->is_fts_aux() && parent) {
+              dd_table_close(parent, thd, &mdl_on_parent, true);
+            }
+          }
 
-    /* Get the next record */
-    dict_sys_mutex_enter();
+          goto free_stage;
+        }
 
-    if (index_rec != nullptr) {
-      dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
+        dict_sys_mutex_exit();
 
-      /* Close parent table if it's a fts aux table. */
-      if (index_rec->table->is_fts_aux() && parent) {
-        dd_table_close(parent, thd, &mdl_on_parent, true);
+        mem_heap_empty(heap);
+
+        /* Get the next record */
+        dict_sys_mutex_enter();
+
+        if (index_rec != nullptr) {
+          dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
+
+          /* Close parent table if it's a fts aux table. */
+          if (index_rec->table->is_fts_aux() && parent) {
+            dd_table_close(parent, thd, &mdl_on_parent, true);
+          }
+        }
+
+        mtr_start(&mtr);
+        rec = dd_getnext_system_rec(&pcur, &mtr);
+      }  // while(rec)
+
+      mtr_commit(&mtr);
+    free_stage:
+      dd_table_close(dd_indexes, thd, &mdl, true);
+      dict_sys_mutex_exit();
+      mem_heap_free(heap);
+
+      /** we dont care about the dd or system objs. and attention to
+      `RECOVERY_INDEX_TABLE_NAME` table. TRX_SYS_SPACE*/
+      if (!ret_index_rec)
+        return nullptr;
+      else if ((ret_index_rec->space_id() != SYSTEM_TABLE_SPACE) && !ret_index_rec->table->is_system_schema() &&
+               !ret_index_rec->table->is_dd_table) {
+        g_index_cache[idx_id] = ret_index_rec;
+        ret_index_rec->table->get_table_name(db_name, table_name);
+        g_index_names[idx_id] = std::make_pair(db_name, table_name);
+        return ret_index_rec;
+      } else {
+        assert(false);
+        return nullptr;
       }
+    } else {
+      db_name = g_index_names[idx_id].first;
+      table_name = g_index_names[idx_id].second;
+      assert(g_index_cache[idx_id]);
+      return g_index_cache[idx_id];
     }
+  } else {
+    db_name = g_index_names[idx_id].first;
+    table_name = g_index_names[idx_id].second;
+    assert(g_index_cache[idx_id]);
+    return g_index_cache[idx_id];
+  }
 
-    mtr_start(&mtr);
-    rec = dd_getnext_system_rec(&pcur, &mtr);
-  }  // while(rec)
-
-  mtr_commit(&mtr);
-  dd_table_close(dd_indexes, thd, &mdl, true);
-  dict_sys_mutex_exit();
-  mem_heap_free(heap);
-
-  /** we dont care about the dd or system objs. and attention to
-  `RECOVERY_INDEX_TABLE_NAME` table. TRX_SYS_SPACE*/
-  if (!ret_index_rec)
-    return nullptr;
-  else if ((ret_index_rec->space_id() != SYSTEM_TABLE_SPACE) && !ret_index_rec->table->is_system_schema() &&
-           !ret_index_rec->table->is_dd_table)
-    return ret_index_rec;
-  else
-    return nullptr;
+  assert(false);
+  return nullptr;
 }
 
 int LogParser::store_field_in_mysql_format(const dict_index_t *index, const dict_col_t *col, const byte *dest,
@@ -791,6 +838,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
 
       // step 3: find all matched rows according to rec.
       auto found_rowid = find_matched_row(context, keys);
+      if (found_rowid == INVALID_ROW_ID) return HA_ERR_WRONG_IN_RECORD;
 
       // step 4: to update rows. TODO: update key field.
       if (!imcs_instance->update_row_from_log(context, found_rowid, row_field_value)) return HA_ERR_WRONG_IN_RECORD;
@@ -842,7 +890,7 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
 
   if (page) {
     auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
-    const dict_index_t *real_tb_index = find_index(index_id);
+    const dict_index_t *real_tb_index = find_index(index_id, context->m_schema_name, context->m_table_name);
     rec = page + offset;
 
     /* We do not need to reserve search latch, as the page
@@ -855,15 +903,10 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
       mem_heap_t *heap = nullptr;
       ulint offsets_[REC_OFFS_NORMAL_SIZE];
       rec_offs_init(offsets_);
-
-      std::string db_name, table_name;
-      real_tb_index->table->get_table_name(db_name, table_name);
-      context->m_schema_name = db_name;
-      context->m_table_name = table_name;
       context->m_extra_info.m_trxid = trx_id;
 
       // get field length from rapid
-      auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
+      auto share = ShannonBase::shannon_loaded_tables->get(context->m_schema_name, context->m_table_name);
       if (share) {
         /**
          * If all rows were deleted from a page, and those were not used by any other transaction.
@@ -912,19 +955,13 @@ byte *LogParser::parse_cur_and_apply_delete_rec(Rapid_load_context *context, byt
     rec_t *rec = page + offset;
     rec_offs_init(offsets_);
     if (page) {
+      auto context = std::make_unique<ShannonBase::Rapid_load_context>();
+
       auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
-      const dict_index_t *real_tb_index = find_index(index_id);
-
-      std::string db_name, table_name;
-      real_tb_index->table->get_table_name(db_name, table_name);
-      // get field length from rapid
-      auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
+      const dict_index_t *real_tb_index = find_index(index_id, context->m_schema_name, context->m_table_name);
+      assert(real_tb_index);
+      auto share = ShannonBase::shannon_loaded_tables->get(context->m_schema_name, context->m_table_name);
       if (share) {  // was not loaded table and not leaf
-        auto context = std::make_unique<ShannonBase::Rapid_load_context>();
-        context->m_schema_name = const_cast<char *>(db_name.c_str());
-        context->m_table_name = const_cast<char *>(table_name.c_str());
-        // context->m_extra_info.m_trxid = trx_id;
-
         /**
          * If all rows were deleted from a page, and those were not used by any other transaction.
          * This page will be purged, otherwise, it's there.
@@ -1032,7 +1069,8 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
 
   /**real_b_index 0 means it's system dict table, otherwise, users. or the record status is
    * NOT REC_STATUS_ORDINARY, means it can be leave nodes. dict_index_is_spatial(index) not support. */
-  real_tb_index = page ? find_index(mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID)) : nullptr;
+  std::string db_name, tb_name;
+  real_tb_index = page ? find_index(mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID), db_name, tb_name) : nullptr;
   if (!block || !real_tb_index || !is_data_rec(cursor_rec)) {
     return (const_cast<byte *>(ptr + (end_seg_len >> 1)));
   }
@@ -1083,15 +1121,14 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
   offsets = rec_get_offsets(buf + origin_offset, index, offsets, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
 
   {
-    std::string db_name, table_name;
-    real_tb_index->table->get_table_name(db_name, table_name);
+    auto context = std::make_unique<Rapid_load_context>();
+    context->m_schema_name = db_name;
+    context->m_table_name = tb_name;
     // get field length from rapid
-    auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
+    auto share = ShannonBase::shannon_loaded_tables->get(context->m_schema_name, context->m_table_name);
     if (!share)  // was not loaded table, return
       goto finish;
-    auto context = std::make_unique<Rapid_load_context>();
-    context->m_schema_name = const_cast<char *>(db_name.c_str());
-    context->m_table_name = const_cast<char *>(table_name.c_str());
+
     parse_cur_rec_change_apply_low(context.get(), buf + origin_offset, index, real_tb_index, offsets, MLOG_REC_INSERT,
                                    false, page_zip);
   }
@@ -1146,6 +1183,7 @@ byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context
   ulint *offsets;
   uint64_t index_id;
   const dict_index_t *tb_index;
+  std::string db_name, tb_name;
 
   if (end_ptr < ptr + 1) {
     return (nullptr);
@@ -1177,7 +1215,7 @@ byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context
   }
 
   index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
-  tb_index = find_index(index_id);
+  tb_index = find_index(index_id, db_name, tb_name);
   if (!tb_index) goto func_exit;
 
   ut_a(page_is_comp(page) == dict_table_is_comp(index->table));
@@ -1190,15 +1228,14 @@ byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context
   }
 
   if (tb_index) {
-    std::string db_name, table_name;
-    tb_index->table->get_table_name(db_name, table_name);
+    auto context = std::make_unique<Rapid_load_context>();
+    context->m_extra_info.m_trxid = trx_id;
+    context->m_schema_name = db_name;
+    context->m_table_name = tb_name;
+
     // get field length from rapid
-    auto share = ShannonBase::shannon_loaded_tables->get(db_name, table_name);
+    auto share = ShannonBase::shannon_loaded_tables->get(context->m_schema_name, context->m_table_name);
     if (share) {  // was not loaded table, return
-      auto context = std::make_unique<Rapid_load_context>();
-      context->m_schema_name = const_cast<char *>(db_name.c_str());
-      context->m_table_name = const_cast<char *>(table_name.c_str());
-      context->m_extra_info.m_trxid = trx_id;
       offsets = rec_get_offsets(rec, index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
       parse_and_apply_upd_rec_in_place(context.get(), rec, index, tb_index, offsets, update, page_zip, trx_id);
     }
