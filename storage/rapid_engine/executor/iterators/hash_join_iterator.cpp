@@ -27,7 +27,7 @@
  * from this.
  * vectorized/parallelized hash join iterator impl for rapid engine. In
  */
-#include "storage/rapid_engine/iterators/hash_join_iterator.h"
+#include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 
 namespace ShannonBase {
 namespace Executor {}  // namespace Executor

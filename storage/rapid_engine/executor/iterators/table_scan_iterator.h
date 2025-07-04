@@ -33,10 +33,10 @@
 #include "sql/iterators/row_iterator.h"
 #include "sql/mem_root_array.h"
 
+#include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/imcs/data_table.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/iterators/iterator.h"
 
 class TABLE;
 namespace ShannonBase {

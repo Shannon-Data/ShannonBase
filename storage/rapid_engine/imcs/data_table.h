@@ -29,9 +29,9 @@
 #include <atomic>
 #include <vector>
 
+#include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/imcs/index/iterator.h"
 #include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/iterators/iterator.h"
 #include "storage/rapid_engine/trx/readview.h"
 
 class TABLE;
