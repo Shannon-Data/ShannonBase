@@ -28,9 +28,12 @@ execute_prepared_stmt
 ml_explain
 ml_explain_row
 ml_explain_table
+ml_model_active
+ml_model_export
 ml_model_import
 ml_model_load
 ml_model_unload
+ml_predict_row
 ml_predict_table
 ml_score
 ml_train
