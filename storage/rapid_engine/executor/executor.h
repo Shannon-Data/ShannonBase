@@ -21,19 +21,11 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for imcs optimizer.
 */
-/** The basic iterator class for IMCS. All specific iterators are all inherited
- * from this.
- */
-#ifndef __SHANNONBASE_HASH_JOIN_ITERATOR_H__
-#define __SHANNONBASE_HASH_JOIN_ITERATOR_H__
-
-#include "sql/iterators/basic_row_iterators.h"
-
-#include "storage/rapid_engine/iterators/iterator.h"
-
+#ifndef __SHANNONBASE_EXECUTOR_H__
+#define __SHANNONBASE_EXECUTOR_H__
 namespace ShannonBase {
 namespace Executor {}  // namespace Executor
 }  // namespace ShannonBase
-#endif  // __SHANNONBASE_HASH_JOIN_ITERATOR_H__
+#endif  //__SHANNONBASE_EXECUTOR_H__

@@ -27,7 +27,7 @@
  * from this.
  * vectorized/parallelized table scan iterator impl for rapid engine. In
  */
-#include "storage/rapid_engine/iterators/table_scan_iterator.h"
+#include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 
 #include "include/my_base.h"
 

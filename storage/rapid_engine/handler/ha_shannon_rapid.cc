@@ -55,6 +55,7 @@
 #include "sql/sql_lex.h"
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
+
 #include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
 #include "storage/innobase/include/dict0dd.h"    //dd_is_partitioned
 #include "storage/rapid_engine/cost/cost.h"
@@ -66,6 +67,7 @@
 #include "storage/rapid_engine/include/rapid_status.h"  //column stats
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
+#include "storage/rapid_engine/optimizer/writable_access_path.h"
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/utils.h"
@@ -883,12 +885,19 @@ static bool RapidOptimize(THD *thd, LEX *lex) {
     return true;
   }
 
+  auto root_access_path = lex->unit->root_access_path();
   JOIN *join = lex->unit->first_query_block()->join;
-  WalkAccessPaths(lex->unit->root_access_path(), join, WalkAccessPathPolicy::ENTIRE_TREE,
-                  [&](AccessPath *path, const JOIN *join) {
-                    ShannonBase::Optimizer::OptimzieAccessPath(path, const_cast<JOIN *>(join));
-                    return false;
-                  });
+  ShannonBase::Optimizer::WalkAndRewriteAccessPaths(root_access_path, join, WalkAccessPathPolicy::ENTIRE_TREE,
+                                                    [&](AccessPath *path, const JOIN *join) -> AccessPath * {
+                                                      return ShannonBase::Optimizer::OptimizeAndRewriteAccessPath(path,
+                                                                                                                  join);
+                                                    });
+  // WalkAccessPaths(lex->unit->root_access_path(), join, WalkAccessPathPolicy::ENTIRE_TREE,
+  //                 [&](AccessPath *path, const JOIN *join) {
+  //                   ShannonBase::Optimizer::OptimzieAccessPath(path, const_cast<JOIN *>(join));
+  //                   return false;
+  //                 });
+
   // Here, because we cannot get the parent node of corresponding iterator, we reset the type of access
   // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`
   // AP workload. But, we will replace the itertor when we traverse iterator tree from root to leaves.
