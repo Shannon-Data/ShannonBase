@@ -64,12 +64,35 @@
 #include "sql/range_optimizer/reverse_index_range_scan.h"
 #include "sql/range_optimizer/rowid_ordered_retrieval.h"
 
-#include "storage/rapid_engine/iterators/iterator.h"
-#include "storage/rapid_engine/iterators/table_scan_iterator.h"
+#include "storage/rapid_engine/executor/iterators/iterator.h"
+#include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 namespace ShannonBase {
 namespace Optimizer {
 
 using pack_rows::TableCollection;
+
+AccessPath *AccessPathFactory::CreateTableScan(TABLE *table, THD *thd, bool vectorized) {
+  auto path = new (current_thd->mem_root) AccessPath();
+  path->type = AccessPath::TABLE_SCAN;
+  path->count_examined_rows = true;
+  path->table_scan().table = table;
+
+  // TODO: to build a new iterator for this acess path if you needed.
+  path->iterator = nullptr;
+  path->secondary_engine_data = nullptr;
+  return path;
+}
+
+AccessPath *AccessPathFactory::CreateHashJoin(AccessPath *outer, AccessPath *inner, bool vectorized) {
+  auto path = new (current_thd->mem_root) AccessPath();
+  path->type = AccessPath::HASH_JOIN;
+  path->hash_join().outer = outer;
+  path->hash_join().inner = inner;
+
+  // to build iterator for Hash_join AccessPath.
+  path->iterator = nullptr;
+  return path;
+}
 
 struct IteratorToBeCreated {
   AccessPath *path;

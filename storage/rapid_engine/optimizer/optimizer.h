@@ -46,6 +46,8 @@ class Rule;
 class CostEstimator;
 class CardinalityEstimator;
 
+AccessPath *OptimizeAndRewriteAccessPath(AccessPath *path, const JOIN *join);
+
 // here, to optimize the secondary engine with its own optimizer.
 void OptimzieAccessPath(AccessPath *path, JOIN *join);
 

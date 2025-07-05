@@ -30,6 +30,9 @@
 
 #ifndef __SHANNONBASE_LOG_PARSER_H__
 #define __SHANNONBASE_LOG_PARSER_H__
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
 
 #include "storage/innobase/include/buf0buf.h"
 #include "storage/innobase/include/log0types.h"
@@ -46,6 +49,11 @@ class TABLE;
 namespace ShannonBase {
 class Rapid_load_context;
 namespace Populate {
+
+extern std::unordered_map<uint64, const dict_index_t *> g_index_cache;
+extern std::unordered_map<uint64, std::pair<std::string, std::string>> g_index_names;
+extern std::shared_mutex g_index_cache_mutex;
+
 /**
  * To parse the redo log file, it used to populate the changes from ionnodb
  * to rapid.
@@ -156,7 +164,7 @@ class LogParser {
                                   const byte *dest, const byte *src, ulint mlen, ulint len);
 
   // only user's index be retrieved from dd_table.
-  const dict_index_t *find_index(uint64 idx_id);
+  const dict_index_t *find_index(uint64 idx_id, std::string& db_name, std::string& table_name);
 
   // get the trxid in byte fmt and returns the length of PK found.
   inline uint get_trxid(const rec_t *rec, const dict_index_t *index,

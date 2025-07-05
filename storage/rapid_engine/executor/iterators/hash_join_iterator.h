@@ -26,55 +26,14 @@
 /** The basic iterator class for IMCS. All specific iterators are all inherited
  * from this.
  */
-#ifndef __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
-#define __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
+#ifndef __SHANNONBASE_HASH_JOIN_ITERATOR_H__
+#define __SHANNONBASE_HASH_JOIN_ITERATOR_H__
 
 #include "sql/iterators/basic_row_iterators.h"
-#include "sql/iterators/row_iterator.h"
-#include "sql/mem_root_array.h"
 
-#include "storage/rapid_engine/imcs/data_table.h"
-#include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/iterators/iterator.h"
+#include "storage/rapid_engine/executor/iterators/iterator.h"
 
-class TABLE;
 namespace ShannonBase {
-namespace Executor {
-
-class VectorizedTableScanIterator : public TableRowIterator {
- public:
-  VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
-  virtual ~VectorizedTableScanIterator();
-
-  bool Init() override;
-  int Read() override;
-
-  size_t ReadCount() override { return m_read_cnt; }
-
-  uchar *GetData(size_t rowid) override;
-
-  void set_filter(filter_func_t filter) { m_filter = filter; }
-
- private:
-  TABLE *m_table{nullptr};
-
-  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table{nullptr};
-
-  std::vector<ColumnChunk> m_col_chunks;
-
-  // Optional filter for predicate pushdown
-  filter_func_t m_filter;
-
-  // the row read a chunk. chunk-a-time.
-  size_t m_read_cnt{0};
-
-  // total rows read since started.
-  size_t m_total_read{0};
-
-  size_t m_batch_size{1};
-};
-
-}  // namespace Executor
+namespace Executor {}  // namespace Executor
 }  // namespace ShannonBase
-#endif  // __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
+#endif  // __SHANNONBASE_HASH_JOIN_ITERATOR_H__

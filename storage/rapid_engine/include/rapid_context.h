@@ -140,7 +140,7 @@ class Rapid_pop_context : public Secondary_engine_execution_context {
  public:
   uint64_t m_start_lsn;
   // current schema name and table name.
-  char *m_schema_name{nullptr}, *m_table_name{nullptr};
+  std::string m_schema_name, m_table_name;
   // trx id.
   Transaction::ID m_trxid{0};
 
