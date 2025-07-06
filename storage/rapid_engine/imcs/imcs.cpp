@@ -379,7 +379,7 @@ int Imcs::insert_row(const Rapid_load_context *context, row_id_t rowid, uchar *b
 }
 
 int Imcs::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                             std::map<std::string, mysql_field_t> &fields) {
+                             std::unordered_map<std::string, mysql_field_t> &fields) {
   std::string sch_tb;
   sch_tb.append(context->m_schema_name).append(":").append(context->m_table_name);
   auto rpd_tb = m_tables[sch_tb].get();
@@ -453,7 +453,7 @@ int Imcs::update_row(const Rapid_load_context *context, row_id_t rowid, std::str
 }
 
 int Imcs::update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                              std::map<std::string, mysql_field_t> &upd_recs) {
+                              std::unordered_map<std::string, mysql_field_t> &upd_recs) {
   ut_a(context);
   auto sch_tb(context->m_schema_name);
   sch_tb.append(":").append(context->m_table_name);

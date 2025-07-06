@@ -257,7 +257,7 @@ INSERT INTO t10 (year, department_id, record_id, data_value) VALUES
 select * from t10 order by department_id;
 explain select * from t10 order by department_id;
 
---sleep 15
+--sleep 10
 --connection connection_1
 --echo #[conn_1_after_insert]
 
@@ -347,7 +347,7 @@ DELETE FROM t10 WHERE year = 2024 AND department_id = 3;
 explain select * from t10 order by department_id;
 select * from t10 order by department_id;
 
---sleep 30
+--sleep 20
 --connection connection_1
 --echo #[conn_1_after_dml]
 

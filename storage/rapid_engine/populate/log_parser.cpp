@@ -68,6 +68,11 @@ std::unordered_map<uint64, const dict_index_t *> g_index_cache;
 std::unordered_map<uint64, std::pair<std::string, std::string>> g_index_names;
 std::shared_mutex g_index_cache_mutex;
 
+std::unordered_map<std::string, LogParser::SYS_FIELD_TYPE_ID> LogParser::m_sys_field_name = {
+    {SHANNON_DB_TRX_ID, LogParser::SYS_FIELD_TYPE_ID::SYS_DB_TRX_ID},
+    {SHANNON_DB_ROW_ID, LogParser::SYS_FIELD_TYPE_ID::SYS_DB_ROW_ID},
+    {SHANNON_DB_ROLL_PTR, LogParser::SYS_FIELD_TYPE_ID::DB_ROLL_PTR}};
+
 uint LogParser::get_trxid(const rec_t *rec, const dict_index_t *index, const ulint *offsets, uchar *trx_id) {
   uint pk_len{0};
   auto trx_id_pos = index->get_sys_col_pos(DATA_TRX_ID);
@@ -137,7 +142,8 @@ bool LogParser::check_key_field(std::unordered_map<std::string, ShannonBase::key
   return false;
 }
 
-int LogParser::build_key(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
+int LogParser::build_key(const Rapid_load_context *context,
+                         std::unordered_map<std::string, mysql_field_t> &field_values,
                          std::map<std::string, key_info_t> &keys) {
   auto sch_tb = context->m_schema_name;
   sch_tb.append(":").append(context->m_table_name);
@@ -190,113 +196,6 @@ int LogParser::build_key(const Rapid_load_context *context, std::map<std::string
   }
 
   return ShannonBase::SHANNON_SUCCESS;
-}
-
-const dict_index_t *LogParser::find_index(uint64 idx_id, std::string &db_name, std::string &table_name) {
-  std::shared_lock slock(g_index_cache_mutex);
-  if (g_index_cache.find(idx_id) == g_index_cache.end()) {
-    slock.unlock();
-    std::unique_lock<std::shared_mutex> ex_lock(g_index_cache_mutex);
-    if (g_index_cache.find(idx_id) == g_index_cache.end()) {  // double check
-      btr_pcur_t pcur;
-      const rec_t *rec;
-      mem_heap_t *heap;
-      mtr_t mtr;
-      MDL_ticket *mdl = nullptr;
-      dict_table_t *dd_indexes;
-      THD *thd = current_thd;
-      const dict_index_t *index_rec{nullptr}, *ret_index_rec{nullptr};
-
-      DBUG_TRACE;
-
-      heap = mem_heap_create(100, UT_LOCATION_HERE);
-      dict_sys_mutex_enter();
-      mtr_start(&mtr);
-
-      /* Start scan the mysql.indexes */
-      rec = dd_startscan_system(thd, &mdl, &pcur, &mtr, dd_indexes_name.c_str(), &dd_indexes);
-      /* Process each record in the table */
-      while (rec) {
-        MDL_ticket *mdl_on_tab = nullptr;
-        dict_table_t *parent = nullptr;
-        MDL_ticket *mdl_on_parent = nullptr;
-
-        /* Populate a dict_index_t structure with information from
-        a INNODB_INDEXES row */
-        auto ret =
-            dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent, &mdl_on_parent, dd_indexes, &mtr);
-
-        if (ret && index_rec->id == idx_id) {  // found.
-
-          ret_index_rec = index_rec;
-
-          if (index_rec != nullptr) {
-            dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
-
-            /* Close parent table if it's a fts aux table. */
-            if (index_rec->table->is_fts_aux() && parent) {
-              dd_table_close(parent, thd, &mdl_on_parent, true);
-            }
-          }
-
-          goto free_stage;
-        }
-
-        dict_sys_mutex_exit();
-
-        mem_heap_empty(heap);
-
-        /* Get the next record */
-        dict_sys_mutex_enter();
-
-        if (index_rec != nullptr) {
-          dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
-
-          /* Close parent table if it's a fts aux table. */
-          if (index_rec->table->is_fts_aux() && parent) {
-            dd_table_close(parent, thd, &mdl_on_parent, true);
-          }
-        }
-
-        mtr_start(&mtr);
-        rec = dd_getnext_system_rec(&pcur, &mtr);
-      }  // while(rec)
-
-      mtr_commit(&mtr);
-    free_stage:
-      dd_table_close(dd_indexes, thd, &mdl, true);
-      dict_sys_mutex_exit();
-      mem_heap_free(heap);
-
-      /** we dont care about the dd or system objs. and attention to
-      `RECOVERY_INDEX_TABLE_NAME` table. TRX_SYS_SPACE*/
-      if (!ret_index_rec)
-        return nullptr;
-      else if ((ret_index_rec->space_id() != SYSTEM_TABLE_SPACE) && !ret_index_rec->table->is_system_schema() &&
-               !ret_index_rec->table->is_dd_table) {
-        g_index_cache[idx_id] = ret_index_rec;
-        ret_index_rec->table->get_table_name(db_name, table_name);
-        g_index_names[idx_id] = std::make_pair(db_name, table_name);
-        return ret_index_rec;
-      } else {
-        assert(false);
-        return nullptr;
-      }
-    } else {
-      db_name = g_index_names[idx_id].first;
-      table_name = g_index_names[idx_id].second;
-      assert(g_index_cache[idx_id]);
-      return g_index_cache[idx_id];
-    }
-  } else {
-    db_name = g_index_names[idx_id].first;
-    table_name = g_index_names[idx_id].second;
-    assert(g_index_cache[idx_id]);
-    return g_index_cache[idx_id];
-  }
-
-  assert(false);
-  return nullptr;
 }
 
 int LogParser::store_field_in_mysql_format(const dict_index_t *index, const dict_col_t *col, const byte *dest,
@@ -589,7 +488,7 @@ byte *LogParser::parse_tablespace_redo_extend(byte *ptr, const byte *end, const 
 
 int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
                                 const dict_index_t *real_index, const ulint *offsets,
-                                std::map<std::string, mysql_field_t> &field_values) {
+                                std::unordered_map<std::string, mysql_field_t> &field_values) {
   ut_ad(rec);
   ut_ad(rec_validate(rec, offsets));
   ut_ad(rec_offs_validate(rec, index, offsets));
@@ -608,6 +507,9 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
   auto rpd_table = imcs_instance->get_table(sch_tb);
   auto keys = rpd_table->m_source_keys;
 
+  mem_heap_t *heap = mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE);
+  auto real_offsets = rec_get_offsets(rec, real_index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
+  uchar mysql_field_data_1[MAX_FIELD_WIDTH] = {0};
   for (auto idx = 0u; idx < index->n_fields; idx++) {
     /**
      * in mlog_parse_index_v1, we can found that it does not bring the true type of that col
@@ -616,9 +518,25 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
      *  MLOG_REC_INSERT logs. And, here, we dont care about DB_ROW_ID, DB_ROLL_PTR, ONLY care
      * about `DB_TRX_ID`.
      */
-    /**index parsed from mlog[name:DUMMY_LOG], is not consitent with real_index.*/
-    mysql_field_t field_value;
+    memset(mysql_field_data_1, 0x0, MAX_FIELD_WIDTH);
+    mem_heap_empty(heap);
 
+    auto field_name = real_index->get_field(idx) ? real_index->get_field(idx)->name() : nullptr;
+    if (!field_name) continue;
+    auto fld_type = m_sys_field_name.find(field_name);
+    auto is_trx_id = (fld_type != m_sys_field_name.end() && fld_type->second == SYS_FIELD_TYPE_ID::SYS_DB_TRX_ID);
+    auto is_row_id = (fld_type != m_sys_field_name.end() && fld_type->second == SYS_FIELD_TYPE_ID::SYS_DB_ROW_ID);
+    auto is_roll_ptr = (fld_type != m_sys_field_name.end() && fld_type->second == SYS_FIELD_TYPE_ID::DB_ROLL_PTR);
+
+    // clang-format off
+    // due to innodb col has not NOT_SECONDARY property, so check it with IMCS.
+    if (is_roll_ptr ||
+        (!is_trx_id && !is_row_id && !check_key_field(keys, field_name) && !rpd_table->get_field(field_name))) {
+      continue;
+    }
+    // clang-format on
+
+    /**index parsed from mlog[name:DUMMY_LOG], is not consitent with real_index.*/
     dtype_t col_type;
     real_index->get_col(idx)->copy_type(&col_type);
     dict_col_t *col = (dict_col_t *)index->get_col(idx);
@@ -629,32 +547,20 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
     col->len = col_type.len;
     col->mbminmaxlen = col_type.mbminmaxlen;
 
+    mysql_field_t field_value;
     field_value.has_nullbit = col->is_nullable();
     field_value.mtype = col->mtype;
 
-    // due to innodb col has not NOT_SECONDARY property, so check it with IMCS.
-    auto field_name = real_index->get_field(idx)->name();
-    // clang-format off
-    if (strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN) == 0 ||
-        (strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN) != 0 &&
-         strncmp(field_name, SHANNON_DB_ROW_ID, SHANNON_DB_ROW_ID_LEN) != 0 &&
-         !check_key_field(keys, field_name) &&
-         !rpd_table->get_field(field_name))) {
-      continue;
-    }
-    // clang-format on
+    auto mysql_fld_len =
+        (is_trx_id) ? SHANNON_DATA_DB_TRX_ID_LEN
+                    : ((is_row_id) ? SHANNON_DATA_DB_ROW_ID_LEN : rpd_table->get_field(field_name)->header()->m_width);
+    DBUG_PRINT("parse_rec_fields", ("Extracted field: %s, mtype=%u, len=%lu", field_name, col->mtype, mysql_fld_len));
 
-    auto mysql_fld_len{0u};
-    if (strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN) == 0) {
-      mysql_fld_len = SHANNON_DATA_DB_TRX_ID_LEN;
-    } else if (strncmp(field_name, SHANNON_DB_ROW_ID, SHANNON_DB_ROW_ID_LEN) == 0) {
-      mysql_fld_len = SHANNON_DATA_DB_ROW_ID_LEN;
-    } else {
-      ut_a(strncmp(field_name, SHANNON_DB_ROLL_PTR, SHANNON_DB_ROLL_PTR_LEN));
-      mysql_fld_len = rpd_table->get_field(field_name)->header()->m_width;
-    }
-    std::unique_ptr<uchar[]> mysql_field_data = std::make_unique<uchar[]>(mysql_fld_len);
-    memset(mysql_field_data.get(), 0x0, mysql_fld_len);
+    std::unique_ptr<uchar[]> mysql_field_data((mysql_fld_len <= MAX_FIELD_WIDTH) ? nullptr : new uchar[mysql_fld_len]);
+    uchar *field_data_ptr = (mysql_fld_len <= MAX_FIELD_WIDTH)
+                                ? mysql_field_data_1
+                                : (memset(mysql_field_data.get(), 0x0, mysql_fld_len), mysql_field_data.get());
+    ut_a(mysql_fld_len <= MAX_FIELD_WIDTH || mysql_field_data);
 
     auto physical_fld_len{0lu};
     auto mtype = real_index->get_col(idx)->mtype;
@@ -672,8 +578,6 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
       ut_ad(rec_offs_validate(rec, index, offsets));
 
       ulint local_len = physical_fld_len;
-      mem_heap_t *heap = mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE);
-      auto real_offsets = rec_get_offsets(rec, real_index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
 
       const page_size_t page_size = dict_table_page_size(index->table);
       auto field_ref = const_cast<byte *>(lob::btr_rec_get_field_ref(real_index, rec, real_offsets, idx));
@@ -684,22 +588,26 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
       data = lob::btr_rec_copy_externally_stored_field_func(nullptr, real_index, rec, real_offsets, page_size, idx,
                                                             &local_len, nullptr,
                                                             IF_DEBUG(dict_index_is_sdi(real_index), ) heap, true);
-    } else {
+    } else {                                                 // store internal.
       if (UNIV_LIKELY(physical_fld_len != UNIV_SQL_NULL)) {  // Not null
         // 1 : gets the data from innodb format to mysql format.
-        if (mysql_fld_len < physical_fld_len) {
+        if ((mysql_fld_len < physical_fld_len) && (physical_fld_len > MAX_FIELD_WIDTH)) {
           mysql_field_data.reset(new uchar[physical_fld_len]);
-          std::memset(mysql_field_data.get(), 0x0, physical_fld_len);
+          memset(mysql_field_data.get(), 0x0, physical_fld_len);
           mysql_fld_len = physical_fld_len;
+          field_data_ptr = mysql_field_data.get();
         }
-        if (mtype == DATA_BLOB) {  // if it's blob type. cp the data directly. ref to: row0sel.cc:2610.[DATA_BLOB]
-          std::memcpy(mysql_field_data.get(), data, physical_fld_len);
+
+        // if it's blob type. cp the data directly. ref to: row0sel.cc:2610.[DATA_BLOB]
+        if (UNIV_UNLIKELY(mtype == DATA_BLOB)) {
+          mysql_fld_len = physical_fld_len;
+          std::memcpy(field_data_ptr, data, physical_fld_len);
         } else
-          store_field_in_mysql_format(index, col, mysql_field_data.get(), data, mysql_fld_len, physical_fld_len);
+          store_field_in_mysql_format(index, col, field_data_ptr, data, mysql_fld_len, physical_fld_len);
 
         // 2: to set trx id if it is DB_TRX_ID column, then goes to next col.
-        if (strncmp(field_name, SHANNON_DB_TRX_ID, SHANNON_DB_TRX_ID_LEN) == 0) {
-          context->m_extra_info.m_trxid = mach_read_from_6(mysql_field_data.get());
+        if (is_trx_id) {
+          context->m_extra_info.m_trxid = mach_read_from_6(field_data_ptr);
           continue;
         }
 
@@ -712,22 +620,25 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
           }
 
           mysql_fld_len -= len_offset;
-          std::memmove(mysql_field_data.get(), mysql_field_data.get() + len_offset, mysql_fld_len);
+          std::memmove(field_data_ptr, field_data_ptr + len_offset, mysql_fld_len);
         }
 
         field_value.mlength = mysql_fld_len;
         field_value.plength = physical_fld_len;
+        if (mysql_field_data.get() == nullptr) {
+          mysql_field_data.reset(new uchar[mysql_fld_len]);
+          std::memcpy(mysql_field_data.get(), field_data_ptr, mysql_fld_len);
+        }
         field_value.data = std::move(mysql_field_data);
-        field_values.emplace(field_name, std::move(field_value));
       } else {  // if value of this field is null, then set field_data to nullptr.
         mysql_field_data.reset(nullptr);
-
         field_value.mlength = UNIV_SQL_NULL;
         field_value.data = nullptr;
-        field_values.emplace(field_name, std::move(field_value));
       }
     }
+    field_values.emplace(field_name, std::move(field_value));
   }
+  mem_heap_free(heap);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -798,8 +709,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     case MLOG_REC_DELETE: {
       if (all) return imcs_instance->delete_rows(context, {});
 
-      std::map<std::string, mysql_field_t> row_field_value;
-      std::map<std::string, std::unique_ptr<uchar[]>> key_values;
+      std::unordered_map<std::string, mysql_field_t> row_field_value;
       // step 1:to get all field data of deleting row.
       parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
 
@@ -813,7 +723,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       }
     } break;
     case MLOG_REC_INSERT: {
-      std::map<std::string, mysql_field_t> row_field_value;  //<field_name, field>
+      std::unordered_map<std::string, mysql_field_t> row_field_value;  //<field_name, field>
       // step 1:to get all field data of inserting row.
       parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
 
@@ -828,8 +738,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     } break;
     case MLOG_REC_UPDATE_IN_PLACE: {
       ut_a(upd);
-      std::map<std::string, mysql_field_t> row_field_value;
-      std::map<std::string, std::unique_ptr<uchar[]>> key_values;  // all in mysql format.
+      std::unordered_map<std::string, mysql_field_t> row_field_value;
       // step 1:to get all field data of updating row.
       parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
 

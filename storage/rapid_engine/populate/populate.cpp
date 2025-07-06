@@ -38,6 +38,12 @@
 #include <sstream>
 #include <thread>
 
+#include "storage/innobase/include/btr0pcur.h"  //for btr_pcur_t
+#include "storage/innobase/include/data0type.h"
+#include "storage/innobase/include/dict0dd.h"
+#include "storage/innobase/include/dict0dict.h"
+#include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
+
 #include "current_thd.h"
 #include "include/os0event.h"
 #include "sql/sql_class.h"
@@ -181,6 +187,7 @@ void Populator::send_notify() { os_event_set(log_sys->rapid_events[0]); }
 
 void Populator::start() {
   if (!Populator::active() && shannon_loaded_tables->size()) {
+    // ShannonBase::Populate::LogParser::load_indexes_caches();
     srv_threads.m_change_pop_cordinator = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
     ShannonBase::Populate::sys_pop_started.store(true, std::memory_order_seq_cst);
     srv_threads.m_change_pop_cordinator.start();
@@ -200,6 +207,78 @@ void Populator::end() {
 
     ut_a(Populator::active() == false);
   }
+}
+
+int Populator::load_indexes_caches() {
+  btr_pcur_t pcur;
+  const rec_t *rec;
+  mem_heap_t *heap;
+  mtr_t mtr;
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *dd_indexes;
+  THD *thd = current_thd;
+  const dict_index_t *index_rec{nullptr};
+
+  DBUG_TRACE;
+
+  heap = mem_heap_create(100, UT_LOCATION_HERE);
+  dict_sys_mutex_enter();
+  mtr_start(&mtr);
+
+  /* Start scan the mysql.indexes */
+  rec = dd_startscan_system(thd, &mdl, &pcur, &mtr, dd_indexes_name.c_str(), &dd_indexes);
+  /* Process each record in the table */
+  while (rec) {
+    MDL_ticket *mdl_on_tab = nullptr;
+    dict_table_t *parent = nullptr;
+    MDL_ticket *mdl_on_parent = nullptr;
+
+    /* Populate a dict_index_t structure with information from
+    a INNODB_INDEXES row */
+    auto ret = dd_process_dd_indexes_rec(heap, rec, &index_rec, &mdl_on_tab, &parent, &mdl_on_parent, dd_indexes, &mtr);
+
+    /** we dont care about the dd or system objs. and attention to
+    `RECOVERY_INDEX_TABLE_NAME` table. TRX_SYS_SPACE*/
+    if (ret && ((index_rec->space_id() != SYSTEM_TABLE_SPACE) && !index_rec->table->is_system_schema() &&
+                !index_rec->table->is_dd_table)) {
+      std::shared_lock slock(g_index_cache_mutex);
+      if (g_index_cache.find(index_rec->id) == g_index_cache.end()) {  // add new one.
+        slock.unlock();
+        std::unique_lock<std::shared_mutex> ex_lock(g_index_cache_mutex);
+        if (g_index_cache.find(index_rec->id) == g_index_cache.end()) {  // double check
+          g_index_cache[index_rec->id] = index_rec;
+          std::string db_name, table_name;
+          index_rec->table->get_table_name(db_name, table_name);
+          g_index_names[index_rec->id] = std::make_pair(db_name, table_name);
+        }
+      }
+    }
+
+    dict_sys_mutex_exit();
+
+    mem_heap_empty(heap);
+
+    /* Get the next record */
+    dict_sys_mutex_enter();
+
+    if (index_rec != nullptr) {
+      dd_table_close(index_rec->table, thd, &mdl_on_tab, true);
+
+      /* Close parent table if it's a fts aux table. */
+      if (index_rec->table->is_fts_aux() && parent) {
+        dd_table_close(parent, thd, &mdl_on_parent, true);
+      }
+    }
+
+    mtr_start(&mtr);
+    rec = dd_getnext_system_rec(&pcur, &mtr);
+  }  // while(rec)
+
+  mtr_commit(&mtr);
+  dd_table_close(dd_indexes, thd, &mdl, true);
+  dict_sys_mutex_exit();
+  mem_heap_free(heap);
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 void Populator::print_info(FILE *file) { /* in: output stream */

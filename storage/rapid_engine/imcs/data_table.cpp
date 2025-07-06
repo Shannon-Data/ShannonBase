@@ -167,13 +167,13 @@ start:
 }
 
 /** TODO:
- * 改为：先统一做可见性判断（一次 row-wise），再处理列数据
-改进示意：
+ * First perform visibility checks in a row-wise manner, then process column data.
+for exam:：
 std::vector<rowid_t> visible_rows;
 std::vector<RowVersionInfo> row_versions;
 
 while (visible_rows.size() < batch_size) {
-    // 统一做可见性判断（只读一次 versioned_ptr）
+    // Perform visibility checks in a unified manner (read versioned_ptr only once).
     auto status = ...;
     if (status is visible) {
         visible_rows.push_back(m_rowid);
@@ -182,11 +182,11 @@ while (visible_rows.size() < batch_size) {
     m_rowid++;
 }
 
-// 然后对每列，批量处理 visible_rows
+// Then, for each column, batch process the visible_rows.
 for (col : cols) {
     for (i = 0; i < visible_rows.size(); ++i) {
         auto rid = visible_rows[i];
-        // 直接解码 rid 对应列数据，写入 col_chunk[i]
+        // directly decode the column data corresponding to each rid and write it into col_chunk[i].
     }
 }
  */

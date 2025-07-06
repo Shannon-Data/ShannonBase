@@ -114,6 +114,9 @@ class Populator {
   static bool check_status(std::string &table_name);
   // to send notify to populator main thread to start do propagation.
   static void send_notify();
+
+  // preload mysql.indexes into caches.
+  static int load_indexes_caches();
 };
 
 }  // namespace Populate
