@@ -94,7 +94,7 @@ class Imcs : public MemoryObject {
 
   // insert a row into IMCS to specific address from log_parser thread.
   int write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                         std::map<std::string, mysql_field_t> &fields);
+                         std::unordered_map<std::string, mysql_field_t> &fields);
 
   // delete a row in IMCS by using its rowid.
   int delete_row(const Rapid_load_context *context, row_id_t rowid);
@@ -110,7 +110,7 @@ class Imcs : public MemoryObject {
    *  upd_recs[in], new values of updating row at row_id.
    */
   int update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                          std::map<std::string, mysql_field_t> &upd_recs);
+                          std::unordered_map<std::string, mysql_field_t> &upd_recs);
 
   int build_indexes_from_keys(const Rapid_load_context *context, std::map<std::string, key_info_t> &keys,
                               row_id_t rowid);

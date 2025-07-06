@@ -114,7 +114,101 @@ AccessPath *OptimizeAndRewriteAccessPath(AccessPath *path, const JOIN *join) {
       // create vectorized table scan if it can.
       return AccessPathFactory::CreateTableScan(table, nullptr, secondary_engine && can_vectorized);
     } break;
+    case AccessPath::INDEX_SCAN: {
+    } break;
+    case AccessPath::SAMPLE_SCAN: {
+    } break;
+    case AccessPath::REF: {
+    } break;
+    case AccessPath::REF_OR_NULL: {
+    } break;
+    case AccessPath::EQ_REF: {
+    } break;
+    case AccessPath::PUSHED_JOIN_REF: {
+    } break;
+    case AccessPath::FULL_TEXT_SEARCH: {
+    } break;
+    case AccessPath::CONST_TABLE: {
+    } break;
+    case AccessPath::MRR: {
+    } break;
+    case AccessPath::FOLLOW_TAIL: {
+    } break;
+    case AccessPath::INDEX_RANGE_SCAN: {
+    } break;
+    case AccessPath::INDEX_MERGE: {
+    } break;
+    case AccessPath::ROWID_INTERSECTION: {
+    } break;
+    case AccessPath::ROWID_UNION: {
+    } break;
+    case AccessPath::INDEX_SKIP_SCAN: {
+    } break;
+    case AccessPath::GROUP_INDEX_SKIP_SCAN: {
+    } break;
+    case AccessPath::DYNAMIC_INDEX_RANGE_SCAN: {
+    } break;
+
+    // Basic access paths that don't correspond to a specific table.
+    case AccessPath::TABLE_VALUE_CONSTRUCTOR: {
+    } break;
+    case AccessPath::FAKE_SINGLE_ROW: {
+    } break;
+    case AccessPath::ZERO_ROWS: {
+    } break;
+    case AccessPath::ZERO_ROWS_AGGREGATED: {
+    } break;
+    case AccessPath::MATERIALIZED_TABLE_FUNCTION: {
+    } break;
+    case AccessPath::UNQUALIFIED_COUNT: {
+    } break;
+
+    // Joins.
+    case AccessPath::NESTED_LOOP_JOIN: {
+    } break;
+    case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL: {
+    } break;
+    case AccessPath::BKA_JOIN: {
+    } break;
     case AccessPath::HASH_JOIN: {
+    } break;
+
+    // Composite access paths.
+    case AccessPath::FILTER: {
+    } break;
+    case AccessPath::SORT: {
+    } break;
+    case AccessPath::AGGREGATE: {
+    } break;
+    case AccessPath::TEMPTABLE_AGGREGATE: {
+    } break;
+    case AccessPath::LIMIT_OFFSET: {
+    } break;
+    case AccessPath::STREAM: {
+    } break;
+    case AccessPath::MATERIALIZE: {
+    } break;
+    case AccessPath::MATERIALIZE_INFORMATION_SCHEMA_TABLE: {
+    } break;
+    case AccessPath::APPEND: {
+    } break;
+    case AccessPath::WINDOW: {
+    } break;
+    case AccessPath::WEEDOUT: {
+    } break;
+    case AccessPath::REMOVE_DUPLICATES: {
+    } break;
+    case AccessPath::REMOVE_DUPLICATES_ON_INDEX: {
+    } break;
+    case AccessPath::ALTERNATIVE: {
+    } break;
+    case AccessPath::CACHE_INVALIDATOR: {
+    } break;
+
+    // Access paths that modify tables.
+    case AccessPath::DELETE_ROWS: {
+    } break;
+    case AccessPath::UPDATE_ROWS: {
     } break;
     default:
       break;

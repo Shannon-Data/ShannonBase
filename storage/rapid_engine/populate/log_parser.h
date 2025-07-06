@@ -64,6 +64,14 @@ class LogParser {
   uint parse_redo(Rapid_load_context* context, byte *ptr, byte *end_ptr);
 
  private:
+  enum class SYS_FIELD_TYPE_ID {
+    SYS_DB_TRX_ID =1,
+    SYS_DB_ROW_ID =2,
+    DB_ROLL_PTR =3,
+    REGULAR = 0      
+  };
+  static std::unordered_map<std::string, LogParser::SYS_FIELD_TYPE_ID> m_sys_field_name;
+
   ulint parse_log_rec(Rapid_load_context* context, mlog_id_t *type, byte *ptr, byte *end_ptr,
                       space_id_t *space_id, page_no_t *page_no, byte **body);
 
@@ -164,7 +172,21 @@ class LogParser {
                                   const byte *dest, const byte *src, ulint mlen, ulint len);
 
   // only user's index be retrieved from dd_table.
-  const dict_index_t *find_index(uint64 idx_id, std::string& db_name, std::string& table_name);
+  inline const dict_index_t *find_index(uint64 idx_id, std::string& db_name, std::string& table_name) {
+    std::shared_lock slock(g_index_cache_mutex);
+    if (g_index_cache.find(idx_id) == g_index_cache.end()) {
+      assert(false);
+    } else {
+      db_name = g_index_names[idx_id].first;
+      table_name = g_index_names[idx_id].second;
+      slock.unlock();
+      assert(g_index_cache[idx_id]);
+      return g_index_cache[idx_id];
+    }
+
+    assert(false);
+    return nullptr;
+  }
 
   // get the trxid in byte fmt and returns the length of PK found.
   inline uint get_trxid(const rec_t *rec, const dict_index_t *index,
@@ -189,7 +211,7 @@ class LogParser {
   // @param field_values[in] , the map of field values. <field_name, field data>
   // @param key_values[in/out], the map of key data, <key_name, key data>.
   // @return 0 success, otherwise failed.
-  int build_key(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
+  int build_key(const Rapid_load_context *context, std::unordered_map<std::string, mysql_field_t> &field_values,
                  std::map<std::string, key_info_t>& keys);
 
   byte *advance_parseMetadataLog(table_id_t id, uint64_t version, byte *ptr,
@@ -218,7 +240,7 @@ class LogParser {
                                    const rec_t *rec, const dict_index_t *index,
                                    const dict_index_t *real_index,
                                    const ulint *offsets,
-                                   std::map<std::string, mysql_field_t>& feild_values);
+                                   std::unordered_map<std::string, mysql_field_t>& feild_values);
 
   /**to find a row in imcs via PK. a row divids into fields, and store int a map.
    * return position of first matched row.

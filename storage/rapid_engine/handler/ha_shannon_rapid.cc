@@ -283,6 +283,10 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   ut_a(table_arg.file != nullptr);
   ut_ad(table_arg.s != nullptr);
 
+  // between the tables loaded into rapid engine for log parser thread. perhaps, some new indexes are added into,
+  // therefore, we reload the indexes caches at each table loaded into to refresh the global indexes cache.
+  ShannonBase::Populate::Populator::load_indexes_caches();
+
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) != nullptr) {
     std::string err;
     err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" already loaded");
