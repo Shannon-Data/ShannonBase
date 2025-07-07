@@ -51,7 +51,7 @@ jobs:
         rm -rf cmake_build
     - name: install_lib
       run: |
-        sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libtirpc-dev
+        sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libtirpc-dev && sudo apt install -y libboost-all-dev
     - name: build_shannon_and_install
       run: |
         cd ${{ github.workspace }}

@@ -101,6 +101,9 @@ constexpr char SHANNON_BLANK_PLACEHOLDER[] = "BLNK";
 
 constexpr char SHANNON_PRIMARY_KEY_NAME[] = "PRIMARY";
 constexpr size_t SHANNON_PRIMARY_KEY_LEN = 7;
+
+enum class SYS_FIELD_TYPE_ID { SYS_DB_TRX_ID = 1, SYS_DB_ROW_ID = 2, DB_ROLL_PTR = 3, REGULAR = 0 };
+
 // The lowest value, here, which means it's a invalid value. to describe its
 // validity.
 constexpr double SHANNON_MIN_DOUBLE = std::numeric_limits<double>::min();

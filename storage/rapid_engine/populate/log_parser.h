@@ -30,9 +30,19 @@
 
 #ifndef __SHANNONBASE_LOG_PARSER_H__
 #define __SHANNONBASE_LOG_PARSER_H__
+#include <atomic>
+#include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <unordered_map>
+
+#include <boost/asio.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/thread_pool.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 #include "storage/innobase/include/buf0buf.h"
 #include "storage/innobase/include/log0types.h"
@@ -42,6 +52,10 @@
 
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
+
+using boost::asio::awaitable;
+using boost::asio::co_spawn;
+using boost::asio::use_awaitable;
 
 // clang-format off
 class Field;
@@ -54,6 +68,38 @@ extern std::unordered_map<uint64, const dict_index_t *> g_index_cache;
 extern std::unordered_map<uint64, std::pair<std::string, std::string>> g_index_names;
 extern std::shared_mutex g_index_cache_mutex;
 
+// co-routine utils class.
+template <typename T>
+class shared_promise {
+public:
+  shared_promise() : m_ready(false) {}
+
+  void set_value(T value) {
+      std::scoped_lock lock(m_mutex);
+      m_value = std::move(value);
+      m_ready = true;
+      m_cond.notify_all();
+  }
+
+  boost::asio::awaitable<T> get_awaitable(boost::asio::any_io_executor executor) {
+    while (true) {
+      {
+        std::scoped_lock lock(m_mutex);
+        if (m_ready) co_return *m_value;
+      }
+
+      boost::asio::steady_timer timer(executor, std::chrono::milliseconds(1));
+      co_await timer.async_wait(boost::asio::use_awaitable);
+    }
+  }
+
+private:
+  std::mutex m_mutex;
+  std::condition_variable m_cond;
+  std::optional<T> m_value;
+  bool m_ready;
+};
+
 /**
  * To parse the redo log file, it used to populate the changes from ionnodb
  * to rapid.
@@ -62,16 +108,7 @@ class LogParser {
  public:
    //store the field infor in mysql format.
   uint parse_redo(Rapid_load_context* context, byte *ptr, byte *end_ptr);
-
  private:
-  enum class SYS_FIELD_TYPE_ID {
-    SYS_DB_TRX_ID =1,
-    SYS_DB_ROW_ID =2,
-    DB_ROLL_PTR =3,
-    REGULAR = 0      
-  };
-  static std::unordered_map<std::string, LogParser::SYS_FIELD_TYPE_ID> m_sys_field_name;
-
   ulint parse_log_rec(Rapid_load_context* context, mlog_id_t *type, byte *ptr, byte *end_ptr,
                       space_id_t *space_id, page_no_t *page_no, byte **body);
 
@@ -240,7 +277,7 @@ class LogParser {
                                    const rec_t *rec, const dict_index_t *index,
                                    const dict_index_t *real_index,
                                    const ulint *offsets,
-                                   std::unordered_map<std::string, mysql_field_t>& feild_values);
+                                   std::unordered_map<std::string, mysql_field_t>& field_values);
 
   /**to find a row in imcs via PK. a row divids into fields, and store int a map.
    * return position of first matched row.
@@ -248,6 +285,15 @@ class LogParser {
    * field_values_to_find [in], the all fields values of a row to find
    * with_sys_col[in], sys col to do comparision or not. */
   row_id_t find_matched_row(Rapid_load_context* context, std::map<std::string, key_info_t>& keys);
+
+  boost::asio::awaitable<int> parse_rec_fields_async(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
+                                      const dict_index_t *real_index, const ulint *offsets,
+                                      std::unordered_map<std::string, mysql_field_t> &field_values);
+
+  boost::asio::awaitable<void> co_parse_field(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
+                               const dict_index_t *real_index, const ulint *offsets, std::mutex &field_mutex,
+                               std::unordered_map<std::string, mysql_field_t> &field_values, size_t idx);
+
 };
 
 }  // namespace Populate
