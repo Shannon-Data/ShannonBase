@@ -59,7 +59,9 @@ cd ShannonBase && mkdir cmake_build && cd cmake_build
 make -j5 && make install
 
 ```
-PS: in `[]`, it's an optional compilation params, which is to enable coverage collection and ASAN check.
+PS: in `[]`, it's an optional compilation params, which is to enable coverage collection and ASAN check. And, boost asio 
+files are needed, you should install boost asio library at first.
+
 
 #### 4: Initialize the database and run ShannonBase
 ```

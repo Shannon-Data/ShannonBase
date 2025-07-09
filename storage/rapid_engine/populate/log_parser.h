@@ -32,17 +32,12 @@
 #define __SHANNONBASE_LOG_PARSER_H__
 #include <atomic>
 #include <condition_variable>
+#include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <unordered_map>
-
-#include <boost/asio.hpp>
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/thread_pool.hpp>
-#include <boost/asio/use_awaitable.hpp>
 
 #include "storage/innobase/include/buf0buf.h"
 #include "storage/innobase/include/log0types.h"
@@ -72,33 +67,52 @@ extern std::shared_mutex g_index_cache_mutex;
 template <typename T>
 class shared_promise {
 public:
-  shared_promise() : m_ready(false) {}
-
-  void set_value(T value) {
-      std::scoped_lock lock(m_mutex);
-      m_value = std::move(value);
+  void set_value(const T &v) {
+    std::lock_guard<std::mutex> lck(m_mutex);
+    if (!m_ready) {
+      m_value = v;
       m_ready = true;
       m_cond.notify_all();
+    }
   }
 
   boost::asio::awaitable<T> get_awaitable(boost::asio::any_io_executor executor) {
     while (true) {
       {
-        std::scoped_lock lock(m_mutex);
+        std::lock_guard<std::mutex> lck(m_mutex);
         if (m_ready) co_return *m_value;
       }
 
-      boost::asio::steady_timer timer(executor, std::chrono::milliseconds(1));
-      co_await timer.async_wait(boost::asio::use_awaitable);
+      co_await boost::asio::post(executor, boost::asio::use_awaitable);
     }
   }
-
 private:
   std::mutex m_mutex;
   std::condition_variable m_cond;
   std::optional<T> m_value;
-  bool m_ready;
+  bool m_ready = false;
 };
+
+template <typename T>
+T cowait_sync_with(boost::asio::thread_pool &pool, boost::asio::awaitable<T> aw) {
+  auto prom = std::make_shared<std::promise<T>>();
+  auto fut = prom->get_future();
+
+  boost::asio::co_spawn(
+      pool,
+      [aw = std::move(aw), prom]() mutable -> boost::asio::awaitable<void> {
+        try {
+          T result = co_await std::move(aw);
+          prom->set_value(std::move(result));
+        } catch (...) {
+          prom->set_exception(std::current_exception());
+        }
+        co_return;
+      },
+      boost::asio::detached);
+
+  return fut.get();  // when the result is ready.
+}
 
 /**
  * To parse the redo log file, it used to populate the changes from ionnodb
@@ -106,7 +120,10 @@ private:
  */
 class LogParser {
  public:
-   //store the field infor in mysql format.
+  LogParser() = default;
+  ~LogParser() = default;
+
+  //store the field infor in mysql format.
   uint parse_redo(Rapid_load_context* context, byte *ptr, byte *end_ptr);
  private:
   ulint parse_log_rec(Rapid_load_context* context, mlog_id_t *type, byte *ptr, byte *end_ptr,
@@ -210,7 +227,7 @@ class LogParser {
 
   // only user's index be retrieved from dd_table.
   inline const dict_index_t *find_index(uint64 idx_id, std::string& db_name, std::string& table_name) {
-    std::shared_lock slock(g_index_cache_mutex);
+    std::shared_lock slock(ShannonBase::Populate::g_index_cache_mutex);
     if (g_index_cache.find(idx_id) == g_index_cache.end()) {
       assert(false);
     } else {
@@ -291,9 +308,13 @@ class LogParser {
                                       std::unordered_map<std::string, mysql_field_t> &field_values);
 
   boost::asio::awaitable<void> co_parse_field(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
-                               const dict_index_t *real_index, const ulint *offsets, std::mutex &field_mutex,
-                               std::unordered_map<std::string, mysql_field_t> &field_values, size_t idx);
+                                      const dict_index_t *real_index, const ulint *offsets, std::mutex &field_mutex,
+                                      size_t idx, std::unordered_map<std::string, mysql_field_t>& field_values);
 
+
+ private:
+  // to indicate whether to use co-routine if # of fields is over this threshold. 
+  static const uint MAX_N_FIELD_PARALLEL = 1;
 };
 
 }  // namespace Populate

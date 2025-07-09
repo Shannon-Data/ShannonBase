@@ -66,6 +66,7 @@ class Imcs : public MemoryObject {
   // gets initialized flag.
   inline bool initialized() { return m_inited; }
 
+  inline static boost::asio::thread_pool *pool() { return m_imcs_pool.get(); }
   inline static Imcs *instance() {
     std::call_once(one, [&] { m_instance = new Imcs(); });
     return m_instance;
@@ -175,6 +176,8 @@ class Imcs : public MemoryObject {
 
   // initialization flag.
   std::atomic<uint8> m_inited{0};
+
+  static std::unique_ptr<boost::asio::thread_pool> m_imcs_pool;
 
   // loaded tables. key format: schema_name + ":" + table_name.
   std::unordered_map<std::string, std::unique_ptr<RapidTable>> m_tables;
