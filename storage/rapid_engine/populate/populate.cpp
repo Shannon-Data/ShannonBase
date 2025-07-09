@@ -187,7 +187,6 @@ void Populator::send_notify() { os_event_set(log_sys->rapid_events[0]); }
 
 void Populator::start() {
   if (!Populator::active() && shannon_loaded_tables->size()) {
-    // ShannonBase::Populate::LogParser::load_indexes_caches();
     srv_threads.m_change_pop_cordinator = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
     ShannonBase::Populate::sys_pop_started.store(true, std::memory_order_seq_cst);
     srv_threads.m_change_pop_cordinator.start();

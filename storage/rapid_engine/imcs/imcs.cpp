@@ -50,17 +50,27 @@ namespace ShannonBase {
 namespace Imcs {
 
 Imcs *Imcs::m_instance{nullptr};
+std::unique_ptr<boost::asio::thread_pool> Imcs::m_imcs_pool{nullptr};
 std::once_flag Imcs::one;
 
 SHANNON_THREAD_LOCAL Imcs *current_imcs_instance = Imcs::instance();
 
 int Imcs::initialize() {
-  m_inited.store(1);
+  if (!m_inited.load()) {
+    m_inited.store(1);
+    Imcs::m_imcs_pool = std::make_unique<boost::asio::thread_pool>(std::thread::hardware_concurrency());
+  }
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::deinitialize() {
-  m_inited.store(0);
+  if (m_inited.load()) {
+    Imcs::m_imcs_pool->stop();
+    Imcs::m_imcs_pool->join();
+    Imcs::m_imcs_pool.reset();
+
+    m_inited.store(0);
+  }
   return ShannonBase::SHANNON_SUCCESS;
 }
 
