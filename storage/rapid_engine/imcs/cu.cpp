@@ -129,6 +129,9 @@ uchar *Cu::get_vfield_value(uchar *&data, size_t &len, bool need_pack) {
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB: {
+      if (m_header->m_source_fld->real_type() == MYSQL_TYPE_ENUM) {
+        return data;
+      }
       if (need_pack) {
         auto to = std::make_unique<uchar[]>(m_header->m_source_fld->pack_length());
         auto to_ptr = Utils::Util::pack_str(data, len, &my_charset_bin, to.get(), m_header->m_source_fld->pack_length(),

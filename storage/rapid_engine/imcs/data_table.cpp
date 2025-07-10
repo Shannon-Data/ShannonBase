@@ -154,9 +154,13 @@ start:
     source_fld->set_notnull();
     ut_a(source_fld->type() == rpd_field->header()->m_source_fld->type());
     if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
-      uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
-      auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
-      source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
+      if (source_fld->real_type() == MYSQL_TYPE_ENUM) {
+        source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, source_fld->pack_length());
+      } else {
+        auto str_id = *reinterpret_cast<uint32 *>(data_ptr);
+        auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
+        source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
+      }
     } else {
       source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
     }

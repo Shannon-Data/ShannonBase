@@ -1,0 +1,36 @@
+create database sh_types;
+use sh_types;
+CREATE TABLE simple_enum_table (
+id INT PRIMARY KEY AUTO_INCREMENT,
+user_name VARCHAR(50) NOT NULL,
+account_status ENUM('active', 'inactive', 'suspended') NOT NULL DEFAULT 'active'
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+INSERT INTO simple_enum_table (user_name, account_status) VALUES
+('张三', 'active'),
+('李四', 'inactive'),
+('bob', 'inactive'),
+('grace', 'active'),
+('王五', 'suspended');
+EXPLAIN SELECT * FROM simple_enum_table;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	simple_enum_table	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	NULL
+SELECT * FROM simple_enum_table;
+id	user_name	account_status
+1	张三	active
+2	李四	inactive
+3	bob	inactive
+4	grace	active
+5	王五	suspended
+SET USE_SECONDARY_ENGINE=FORCED;
+ALTER TABLE simple_enum_table SECONDARY_LOAD;
+EXPLAIN SELECT * FROM simple_enum_table;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	simple_enum_table	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using secondary engine Rapid
+SELECT * FROM simple_enum_table;
+id	user_name	account_status
+1	张三	active
+2	李四	inactive
+3	bob	inactive
+4	grace	active
+5	王五	suspended
+DROP DATABASE sh_types;

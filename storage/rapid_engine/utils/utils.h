@@ -249,7 +249,7 @@ class Util {
   static inline bool is_varstring(enum_field_types type) {
     /**if this is a string type, it will be use local dictionary encoding, therefore,
      * using stringid as field value. */
-    return (type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING) ? true : false;
+    return ((type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_VAR_STRING) ? true : false);
   }
 
   static inline bool is_string(enum_field_types type) {
