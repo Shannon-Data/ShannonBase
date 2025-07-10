@@ -479,6 +479,21 @@ score	name	id	gender
 91	Ivy	9	F
 82	Jack	10	M
 UPDATE t2 SET email = 'alice_new@example.com' WHERE id = 1;
+explain select * from t2 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t2	NULL	index	NULL	PRIMARY	4	NULL	10	100.00	NULL
+select * from t2 order by id;
+id	email
+1	alice_new@example.com
+2	bob@example.com
+3	charlie@example.com
+4	diana@example.com
+5	eve@example.com
+6	frank@example.com
+7	grace@example.com
+8	hank@example.com
+9	ivy@example.com
+10	jack@example.com
 DELETE FROM t2 WHERE id = 3;
 explain select * from t2 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra

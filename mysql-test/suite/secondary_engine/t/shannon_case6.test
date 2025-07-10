@@ -301,6 +301,8 @@ explain select * from t1 order by id;
 select * from t1 order by id;
 
 UPDATE t2 SET email = 'alice_new@example.com' WHERE id = 1;
+explain select * from t2 order by id;
+select * from t2 order by id;
 DELETE FROM t2 WHERE id = 3;
 explain select * from t2 order by id;
 select * from t2 order by id;

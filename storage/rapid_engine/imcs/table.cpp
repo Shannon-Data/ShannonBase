@@ -177,22 +177,31 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
 
     auto data_len{0u}, extra_offset{0u};
     uchar *data_ptr{nullptr};
-    if (Utils::Util::is_blob(fld->type())) {
-      data_ptr = const_cast<uchar *>(fld->data_ptr());
-      data_len = down_cast<Field_blob *>(fld)->get_length();
+    if (fld->is_null()) {
+      data_len = UNIV_SQL_NULL;
+      data_ptr = nullptr;
     } else {
-      extra_offset = Utils::Util::is_varstring(fld->type()) ? (fld->field_length > 256 ? 2 : 1) : 0;
-      data_ptr = fld->is_null() ? nullptr : fld->field_ptr() + extra_offset;
-      if (fld->is_null()) {
-        data_len = UNIV_SQL_NULL;
-        data_ptr = nullptr;
-      } else {
-        if (extra_offset == 1)
-          data_len = mach_read_from_1(fld->field_ptr());
-        else if (extra_offset == 2)
-          data_len = mach_read_from_2_little_endian(fld->field_ptr());
-        else
+      switch (fld->type()) {
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_TINY_BLOB:
+        case MYSQL_TYPE_MEDIUM_BLOB:
+        case MYSQL_TYPE_LONG_BLOB: {
+          data_ptr = const_cast<uchar *>(fld->data_ptr());
+          data_len = down_cast<Field_blob *>(fld)->get_length();
+        } break;
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING: {
+          extra_offset = (fld->field_length > 256 ? 2 : 1);
+          data_ptr = fld->field_ptr() + extra_offset;
+          if (extra_offset == 1)
+            data_len = mach_read_from_1(fld->field_ptr());
+          else if (extra_offset == 2)
+            data_len = mach_read_from_2_little_endian(fld->field_ptr());
+        } break;
+        default: {
+          data_ptr = fld->field_ptr();
           data_len = fld->pack_length();
+        } break;
       }
     }
 

@@ -1,0 +1,35 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+# USED FOR enum type.
+create database sh_types;
+use sh_types;
+--disable_warnings
+
+CREATE TABLE simple_enum_table (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_name VARCHAR(50) NOT NULL,
+    account_status ENUM('active', 'inactive', 'suspended') NOT NULL DEFAULT 'active'
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+
+# insert example rows
+INSERT INTO simple_enum_table (user_name, account_status) VALUES
+('张三', 'active'),
+('李四', 'inactive'),
+('bob', 'inactive'),
+('grace', 'active'),
+('王五', 'suspended');
+
+EXPLAIN SELECT * FROM simple_enum_table;
+SELECT * FROM simple_enum_table;
+
+SET USE_SECONDARY_ENGINE=FORCED;
+ALTER TABLE simple_enum_table SECONDARY_LOAD;
+
+EXPLAIN SELECT * FROM simple_enum_table;
+SELECT * FROM simple_enum_table;
+
+--enable_warnings
+DROP DATABASE sh_types;

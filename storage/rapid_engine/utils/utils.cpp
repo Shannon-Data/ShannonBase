@@ -51,7 +51,6 @@ bool Util::is_support_type(enum_field_types type) {
     case MYSQL_TYPE_GEOMETRY:
     case MYSQL_TYPE_TYPED_ARRAY:
     case MYSQL_TYPE_JSON:
-    case MYSQL_TYPE_ENUM:
     case MYSQL_TYPE_SET: {
       return false;
     } break;
@@ -275,7 +274,7 @@ std::vector<std::string> Util::split(const std::string &str, char delimiter) {
 uint Util::normalized_length(const Field *field) {
   return (Utils::Util::is_blob(field->type()) || Utils::Util::is_varstring(field->type()) ||
           Utils::Util::is_string(field->type()))
-             ? sizeof(uint32)
+             ? ((field->real_type() == MYSQL_TYPE_ENUM) ? field->pack_length() : sizeof(uint32))
              : field->pack_length();
 }
 
