@@ -164,6 +164,8 @@ int Table::build_index(const Rapid_load_context *context, const KEY *key, row_id
   return build_index_impl(context, key, rowid);
 }
 
+// IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `PartTable::write`
+// CORRESPONDINGLY.
 int Table::write(const Rapid_load_context *context, uchar *data) {
   /**
    * for VARCHAR type Data in field->ptr is stored as: 1 or 2 bytes length-prefix-header  (from
@@ -356,6 +358,7 @@ int PartTable::build_index(const Rapid_load_context *context, const KEY *key, ro
   return build_index_impl(context, key, rowid);
 }
 
+// IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `Table::write` CORRESPONDINGLY.
 int PartTable::write(const Rapid_load_context *context, uchar *data) {
   row_id_t rowid{0};
   for (auto index = 0u; index < context->m_table->s->fields; index++) {
@@ -364,24 +367,34 @@ int PartTable::write(const Rapid_load_context *context, uchar *data) {
 
     auto data_len{0u}, extra_offset{0u};
     uchar *data_ptr{nullptr};
-    if (Utils::Util::is_blob(fld->type())) {
-      data_ptr = const_cast<uchar *>(fld->data_ptr());
-      data_len = down_cast<Field_blob *>(fld)->get_length();
+    if (fld->is_null()) {
+      data_len = UNIV_SQL_NULL;
+      data_ptr = nullptr;
     } else {
-      extra_offset = Utils::Util::is_varstring(fld->type()) ? (fld->field_length > 256 ? 2 : 1) : 0;
-      data_ptr = fld->is_null() ? nullptr : fld->field_ptr() + extra_offset;
-      if (fld->is_null()) {
-        data_len = UNIV_SQL_NULL;
-        data_ptr = nullptr;
-      } else {
-        if (extra_offset == 1)
-          data_len = mach_read_from_1(fld->field_ptr());
-        else if (extra_offset == 2)
-          data_len = mach_read_from_2_little_endian(fld->field_ptr());
-        else
+      switch (fld->type()) {
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_TINY_BLOB:
+        case MYSQL_TYPE_MEDIUM_BLOB:
+        case MYSQL_TYPE_LONG_BLOB: {
+          data_ptr = const_cast<uchar *>(fld->data_ptr());
+          data_len = down_cast<Field_blob *>(fld)->get_length();
+        } break;
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING: {
+          extra_offset = (fld->field_length > 256 ? 2 : 1);
+          data_ptr = fld->field_ptr() + extra_offset;
+          if (extra_offset == 1)
+            data_len = mach_read_from_1(fld->field_ptr());
+          else if (extra_offset == 2)
+            data_len = mach_read_from_2_little_endian(fld->field_ptr());
+        } break;
+        default: {
+          data_ptr = fld->field_ptr();
           data_len = fld->pack_length();
+        } break;
       }
     }
+
     auto active_part = context->m_extra_info.m_active_part_key;
     auto key = active_part.append(":").append(fld->field_name);
     if (!m_fields[key]->write_row(context, data_ptr, data_len)) {
