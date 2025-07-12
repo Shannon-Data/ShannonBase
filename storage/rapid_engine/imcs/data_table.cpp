@@ -94,6 +94,8 @@ int DataTable::init() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+// IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `DataTable::next_batch`
+// CORRESPONDINGLY.
 int DataTable::next(uchar *buf) {
   // In optimization phase. we should not choice rapid to scan, when pop threading
   // is running to repop the data to rapid.
@@ -194,6 +196,8 @@ for (col : cols) {
     }
 }
  */
+// IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `DataTable::next`
+// CORRESPONDINGLY.
 int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt) {
 start:
   assert(m_initialized.load());
@@ -252,12 +256,14 @@ start:
       // source_fld->set_notnull();
       ut_a(source_fld->type() == rpd_field->header()->m_source_fld->type());
       if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
-        uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
-        auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
-        col_chunk.add((uchar *)str_ptr.c_str(), strlen(str_ptr.c_str()), false);
-        // source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
+        if (source_fld->real_type() == MYSQL_TYPE_ENUM) {
+          col_chunk.add(data_ptr, source_fld->pack_length(), false);
+        } else {
+          uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
+          auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
+          col_chunk.add((uchar *)str_ptr.c_str(), strlen(str_ptr.c_str()), false);
+        }
       } else {
-        // source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
         col_chunk.add(data_ptr, normalized_length, false);
       }
     }
