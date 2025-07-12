@@ -90,6 +90,13 @@ class DataTable : public MemoryObject {
   }
 
  private:
+  struct IteratorDeleter {
+    void operator()(Index::Iterator *p) const {
+      delete p;  // Now safe because of virtual destructor
+    }
+  };
+
+ private:
   std::atomic<bool> m_initialized{false};
 
   // the data source, an IMCS.
@@ -105,7 +112,7 @@ class DataTable : public MemoryObject {
   std::unique_ptr<Rapid_load_context> m_context{nullptr};
 
   // index iterator.
-  std::unique_ptr<Index::Iterator> m_index_iter{nullptr};
+  std::unique_ptr<Index::Iterator, IteratorDeleter> m_index_iter;
 
   // active index no.
   int8_t m_active_index{MAX_KEY};

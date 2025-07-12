@@ -27,6 +27,7 @@
 #define __SHANNONBASE_CHUNK_H__
 
 #include <atomic>
+#include <shared_mutex>
 #include <tuple>
 #include <unordered_map>
 
@@ -126,23 +127,27 @@ class Chunk : public MemoryObject {
   Chunk &operator=(Chunk &&) = delete;
 
   inline Chunk_header *header() {
-    std::scoped_lock lk(m_header_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_header_mutex);
     return m_header.get();
   }
 
-  inline uchar *base() const { return m_base.load(std::memory_order_relaxed); }
-  inline uchar *end() const { return m_end.load(std::memory_order_relaxed); }
-
-  // the data write to where in this chunk.
-  inline uchar *where() {
-    assert(m_data.load(std::memory_order_relaxed) < m_end.load(std::memory_order_relaxed));
-    return m_data.load(std::memory_order_relaxed);
+  inline uchar *base() const {
+    std::lock_guard<std::mutex> lock(m_chunk_memory_mutex);
+    return m_chunk_memory->get();
+  }
+  inline uchar *end() const {
+    std::lock_guard<std::mutex> lock(m_chunk_memory_mutex);
+    return m_chunk_memory->get() + static_cast<ptrdiff_t>(m_capacity);
   }
 
-  // return the real time chunk size.
-  inline size_t chunk_size() {
-    assert(m_data.load(std::memory_order_relaxed) < m_end.load(std::memory_order_relaxed));
-    return m_data.load(std::memory_order_relaxed) - m_end.load(std::memory_order_relaxed);
+  // the data write to where in this chunk.
+  inline uchar *where() { return m_data.load(std::memory_order_acquire); }
+
+  // returns the address of rowid.
+  inline uchar *tell(row_id_t rowid) {
+    std::lock_guard<std::mutex> lock(m_chunk_memory_mutex);
+    if (rowid > SHANNON_ROWS_IN_CHUNK) return end();
+    return m_chunk_memory->get() + static_cast<ptrdiff_t>(rowid * m_header->m_normalized_pack_length);
   }
 
   /** start to read the data from the last pos to data.
@@ -190,20 +195,6 @@ class Chunk : public MemoryObject {
   // to do garbage collection.
   int GC();
 
-  // return the data postion of this chunk.
-  inline uchar *tell() {
-    std::scoped_lock lk(m_data_mutex);
-    return m_data.load();
-  }
-
-  // gets the current pos offset.
-  inline row_id_t pos() {
-    assert(((m_data.load() - m_base.load()) % m_header->m_normalized_pack_length) == 0);
-    return (m_data.load() - m_base.load()) / m_header->m_normalized_pack_length;
-  }
-
-  inline bool full() { return ((m_end.load() - m_data.load()) == 0); }
-
   // gets null bit flag.
   int is_null(const Rapid_load_context *context, row_id_t pos);
 
@@ -223,12 +214,16 @@ class Chunk : public MemoryObject {
   inline size_t field_length_bytes() { return m_header->m_source_fld->get_length_bytes(); }
 
   inline uchar *seek(row_id_t rowid) {
-    auto real_row = (m_data - m_base) / m_header->m_normalized_pack_length;
-
-    if (rowid >= real_row)
-      return m_data;
+    std::lock_guard<std::mutex> lock(m_chunk_memory_mutex);
+    if (rowid > m_capacity)
+      return end();
     else
-      return m_base + rowid * m_header->m_normalized_pack_length;
+      return m_chunk_memory->get() + static_cast<ptrdiff_t>(rowid * m_header->m_normalized_pack_length);
+  }
+
+  inline row_id_t current_id() {
+    assert(m_chunk_memory->get() < m_end.load(std::memory_order_acquire));
+    return (m_data.load(std::memory_order_acquire) - m_chunk_memory->get()) / m_header->m_normalized_pack_length;
   }
 
   // gets the physical row count.
@@ -238,7 +233,32 @@ class Chunk : public MemoryObject {
   row_id_t rows(Rapid_load_context *context);
 
   inline void set_owner(Cu *owner) { m_owner = owner; }
-  inline Cu *onwer() const { return m_owner; }
+  inline Cu *owner() const { return m_owner; }
+
+ private:
+  class ChunkMemoryManager {
+   public:
+    explicit ChunkMemoryManager(size_t size);
+    ~ChunkMemoryManager();
+
+    ChunkMemoryManager(const ChunkMemoryManager &) = delete;
+    ChunkMemoryManager &operator=(const ChunkMemoryManager &) = delete;
+
+    ChunkMemoryManager(ChunkMemoryManager &&other) noexcept : m_base_addr(other.m_base_addr), m_size(other.m_size) {
+      other.m_base_addr = nullptr;
+      other.m_size = 0;
+    }
+
+    ChunkMemoryManager &operator=(ChunkMemoryManager &&other) noexcept;
+
+    inline uchar *get() const noexcept { return m_base_addr; }
+    inline size_t size() const noexcept { return m_size; }
+    inline bool valid() const noexcept { return m_base_addr != nullptr; }
+
+   private:
+    uchar *m_base_addr{nullptr};
+    size_t m_size{0};
+  };
 
  private:
   Cu *m_owner;
@@ -246,17 +266,13 @@ class Chunk : public MemoryObject {
   // the key string of this chunk.
   std::string m_chunk_key;
 
-  std::mutex m_header_mutex;
+  std::shared_mutex m_header_mutex;
   std::unique_ptr<Chunk_header> m_header{nullptr};
 
-  std::mutex m_data_mutex;
   /** the base pointer of chunk, and the current pos of data. whether data
    * should be in order or not */
-  std::atomic<uchar *> m_base{nullptr};
-
-  // end address of memory, to determine whether the memory is full or not.
-  // m_data_base + chunk_size ;
-  std::atomic<uchar *> m_end{nullptr};
+  mutable std::mutex m_chunk_memory_mutex;
+  std::unique_ptr<ChunkMemoryManager> m_chunk_memory{nullptr};
 
   // current pointer, where the data write to. use for writting.
   std::atomic<uchar *> m_data{nullptr};
@@ -264,11 +280,24 @@ class Chunk : public MemoryObject {
   // current pointer, where the data read from. use for reading.
   std::atomic<uchar *> m_rdata{nullptr};
 
+  // end pointer of this chunk.
+  std::atomic<uchar *> m_end{nullptr};
+
+  size_t m_capacity{0};
+
   // the checksum, use base64 or crc32, etc.
   uint64 m_check_sum{0};
 
   // maigic num of chunk.
   const char *m_magic = "SHANNON_CHUNK";
+
+  void init_chunk_key(const Field *field, const std::string *custom_key = nullptr);
+
+  bool validate_initialization() const;
+
+  bool ensure_null_mask_allocated();
+
+  bool ensure_del_mask_allocated();
 
   void init_header(const Field *field);
 

@@ -129,12 +129,6 @@ class Cu : public MemoryObject {
     return m_chunks[0].get()->base();
   }
 
-  // gets to the last address of CU.
-  inline uchar *last() {
-    if (!m_chunks.size()) return nullptr;
-    return m_chunks[m_chunks.size() - 1]->tell();
-  }
-
   // get the chunk header.
   inline Cu_header *header() { return m_header.get(); }
 
@@ -145,10 +139,7 @@ class Cu : public MemoryObject {
   }
 
   // get how many chunks in this CU.
-  inline uint32 chunks() const {
-    assert((m_header->m_prows.load() / SHANNON_ROWS_IN_CHUNK + 1) == m_chunks.size());
-    return m_chunks.size();
-  }
+  inline uint32 chunks() const { return m_chunks.size(); }
 
   // get how many rows in this cu. Here, we dont care about MVCC. just physical
   // rows.

@@ -67,16 +67,22 @@ using rpd_columns_container = std::vector<rpd_column_info_t>;
 // Map from (db_name, table_name) to the RapidShare with table state.
 class LoadedTables {
   std::map<std::string, RapidShare *> m_tables;
-  std::mutex m_mutex;
+  mutable std::mutex m_mutex;
 
  public:
+  LoadedTables() = default;
+  virtual ~LoadedTables();
+
   void add(const std::string &db, const std::string &table, RapidShare *rs);
 
   RapidShare *get(const std::string &db, const std::string &table);
 
   void erase(const std::string &db, const std::string &table);
 
-  auto size() const { return m_tables.size(); }
+  auto size() const {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    return m_tables.size();
+  }
 
   void table_infos(uint index, ulonglong &tid, std::string &schema, std::string &table);
 };

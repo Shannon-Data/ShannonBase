@@ -149,8 +149,6 @@ int LogParser::build_key(const Rapid_load_context *context,
   auto matched_keys = rpd_tb->m_source_keys;
   ut_a(matched_keys.size() > 0);
 
-  std::unique_ptr<uchar[]> key_buff{nullptr};
-
   for (const auto &[key_name, key_meta] : matched_keys) {
     const size_t key_len = key_meta.first;
     const auto &key_fields = key_meta.second;
@@ -165,6 +163,9 @@ int LogParser::build_key(const Rapid_load_context *context,
       auto &mysql_field = mysql_key->second;
 
       if (mysql_field.has_nullbit) {
+        if (key_offset >= key_len) {
+          return HA_ERR_GENERIC;
+        }
         *key_buff.get() = (mysql_field.is_null) ? 1 : 0;
         key_offset++;
       }
@@ -176,6 +177,9 @@ int LogParser::build_key(const Rapid_load_context *context,
         case DATA_BLOB:
         case DATA_VARCHAR:
         case DATA_VARMYSQL: {
+          if (key_offset + HA_KEY_BLOB_LENGTH + mysql_field.mlength > key_len) {
+            return HA_ERR_GENERIC;
+          }
           int2store(key_buff.get() + key_offset, mysql_field.plength);
           key_offset += HA_KEY_BLOB_LENGTH;
           std::memcpy(key_buff.get() + key_offset, mysql_field.data.get(), mysql_field.mlength);
@@ -185,6 +189,9 @@ int LogParser::build_key(const Rapid_load_context *context,
         case DATA_FLOAT:
         case DATA_DECIMAL:
         case DATA_FIXBINARY: {
+          if (key_offset + mysql_field.mlength > key_len) {
+            return HA_ERR_GENERIC;
+          }
           ut_a(mysql_field.mlength == mysql_field.plength);
           auto field_ptr = rpd_tb->get_field(key_field)->header()->m_source_fld;
           uchar encoding[8] = {0};
@@ -195,9 +202,12 @@ int LogParser::build_key(const Rapid_load_context *context,
         } break;
         default: {
           // other types.
+          if (key_offset + mysql_field.mlength > key_len) {
+            return HA_ERR_GENERIC;
+          }
           std::memcpy(key_buff.get() + key_offset, mysql_field.data.get(), mysql_field.mlength);
           key_offset += mysql_field.mlength;
-          if (key_offset < key_meta.first && cs)
+          if (key_offset < key_len && cs)
             cs->cset->fill(cs, (char *)key_buff.get() + key_offset, key_meta.first - key_offset, ' ');
         } break;
       }

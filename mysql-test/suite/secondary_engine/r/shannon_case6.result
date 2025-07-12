@@ -85,6 +85,9 @@ alter table t9 secondary_load;
 alter table t10 secondary_load;
 [conn1_nothing]
 set use_secondary_engine=forced;
+select @@use_secondary_engine;
+@@use_secondary_engine
+FORCED
 select * from t1;
 score	name	id	gender
 select * from t2;
@@ -110,6 +113,9 @@ explain select * from t8;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	t8	NULL	ALL	NULL	NULL	NULL	NULL	0	0.00	Using secondary engine Rapid
 [conn2_insert]
+select @@use_secondary_engine;
+@@use_secondary_engine
+ON
 INSERT INTO t1 (score, name, id, gender) VALUES
 (85, 'Alice', 1, 'F'),
 (92, 'Bob', 2, 'M'),
@@ -462,6 +468,9 @@ year	department_id	record_id	data_value
 2024	2	2	Expenses: 300K
 2024	3	3	Profit: 200K
 #[conn_2_DML]
+select @@use_secondary_engine;
+@@use_secondary_engine
+ON
 UPDATE t1 SET score = 95 WHERE id = 1;
 DELETE FROM t1 WHERE id = 3;
 explain select * from t1 order by id;
@@ -620,6 +629,9 @@ year	department_id	record_id	data_value
 2024	1	1	Revenue: 600K
 2024	2	2	Expenses: 300K
 #[conn_1_after_dml]
+select @@use_secondary_engine;
+@@use_secondary_engine
+FORCED
 explain select * from t1 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid

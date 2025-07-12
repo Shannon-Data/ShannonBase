@@ -107,30 +107,37 @@ bool Rapid_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
 }
 
 // Map from (db_name, table_name) to the RapidShare with table state.
+LoadedTables::~LoadedTables() {
+  std::lock_guard<std::mutex> guard(m_mutex);
+  for (auto &entry : m_tables) {
+    delete entry.second;
+  }
+}
 void LoadedTables::add(const std::string &db, const std::string &table, RapidShare *rs) {
   std::lock_guard<std::mutex> guard(m_mutex);
   std::string keystr = db + ":" + table;
-  m_tables.emplace(keystr, rs);
+  auto it = m_tables.find(keystr);
+  if (it != m_tables.end()) {  // replace with new one.
+    delete it->second;
+    it->second = rs;
+  } else {
+    m_tables.emplace(keystr, rs);
+  }
 }
 
 RapidShare *LoadedTables::get(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
-  std::string keystr = db + ":" + table;
-  auto it = m_tables.find(keystr);
-  return it == m_tables.end() ? nullptr : it->second;
+  auto it = m_tables.find(db + ":" + table);
+  return it != m_tables.end() ? it->second : nullptr;
 }
 
 void LoadedTables::erase(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
-  std::string keystr = db + ":" + table;
-  if (m_tables.find(keystr) == m_tables.end()) return;
-
-  auto sh = m_tables[keystr];
-  if (sh) {
-    delete sh;
-    sh = nullptr;
+  auto it = m_tables.find(db + ":" + table);
+  if (it != m_tables.end()) {
+    delete it->second;
+    m_tables.erase(it);
   }
-  m_tables.erase(keystr);
 }
 
 void LoadedTables::table_infos(uint index, ulonglong &tid, std::string &schema, std::string &table) {
