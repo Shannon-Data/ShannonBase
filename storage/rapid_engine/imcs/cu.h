@@ -129,12 +129,6 @@ class Cu : public MemoryObject {
     return m_chunks[0].get()->base();
   }
 
-  // gets to the last address of CU.
-  inline uchar *last() {
-    if (!m_chunks.size()) return nullptr;
-    return m_chunks[m_chunks.size() - 1]->tell();
-  }
-
   // get the chunk header.
   inline Cu_header *header() { return m_header.get(); }
 

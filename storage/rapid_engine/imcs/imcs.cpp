@@ -69,6 +69,9 @@ int Imcs::deinitialize() {
     Imcs::m_imcs_pool->join();
     Imcs::m_imcs_pool.reset();
 
+    m_tables.clear();  // unique_ptr will handle deletion
+    m_parttables.clear();
+
     m_inited.store(0);
   }
   return ShannonBase::SHANNON_SUCCESS;
