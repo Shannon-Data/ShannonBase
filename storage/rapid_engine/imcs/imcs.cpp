@@ -69,6 +69,9 @@ int Imcs::deinitialize() {
     Imcs::m_imcs_pool->join();
     Imcs::m_imcs_pool.reset();
 
+    m_tables.clear();  // unique_ptr will handle deletion
+    m_parttables.clear();
+
     m_inited.store(0);
   }
   return ShannonBase::SHANNON_SUCCESS;
@@ -207,6 +210,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   auto m_thd = context->m_thd;
   // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
   if (file->inited == handler::NONE && file->ha_rnd_init(true)) {
+    file->ha_rnd_end();
     my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
     return HA_ERR_GENERIC;
   }
@@ -232,7 +236,6 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
     auto load_context = const_cast<Rapid_load_context *>(context);
     load_context->m_extra_info.m_key_len = file->ref_length;
     if (m_tables[key_part].get()->write(context, context->m_table->record[0])) {
-      file->ha_rnd_end();
       std::string errmsg;
       errmsg.append("load data from ")
           .append(context->m_schema_name.c_str())
@@ -240,6 +243,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
           .append(context->m_table_name.c_str())
           .append(" to imcs failed.");
       my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+      break;
     }
 
     m_thd->inc_sent_row_count(1);

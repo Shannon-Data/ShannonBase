@@ -108,6 +108,7 @@ alter table t10 secondary_load;
 --connection connection_1
 --echo [conn1_nothing]
 set use_secondary_engine=forced;
+select @@use_secondary_engine;
 
 select * from t1;
 select * from t2;
@@ -124,6 +125,7 @@ explain select * from t8;
 
 --connection connection_2
 --echo [conn2_insert]
+select @@use_secondary_engine;
 
 INSERT INTO t1 (score, name, id, gender) VALUES
 (85, 'Alice', 1, 'F'),
@@ -295,6 +297,8 @@ select * from t10 order by department_id;
 
 --connection connection_2
 --echo #[conn_2_DML]
+select @@use_secondary_engine;
+
 UPDATE t1 SET score = 95 WHERE id = 1;
 DELETE FROM t1 WHERE id = 3;
 explain select * from t1 order by id;
@@ -352,6 +356,7 @@ select * from t10 order by department_id;
 --sleep 20
 --connection connection_1
 --echo #[conn_1_after_dml]
+select @@use_secondary_engine;
 
 explain select * from t1 order by id;
 select * from t1 order by id;

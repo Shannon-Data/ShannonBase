@@ -45,6 +45,41 @@
 namespace ShannonBase {
 namespace Imcs {
 
+Chunk::ChunkMemoryManager::ChunkMemoryManager(size_t size) : m_size(size) {
+  if (size == 0) {
+    throw std::invalid_argument("Chunk size cannot be zero");
+  }
+
+  m_base_addr = static_cast<uchar *>(ut::aligned_alloc(size, CACHE_LINE_SIZE));
+  if (!m_base_addr) {
+    return;
+  }
+
+  std::memset(m_base_addr, 0, size);
+  rapid_allocated_mem_size.fetch_add(size, std::memory_order_relaxed);
+}
+
+Chunk::ChunkMemoryManager::~ChunkMemoryManager() {
+  if (m_base_addr) {
+    rapid_allocated_mem_size.fetch_sub(m_size, std::memory_order_relaxed);
+    ut::aligned_free(m_base_addr);
+  }
+}
+
+Chunk::ChunkMemoryManager &Chunk::ChunkMemoryManager::operator=(ChunkMemoryManager &&other) noexcept {
+  if (this != &other) {
+    if (m_base_addr) {
+      rapid_allocated_mem_size.fetch_sub(m_size, std::memory_order_relaxed);
+      ut::aligned_free(m_base_addr);
+    }
+
+    m_base_addr = other.m_base_addr;
+    m_size = other.m_size;
+    other.m_base_addr = nullptr;
+    other.m_size = 0;
+  }
+  return *this;
+}
 /**
  * every chunks has a fixed num of rows: SHANNON_ROWS_IN_CHUN
  * K. we can calcuate
@@ -54,73 +89,119 @@ namespace Imcs {
  */
 
 Chunk::Chunk(const Field *field) {
-  m_chunk_key.append(field->table->s->db.str)
-      .append(":")
-      .append(field->table->s->table_name.str)
-      .append(":")
-      .append(field->field_name);
-
+  init_chunk_key(field);
   init_header(field);
   init_body(field);
+  if (!validate_initialization()) {
+    m_header.reset();
+    m_chunk_memory.reset();
+    // throw std::runtime_error("Chunk initialization failed validation");
+  }
 }
 
 Chunk::Chunk(const Field *field, std::string &keyname) {
-  m_chunk_key = keyname;
+  init_chunk_key(field, &keyname);
   init_header(field);
   init_body(field);
+  if (!validate_initialization()) {
+    m_header.reset();
+    m_chunk_memory.reset();
+    // throw std::runtime_error("Chunk initialization failed validation");
+  }
 }
 
 Chunk::~Chunk() {
-  if (m_base) {
-    ut::aligned_free(m_base);
-    m_base = m_data = nullptr;
-    rapid_allocated_mem_size.fetch_sub(m_header->m_normalized_pack_length * SHANNON_ROWS_IN_CHUNK);
+  m_header.reset();
+  m_chunk_memory.reset();
+}
+
+bool Chunk::validate_initialization() const {
+  return m_header && m_header->m_source_fld && m_header->m_normalized_pack_length > 0 && m_header->m_smu &&
+         m_chunk_memory && m_chunk_memory->valid();
+}
+
+void Chunk::init_chunk_key(const Field *field, const std::string *custom_key) {
+  if (custom_key) {
+    m_chunk_key = *custom_key;
+  } else {
+    m_chunk_key.clear();
+    m_chunk_key.reserve(256);
+    m_chunk_key.append(field->table->s->db.str)
+        .append(":")
+        .append(field->table->s->table_name.str)
+        .append(":")
+        .append(field->field_name);
   }
 }
 
 void Chunk::init_header(const Field *field) {
-  m_header.reset(new (std::nothrow) Chunk_header());
+  m_header = std::make_unique<Chunk_header>();
   if (!m_header) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header allocation failed");
     return;  // allocated faile.
   }
 
   m_header->m_source_fld = field->clone(&rapid_mem_root);
-  assert(m_header->m_source_fld);
-  m_header->m_type = field->type();
+  if (!m_header->m_source_fld) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Failed to clone field");
+    return;  // allocated faile.
+  }
 
+  m_header->m_type = field->type();
   m_header->m_db = field->table->s->db.str;
   m_header->m_table_name = field->table->s->table_name.str;
-
   m_header->m_pack_length = field->pack_length();
   m_header->m_normalized_pack_length = Utils::Util::normalized_length(field);
   m_header->m_key_len = field->table->file->ref_length;
+  m_header->m_nullable = field->is_nullable();
 
-  m_header->m_prows.store(0);
-  m_header->m_sum.store(0);
-  m_header->m_avg.store(0);
-  m_header->m_min.store(std::numeric_limits<double>::max());
-  m_header->m_max.store(std::numeric_limits<double>::min());
-  m_header->m_middle.store(0);
-  m_header->m_median.store(0);
+  m_header->m_prows.store(0, std::memory_order_relaxed);
+  m_header->m_sum.store(0, std::memory_order_relaxed);
+  m_header->m_avg.store(0, std::memory_order_relaxed);
+  m_header->m_min.store(std::numeric_limits<double>::max(), std::memory_order_relaxed);
+  m_header->m_max.store(std::numeric_limits<double>::lowest(), std::memory_order_relaxed);
+  m_header->m_middle.store(0, std::memory_order_relaxed);
+  m_header->m_median.store(0, std::memory_order_relaxed);
 
-  /** there's null values in, therefore, alloc the null bitmap, and del bit map will
-   * lazy allocated.*/
+  m_header->m_trx_min = Transaction::ID{0};
+  m_header->m_trx_max = Transaction::ID{0};
+
+  m_header->m_smu = std::make_unique<ShannonBase::ReadView::Snapshot_meta_unit>();
+  if (!m_header->m_smu) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Failed to allocate Snapshot_meta_unit");
+    return;
+  }
+  m_header->m_smu->set_owner(this);
+
   if (field->is_nullable()) {
-    m_header->m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(SHANNON_ROWS_IN_CHUNK));
+    ensure_null_mask_allocated();
+  }
+}
+
+bool Chunk::ensure_null_mask_allocated() {
+  std::unique_lock<std::shared_mutex> lock(m_header_mutex);
+
+  if (!m_header->m_null_mask) {
+    m_header->m_null_mask = std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
     if (!m_header->m_null_mask) {
-      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header bit map allocation failed");
-      return;  // allocated faile.
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Failed to allocate null mask");
+      return true;
     }
   }
+  return false;
+}
 
-  // the SMU ptr. just like rollback ptr.
-  m_header->m_smu.reset(new (std::nothrow) ShannonBase::ReadView::Snapshot_meta_unit());
-  if (!m_header->m_smu) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header SMU allocation failed");
-    return;  // allocated faile.
+bool Chunk::ensure_del_mask_allocated() {
+  std::unique_lock<std::shared_mutex> lock(m_header_mutex);
+
+  if (!m_header->m_del_mask) {
+    m_header->m_del_mask = std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
+    if (!m_header->m_del_mask) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Failed to allocate deletion mask");
+      return true;
+    }
   }
-  m_header->m_smu.get()->set_owner(this);
+  return false;
 }
 
 void Chunk::init_body(const Field *field) {
@@ -133,21 +214,21 @@ void Chunk::init_body(const Field *field) {
    * memory management. In IMCS, all modules use ut:: to manage memory
    * operations, it's an effiecient memory utils. it has been initialized in
    * ha_innodb.cc: ut_new_boot(); */
-  if (likely(rapid_allocated_mem_size + chunk_size <= ShannonBase::rpd_mem_sz_max)) {
-    m_base = static_cast<uchar *>(ut::aligned_alloc(chunk_size, CACHE_LINE_SIZE));
-    if (unlikely(!m_base)) {
-      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
-      return;
-    }
-
-    m_data.store(m_base);
-    m_rdata.store(m_base);
-    m_end.store(m_base + static_cast<ptrdiff_t>(chunk_size));
-    rapid_allocated_mem_size.fetch_add(chunk_size);
-  } else {
+  if (likely(rapid_allocated_mem_size + chunk_size > ShannonBase::rpd_mem_sz_max)) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
     return;
   }
+
+  m_chunk_memory = std::make_unique<ChunkMemoryManager>(chunk_size);
+  if (unlikely(!m_chunk_memory->get())) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
+    return;
+  }
+
+  m_capacity = chunk_size;
+  m_data.store(m_chunk_memory->get());
+  m_end.store(m_chunk_memory->get() + static_cast<ptrdiff_t>(m_capacity));
+  m_rdata.store(m_chunk_memory->get());
 }
 
 void Chunk::update_meta_info(const Rapid_load_context *context, OPER_TYPE type, uchar *data, uchar *old) {
@@ -229,7 +310,7 @@ void Chunk::update_meta_info(const Rapid_load_context *context, OPER_TYPE type, 
 }
 
 void Chunk::reset_meta_info() {
-  std::scoped_lock lk(m_header_mutex);
+  std::unique_lock<std::shared_mutex> lk(m_header_mutex);
   m_header->m_avg.store(0);
   m_header->m_sum.store(0);
   m_header->m_prows.store(0);
@@ -244,7 +325,8 @@ void Chunk::reset_meta_info() {
 // check the data type is leagal or not.
 void Chunk::check_data_type(size_t type_size) {
   if (type_size == UNIV_SQL_NULL) return;
-  std::scoped_lock lk(m_header_mutex);
+
+  std::shared_lock<std::shared_mutex> lk(m_header_mutex);
   /** if the field is not text type, the data size read/write should be same as its type size. */
   switch (m_header->m_source_fld->type()) {
     case MYSQL_TYPE_DECIMAL:
@@ -265,7 +347,7 @@ void Chunk::check_data_type(size_t type_size) {
 }
 
 int Chunk::is_null(const Rapid_load_context *context, row_id_t pos) {
-  std::scoped_lock lk(m_header_mutex);
+  std::shared_lock<std::shared_mutex> lk(m_header_mutex);
   if (!m_header->m_null_mask.get())
     return static_cast<int>(false);
   else
@@ -273,7 +355,7 @@ int Chunk::is_null(const Rapid_load_context *context, row_id_t pos) {
 }
 
 int Chunk::is_deleted(const Rapid_load_context *context, row_id_t pos) {
-  std::scoped_lock lk(m_header_mutex);
+  std::shared_lock<std::shared_mutex> lk(m_header_mutex);
   if (!m_header->m_del_mask.get())
     return SHANNON_SUCCESS;
   else
@@ -307,13 +389,15 @@ uchar *Chunk::read(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
-  if (unlikely(m_rdata.load() + len > m_end.load())) {
-    m_rdata.store(m_base.load());
+  ut_a(len % m_header->m_normalized_pack_length == 0);
+
+  if (unlikely(m_rdata.load(std::memory_order_acquire) + static_cast<ptrdiff_t>(len) >
+               m_end.load(std::memory_order_acquire))) {  // out of range.
+    m_rdata.store(base());
     return nullptr;
   }
 
-  ut_a(len == m_header->m_normalized_pack_length);
-  auto ret = reinterpret_cast<uchar *>(std::memcpy(data, m_rdata, len));
+  auto ret = reinterpret_cast<uchar *>(std::memcpy(data, m_rdata.load(std::memory_order_acquire), len));
   m_rdata.fetch_add(len);
 
   return ret;
@@ -325,40 +409,25 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
 
   check_data_type(len);
 
+  uchar *ret{m_data.load(std::memory_order_acquire)};
   auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
-  auto diff = m_data.load(std::memory_order_relaxed) - m_base.load(std::memory_order_relaxed);
-  ut_a((diff % normal_len) == 0);
+  auto rowid = current_id();
 
-  if (unlikely((m_data.load(std::memory_order_relaxed) + normal_len) >
-               m_end.load(std::memory_order_relaxed))) {  // this chunk is full.
-    ut_a(diff / m_header->m_normalized_pack_length == SHANNON_ROWS_IN_CHUNK);
-    return nullptr;
-  }
-
-  row_id_t rowid = diff / m_header->m_normalized_pack_length;
-  ut_a(rowid < SHANNON_ROWS_IN_CHUNK);
-
-  uchar *ret{m_data.load(std::memory_order_relaxed)};
-  if (len == UNIV_SQL_NULL) {      // to write a null value.
-    if (!m_header->m_null_mask) {  // allocate a null bitmap.
-      m_header->m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(SHANNON_ROWS_IN_CHUNK));
-      if (!m_header->m_null_mask) {
-        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header bit map allocation failed");
-        return nullptr;
-      }
-    }
-
+  if (len == UNIV_SQL_NULL) {  // to write a null value.
+    if (!m_header->m_null_mask && ensure_null_mask_allocated()) return nullptr;
     /**Here, is trying to write a null value, first of all, we update the null bit
      * mask, then writting a placehold to chunk, we dont care about what read data
      * was written down.*/
-    std::scoped_lock lk(m_header_mutex);
+    std::unique_lock<std::shared_mutex> lk(m_header_mutex);
     Utils::Util::bit_array_set(m_header->m_null_mask.get(), m_header->m_prows);
-    m_data.fetch_add(normal_len);
   } else {
-    std::scoped_lock data_guard(m_data_mutex);
-    ret = static_cast<uchar *>(std::memcpy(m_data.load(), data, normal_len));
-    m_data.fetch_add(normal_len);
+    ut_a(len % m_header->m_normalized_pack_length == 0);
+    if (unlikely((m_data + static_cast<ptrdiff_t>(normal_len)) > m_end.load(std::memory_order_acquire)))
+      return nullptr;  // this chunk is full.
+
+    ret = static_cast<uchar *>(std::memcpy(m_data.load(std::memory_order_acquire), data, normal_len));
   }
+  m_data.fetch_add(normal_len);
 
   if (context->m_extra_info.m_trxid) {  // means not from secondary_load operation.
     build_version(rowid, context->m_extra_info.m_trxid, data, normal_len, OPER_TYPE::OPER_INSERT);
@@ -367,8 +436,8 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
   update_meta_info(context, ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
 
 #ifndef NDEBUG
-  uint64 data_rows =
-      static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load() - m_base.load()) / m_header->m_normalized_pack_length);
+  uint64 data_rows = static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load(std::memory_order_acquire) - base()) /
+                                         m_header->m_normalized_pack_length);
   ut_a(data_rows <= SHANNON_ROWS_IN_CHUNK);
 #endif
   return ret;
@@ -376,37 +445,27 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
 
 uchar *Chunk::write_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len) {
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
-  assert(context->m_extra_info.m_key_len == m_header->m_key_len);
-
+  ut_a(context->m_extra_info.m_key_len == m_header->m_key_len);
+  ut_a(len == m_header->m_normalized_pack_length);
   check_data_type(len);
 
   auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
-  if (rowid >= SHANNON_ROWS_IN_CHUNK) {  // this chunk is full.
-    return nullptr;
-  }
+  auto to_addr = base() + static_cast<ptrdiff_t>(rowid * normal_len);
+  if (to_addr > end()) return nullptr;  // out of range.
 
-  auto row_addr = m_base.load() + rowid * normal_len;
-  uchar *ret{row_addr};
-  if (len == UNIV_SQL_NULL) {      // to write a null value.
-    if (!m_header->m_null_mask) {  // allocate a null bitmap.
-      m_header->m_null_mask.reset(new (std::nothrow) ShannonBase::bit_array_t(SHANNON_ROWS_IN_CHUNK));
-      if (!m_header->m_null_mask) {
-        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header bit map allocation failed");
-        return nullptr;
-      }
-    }
+  uchar *ret{m_data.load(std::memory_order_acquire)};
+  if (len == UNIV_SQL_NULL) {                                                    // to write a null value.
+    if (!m_header->m_null_mask && ensure_null_mask_allocated()) return nullptr;  // allocate a null bitmap failed.
 
     /**Here, is trying to write a null value, first of all, we update the null bit
      * mask, then writting a placehold to chunk, we dont care about what read data
      * was written down.*/
-    std::scoped_lock lk(m_header_mutex);
-    Utils::Util::bit_array_set(m_header->m_null_mask.get(), m_header->m_prows);
-    m_data.fetch_add(normal_len);
+    std::unique_lock<std::shared_mutex> lk(m_header_mutex);
+    Utils::Util::bit_array_set(m_header->m_null_mask.get(), rowid);
   } else {
-    std::scoped_lock data_guard(m_data_mutex);
-    ret = static_cast<uchar *>(std::memcpy(row_addr, data, normal_len));
-    m_data.fetch_add(normal_len);
+    ret = static_cast<uchar *>(std::memcpy(to_addr, data, normal_len));
   }
+  m_data.fetch_add(normal_len);
 
   if (context->m_extra_info.m_trxid) {  // means not from secondary_load operation.
     build_version(rowid, context->m_extra_info.m_trxid, data, normal_len, OPER_TYPE::OPER_INSERT);
@@ -416,7 +475,7 @@ uchar *Chunk::write_from_log(const Rapid_load_context *context, row_id_t rowid, 
 
 #ifndef NDEBUG
   uint64 data_rows =
-      static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load() - m_base.load()) / m_header->m_normalized_pack_length);
+      static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load() - base()) / m_header->m_normalized_pack_length);
   ut_a(data_rows <= SHANNON_ROWS_IN_CHUNK);
 #endif
   return ret;
@@ -426,10 +485,10 @@ uchar *Chunk::update(const Rapid_load_context *context, row_id_t rowid, uchar *n
   ut_a((!new_data && len == UNIV_SQL_NULL) || (new_data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
-  std::atomic<uchar *> where_ptr{m_base.load(std::memory_order_relaxed)};
-  auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
-  where_ptr.fetch_add(rowid * normal_len, std::memory_order_relaxed);
+  ut_a(len % m_header->m_normalized_pack_length == 0);
 
+  auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
+  auto where_ptr = tell(rowid);
   if (context->m_extra_info.m_trxid) {
     build_version(rowid, context->m_extra_info.m_trxid, where_ptr, normal_len, OPER_TYPE::OPER_UPDATE);
   }
@@ -450,9 +509,8 @@ uchar *Chunk::update_from_log(const Rapid_load_context *context, row_id_t rowid,
   ut_a((!new_data && len == UNIV_SQL_NULL) || (new_data && len != UNIV_SQL_NULL));
   check_data_type(len);
 
-  std::atomic<uchar *> where_ptr{m_base.load(std::memory_order_relaxed)};
   auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
-  where_ptr.fetch_add(rowid * normal_len, std::memory_order_relaxed);
+  auto where_ptr = tell(rowid);
 
   if (context->m_extra_info.m_trxid) {
     build_version(rowid, context->m_extra_info.m_trxid, where_ptr, normal_len, OPER_TYPE::OPER_UPDATE);
@@ -472,22 +530,19 @@ uchar *Chunk::update_from_log(const Rapid_load_context *context, row_id_t rowid,
 
 uchar *Chunk::remove(const Rapid_load_context *context, row_id_t rowid) {
   ut_a(context->m_extra_info.m_key_len == m_header->m_key_len);
-  uchar *del_from{nullptr};
+  if (rowid >= m_header->m_prows.load() && rowid <= SHANNON_ROWS_IN_CHUNK) return nullptr;  // out of rowid range.
 
-  if (rowid >= m_header->m_prows.load()) return nullptr;  // out of rowid range.
+  if (!m_header->m_del_mask.get() && ensure_del_mask_allocated()) return nullptr;  // allocated del mask failed.
 
-  if (!m_header->m_del_mask.get()) {
-    // TODO: to impl a more smart algorithm to alloc null and del bitmap.
-    m_header->m_del_mask = std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
+  {
+    std::unique_lock<std::shared_mutex> lk(m_header_mutex);
+    Utils::Util::bit_array_set(m_header->m_del_mask.get(), rowid);
   }
-  Utils::Util::bit_array_set(m_header->m_del_mask.get(), rowid);
 
+  std::shared_lock<std::shared_mutex> lk(m_header_mutex);
   bool is_null = (m_header->m_null_mask.get()) ? Utils::Util::bit_array_get(m_header->m_null_mask.get(), rowid) : false;
 
-  del_from = m_base.load(std::memory_order_relaxed);
-  del_from += rowid * m_header->m_normalized_pack_length;
-  ut_a(del_from <= m_data.load(std::memory_order_relaxed));
-
+  auto del_from = tell(rowid);
   // get the old data and insert smu ptr link.
   auto data_len = m_header->m_normalized_pack_length;
   if (context->m_extra_info.m_trxid) {
@@ -500,13 +555,9 @@ uchar *Chunk::remove(const Rapid_load_context *context, row_id_t rowid) {
 }
 
 void Chunk::truncate() {
-  std::scoped_lock lk(m_data_mutex);
-  if (m_base) {
-    ut::aligned_free(m_base);
-    m_base = m_data = nullptr;
-    auto rec_length = m_header->m_normalized_pack_length;
-    rapid_allocated_mem_size -= (SHANNON_ROWS_IN_CHUNK * rec_length);
-  }
+  m_header->m_smu.reset();
+  m_header.reset();
+  m_chunk_memory.reset();
 
   // todo: remove all index record from index tree.
   reset_meta_info();

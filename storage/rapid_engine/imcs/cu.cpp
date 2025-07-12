@@ -62,7 +62,7 @@ Cu::~Cu() {
 
 void Cu::init_header(const Field *field) {
   {
-    m_header.reset(new (std::nothrow) Cu_header());
+    m_header = std::make_unique<Cu_header>();
     if (!m_header) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Cu header allocation failed");
       return;
@@ -91,7 +91,7 @@ void Cu::init_header(const Field *field) {
   } else
     m_header->m_encoding_type = Compress::Encoding_type::NONE;
 
-  m_header->m_local_dict.reset(new (std::nothrow) Compress::Dictionary(m_header->m_encoding_type));
+  m_header->m_local_dict = std::make_unique<Compress::Dictionary>(m_header->m_encoding_type);
   if (!m_header->m_local_dict) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Cu dictionary allocation failed");
     return;
@@ -100,13 +100,13 @@ void Cu::init_header(const Field *field) {
 
 void Cu::init_body(const Field *field) {
   // the initial one chunk built.
-  auto chunk = new (std::nothrow) Chunk(const_cast<Field *>(field), m_cu_key);
+  auto chunk = std::make_unique<Chunk>(const_cast<Field *>(field), m_cu_key);
   if (!chunk) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
     return;
   }
   chunk->set_owner(this);
-  m_chunks.emplace_back(chunk);
+  m_chunks.emplace_back(std::move(chunk));
 
   m_current_chunk.store(0);
 }
@@ -257,7 +257,7 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
       return nullptr;
     }
     chunk->set_owner(this);
-    m_chunks.emplace_back(chunk);
+    m_chunks.emplace_back(std::move(chunk));
 
     written_to = m_chunks[m_chunks.size() - 1].get()->write(context, wdata, wlen);
   }
