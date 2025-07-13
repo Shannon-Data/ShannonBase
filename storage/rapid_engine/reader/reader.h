@@ -35,6 +35,7 @@
 #include "storage/rapid_engine/include/rapid_object.h"
 class key_range;
 namespace ShannonBase {
+namespace Reader {
 // interface of reader, which is used to travel all data.
 class Reader : public MemoryObject {
  public:
@@ -53,5 +54,6 @@ class Reader : public MemoryObject {
   virtual uchar *seek(size_t offset) = 0;
 };
 
+}  // namespace Reader
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_READER_READER_H__

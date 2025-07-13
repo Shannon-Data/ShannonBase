@@ -70,10 +70,43 @@ SET (SHANNON_TRX_SOURCES
     trx/transaction.cpp
     trx/readview.cpp
 )
-SET (SHANNON_READER_SOURCES
-    reader/parquet_reader.cpp
+
+SET(SHANNON_READER_SOURCES
     reader/csv_reader.cpp
 )
+
+IF(LINUX AND WITH_LAKEHOUSE)
+  list(APPEND SHANNON_READER_SOURCES reader/parquet_reader.cpp)
+    
+  find_package(Arrow REQUIRED)
+  IF(NOT Arrow_FOUND)
+    message(FATAL_ERROR
+      "Apache Arrow not found!\n"
+      "Please install it using one of the following methods:\n"
+      "  - On Ubuntu/Debian: sudo apt-get install libarrow-dev libparquet-dev\n"
+      "  - On CentOS/RHEL: sudo yum install arrow-devel parquet-devel\n"
+      "  - From source: https://arrow.apache.org/install/\n"
+      "  - Using conda: conda install -c conda-forge pyarrow\n"
+      "Ensure that the library is in your PATH or set ARROW_ROOT to its install location."
+  )
+  ENDIF()
+
+  find_package(Parquet REQUIRED)
+  IF(NOT Parquet_FOUND)
+  message(FATAL_ERROR
+      "Apache Parquet not found!\n"
+      "Please install it along with Arrow:\n"
+      "  - On Ubuntu/Debian: sudo apt-get install libparquet-dev\n"
+      "  - On CentOS/RHEL: sudo yum install parquet-devel\n"
+      "  - From source: https://arrow.apache.org/install/\n"
+      "  - Using conda: conda install -c conda-forge pyarrow\n"
+      "Ensure that the library is in your PATH or set PARQUET_ROOT to its install location."
+  )
+  ENDIF()  
+
+  add_definitions(-DLAKEHOUSE_ENABLED)
+ENDIF()
+
 SET (SHANNON_ITERATOR_SOURCES
     executor/iterators/iterator.cpp
     executor/iterators/hash_join_iterator.cpp
@@ -111,12 +144,18 @@ IF(HAVE_LIBNUMA)
   SET(NUMA_LIBRARY "numa")
 ENDIF()
 
+SET(SHANNON_RAPID_LIBRARIES sql_dd ${ZLIB_LIBRARY} ${LZ4_LIBRARY} ${NUMA_LIBRARY} _lightgbm gomp)
+
+IF(WITH_LAKEHOUSE)
+    SET(SHANNON_RAPID_LIBRARIES ${SHANNON_RAPID_LIBRARIES} INTERFACE Arrow::arrow_shared Parquet::parquet_shared)
+ENDIF()
+
 MYSQL_ADD_PLUGIN(shannon_rapid
   ${SHANNON_RAPID_SOURCES} ${SHANNON_RAPID_COMPRESS_SOURCES}
   STORAGE_ENGINE
   MANDATORY
   MODULE_OUTPUT_NAME ha_rapid
-  LINK_LIBRARIES sql_dd ${ZLIB_LIBRARY} ${LZ4_LIBRARY} ${NUMA_LIBRARY} _lightgbm gomp)
+  LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES})
 
 # Avoid generating Hardware Capabilities due to crc32 instructions
 IF(SOLARIS_INTEL)

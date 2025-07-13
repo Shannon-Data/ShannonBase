@@ -28,7 +28,14 @@
 */
 #ifndef __SHANNONBASE_CSV_READER_H__
 #define __SHANNONBASE_CSV_READER_H__
+
+#include <algorithm>
+#include <cstring>
+#include <fstream>
+#include <memory>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "include/my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_object.h"
@@ -36,29 +43,94 @@
 
 class key_range;
 namespace ShannonBase {
-class CSVReader : public Reader {
+namespace Reader {
+// CSV parsing helper class
+class CSVParser {
  public:
-  CSVReader(std::string &path) : m_path(path), m_csv_fd(nullptr) {}
-  CSVReader(CSVReader &) = delete;
-  CSVReader(CSVReader &&) = delete;
-  virtual ~CSVReader() = default;
+  static std::vector<std::string> parseLine(const std::string &line, char delimiter = ',') {
+    std::vector<std::string> fields;
+    std::string field;
+    bool inQuotes = false;
 
-  int open() override;
-  int close() override;
-  int read(Secondary_engine_execution_context *, uchar *, size_t = 0) override;
-  int write(Secondary_engine_execution_context *, uchar *, size_t = 0) override;
-  int records_in_range(Secondary_engine_execution_context *, unsigned int, key_range *, key_range *) override;
-  int index_read(Secondary_engine_execution_context *, uchar *, uchar *, uint, ha_rkey_function) override;
-  int index_general(Secondary_engine_execution_context *, uchar *, size_t = 0) override;
-  int index_next(Secondary_engine_execution_context *, uchar *, size_t = 0) override;
-  int index_next_same(Secondary_engine_execution_context *, uchar *, uchar *, uint, ha_rkey_function) override;
-  uchar *tell(uint = 0) override;
-  uchar *seek(size_t offset) override;
+    for (size_t i = 0; i < line.length(); ++i) {
+      char c = line[i];
+
+      if (c == '"') {
+        inQuotes = !inQuotes;
+      } else if (c == delimiter && !inQuotes) {
+        fields.push_back(field);
+        field.clear();
+      } else {
+        field += c;
+      }
+    }
+    fields.push_back(field);
+    return fields;
+  }
+
+  static std::string trim(const std::string &str) {
+    size_t start = str.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = str.find_last_not_of(" \t\r\n");
+    return str.substr(start, end - start + 1);
+  }
+};
+
+class CSVReader {
+ public:
+  CSVReader(const std::string &path);
+  ~CSVReader();
+
+  // Delete copy and move operations
+  CSVReader(const CSVReader &) = delete;
+  CSVReader(CSVReader &&) = delete;
+  CSVReader &operator=(const CSVReader &) = delete;
+  CSVReader &operator=(CSVReader &&) = delete;
+
+  // Interface methods
+  int open();
+  int close();
+  int read(Secondary_engine_execution_context *context, uchar *buffer, size_t length);
+  int write(Secondary_engine_execution_context *context, uchar *buffer, size_t length);
+  int records_in_range(Secondary_engine_execution_context *context, unsigned int index, key_range *min_key,
+                       key_range *max_key);
+  int index_read(Secondary_engine_execution_context *context, uchar *buffer, uchar *key, uint key_len,
+                 ha_rkey_function find_flag);
+  int index_general(Secondary_engine_execution_context *context, uchar *buffer, size_t length);
+  int index_next(Secondary_engine_execution_context *context, uchar *buffer, size_t length);
+  int index_next_same(Secondary_engine_execution_context *context, uchar *buffer, uchar *key, uint key_len,
+                      ha_rkey_function find_flag);
+  uchar *tell(uint field_index);
+  uchar *seek(size_t offset);
+
+  // Helper methods
+  size_t getCurrentPosition() const;
+  size_t getTotalRecords() const;
+  const std::vector<std::string> &getHeaders() const;
+  const std::vector<std::string> &getCurrentRecord() const;
+  bool isEOF() const;
 
  private:
   std::string m_path;
   FILE *m_csv_fd;
+  size_t m_current_pos;
+  size_t m_total_records;
+  bool m_is_opened;
+  bool m_eof_reached;
+  std::vector<std::string> m_headers;
+  std::vector<std::string> m_current_record;
+
+  // Private helper methods
+  bool readHeader();
+  void skipHeader();
+  void countRecords();
+  void serializeRecord(uchar *buffer, size_t length);
+  int linearSearch(Secondary_engine_execution_context *context, uchar *buffer, uchar *key, uint key_len,
+                   ha_rkey_function find_flag);
+  int findNextSame(Secondary_engine_execution_context *context, uchar *buffer, uchar *key, uint key_len,
+                   ha_rkey_function find_flag);
 };
 
+}  // namespace Reader
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CSV_READER_H__
