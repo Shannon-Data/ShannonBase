@@ -1,7 +1,12 @@
 ![image](./Docs/shannon-logo.png)
 
+![Static Badge](https://img.shields.io/badge/AI%2FML_Native-_?link=https%3A%2F%2Fgithub.com%2Fmicrosoft%2FLightGBM)
+![Static Badge](https://img.shields.io/badge/ONNX--Runtime-_?link=https%3A%2F%2Fgithub.com%2Fmicrosoft%2Fonnxruntime)
+![Static Badge](https://img.shields.io/badge/ML_embedded-_?link=https%3A%2F%2Fgithub.com%2Fmicrosoft%2FLightGBM)
+![Static Badge](https://img.shields.io/badge/Embedding--Native-_?link=https%3A%2F%2Fgithub.com%2Fmicrosoft%2Fonnxruntime)
 ![nightly](https://github.com/Shannon-Data/ShannonBase/actions/workflows/nightly.yaml/badge.svg)
 ![weekly](https://github.com/Shannon-Data/ShannonBase/actions/workflows/weekly.yaml/badge.svg)
+
 
 ShannonBase is a HTAP database provided by Shannon Data AI, which is an infra for big data & AI. 
 
