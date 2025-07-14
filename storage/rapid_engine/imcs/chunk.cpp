@@ -132,6 +132,7 @@ void Chunk::init_chunk_key(const Field *field, const std::string *custom_key) {
         .append(":")
         .append(field->field_name);
   }
+  m_chunk_footprint = m_chunk_key.append(":").append(Utils::Util::currenttime_to_string());
 }
 
 void Chunk::init_header(const Field *field) {

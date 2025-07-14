@@ -26,6 +26,7 @@
 #ifndef __SHANNONBASE_UTILS_H__
 #define __SHANNONBASE_UTILS_H__
 
+#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -271,6 +272,18 @@ class Util {
   static std::vector<std::string> split(const std::string &str, char delimiter);
 
   static uint normalized_length(const Field *field);
+
+  static inline std::string currenttime_to_string() {
+    auto now = std::chrono::system_clock::now();
+    auto now_time_t = std::chrono::system_clock::to_time_t(now);
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+
+    std::tm tm = *std::localtime(&now_time_t);
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << "." << std::setfill('0') << std::setw(3) << now_ms.count();
+    return oss.str();
+  }
 };
 
 template <typename T>

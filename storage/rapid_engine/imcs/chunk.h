@@ -234,6 +234,7 @@ class Chunk : public MemoryObject {
 
   inline void set_owner(Cu *owner) { m_owner = owner; }
   inline Cu *owner() const { return m_owner; }
+  inline std::string &foot_print() { return m_chunk_footprint; }
 
  private:
   class ChunkMemoryManager {
@@ -264,7 +265,7 @@ class Chunk : public MemoryObject {
   Cu *m_owner;
 
   // the key string of this chunk.
-  std::string m_chunk_key;
+  std::string m_chunk_key, m_chunk_footprint;
 
   std::shared_mutex m_header_mutex;
   std::unique_ptr<Chunk_header> m_header{nullptr};
