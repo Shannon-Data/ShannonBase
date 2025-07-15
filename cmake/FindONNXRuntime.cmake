@@ -7,7 +7,7 @@
 
 # Set default ONNX Runtime version
 if (NOT ONNXRUNTIME_VERSION)
-  set(ONNXRUNTIME_VERSION "1.17.0")
+  set(ONNXRUNTIME_VERSION "1.22.0")
 endif()
 
 # Automatically determine backend: cpu or gpu

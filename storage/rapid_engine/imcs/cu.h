@@ -203,6 +203,9 @@ class Cu : public MemoryObject {
   // key name of this cu.
   std::string m_cu_key;
 
+  // temp used in cu. to reduce the new/delete oper. and memory fragmentation.
+  uchar m_tmp_buff[MAX_FIELD_WIDTH] = {0};
+
   // magic number for CU.
   const char *m_magic = "SHANNON_CU";
 };

@@ -232,12 +232,13 @@ void Cu::update_meta_info(OPER_TYPE type, uchar *data, uchar *old, bool row_rese
 
 uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
-  std::unique_ptr<uchar[]> datum{nullptr};
+
+  auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
+  std::unique_ptr<uchar[]> datum((dlen < MAX_FIELD_WIDTH) ? nullptr : new uchar[dlen]);
+  uchar *pdatum = datum.get() ? datum.get() : m_tmp_buff;
   if (data) {
-    auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
-    datum.reset(new uchar[dlen]);
-    memset(datum.get(), 0x0, dlen);
-    std::memcpy(datum.get(), data, len);
+    std::memset(pdatum, 0x0, len);
+    std::memcpy(pdatum, data, len);
   }
 
   /** if the field type is text type then the value will be encoded by local dictionary.
@@ -246,7 +247,6 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
   auto chunk_ptr = m_chunks[m_chunks.size() - 1].get();
   ut_a(chunk_ptr);
 
-  auto pdatum = datum.get();
   auto wlen = len;
   auto wdata = (len == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, wlen, false);
   if (!(written_to = chunk_ptr->write(context, wdata, wlen))) {  // current chunk is full.
@@ -274,12 +274,12 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
 uchar *Cu::write_row_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len) {
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
 
-  std::unique_ptr<uchar[]> datum{nullptr};
+  auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
+  std::unique_ptr<uchar[]> datum((dlen < MAX_FIELD_WIDTH) ? nullptr : new uchar[dlen]);
+  uchar *pdatum = datum.get() ? datum.get() : m_tmp_buff;
   if (data) {
-    auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
-    datum.reset(new uchar[dlen]);
-    memset(datum.get(), 0x0, dlen);
-    std::memcpy(datum.get(), data, len);
+    std::memset(pdatum, 0x0, len);
+    std::memcpy(pdatum, data, len);
   }
 
   /** if the field type is text type then the value will be encoded by local dictionary.
@@ -288,7 +288,6 @@ uchar *Cu::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
   auto chunk_ptr = m_chunks[m_chunks.size() - 1].get();
   ut_a(chunk_ptr);
 
-  auto pdatum = datum.get();
   auto wlen = len;
   auto wdata = (wlen == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, wlen, false);
 
@@ -383,12 +382,12 @@ uchar *Cu::update_row_from_log(const Rapid_load_context *context, row_id_t rowid
   ut_a(context);
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
 
-  std::unique_ptr<uchar[]> datum{nullptr};
+  std::unique_ptr<uchar[]> datum((len < MAX_FIELD_WIDTH) ? nullptr : new uchar[len]);
+  auto pdatum = (datum.get()) ? datum.get() : m_tmp_buff;
   if (data) {
-    datum.reset(new uchar[len]);
-    std::memcpy(datum.get(), data, len);
+    std::memset(pdatum, 0x0, len);
+    std::memcpy(pdatum, data, len);
   }
-  auto pdatum = datum.get();
   auto wdata = (len == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, len, false);
 
   auto chunk_id = rowid / SHANNON_ROWS_IN_CHUNK;
