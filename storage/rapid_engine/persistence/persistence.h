@@ -25,7 +25,55 @@
 */
 #ifndef __SHANNONBASE_PERSISTENCE_H__
 #define __SHANNONBASE_PERSISTENCE_H__
+#include <atomic>
+#include <fstream>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "include/my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_const.h"
+
 namespace ShannonBase {
-namespace Persistence {}  // namespace Persistence
+namespace Imcs {
+class Chunk;
+class ChunkPersister {
+ public:
+  ChunkPersister(const std::string &wal_path, const std::string &checkpoint_path);
+  ~ChunkPersister();
+
+  void save_chunk(const Chunk *chunk, const std::string &path);
+  void load_chunk(Chunk *chunk, const std::string &path);
+
+  void begin_transaction();
+  void commit_transaction();
+
+  void rollback_transaction();
+  void recover();
+
+  void create_checkpoint();
+
+ private:
+  struct WALEntry {
+    uint64_t transaction_id;
+    std::string operation;  // "INSERT", "UPDATE", "DELETE"
+    std::string chunk_key;
+    row_id_t row_id;
+    std::vector<uchar> data;
+  };
+
+  void write_wal(const WALEntry &entry);
+
+  std::vector<WALEntry> read_wal();
+
+  void load_from_checkpoint();
+
+  std::string wal_path_;
+  std::string checkpoint_path_;
+  std::atomic<uint64_t> transaction_id_;
+  std::ofstream wal_file_;
+  bool in_transaction_;
+};
+}  // namespace Imcs
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_PERSISTENCE_H__
