@@ -144,6 +144,11 @@ IF((LINUX OR WIN32) AND WITH_LAKEHOUSE STREQUAL "system")
     ENDIF()
 ENDIF()
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+find_package(ONNXRuntime REQUIRED)
+
+INCLUDE_DIRECTORIES(${ONNXRUNTIME_INCLUDE_DIRS})
+
 SET (SHANNON_ITERATOR_SOURCES
     executor/iterators/iterator.cpp
     executor/iterators/hash_join_iterator.cpp
@@ -195,7 +200,7 @@ MYSQL_ADD_PLUGIN(shannon_rapid
   STORAGE_ENGINE
   MANDATORY
   MODULE_OUTPUT_NAME ha_rapid
-  LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES})
+  LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES} ${ONNXRUNTIME_LIBRARIES})
 
 # Avoid generating Hardware Capabilities due to crc32 instructions
 IF(SOLARIS_INTEL)
