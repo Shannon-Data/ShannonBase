@@ -67,7 +67,7 @@ select * from ti order by id, name;
 select * from ti order by score, name;
 select id, name, sum(score) from ti group by id, name order by id;
 
---sleep 18
+--sleep 10
 --connection connection_1
 --echo [conn1]
 explain select * from ti order by name;

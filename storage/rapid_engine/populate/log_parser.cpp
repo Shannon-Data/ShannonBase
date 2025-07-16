@@ -72,6 +72,8 @@ std::unordered_map<std::string, SYS_FIELD_TYPE_ID> current_sys_field_map = {
     {SHANNON_DB_ROW_ID, SYS_FIELD_TYPE_ID::SYS_DB_ROW_ID},
     {SHANNON_DB_ROLL_PTR, SYS_FIELD_TYPE_ID::DB_ROLL_PTR}};
 
+alignas(CACHE_LINE_SIZE) SHANNON_THREAD_LOCAL uchar LogParser::mysql_field_data_1[MAX_FIELD_WIDTH] = {0};
+
 uint LogParser::get_trxid(const rec_t *rec, const dict_index_t *index, const ulint *offsets, uchar *trx_id) {
   uint pk_len{0};
   auto trx_id_pos = index->get_sys_col_pos(DATA_TRX_ID);
@@ -510,8 +512,9 @@ byte *LogParser::parse_tablespace_redo_extend(byte *ptr, const byte *end, const 
 
 // identical to parse_rec_field impl, but it used in co-routine.
 boost::asio::awaitable<void> LogParser::co_parse_field(Rapid_load_context *context, const rec_t *rec,
-                                                       const dict_index_t *index, const dict_index_t *real_index,
-                                                       const ulint *offsets, std::mutex &field_mutex, size_t idx,
+                                                       const dict_index_t *index, const ulint *offsets,
+                                                       const dict_index_t *real_index, std::mutex &field_mutex,
+                                                       size_t idx,
                                                        std::unordered_map<std::string, mysql_field_t> &field_values) {
   // switch async context.
   co_await boost::asio::post(boost::asio::use_awaitable);
@@ -524,7 +527,6 @@ boost::asio::awaitable<void> LogParser::co_parse_field(Rapid_load_context *conte
 
   mem_heap_t *heap = mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE);
   auto real_offsets = rec_get_offsets(rec, real_index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
-  uchar mysql_field_data_1[MAX_FIELD_WIDTH] = {0};
 
   /**
    * in mlog_parse_index_v1, we can found that it does not bring the true type of that col
@@ -573,10 +575,9 @@ boost::asio::awaitable<void> LogParser::co_parse_field(Rapid_load_context *conte
   DBUG_PRINT("parse_rec_fields", ("Extracted field: %s, mtype=%u, len=%lu", field_name, col->mtype, mysql_fld_len));
 
   std::unique_ptr<uchar[]> mysql_field_data((mysql_fld_len <= MAX_FIELD_WIDTH) ? nullptr : new uchar[mysql_fld_len]);
-  uchar *field_data_ptr = (mysql_fld_len <= MAX_FIELD_WIDTH)
-                              ? mysql_field_data_1
-                              : (memset(mysql_field_data.get(), 0x0, mysql_fld_len), mysql_field_data.get());
+  uchar *field_data_ptr = (mysql_fld_len <= MAX_FIELD_WIDTH) ? mysql_field_data_1 : mysql_field_data.get();
   ut_a(mysql_fld_len <= MAX_FIELD_WIDTH || mysql_field_data);
+  std::memset(field_data_ptr, 0x0, mysql_fld_len <= MAX_FIELD_WIDTH ? MAX_FIELD_WIDTH : mysql_fld_len);
 
   auto physical_fld_len{0lu};
   auto mtype = real_index->get_col(idx)->mtype;
@@ -663,8 +664,8 @@ boost::asio::awaitable<void> LogParser::co_parse_field(Rapid_load_context *conte
 }
 
 boost::asio::awaitable<int> LogParser::parse_rec_fields_async(
-    Rapid_load_context *context, const rec_t *rec, const dict_index_t *index, const dict_index_t *real_index,
-    const ulint *offsets, std::unordered_map<std::string, mysql_field_t> &field_values) {
+    Rapid_load_context *context, const rec_t *rec, const dict_index_t *index, const ulint *offsets,
+    const dict_index_t *real_index, std::unordered_map<std::string, mysql_field_t> &field_values) {
   auto log_parser_pool = ShannonBase::Imcs::Imcs::pool();
   auto field_mutex = std::make_shared<std::mutex>();
   auto executor = co_await boost::asio::this_coro::executor;
@@ -675,10 +676,10 @@ boost::asio::awaitable<int> LogParser::parse_rec_fields_async(
   for (size_t idx = 0; idx < index->n_fields; ++idx) {
     boost::asio::co_spawn(
         *log_parser_pool,
-        [this, context, rec, index, real_index, offsets, field_mutex, idx, field_values_ptr, counter,
+        [this, context, rec, index, offsets, real_index, field_mutex, idx, field_values_ptr, counter,
          result_promise]() mutable -> boost::asio::awaitable<void> {
           try {
-            co_await co_parse_field(context, rec, index, real_index, offsets, *field_mutex, idx, *field_values_ptr);
+            co_await co_parse_field(context, rec, index, offsets, real_index, *field_mutex, idx, *field_values_ptr);
           } catch (...) {
             result_promise->set_value(HA_ERR_GENERIC);
             DBUG_PRINT("parse_rec_fields_async", ("co_parse_field failed."));
@@ -697,7 +698,7 @@ boost::asio::awaitable<int> LogParser::parse_rec_fields_async(
 }
 
 int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
-                                const dict_index_t *real_index, const ulint *offsets,
+                                const ulint *offsets, const dict_index_t *real_index,
                                 std::unordered_map<std::string, mysql_field_t> &field_values) {
   ut_ad(rec);
   ut_ad(rec_validate(rec, offsets));
@@ -721,7 +722,6 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
                                                              mem_heap_free);
   auto heap_ptr = heap.get();
   auto real_offsets = rec_get_offsets(rec, real_index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap_ptr);
-  uchar mysql_field_data_1[MAX_FIELD_WIDTH] = {0};
   for (auto idx = 0u; idx < index->n_fields; idx++) {
     /**
      * in mlog_parse_index_v1, we can found that it does not bring the true type of that col
@@ -769,10 +769,9 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
     DBUG_PRINT("parse_rec_fields", ("Extracted field: %s, mtype=%u, len=%lu", field_name, col->mtype, mysql_fld_len));
 
     std::unique_ptr<uchar[]> mysql_field_data((mysql_fld_len <= MAX_FIELD_WIDTH) ? nullptr : new uchar[mysql_fld_len]);
-    uchar *field_data_ptr = (mysql_fld_len <= MAX_FIELD_WIDTH)
-                                ? mysql_field_data_1
-                                : (memset(mysql_field_data.get(), 0x0, mysql_fld_len), mysql_field_data.get());
+    uchar *field_data_ptr = mysql_fld_len <= MAX_FIELD_WIDTH ? mysql_field_data_1 : mysql_field_data.get();
     ut_a(mysql_fld_len <= MAX_FIELD_WIDTH || mysql_field_data);
+    std::memset(field_data_ptr, 0x0, mysql_fld_len <= MAX_FIELD_WIDTH ? MAX_FIELD_WIDTH : mysql_fld_len);
 
     auto physical_fld_len{0lu};
     auto mtype = real_index->get_col(idx)->mtype;
@@ -924,10 +923,10 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       std::unordered_map<std::string, mysql_field_t> row_field_value;
       // step 1:to get all field data of deleting row.
       if (index->n_fields <= LogParser::MAX_N_FIELD_PARALLEL)
-        parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
+        parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
       else
         cowait_sync_with(*log_parser_pool,
-                         parse_rec_fields_async(context, rec, index, real_index, offsets, row_field_value));
+                         parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
 
       std::map<std::string, key_info_t> keys;
       if (build_key(context, row_field_value, keys)) return HA_ERR_WRONG_IN_RECORD;
@@ -942,10 +941,10 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       std::unordered_map<std::string, mysql_field_t> row_field_value;  //<field_name, field>
       // step 1:to get all field data of inserting row.
       if (index->n_fields <= LogParser::MAX_N_FIELD_PARALLEL)
-        parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
+        parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
       else
         cowait_sync_with(*log_parser_pool,
-                         parse_rec_fields_async(context, rec, index, real_index, offsets, row_field_value));
+                         parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
 
       // step 2: insert all field data into CUs.
       auto rowid = imcs_instance->reserve_row_id(sch_tb);
@@ -961,10 +960,10 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       std::unordered_map<std::string, mysql_field_t> row_field_value;
       // step 1:to get all field data of updating row.
       if (index->n_fields <= LogParser::MAX_N_FIELD_PARALLEL)
-        parse_rec_fields(context, rec, index, real_index, offsets, row_field_value);
+        parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
       else
         cowait_sync_with(*log_parser_pool,
-                         parse_rec_fields_async(context, rec, index, real_index, offsets, row_field_value));
+                         parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
 
       // step 2: insert all field data into CUs.
       std::map<std::string, key_info_t> keys;
