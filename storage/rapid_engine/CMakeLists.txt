@@ -75,37 +75,79 @@ SET(SHANNON_READER_SOURCES
     reader/csv_reader.cpp
 )
 
-IF(LINUX AND WITH_LAKEHOUSE)
-  list(APPEND SHANNON_READER_SOURCES reader/parquet_reader.cpp)
-    
-  find_package(Arrow REQUIRED)
-  IF(NOT Arrow_FOUND)
-    message(FATAL_ERROR
-      "Apache Arrow not found!\n"
-      "Please install it using one of the following methods:\n"
-      "  - On Ubuntu/Debian: sudo apt-get install libarrow-dev libparquet-dev\n"
-      "  - On CentOS/RHEL: sudo yum install arrow-devel parquet-devel\n"
-      "  - From source: https://arrow.apache.org/install/\n"
-      "  - Using conda: conda install -c conda-forge pyarrow\n"
-      "Ensure that the library is in your PATH or set ARROW_ROOT to its install location."
-  )
-  ENDIF()
+IF((LINUX OR WIN32) AND WITH_LAKEHOUSE STREQUAL "system")
+    list(APPEND SHANNON_READER_SOURCES reader/parquet_reader.cpp)
 
-  find_package(Parquet REQUIRED)
-  IF(NOT Parquet_FOUND)
-  message(FATAL_ERROR
-      "Apache Parquet not found!\n"
-      "Please install it along with Arrow:\n"
-      "  - On Ubuntu/Debian: sudo apt-get install libparquet-dev\n"
-      "  - On CentOS/RHEL: sudo yum install parquet-devel\n"
-      "  - From source: https://arrow.apache.org/install/\n"
-      "  - Using conda: conda install -c conda-forge pyarrow\n"
-      "Ensure that the library is in your PATH or set PARQUET_ROOT to its install location."
-  )
-  ENDIF()  
+    find_package(Arrow)
+    IF(NOT Arrow_FOUND)
+        IF(WIN32)
+            MESSAGE(FATAL_ERROR
+                "Apache Arrow not found!\n"
+                "Please install it using one of the following methods:\n"
+                "  - Using vcpkg: vcpkg install arrow\n"
+                "  - Using conda: conda install -c conda-forge pyarrow\n"
+                "  - Download pre-built binaries from: https://arrow.apache.org/install/\n"
+                "  - Build from source: https://arrow.apache.org/docs/developers/cpp/windows.html\n"
+                "Ensure that the library is in your PATH or set ARROW_ROOT to its install location."
+            )
+        ELSE()
+            MESSAGE(FATAL_ERROR
+                "Apache Arrow not found!\n"
+                "Please install it using one of the following methods:\n"
+                "  - On Ubuntu/Debian: sudo apt-get install libarrow-dev libparquet-dev\n"
+                "  - On CentOS/RHEL: sudo yum install arrow-devel parquet-devel\n"
+                "  - From source: https://arrow.apache.org/install/\n"
+                "  - Using conda: conda install -c conda-forge pyarrow\n"
+                "Ensure that the library is in your PATH or set ARROW_ROOT to its install location."
+            )
+        ENDIF()
+    ENDIF()
 
-  add_definitions(-DLAKEHOUSE_ENABLED)
+    find_package(Parquet)
+    IF(NOT Parquet_FOUND)
+        IF(WIN32)
+            MESSAGE(FATAL_ERROR
+                "Apache Parquet not found!\n"
+                "Please install it along with Arrow:\n"
+                "  - Using vcpkg: vcpkg install arrow[parquet]\n"
+                "  - Using conda: conda install -c conda-forge pyarrow\n"
+                "  - Download pre-built binaries from: https://arrow.apache.org/install/\n"
+                "  - Build from source: https://arrow.apache.org/docs/developers/cpp/windows.html\n"
+                "Ensure that the library is in your PATH or set PARQUET_ROOT to its install location."
+            )
+        ELSE()
+            MESSAGE(FATAL_ERROR
+                "Apache Parquet not found!\n"
+                "Please install it along with Arrow:\n"
+                "  - On Ubuntu/Debian: sudo apt-get install libparquet-dev\n"
+                "  - On CentOS/RHEL: sudo yum install parquet-devel\n"
+                "  - From source: https://arrow.apache.org/install/\n"
+                "  - Using conda: conda install -c conda-forge pyarrow\n"
+                "Ensure that the library is in your PATH or set PARQUET_ROOT to its install location."
+            )
+        ENDIF()
+    ENDIF()
+
+    add_definitions(-DLAKEHOUSE_ENABLED)
+
+    IF(WIN32)
+        set_property(TARGET ha_rapid PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+
+        if(CMAKE_TOOLCHAIN_FILE)
+            find_package(PkgConfig QUIET)
+        endif()
+
+        if(MSVC)
+            target_link_libraries(ha_rapid PRIVATE ws2_32)
+        endif()
+    ENDIF()
 ENDIF()
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+find_package(ONNXRuntime REQUIRED)
+
+INCLUDE_DIRECTORIES(${ONNXRUNTIME_INCLUDE_DIRS})
 
 SET (SHANNON_ITERATOR_SOURCES
     executor/iterators/iterator.cpp
@@ -123,6 +165,8 @@ set (SHANNON_OPTIMIZE
 set (SHANNON_ML
     ml/ml.cpp
 )
+set (SHANNON_PERSISTENCE
+)
 SET(SHANNON_RAPID_SOURCES
     handler/ha_shannon_rapid.cc
     handler/ha_shannon_rapidpart.cc
@@ -132,6 +176,7 @@ SET(SHANNON_RAPID_SOURCES
     ${SHANNON_POPULATE_SOURCES}
     ${SHANNON_ML}
     ${SHANNON_OPTIMIZE}
+    ${SHANNON_PERSISTENCE}
 )
 
 ADD_LIBRARY(rapid_compress STATIC ${SHANNON_RAPID_COMPRESS_SOURCES})
@@ -155,7 +200,7 @@ MYSQL_ADD_PLUGIN(shannon_rapid
   STORAGE_ENGINE
   MANDATORY
   MODULE_OUTPUT_NAME ha_rapid
-  LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES})
+  LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES} ${ONNXRUNTIME_LIBRARIES})
 
 # Avoid generating Hardware Capabilities due to crc32 instructions
 IF(SOLARIS_INTEL)

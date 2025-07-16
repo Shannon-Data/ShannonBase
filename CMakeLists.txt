@@ -942,6 +942,8 @@ ENDIF()
 OPTION(ENABLED_PROFILING "Enable profiling" ON)
 OPTION(WITHOUT_SERVER OFF)
 
+OPTION(WITH_LAKEHOUSE "Enable Lakehouse support (Parquet reader)" OFF)
+
 IF(WIN32)
   OPTION(WITH_MSCRT_DEBUG "MS Visual Studio Debug CRT instrumentation" OFF)
 ENDIF()
