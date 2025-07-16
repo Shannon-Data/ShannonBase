@@ -38,8 +38,9 @@
 
 namespace ShannonBase {
 namespace Imcs {
-
+alignas(CACHE_LINE_SIZE) SHANNON_THREAD_LOCAL uchar Cu::m_buff[MAX_FIELD_WIDTH] = {0};
 Cu::Cu(const Field *field) {
+  static_assert(alignof(m_buff) >= CACHE_LINE_SIZE, "Alignment failed");
   ut_a(field && !field->is_flag_set(NOT_SECONDARY_FLAG));
   m_cu_key.append(field->table->s->db.str)
       .append(":")
@@ -232,12 +233,14 @@ void Cu::update_meta_info(OPER_TYPE type, uchar *data, uchar *old, bool row_rese
 
 uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
-  std::unique_ptr<uchar[]> datum{nullptr};
+  auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;  // at least has size(uint32).
+  std::unique_ptr<uchar[]> datum(dlen < MAX_FIELD_WIDTH ? nullptr : new uchar[dlen]);
+  uchar *pdatum{nullptr};
+
   if (data) {
-    auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
-    datum.reset(new uchar[dlen]);
-    memset(datum.get(), 0x0, dlen);
-    std::memcpy(datum.get(), data, len);
+    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff : datum.get();
+    std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
+    std::memcpy(pdatum, data, len);
   }
 
   /** if the field type is text type then the value will be encoded by local dictionary.
@@ -246,8 +249,7 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
   auto chunk_ptr = m_chunks[m_chunks.size() - 1].get();
   ut_a(chunk_ptr);
 
-  auto pdatum = datum.get();
-  auto wlen = len;
+  size_t wlen{len};  // will changed by get_vfield_value.
   auto wdata = (len == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, wlen, false);
   if (!(written_to = chunk_ptr->write(context, wdata, wlen))) {  // current chunk is full.
     // then build a new one, and re-try to write the data.
@@ -273,13 +275,13 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
  */
 uchar *Cu::write_row_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len) {
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
-
-  std::unique_ptr<uchar[]> datum{nullptr};
+  auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
+  std::unique_ptr<uchar[]> datum(dlen < MAX_FIELD_WIDTH ? nullptr : new uchar[dlen]);
+  uchar *pdatum{nullptr};
   if (data) {
-    auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
-    datum.reset(new uchar[dlen]);
-    memset(datum.get(), 0x0, dlen);
-    std::memcpy(datum.get(), data, len);
+    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff : datum.get();
+    std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
+    std::memcpy(pdatum, data, len);
   }
 
   /** if the field type is text type then the value will be encoded by local dictionary.
@@ -288,8 +290,7 @@ uchar *Cu::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
   auto chunk_ptr = m_chunks[m_chunks.size() - 1].get();
   ut_a(chunk_ptr);
 
-  auto pdatum = datum.get();
-  auto wlen = len;
+  auto wlen{len};
   auto wdata = (wlen == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, wlen, false);
 
   if (!(written_to = chunk_ptr->write_from_log(context, rowid, wdata, wlen))) {  // current chunk is full.
@@ -383,12 +384,14 @@ uchar *Cu::update_row_from_log(const Rapid_load_context *context, row_id_t rowid
   ut_a(context);
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
 
-  std::unique_ptr<uchar[]> datum{nullptr};
+  auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
+  std::unique_ptr<uchar[]> datum((dlen < MAX_FIELD_WIDTH) ? nullptr : new uchar[dlen]);
+  uchar *pdatum{nullptr};
   if (data) {
-    datum.reset(new uchar[len]);
-    std::memcpy(datum.get(), data, len);
+    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff : datum.get();
+    std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
+    std::memcpy(pdatum, data, len);
   }
-  auto pdatum = datum.get();
   auto wdata = (len == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, len, false);
 
   auto chunk_id = rowid / SHANNON_ROWS_IN_CHUNK;

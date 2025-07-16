@@ -291,10 +291,9 @@ class LogParser {
    * into a vector. all field values store in feild_values' and store key info
    * into context. [field_name, field_value] and [key_name, key_value]*/
   int parse_rec_fields(Rapid_load_context* context,
-                                   const rec_t *rec, const dict_index_t *index,
-                                   const dict_index_t *real_index,
-                                   const ulint *offsets,
-                                   std::unordered_map<std::string, mysql_field_t>& field_values);
+                       const rec_t *rec, const dict_index_t *index,
+                       const ulint *offsets, const dict_index_t *real_index,
+                       std::unordered_map<std::string, mysql_field_t>& field_values);
 
   /**to find a row in imcs via PK. a row divids into fields, and store int a map.
    * return position of first matched row.
@@ -303,18 +302,22 @@ class LogParser {
    * with_sys_col[in], sys col to do comparision or not. */
   row_id_t find_matched_row(Rapid_load_context* context, std::map<std::string, key_info_t>& keys);
 
-  boost::asio::awaitable<int> parse_rec_fields_async(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
-                                      const dict_index_t *real_index, const ulint *offsets,
-                                      std::unordered_map<std::string, mysql_field_t> &field_values);
+  boost::asio::awaitable<int> parse_rec_fields_async(Rapid_load_context *context, const rec_t *rec,
+                                                    const dict_index_t *index, const ulint *offsets,
+                                                    const dict_index_t *real_index,
+                                                    std::unordered_map<std::string, mysql_field_t> &field_values);
 
   boost::asio::awaitable<void> co_parse_field(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
-                                      const dict_index_t *real_index, const ulint *offsets, std::mutex &field_mutex,
-                                      size_t idx, std::unordered_map<std::string, mysql_field_t>& field_values);
+                                              const ulint *offsets, const dict_index_t *real_index,
+                                              std::mutex &field_mutex, size_t idx,
+                                              std::unordered_map<std::string, mysql_field_t>& field_values);
 
 
  private:
+  alignas(CACHE_LINE_SIZE) static SHANNON_THREAD_LOCAL uchar mysql_field_data_1[MAX_FIELD_WIDTH];
+  static SHANNON_THREAD_LOCAL uchar padding[CACHE_LINE_SIZE - (MAX_FIELD_WIDTH % CACHE_LINE_SIZE)]; // padding
   // to indicate whether to use co-routine if # of fields is over this threshold. 
-  static const uint MAX_N_FIELD_PARALLEL = 1;
+  static const uint MAX_N_FIELD_PARALLEL = 8;
 };
 
 }  // namespace Populate

@@ -203,6 +203,8 @@ class Cu : public MemoryObject {
   // key name of this cu.
   std::string m_cu_key;
 
+  alignas(CACHE_LINE_SIZE) static SHANNON_THREAD_LOCAL uchar m_buff[MAX_FIELD_WIDTH];
+  static SHANNON_THREAD_LOCAL uchar padding[CACHE_LINE_SIZE - (MAX_FIELD_WIDTH % CACHE_LINE_SIZE)];  // padding
   // magic number for CU.
   const char *m_magic = "SHANNON_CU";
 };

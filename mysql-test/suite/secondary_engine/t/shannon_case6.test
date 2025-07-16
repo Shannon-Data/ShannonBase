@@ -353,7 +353,7 @@ DELETE FROM t10 WHERE year = 2024 AND department_id = 3;
 explain select * from t10 order by department_id;
 select * from t10 order by department_id;
 
---sleep 20
+--sleep 10
 --connection connection_1
 --echo #[conn_1_after_dml]
 select @@use_secondary_engine;
