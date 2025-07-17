@@ -56,9 +56,11 @@ using boost::asio::use_awaitable;
 class Field;
 class TABLE;
 namespace ShannonBase {
+namespace Imcs{
+class RapidTable;
+}
 class Rapid_load_context;
 namespace Populate {
-
 extern std::unordered_map<uint64, const dict_index_t *> g_index_cache;
 extern std::unordered_map<uint64, std::pair<std::string, std::string>> g_index_names;
 extern std::shared_mutex g_index_cache_mutex;
@@ -310,9 +312,13 @@ class LogParser {
   boost::asio::awaitable<void> co_parse_field(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
                                               const ulint *offsets, const dict_index_t *real_index,
                                               std::mutex &field_mutex, size_t idx,
-                                              std::unordered_map<std::string, mysql_field_t>& field_values);
+                                              std::unordered_map<std::string, mysql_field_t> &field_values);
 
-
+  bool rec_field_parse(Rapid_load_context *context, mem_heap_t *heap, Imcs::RapidTable *rpd_table, const rec_t *rec,
+                        const dict_index_t *index, const ulint *offsets,
+                        const dict_index_t *real_index, const ulint *real_offsets,
+                        size_t idx, std::mutex &field_mutex,
+                        std::unordered_map<std::string, mysql_field_t> &field_values);
  private:
   alignas(CACHE_LINE_SIZE) static SHANNON_THREAD_LOCAL uchar mysql_field_data_1[MAX_FIELD_WIDTH];
   static SHANNON_THREAD_LOCAL uchar padding[CACHE_LINE_SIZE - (MAX_FIELD_WIDTH % CACHE_LINE_SIZE)]; // padding
