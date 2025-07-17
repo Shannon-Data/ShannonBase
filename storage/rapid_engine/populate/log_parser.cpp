@@ -32,6 +32,7 @@
 */
 
 #include "storage/rapid_engine/populate/log_parser.h"
+#include <algorithm>
 
 #include "current_thd.h"
 #include "sql/table.h"
@@ -73,6 +74,8 @@ std::unordered_map<std::string, SYS_FIELD_TYPE_ID> current_sys_field_map = {
     {SHANNON_DB_ROLL_PTR, SYS_FIELD_TYPE_ID::DB_ROLL_PTR}};
 
 alignas(CACHE_LINE_SIZE) SHANNON_THREAD_LOCAL uchar LogParser::mysql_field_data_1[MAX_FIELD_WIDTH] = {0};
+
+ShannonBase::Utils::SimpleRatioAdjuster LogParser::m_adaptive_ratio(0.3);
 
 uint LogParser::get_trxid(const rec_t *rec, const dict_index_t *index, const ulint *offsets, uchar *trx_id) {
   uint pk_len{0};
@@ -670,24 +673,31 @@ boost::asio::awaitable<int> LogParser::parse_rec_fields_async(
   auto field_mutex = std::make_shared<std::mutex>();
   auto executor = co_await boost::asio::this_coro::executor;
   auto counter = std::make_shared<std::atomic<size_t>>(index->n_fields);
-  auto result_promise = std::make_shared<shared_promise<int>>();
+  auto result_promise = std::make_shared<ShannonBase::Utils::shared_promise<int>>();
   auto field_values_ptr = &field_values;
 
-  for (size_t idx = 0; idx < index->n_fields; ++idx) {
+  uint max_batch_sz = m_adaptive_ratio.getMaxBatchSize();
+  for (auto idx = 0u; idx < index->n_fields; idx += max_batch_sz) {
+    size_t end = std::min(idx + max_batch_sz, index->n_fields);
+
     boost::asio::co_spawn(
         *log_parser_pool,
-        [this, context, rec, index, offsets, real_index, field_mutex, idx, field_values_ptr, counter,
+        [this, end, context, rec, index, offsets, real_index, field_mutex, idx, field_values_ptr, counter,
          result_promise]() mutable -> boost::asio::awaitable<void> {
           try {
-            co_await co_parse_field(context, rec, index, offsets, real_index, *field_mutex, idx, *field_values_ptr);
+            for (size_t sub_idx = idx; sub_idx < end; ++sub_idx) {
+              co_await co_parse_field(context, rec, index, offsets, real_index, *field_mutex, sub_idx,
+                                      *field_values_ptr);
+              if (counter->fetch_sub(1) == 1) {
+                result_promise->set_value(ShannonBase::SHANNON_SUCCESS);
+              }
+            }
           } catch (...) {
             result_promise->set_value(HA_ERR_GENERIC);
             DBUG_PRINT("parse_rec_fields_async", ("co_parse_field failed."));
             co_return;
           }
-          if (counter->fetch_sub(1) == 1) {
-            result_promise->set_value(ShannonBase::SHANNON_SUCCESS);
-          }
+
           co_return;
         },
         boost::asio::detached);
@@ -922,11 +932,11 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
 
       std::unordered_map<std::string, mysql_field_t> row_field_value;
       // step 1:to get all field data of deleting row.
-      if (index->n_fields <= LogParser::MAX_N_FIELD_PARALLEL)
+      if (index->n_fields <= ShannonBase::MAX_N_FIELD_PARALLEL)
         parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
       else
-        cowait_sync_with(*log_parser_pool,
-                         parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
+        ShannonBase::Utils::cowait_sync_with(
+            *log_parser_pool, parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
 
       std::map<std::string, key_info_t> keys;
       if (build_key(context, row_field_value, keys)) return HA_ERR_WRONG_IN_RECORD;
@@ -940,11 +950,11 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     case MLOG_REC_INSERT: {
       std::unordered_map<std::string, mysql_field_t> row_field_value;  //<field_name, field>
       // step 1:to get all field data of inserting row.
-      if (index->n_fields <= LogParser::MAX_N_FIELD_PARALLEL)
+      if (index->n_fields <= ShannonBase::MAX_N_FIELD_PARALLEL)
         parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
       else
-        cowait_sync_with(*log_parser_pool,
-                         parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
+        ShannonBase::Utils::cowait_sync_with(
+            *log_parser_pool, parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
 
       // step 2: insert all field data into CUs.
       auto rowid = imcs_instance->reserve_row_id(sch_tb);
@@ -959,11 +969,11 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       ut_a(upd);
       std::unordered_map<std::string, mysql_field_t> row_field_value;
       // step 1:to get all field data of updating row.
-      if (index->n_fields <= LogParser::MAX_N_FIELD_PARALLEL)
+      if (index->n_fields <= ShannonBase::MAX_N_FIELD_PARALLEL)
         parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
       else
-        cowait_sync_with(*log_parser_pool,
-                         parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
+        ShannonBase::Utils::cowait_sync_with(
+            *log_parser_pool, parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
 
       // step 2: insert all field data into CUs.
       std::map<std::string, key_info_t> keys;

@@ -83,6 +83,7 @@ constexpr uint64 SHANNON_POP_BUFF_THRESHOLD_COUNT = 10000;
 
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
 
+constexpr uint MAX_N_FIELD_PARALLEL = 8;
 constexpr uint SHANNON_BATCH_NUM = 8;
 
 constexpr char SHANNON_DB_ROW_ID[] = "DB_ROW_ID";
