@@ -49,7 +49,6 @@ namespace ShannonBase {
 namespace Compress {
 class Dictionary;
 }
-
 namespace Utils {
 class Util {
  public:
