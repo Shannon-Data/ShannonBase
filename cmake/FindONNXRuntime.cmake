@@ -64,8 +64,12 @@ if (ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
   return()
 endif()
 
-# If not found, download the binary archive
-message(STATUS "[ONNXRuntime] System installation not found. Downloading: ${_onnx_url}")
+# Check if already downloaded and extracted
+if (EXISTS "${_install_dir}")
+  message(STATUS "[ONNXRuntime] Found existing installation at ${_install_dir}")
+else()
+  # If not found, download the binary archive
+  message(STATUS "[ONNXRuntime] System installation not found. Downloading: ${_onnx_url}")
 
 file(DOWNLOAD ${_onnx_url} ${_download_path}
      SHOW_PROGRESS STATUS _dl_status)
@@ -93,6 +97,7 @@ endif()
 file(GLOB _dirs "${_extract_dir}/onnxruntime-*")
 list(GET _dirs 0 _extracted_dir)
 file(RENAME ${_extracted_dir} ${_install_dir})
+endif()
 
 # Register the ONNX Runtime include and lib paths
 set(ONNXRUNTIME_FOUND TRUE)
@@ -103,4 +108,3 @@ else()
   set(ONNXRUNTIME_LIBRARY "${_install_dir}/lib/libonnxruntime.so")
 endif()
 set(ONNXRUNTIME_LIBRARIES ${ONNXRUNTIME_LIBRARY})
-

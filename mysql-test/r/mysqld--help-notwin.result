@@ -517,6 +517,7 @@ The following options may be given as the first argument:
  --lc-time-names=name 
  Set the language used for the month names and the days of
  the week.
+ --llm-dir=name      Set the where the llm models locate.
  --local-infile      Enable LOAD DATA LOCAL INFILE
  --lock-wait-timeout=# 
  Timeout in seconds to wait for a lock before returning an
@@ -1747,6 +1748,7 @@ keyring-migration-user (No default value)
 large-pages FALSE
 lc-messages en_US
 lc-time-names en_US
+llm-dir (No default value)
 local-infile FALSE
 lock-wait-timeout 31536000
 log-bin (No default value)

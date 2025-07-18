@@ -1474,7 +1474,7 @@ const char *server_uuid_ptr;
 char server_build_id[42];
 const char *server_build_id_ptr;
 #endif
-char mysql_home[FN_REFLEN], pidfile_name[FN_REFLEN];
+char mysql_home[FN_REFLEN], pidfile_name[FN_REFLEN], mysql_llm_home[FN_REFLEN];
 char system_time_zone_dst_on[30], system_time_zone_dst_off[30];
 char default_logfile_name[FN_REFLEN];
 char default_binlogfile_name[FN_REFLEN];
@@ -1675,7 +1675,7 @@ bool binlog_expire_logs_seconds_supplied = false;
 static bool opt_myisam_log;
 static ulong opt_specialflag;
 char *opt_binlog_index_name;
-char *mysql_home_ptr, *pidfile_name_ptr;
+char *mysql_home_ptr, *pidfile_name_ptr, *mysql_llm_home_ptr;
 
 /**
   Memory for allocating command line arguments, after load_defaults().
@@ -6603,6 +6603,9 @@ int init_common_variables() {
   if (!is_help_or_validate_option()) {
     LogErr(INFORMATION_LEVEL, ER_BASEDIR_SET_TO, mysql_home);
   }
+  if (!is_help_or_validate_option()) {
+    LogErr(INFORMATION_LEVEL, ER_BASEDIR_SET_TO, mysql_llm_home);
+  }
   if (!opt_validate_config && (opt_initialize || opt_initialize_insecure)) {
     LogErr(SYSTEM_LEVEL, ER_STARTING_INIT, my_progname, server_version,
            (ulong)getpid());
@@ -10669,6 +10672,10 @@ struct my_option my_long_options[] = {
      &opt_tc_log_size, nullptr, GET_ULONG, REQUIRED_ARG,
      TC_LOG_MIN_PAGES *my_getpagesize(), TC_LOG_MIN_PAGES *my_getpagesize(),
      ULONG_MAX, nullptr, my_getpagesize(), nullptr},
+    {"llm-dir", OPT_LLM_DIR,
+     "Set the where the llm models locate.",
+     &mysql_llm_home, &mysql_llm_home, nullptr, GET_STR, REQUIRED_ARG,
+     0, 0, 0, nullptr, 0, nullptr},
     {"master-retry-count", OPT_MASTER_RETRY_COUNT,
      "The number of times this replica will attempt to connect to a source "
      "before giving up. "
@@ -12114,6 +12121,10 @@ bool mysqld_get_one_option(int optid,
     case 'T':
       test_flags = argument ? (uint)atoi(argument) : 0;
       opt_endinfo = true;
+      break;
+    case (int) OPT_LLM_DIR:
+      strmake(mysql_llm_home, argument, sizeof(mysql_llm_home) - 1);
+      mysql_llm_home_ptr = mysql_llm_home;
       break;
     case (int)OPT_ISAM_LOG:
       opt_myisam_log = true;

@@ -261,7 +261,7 @@ extern ulong opt_log_timestamps;
 extern const char *timestamp_type_names[];
 extern char *opt_general_logname, *opt_slow_logname, *opt_bin_logname,
     *opt_relay_logname;
-extern char *mysql_home_ptr, *pidfile_name_ptr;
+extern char *mysql_home_ptr, *pidfile_name_ptr, *mysql_llm_home_ptr;
 extern uint default_password_lifetime;
 extern bool password_require_current;
 /*
