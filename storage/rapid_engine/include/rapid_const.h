@@ -54,6 +54,7 @@
 #define SHANNON_VECTOR_WIDTH 8
 #endif
 
+extern char *mysql_llm_home_ptr;
 namespace ShannonBase {
 using row_id_t = size_t;
 /** Handler name for rapid */

@@ -2740,6 +2740,13 @@ IF(UNIX)
   ENDIF()
 ENDIF()
 
+# Install llm_dataset directory to <CMAKE_INSTALL_PREFIX>/share
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/extra/llm-models
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/
+    FILE_PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
+    DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+)
+
 # Without any --plugin-dir=<directory name> the server will look in
 # INSTALL_PLUGINDIR, which is "lib/plugin" for standalone builds.
 # This means that by default, we create a symlink plugin@ in lib/.
