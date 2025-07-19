@@ -67,6 +67,7 @@ make -j5 && make install
 PS: in `[]`, it's an optional compilation params, which is to enable coverage collection and ASAN check. And, boost asio 
 files are needed, you should install boost asio library at first.
 
+To activate support for the Lakehouse feature, which allows ShannonBase to read Parquet format files, configure the build with the CMake option `-DWITH_LAKEHOUSE=system`. This setting integrates the required Lakehouse dependencies and enables Parquet file processing capabilities within the ShannonBase.
 
 #### 4: Initialize the database and run ShannonBase
 ```
