@@ -118,8 +118,6 @@ class ColumnChunk {
   std::unique_ptr<ShannonBase::bit_array_t> m_null_mask{nullptr};
 };
 
-class Iterator : public RowIterator {};
-
 }  // namespace Executor
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ITERATOR_H__
