@@ -33,7 +33,7 @@ show variables  like '%use_secondary_engine%' ;
 insert into ti values(1, 1.1, '创建相应的 lsn值', '创建相应的 lsn值0');
 select * from ti order by name;
 
---sleep 10
+--sleep 1
 --connection connection_1
 --echo [conn1_after_insertion]
 select * from ti order by name;
@@ -45,7 +45,7 @@ insert into ti values(1, 1.12, '创建相应的情况下d', '创建相应的 lsn
 insert into ti values(2, 1.102, '创建相应的情况下s', '创建相应的 lsn值s');
 
 select * from ti order by name;
---sleep 10
+--sleep 1
 --connection connection_1
 --echo [conn1_after_insertion]
 explain select * from ti order by name;
@@ -67,7 +67,7 @@ select * from ti order by id, name;
 select * from ti order by score, name;
 select id, name, sum(score) from ti group by id, name order by id;
 
---sleep 10
+--sleep 1
 --connection connection_1
 --echo [conn1]
 explain select * from ti order by name;

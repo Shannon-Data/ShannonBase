@@ -49,7 +49,7 @@ select * from tt2;
 
 --connection connection_1
 --echo [conn1]
---sleep 18
+--sleep 1
 explain select * from tt2;
 select * from tt2;
 

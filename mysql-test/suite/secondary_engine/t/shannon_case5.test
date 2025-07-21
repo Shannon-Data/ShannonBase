@@ -45,7 +45,7 @@ explain select avg(score), gender from tt6 group by gender;
 select avg(score), gender from tt6 group by gender;
 
 insert into tt6(score, name, gender) values('40','n4','f'),(50,'n5','m');
---sleep 10
+--sleep 1
 explain select score, name, gender from tt6 order by score;
 select score, name, gender from tt6 order by score;
 
@@ -53,29 +53,29 @@ explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
 
 delete from tt6 where score=40;
---sleep 10
+--sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
 
 #if the conditions were not loaded into rapid, we dont nothing.
 delete from tt6 where id=3;
---sleep 10
+--sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
 
 update tt6 set name ='n5_new2' where score=50;
---sleep 10
+--sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
 
 #if the conditions were not loaded into rapid, we dont nothing.
 update tt6 set name ='n5_new22' where id=5;
---sleep 10
+--sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
 
 delete from tt6 where id=2;
---sleep 10
+--sleep 1
 explain select score, name, gender from tt6 order by score desc;
 select score, name, gender from tt6 order by score desc;
 
