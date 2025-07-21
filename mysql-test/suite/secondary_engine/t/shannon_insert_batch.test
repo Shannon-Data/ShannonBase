@@ -44,38 +44,38 @@ END //
 DELIMITER ;//
 
 CALL insert_into_tt1();
---sleep 5
+--sleep 1
 
 --echo #[conn_1] after insertion in conn2
 --connection connection_1
---sleep 10
+--sleep 1
 select count(score) from tt1;
 
 --echo #[conn_2]
 --connection connection_2
 update tt1 set gender='M';
---sleep 5
+--sleep 1
 select count(*) from tt1 where gender ='M';
 
 --echo #[conn_1]
 --connection connection_1
---sleep 10
+--sleep 1
 select count(score) from tt1 where gender ='M';
 
 --echo #[conn_2]
 --connection connection_2
 delete from tt1;
---sleep 5
+--sleep 1
 select * from tt1;
 
 --echo #[conn_1]
 --connection connection_1
---sleep 10
+--sleep 1
 select * from tt1;
 
 --echo #[conn_1]
 --connection connection_1
---sleep 5
+--sleep 1
 set use_secondary_engine=off;
 drop database test_query;
 
