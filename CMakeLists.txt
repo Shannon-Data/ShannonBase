@@ -782,7 +782,7 @@ elseif (APPLE)
 elseif (UNIX AND NOT APPLE)
     execute_process(
         COMMAND lscpu
-        COMMAND grep "Vendor ID"
+        COMMAND grep "ID"
         OUTPUT_VARIABLE CPU_MANUFACTURER
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
