@@ -27,13 +27,6 @@
 #define __SHANNONBASE_RPD_OBJECT_H__
 #include <cstring>
 
-#include <boost/asio.hpp>
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/thread_pool.hpp>
-#include <boost/asio/use_awaitable.hpp>
-
 #include "field_types.h"          //for MYSQL_TYPE_XXX
 #include "include/my_alloc.h"     // MEM_ROOT
 #include "include/my_inttypes.h"  //uint8_t

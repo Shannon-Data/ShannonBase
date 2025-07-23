@@ -43,6 +43,7 @@
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/utils/concurrent.h"
 
 class ha_innobase;
 class ha_innopart;

@@ -70,8 +70,8 @@
 #include "storage/rapid_engine/optimizer/writable_access_path.h"
 #include "storage/rapid_engine/populate/populate.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
+#include "storage/rapid_engine/utils/concurrent.h"
 #include "storage/rapid_engine/utils/utils.h"
-
 #include "template_utils.h"
 #include "thr_lock.h"
 
@@ -431,10 +431,16 @@ int ha_rapid::rnd_next(uchar *buf) {
   int error{HA_ERR_END_OF_FILE};
 
   if (inited == handler::RND && m_start_of_scan) {
-    error = m_data_table->next(buf);  // index_first(buf);
-
-    if (error == HA_ERR_KEY_NOT_FOUND) {
-      error = HA_ERR_END_OF_FILE;
+    if (table_share->fields <= ShannonBase::MAX_N_FIELD_PARALLEL) {
+      error = m_data_table->next(buf);
+    } else {
+      auto reader_pool = ShannonBase::Imcs::Imcs::pool();
+      std::future<int> fut =
+          boost::asio::co_spawn(*reader_pool, m_data_table->next_async(buf), boost::asio::use_future);
+      error = fut.get();  // co_await m_data_table->next_async(buf);  // index_first(buf);
+      if (error == HA_ERR_KEY_NOT_FOUND) {
+        error = HA_ERR_END_OF_FILE;
+      }
     }
   }
 
