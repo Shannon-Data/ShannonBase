@@ -27,13 +27,16 @@
 #define __SHANNONBASE_DATA_TABLE_H__
 
 #include <atomic>
+#include <functional>
+#include <utility>
 #include <vector>
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/imcs/index/iterator.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/trx/readview.h"
-
+#include "storage/rapid_engine/utils/concurrent.h"  //asio
+#include "storage/rapid_engine/utils/cpu.h"         //SimpleRatioAdjuster
 class TABLE;
 namespace ShannonBase {
 class Rapid_load_context;
@@ -42,6 +45,28 @@ namespace Imcs {
 class Imcs;
 class Cu;
 class RapidTable;
+
+class DeferGuard {
+ public:
+  explicit DeferGuard(std::function<void()> fn) : m_fn(std::move(fn)), m_active(true) {}
+
+  DeferGuard(const DeferGuard &) = delete;
+  DeferGuard &operator=(const DeferGuard &) = delete;
+
+  DeferGuard(DeferGuard &&other) noexcept : m_fn(std::move(other.m_fn)), m_active(other.m_active) {
+    other.m_active = false;
+  }
+
+  ~DeferGuard() {
+    if (m_active && m_fn) m_fn();
+  }
+
+  void dismiss() noexcept { m_active = false; }
+
+ private:
+  std::function<void()> m_fn;
+  bool m_active;
+};
 
 class DataTable : public MemoryObject {
  public:
@@ -59,6 +84,8 @@ class DataTable : public MemoryObject {
 
   // to the next rows.
   int next(uchar *buf);
+
+  boost::asio::awaitable<int> next_async(uchar *buf);
 
   // read the data in data in batch mode.
   int next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
@@ -95,6 +122,9 @@ class DataTable : public MemoryObject {
       delete p;  // Now safe because of virtual destructor
     }
   };
+  enum class FETCH_STATUS : uint8 { FETCH_ERROR, FETCH_OK, FETCH_CONTINUE, FETCH_NEXT_ROW };
+
+  DataTable::FETCH_STATUS fetch_next_row(ulong current_chunk, ulong offset_in_chunk, Field *source_fld);
 
  private:
   std::atomic<bool> m_initialized{false};
@@ -123,6 +153,8 @@ class DataTable : public MemoryObject {
   // Reusable buffer
   std::unique_ptr<uchar[]> m_row_buffer;
   size_t m_buffer_size = 0;
+
+  static ShannonBase::Utils::SimpleRatioAdjuster m_adaptive_ratio;
 };
 
 }  // namespace Imcs

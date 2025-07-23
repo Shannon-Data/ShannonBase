@@ -49,6 +49,8 @@
 
 namespace ShannonBase {
 namespace Imcs {
+ShannonBase::Utils::SimpleRatioAdjuster DataTable::m_adaptive_ratio(0.3);
+
 DataTable::DataTable(TABLE *source, RapidTable *rpd) : m_initialized{false}, m_data_source(source), m_rapid_table(rpd) {
   ut_a(m_data_source && m_rapid_table);
   m_rowid.store(0);
@@ -94,6 +96,142 @@ int DataTable::init() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+DataTable::FETCH_STATUS DataTable::fetch_next_row(ulong current_chunk, ulong offset_in_chunk, Field *source_fld) {
+  auto rpd_field = m_rapid_table->get_field(source_fld->field_name);
+  ut_a(rpd_field);
+
+  auto normalized_length = rpd_field->normalized_pack_length();
+  DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "secondary_engine_rapid_next_error");
+    return DataTable::FETCH_STATUS::FETCH_ERROR;
+  });
+
+  // to check version link to check its old value.
+  auto current_chunk_ptr = rpd_field->chunk(current_chunk);
+  auto current_data_ptr = current_chunk_ptr->base() + offset_in_chunk * normalized_length;
+  if ((uintptr_t(current_data_ptr) & (CACHE_LINE_SIZE - 1)) == 0)
+    SHANNON_PREFETCH_R(current_data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
+
+  auto data_len = normalized_length;
+  auto data_ptr = ensure_buffer_size(data_len);
+  std::memcpy(data_ptr, current_data_ptr, data_len);
+
+  uint8 status{0};
+  auto versioned_ptr =
+      current_chunk_ptr->header()->m_smu->build_prev_vers(m_context.get(), offset_in_chunk, data_ptr, data_len, status);
+  if (!versioned_ptr &&
+      (status &
+       static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_ROLLBACKED))) {  // means rollbacked rows.
+    return DataTable::FETCH_STATUS::FETCH_NEXT_ROW;
+  }
+  if (status &
+      static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_NULL)) {  // the original value is null.
+    ut_a(data_len == UNIV_SQL_NULL);
+    source_fld->set_null();
+    return DataTable::FETCH_STATUS::FETCH_CONTINUE;
+  }
+  if (status & static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_DELETED)) {
+    return DataTable::FETCH_STATUS::FETCH_NEXT_ROW;
+  }
+
+  source_fld->set_notnull();
+  ut_a(source_fld->type() == rpd_field->header()->m_source_fld->type());
+  if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
+    if (source_fld->real_type() == MYSQL_TYPE_ENUM) {
+      source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, source_fld->pack_length());
+    } else {
+      auto str_id = *reinterpret_cast<uint32 *>(data_ptr);
+      auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
+      source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
+    }
+  } else {
+    source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
+  }
+  return DataTable::FETCH_STATUS::FETCH_OK;
+}
+
+boost::asio::awaitable<int> DataTable::next_async(uchar *buf) {
+  // In optimization phase. we should not choice rapid to scan, when pop threading
+  // is running to repop the data to rapid.
+  // ut_a(ShannonBase::Populate::sys_pop_buff.size() == 0);
+  // make all ptr in m_field_ptrs to move forward one step(one row).
+  assert(m_initialized.load());
+
+  auto field_read_pool = ShannonBase::Imcs::Imcs::pool();
+  auto executor = co_await boost::asio::this_coro::executor;
+  const size_t n_fields = m_data_source->s->fields;
+  const size_t max_batch_sz = m_adaptive_ratio.getMaxBatchSize();
+
+start:
+  if (m_rowid >= m_rapid_table->m_fields.begin()->second->prows()) co_return HA_ERR_END_OF_FILE;
+
+  const auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
+  const auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
+
+  for (size_t i = 0; i < n_fields; i += max_batch_sz) {
+    Utils::ColumnMapGuard guard(m_data_source);
+    size_t end = std::min(i + max_batch_sz, n_fields);
+
+    auto counter = std::make_shared<std::atomic<size_t>>(end - i);
+    auto batch_promise = std::make_shared<ShannonBase::Utils::shared_promise<DataTable::FETCH_STATUS>>();
+    auto promise_set = std::make_shared<std::atomic<bool>>(false);
+
+    for (size_t sub_idx = i; sub_idx < end; ++sub_idx) {
+      auto source_fld = *(m_data_source->field + sub_idx);
+
+      // Skip fields not in read_set or marked as NOT_SECONDARY_FLAG
+      if (!bitmap_is_set(m_data_source->read_set, sub_idx) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) {
+        if (counter->fetch_sub(1) == 1 && !promise_set->exchange(true)) {
+          batch_promise->set_value(DataTable::FETCH_STATUS::FETCH_OK);
+        }
+        continue;
+      }
+
+      boost::asio::co_spawn(
+          *field_read_pool,
+          [this, sub_idx, max_batch_sz, current_chunk, offset_in_chunk, source_fld, counter, batch_promise,
+           promise_set]() mutable -> boost::asio::awaitable<void> {
+            DeferGuard defer([counter, promise_set, batch_promise]() {
+              if (counter->fetch_sub(1) == 1 && !promise_set->exchange(true)) {
+                // If last coroutine finishes, and no one has set promise
+                batch_promise->set_value(DataTable::FETCH_STATUS::FETCH_OK);
+              }
+            });
+
+            try {
+              auto res = fetch_next_row(current_chunk, offset_in_chunk, source_fld);
+
+              if (res == DataTable::FETCH_STATUS::FETCH_NEXT_ROW || res == DataTable::FETCH_STATUS::FETCH_ERROR) {
+                if (!promise_set->exchange(true)) {
+                  batch_promise->set_value(res);
+                }
+                co_return;
+              }
+            } catch (...) {
+              if (!promise_set->exchange(true)) {
+                batch_promise->set_value(DataTable::FETCH_STATUS::FETCH_ERROR);
+              }
+              co_return;
+            }
+            co_return;
+          },
+          boost::asio::detached);
+    }
+
+    // Wait for this batch to complete
+    auto batch_result = co_await batch_promise->get_awaitable(executor);
+    if (batch_result == DataTable::FETCH_STATUS::FETCH_ERROR) {
+      co_return HA_ERR_GENERIC;
+    } else if (batch_result == DataTable::FETCH_STATUS::FETCH_NEXT_ROW) {
+      m_rowid.fetch_add(1);
+      goto start;
+    }
+  }
+
+  m_rowid.fetch_add(1);
+  co_return ShannonBase::SHANNON_SUCCESS;
+}
+
 // IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `DataTable::next_batch`
 // CORRESPONDINGLY.
 int DataTable::next(uchar *buf) {
@@ -109,62 +247,18 @@ start:
   auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
   auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
 
+  Utils::ColumnMapGuard guard(m_data_source);
   for (auto ind = 0u; ind < m_data_source->s->fields; ind++) {
     auto source_fld = *(m_data_source->field + ind);
     if (!bitmap_is_set(m_data_source->read_set, ind) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-    auto rpd_field = m_rapid_table->get_field(source_fld->field_name);
-    ut_a(rpd_field);
-
-    auto normalized_length = rpd_field->normalized_pack_length();
-    DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
-      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "secondary_engine_rapid_next_error");
-      return HA_ERR_GENERIC;
-    });
-
-    Utils::ColumnMapGuard guard(m_data_source);
-    // to check version link to check its old value.
-    auto current_chunk_ptr = rpd_field->chunk(current_chunk);
-    auto current_data_ptr = current_chunk_ptr->base() + offset_in_chunk * normalized_length;
-    if ((uintptr_t(current_data_ptr) & (CACHE_LINE_SIZE - 1)) == 0)
-      SHANNON_PREFETCH_R(current_data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
-
-    auto data_len = normalized_length;
-    auto data_ptr = ensure_buffer_size(data_len);
-    std::memcpy(data_ptr, current_data_ptr, data_len);
-
-    uint8 status{0};
-    auto versioned_ptr = current_chunk_ptr->header()->m_smu->build_prev_vers(m_context.get(), offset_in_chunk, data_ptr,
-                                                                             data_len, status);
-    if (!versioned_ptr &&
-        (status &
-         static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_ROLLBACKED))) {  // means rollbacked rows.
+    auto res = fetch_next_row(current_chunk, offset_in_chunk, source_fld);
+    if (res == DataTable::FETCH_STATUS::FETCH_NEXT_ROW) {
       m_rowid.fetch_add(1);
       goto start;
-    }
-    if (status &
-        static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_NULL)) {  // the original value is null.
-      ut_a(data_len == UNIV_SQL_NULL);
-      source_fld->set_null();
+    } else if (res == DataTable::FETCH_STATUS::FETCH_CONTINUE) {
       continue;
-    }
-    if (status & static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_DELETED)) {
-      m_rowid.fetch_add(1);
-      goto start;
-    }
-
-    source_fld->set_notnull();
-    ut_a(source_fld->type() == rpd_field->header()->m_source_fld->type());
-    if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
-      if (source_fld->real_type() == MYSQL_TYPE_ENUM) {
-        source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, source_fld->pack_length());
-      } else {
-        auto str_id = *reinterpret_cast<uint32 *>(data_ptr);
-        auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
-        source_fld->store(str_ptr.c_str(), strlen(str_ptr.c_str()), source_fld->charset());
-      }
-    } else {
-      source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), data_ptr, normalized_length);
+    } else if (res == DataTable::FETCH_STATUS::FETCH_ERROR) {
+      return HA_ERR_GENERIC;
     }
   }
 
