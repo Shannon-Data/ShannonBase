@@ -13,9 +13,6 @@ on:
       - '.devcontainer/**'
       - '.github/ISSUE_TEMPLATE/**'
   pull_request:
-    # branches-ignore:
-    #   - main
-        # wait for mergify to ignore
     paths-ignore:
       - 'Docs/**'
       - 'docs/**'
@@ -38,7 +35,6 @@ defaults:
 jobs:
   lint:
     name: lint
-    # if: ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-testing') && github.event.pull_request.merged != true }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,66 +43,118 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: false
-      # - name: Check License Header
-      #   uses: apache/skywalking-eyes/header@main 
       - name: Ensure clang-format is available
         run: |
           command -v clang-format-14 > /dev/null || (sudo apt-get update && sudo apt-get install -y clang-format-14)
       - name: Format check
         run: |
           git diff -U0 --no-color ${{ github.event.pull_request.base.sha }} HEAD storage/rapid_engine ml | /usr/share/clang/clang-format-14/clang-format-diff.py -p1 | tee /tmp/.clang-format-diff
-          [ -s /tmp/.clang-format-diff ] && exit 1 || true 
+          [ -s /tmp/.clang-format-diff ] && exit 1 || true
 
-  build:
+  # x86
+  build_x86:
     needs: lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-        fetch-depth: 0
-    - name: Clean old build cache
-      run: |
-        cd ${{ github.workspace }}
-        rm -rf cmake_build
-    - name: install_lib
-      run: |
-        sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libtirpc-dev && sudo apt install -y libboost-all-dev
-    - name: build_shannon_and_install
-      run: |
-        cd ${{ github.workspace }}
-        mkdir cmake_build && cd cmake_build
-        sudo mkdir -p /home/shannon-bin && sudo mkdir -p /home/shannon-bin/data
-        sudo chown -R $USER:$USER /home/shannon-bin/
-        git config --global --add safe.directory ${{ github.workspace }}
-        git fetch --tags -f
-        cmake ../ \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
-        -DMYSQL_DATADIR=/home/shannon-bin/data \
-        -DSYSCONFDIR=/home/shannon-bin/ \
-        -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
-        -DWITH_MYISAM_STORAGE_ENGINE=1 \
-        -DWITH_INNOBASE_STORAGE_ENGINE=1 \
-        -DMYSQL_TCP_PORT=3306 \
-        -DENABLED_LOCAL_INFILE=1 \
-        -DWITH_PROTOBUF=bundled \
-        -DWITH_UNIT_TESTS=OFF \
-        -DWITH_HYPERGRAPH_OPTIMIZER=ON \
-        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j5 && \
-        sudo make install
-    - name: clean_up_shannonbase_build
-      run: |
-        sudo find ${{ github.workspace }} -mindepth 1 -delete
-    - name: run_mtr_test
-      run: |
-        sudo mkdir -p /home/shannon-bin/log
-        sudo chown -R $USER:$USER /home/shannon-bin/
-        cd /home/shannon-bin/mysql-test/
-        sudo chmod -R u+rwx mysql-test-run.pl
-        ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
-        information_schema,ml \
-        --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)        
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Clean old build cache
+        run: |
+          cd ${{ github.workspace }}
+          rm -rf cmake_build
+      - name: Install x86 dependencies
+        run: |
+          sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libtirpc-dev libboost-all-dev
+      - name: Build and install (x86)
+        run: |
+          cd ${{ github.workspace }}
+          mkdir cmake_build && cd cmake_build
+          sudo mkdir -p /home/shannon-bin && sudo mkdir -p /home/shannon-bin/data
+          sudo chown -R $USER:$USER /home/shannon-bin/
+          git config --global --add safe.directory ${{ github.workspace }}
+          git fetch --tags -f
+          cmake ../ \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
+          -DMYSQL_DATADIR=/home/shannon-bin/data \
+          -DSYSCONFDIR=/home/shannon-bin/ \
+          -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
+          -DWITH_MYISAM_STORAGE_ENGINE=1 \
+          -DWITH_INNOBASE_STORAGE_ENGINE=1 \
+          -DMYSQL_TCP_PORT=3306 \
+          -DENABLED_LOCAL_INFILE=1 \
+          -DWITH_PROTOBUF=bundled \
+          -DWITH_UNIT_TESTS=OFF \
+          -DWITH_HYPERGRAPH_OPTIMIZER=ON \
+          -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j5 && \
+          sudo make install
+      - name: Clean up build
+        run: |
+          sudo find ${{ github.workspace }} -mindepth 1 -delete
+      - name: Run MTR tests (x86)
+        run: |
+          sudo mkdir -p /home/shannon-bin/log
+          sudo chown -R $USER:$USER /home/shannon-bin/
+          cd /home/shannon-bin/mysql-test/
+          sudo chmod -R u+rwx mysql-test-run.pl
+          ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
+          information_schema,ml \
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         # sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.push
         #./collections/default.push
+  # ARM 
+  build_arm:
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Clean old build cache
+        run: |
+          cd ${{ github.workspace }}
+          rm -rf cmake_build
+      - name: Install ARM dependencies
+        run: |
+          sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libtirpc-dev libboost-all-dev libjson-perl
+      - name: Build and install (ARM)
+        run: |
+          cd ${{ github.workspace }}
+          mkdir cmake_build && cd cmake_build
+          sudo mkdir -p /home/shannon-bin && sudo mkdir -p /home/shannon-bin/data
+          sudo chown -R $USER:$USER /home/shannon-bin/
+          git config --global --add safe.directory ${{ github.workspace }}
+          git fetch --tags -f
+          cmake ../ \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
+          -DMYSQL_DATADIR=/home/shannon-bin/data \
+          -DSYSCONFDIR=/home/shannon-bin/ \
+          -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
+          -DWITH_MYISAM_STORAGE_ENGINE=1 \
+          -DWITH_INNOBASE_STORAGE_ENGINE=1 \
+          -DMYSQL_TCP_PORT=3306 \
+          -DENABLED_LOCAL_INFILE=1 \
+          -DWITH_PROTOBUF=bundled \
+          -DWITH_UNIT_TESTS=OFF \
+          -DWITH_HYPERGRAPH_OPTIMIZER=ON \
+          -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j5 && \
+          sudo make install
+      - name: Clean up build
+        run: |
+          sudo find ${{ github.workspace }} -mindepth 1 -delete
+      - name: Run MTR tests (ARM)
+        run: |
+          sudo mkdir -p /home/shannon-bin/log
+          sudo chown -R $USER:$USER /home/shannon-bin/
+          cd /home/shannon-bin/mysql-test/
+          sudo chmod -R u+rwx mysql-test-run.pl
+          ./mysql-test-run.pl --suite=main,innodb,secondary_engine,ml \
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
+        # when we have a fast git action runner, we can use the following command to run the test.
+        # sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.push
+        #./collections/default.push          

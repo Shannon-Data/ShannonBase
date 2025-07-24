@@ -51,8 +51,8 @@
 
 #if defined(SHANNON_SSE_VECT_SUPPORTED) || defined(SHANNON_AVX_VECT_SUPPORTED)
 #define SHANNON_VECTORIZE_SUPPORT
-#define SHANNON_VECTOR_WIDTH 8
 #endif
+#define SHANNON_VECTOR_WIDTH 8
 
 extern char *mysql_llm_home_ptr;
 namespace ShannonBase {

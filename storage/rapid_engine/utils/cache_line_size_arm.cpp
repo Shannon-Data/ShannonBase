@@ -23,10 +23,24 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
-#include "storage/rapid_engine/utils/SIMD.h"
 
-namespace ShannonBase {
-namespace Utils {
-namespace SIMD {}
-}  // namespace Utils
-}  // namespace ShannonBase
+#include <stdio.h>
+
+unsigned int get_cache_line_size() {
+  unsigned long ctr_el0;
+
+  // read CTR_EL0
+  asm volatile("mrs %0, ctr_el0" : "=r"(ctr_el0));
+
+  // CTR_EL0 bits[19:16] = log2(cache line size in words) => size in bytes = 4 << (CTR_EL0[19:16])
+  unsigned int log2_words = (ctr_el0 >> 16) & 0xF;
+  unsigned int cache_line_size = 4 << log2_words;
+
+  return cache_line_size;
+}
+
+int main() {
+  unsigned int line_size = get_cache_line_size();
+  printf("Cache line size: %u bytes\n", line_size);
+  return 0;
+}
