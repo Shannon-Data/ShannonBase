@@ -2,6 +2,9 @@
 # ShannonBase test case for ML functions.
 # ShannonBase copyright 2023-
 ##############################################################################
+--source include/have_debug.inc
+--replace_result (-?\d+\.\d{15})\d+ \1...
+
 --disable_warnings
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 
@@ -12,7 +15,24 @@ ALTER DATABASE shannon_ml CHARACTER SET ascii COLLATE ascii_bin;
 USE shannon_ml;
 --enable_warnings
 
-CREATE TABLE census_train ( age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
+CREATE TABLE census_train ( 
+  age INT, 
+  workclass VARCHAR(255), 
+  fnlwgt INT, 
+  education VARCHAR(255), 
+  `education-num` INT, 
+  `marital-status` VARCHAR(255), 
+  occupation VARCHAR(255), 
+  relationship VARCHAR(255), 
+  race VARCHAR(255), 
+  sex VARCHAR(255), 
+  `capital-gain` INT, 
+  `capital-loss` INT, 
+  `hours-per-week` INT, 
+  `native-country` VARCHAR(255), 
+  revenue VARCHAR(255)
+) secondary_engine=rapid;
+
 CREATE TABLE census_test LIKE census_train;
 
 --disable_query_log
@@ -31,13 +51,15 @@ CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'cla
 CALL sys.ML_MODEL_LOAD(@census_model, NULL);
 
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
-       JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+       JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, 
+       JSON_UNQUOTE(MODEL_METADATA->'$.column_names') AS feature_names
 FROM ML_SCHEMA_root.MODEL_CATALOG;
 
-SELECT CHUNK_ID, MODEL_HANDLE from ML_SCHEMA_root.MODEL_OBJECT_CATALOG;
+SELECT CHUNK_ID, MODEL_HANDLE FROM ML_SCHEMA_root.MODEL_OBJECT_CATALOG;
 
 SELECT MODEL_ID, ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE, ML_SCHEMA_root.MODEL_CATALOG.MODEL_OBJECT, MODEL_OWNER, 
-       JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
+       JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, 
+       JSON_UNQUOTE(MODEL_METADATA->'$.column_names') AS feature_names
 FROM  ML_SCHEMA_root.MODEL_CATALOG, ML_SCHEMA_root.MODEL_OBJECT_CATALOG
 WHERE ML_SCHEMA_root.MODEL_CATALOG.MODEL_HANDLE = ML_SCHEMA_root.MODEL_OBJECT_CATALOG.MODEL_HANDLE;
 
@@ -58,6 +80,39 @@ SET @row_input = JSON_OBJECT(
           "native-country", "United-States");
 
 SELECT sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
+
+--eval SET @res := sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
+
+SELECT
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.age')) AS age,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.sex')) AS sex,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.race')) AS race,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.fnlwgt')) AS fnlwgt,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.education')) AS education,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.workclass')) AS workclass,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.occupation')) AS occupation,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$."capital-gain"')) AS `capital-gain`,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$."capital-loss"')) AS `capital-loss`,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.relationship')) AS relationship,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$."education-num"')) AS `education-num`,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$."hours-per-week"')) AS `hours-per-week`,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$."marital-status"')) AS `marital-status`,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$."native-country"')) AS `native-country`,
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS prediction,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.age'), 12) AS prob_age,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.sex'), 12) AS prob_sex,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.race'), 12) AS prob_race,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.fnlwgt'), 12) AS prob_fnlwgt,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.education'), 12) AS prob_education,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.workclass'), 12) AS prob_workclass,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.occupation'), 12) AS prob_occupation,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."capital-gain"'), 12) AS prob_capital_gain,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."capital-loss"'), 12) AS prob_capital_loss,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.relationship'), 12) AS prob_relationship,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."education-num"'), 12) AS prob_education_num,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."hours-per-week"'), 12) AS prob_hours_per_week,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."marital-status"'), 12) AS prob_marital_status,
+  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."native-country"'), 12) AS prob_native_country;
 
 #unload model into memory
 CALL sys.ML_MODEL_UNLOAD(@census_model);

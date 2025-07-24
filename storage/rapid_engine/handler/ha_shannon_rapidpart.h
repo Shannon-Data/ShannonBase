@@ -151,7 +151,7 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
 
   row_type get_partition_row_type(const dd::Table *, uint) override {
     assert(false);
-    row_type ret;
+    row_type ret{ROW_TYPE_DEFAULT};
     return ret;
   }
 

@@ -26,16 +26,13 @@
 #ifndef __SHANNONBASE_UTILS_SIMD_H__
 #define __SHANNONBASE_UTILS_SIMD_H__
 
+#include <algorithm>
+#include <cstdint>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
-
-#include "include/field_types.h"
-#include "include/my_inttypes.h"
-#include "sql-common/my_decimal.h"
-#include "sql/field.h"   //Field
-#include "sql/tztime.h"  //timzone
 
 namespace ShannonBase {
 namespace Utils {
@@ -43,6 +40,7 @@ namespace SIMD {
 // ============================================================================
 // SIMD Capability Detection
 // ============================================================================
+#ifdef __x86_64__
 [[maybe_unused]] static bool hasSSE2() { return __builtin_cpu_supports("sse2"); }
 [[maybe_unused]] static bool hasSSE41() { return __builtin_cpu_supports("sse4.1"); }
 [[maybe_unused]] static bool hasAVX() { return __builtin_cpu_supports("avx"); }
@@ -51,7 +49,42 @@ namespace SIMD {
 [[maybe_unused]] static bool hasAVX512F() { return __builtin_cpu_supports("avx512f"); }
 
 [[maybe_unused]] static void initialize() { __builtin_cpu_init(); }
+#elif defined(__aarch64__) || defined(__arm__)
+// ARM implementations
+#include <sys/auxv.h>
 
+[[maybe_unused]] static bool hasNEON() {
+#if defined(__aarch64__)
+  return true;  // NEON is mandatory on AArch64
+#else
+  return (getauxval(AT_HWCAP) & HWCAP_NEON) != 0;
+#endif
+}
+
+[[maybe_unused]] static bool hasCRC() { return (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0; }
+
+// ARM versions of the functions - return false or implement ARM equivalents
+[[maybe_unused]] static bool hasSSE2() { return false; }
+[[maybe_unused]] static bool hasSSE41() { return false; }
+[[maybe_unused]] static bool hasAVX() { return false; }
+[[maybe_unused]] static bool hasAVX2() { return false; }
+[[maybe_unused]] static bool hasFMA() { return (getauxval(AT_HWCAP) & HWCAP_FPHP) != 0; }
+[[maybe_unused]] static bool hasAVX512F() { return false; }
+
+[[maybe_unused]] static void initialize() {
+  // No initialization needed on ARM or can parse /proc/cpuinfo
+}
+#else
+// Unknown architecture
+[[maybe_unused]] static bool hasSSE2() { return false; }
+[[maybe_unused]] static bool hasSSE41() { return false; }
+[[maybe_unused]] static bool hasAVX() { return false; }
+[[maybe_unused]] static bool hasAVX2() { return false; }
+[[maybe_unused]] static bool hasFMA() { return false; }
+[[maybe_unused]] static bool hasAVX512F() { return false; }
+
+[[maybe_unused]] static void initialize() {}
+#endif
 }  // namespace SIMD
 }  // namespace Utils
 }  // namespace ShannonBase
