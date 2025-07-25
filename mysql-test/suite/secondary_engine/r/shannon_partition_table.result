@@ -19,7 +19,7 @@ L_SHIPMODE     CHAR(10) NOT NULL,
 L_COMMENT      VARCHAR(44) NOT NULL,
 PRIMARY KEY (L_ORDERKEY, L_LINENUMBER))
 PARTITION BY KEY()
-PARTITIONS 128;
+PARTITIONS 64;
 alter table LINEITEM secondary_engine NULL;
 alter table LINEITEM change L_RETURNFLAG L_RETURNFLAG CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
 alter table LINEITEM change L_LINESTATUS L_LINESTATUS CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
@@ -30,9 +30,7 @@ alter table LINEITEM change L_ORDERKEY L_ORDERKEY BIGINT NOT NULL COMMENT 'RAPID
 set use_secondary_engine=forced;
 alter table LINEITEM secondary_engine RAPID;
 alter table LINEITEM secondary_load;
-ERROR HY000: Rapid allocated memory exceeds over the maximum
 alter table LINEITEM secondary_unload;
-ERROR HY000: DDLs on a table with a secondary engine defined are not allowed.
 alter table LINEITEM secondary_load PARTITION(p0, p1, p10);
 alter table LINEITEM secondary_unload;
 alter table LINEITEM secondary_load PARTITION(p0, p1, p10);

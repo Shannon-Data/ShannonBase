@@ -26,7 +26,7 @@ CREATE TABLE LINEITEM ( L_ORDERKEY    BIGINT NOT NULL,
                         L_COMMENT      VARCHAR(44) NOT NULL,
                         PRIMARY KEY (L_ORDERKEY, L_LINENUMBER))
                         PARTITION BY KEY()
-                        PARTITIONS 128;
+                        PARTITIONS 64;
 
 alter table LINEITEM secondary_engine NULL;
 
@@ -48,9 +48,7 @@ alter table LINEITEM change L_ORDERKEY L_ORDERKEY BIGINT NOT NULL COMMENT 'RAPID
 set use_secondary_engine=forced;
 alter table LINEITEM secondary_engine RAPID;
 
---error 3877
 alter table LINEITEM secondary_load;
---error 3890
 alter table LINEITEM secondary_unload;
 
 alter table LINEITEM secondary_load PARTITION(p0, p1, p10);

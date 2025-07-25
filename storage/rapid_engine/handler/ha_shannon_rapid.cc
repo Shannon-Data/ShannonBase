@@ -89,6 +89,7 @@ handlerton *shannon_rapid_hton_ptr{nullptr};
 LoadedTables *shannon_loaded_tables = nullptr;
 uint64 rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
 ulonglong rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
+ulonglong rpd_para_load_threshold = ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD;
 std::atomic<size_t> rapid_allocated_mem_size = 0;
 rpd_columns_container rpd_columns_info;
 
@@ -1007,11 +1008,16 @@ static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share,
   return new (mem_root) ShannonBase::ha_rapid(hton, table_share);
 }
 
+/**
+ * Rapid engine system variables to control the behavior of Rapid Engine, such as the max memory used, etc.
+ */
 static SHOW_VAR rapid_status_variables[] = {
+    /*the max memory used for rapid.*/
     {"rapid_memory_size_max", (char *)&ShannonBase::rpd_mem_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
-
+    /*the max size of pop buffer size.*/
     {"rapid_pop_buffer_size_max", (char *)&ShannonBase::rpd_pop_buff_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
-
+    /*the max row number of used to enable parallel load for secondary_load*/
+    {"rapid_parallel_load_max", (char *)&ShannonBase::rpd_para_load_threshold, SHOW_LONG, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
@@ -1064,6 +1070,25 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from check function */
 static void rpd_pop_buff_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {}
 
+/** Validate passed-in "value" is a valid monitor counter name.
+ This function is registered as a callback with MySQL.
+ @return 0 for valid name */
+static int rpd_para_load_threshold_validate(THD *,                          /*!< in: thread handle */
+                                            SYS_VAR *,                      /*!< in: pointer to system
+                                                                                            variable */
+                                            void *save,                     /*!< out: immediate result
+                                                                            for update function */
+                                            struct st_mysql_value *value) { /*!< in: incoming string */
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+/** Update the system variable rapid_parallel_load_threshold.
+This function is registered as a callback with MySQL.
+@param[in]  thd       thread handle
+@param[out] var_ptr   where the formal string goes
+@param[in]  save      immediate result from chesck function */
+static void rpd_para_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {}
+
 static MYSQL_SYSVAR_ULONG(rapid_memory_size_max, ShannonBase::rpd_mem_sz_max, PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                           "Number of memory size that used for rapid engine, and it must "
                           "not be oversize half of physical mem size.",
@@ -1078,9 +1103,18 @@ static MYSQL_SYSVAR_ULONGLONG(rapid_pop_buffer_size_max, ShannonBase::rpd_pop_bu
                               ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE, 0,
                               ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE, 0);
 
+static MYSQL_SYSVAR_ULONGLONG(rapid_parallel_load_max, ShannonBase::rpd_para_load_threshold,
+                              PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+                              "Max number of rows used to use parallel load for secondary_load "
+                              "from innodb to rapid engine..",
+                              rpd_para_load_threshold_validate, rpd_para_load_threshold_update,
+                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD, 0,
+                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD, 0);
+
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(rapid_memory_size_max),
     MYSQL_SYSVAR(rapid_pop_buffer_size_max),
+    MYSQL_SYSVAR(rapid_parallel_load_max),
     nullptr,
 };
 

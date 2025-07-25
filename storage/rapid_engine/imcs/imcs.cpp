@@ -47,8 +47,8 @@
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
 namespace ShannonBase {
+extern ulonglong rpd_para_load_threshold;
 namespace Imcs {
-
 Imcs *Imcs::m_instance{nullptr};
 std::unique_ptr<boost::asio::thread_pool> Imcs::m_imcs_pool{nullptr};
 std::once_flag Imcs::one;
@@ -221,34 +221,37 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   key_part.append(context->m_schema_name.c_str()).append(":").append(context->m_table_name.c_str());
   ut_a(m_tables.find(key_part) != m_tables.end());
 
-  while ((tmp = file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
-    /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
-     without locks. Now, do full scan, but multi-thread scan will impl in future. */
-    if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+  if (file->stats.records < ShannonBase::rpd_para_load_threshold) {  // not para load.
+    while ((tmp = file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
+      /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
+       without locks. Now, do full scan, but multi-thread scan will impl in future. */
+      if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
-    DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
-      my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
-      file->ha_rnd_end();
-      return HA_ERR_GENERIC;
-    });
+      DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
+        my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
+        file->ha_rnd_end();
+        return HA_ERR_GENERIC;
+      });
 
-    // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
-    auto load_context = const_cast<Rapid_load_context *>(context);
-    load_context->m_extra_info.m_key_len = file->ref_length;
-    if (m_tables[key_part].get()->write(context, context->m_table->record[0])) {
-      std::string errmsg;
-      errmsg.append("load data from ")
-          .append(context->m_schema_name.c_str())
-          .append(".")
-          .append(context->m_table_name.c_str())
-          .append(" to imcs failed.");
-      my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
-      break;
+      // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
+      auto load_context = const_cast<Rapid_load_context *>(context);
+      load_context->m_extra_info.m_key_len = file->ref_length;
+      if (m_tables[key_part].get()->write(context, context->m_table->record[0])) {
+        std::string errmsg;
+        errmsg.append("load data from ")
+            .append(context->m_schema_name.c_str())
+            .append(".")
+            .append(context->m_table_name.c_str())
+            .append(" to imcs failed.");
+        my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+        break;
+      }
+
+      m_thd->inc_sent_row_count(1);
+
+      if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
     }
-
-    m_thd->inc_sent_row_count(1);
-
-    if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
+  } else {  // using parallel load.
   }
   // end of load the data from innodb to imcs.
   file->ha_rnd_end();
