@@ -158,6 +158,9 @@ N_NATIONKEY	N_NAME	N_REGIONKEY	N_COMMENT
 22	RUSSIA	3	 requests against the platelets use never according to the quickly regular pint
 23	UNITED KINGDOM	3	eans boost carefully special requests. accounts are. carefull
 24	UNITED STATES	1	y final packages. slow foxes cajole quickly. quickly silent platelets breach ironic accounts. unusual pinto be
+select count(*) from NATION;
+count(*)
+25
 select * from REGION LIMIT 100;
 R_REGIONKEY	R_NAME	R_COMMENT
 0	AFRICA	lar deposits. blithely final packages cajole. regular waters are final requests. regular accounts are according to 
@@ -165,6 +168,9 @@ R_REGIONKEY	R_NAME	R_COMMENT
 2	ASIA	ges. thinly even pinto beans ca
 3	EUROPE	ly final courts cajole furiously final excuse
 4	MIDDLE EAST	uickly special accounts cajole carefully blithely close requests. carefully final asymptotes haggle furiousl
+select count(*) from REGION;
+count(*)
+5
 select * from LINEITEM LIMIT 100;
 L_ORDERKEY	L_PARTKEY	L_SUPPKEY	L_LINENUMBER	L_QUANTITY	L_EXTENDEDPRICE	L_DISCOUNT	L_TAX	L_RETURNFLAG	L_LINESTATUS	L_SHIPDATE	L_COMMITDATE	L_RECEIPTDATE	L_SHIPINSTRUCT	L_SHIPMODE	L_COMMENT
 23999975	625094	15140	2	23.00	23438.38	0.05	0.06	N	O	1996-10-23	1996-09-11	1996-11-12	DELIVER IN PERSON	AIR	ly regular realms after the
@@ -177,6 +183,9 @@ L_ORDERKEY	L_PARTKEY	L_SUPPKEY	L_LINENUMBER	L_QUANTITY	L_EXTENDEDPRICE	L_DISCOUN
 23999974	311819	31820	4	22.00	40277.60	0.08	0.01	N	O	1997-03-25	1997-04-24	1997-03-28	COLLECT COD	REG AIR	uickly ironic pains. bli
 24000000	712607	2625	4	7.00	11336.99	0.09	0.00	N	O	1996-07-16	1996-06-18	1996-08-04	COLLECT COD	SHIP	ckly express requests. even, pendin
 24000000	651246	21263	1	5.00	5986.05	0.06	0.05	N	O	1996-06-11	1996-05-16	1996-06-22	NONE	TRUCK	nts use. ir
+select count(*) from LINEITEM;
+count(*)
+10
 select * from SUPPLIER LIMIT 100;
 S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 1	Supplier#000000001	 N kD4on9OM Ipw3,gf0JBoQDd7tgrzrddZ	17	27-918-335-1736	5755.94	each slyly above the careful
@@ -279,6 +288,9 @@ S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 98	Supplier#000000098	ogHn8dpXB5Q	21	31-914-775-1978	5873.07	esias use slyly under the ironic foxes. re
 99	Supplier#000000099	4SxkTHG28nZrtT0,MnVF9H	18	28-272-909-1617	3671.34	nic dependencies dazzle flu
 100	Supplier#000000100	rIlN li8zvW22l2slbcx ECP4fL	21	31-351-324-5062	3191.70	es. regular instructions sleep carefully. slyly ironic packages across the foxes boost 
+select count(*) from SUPPLIER;
+count(*)
+40000
 select * from ORDERS LIMIT 100;
 O_ORDERKEY	O_CUSTKEY	O_ORDERSTATUS	O_TOTALPRICE	O_ORDERDATE	O_ORDERPRIORITY	O_CLERK	O_SHIPPRIORITY	O_COMMENT
 23999943	324892	O	20086.99	1997-07-15	5-LOW	Clerk#000002598	0	uickly regular request
@@ -291,6 +303,9 @@ O_ORDERKEY	O_CUSTKEY	O_ORDERSTATUS	O_TOTALPRICE	O_ORDERDATE	O_ORDERPRIORITY	O_CL
 23999974	536512	O	221768.47	1997-03-14	3-MEDIUM	Clerk#000001003	0	nstructions. blithely pending attainments 
 23999975	356203	O	53833.03	1996-07-20	2-HIGH	Clerk#000000964	0	cording to the furi
 24000000	494116	O	89273.91	1996-04-06	1-URGENT	Clerk#000002055	0	e furiously. blithely ironic packages cajole furiou
+select count(*) from ORDERS;
+count(*)
+10
 select * from CUSTOMER LIMIT 100;
 C_CUSTKEY	C_NAME	C_ADDRESS	C_NATIONKEY	C_PHONE	C_ACCTBAL	C_MKTSEGMENT	C_COMMENT
 599991	Customer#000599991	p93wF9omq62FpFMPlHSQCNht	4	14-369-810-1153	8054.37	BUILDING	dencies. blithely regular requests integrate above the fluffily regular pinto beans. slyly express excuses 
@@ -303,6 +318,9 @@ C_CUSTKEY	C_NAME	C_ADDRESS	C_NATIONKEY	C_PHONE	C_ACCTBAL	C_MKTSEGMENT	C_COMMENT
 599998	Customer#000599998	n74LS6oD8K4Iez3r	16	26-458-721-6413	326.31	HOUSEHOLD	ounts cajole fluffily blithely ironic packages-- slyly silent frays sleep across th
 599999	Customer#000599999	OhzTmKjlTsjgJzdO2R7woql1HEG0ui	11	21-417-873-3297	4154.40	BUILDING	s. ideas affix carefully. blithely final deposits use. slyly even instructions slee
 600000	Customer#000600000	oiW3kc,i6jU8c qXzMKlTaj0QAxcFx0V2,	1	11-288-619-1849	3929.36	HOUSEHOLD	fter the regular instructions. evenly silent theodolites cajole of the express foxes. s
+select count(*) from CUSTOMER;
+count(*)
+10
 select * from PART LIMIT 100;
 P_PARTKEY	P_NAME	P_MFGR	P_BRAND	P_TYPE	P_SIZE	P_CONTAINER	P_RETAILPRICE	P_COMMENT
 799991	pale white sandy antique hot	Manufacturer#3	Brand#32	PROMO BRUSHED COPPER	19	LG JAR	2090.96	lyly even pac
@@ -315,6 +333,9 @@ P_PARTKEY	P_NAME	P_MFGR	P_BRAND	P_TYPE	P_SIZE	P_CONTAINER	P_RETAILPRICE	P_COMMEN
 799998	plum maroon brown firebrick coral	Manufacturer#5	Brand#53	ECONOMY BURNISHED NICKEL	47	JUMBO DRUM	2097.96	its. even dolp
 799999	turquoise steel navy light goldenrod	Manufacturer#1	Brand#12	ECONOMY BURNISHED NICKEL	49	WRAP DRUM	2098.96	 instruc
 800000	maroon wheat midnight grey snow	Manufacturer#3	Brand#35	LARGE PLATED TIN	28	SM PKG	1099.97	cies. furiously unu
+select count(*) from PART;
+count(*)
+10
 select * from PARTSUPP LIMIT 100;
 PS_PARTKEY	PS_SUPPKEY	PS_AVAILQTY	PS_SUPPLYCOST	PS_COMMENT
 799998	20037	8346	882.69	ts cajole furiously across the final, regular deposits. slyly ironic instructions haggle furiously about the special ideas. blithely bold a
@@ -327,6 +348,9 @@ PS_PARTKEY	PS_SUPPKEY	PS_AVAILQTY	PS_SUPPLYCOST	PS_COMMENT
 800000	10020	6605	356.96	instructions integrate carefully. blithely blithe platelets haggle blithely against the p
 800000	20039	83	637.55	 slyly to the ironic packages. carefully ironic deposits wake. slyly final deposits breach carefully even asymptotes. even accounts haggle. slyly ironic asymptotes wak
 800000	30058	2012	227.34	ial packages. pending packages wake after the requests. furiously permanent dependencies thrash after the special, ironic hockey players. carefull
+select count(*) from PARTSUPP;
+count(*)
+10
 set use_secondary_engine=forced;
 EXPLAIN SELECT  
 PS_PARTKEY, SUM(PS_SUPPLYCOST * PS_AVAILQTY) AS VALUE
