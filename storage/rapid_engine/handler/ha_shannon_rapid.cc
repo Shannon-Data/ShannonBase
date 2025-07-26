@@ -90,6 +90,8 @@ LoadedTables *shannon_loaded_tables = nullptr;
 uint64 rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
 ulonglong rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
 ulonglong rpd_para_load_threshold = ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD;
+int rpd_async_column_threshold = ShannonBase::DEFAULT_N_FIELD_PARALLEL;
+
 std::atomic<size_t> rapid_allocated_mem_size = 0;
 rpd_columns_container rpd_columns_info;
 
@@ -432,7 +434,7 @@ int ha_rapid::rnd_next(uchar *buf) {
   int error{HA_ERR_END_OF_FILE};
 
   if (inited == handler::RND && m_start_of_scan) {
-    if (table_share->fields <= ShannonBase::MAX_N_FIELD_PARALLEL) {
+    if (table_share->fields <= static_cast<uint>(ShannonBase::rpd_async_column_threshold)) {
       error = m_data_table->next(buf);
     } else {
       auto reader_pool = ShannonBase::Imcs::Imcs::pool();
@@ -1018,7 +1020,9 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_pop_buffer_size_max", (char *)&ShannonBase::rpd_pop_buff_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
     /*the max row number of used to enable parallel load for secondary_load*/
     {"rapid_parallel_load_max", (char *)&ShannonBase::rpd_para_load_threshold, SHOW_LONG, SHOW_SCOPE_GLOBAL},
-    {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
+    /*the max column number of used to aysnc reading or parsing log*/
+    {"rapid_async_column_threshold", (char *)&ShannonBase::rpd_async_column_threshold, SHOW_INT, SHOW_SCOPE_GLOBAL},
+    {NullS, NullS, SHOW_INT, SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
  * VARIABLES. */
@@ -1089,32 +1093,99 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from chesck function */
 static void rpd_para_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {}
 
-static MYSQL_SYSVAR_ULONG(rapid_memory_size_max, ShannonBase::rpd_mem_sz_max, PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+/** Update the system variable rpd_async_threshold.
+This function is registered as a callback with MySQL.
+@param[in]  thd       thread handle
+@param[out] var_ptr   where the formal string goes
+@param[in]  save      immediate result from check function */
+static void rpd_async_threshold_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *var [[maybe_unused]], void *var_ptr,
+                                       const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+
+  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
+  ShannonBase::rpd_async_column_threshold = *static_cast<const int *>(save);
+}
+
+/** Validate passed-in "value" is a valid monitor counter name.
+ This function is registered as a callback with MySQL.
+ @return 0 for valid name */
+static int rpd_async_threshold_validate(THD *,                          /*!< in: thread handle */
+                                        SYS_VAR *,                      /*!< in: pointer to system
+                                                                                        variable */
+                                        void *save,                     /*!< out: immediate result
+                                                                        for update function */
+                                        struct st_mysql_value *value) { /*!< in: incoming string */
+  long long input_val;
+
+  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) return 1;
+
+  if (value->val_int(value, &input_val)) {
+    return 1;
+  }
+
+  if (input_val < 1 || input_val > ShannonBase::MAX_N_FIELD_PARALLEL) {
+    return 1;
+  }
+
+  *static_cast<int *>(save) = static_cast<int>(input_val);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+// clang-format off
+static MYSQL_SYSVAR_ULONG(rapid_memory_size_max,
+                          ShannonBase::rpd_mem_sz_max,
+                          PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                           "Number of memory size that used for rapid engine, and it must "
                           "not be oversize half of physical mem size.",
-                          rpd_mem_size_max_validate, rpd_mem_size_max_update, ShannonBase::SHANNON_MAX_MEMRORY_SIZE, 0,
-                          ShannonBase::SHANNON_MAX_MEMRORY_SIZE, 0);
+                          rpd_mem_size_max_validate,
+                          rpd_mem_size_max_update,
+                          ShannonBase::SHANNON_MAX_MEMRORY_SIZE,
+                          ShannonBase::SHANNON_MAX_MEMRORY_SIZE,
+                          ShannonBase::SHANNON_MAX_MEMRORY_SIZE,
+                          0);
 
-static MYSQL_SYSVAR_ULONGLONG(rapid_pop_buffer_size_max, ShannonBase::rpd_pop_buff_sz_max,
+static MYSQL_SYSVAR_ULONGLONG(rapid_pop_buffer_size_max,
+                              ShannonBase::rpd_pop_buff_sz_max,
                               PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                               "Number of memory used for populating the changes "
                               "in innodb to rapid engine..",
-                              rpd_pop_buff_size_max_validate, rpd_pop_buff_size_max_update,
-                              ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE, 0,
-                              ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE, 0);
+                              rpd_pop_buff_size_max_validate,
+                              rpd_pop_buff_size_max_update,
+                              ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE,
+                              ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE,
+                              ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE,
+                              0);
 
-static MYSQL_SYSVAR_ULONGLONG(rapid_parallel_load_max, ShannonBase::rpd_para_load_threshold,
+static MYSQL_SYSVAR_ULONGLONG(rapid_parallel_load_max,
+                              ShannonBase::rpd_para_load_threshold,
                               PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                               "Max number of rows used to use parallel load for secondary_load "
                               "from innodb to rapid engine..",
-                              rpd_para_load_threshold_validate, rpd_para_load_threshold_update,
-                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD, 0,
-                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD, 0);
+                              rpd_para_load_threshold_validate,
+                              rpd_para_load_threshold_update,
+                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD,
+                              1,
+                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD,
+                              0);
+
+static MYSQL_SYSVAR_INT(rapid_async_column_threshold,
+                        ShannonBase::rpd_async_column_threshold,
+                        PLUGIN_VAR_OPCMDARG,
+                        "Max number of columns will do async-corountine for reading data or parsing log ",
+                        rpd_async_threshold_validate,
+                        rpd_async_threshold_update,
+                        ShannonBase::DEFAULT_N_FIELD_PARALLEL,
+                        1,
+                        ShannonBase::MAX_N_FIELD_PARALLEL,
+                        0);
+// clang-format on
 
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(rapid_memory_size_max),
     MYSQL_SYSVAR(rapid_pop_buffer_size_max),
     MYSQL_SYSVAR(rapid_parallel_load_max),
+    MYSQL_SYSVAR(rapid_async_column_threshold),
     nullptr,
 };
 

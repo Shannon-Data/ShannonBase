@@ -59,6 +59,7 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
+extern int rpd_async_column_threshold;
 namespace Populate {
 // to cache the found index_t usd by log parser, and used for next time.
 std::unordered_map<uint64, const dict_index_t *> g_index_cache;
@@ -827,7 +828,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
 
       std::unordered_map<std::string, mysql_field_t> row_field_value;
       // step 1:to get all field data of deleting row.
-      if (index->n_fields <= ShannonBase::MAX_N_FIELD_PARALLEL)
+      if (index->n_fields <= ShannonBase::rpd_async_column_threshold)
         parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
       else
         ShannonBase::Utils::cowait_sync_with(
@@ -845,7 +846,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     case MLOG_REC_INSERT: {
       std::unordered_map<std::string, mysql_field_t> row_field_value;  //<field_name, field>
       // step 1:to get all field data of inserting row.
-      if (index->n_fields <= ShannonBase::MAX_N_FIELD_PARALLEL)
+      if (index->n_fields <= ShannonBase::rpd_async_column_threshold)
         parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
       else
         ShannonBase::Utils::cowait_sync_with(
@@ -864,7 +865,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
       ut_a(upd);
       std::unordered_map<std::string, mysql_field_t> row_field_value;
       // step 1:to get all field data of updating row.
-      if (index->n_fields <= ShannonBase::MAX_N_FIELD_PARALLEL)
+      if (index->n_fields <= ShannonBase::rpd_async_column_threshold)
         parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
       else
         ShannonBase::Utils::cowait_sync_with(

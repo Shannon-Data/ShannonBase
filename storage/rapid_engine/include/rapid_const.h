@@ -85,7 +85,8 @@ constexpr uint64 SHANNON_PARALLEL_LOAD_THRESHOLD = 1000000;
 
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
 
-constexpr uint MAX_N_FIELD_PARALLEL = 8;
+constexpr uint MAX_N_FIELD_PARALLEL = 128;
+constexpr uint DEFAULT_N_FIELD_PARALLEL = 16;
 constexpr uint SHANNON_BATCH_NUM = 8;
 
 constexpr char SHANNON_DB_ROW_ID[] = "DB_ROW_ID";
