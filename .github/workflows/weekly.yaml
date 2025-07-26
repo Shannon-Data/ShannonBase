@@ -6,7 +6,7 @@ on:
     tags:
       - "*v*"
   schedule:
-    - cron: '0 1 * * 6'   # every week at saturday 1 AM(UTC)
+    - cron: '30 22 * * 5'   # every week at saturday 1 AM(UTC)
 
 concurrency:
   group: weekly
@@ -37,8 +37,8 @@ jobs:
         run: |
           git diff -U0 --no-color ${{ github.event.pull_request.base.sha }} HEAD storage/rapid_engine ml | /usr/share/clang/clang-format-14/clang-format-diff.py -p1 | tee /tmp/.clang-format-diff
           [ -s /tmp/.clang-format-diff ] && exit 1 || true 
-
-  build:
+  #x86
+  build_x86:
     needs: lint
     runs-on: ubuntu-latest
     steps:
@@ -74,7 +74,7 @@ jobs:
         -DWITH_PROTOBUF=bundled \
         -DWITH_UNIT_TESTS=OFF \
         -DWITH_HYPERGRAPH_OPTIMIZER=ON \
-        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j5 && \
+        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j$(nproc) && \
         sudo make install
     - name: clean_up_shannonbase_build
       run: |
@@ -91,3 +91,57 @@ jobs:
         #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
         #./collections/default.weekly.basic
         #./collections/default.weekly
+  # ARM
+  build_arm:
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Clean old build cache
+        run: |
+          cd ${{ github.workspace }}
+          rm -rf cmake_build
+      - name: Install ARM dependencies
+        run: |
+          sudo apt update -y && sudo apt upgrade -y && sudo apt install -y libtirpc-dev libboost-all-dev libjson-perl
+      - name: Build and install (ARM)
+        run: |
+          cd ${{ github.workspace }}
+          mkdir cmake_build && cd cmake_build
+          sudo mkdir -p /home/shannon-bin && sudo mkdir -p /home/shannon-bin/data
+          sudo chown -R $USER:$USER /home/shannon-bin/
+          git config --global --add safe.directory ${{ github.workspace }}
+          git fetch --tags -f
+          cmake ../ \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/home/shannon-bin/ \
+          -DMYSQL_DATADIR=/home/shannon-bin/data \
+          -DSYSCONFDIR=/home/shannon-bin/ \
+          -DMYSQL_UNIX_ADDR=/home/shannon-bin/temp/mysql.sock \
+          -DWITH_MYISAM_STORAGE_ENGINE=1 \
+          -DWITH_INNOBASE_STORAGE_ENGINE=1 \
+          -DMYSQL_TCP_PORT=3306 \
+          -DENABLED_LOCAL_INFILE=1 \
+          -DWITH_PROTOBUF=bundled \
+          -DWITH_UNIT_TESTS=OFF \
+          -DWITH_HYPERGRAPH_OPTIMIZER=ON \
+          -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j$(nproc) && \
+          sudo make install
+      - name: Clean up build
+        run: |
+          sudo find ${{ github.workspace }} -mindepth 1 -delete
+      - name: Run MTR tests (ARM)
+        run: |
+          sudo mkdir -p /home/shannon-bin/log
+          sudo chown -R $USER:$USER /home/shannon-bin/
+          cd /home/shannon-bin/mysql-test/
+          sudo chmod -R u+rwx mysql-test-run.pl
+          ./mysql-test-run.pl --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
+          --big-test --nocheck-testcases --retry=3 --parallel=$(nproc)
+          # when we have a fast git action runner, we can use the following command to run the test.
+          #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
+          #./collections/default.weekly.basic
+          #./collections/default.weekly
