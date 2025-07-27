@@ -1091,7 +1091,13 @@ This function is registered as a callback with MySQL.
 @param[in]  thd       thread handle
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from chesck function */
-static void rpd_para_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {}
+static void rpd_para_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+
+  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
+  ShannonBase::rpd_para_load_threshold = *static_cast<const int *>(save);
+}
 
 /** Update the system variable rpd_async_threshold.
 This function is registered as a callback with MySQL.
