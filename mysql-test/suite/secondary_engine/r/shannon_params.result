@@ -1,0 +1,55 @@
+create database sh_params;
+use sh_params;
+CREATE TABLE t1 (
+id INT PRIMARY KEY AUTO_INCREMENT,
+user_name VARCHAR(50) NOT NULL,
+account_status ENUM('active', 'inactive', 'suspended') NOT NULL DEFAULT 'active'
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+INSERT INTO t1 (user_name, account_status) VALUES
+('张三', 'active'),
+('李四', 'inactive'),
+('bob', 'inactive'),
+('grace', 'active'),
+('王五', 'suspended');
+SHOW VARIABLES LIKE "%rapid%";
+Variable_name	Value
+rapid_rapid_async_column_threshold	16
+rapid_rapid_memory_size_max	8589934592
+rapid_rapid_parallel_load_max	1000000
+rapid_rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	0.700000
+rapid_self_load_enabled	FALSE
+rapid_self_load_interval_seconds	86400.000000
+rapid_self_load_skip_quiet_check	FALSE
+rapid_use_dynamic_offload	ON
+SET rapid_rapid_async_column_threshold=11;
+ERROR HY000: Variable 'rapid_rapid_async_column_threshold' is a GLOBAL variable and should be set with SET GLOBAL
+SET GLOBAL rapid_rapid_async_column_threshold=11;
+SHOW VARIABLES LIKE "%rapid%";
+Variable_name	Value
+rapid_rapid_async_column_threshold	11
+rapid_rapid_memory_size_max	8589934592
+rapid_rapid_parallel_load_max	1000000
+rapid_rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	0.700000
+rapid_self_load_enabled	FALSE
+rapid_self_load_interval_seconds	86400.000000
+rapid_self_load_skip_quiet_check	FALSE
+rapid_use_dynamic_offload	ON
+ALTER TABLE  t1 secondary_load;
+SET GLOBAL rapid_rapid_async_column_threshold=10;
+ERROR HY000: Tables have been loaded, cannot change the rapid params
+ALTER TABLE  t1 secondary_unload;
+SET GLOBAL rapid_rapid_async_column_threshold=10;
+SHOW VARIABLES LIKE "%rapid%";
+Variable_name	Value
+rapid_rapid_async_column_threshold	10
+rapid_rapid_memory_size_max	8589934592
+rapid_rapid_parallel_load_max	1000000
+rapid_rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	0.700000
+rapid_self_load_enabled	FALSE
+rapid_self_load_interval_seconds	86400.000000
+rapid_self_load_skip_quiet_check	FALSE
+rapid_use_dynamic_offload	ON
+DROP DATABASE sh_params;
