@@ -261,13 +261,16 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 }
 
 int ha_rapid::records(ha_rows *num_rows) {
+#if 0
   Rapid_load_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   std::string sch_tb;
   sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
   auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
   *num_rows = rpd_tb->first_field()->rows(&context);
+#endif
 
+  ha_get_primary_handler()->ha_records(num_rows);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -1045,6 +1048,21 @@ static int rpd_mem_size_max_validate(THD *,                          /*!< in: th
                                                                      for update function */
                                      struct st_mysql_value *value) { /*!< in: incoming string */
 
+  long long input_val;
+
+  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+    return 1;
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Tables have been loaded, cannot change the rapid params");
+  }
+  if (value->val_int(value, &input_val)) {
+    return 1;
+  }
+
+  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE) {
+    return 1;
+  }
+
+  *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -1053,7 +1071,12 @@ This function is registered as a callback with MySQL.
 @param[in]  thd       thread handle
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from check function */
-static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {}
+static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+
+  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
+  ShannonBase::rpd_mem_sz_max = *static_cast<const int *>(save);
+}
 
 /** Validate passed-in "value" is a valid monitor counter name.
  This function is registered as a callback with MySQL.
@@ -1064,6 +1087,22 @@ static int rpd_pop_buff_size_max_validate(THD *,                          /*!< i
                                           void *save,                     /*!< out: immediate result
                                                                           for update function */
                                           struct st_mysql_value *value) { /*!< in: incoming string */
+  long long input_val;
+
+  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Tables have been loaded, cannot change the rapid params");
+    return 1;
+  }
+
+  if (value->val_int(value, &input_val)) {
+    return 1;
+  }
+
+  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
+    return 1;
+  }
+
+  *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -1072,7 +1111,12 @@ This function is registered as a callback with MySQL.
 @param[in]  thd       thread handle
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from check function */
-static void rpd_pop_buff_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {}
+static void rpd_pop_buff_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+
+  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
+  ShannonBase::rpd_pop_buff_sz_max = *static_cast<const int *>(save);
+}
 
 /** Validate passed-in "value" is a valid monitor counter name.
  This function is registered as a callback with MySQL.
@@ -1083,6 +1127,21 @@ static int rpd_para_load_threshold_validate(THD *,                          /*!<
                                             void *save,                     /*!< out: immediate result
                                                                             for update function */
                                             struct st_mysql_value *value) { /*!< in: incoming string */
+  long long input_val;
+
+  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Tables have been loaded, cannot change the rapid params");
+    return 1;
+  }
+  if (value->val_int(value, &input_val)) {
+    return 1;
+  }
+
+  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD) {
+    return 1;
+  }
+
+  *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -1091,7 +1150,13 @@ This function is registered as a callback with MySQL.
 @param[in]  thd       thread handle
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from chesck function */
-static void rpd_para_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {}
+static void rpd_para_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+
+  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
+  ShannonBase::rpd_para_load_threshold = *static_cast<const int *>(save);
+}
 
 /** Update the system variable rpd_async_threshold.
 This function is registered as a callback with MySQL.
@@ -1118,7 +1183,10 @@ static int rpd_async_threshold_validate(THD *,                          /*!< in:
                                         struct st_mysql_value *value) { /*!< in: incoming string */
   long long input_val;
 
-  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) return 1;
+  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Tables have been loaded, cannot change the rapid params");
+    return 1;
+  }
 
   if (value->val_int(value, &input_val)) {
     return 1;
