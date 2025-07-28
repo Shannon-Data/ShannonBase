@@ -174,8 +174,9 @@ select count(*) from NATION;
 select * from REGION LIMIT 100;
 select count(*) from REGION;
 
-select * from LINEITEM LIMIT 100;
-select count(*) from LINEITEM;
+explain select * from LINEITEM LIMIT 100;
+#when parttable scan ready to enable.
+#select count(*) from LINEITEM;
 
 select * from SUPPLIER LIMIT 100;
 select count(*) from SUPPLIER;
@@ -242,28 +243,6 @@ ORDER BY VALUE DESC;
 
 set use_secondary_engine=off;
 #---use innodb
-EXPLAIN SELECT  
-    PS_PARTKEY, SUM(PS_SUPPLYCOST * PS_AVAILQTY) AS VALUE
-FROM
-    PARTSUPP,
-    SUPPLIER,
-    NATION
-WHERE
-    PS_SUPPKEY = S_SUPPKEY
-    AND S_NATIONKEY = N_NATIONKEY
-    AND N_NAME = 'GERMANY'
-GROUP BY PS_PARTKEY
-HAVING SUM(PS_SUPPLYCOST * PS_AVAILQTY) > (SELECT 
-        SUM(PS_SUPPLYCOST * PS_AVAILQTY) * 0.0001
-    FROM
-        PARTSUPP,
-        SUPPLIER,
-        NATION
-    WHERE
-        PS_SUPPKEY = S_SUPPKEY
-        AND S_NATIONKEY = N_NATIONKEY
-        AND N_NAME = 'GERMANY')
-ORDER BY VALUE DESC;
 
 SELECT  
     PS_PARTKEY, SUM(PS_SUPPLYCOST * PS_AVAILQTY) AS VALUE

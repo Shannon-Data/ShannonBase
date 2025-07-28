@@ -97,6 +97,45 @@ T cowait_sync_with(boost::asio::thread_pool &pool, boost::asio::awaitable<T> aw)
   return fut.get();  // when the result is ready.
 }
 
+class latch {
+ public:
+  explicit latch(int count) : m_count(count) { assert(count >= 0); }
+
+  latch(const latch &) = delete;
+  latch &operator=(const latch &) = delete;
+
+  void wait() {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    m_cv.wait(lock, [this] { return m_count == 0; });
+  }
+
+  bool try_wait() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_count == 0;
+  }
+
+  void count_down(int update = 1) {
+    assert(update > 0);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (update <= m_count) {
+      m_count -= update;
+      if (m_count == 0) {
+        m_cv.notify_all();
+      }
+    }
+  }
+
+  int current_count() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_count;
+  }
+
+ private:
+  mutable std::mutex m_mutex;
+  std::condition_variable m_cv;
+  int m_count;
+};
+
 }  // namespace Utils
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CONCURRENT_UTIL_H__

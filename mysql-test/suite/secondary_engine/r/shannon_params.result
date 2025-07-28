@@ -15,7 +15,7 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_rapid_async_column_threshold	16
 rapid_rapid_memory_size_max	8589934592
-rapid_rapid_parallel_load_max	1000000
+rapid_rapid_parallel_load_max	10000
 rapid_rapid_pop_buffer_size_max	134217728
 rapid_self_load_base_relation_fill_percentage	0.700000
 rapid_self_load_enabled	FALSE
@@ -29,7 +29,7 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_rapid_async_column_threshold	11
 rapid_rapid_memory_size_max	8589934592
-rapid_rapid_parallel_load_max	1000000
+rapid_rapid_parallel_load_max	10000
 rapid_rapid_pop_buffer_size_max	134217728
 rapid_self_load_base_relation_fill_percentage	0.700000
 rapid_self_load_enabled	FALSE
@@ -45,7 +45,7 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_rapid_async_column_threshold	10
 rapid_rapid_memory_size_max	8589934592
-rapid_rapid_parallel_load_max	1000000
+rapid_rapid_parallel_load_max	10000
 rapid_rapid_pop_buffer_size_max	134217728
 rapid_self_load_base_relation_fill_percentage	0.700000
 rapid_self_load_enabled	FALSE

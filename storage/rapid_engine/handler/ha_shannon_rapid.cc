@@ -327,6 +327,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = table_arg.s->db.str;
   context.m_table_name = table_arg.s->table_name.str;
+  context.m_extra_info.m_key_len = table_arg.file->ref_length;
 
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
     std::string err;
@@ -512,11 +513,14 @@ int ha_rapid::index_next_same(uchar *buf, const uchar *, uint) {
 
 int ha_rapid::index_first(uchar *buf) {
   DBUG_TRACE;
-
+  ut_ad(m_start_of_scan && inited == handler::INDEX);
   ha_statistic_increment(&System_status_var::ha_read_first_count);
 
-  int error = m_data_table->index_read(buf, end_range->key, end_range->length, end_range->flag);
-
+  int error;
+  if (end_range)
+    error = m_data_table->index_read(buf, end_range->key, end_range->length, end_range->flag);
+  else
+    error = m_data_table->index_next(buf);
   return error;
 }
 
@@ -1128,11 +1132,6 @@ static int rpd_para_load_threshold_validate(THD *,                          /*!<
                                                                             for update function */
                                             struct st_mysql_value *value) { /*!< in: incoming string */
   long long input_val;
-
-  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Tables have been loaded, cannot change the rapid params");
-    return 1;
-  }
   if (value->val_int(value, &input_val)) {
     return 1;
   }
@@ -1227,13 +1226,13 @@ static MYSQL_SYSVAR_ULONGLONG(rapid_pop_buffer_size_max,
 
 static MYSQL_SYSVAR_ULONGLONG(rapid_parallel_load_max,
                               ShannonBase::rpd_para_load_threshold,
-                              PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+                              PLUGIN_VAR_OPCMDARG,
                               "Max number of rows used to use parallel load for secondary_load "
                               "from innodb to rapid engine..",
                               rpd_para_load_threshold_validate,
                               rpd_para_load_threshold_update,
-                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD,
-                              1,
+                              10000,
+                              1000,
                               ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD,
                               0);
 
