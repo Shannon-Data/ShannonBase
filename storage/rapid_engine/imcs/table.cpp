@@ -103,7 +103,6 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
      knows of */
     ut_a(source->file->ref_length == ShannonBase::SHANNON_DATA_DB_ROW_ID_LEN);
 
-    ut_a(const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len == source->file->ref_length);
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = source->file->ref_length;
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff =
         std::make_unique<uchar[]>(source->file->ref_length);
@@ -160,8 +159,86 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
   return SHANNON_SUCCESS;
 }
 
+// using for parallel load.
+int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
+                            ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
+  // this is come from ha_innodb.cc postion(), when postion() changed, the part should be changed respondingly.
+  // why we dont not change the impl of postion() directly? because the postion() is impled in innodb engine.
+  // we want to decouple with innodb engine.
+  auto source = context->m_table;
+  std::unique_ptr<uchar[]> key_buff{nullptr};
+  auto key_len{0u};
+  if (key == nullptr) {
+    /* No primary key was defined for the table and we generated the clustered index
+     from row id: the row reference will be the row id, not any key value that MySQL
+     knows of */
+    ut_a(source->file->ref_length == ShannonBase::SHANNON_DATA_DB_ROW_ID_LEN);
+
+    ut_a(const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len == source->file->ref_length);
+    key_len = source->file->ref_length;
+    key_buff.reset(new uchar[key_len]);
+    memset(key_buff.get(), 0x0, key_len);
+    memcpy(key_buff.get(), source->file->ref, key_len);
+  } else {
+    /* Copy primary key as the row reference */
+    auto from_record = rowdata;
+
+    key_len = key->key_length;
+    key_buff.reset(new uchar[key_len]);
+    memset(key_buff.get(), 0x0, key_len);
+    auto to_key = key_buff.get();
+
+    uint length{0u};
+    KEY_PART_INFO *key_part;
+    /* Copy the key parts */
+    auto key_length = key->key_length;
+    for (key_part = key->key_part; (int)key_length > 0; key_part++) {
+      Field *field = key_part->field;
+      const CHARSET_INFO *cs = field->charset();
+      auto fld_ptr = rowdata + ptrdiff_t(col_offsets[field->field_index()]);
+      field->set_field_ptr(fld_ptr);
+
+      if (key_part->null_bit) {
+        bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
+        ut_a(is_field_null(field->field_index(), rowdata, null_byte_offsets, null_bitmasks) == key_is_null);
+        *to_key++ = (key_is_null ? 1 : 0);
+        key_length--;
+      }
+
+      if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
+        key_length -= HA_KEY_BLOB_LENGTH;
+        length = std::min<uint>(key_length, key_part->length);
+        field->get_key_image(to_key, length, Field::itRAW);
+        to_key += HA_KEY_BLOB_LENGTH;
+      } else {
+        length = std::min<uint>(key_length, key_part->length);
+        if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
+            field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
+          uchar encoding[8] = {0};
+          Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
+          memcpy(to_key, encoding, length);
+        } else {
+          const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
+          if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
+        }
+      }
+      to_key += length;
+      key_length -= length;
+    }
+  }
+  auto keypart = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
+  m_indexes[keypart].get()->insert(key_buff.get(), key_len, &rowid, sizeof(rowid));
+  return SHANNON_SUCCESS;
+}
+
 int Table::build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid) {
   return build_index_impl(context, key, rowid);
+}
+
+// using for parallel load.
+int Table::build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
+                       ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
+  return build_index_impl(context, key, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
 }
 
 // IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `PartTable::write`
@@ -216,17 +293,88 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
   if (context->m_table->s->is_missing_primary_key()) {
     context->m_table->file->position((const uchar *)context->m_table->record[0]);  // to set DB_ROW_ID.
     if (build_index(context, nullptr, rowid)) return HA_ERR_GENERIC;
-
-    for (auto index = 0u; index < context->m_table->s->keys; index++) {
-      auto key_info = context->m_table->key_info + index;
-      if (build_index(context, key_info, rowid)) return HA_ERR_GENERIC;
-    }
-  } else {
-    for (auto index = 0u; index < context->m_table->s->keys; index++) {
-      auto key_info = context->m_table->key_info + index;
-      if (build_index(context, key_info, rowid)) return HA_ERR_GENERIC;
-    }
   }
+
+  for (auto index = 0u; index < context->m_table->s->keys; index++) {
+    auto key_info = context->m_table->key_info + index;
+    if (build_index(context, key_info, rowid)) return HA_ERR_GENERIC;
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+// using for parallel load. change the parttable correspondingly.
+int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
+                 ulong *null_byte_offsets, ulong *null_bitmasks) {
+  ut_a(context->m_table->s->fields == n_cols);
+  row_id_t rowid{0};
+  auto offsets = col_offsets;
+  uchar *data_ptr{nullptr};
+  uint data_len{0};
+
+  for (auto col_ind = 0u; col_ind < context->m_table->s->fields; col_ind++) {
+    auto fld = *(context->m_table->field + col_ind);
+    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    auto is_null = is_field_null(col_ind, rowdata, null_byte_offsets, null_bitmasks);
+    data_ptr = rowdata + ptrdiff_t(*(offsets + col_ind));
+    if (is_null) {
+      data_len = UNIV_SQL_NULL;
+      data_ptr = nullptr;
+    } else {
+      switch (fld->type()) {
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_TINY_BLOB:
+        case MYSQL_TYPE_MEDIUM_BLOB:
+        case MYSQL_TYPE_LONG_BLOB: {
+          auto bfld = down_cast<Field_blob *>(fld);
+          switch (bfld->pack_length_no_ptr()) {
+            case 1:
+              data_len = *data_ptr;
+              break;
+            case 2:
+              data_len = uint2korr(data_ptr);
+              break;
+            case 3:
+              data_len = uint3korr(data_ptr);
+              break;
+            case 4:
+              data_len = uint4korr(data_ptr);
+              break;
+          }
+        } break;
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING: {
+          auto extra_offset = (fld->field_length > 256 ? 2 : 1);
+          if (extra_offset == 1)
+            data_len = mach_read_from_1(data_ptr);
+          else if (extra_offset == 2)
+            data_len = mach_read_from_2_little_endian(data_ptr);
+          data_ptr = data_ptr + ptrdiff_t(extra_offset);
+        } break;
+        default: {
+          data_len = fld->pack_length();
+        } break;
+      }
+    }
+    if (!m_fields[fld->field_name]->write_row(context, data_ptr, data_len)) {
+      return HA_ERR_GENERIC;
+    }
+    rowid = m_fields[fld->field_name]->header()->m_prows.load(std::memory_order_relaxed) - 1;
+  }
+
+  if (context->m_table->s->is_missing_primary_key()) {
+    context->m_table->file->position((const uchar *)rowdata);  // to set DB_ROW_ID.
+    if (build_index(context, nullptr, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks))
+      return HA_ERR_GENERIC;
+  }
+
+  for (auto index = 0u; index < context->m_table->s->keys; index++) {
+    auto key_info = context->m_table->key_info + index;
+    if (build_index(context, key_info, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks))
+      return HA_ERR_GENERIC;
+  }
+
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -354,8 +502,89 @@ int PartTable::build_index_impl(const Rapid_load_context *context, const KEY *ke
   return SHANNON_SUCCESS;
 }
 
+// using for parallel load.
+int PartTable::build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
+                                ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
+  // this is come from ha_innodb.cc postion(), when postion() changed, the part should be changed respondingly.
+  // why we dont not change the impl of postion() directly? because the postion() is impled in innodb engine.
+  // we want to decouple with innodb engine.
+  auto source = context->m_table;
+  auto active_partkey = context->m_extra_info.m_active_part_key;
+
+  std::unique_ptr<uchar[]> key_buff{nullptr};
+  auto key_len{0u};
+  if (key == nullptr) {
+    /* No primary key was defined for the table and we generated the clustered index
+     from row id: the row reference will be the row id, not any key value that MySQL
+     knows of */
+    ut_a(source->file->ref_length == ShannonBase::SHANNON_DATA_DB_ROW_ID_LEN);
+    ut_a(const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len == source->file->ref_length);
+    key_len = source->file->ref_length;
+    key_buff = std::make_unique<uchar[]>(key_len);
+    memset(key_buff.get(), 0x0, key_len);
+    memcpy(key_buff.get(), source->file->ref, key_len);
+  } else {
+    /* Copy primary key as the row reference */
+    auto from_record = rowdata;
+
+    key_len = key->key_length;
+    key_buff = std::make_unique<uchar[]>(key_len);
+    memset(key_buff.get(), 0x0, key_len);
+    auto to_key = key_buff.get();
+
+    uint length{0u};
+    KEY_PART_INFO *key_part;
+    /* Copy the key parts */
+    auto key_length = key->key_length;
+    for (key_part = key->key_part; (int)key_length > 0; key_part++) {
+      Field *field = key_part->field;
+      const CHARSET_INFO *cs = field->charset();
+      auto fld_ptr = rowdata + ptrdiff_t(col_offsets[field->field_index()]);
+      field->set_field_ptr(fld_ptr);
+
+      if (key_part->null_bit) {
+        bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
+        ut_a(is_field_null(field->field_index(), rowdata, null_byte_offsets, null_bitmasks) == key_is_null);
+        *to_key++ = (key_is_null ? 1 : 0);
+        key_length--;
+      }
+
+      if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
+        key_length -= HA_KEY_BLOB_LENGTH;
+        length = std::min<uint>(key_length, key_part->length);
+        field->get_key_image(to_key, length, Field::itRAW);
+        to_key += HA_KEY_BLOB_LENGTH;
+      } else {
+        length = std::min<uint>(key_length, key_part->length);
+        if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
+            field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
+          uchar encoding[8] = {0};
+          Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
+          memcpy(to_key, encoding, length);
+        } else {
+          const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
+          if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
+        }
+      }
+      to_key += length;
+      key_length -= length;
+    }
+  }
+
+  auto keyname = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
+  auto active_key = active_partkey.append(":").append(keyname);
+  m_indexes[active_key].get()->insert(key_buff.get(), key_len, &rowid, sizeof(rowid));
+  return SHANNON_SUCCESS;
+}
+
 int PartTable::build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid) {
   return build_index_impl(context, key, rowid);
+}
+
+// using for parallel load.
+int PartTable::build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
+                           ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
+  return build_index_impl(context, key, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
 }
 
 // IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `Table::write` CORRESPONDINGLY.
@@ -406,16 +635,84 @@ int PartTable::write(const Rapid_load_context *context, uchar *data) {
   if (context->m_table->s->is_missing_primary_key()) {
     context->m_table->file->position((const uchar *)context->m_table->record[0]);  // to set DB_ROW_ID.
     if (build_index(context, nullptr, rowid)) return HA_ERR_GENERIC;
+  }
+  for (auto index = 0u; index < context->m_table->s->keys; index++) {
+    auto key_info = context->m_table->key_info + index;
+    if (build_index(context, key_info, rowid)) return HA_ERR_GENERIC;
+  }
 
-    for (auto index = 0u; index < context->m_table->s->keys; index++) {
-      auto key_info = context->m_table->key_info + index;
-      if (build_index(context, key_info, rowid)) return HA_ERR_GENERIC;
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int PartTable::write(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
+                     ulong *null_byte_offsets, ulong *null_bitmasks) {
+  ut_a(context->m_table->s->fields == n_cols);
+  row_id_t rowid{0};
+  auto offsets = col_offsets;
+  uchar *data_ptr{nullptr};
+  uint data_len{0};
+
+  for (auto col_ind = 0u; col_ind < context->m_table->s->fields; col_ind++) {
+    auto fld = *(context->m_table->field + col_ind);
+    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    auto is_null = is_field_null(col_ind, rowdata, null_byte_offsets, null_bitmasks);
+    data_ptr = rowdata + ptrdiff_t(*(offsets + col_ind));
+    if (is_null) {
+      data_len = UNIV_SQL_NULL;
+      data_ptr = nullptr;
+    } else {
+      switch (fld->type()) {
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_TINY_BLOB:
+        case MYSQL_TYPE_MEDIUM_BLOB:
+        case MYSQL_TYPE_LONG_BLOB: {
+          auto bfld = down_cast<Field_blob *>(fld);
+          switch (bfld->pack_length_no_ptr()) {
+            case 1:
+              data_len = *data_ptr;
+              break;
+            case 2:
+              data_len = uint2korr(data_ptr);
+              break;
+            case 3:
+              data_len = uint3korr(data_ptr);
+              break;
+            case 4:
+              data_len = uint4korr(data_ptr);
+              break;
+          }
+        } break;
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING: {
+          auto extra_offset = (fld->field_length > 256 ? 2 : 1);
+          if (extra_offset == 1)
+            data_len = mach_read_from_1(data_ptr);
+          else if (extra_offset == 2)
+            data_len = mach_read_from_2_little_endian(data_ptr);
+          data_ptr = data_ptr + ptrdiff_t(extra_offset);
+        } break;
+        default: {
+          data_len = fld->pack_length();
+        } break;
+      }
     }
-  } else {
-    for (auto index = 0u; index < context->m_table->s->keys; index++) {
-      auto key_info = context->m_table->key_info + index;
-      if (build_index(context, key_info, rowid)) return HA_ERR_GENERIC;
+    if (!m_fields[fld->field_name]->write_row(context, data_ptr, data_len)) {
+      return HA_ERR_GENERIC;
     }
+    rowid = m_fields[fld->field_name]->header()->m_prows.load(std::memory_order_relaxed) - 1;
+  }
+
+  if (context->m_table->s->is_missing_primary_key()) {
+    context->m_table->file->position((const uchar *)rowdata);  // to set DB_ROW_ID.
+    if (build_index(context, nullptr, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks))
+      return HA_ERR_GENERIC;
+  }
+
+  for (auto index = 0u; index < context->m_table->s->keys; index++) {
+    auto key_info = context->m_table->key_info + index;
+    if (build_index(context, key_info, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks))
+      return HA_ERR_GENERIC;
   }
   return ShannonBase::SHANNON_SUCCESS;
 }

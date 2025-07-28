@@ -29,11 +29,14 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 
 #include <threads.h>
+#include <condition_variable>
+#include <mutex>
 #include <sstream>
 #include <string>
 
 #include "include/decimal.h"
 #include "include/my_dbug.h"                     //DBUG_EXECUTE_IF
+#include "include/row0pread-adapter.h"           //Parallel Reader
 #include "sql/partitioning/partition_handler.h"  //partition handler
 
 #include "storage/innobase/handler/ha_innopart.h"
@@ -221,22 +224,102 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   key_part.append(context->m_schema_name.c_str()).append(":").append(context->m_table_name.c_str());
   ut_a(m_tables.find(key_part) != m_tables.end());
 
-  if (file->stats.records < ShannonBase::rpd_para_load_threshold) {  // not para load.
-    while ((tmp = file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
-      /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
-       without locks. Now, do full scan, but multi-thread scan will impl in future. */
-      if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+  while ((tmp = file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
+    /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
+     without locks. Now, do full scan, but multi-thread scan will impl in future. */
+    if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
-      DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
-        my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
-        file->ha_rnd_end();
-        return HA_ERR_GENERIC;
-      });
+    DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
+      my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
+      file->ha_rnd_end();
+      return HA_ERR_GENERIC;
+    });
 
-      // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
-      auto load_context = const_cast<Rapid_load_context *>(context);
-      load_context->m_extra_info.m_key_len = file->ref_length;
-      if (m_tables[key_part].get()->write(context, context->m_table->record[0])) {
+    // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
+    if (m_tables[key_part].get()->write(context, context->m_table->record[0])) {
+      std::string errmsg;
+      errmsg.append("load data from ")
+          .append(context->m_schema_name.c_str())
+          .append(".")
+          .append(context->m_table_name.c_str())
+          .append(" to imcs failed.");
+      my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+      break;
+    }
+
+    m_thd->inc_sent_row_count(1);
+
+    if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
+  }
+  // end of load the data from innodb to imcs.
+  file->ha_rnd_end();
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *file) {
+  auto m_thd = context->m_thd;
+  // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
+  size_t num_threads;
+  auto max_threads = thd_parallel_read_threads(m_thd);
+  int tmp{HA_ERR_GENERIC};
+
+  m_thd->set_sent_row_count(0);
+  RapidTable *source_table{nullptr};
+  std::string key_part;
+  {
+    std::shared_lock lk(this->m_table_mutex);
+    key_part.append(context->m_schema_name.c_str()).append(":").append(context->m_table_name.c_str());
+    if (m_tables.find(key_part) == m_tables.end()) {
+      my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
+      return HA_ERR_GENERIC;
+    }
+    source_table = m_tables[key_part].get();
+  }
+
+  struct ScanCtxGuard {
+    ha_innobase *file;
+    void *ctx{nullptr};
+    std::vector<void *> thread_ctxs;
+    ScanCtxGuard(ha_innobase *f) : file(f) {}
+    ~ScanCtxGuard() {
+      if (ctx) file->parallel_scan_end(ctx);
+    }
+  } scan_ctx_guard(file);
+  parall_scan_cookie_t scan_cookie;
+
+  if (file->inited == handler::NONE && file->parallel_scan_init(scan_ctx_guard.ctx, &num_threads, true, max_threads)) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  // to set the thread contexts. now set to nullptr,  you can use your own ctx. or resize(num_threads,
+  // (void*)&scan_cookie);
+  scan_ctx_guard.thread_ctxs.resize(num_threads, nullptr);
+  scan_cookie.completion_latch = std::make_unique<Utils::latch>(num_threads);
+
+  Parallel_reader_adapter::Init_fn init_fn = [&scan_cookie](void *cookie, ulong ncols, ulong row_len,
+                                                            const ulong *col_offsets, const ulong *null_byte_offsets,
+                                                            const ulong *null_bitmasks) -> bool {
+    scan_cookie.scan_done = false;
+    scan_cookie.n_cols = ncols;
+    scan_cookie.row_len = row_len;
+    scan_cookie.col_offsets = const_cast<ulong *>(col_offsets);
+    scan_cookie.null_byte_offsets = const_cast<ulong *>(null_byte_offsets);
+    scan_cookie.null_bitmasks = const_cast<ulong *>(null_bitmasks);
+    return false;
+  };
+
+  Parallel_reader_adapter::Load_fn load_fn = [&key_part, &scan_cookie, &context, &file, &source_table](
+                                                 void *cookie, uint nrows, void *rowdata,
+                                                 uint64_t partition_id) -> bool {
+    // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
+    // auto scan_cookie = (parall_scan_cookie_t*) cookie, if you enable thread contexs.
+    auto data_ptr = static_cast<uchar *>(rowdata);
+    auto end_data_ptr = static_cast<uchar *>(rowdata) + ptrdiff_t(nrows * scan_cookie.row_len);
+    for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie.row_len), index++) {
+      if (source_table->write(context, (uchar *)data_ptr, scan_cookie.row_len, scan_cookie.col_offsets,
+                              scan_cookie.n_cols, scan_cookie.null_byte_offsets, scan_cookie.null_bitmasks)) {
+        scan_cookie.error_flag.store(true);
         std::string errmsg;
         errmsg.append("load data from ")
             .append(context->m_schema_name.c_str())
@@ -244,18 +327,36 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
             .append(context->m_table_name.c_str())
             .append(" to imcs failed.");
         my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
-        break;
+        return true;
       }
-
-      m_thd->inc_sent_row_count(1);
-
-      if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
     }
-  } else {  // using parallel load.
-  }
-  // end of load the data from innodb to imcs.
-  file->ha_rnd_end();
 
+    ut_a(data_ptr == end_data_ptr);
+    scan_cookie.n_rows.fetch_add(nrows);
+    return false;
+  };
+
+  Parallel_reader_adapter::End_fn end_fn = [&scan_cookie](void *cookie) {
+    scan_cookie.scan_done.store(true);
+    scan_cookie.completion_latch->count_down();
+  };
+
+  tmp = file->parallel_scan(scan_ctx_guard.ctx, scan_ctx_guard.thread_ctxs.data(), init_fn, load_fn, end_fn);
+  // Wait for scan to complete or error
+  scan_cookie.completion_latch->wait();
+
+  /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
+    without locks. Now, do full scan, but multi-thread scan will impl in future. */
+  // if (tmp == HA_ERR_KEY_NOT_FOUND) return HA_ERR_KEY_NOT_FOUND;
+  if (tmp || scan_cookie.error_flag.load()) {
+    DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
+      my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
+      return tmp ? tmp : HA_ERR_GENERIC;
+    });
+  }
+
+  context->m_thd->inc_sent_row_count(scan_cookie.n_rows);
+  // end of load the data from innodb to imcs.
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -288,8 +389,6 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
       });
 
       // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
-      auto load_context = const_cast<Rapid_load_context *>(context);
-      load_context->m_extra_info.m_key_len = file->ref_length;
       if (m_parttables[key].get()->write(context, context->m_table->record[0])) {
         file->rnd_end_in_part(part.second, true);
         std::string errmsg;
@@ -321,7 +420,13 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
     return HA_ERR_GENERIC;
   }
 
-  return load_innodb(context, dynamic_cast<ha_innobase *>(source->file));
+  // if the rec count is more than threshold and has primary key, it can be use parallel load, otherwise not.
+  auto parall_scan = (dynamic_cast<ha_innobase *>(source->file)->stats.records > ShannonBase::rpd_para_load_threshold &&
+                      !context->m_table->s->is_missing_primary_key())
+                         ? true
+                         : false;
+  return !parall_scan ? load_innodb(context, dynamic_cast<ha_innobase *>(source->file))
+                      : load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file));
 }
 
 int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
@@ -354,6 +459,8 @@ int Imcs::unload_innodb(const Rapid_load_context *context, const char *db_name, 
     my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
     return HA_ERR_GENERIC;
   }
+
+  std::unique_lock lock(m_table_mutex);
   m_tables.erase(key);
 
   shannon_loaded_tables->erase(db_name, table_name);

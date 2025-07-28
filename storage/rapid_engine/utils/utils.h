@@ -27,6 +27,7 @@
 #define __SHANNONBASE_UTILS_H__
 
 #include <chrono>
+#include <condition_variable>
 #include <iomanip>
 #include <iostream>
 #include <sstream>

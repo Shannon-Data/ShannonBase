@@ -136,15 +136,20 @@ class Imcs : public MemoryObject {
   void cleanup(std::string &sch_name, std::string &table_name);
 
   inline RapidTable *get_table(std::string &sch_table) {
+    std::shared_lock lk(m_table_mutex);
     if (m_tables.find(sch_table) == m_tables.end())
       return nullptr;
     else
       return m_tables[sch_table].get();
   }
 
-  inline std::unordered_map<std::string, std::unique_ptr<RapidTable>> &get_tables() { return m_tables; }
+  inline std::unordered_map<std::string, std::unique_ptr<RapidTable>> &get_tables() {
+    std::shared_lock lk(m_table_mutex);
+    return m_tables;
+  }
 
   inline RapidTable *get_parttable(std::string &sch_table) {
+    std::shared_lock lk(m_table_mutex);
     if (m_parttables.find(sch_table) == m_parttables.end())
       return nullptr;
     else
@@ -158,6 +163,7 @@ class Imcs : public MemoryObject {
   Imcs &operator=(const Imcs &&) = delete;
 
   int load_innodb(const Rapid_load_context *context, ha_innobase *file);
+  int load_innodb_parallel(const Rapid_load_context *context, ha_innobase *file);
   int load_innodbpart(const Rapid_load_context *context, ha_innopart *file);
 
   int unload_innodb(const Rapid_load_context *context, const char *db_name, const char *table_name,
@@ -169,6 +175,18 @@ class Imcs : public MemoryObject {
   int create_index_memo(const Rapid_load_context *context, RapidTable *rapid);
 
  private:
+  typedef struct {
+    // if you dont use this, remove the boost_thread and boost_system libs in cmake file.
+    std::unique_ptr<Utils::latch> completion_latch{nullptr};
+    std::atomic<bool> scan_done{false};
+    std::atomic<bool> error_flag{false};
+    std::atomic<size_t> n_rows{0};
+    std::atomic<ulong> n_cols{0}, row_len{0};
+    std::atomic<ulong *> col_offsets;
+    std::atomic<ulong *> null_byte_offsets;
+    std::atomic<ulong *> null_bitmasks;
+  } parall_scan_cookie_t;
+
   // imcs instance
   static Imcs *m_instance;
 
@@ -180,6 +198,7 @@ class Imcs : public MemoryObject {
 
   static std::unique_ptr<boost::asio::thread_pool> m_imcs_pool;
 
+  std::shared_mutex m_table_mutex;
   // loaded tables. key format: schema_name + ":" + table_name.
   std::unordered_map<std::string, std::unique_ptr<RapidTable>> m_tables;
 

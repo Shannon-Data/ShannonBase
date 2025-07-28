@@ -1,0 +1,258 @@
+create database sh_para_load;
+use sh_para_load;
+SHOW  VARIABLES like "%rapid%";
+Variable_name	Value
+rapid_rapid_async_column_threshold	16
+rapid_rapid_memory_size_max	8589934592
+rapid_rapid_parallel_load_max	10000
+rapid_rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	0.700000
+rapid_self_load_enabled	FALSE
+rapid_self_load_interval_seconds	86400.000000
+rapid_self_load_skip_quiet_check	FALSE
+rapid_use_dynamic_offload	ON
+SET GLOBAL rapid_rapid_parallel_load_max=10;
+SHOW VARIABLES like "%rapid%";
+Variable_name	Value
+rapid_rapid_async_column_threshold	16
+rapid_rapid_memory_size_max	8589934592
+rapid_rapid_parallel_load_max	10
+rapid_rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	0.700000
+rapid_self_load_enabled	FALSE
+rapid_self_load_interval_seconds	86400.000000
+rapid_self_load_skip_quiet_check	FALSE
+rapid_use_dynamic_offload	ON
+SET USE_SECONDARY_ENGINE = FORCED;
+CREATE TABLE with_primary_key (
+id INT AUTO_INCREMENT,
+name VARCHAR(50) COMMENT '姓名/Name',
+age INT COMMENT '年龄/Age',
+email VARCHAR(100) COMMENT '电子邮箱',
+country VARCHAR(30) COMMENT '国家/Country',
+PRIMARY KEY (id),
+INDEX idx_name (name),
+INDEX idx_country (country)
+) ENGINE=InnoDB
+SECONDARY_ENGINE=RAPID
+COMMENT='有主键索引的表/Table with primary key';
+INSERT INTO with_primary_key (name, age, email, country) VALUES
+('张三 Zhang San', 25, 'zhangsan@example.com', '中国/China'),
+('李四 Li Si', 30, 'lisi@example.com', '中国/China'),
+('王五 Wang Wu', 28, 'wangwu@example.com', '美国/USA'),
+('赵六 Zhao Liu', 35, 'zhaoliu@example.com', '加拿大/Canada'),
+('钱七 Qian Qi', 22, 'qianqi@example.com', '英国/UK'),
+('Emma Johnson', 40, 'emma.j@example.com', '美国/USA'),
+('Michael Brown', 29, 'michael.b@example.com', '澳大利亚/Australia'),
+('Sarah Davis', 31, 'sarah.d@example.com', '英国/UK'),
+('David Wilson', 27, 'david.w@example.com', '加拿大/Canada'),
+('Lisa Miller', 33, 'lisa.m@example.com', '德国/Germany'),
+('陈小明 Chen Xiaoming', 26, 'chenxm@example.com', '中国/China'),
+('王丽 Wang Li', 24, 'wangli@example.com', '新加坡/Singapore'),
+('James Taylor', 38, 'james.t@example.com', '法国/France'),
+('Olivia Martinez', 41, 'olivia.m@example.com', '西班牙/Spain'),
+('张伟 Zhang Wei', 23, 'zhangw@example.com', '日本/Japan'),
+('Sophia Anderson', 37, 'sophia.a@example.com', '意大利/Italy'),
+('Robert Thomas', 32, 'robert.t@example.com', '俄罗斯/Russia'),
+('刘芳 Liu Fang', 34, 'liufang@example.com', '韩国/Korea'),
+('Daniel White', 39, 'daniel.w@example.com', '巴西/Brazil'),
+('杨洋 Yang Yang', 36, 'yangyang@example.com', '印度/India');
+ALTER TABLE with_primary_key SECONDARY_LOAD;
+SELECT * FROM with_primary_key WHERE id > 10;
+id	name	age	email	country
+11	陈小明 Chen Xiaoming	26	chenxm@example.com	中国/China
+12	王丽 Wang Li	24	wangli@example.com	新加坡/Singapore
+13	James Taylor	38	james.t@example.com	法国/France
+14	Olivia Martinez	41	olivia.m@example.com	西班牙/Spain
+15	张伟 Zhang Wei	23	zhangw@example.com	日本/Japan
+16	Sophia Anderson	37	sophia.a@example.com	意大利/Italy
+17	Robert Thomas	32	robert.t@example.com	俄罗斯/Russia
+18	刘芳 Liu Fang	34	liufang@example.com	韩国/Korea
+19	Daniel White	39	daniel.w@example.com	巴西/Brazil
+20	杨洋 Yang Yang	36	yangyang@example.com	印度/India
+EXPLAIN SELECT * FROM with_primary_key WHERE id = 10;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	with_primary_key	NULL	const	PRIMARY	PRIMARY	4	const	1	100.00	Using secondary engine Rapid
+SELECT * FROM with_primary_key WHERE age > 22;
+id	name	age	email	country
+1	张三 Zhang San	25	zhangsan@example.com	中国/China
+2	李四 Li Si	30	lisi@example.com	中国/China
+3	王五 Wang Wu	28	wangwu@example.com	美国/USA
+4	赵六 Zhao Liu	35	zhaoliu@example.com	加拿大/Canada
+6	Emma Johnson	40	emma.j@example.com	美国/USA
+7	Michael Brown	29	michael.b@example.com	澳大利亚/Australia
+8	Sarah Davis	31	sarah.d@example.com	英国/UK
+9	David Wilson	27	david.w@example.com	加拿大/Canada
+10	Lisa Miller	33	lisa.m@example.com	德国/Germany
+11	陈小明 Chen Xiaoming	26	chenxm@example.com	中国/China
+12	王丽 Wang Li	24	wangli@example.com	新加坡/Singapore
+13	James Taylor	38	james.t@example.com	法国/France
+14	Olivia Martinez	41	olivia.m@example.com	西班牙/Spain
+15	张伟 Zhang Wei	23	zhangw@example.com	日本/Japan
+16	Sophia Anderson	37	sophia.a@example.com	意大利/Italy
+17	Robert Thomas	32	robert.t@example.com	俄罗斯/Russia
+18	刘芳 Liu Fang	34	liufang@example.com	韩国/Korea
+19	Daniel White	39	daniel.w@example.com	巴西/Brazil
+20	杨洋 Yang Yang	36	yangyang@example.com	印度/India
+EXPLAIN SELECT * FROM with_primary_key WHERE age = 10;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	with_primary_key	NULL	ALL	NULL	NULL	NULL	NULL	20	10.00	Using where; Using secondary engine Rapid
+ALTER TABLE with_primary_key SECONDARY_UNLOAD;
+CREATE TABLE without_primary_key (
+student_id VARCHAR(20) COMMENT '学号/Student ID',
+student_name VARCHAR(50) COMMENT '学生姓名/Student Name',
+class_name VARCHAR(30) COMMENT '班级/Class',
+score DECIMAL(5,2) COMMENT '分数/Score',
+INDEX idx_class (class_name),
+INDEX idx_score (score)
+) ENGINE=InnoDB
+SECONDARY_ENGINE=RAPID
+COMMENT='没有主键索引的表/Table without primary key';
+INSERT INTO without_primary_key (student_id, student_name, class_name, score) VALUES
+('S2023001', '李明 Li Ming', '一班/Class 1', 89.5),
+('S2023002', '王芳 Wang Fang', '二班/Class 2', 92.0),
+('S2023003', 'John Smith', '三班/Class 3', 85.5),
+('S2023004', '张强 Zhang Qiang', '一班/Class 1', 78.0),
+('S2023005', 'Emily Johnson', '二班/Class 2', 95.5),
+('S2023006', '陈晨 Chen Chen', '三班/Class 3', 88.0),
+('S2023007', 'Michael Brown', '一班/Class 1', 76.5),
+('S2023008', '刘洋 Liu Yang', '二班/Class 2', 91.0),
+('S2023009', 'Sarah Davis', '三班/Class 3', 84.5),
+('S2023010', '赵薇 Zhao Wei', '一班/Class 1', 93.0),
+('S2023011', 'David Wilson', '二班/Class 2', 79.5),
+('S2023012', '王丽 Wang Li', '三班/Class 3', 87.0),
+('S2023013', 'Robert Taylor', '一班/Class 1', 82.5),
+('S2023014', '杨光 Yang Guang', '二班/Class 2', 90.0),
+('S2023015', 'Lisa Miller', '三班/Class 3', 77.5),
+('S2023016', '周杰 Zhou Jie', '一班/Class 1', 94.0),
+('S2023017', 'James Thomas', '二班/Class 2', 83.5),
+('S2023018', '吴敏 Wu Min', '三班/Class 3', 89.0),
+('S2023019', 'Daniel White', '一班/Class 1', 81.5),
+('S2023020', '孙丽 Sun Li', '二班/Class 2', 96.0);
+ALTER TABLE without_primary_key SECONDARY_LOAD;
+SELECT * FROM without_primary_key WHERE student_id = 'S2023009';
+student_id	student_name	class_name	score
+S2023009	Sarah Davis	三班/Class 3	84.50
+EXPLAIN SELECT * FROM without_primary_key WHERE student_id = 'S2023009';
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	without_primary_key	NULL	ALL	NULL	NULL	NULL	NULL	20	10.00	Using where; Using secondary engine Rapid
+ALTER TABLE without_primary_key SECONDARY_UNLOAD;
+CREATE TABLE with_unique_index (
+product_code VARCHAR(20) COMMENT '产品代码/Product Code',
+product_name VARCHAR(100) COMMENT '产品名称/Product Name',
+category VARCHAR(50) COMMENT '类别/Category',
+price DECIMAL(10,2) COMMENT '价格/Price',
+UNIQUE INDEX uidx_code (product_code),
+INDEX idx_category (category)
+) ENGINE=InnoDB
+SECONDARY_ENGINE=RAPID
+COMMENT='有唯一索引的表/Table with unique index';
+INSERT INTO with_unique_index (product_code, product_name, category, price) VALUES
+('P1001', '智能手机 Smartphone', '电子产品/Electronics', 2999.00),
+('P1002', '笔记本电脑 Laptop', '电子产品/Electronics', 5999.00),
+('P1003', '平板电脑 Tablet', '电子产品/Electronics', 2599.00),
+('P1004', '无线耳机 Wireless Earbuds', '电子产品/Electronics', 499.00),
+('P1005', '智能手表 Smart Watch', '电子产品/Electronics', 1299.00),
+('P1006', '办公椅 Office Chair', '家具/Furniture', 899.00),
+('P1007', '书桌 Desk', '家具/Furniture', 1299.00),
+('P1008', '沙发 Sofa', '家具/Furniture', 3999.00),
+('P1009', '台灯 Desk Lamp', '家居用品/Home', 199.00),
+('P1010', '咖啡机 Coffee Maker', '家用电器/Appliance', 999.00),
+('P1011', '微波炉 Microwave', '家用电器/Appliance', 599.00),
+('P1012', '电饭煲 Rice Cooker', '家用电器/Appliance', 399.00),
+('P1013', '运动鞋 Sneakers', '服装服饰/Apparel', 499.00),
+('P1014', 'T恤 T-Shirt', '服装服饰/Apparel', 99.00),
+('P1015', '牛仔裤 Jeans', '服装服饰/Apparel', 199.00),
+('P1016', '背包 Backpack', '箱包/Bags', 299.00),
+('P1017', '行李箱 Luggage', '箱包/Bags', 599.00),
+('P1018', '钢笔 Fountain Pen', '文具/Stationery', 199.00),
+('P1019', '笔记本 Notebook', '文具/Stationery', 29.00),
+('P1020', '水杯 Water Bottle', '日用品/Daily', 59.00);
+ALTER TABLE with_unique_index SECONDARY_LOAD;
+SELECT * FROM with_unique_index WHERE product_code = 'P1013';
+product_code	product_name	category	price
+P1013	运动鞋 Sneakers	服装服饰/Apparel	499.00
+EXPLAIN SELECT * FROM with_unique_index WHERE product_code = 'P1013';
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	with_unique_index	NULL	const	uidx_code	uidx_code	83	const	1	100.00	Using secondary engine Rapid
+SELECT * FROM with_unique_index WHERE category = '电子产品/Electronics';
+product_code	product_name	category	price
+P1001	智能手机 Smartphone	电子产品/Electronics	2999.00
+P1002	笔记本电脑 Laptop	电子产品/Electronics	5999.00
+P1003	平板电脑 Tablet	电子产品/Electronics	2599.00
+P1004	无线耳机 Wireless Earbuds	电子产品/Electronics	499.00
+P1005	智能手表 Smart Watch	电子产品/Electronics	1299.00
+EXPLAIN SELECT * FROM with_unique_index WHERE category = '电子产品/Electronics';
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	with_unique_index	NULL	ref	idx_category	idx_category	203	const	5	100.00	Using secondary engine Rapid
+ALTER TABLE with_unique_index SECONDARY_UNLOAD;
+CREATE TABLE with_secondary_index (
+order_id VARCHAR(20) COMMENT '订单号/Order ID',
+customer_name VARCHAR(50) COMMENT '客户姓名/Customer Name',
+product_name VARCHAR(100) COMMENT '产品名称/Product Name',
+order_date DATE COMMENT '订单日期/Order Date',
+amount DECIMAL(10,2) COMMENT '金额/Amount',
+status VARCHAR(20) COMMENT '状态/Status',
+PRIMARY KEY (order_id),
+INDEX idx_customer (customer_name),
+INDEX idx_date (order_date),
+INDEX idx_status (status)
+) ENGINE=InnoDB
+SECONDARY_ENGINE=RAPID
+COMMENT='有二级索引的表/Table with secondary indexes';
+INSERT INTO with_secondary_index (order_id, customer_name, product_name, order_date, amount, status) VALUES
+('ORD20230001', '张三 Zhang San', '智能手机 Smartphone', '2023-01-15', 2999.00, '已完成/Completed'),
+('ORD20230002', '李四 Li Si', '笔记本电脑 Laptop', '2023-01-16', 5999.00, '已发货/Shipped'),
+('ORD20230003', 'John Smith', '平板电脑 Tablet', '2023-01-17', 2599.00, '处理中/Processing'),
+('ORD20230004', '王五 Wang Wu', '无线耳机 Wireless Earbuds', '2023-01-18', 499.00, '已完成/Completed'),
+('ORD20230005', 'Emily Johnson', '智能手表 Smart Watch', '2023-01-19', 1299.00, '已发货/Shipped'),
+('ORD20230006', '赵六 Zhao Liu', '办公椅 Office Chair', '2023-01-20', 899.00, '已完成/Completed'),
+('ORD20230007', 'Michael Brown', '书桌 Desk', '2023-01-21', 1299.00, '处理中/Processing'),
+('ORD20230008', '钱七 Qian Qi', '沙发 Sofa', '2023-01-22', 3999.00, '已取消/Cancelled'),
+('ORD20230009', 'Sarah Davis', '台灯 Desk Lamp', '2023-01-23', 199.00, '已完成/Completed'),
+('ORD20230010', '孙八 Sun Ba', '咖啡机 Coffee Maker', '2023-01-24', 999.00, '已发货/Shipped'),
+('ORD20230011', 'David Wilson', '微波炉 Microwave', '2023-01-25', 599.00, '处理中/Processing'),
+('ORD20230012', '周九 Zhou Jiu', '电饭煲 Rice Cooker', '2023-01-26', 399.00, '已完成/Completed'),
+('ORD20230013', 'Lisa Miller', '运动鞋 Sneakers', '2023-01-27', 499.00, '已发货/Shipped'),
+('ORD20230014', '吴十 Wu Shi', 'T恤 T-Shirt', '2023-01-28', 99.00, '已完成/Completed'),
+('ORD20230015', 'Robert Taylor', '牛仔裤 Jeans', '2023-01-29', 199.00, '处理中/Processing'),
+('ORD20230016', '郑十一 Zheng Shiyi', '背包 Backpack', '2023-01-30', 299.00, '已取消/Cancelled'),
+('ORD20230017', 'James Thomas', '行李箱 Luggage', '2023-01-31', 599.00, '已完成/Completed'),
+('ORD20230018', '王十二 Wang Shier', '钢笔 Fountain Pen', '2023-02-01', 199.00, '已发货/Shipped'),
+('ORD20230019', 'Daniel White', '笔记本 Notebook', '2023-02-02', 29.00, '处理中/Processing'),
+('ORD20230020', '刘十三 Liu Shisan', '水杯 Water Bottle', '2023-02-03', 59.00, '已完成/Completed');
+ALTER TABLE with_secondary_index SECONDARY_LOAD;
+SELECT * FROM with_secondary_index WHERE order_id > 'ORD20230011';
+order_id	customer_name	product_name	order_date	amount	status
+ORD20230012	周九 Zhou Jiu	电饭煲 Rice Cooker	2023-01-26	399.00	已完成/Completed
+ORD20230013	Lisa Miller	运动鞋 Sneakers	2023-01-27	499.00	已发货/Shipped
+ORD20230014	吴十 Wu Shi	T恤 T-Shirt	2023-01-28	99.00	已完成/Completed
+ORD20230015	Robert Taylor	牛仔裤 Jeans	2023-01-29	199.00	处理中/Processing
+ORD20230016	郑十一 Zheng Shiyi	背包 Backpack	2023-01-30	299.00	已取消/Cancelled
+ORD20230017	James Thomas	行李箱 Luggage	2023-01-31	599.00	已完成/Completed
+ORD20230018	王十二 Wang Shier	钢笔 Fountain Pen	2023-02-01	199.00	已发货/Shipped
+ORD20230019	Daniel White	笔记本 Notebook	2023-02-02	29.00	处理中/Processing
+ORD20230020	刘十三 Liu Shisan	水杯 Water Bottle	2023-02-03	59.00	已完成/Completed
+EXPLAIN SELECT * FROM with_secondary_index WHERE order_id > 'ORD20230011';
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	with_secondary_index	NULL	range	PRIMARY	PRIMARY	82	NULL	9	100.00	Using where; Using secondary engine Rapid
+SELECT * FROM with_secondary_index WHERE order_id = 'ORD20230011';
+order_id	customer_name	product_name	order_date	amount	status
+ORD20230011	David Wilson	微波炉 Microwave	2023-01-25	599.00	处理中/Processing
+EXPLAIN SELECT * FROM with_secondary_index WHERE order_id = 'ORD20230011';
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	with_secondary_index	NULL	const	PRIMARY	PRIMARY	82	const	1	100.00	Using secondary engine Rapid
+ALTER TABLE with_secondary_index SECONDARY_UNLOAD;
+SET GLOBAL rapid_rapid_parallel_load_max = 10000;
+SHOW  VARIABLES like "%rapid%";
+Variable_name	Value
+rapid_rapid_async_column_threshold	16
+rapid_rapid_memory_size_max	8589934592
+rapid_rapid_parallel_load_max	10000
+rapid_rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	0.700000
+rapid_self_load_enabled	FALSE
+rapid_self_load_interval_seconds	86400.000000
+rapid_self_load_skip_quiet_check	FALSE
+rapid_use_dynamic_offload	ON
+DROP DATABASE sh_para_load;

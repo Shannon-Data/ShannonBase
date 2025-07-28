@@ -406,7 +406,6 @@ uchar *Chunk::read(const Rapid_load_context *context, uchar *data, size_t len) {
 
 uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) {
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
-  assert(context->m_extra_info.m_key_len == m_header->m_key_len);
 
   check_data_type(len);
 
@@ -446,7 +445,6 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
 
 uchar *Chunk::write_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len) {
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
-  ut_a(context->m_extra_info.m_key_len == m_header->m_key_len);
   ut_a(len == m_header->m_normalized_pack_length);
   check_data_type(len);
 
@@ -530,7 +528,6 @@ uchar *Chunk::update_from_log(const Rapid_load_context *context, row_id_t rowid,
 }
 
 uchar *Chunk::remove(const Rapid_load_context *context, row_id_t rowid) {
-  ut_a(context->m_extra_info.m_key_len == m_header->m_key_len);
   if (rowid >= m_header->m_prows.load() && rowid <= SHANNON_ROWS_IN_CHUNK) return nullptr;  // out of rowid range.
 
   if (!m_header->m_del_mask.get() && ensure_del_mask_allocated()) return nullptr;  // allocated del mask failed.
