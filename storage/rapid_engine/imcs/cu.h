@@ -47,6 +47,8 @@ class Rapid_load_context;
 namespace Imcs {
 class Dictionary;
 class Chunk;
+class RapidTable;
+
 class Cu : public MemoryObject {
  public:
   using cu_fd_t = uint64;
@@ -81,19 +83,17 @@ class Cu : public MemoryObject {
     std::atomic<double> m_max{SHANNON_MIN_DOUBLE}, m_min{SHANNON_MAX_DOUBLE}, m_middle{0}, m_median{0}, m_avg{0},
         m_sum{0};
 
+    // belongs to which table.
+    RapidTable *m_owner;
+
     // key length of this cu.
     std::atomic<size_t> m_key_len{0};
-
-    // source table name str.
-    std::string m_table_name;
-
-    // source db name str.
-    std::string m_db;
   };
 
-  explicit Cu(const Field *field);
-  Cu(const Field *field, std::string name);
+  Cu(RapidTable *owner, const Field *field);
+  Cu(RapidTable *owner, const Field *field, std::string name);
   virtual ~Cu();
+
   Cu(Cu &&) = delete;
   Cu &operator=(Cu &&) = delete;
 
@@ -176,7 +176,7 @@ class Cu : public MemoryObject {
 
  private:
   // init chunks.
-  void init_header(const Field *field);
+  void init_header(RapidTable *owner, const Field *field);
   void init_body(const Field *field);
 
   // get the field value. if field is string/text then return its stringid.
@@ -203,8 +203,10 @@ class Cu : public MemoryObject {
   // key name of this cu.
   std::string m_cu_key;
 
-  alignas(CACHE_LINE_SIZE) static SHANNON_THREAD_LOCAL uchar m_buff[MAX_FIELD_WIDTH];
-  static SHANNON_THREAD_LOCAL uchar padding[CACHE_LINE_SIZE - (MAX_FIELD_WIDTH % CACHE_LINE_SIZE)];  // padding
+  typedef struct alignas(CACHE_LINE_SIZE) LocalDataBuffer_t {
+    uchar data[MAX_FIELD_WIDTH];
+  } LocalDataBuffer;
+  static SHANNON_THREAD_LOCAL LocalDataBuffer m_buff;
   // magic number for CU.
   const char *m_magic = "SHANNON_CU";
 };

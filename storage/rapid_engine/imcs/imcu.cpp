@@ -32,39 +32,7 @@
 
 namespace ShannonBase {
 namespace Imcs {
-Imcu::Imcu(const TABLE &table_arg) {
-  m_headers.m_avg = 0;
-  m_headers.m_fields = 0;
-  m_headers.m_max_value = std::numeric_limits<double>::lowest();
-  m_headers.m_min_value = std::numeric_limits<double>::max();
-  m_headers.m_median = 0;
-  m_headers.m_middle = 0;
-
-  m_headers.m_db = table_arg.s->db.str;
-  m_headers.m_table = table_arg.s->table_name.str;
-  m_headers.m_has_vcol = false;
-
-  uint fields{table_arg.s->fields};
-  std::scoped_lock lk(m_mutex_cus);
-  for (uint index = 0; index < fields; index++) {
-    Field *col = *(table_arg.s->field + index);
-    if (col->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-    m_headers.m_fields++;
-    m_headers.m_field.push_back(col);
-
-    Cu *cu = new Cu(col);
-    auto ret = m_cus.insert(std::make_pair(col, cu));
-    if (!ret.second) {  // if insert failed. the clear up all the inserted
-                        // items.
-      m_cus.clear();
-      m_headers.m_fields = 0;
-      m_headers.m_field.clear();
-    }
-  }
-
-  m_prev = nullptr;
-  m_next = nullptr;
-}
+Imcu::Imcu(const TABLE &table_arg) {}
 
 Imcu::~Imcu() { std::scoped_lock lk(m_mutex_cus); }
 

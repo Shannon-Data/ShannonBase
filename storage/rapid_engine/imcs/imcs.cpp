@@ -283,9 +283,25 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     ScanCtxGuard(ha_innobase *f) : file(f) {}
     ~ScanCtxGuard() {
       if (ctx) file->parallel_scan_end(ctx);
+      for (auto &it : thread_ctxs) {
+        delete static_cast<parall_scan_cookie_t *>(it);
+        it = nullptr;
+      }
+      thread_ctxs.clear();
+    }
+
+    void set_thread_ctxs(size_t num_threads) {
+      thread_ctxs.resize(num_threads);
+      for (auto i = 0u; i < num_threads; ++i) {
+        parall_scan_cookie_t *cookie = new parall_scan_cookie_t;
+        thread_ctxs[i] = static_cast<void *>(cookie);
+      }
     }
   } scan_ctx_guard(file);
-  parall_scan_cookie_t scan_cookie;
+
+  std::unique_ptr<Utils::latch> completion_latch{nullptr};
+  std::atomic<bool> error_flag{false};
+  std::atomic<size_t> total_rows{0};
 
   if (file->inited == handler::NONE && file->parallel_scan_init(scan_ctx_guard.ctx, &num_threads, true, max_threads)) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
@@ -294,32 +310,37 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
 
   // to set the thread contexts. now set to nullptr,  you can use your own ctx. or resize(num_threads,
   // (void*)&scan_cookie);
-  scan_ctx_guard.thread_ctxs.resize(num_threads, nullptr);
-  scan_cookie.completion_latch = std::make_unique<Utils::latch>(num_threads);
+  scan_ctx_guard.set_thread_ctxs(num_threads);
+  completion_latch = std::make_unique<Utils::latch>(num_threads);
 
-  Parallel_reader_adapter::Init_fn init_fn = [&scan_cookie](void *cookie, ulong ncols, ulong row_len,
-                                                            const ulong *col_offsets, const ulong *null_byte_offsets,
-                                                            const ulong *null_bitmasks) -> bool {
-    scan_cookie.scan_done = false;
-    scan_cookie.n_cols = ncols;
-    scan_cookie.row_len = row_len;
-    scan_cookie.col_offsets = const_cast<ulong *>(col_offsets);
-    scan_cookie.null_byte_offsets = const_cast<ulong *>(null_byte_offsets);
-    scan_cookie.null_bitmasks = const_cast<ulong *>(null_bitmasks);
+  Parallel_reader_adapter::Init_fn init_fn = [](void *cookie, ulong ncols, ulong row_len, const ulong *col_offsets,
+                                                const ulong *null_byte_offsets, const ulong *null_bitmasks) -> bool {
+    auto ck = static_cast<parall_scan_cookie_t *>(cookie);
+    ck->scan_done = false;
+    ck->n_cols = ncols;
+    ck->row_len = row_len;
+    ck->col_offsets.assign(col_offsets, col_offsets + ncols);
+    ck->null_byte_offsets.assign(null_byte_offsets, null_byte_offsets + ncols);
+    ck->null_bitmasks.assign(null_bitmasks, null_bitmasks + ncols);
+    ck->tid = std::this_thread::get_id();
     return false;
   };
 
-  Parallel_reader_adapter::Load_fn load_fn = [&key_part, &scan_cookie, &context, &file, &source_table](
+  Parallel_reader_adapter::Load_fn load_fn = [&context, &file, &source_table, &key_part, &error_flag, &total_rows](
                                                  void *cookie, uint nrows, void *rowdata,
                                                  uint64_t partition_id) -> bool {
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
-    // auto scan_cookie = (parall_scan_cookie_t*) cookie, if you enable thread contexs.
+    auto scan_cookie = static_cast<parall_scan_cookie_t *>(cookie);  //, if you enable thread contexs.
+    ut_a(scan_cookie);
+    ut_a(scan_cookie->tid == std::this_thread::get_id());
+
     auto data_ptr = static_cast<uchar *>(rowdata);
-    auto end_data_ptr = static_cast<uchar *>(rowdata) + ptrdiff_t(nrows * scan_cookie.row_len);
-    for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie.row_len), index++) {
-      if (source_table->write(context, (uchar *)data_ptr, scan_cookie.row_len, scan_cookie.col_offsets,
-                              scan_cookie.n_cols, scan_cookie.null_byte_offsets, scan_cookie.null_bitmasks)) {
-        scan_cookie.error_flag.store(true);
+    auto end_data_ptr = static_cast<uchar *>(rowdata) + ptrdiff_t(nrows * scan_cookie->row_len);
+    for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie->row_len), index++) {
+      if (source_table->write(context, (uchar *)data_ptr, scan_cookie->row_len, scan_cookie->col_offsets.data(),
+                              scan_cookie->n_cols, scan_cookie->null_byte_offsets.data(),
+                              scan_cookie->null_bitmasks.data())) {
+        error_flag.store(true);
         std::string errmsg;
         errmsg.append("load data from ")
             .append(context->m_schema_name.c_str())
@@ -332,30 +353,35 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     }
 
     ut_a(data_ptr == end_data_ptr);
-    scan_cookie.n_rows.fetch_add(nrows);
+    scan_cookie->n_rows.store(nrows);
+    total_rows.fetch_add(nrows);
     return false;
   };
 
-  Parallel_reader_adapter::End_fn end_fn = [&scan_cookie](void *cookie) {
-    scan_cookie.scan_done.store(true);
-    scan_cookie.completion_latch->count_down();
+  Parallel_reader_adapter::End_fn end_fn = [&completion_latch](void *cookie) {
+    auto scan_cookie = static_cast<parall_scan_cookie_t *>(cookie);  //, if you enable thread contexs.
+    ut_a(scan_cookie);
+    ut_a(scan_cookie->tid == std::this_thread::get_id());
+    scan_cookie->scan_done.store(true);
+
+    completion_latch->count_down();
   };
 
   tmp = file->parallel_scan(scan_ctx_guard.ctx, scan_ctx_guard.thread_ctxs.data(), init_fn, load_fn, end_fn);
   // Wait for scan to complete or error
-  scan_cookie.completion_latch->wait();
+  completion_latch->wait();
 
   /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
     without locks. Now, do full scan, but multi-thread scan will impl in future. */
   // if (tmp == HA_ERR_KEY_NOT_FOUND) return HA_ERR_KEY_NOT_FOUND;
-  if (tmp || scan_cookie.error_flag.load()) {
+  if (tmp || error_flag.load()) {
     DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
       my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
       return tmp ? tmp : HA_ERR_GENERIC;
     });
   }
 
-  context->m_thd->inc_sent_row_count(scan_cookie.n_rows);
+  context->m_thd->inc_sent_row_count(total_rows.load());
   // end of load the data from innodb to imcs.
   return ShannonBase::SHANNON_SUCCESS;
 }

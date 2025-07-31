@@ -112,15 +112,12 @@ class Chunk : public MemoryObject {
     // the last GC timestamp
     std::chrono::time_point<std::chrono::steady_clock> m_last_gc_tm;
 
-    // source table name str.
-    std::string m_table_name;
-
-    // source db name str.
-    std::string m_db;
+    // which cu it belongs to.
+    Cu *m_owner;
   };
 
-  explicit Chunk(const Field *field);
-  explicit Chunk(const Field *field, std::string &keyname);
+  Chunk(Cu *owner, const Field *field);
+  Chunk(Cu *owner, const Field *field, std::string &keyname);
   virtual ~Chunk();
 
   Chunk(Chunk &&) = delete;
@@ -221,19 +218,15 @@ class Chunk : public MemoryObject {
       return m_chunk_memory->get() + static_cast<ptrdiff_t>(rowid * m_header->m_normalized_pack_length);
   }
 
-  inline row_id_t current_id() {
+  // gets the current pos in row_id_t format.
+  inline row_id_t current_pos() {
     assert(m_chunk_memory->get() < m_end.load(std::memory_order_acquire));
     return (m_data.load(std::memory_order_acquire) - m_chunk_memory->get()) / m_header->m_normalized_pack_length;
   }
 
-  // gets the physical row count.
-  inline row_id_t prows() { return m_header->m_prows; }
+  // gets row count.
+  inline row_id_t rows(Rapid_load_context *context);
 
-  // gets
-  row_id_t rows(Rapid_load_context *context);
-
-  inline void set_owner(Cu *owner) { m_owner = owner; }
-  inline Cu *owner() const { return m_owner; }
   inline std::string &foot_print() { return m_chunk_footprint; }
 
  private:
@@ -262,8 +255,6 @@ class Chunk : public MemoryObject {
   };
 
  private:
-  Cu *m_owner;
-
   // the key string of this chunk.
   std::string m_chunk_key, m_chunk_footprint;
 
@@ -300,7 +291,7 @@ class Chunk : public MemoryObject {
 
   bool ensure_del_mask_allocated();
 
-  void init_header(const Field *field);
+  void init_header(Cu *owner, const Field *field);
 
   void init_body(const Field *field);
 

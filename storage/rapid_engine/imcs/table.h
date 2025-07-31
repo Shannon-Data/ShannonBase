@@ -91,6 +91,12 @@ class RapidTable : public MemoryObject {
   // name of this table.
   std::string m_table_name;
 
+  // the phyiscal # of rows in this table.
+  // physical row count. If you want to get logical rows, you should consider
+  // MVCC to decide that whether this phyical row is visiable or not to this
+  // transaction.
+  std::atomic<row_id_t> m_prows{0};
+
   // the loaded cus. key format: field/column name.
   std::shared_mutex m_fields_mutex;
   std::unordered_map<std::string, std::unique_ptr<Cu>> m_fields;
@@ -100,6 +106,7 @@ class RapidTable : public MemoryObject {
   std::unordered_map<std::string, key_meta_t> m_source_keys;
 
   // key format: key_name.
+  std::shared_mutex m_indexes_mutex;
   std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
 };
 
