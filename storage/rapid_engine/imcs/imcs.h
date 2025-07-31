@@ -177,14 +177,20 @@ class Imcs : public MemoryObject {
  private:
   typedef struct {
     // if you dont use this, remove the boost_thread and boost_system libs in cmake file.
-    std::unique_ptr<Utils::latch> completion_latch{nullptr};
+    // thread id
+    std::thread::id tid;
+
+    // this thread work whether done or not.
     std::atomic<bool> scan_done{false};
-    std::atomic<bool> error_flag{false};
+
+    // # of rows scan in this thread.
     std::atomic<size_t> n_rows{0};
+
+    //# of column and row len of a row in this thread work.
     std::atomic<ulong> n_cols{0}, row_len{0};
-    std::atomic<ulong *> col_offsets;
-    std::atomic<ulong *> null_byte_offsets;
-    std::atomic<ulong *> null_bitmasks;
+    std::vector<ulong> col_offsets;
+    std::vector<ulong> null_byte_offsets;
+    std::vector<ulong> null_bitmasks;
   } parall_scan_cookie_t;
 
   // imcs instance

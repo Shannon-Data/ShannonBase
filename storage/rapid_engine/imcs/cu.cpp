@@ -38,8 +38,8 @@
 
 namespace ShannonBase {
 namespace Imcs {
-alignas(CACHE_LINE_SIZE) SHANNON_THREAD_LOCAL uchar Cu::m_buff[MAX_FIELD_WIDTH] = {0};
-Cu::Cu(const Field *field) {
+SHANNON_THREAD_LOCAL Cu::LocalDataBuffer Cu::m_buff;
+Cu::Cu(RapidTable *owner, const Field *field) {
   static_assert(alignof(m_buff) >= CACHE_LINE_SIZE, "Alignment failed");
   ut_a(field && !field->is_flag_set(NOT_SECONDARY_FLAG));
   m_cu_key.append(field->table->s->db.str)
@@ -47,13 +47,13 @@ Cu::Cu(const Field *field) {
       .append(field->table->s->table_name.str)
       .append(":")
       .append(field->field_name);
-  init_header(field);
+  init_header(owner, field);
   init_body(field);
 }
 
-Cu::Cu(const Field *field, std::string name) {
+Cu::Cu(RapidTable *owner, const Field *field, std::string name) {
   m_cu_key = name;
-  init_header(field);
+  init_header(owner, field);
   init_body(field);
 }
 
@@ -61,15 +61,14 @@ Cu::~Cu() {
   if (m_chunks.size()) m_chunks.clear();
 }
 
-void Cu::init_header(const Field *field) {
+void Cu::init_header(RapidTable *owner, const Field *field) {
   {
     m_header = std::make_unique<Cu_header>();
     if (!m_header) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Cu header allocation failed");
       return;
     }
-    m_header->m_db = field->table->s->db.str;
-    m_header->m_table_name = field->table->s->table_name.str;
+    m_header->m_owner = owner;
 
     // TODO: be aware of freeing the cloned object here.
     m_header->m_source_fld = field->clone(&rapid_mem_root);
@@ -101,12 +100,11 @@ void Cu::init_header(const Field *field) {
 
 void Cu::init_body(const Field *field) {
   // the initial one chunk built.
-  auto chunk = std::make_unique<Chunk>(const_cast<Field *>(field), m_cu_key);
+  auto chunk = std::make_unique<Chunk>(this, const_cast<Field *>(field), m_cu_key);
   if (!chunk) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
     return;
   }
-  chunk->set_owner(this);
   m_chunks.emplace_back(std::move(chunk));
 
   m_current_chunk.store(0);
@@ -238,7 +236,7 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
   uchar *pdatum{nullptr};
 
   if (data) {
-    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff : datum.get();
+    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff.data : datum.get();
     std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
     std::memcpy(pdatum, data, len);
   }
@@ -251,14 +249,15 @@ uchar *Cu::write_row(const Rapid_load_context *context, uchar *data, size_t len)
 
   size_t wlen{len};  // will changed by get_vfield_value.
   auto wdata = (len == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, wlen, false);
+
+  std::scoped_lock lk(m_mutex);
   if (!(written_to = chunk_ptr->write(context, wdata, wlen))) {  // current chunk is full.
     // then build a new one, and re-try to write the data.
-    auto chunk = new (std::nothrow) Chunk(const_cast<Field *>(m_header->m_source_fld), m_cu_key);
+    auto chunk = new (std::nothrow) Chunk(this, const_cast<Field *>(m_header->m_source_fld), m_cu_key);
     if (!chunk) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk allocation failed");
       return nullptr;
     }
-    chunk->set_owner(this);
     m_chunks.emplace_back(std::move(chunk));
 
     written_to = m_chunks[m_chunks.size() - 1].get()->write(context, wdata, wlen);
@@ -279,7 +278,7 @@ uchar *Cu::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
   std::unique_ptr<uchar[]> datum(dlen < MAX_FIELD_WIDTH ? nullptr : new uchar[dlen]);
   uchar *pdatum{nullptr};
   if (data) {
-    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff : datum.get();
+    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff.data : datum.get();
     std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
     std::memcpy(pdatum, data, len);
   }
@@ -293,10 +292,10 @@ uchar *Cu::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
   auto wlen{len};
   auto wdata = (wlen == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, wlen, false);
 
+  std::scoped_lock lk(m_mutex);
   if (!(written_to = chunk_ptr->write_from_log(context, rowid, wdata, wlen))) {  // current chunk is full.
     // then build a new one, and re-try to write the data.
-    auto chunk = std::make_unique<Chunk>(m_header->m_source_fld);
-    chunk->set_owner(this);
+    auto chunk = std::make_unique<Chunk>(this, m_header->m_source_fld);
     m_chunks.emplace_back(std::move(chunk));
     if (!m_chunks[m_chunks.size() - 1].get()) return nullptr;  // runs out of mem.
 
@@ -319,6 +318,7 @@ uchar *Cu::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   auto chunk_id = rowid / SHANNON_ROWS_IN_CHUNK;
   if (chunk_id > m_chunks.size()) return del_from;  // out of chunk rnage.
 
+  std::scoped_lock lk(m_mutex);
   auto offset_in_chunk = rowid % SHANNON_ROWS_IN_CHUNK;
   if (!(del_from = m_chunks[chunk_id]->remove(context, offset_in_chunk))) {  // ret to deleted row addr.
     return del_from;
@@ -388,7 +388,7 @@ uchar *Cu::update_row_from_log(const Rapid_load_context *context, row_id_t rowid
   std::unique_ptr<uchar[]> datum((dlen < MAX_FIELD_WIDTH) ? nullptr : new uchar[dlen]);
   uchar *pdatum{nullptr};
   if (data) {
-    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff : datum.get();
+    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff.data : datum.get();
     std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
     std::memcpy(pdatum, data, len);
   }

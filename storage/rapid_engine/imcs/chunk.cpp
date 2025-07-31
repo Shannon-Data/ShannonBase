@@ -88,9 +88,9 @@ Chunk::ChunkMemoryManager &Chunk::ChunkMemoryManager::operator=(ChunkMemoryManag
  * where we are in this chunk.
  */
 
-Chunk::Chunk(const Field *field) {
+Chunk::Chunk(Cu *owner, const Field *field) {
   init_chunk_key(field);
-  init_header(field);
+  init_header(owner, field);
   init_body(field);
   if (!validate_initialization()) {
     m_header.reset();
@@ -99,9 +99,9 @@ Chunk::Chunk(const Field *field) {
   }
 }
 
-Chunk::Chunk(const Field *field, std::string &keyname) {
+Chunk::Chunk(Cu *owner, const Field *field, std::string &keyname) {
   init_chunk_key(field, &keyname);
-  init_header(field);
+  init_header(owner, field);
   init_body(field);
   if (!validate_initialization()) {
     m_header.reset();
@@ -135,13 +135,14 @@ void Chunk::init_chunk_key(const Field *field, const std::string *custom_key) {
   m_chunk_footprint = m_chunk_key.append(":").append(Utils::Util::currenttime_to_string());
 }
 
-void Chunk::init_header(const Field *field) {
+void Chunk::init_header(Cu *owner, const Field *field) {
   m_header = std::make_unique<Chunk_header>();
   if (!m_header) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Chunk header allocation failed");
     return;  // allocated faile.
   }
 
+  m_header->m_owner = owner;
   m_header->m_source_fld = field->clone(&rapid_mem_root);
   if (!m_header->m_source_fld) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Failed to clone field");
@@ -149,8 +150,6 @@ void Chunk::init_header(const Field *field) {
   }
 
   m_header->m_type = field->type();
-  m_header->m_db = field->table->s->db.str;
-  m_header->m_table_name = field->table->s->table_name.str;
   m_header->m_pack_length = field->pack_length();
   m_header->m_normalized_pack_length = Utils::Util::normalized_length(field);
   m_header->m_key_len = field->table->file->ref_length;
@@ -233,7 +232,7 @@ void Chunk::init_body(const Field *field) {
 }
 
 void Chunk::update_meta_info(const Rapid_load_context *context, OPER_TYPE type, uchar *data, uchar *old) {
-  auto dict = m_owner->header()->m_local_dict.get();
+  auto dict = m_header->m_owner->header()->m_local_dict.get();
   double data_val = data ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, data, dict) : 0;
   double old_val = old ? Utils::Util::get_field_numeric<double>(m_header->m_source_fld, old, dict) : 0;
   /** TODO: due to the each data has its own version, and the data
@@ -411,7 +410,8 @@ uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) 
 
   uchar *ret{m_data.load(std::memory_order_acquire)};
   auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
-  auto rowid = current_id();
+  ut_a(normal_len == m_header->m_normalized_pack_length);
+  auto rowid = current_pos();
 
   if (len == UNIV_SQL_NULL) {  // to write a null value.
     if (!m_header->m_null_mask && ensure_null_mask_allocated()) return nullptr;
@@ -571,7 +571,8 @@ int Chunk::purge() {
   } else {
     ::ReadView oldest_view;
     trx_sys->mvcc->clone_oldest_view(&oldest_view);
-    ret = m_header->m_smu->purge(m_header->m_table_name.c_str(), &oldest_view);
+    auto table_name = m_header->m_owner->header()->m_owner->m_table_name;
+    ret = m_header->m_smu->purge(table_name.c_str(), &oldest_view);
     m_header->m_last_gc_tm = std::chrono::steady_clock::now();
   }
   return ret;
@@ -581,7 +582,10 @@ int Chunk::GC() { return SHANNON_SUCCESS; }
 
 row_id_t Chunk::rows(Rapid_load_context *context) {
   // in furture, we get the rows with visibility check. Now, just return the prows.
-  return m_header->m_prows;
+  if (context == nullptr)
+    return m_header->m_prows;
+  else
+    assert(false);  // not ready now.
 }
 
 }  // namespace Imcs

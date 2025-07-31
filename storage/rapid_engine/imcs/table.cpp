@@ -56,7 +56,7 @@ int RapidTable::build_field_memo(const Rapid_load_context *context, Field *field
   }
 
   std::unique_lock<std::shared_mutex> lk(m_fields_mutex);
-  m_fields.emplace(field->field_name, std::make_unique<Cu>(field, field->field_name));
+  m_fields.emplace(field->field_name, std::make_unique<Cu>(this, field, field->field_name));
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -192,40 +192,44 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
     KEY_PART_INFO *key_part;
     /* Copy the key parts */
     auto key_length = key->key_length;
-    for (key_part = key->key_part; (int)key_length > 0; key_part++) {
-      Field *field = key_part->field;
-      const CHARSET_INFO *cs = field->charset();
-      auto fld_ptr = rowdata + ptrdiff_t(col_offsets[field->field_index()]);
-      field->set_field_ptr(fld_ptr);
+    {
+      std::unique_lock<std::shared_mutex> ex_lk(m_indexes_mutex);
+      for (key_part = key->key_part; (int)key_length > 0; key_part++) {
+        Field *field = key_part->field;
+        const CHARSET_INFO *cs = field->charset();
+        auto fld_ptr = rowdata + ptrdiff_t(col_offsets[field->field_index()]);
+        field->set_field_ptr(fld_ptr);
 
-      if (key_part->null_bit) {
-        bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
-        ut_a(is_field_null(field->field_index(), rowdata, null_byte_offsets, null_bitmasks) == key_is_null);
-        *to_key++ = (key_is_null ? 1 : 0);
-        key_length--;
-      }
-
-      if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
-        key_length -= HA_KEY_BLOB_LENGTH;
-        length = std::min<uint>(key_length, key_part->length);
-        field->get_key_image(to_key, length, Field::itRAW);
-        to_key += HA_KEY_BLOB_LENGTH;
-      } else {
-        length = std::min<uint>(key_length, key_part->length);
-        if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
-            field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
-          uchar encoding[8] = {0};
-          Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
-          memcpy(to_key, encoding, length);
-        } else {
-          const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
-          if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
+        if (key_part->null_bit) {
+          bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
+          ut_a(is_field_null(field->field_index(), rowdata, null_byte_offsets, null_bitmasks) == key_is_null);
+          *to_key++ = (key_is_null ? 1 : 0);
+          key_length--;
         }
+
+        if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
+          key_length -= HA_KEY_BLOB_LENGTH;
+          length = std::min<uint>(key_length, key_part->length);
+          field->get_key_image(to_key, length, Field::itRAW);
+          to_key += HA_KEY_BLOB_LENGTH;
+        } else {
+          length = std::min<uint>(key_length, key_part->length);
+          if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
+              field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
+            uchar encoding[8] = {0};
+            Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
+            memcpy(to_key, encoding, length);
+          } else {
+            const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
+            if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
+          }
+        }
+        to_key += length;
+        key_length -= length;
       }
-      to_key += length;
-      key_length -= length;
     }
   }
+
   auto keypart = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
   m_indexes[keypart].get()->insert(key_buff.get(), key_len, &rowid, sizeof(rowid));
   return SHANNON_SUCCESS;
@@ -387,7 +391,7 @@ int PartTable::build_field_memo(const Rapid_load_context *context, Field *field)
     }
     auto part_name = part.first;
     part_name.append("#").append(std::to_string(part.second)).append(":").append(field->field_name);
-    m_fields.emplace(part_name, std::make_unique<Cu>(field, part_name));
+    m_fields.emplace(part_name, std::make_unique<Cu>(this, field, part_name));
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -536,38 +540,41 @@ int PartTable::build_index_impl(const Rapid_load_context *context, const KEY *ke
     KEY_PART_INFO *key_part;
     /* Copy the key parts */
     auto key_length = key->key_length;
-    for (key_part = key->key_part; (int)key_length > 0; key_part++) {
-      Field *field = key_part->field;
-      const CHARSET_INFO *cs = field->charset();
-      auto fld_ptr = rowdata + ptrdiff_t(col_offsets[field->field_index()]);
-      field->set_field_ptr(fld_ptr);
+    {
+      std::unique_lock<std::shared_mutex> ex_lk(m_indexes_mutex);
+      for (key_part = key->key_part; (int)key_length > 0; key_part++) {
+        Field *field = key_part->field;
+        const CHARSET_INFO *cs = field->charset();
+        auto fld_ptr = rowdata + ptrdiff_t(col_offsets[field->field_index()]);
+        field->set_field_ptr(fld_ptr);
 
-      if (key_part->null_bit) {
-        bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
-        ut_a(is_field_null(field->field_index(), rowdata, null_byte_offsets, null_bitmasks) == key_is_null);
-        *to_key++ = (key_is_null ? 1 : 0);
-        key_length--;
-      }
-
-      if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
-        key_length -= HA_KEY_BLOB_LENGTH;
-        length = std::min<uint>(key_length, key_part->length);
-        field->get_key_image(to_key, length, Field::itRAW);
-        to_key += HA_KEY_BLOB_LENGTH;
-      } else {
-        length = std::min<uint>(key_length, key_part->length);
-        if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
-            field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
-          uchar encoding[8] = {0};
-          Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
-          memcpy(to_key, encoding, length);
-        } else {
-          const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
-          if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
+        if (key_part->null_bit) {
+          bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
+          ut_a(is_field_null(field->field_index(), rowdata, null_byte_offsets, null_bitmasks) == key_is_null);
+          *to_key++ = (key_is_null ? 1 : 0);
+          key_length--;
         }
+
+        if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
+          key_length -= HA_KEY_BLOB_LENGTH;
+          length = std::min<uint>(key_length, key_part->length);
+          field->get_key_image(to_key, length, Field::itRAW);
+          to_key += HA_KEY_BLOB_LENGTH;
+        } else {
+          length = std::min<uint>(key_length, key_part->length);
+          if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
+              field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
+            uchar encoding[8] = {0};
+            Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
+            memcpy(to_key, encoding, length);
+          } else {
+            const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
+            if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
+          }
+        }
+        to_key += length;
+        key_length -= length;
       }
-      to_key += length;
-      key_length -= length;
     }
   }
 
