@@ -205,7 +205,7 @@ void CSVReader::skipHeader() {
   if (!m_csv_fd) return;
 
   char line[8192];
-  fgets(line, sizeof(line), m_csv_fd);
+  auto ret [[maybe_unused]] = fgets(line, sizeof(line), m_csv_fd);
 }
 
 void CSVReader::countRecords() {

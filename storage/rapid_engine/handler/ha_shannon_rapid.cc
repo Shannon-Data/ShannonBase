@@ -203,10 +203,10 @@ int ha_rapid::info(unsigned int flags) {
 
   if (table->part_info) {
     auto rpd_tb = Imcs::Imcs::instance()->get_parttable(sch_tb);
-    stats.records = rpd_tb->first_field()->rows(&context);
+    stats.records = rpd_tb->rows(&context);
   } else {
     auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
-    stats.records = rpd_tb->first_field()->rows(&context);
+    stats.records = rpd_tb->rows(&context);
   }
 
   context.m_trx->commit();

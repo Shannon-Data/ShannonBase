@@ -177,7 +177,7 @@ void Transaction::set_read_only(bool read_only) { m_read_only = read_only; }
 }
 
 int Transaction::release_snapshot() {
-  if (m_trx_impl->read_view && MVCC::is_view_active(m_trx_impl->read_view)) {
+  if (trx_sys->mvcc && m_trx_impl->read_view && MVCC::is_view_active(m_trx_impl->read_view)) {
     trx_sys->mvcc->view_close(m_trx_impl->read_view, false);
   }
 
