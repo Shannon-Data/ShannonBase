@@ -163,7 +163,7 @@ boost::asio::awaitable<int> DataTable::next_async(uchar *buf) {
   const size_t max_batch_sz = m_adaptive_ratio.getMaxBatchSize();
 
 start:
-  if (m_rowid >= m_rapid_table->m_fields.begin()->second->prows()) co_return HA_ERR_END_OF_FILE;
+  if (m_rowid >= m_rapid_table->rows(nullptr)) co_return HA_ERR_END_OF_FILE;
 
   const auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
   const auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
@@ -242,7 +242,7 @@ int DataTable::next(uchar *buf) {
 start:
   assert(m_initialized.load());
 
-  if (m_rowid >= m_rapid_table->m_fields.begin()->second->prows()) return HA_ERR_END_OF_FILE;
+  if (m_rowid >= m_rapid_table->rows(nullptr)) return HA_ERR_END_OF_FILE;
 
   auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
   auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
@@ -296,7 +296,7 @@ int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::
 start:
   assert(m_initialized.load());
   while (read_cnt < batch_size) {
-    if (m_rowid >= m_rapid_table->m_fields.begin()->second->prows()) return HA_ERR_END_OF_FILE;
+    if (m_rowid >= m_rapid_table->rows(nullptr)) return HA_ERR_END_OF_FILE;
 
     auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
     auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
@@ -381,8 +381,7 @@ int DataTable::end() {
 int DataTable::index_init(uint keynr, bool sorted) {
   init();
   m_active_index = keynr;
-  auto keyname = m_data_source->s->key_info[keynr].name;
-  auto index = m_rapid_table->m_indexes[keyname].get();
+  auto index = m_rapid_table->get_index(m_data_source->s->key_info[keynr].name);
   if (index == nullptr) {
     std::string err;
     err.append(m_data_source->s->db.str)

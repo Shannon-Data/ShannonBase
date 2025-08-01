@@ -122,18 +122,12 @@ class Imcs : public MemoryObject {
 
   int rollback_changes_by_trxid(Transaction::ID trxid);
 
-  // reserve a row_id by given schema name and table name in 'sch:table:’ format.
-  inline row_id_t reserve_row_id(std::string &sch_table) {
-    if (m_tables.size() == 0) return INVALID_ROW_ID;
-
-    auto next_row_id{INVALID_ROW_ID};
-    std::for_each(m_tables[sch_table]->m_fields.begin(), m_tables[sch_table]->m_fields.end(),
-                  [&](auto &pair) { next_row_id = pair.second->header()->m_prows.fetch_add(1); });
-
-    return next_row_id;
-  }
-
   void cleanup(std::string &sch_name, std::string &table_name);
+
+  inline row_id_t reserve_row_id(std::string &sch_table) {
+    if (m_tables.size() == 0 || m_tables.find(sch_table) == m_tables.end()) return INVALID_ROW_ID;
+    return m_tables[sch_table]->reserve_id(nullptr);
+  }
 
   inline RapidTable *get_table(std::string &sch_table) {
     std::shared_lock lk(m_table_mutex);
@@ -171,8 +165,6 @@ class Imcs : public MemoryObject {
 
   int unload_innodbpart(const Rapid_load_context *context, const char *db_name, const char *table_name,
                         bool error_if_not_loaded);
-
-  int create_index_memo(const Rapid_load_context *context, RapidTable *rapid);
 
  private:
   typedef struct {

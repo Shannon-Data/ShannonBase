@@ -156,15 +156,10 @@ class Chunk : public MemoryObject {
 
   /**start to write the data to chunk.
    * [in] data, the data to write in.
+   * [in] rowid, the pos to write.
    * [in] len, the data len.
    * return the address where the data write to.*/
-  uchar *write(const Rapid_load_context *context, uchar *data, size_t len);
-
-  /**start to write the data to chunk.
-   * [in] data, the data to write in.
-   * [in] len, the data len.
-   * return the address where the data write to.*/
-  uchar *write_from_log(const Rapid_load_context *context, row_id_t, uchar *data, size_t len);
+  uchar *write(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
 
   /**start to delete the data to chunk. just mark it down.
    * [in] rowid, where the data to update.

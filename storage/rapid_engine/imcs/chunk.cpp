@@ -403,56 +403,15 @@ uchar *Chunk::read(const Rapid_load_context *context, uchar *data, size_t len) {
   return ret;
 }
 
-uchar *Chunk::write(const Rapid_load_context *context, uchar *data, size_t len) {
+uchar *Chunk::write(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len) {
   ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
-
-  check_data_type(len);
-
-  uchar *ret{m_data.load(std::memory_order_acquire)};
-  auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
-  ut_a(normal_len == m_header->m_normalized_pack_length);
-  auto rowid = current_pos();
-
-  if (len == UNIV_SQL_NULL) {  // to write a null value.
-    if (!m_header->m_null_mask && ensure_null_mask_allocated()) return nullptr;
-    /**Here, is trying to write a null value, first of all, we update the null bit
-     * mask, then writting a placehold to chunk, we dont care about what read data
-     * was written down.*/
-    std::unique_lock<std::shared_mutex> lk(m_header_mutex);
-    Utils::Util::bit_array_set(m_header->m_null_mask.get(), m_header->m_prows);
-  } else {
-    ut_a(len % m_header->m_normalized_pack_length == 0);
-    if (unlikely((m_data + static_cast<ptrdiff_t>(normal_len)) > m_end.load(std::memory_order_acquire)))
-      return nullptr;  // this chunk is full.
-
-    ret = static_cast<uchar *>(std::memcpy(m_data.load(std::memory_order_acquire), data, normal_len));
-  }
-  m_data.fetch_add(normal_len);
-
-  if (context->m_extra_info.m_trxid) {  // means not from secondary_load operation.
-    build_version(rowid, context->m_extra_info.m_trxid, data, normal_len, OPER_TYPE::OPER_INSERT);
-  }
-
-  update_meta_info(context, ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
-
-#ifndef NDEBUG
-  uint64 data_rows = static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load(std::memory_order_acquire) - base()) /
-                                         m_header->m_normalized_pack_length);
-  ut_a(data_rows <= SHANNON_ROWS_IN_CHUNK);
-#endif
-  return ret;
-}
-
-uchar *Chunk::write_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len) {
-  ut_a((!data && len == UNIV_SQL_NULL) || (data && len != UNIV_SQL_NULL));
-  ut_a(len == m_header->m_normalized_pack_length);
   check_data_type(len);
 
   auto normal_len = (len == UNIV_SQL_NULL) ? m_header->m_normalized_pack_length : len;
-  auto to_addr = base() + static_cast<ptrdiff_t>(rowid * normal_len);
+  auto to_addr = base() + rowid * m_header->m_normalized_pack_length;
   if (to_addr > end()) return nullptr;  // out of range.
 
-  uchar *ret{m_data.load(std::memory_order_acquire)};
+  uchar *ret{to_addr};
   if (len == UNIV_SQL_NULL) {                                                    // to write a null value.
     if (!m_header->m_null_mask && ensure_null_mask_allocated()) return nullptr;  // allocate a null bitmap failed.
 
@@ -464,17 +423,15 @@ uchar *Chunk::write_from_log(const Rapid_load_context *context, row_id_t rowid, 
   } else {
     ret = static_cast<uchar *>(std::memcpy(to_addr, data, normal_len));
   }
+  update_meta_info(context, ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
   m_data.fetch_add(normal_len);
 
   if (context->m_extra_info.m_trxid) {  // means not from secondary_load operation.
     build_version(rowid, context->m_extra_info.m_trxid, data, normal_len, OPER_TYPE::OPER_INSERT);
   }
 
-  update_meta_info(context, ShannonBase::OPER_TYPE::OPER_INSERT, data, data);
-
 #ifndef NDEBUG
-  uint64 data_rows =
-      static_cast<uint64>(static_cast<ptrdiff_t>(m_data.load() - base()) / m_header->m_normalized_pack_length);
+  uint64 data_rows = static_cast<uint64>(static_cast<ptrdiff_t>(to_addr - base()) / m_header->m_normalized_pack_length);
   ut_a(data_rows <= SHANNON_ROWS_IN_CHUNK);
 #endif
   return ret;
@@ -571,7 +528,7 @@ int Chunk::purge() {
   } else {
     ::ReadView oldest_view;
     trx_sys->mvcc->clone_oldest_view(&oldest_view);
-    auto table_name = m_header->m_owner->header()->m_owner->m_table_name;
+    auto table_name = m_header->m_owner->header()->m_owner->name();
     ret = m_header->m_smu->purge(table_name.c_str(), &oldest_view);
     m_header->m_last_gc_tm = std::chrono::steady_clock::now();
   }

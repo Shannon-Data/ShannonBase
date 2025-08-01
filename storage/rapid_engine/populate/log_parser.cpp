@@ -152,7 +152,7 @@ int LogParser::build_key(const Rapid_load_context *context,
                          std::map<std::string, key_info_t> &keys) {
   std::string sch_tb = context->m_schema_name + ":" + context->m_table_name;
   auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
-  auto matched_keys = rpd_tb->m_source_keys;
+  auto &matched_keys = rpd_tb->get_source_keys();
   ut_a(matched_keys.size() > 0);
 
   for (const auto &[key_name, key_meta] : matched_keys) {
@@ -772,8 +772,8 @@ row_id_t LogParser::find_matched_row(Rapid_load_context *context, std::map<std::
     ut_a(context->m_extra_info.m_key_len == keys[ShannonBase::SHANNON_PRIMARY_KEY_NAME].first);
     std::memcpy(context->m_extra_info.m_key_buff.get(), keys[ShannonBase::SHANNON_PRIMARY_KEY_NAME].second.get(),
                 context->m_extra_info.m_key_len);
-    auto rowid = rpd_tb->m_indexes[ShannonBase::SHANNON_PRIMARY_KEY_NAME]->lookup(
-        context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len);
+    auto rowid = rpd_tb->get_index(ShannonBase::SHANNON_PRIMARY_KEY_NAME)
+                     ->lookup(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len);
     return rowid ? *rowid : INVALID_ROW_ID;
   } else
     return INVALID_ROW_ID;
