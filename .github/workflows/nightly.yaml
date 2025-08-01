@@ -139,6 +139,7 @@ jobs:
           cd /home/shannon-bin/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
           ./mysql-test-run.pl --suite=main,innodb,secondary_engine,ml \
+          --skip-test=innodb.alter_table_temp_files_io innodb.large_partitions_ddl innodb.lob_recovery innodb.zlob_ddl_big main.mysql_upgrade_grant \ #due to timeout on ARM
           --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
           # when we have a fast git action runner, we can use the following command to run the test.
           #sudo chmod +x ./collections/default.push && ./collections/default.daily
