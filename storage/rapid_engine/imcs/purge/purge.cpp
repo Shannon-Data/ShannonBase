@@ -100,11 +100,11 @@ static void purge_func_main() {
       // we only use a third of threads to do purge opers.
       std::vector<std::future<int>> results;
       size_t thread_num = std::thread::hardware_concurrency() / 3;
-      thread_num = std::min(thread_num, tb.second.get()->m_fields.size());
+      thread_num = std::min(thread_num, tb.second.get()->get_fields().size());
 
       size_t thr_cnt = 0;
 
-      for (auto &cu : tb.second.get()->m_fields) {
+      for (auto &cu : tb.second.get()->get_fields()) {
         results.emplace_back(std::async(std::launch::async, purger_purge_worker, cu.second.get()));
         thr_cnt++;
 

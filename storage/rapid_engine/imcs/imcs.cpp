@@ -80,17 +80,6 @@ int Imcs::deinitialize() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Imcs::create_index_memo(const Rapid_load_context *context, RapidTable *rapid) {
-  auto source = context->m_table;
-  ut_a(source);
-  // no.1: primary key. using row_id as the primary key when missing user-defined pk.
-  if (source->s->is_missing_primary_key()) rapid->build_hidden_index_memo(context);
-
-  // no.2: user-defined indexes.
-  rapid->build_user_defined_index_memo(context);
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
 int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
   auto ret{ShannonBase::SHANNON_SUCCESS};
@@ -99,15 +88,12 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
     table = std::make_unique<PartTable>(source->s->db.str, source->s->table_name.str);
   else
     table = std::make_unique<Table>(source->s->db.str, source->s->table_name.str);
+
   // step 1: build the Cus meta info for every column.
-  for (auto index = 0u; index < source->s->fields; index++) {
-    auto fld = *(source->field + index);
-    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-    if ((ret = table.get()->build_field_memo(context, fld))) return ret;
-  }
+  if ((ret = table.get()->create_fields_memo(context))) return ret;
 
   // step 2: build indexes.
-  ret = create_index_memo(context, table.get());
+  if ((ret = table.get()->create_index_memo(context))) return ret;
 
   // Adding the Table meta obj into m_tables/loaded tables meta information.
   std::string keypart;
@@ -117,7 +103,7 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   else
     m_tables.emplace(keypart, std::move(table));
 
-  return ret;
+  return ShannonBase::SHANNON_SUCCESS;
   /* in secondary load phase, the table not loaded into imcs. therefore, it can be seen
      by any transactions. If this table has been loaded into imcs. A new data such as
      insert/update/delete will associated with a SMU items to trace its visibility. Therefore
@@ -139,7 +125,7 @@ int Imcs::build_indexes_from_keys(const Rapid_load_context *context, std::map<st
     auto key_name = key.first;
     auto key_len = key.second.first;
     auto key_buff = key.second.second.get();
-    m_tables[sch_tb].get()->m_indexes[key_name].get()->insert(key_buff, key_len, &rowid, sizeof(row_id_t));
+    m_tables[sch_tb].get()->get_index(key_name)->insert(key_buff, key_len, &rowid, sizeof(row_id_t));
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -151,11 +137,10 @@ int Imcs::build_indexes_from_log(const Rapid_load_context *context, std::map<std
   sch_tb.append(":").append(context->m_table_name);
   auto rpd_table = m_tables[sch_tb].get();
 
-  auto matched_keys = m_tables[sch_tb].get()->m_source_keys;
+  auto &matched_keys = m_tables[sch_tb].get()->get_source_keys();
   ut_a(matched_keys.size() > 0);
 
   std::unique_ptr<uchar[]> key_buff{nullptr};
-
   for (auto &key : matched_keys) {
     auto key_name = key.first;
     auto key_info = key.second;
@@ -194,9 +179,8 @@ int Imcs::build_indexes_from_log(const Rapid_load_context *context, std::map<std
         }
       }
     }
-
-    ut_a(rpd_table->m_indexes.find(key_name) != rpd_table->m_indexes.end());
-    rpd_table->m_indexes[key_name].get()->insert(key_buff.get(), key_info.first, &rowid, sizeof(row_id_t));
+    auto index = rpd_table->get_index(key_name);
+    if (index) index->insert(key_buff.get(), key_info.first, &rowid, sizeof(row_id_t));
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -242,7 +226,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
           .append(context->m_schema_name.c_str())
           .append(".")
           .append(context->m_table_name.c_str())
-          .append(" to imcs failed.");
+          .append(" to imcs failed");
       my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
       break;
     }
@@ -326,7 +310,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return false;
   };
 
-  Parallel_reader_adapter::Load_fn load_fn = [&context, &file, &source_table, &key_part, &error_flag, &total_rows](
+  Parallel_reader_adapter::Load_fn load_fn = [&context, &source_table, &error_flag, &total_rows](
                                                  void *cookie, uint nrows, void *rowdata,
                                                  uint64_t partition_id) -> bool {
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
@@ -418,7 +402,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
       if (m_parttables[key].get()->write(context, context->m_table->record[0])) {
         file->rnd_end_in_part(part.second, true);
         std::string errmsg;
-        errmsg.append("load data from ").append(sch_name).append(".").append(table_name).append(" to imcs failed.");
+        errmsg.append("load data from ").append(sch_name).append(".").append(table_name).append(" to imcs failed");
         my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
       }
 
@@ -532,61 +516,25 @@ int Imcs::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
                              std::unordered_map<std::string, mysql_field_t> &fields) {
   std::string sch_tb;
   sch_tb.append(context->m_schema_name).append(":").append(context->m_table_name);
-  auto rpd_tb = m_tables[sch_tb].get();
-
-  for (auto &field_val : fields) {
-    auto key_name = field_val.first;
-    // escape the db_trx_id field and the filed is set to NOT_SECONDARY[not loaded int imcs]
-    if (key_name == SHANNON_DB_TRX_ID || rpd_tb->get_field(key_name) == nullptr) continue;
-    // if data is nullptr, means it's 'NULL'.
-    auto len = field_val.second.mlength;
-    if (!rpd_tb->get_field(key_name)->write_row_from_log(context, rowid, field_val.second.data.get(), len))
-      return HA_ERR_WRONG_IN_RECORD;
-  }
-  return ShannonBase::SHANNON_SUCCESS;
+  return m_tables[sch_tb].get()->write_row_from_log(context, rowid, fields);
 }
 
 int Imcs::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   ut_a(context);
   auto sch_tb(context->m_schema_name);
   sch_tb.append(":").append(context->m_table_name);
-  auto rpd_tb = m_tables[sch_tb].get();
+  if (m_tables.find(sch_tb) == m_tables.end()) return HA_ERR_GENERIC;
 
-  if (!rpd_tb->m_fields.size()) return SHANNON_SUCCESS;
-
-  for (auto it = rpd_tb->m_fields.begin(); it != rpd_tb->m_fields.end();) {
-    if (!it->second->delete_row(context, rowid)) {
-      return HA_ERR_GENERIC;
-    }
-    ++it;
-  }
-  return ShannonBase::SHANNON_SUCCESS;
+  return m_tables[sch_tb].get()->delete_row(context, rowid);
 }
 
 int Imcs::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) {
   ut_a(context);
   auto sch_tb(context->m_schema_name);
   sch_tb.append(":").append(context->m_table_name);
-  auto rpd_tb = m_tables[sch_tb].get();
 
-  if (!rpd_tb->m_fields.size()) return SHANNON_SUCCESS;
-
-  if (rowids.empty()) {  // delete all rows.
-    for (auto &cu : rpd_tb->m_fields) {
-      assert(cu.second);
-      if (!cu.second->delete_row_all(context)) return HA_ERR_GENERIC;
-    }
-
-    return ShannonBase::SHANNON_SUCCESS;
-  }
-
-  for (auto &rowid : rowids) {
-    for (auto &cu : rpd_tb->m_fields) {
-      assert(cu.second);
-      if (!cu.second->delete_row(context, rowid)) return HA_ERR_GENERIC;
-    }
-  }
-  return ShannonBase::SHANNON_SUCCESS;
+  if (m_tables.find(sch_tb) == m_tables.end()) return HA_ERR_GENERIC;
+  return m_tables[sch_tb].get()->delete_rows(context, rowids);
 }
 
 int Imcs::update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
@@ -594,10 +542,7 @@ int Imcs::update_row(const Rapid_load_context *context, row_id_t rowid, std::str
   ut_a(context);
   auto sch_tb(context->m_schema_name);
   sch_tb.append(":").append(context->m_table_name);
-  auto rpd_tb = m_tables[sch_tb].get();
-
-  ut_a(rpd_tb->m_fields[field_key].get());
-  auto ret = rpd_tb->m_fields[field_key]->update_row(context, rowid, const_cast<uchar *>(new_field_data), nlen);
+  auto ret = m_tables[sch_tb].get()->update_row(context, rowid, field_key, new_field_data, nlen);
   if (!ret) return HA_ERR_GENERIC;
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -607,24 +552,12 @@ int Imcs::update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
   ut_a(context);
   auto sch_tb(context->m_schema_name);
   sch_tb.append(":").append(context->m_table_name);
-  auto rpd_tb = m_tables[sch_tb].get();
-
-  for (auto &field_val : upd_recs) {
-    auto key_name = field_val.first;
-    // escape the db_trx_id field and the filed is set to NOT_SECONDARY[not loaded int imcs]
-    if (key_name == SHANNON_DB_TRX_ID || rpd_tb->get_field(key_name) == nullptr) continue;
-    // if data is nullptr, means it's 'NULL'.
-    auto len = field_val.second.mlength;
-    if (!rpd_tb->get_field(key_name)->update_row_from_log(context, rowid, field_val.second.data.get(), len))
-      return HA_ERR_WRONG_IN_RECORD;
-  }
-
-  return ShannonBase::SHANNON_SUCCESS;
+  return m_tables[sch_tb].get()->update_row_from_log(context, rowid, upd_recs);
 }
 
 int Imcs::rollback_changes_by_trxid(Transaction::ID trxid) {
   for (auto &tb : m_tables) {
-    for (auto &cu : tb.second.get()->m_fields) {
+    for (auto &cu : tb.second.get()->get_fields()) {
       auto chunk_sz = cu.second.get()->chunks();
       for (auto index = 0u; index < chunk_sz; index++) {
         auto &version_infos = cu.second.get()->chunk(index)->header()->m_smu->version_info();

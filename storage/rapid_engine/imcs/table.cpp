@@ -47,28 +47,48 @@
 namespace ShannonBase {
 namespace Imcs {
 
-int RapidTable::build_field_memo(const Rapid_load_context *context, Field *field) {
-  ut_a(field);
-  size_t chunk_size = SHANNON_ROWS_IN_CHUNK * Utils::Util::normalized_length(field);
-  if (likely(ShannonBase::rapid_allocated_mem_size + chunk_size > ShannonBase::rpd_mem_sz_max)) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
-    return HA_ERR_GENERIC;
+int Table::create_fields_memo(const Rapid_load_context *context) {
+  ut_a(context && context->m_table);
+  auto source = context->m_table;
+
+  for (auto index = 0u; index < source->s->fields; index++) {
+    auto field = *(source->field + index);
+    if (field->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    size_t chunk_size = SHANNON_ROWS_IN_CHUNK * Utils::Util::normalized_length(field);
+    if (likely(ShannonBase::rapid_allocated_mem_size + chunk_size > ShannonBase::rpd_mem_sz_max)) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
+      return HA_ERR_GENERIC;
+    }
+
+    std::unique_lock<std::shared_mutex> lk(m_fields_mutex);
+    m_fields.emplace(field->field_name, std::make_unique<Cu>(this, field, field->field_name));
   }
 
-  std::unique_lock<std::shared_mutex> lk(m_fields_mutex);
-  m_fields.emplace(field->field_name, std::make_unique<Cu>(this, field, field->field_name));
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int RapidTable::build_hidden_index_memo(const Rapid_load_context *context) {
+int Table::create_index_memo(const Rapid_load_context *context) {
+  auto source = context->m_table;
+  ut_a(source);
+  // no.1: primary key. using row_id as the primary key when missing user-defined pk.
+  if (source->s->is_missing_primary_key()) build_hidden_index_memo(context);
+
+  // no.2: user-defined indexes.
+  build_user_defined_index_memo(context);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Table::build_hidden_index_memo(const Rapid_load_context *context) {
   m_source_keys.emplace(ShannonBase::SHANNON_PRIMARY_KEY_NAME,
                         std::make_pair(SHANNON_DATA_DB_ROW_ID_LEN, std::vector<std::string>{SHANNON_DB_ROW_ID}));
   m_indexes.emplace(ShannonBase::SHANNON_PRIMARY_KEY_NAME,
                     std::make_unique<Index::Index<uchar, row_id_t>>(ShannonBase::SHANNON_PRIMARY_KEY_NAME));
+  m_index_mutexes.emplace(ShannonBase::SHANNON_PRIMARY_KEY_NAME, std::make_unique<std::mutex>());
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int RapidTable::build_user_defined_index_memo(const Rapid_load_context *context) {
+int Table::build_user_defined_index_memo(const Rapid_load_context *context) {
   auto source = context->m_table;
 
   for (auto ind = 0u; ind < source->s->keys; ind++) {
@@ -80,12 +100,13 @@ int RapidTable::build_user_defined_index_memo(const Rapid_load_context *context)
 
     m_source_keys.emplace(key_info->name, std::make_pair(key_info->key_length, key_parts_names));
     m_indexes.emplace(key_info->name, std::make_unique<Index::Index<uchar, row_id_t>>(key_info->name));
+    m_index_mutexes.emplace(key_info->name, std::make_unique<std::mutex>());
   }
 
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-Cu *RapidTable::get_field(std::string field_name) {
+Cu *Table::get_field(std::string field_name) {
   std::shared_lock<std::shared_mutex> lk(m_fields_mutex);
   if (m_fields.find(field_name) == m_fields.end()) return nullptr;
   return m_fields[field_name].get();
@@ -152,8 +173,11 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
     }
   }
   auto keypart = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
-  m_indexes[keypart].get()->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
-                                   sizeof(rowid));
+  {
+    std::lock_guard<std::mutex> lock(*m_index_mutexes[keypart].get());
+    m_indexes[keypart].get()->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
+                                     sizeof(rowid));
+  }
   const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = 0;
   const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff.reset(nullptr);
   return SHANNON_SUCCESS;
@@ -172,6 +196,7 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
     /* No primary key was defined for the table and we generated the clustered index
      from row id: the row reference will be the row id, not any key value that MySQL
      knows of */
+    ut_a(false);  // In parallel scan, the primary key must be have, otherwise sequential scan.
     ut_a(source->file->ref_length == ShannonBase::SHANNON_DATA_DB_ROW_ID_LEN);
 
     ut_a(const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len == source->file->ref_length);
@@ -190,10 +215,9 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
 
     uint length{0u};
     KEY_PART_INFO *key_part;
-    /* Copy the key parts */
     auto key_length = key->key_length;
-    {
-      std::unique_lock<std::shared_mutex> ex_lk(m_indexes_mutex);
+    { /* Copy the key parts */
+      std::unique_lock<std::shared_mutex> ex_lk(m_key_buff_mutex);
       for (key_part = key->key_part; (int)key_length > 0; key_part++) {
         Field *field = key_part->field;
         const CHARSET_INFO *cs = field->charset();
@@ -227,11 +251,14 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
         to_key += length;
         key_length -= length;
       }
-    }
+    }  // scope lock end.
   }
 
   auto keypart = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
-  m_indexes[keypart].get()->insert(key_buff.get(), key_len, &rowid, sizeof(rowid));
+  {
+    std::lock_guard<std::mutex> lock(*m_index_mutexes[keypart].get());
+    m_indexes[keypart].get()->insert(key_buff.get(), key_len, &rowid, sizeof(rowid));
+  }
   return SHANNON_SUCCESS;
 }
 
@@ -253,7 +280,8 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
    * Field_varstring::length_bytes) data. the here we dont use var_xxx to get data, rather getting
    * directly, due to we dont care what real it is. ref to: field.cc:6703
    */
-  row_id_t rowid{0};
+
+  auto rowid = reserver_rowid();
   for (auto index = 0u; index < context->m_table->s->fields; index++) {
     auto fld = *(context->m_table->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -288,10 +316,9 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
       }
     }
 
-    if (!m_fields[fld->field_name]->write_row(context, data_ptr, data_len)) {
+    if (!(m_fields[fld->field_name]->write_row(context, rowid, data_ptr, data_len))) {
       return HA_ERR_GENERIC;
     }
-    rowid = m_fields[fld->field_name]->header()->m_prows.load(std::memory_order_relaxed) - 1;
   }
 
   if (context->m_table->s->is_missing_primary_key()) {
@@ -311,10 +338,11 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
 int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
                  ulong *null_byte_offsets, ulong *null_bitmasks) {
   ut_a(context->m_table->s->fields == n_cols);
-  row_id_t rowid{0};
   auto offsets = col_offsets;
   uchar *data_ptr{nullptr};
   uint data_len{0};
+
+  auto rowid = reserver_rowid();
 
   for (auto col_ind = 0u; col_ind < context->m_table->s->fields; col_ind++) {
     auto fld = *(context->m_table->field + col_ind);
@@ -361,10 +389,11 @@ int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, 
         } break;
       }
     }
-    if (!m_fields[fld->field_name]->write_row(context, data_ptr, data_len)) {
+
+    if (!(m_fields[fld->field_name]->write_row(context, rowid, data_ptr, data_len))) {
+      // TODO: mark this row to be junk.
       return HA_ERR_GENERIC;
     }
-    rowid = m_fields[fld->field_name]->header()->m_prows.load(std::memory_order_relaxed) - 1;
   }
 
   if (context->m_table->s->is_missing_primary_key()) {
@@ -382,18 +411,116 @@ int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, 
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int PartTable::build_field_memo(const Rapid_load_context *context, Field *field) {
-  for (auto &part : context->m_extra_info.m_partition_infos) {
-    size_t chunk_size = SHANNON_ROWS_IN_CHUNK * Utils::Util::normalized_length(field);
-    if (likely(ShannonBase::rapid_allocated_mem_size + chunk_size > ShannonBase::rpd_mem_sz_max)) {
-      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
+int Table::delete_row(const Rapid_load_context *context, row_id_t rowid) {
+  for (auto it = m_fields.begin(); it != m_fields.end();) {
+    if (!it->second->delete_row(context, rowid)) {
       return HA_ERR_GENERIC;
     }
-    auto part_name = part.first;
-    part_name.append("#").append(std::to_string(part.second)).append(":").append(field->field_name);
-    m_fields.emplace(part_name, std::make_unique<Cu>(this, field, part_name));
+    ++it;
   }
 
+  m_prows.fetch_sub(1);
+  return SHANNON_SUCCESS;
+}
+
+int Table::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
+                              std::unordered_map<std::string, mysql_field_t> &fields) {
+  for (auto &field_val : fields) {
+    auto key_name = field_val.first;
+    // escape the db_trx_id field and the filed is set to NOT_SECONDARY[not loaded int imcs]
+    if (key_name == SHANNON_DB_TRX_ID || m_fields.find(key_name) == m_fields.end()) continue;
+    // if data is nullptr, means it's 'NULL'.
+    auto len = field_val.second.mlength;
+    if (!m_fields[key_name]->write_row(context, rowid, field_val.second.data.get(), len)) {
+      // TODO: mark this row to be junk.
+      return HA_ERR_WRONG_IN_RECORD;
+    }
+  }
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Table::update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
+                      const uchar *new_field_data, size_t nlen) {
+  if (m_fields.find(field_key) == m_fields.end()) return HA_ERR_GENERIC;
+
+  auto ret = m_fields[field_key]->update_row(context, rowid, const_cast<uchar *>(new_field_data), nlen);
+  if (!ret) return HA_ERR_GENERIC;
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Table::update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
+                               std::unordered_map<std::string, mysql_field_t> &upd_recs) {
+  for (auto &field_val : upd_recs) {
+    auto key_name = field_val.first;
+    // escape the db_trx_id field and the filed is set to NOT_SECONDARY[not loaded int imcs]
+    if (key_name == SHANNON_DB_TRX_ID || m_fields.find(key_name) == m_fields.end()) continue;
+    // if data is nullptr, means it's 'NULL'.
+    auto len = field_val.second.mlength;
+    if (!m_fields[key_name]->update_row_from_log(context, rowid, field_val.second.data.get(), len))
+      return HA_ERR_WRONG_IN_RECORD;
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Table::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) {
+  if (!m_fields.size()) return SHANNON_SUCCESS;
+
+  if (rowids.empty()) {  // delete all rows.
+    for (auto &cu : m_fields) {
+      assert(cu.second);
+      if (!cu.second->delete_row_all(context)) return HA_ERR_GENERIC;
+    }
+
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  for (auto &rowid : rowids) {
+    for (auto &cu : m_fields) {
+      assert(cu.second);
+      if (!cu.second->delete_row(context, rowid)) return HA_ERR_GENERIC;
+    }
+  }
+  // TODO: remove the index item.
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int PartTable::create_fields_memo(const Rapid_load_context *context) {
+  ut_a(context && context->m_table);
+  auto source = context->m_table;
+
+  for (auto index = 0u; index < source->s->fields; index++) {
+    auto field = *(source->field + index);
+    for (auto &part : context->m_extra_info.m_partition_infos) {
+      size_t chunk_size = SHANNON_ROWS_IN_CHUNK * Utils::Util::normalized_length(field);
+      if (likely(ShannonBase::rapid_allocated_mem_size + chunk_size > ShannonBase::rpd_mem_sz_max)) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid allocated memory exceeds over the maximum");
+        return HA_ERR_GENERIC;
+      }
+      auto part_name = part.first;
+      part_name.append("#").append(std::to_string(part.second)).append(":").append(field->field_name);
+      m_fields.emplace(part_name, std::make_unique<Cu>(this, field, part_name));
+    }
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+Cu *PartTable::get_field(std::string field_name) {
+  std::shared_lock<std::shared_mutex> lk(m_fields_mutex);
+  if (m_fields.find(field_name) == m_fields.end()) return nullptr;
+  return m_fields[field_name].get();
+}
+
+int PartTable::create_index_memo(const Rapid_load_context *context) {
+  auto source = context->m_table;
+  ut_a(source);
+  // no.1: primary key. using row_id as the primary key when missing user-defined pk.
+  if (source->s->is_missing_primary_key()) build_hidden_index_memo(context);
+
+  // no.2: user-defined indexes.
+  build_user_defined_index_memo(context);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -406,6 +533,7 @@ int PartTable::build_hidden_index_memo(const Rapid_load_context *context) {
     m_source_keys.emplace(partkey,
                           std::make_pair(SHANNON_DATA_DB_ROW_ID_LEN, std::vector<std::string>{SHANNON_DB_ROW_ID}));
     m_indexes.emplace(partkey, std::make_unique<Index::Index<uchar, row_id_t>>(SHANNON_DB_ROW_ID));
+    m_index_mutexes.emplace(ShannonBase::SHANNON_PRIMARY_KEY_NAME, std::make_unique<std::mutex>());
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -428,6 +556,7 @@ int PartTable::build_user_defined_index_memo(const Rapid_load_context *context) 
       }
       m_source_keys.emplace(keyname, std::make_pair(key_info->key_length, key_parts_names));
       m_indexes.emplace(keyname, std::make_unique<Index::Index<uchar, row_id_t>>(keyname));
+      m_index_mutexes.emplace(keyname, std::make_unique<std::mutex>());
     }
   }
 
@@ -499,8 +628,11 @@ int PartTable::build_index_impl(const Rapid_load_context *context, const KEY *ke
 
   auto keyname = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
   auto active_key = active_partkey.append(":").append(keyname);
-  m_indexes[active_key].get()->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
-                                      sizeof(rowid));
+  {
+    std::lock_guard<std::mutex> lock(*m_index_mutexes[active_key].get());
+    m_indexes[active_key].get()->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
+                                        sizeof(rowid));
+  }
   const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = 0;
   const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff.reset(nullptr);
   return SHANNON_SUCCESS;
@@ -541,7 +673,7 @@ int PartTable::build_index_impl(const Rapid_load_context *context, const KEY *ke
     /* Copy the key parts */
     auto key_length = key->key_length;
     {
-      std::unique_lock<std::shared_mutex> ex_lk(m_indexes_mutex);
+      std::unique_lock<std::shared_mutex> ex_lk(m_key_buff_mutex);
       for (key_part = key->key_part; (int)key_length > 0; key_part++) {
         Field *field = key_part->field;
         const CHARSET_INFO *cs = field->charset();
@@ -580,7 +712,11 @@ int PartTable::build_index_impl(const Rapid_load_context *context, const KEY *ke
 
   auto keyname = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
   auto active_key = active_partkey.append(":").append(keyname);
-  m_indexes[active_key].get()->insert(key_buff.get(), key_len, &rowid, sizeof(rowid));
+  {
+    std::lock_guard<std::mutex> lock(*m_index_mutexes[active_key].get());
+    m_indexes[active_key].get()->insert(key_buff.get(), key_len, &rowid, sizeof(rowid));
+  }
+
   return SHANNON_SUCCESS;
 }
 
@@ -596,7 +732,9 @@ int PartTable::build_index(const Rapid_load_context *context, const KEY *key, ro
 
 // IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `Table::write` CORRESPONDINGLY.
 int PartTable::write(const Rapid_load_context *context, uchar *data) {
-  row_id_t rowid{0};
+  ut_a(context && data);
+
+  auto rowid = reserver_rowid();
   for (auto index = 0u; index < context->m_table->s->fields; index++) {
     auto fld = *(context->m_table->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -633,10 +771,10 @@ int PartTable::write(const Rapid_load_context *context, uchar *data) {
 
     auto active_part = context->m_extra_info.m_active_part_key;
     auto key = active_part.append(":").append(fld->field_name);
-    if (!m_fields[key]->write_row(context, data_ptr, data_len)) {
+    if (!(m_fields[key]->write_row(context, rowid, data_ptr, data_len))) {
+      // TODO: mark this row to be junk.
       return HA_ERR_GENERIC;
     }
-    rowid = m_fields[key]->header()->m_prows.load(std::memory_order_relaxed) - 1;
   }
 
   if (context->m_table->s->is_missing_primary_key()) {
@@ -654,11 +792,11 @@ int PartTable::write(const Rapid_load_context *context, uchar *data) {
 int PartTable::write(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
                      ulong *null_byte_offsets, ulong *null_bitmasks) {
   ut_a(context->m_table->s->fields == n_cols);
-  row_id_t rowid{0};
   auto offsets = col_offsets;
   uchar *data_ptr{nullptr};
   uint data_len{0};
 
+  auto rowid = reserver_rowid();
   for (auto col_ind = 0u; col_ind < context->m_table->s->fields; col_ind++) {
     auto fld = *(context->m_table->field + col_ind);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -704,10 +842,11 @@ int PartTable::write(const Rapid_load_context *context, uchar *rowdata, size_t l
         } break;
       }
     }
-    if (!m_fields[fld->field_name]->write_row(context, data_ptr, data_len)) {
+
+    if (!(m_fields[fld->field_name]->write_row(context, rowid, data_ptr, data_len))) {
+      // TODO: mark this row to be junk.
       return HA_ERR_GENERIC;
     }
-    rowid = m_fields[fld->field_name]->header()->m_prows.load(std::memory_order_relaxed) - 1;
   }
 
   if (context->m_table->s->is_missing_primary_key()) {
@@ -720,6 +859,82 @@ int PartTable::write(const Rapid_load_context *context, uchar *rowdata, size_t l
     auto key_info = context->m_table->key_info + index;
     if (build_index(context, key_info, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks))
       return HA_ERR_GENERIC;
+  }
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int PartTable::delete_row(const Rapid_load_context *context, row_id_t rowid) {
+  for (auto it = m_fields.begin(); it != m_fields.end();) {
+    if (!it->second->delete_row(context, rowid)) {
+      return HA_ERR_GENERIC;
+    }
+    ++it;
+  }
+
+  return SHANNON_SUCCESS;
+}
+
+int PartTable::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
+                                  std::unordered_map<std::string, mysql_field_t> &fields) {
+  for (auto &field_val : fields) {
+    auto key_name = field_val.first;
+    // escape the db_trx_id field and the filed is set to NOT_SECONDARY[not loaded int imcs]
+    if (key_name == SHANNON_DB_TRX_ID || m_fields.find(key_name) == m_fields.end()) continue;
+    // if data is nullptr, means it's 'NULL'.
+    auto len = field_val.second.mlength;
+    if (!m_fields[key_name]->write_row(context, rowid, field_val.second.data.get(), len)) {
+      // TODO: mark this row to be junk.
+      return HA_ERR_WRONG_IN_RECORD;
+    }
+  }
+
+  m_prows.fetch_add(1);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int PartTable::update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
+                          const uchar *new_field_data, size_t nlen) {
+  if (m_fields.find(field_key) == m_fields.end()) return HA_ERR_GENERIC;
+
+  auto ret = m_fields[field_key]->update_row(context, rowid, const_cast<uchar *>(new_field_data), nlen);
+  if (!ret) return HA_ERR_GENERIC;
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int PartTable::update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
+                                   std::unordered_map<std::string, mysql_field_t> &upd_recs) {
+  for (auto &field_val : upd_recs) {
+    auto key_name = field_val.first;
+    // escape the db_trx_id field and the filed is set to NOT_SECONDARY[not loaded int imcs]
+    if (key_name == SHANNON_DB_TRX_ID || m_fields.find(key_name) == m_fields.end()) continue;
+    // if data is nullptr, means it's 'NULL'.
+    auto len = field_val.second.mlength;
+    if (!m_fields[key_name]->update_row_from_log(context, rowid, field_val.second.data.get(), len))
+      return HA_ERR_WRONG_IN_RECORD;
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int PartTable::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) {
+  if (!m_fields.size()) return SHANNON_SUCCESS;
+
+  auto deleted_cnt{0};
+  if (rowids.empty()) {  // delete all rows.
+    for (auto &cu : m_fields) {
+      assert(cu.second);
+      if (!cu.second->delete_row_all(context)) return HA_ERR_GENERIC;
+    }
+
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  for (auto &rowid : rowids) {  // delete some rows.
+    for (auto &cu : m_fields) {
+      assert(cu.second);
+      if (!cu.second->delete_row(context, rowid)) return HA_ERR_GENERIC;
+    }
+    deleted_cnt++;
   }
   return ShannonBase::SHANNON_SUCCESS;
 }

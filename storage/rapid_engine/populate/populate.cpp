@@ -155,6 +155,8 @@ static void parse_log_func_main(log_t *log_ptr) {
           std::async(std::launch::async, parse_mtr_log_worker, curr_iter->first, from_ptr, from_ptr + size, size));
       curr_iter++;
       mutex_exit(&log_sys->rapid_populator_mutex);
+
+      if (curr_iter == sys_pop_buff.end()) break;
     }
 
     for (auto &res : results) {  // gets the result from worker thread.

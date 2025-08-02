@@ -54,10 +54,6 @@ class Cu : public MemoryObject {
   using cu_fd_t = uint64;
   using Cu_header = struct SHANNON_ALIGNAS Cu_header_t {
    public:
-    // physical row count. If you want to get logical rows, you should consider
-    // MVCC to decide that whether this phyical row is visiable or not to this
-    // transaction.
-    std::atomic<row_id_t> m_prows{0};
     // a copy of source field info, only use its meta info. do NOT use it
     // directly.
     Field *m_source_fld{nullptr};
@@ -100,12 +96,7 @@ class Cu : public MemoryObject {
   /** write the data to a cu. `data` the data will be written. returns the
   address where the data wrote. the data append to tail of Cu. returns nullptr
   failed.*/
-  uchar *write_row(const Rapid_load_context *context, uchar *data, size_t len);
-
-  /** write the data to a cu. `data` the data will be written. returns the
-   address where the data wrote. the data append to tail of Cu. returns nullptr
-   if failed. otherwise, return addr of where the data written.*/
-  uchar *write_row_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
+  uchar *write_row(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
 
   /** read the data from this Cu, traverse all chunks in cu to get the data from
   where m_r_ptr locates. */
@@ -123,14 +114,14 @@ class Cu : public MemoryObject {
   // update the data located at rowid with new value-'data'.
   uchar *update_row_from_log(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len);
 
+  // get the chunk header.
+  inline Cu_header *header() { return m_header.get(); }
+
   // gets the base address of CU.
   inline uchar *base() {
     if (!m_chunks.size()) return nullptr;
     return m_chunks[0].get()->base();
   }
-
-  // get the chunk header.
-  inline Cu_header *header() { return m_header.get(); }
 
   // get the pointer of chunk with its id.
   inline Chunk *chunk(uint id) {
@@ -140,13 +131,6 @@ class Cu : public MemoryObject {
 
   // get how many chunks in this CU.
   inline uint32 chunks() const { return m_chunks.size(); }
-
-  // get how many rows in this cu. Here, we dont care about MVCC. just physical
-  // rows.
-  inline row_id_t prows() { return m_header->m_prows.load(std::memory_order_seq_cst); }
-
-  // the visiable row count to `trxid` transaction. The mvcc should be considered.
-  row_id_t rows(Rapid_load_context *context);
 
   // returns the normalized length, the text type encoded with uint32.
   inline size_t normalized_pack_length() {
@@ -174,18 +158,52 @@ class Cu : public MemoryObject {
 
   inline std::mutex &get_mutex() { return m_mutex; }
 
+  void get_current_statistics(bool force_recalc = false) {
+    if (force_recalc || m_stats_dirty.load(std::memory_order_relaxed)) {
+      recalculate_statistics();
+    }
+  }
+
  private:
-  // init chunks.
-  void init_header(RapidTable *owner, const Field *field);
+  // init chunks header.
+  void init_header(Cu_header *header, RapidTable *owner, const Field *field);
+
+  // inti chunk body, mainly the memory space.
   void init_body(const Field *field);
 
   // get the field value. if field is string/text then return its stringid.
   // or, do nothing.
   uchar *get_vfield_value(uchar *&data, size_t &len, bool need_pack = false);
 
+  // alloclate a new chunk if it's needed.
+  void ensure_new_chunks(size_t required_chunk_id);
+
   // upda the header info, such as row count, sum, avg, etc.
   // if row_reserved = true, means the prows has been added.
   void update_meta_info(OPER_TYPE type, uchar *data, uchar *old, bool row_reserved = false);
+
+  // re-calculate the statistics.
+  void recalculate_statistics();
+
+  template <typename T, typename Compare>
+  void update_atomic_value(std::atomic<T> &atomic_var, T new_val, Compare comp) {
+    T current_val = atomic_var.load(std::memory_order_relaxed);
+    while (comp(current_val, new_val)) {
+      if (atomic_var.compare_exchange_weak(current_val, new_val, std::memory_order_relaxed,
+                                           std::memory_order_relaxed)) {
+        break;  // update success
+      }
+      // current_val is already the latest.
+    }
+  }
+
+  void update_min_atomic(double new_val) {
+    update_atomic_value(m_header->m_min, new_val, [](double current, double candidate) { return current > candidate; });
+  }
+
+  void update_max_atomic(double new_val) {
+    update_atomic_value(m_header->m_max, new_val, [](double current, double candidate) { return current < candidate; });
+  }
 
  private:
   // mutex of cu
@@ -207,6 +225,12 @@ class Cu : public MemoryObject {
     uchar data[MAX_FIELD_WIDTH];
   } LocalDataBuffer;
   static SHANNON_THREAD_LOCAL LocalDataBuffer m_buff;
+
+  // the meta stat mutex.
+  std::mutex m_stats_mutex;
+  //// the statistics is refreshed.
+  std::atomic<bool> m_stats_dirty{false};
+
   // magic number for CU.
   const char *m_magic = "SHANNON_CU";
 };
