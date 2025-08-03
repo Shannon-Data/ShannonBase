@@ -282,6 +282,7 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
    */
 
   auto rowid = reserver_rowid();
+
   for (auto index = 0u; index < context->m_table->s->fields; index++) {
     auto fld = *(context->m_table->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -297,6 +298,7 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
         case MYSQL_TYPE_TINY_BLOB:
         case MYSQL_TYPE_MEDIUM_BLOB:
         case MYSQL_TYPE_LONG_BLOB: {
+          // TODO: BLOB data maybe not in the page. stores off the page.
           data_ptr = const_cast<uchar *>(fld->data_ptr());
           data_len = down_cast<Field_blob *>(fld)->get_length();
         } break;
@@ -338,7 +340,6 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
 int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
                  ulong *null_byte_offsets, ulong *null_bitmasks) {
   ut_a(context->m_table->s->fields == n_cols);
-  auto offsets = col_offsets;
   uchar *data_ptr{nullptr};
   uint data_len{0};
 
@@ -348,8 +349,9 @@ int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, 
     auto fld = *(context->m_table->field + col_ind);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    auto is_null = is_field_null(col_ind, rowdata, null_byte_offsets, null_bitmasks);
-    data_ptr = rowdata + ptrdiff_t(*(offsets + col_ind));
+    data_ptr = rowdata + col_offsets[col_ind];
+    auto is_null = (fld->is_nullable()) ? is_field_null(col_ind, rowdata, null_byte_offsets, null_bitmasks) : false;
+
     if (is_null) {
       data_len = UNIV_SQL_NULL;
       data_ptr = nullptr;
@@ -359,6 +361,7 @@ int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, 
         case MYSQL_TYPE_TINY_BLOB:
         case MYSQL_TYPE_MEDIUM_BLOB:
         case MYSQL_TYPE_LONG_BLOB: {
+          // TODO: BLOB data maybe not in the page. stores off the page.
           auto bfld = down_cast<Field_blob *>(fld);
           switch (bfld->pack_length_no_ptr()) {
             case 1:
@@ -411,16 +414,38 @@ int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, 
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Table::delete_row(const Rapid_load_context *context, row_id_t rowid) {
-  for (auto it = m_fields.begin(); it != m_fields.end();) {
-    if (!it->second->delete_row(context, rowid)) {
-      return HA_ERR_GENERIC;
-    }
-    ++it;
-  }
+int Table::rollback_changes_by_trxid(Transaction::ID trxid) {
+  for (auto &cu : m_fields) {
+    auto chunk_sz = cu.second.get()->chunks();
+    for (auto index = 0u; index < chunk_sz; index++) {
+      auto &version_infos = cu.second.get()->chunk(index)->header()->m_smu->version_info();
+      if (!version_infos.size()) continue;
 
-  m_prows.fetch_sub(1);
-  return SHANNON_SUCCESS;
+      for (auto &ver : version_infos) {
+        std::lock_guard<std::mutex> lock(ver.second.vec_mutex);
+        auto rowid = ver.first;
+
+        std::for_each(ver.second.items.begin(), ver.second.items.end(), [&](ReadView::SMU_item &item) {
+          if (item.trxid == trxid) {
+            // To update rows status.
+            if (item.oper_type == OPER_TYPE::OPER_INSERT) {                      //
+              if (!cu.second.get()->chunk(index)->header()->m_del_mask.get()) {  // the del mask not exists now.
+                cu.second.get()->chunk(index)->header()->m_del_mask =
+                    std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
+              }
+              Utils::Util::bit_array_set(cu.second.get()->chunk(index)->header()->m_del_mask.get(), rowid);
+            }
+            if (item.oper_type == OPER_TYPE::OPER_DELETE) {
+              Utils::Util::bit_array_reset(cu.second.get()->chunk(index)->header()->m_del_mask.get(), rowid);
+            }
+            item.tm_committed = ShannonBase::SHANNON_MAX_STMP;  // reset commit timestamp to max, mean it rollbacked.
+                                                                // has been rollbacked, invisible to all readview.
+          }
+        });
+      }
+    }
+  }
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Table::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
@@ -461,6 +486,18 @@ int Table::update_row_from_log(const Rapid_load_context *context, row_id_t rowid
   }
 
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+int Table::delete_row(const Rapid_load_context *context, row_id_t rowid) {
+  for (auto it = m_fields.begin(); it != m_fields.end();) {
+    if (!it->second->delete_row(context, rowid)) {
+      return HA_ERR_GENERIC;
+    }
+    ++it;
+  }
+
+  m_prows.fetch_sub(1);
+  return SHANNON_SUCCESS;
 }
 
 int Table::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) {
@@ -792,7 +829,6 @@ int PartTable::write(const Rapid_load_context *context, uchar *data) {
 int PartTable::write(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
                      ulong *null_byte_offsets, ulong *null_bitmasks) {
   ut_a(context->m_table->s->fields == n_cols);
-  auto offsets = col_offsets;
   uchar *data_ptr{nullptr};
   uint data_len{0};
 
@@ -801,8 +837,8 @@ int PartTable::write(const Rapid_load_context *context, uchar *rowdata, size_t l
     auto fld = *(context->m_table->field + col_ind);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    auto is_null = is_field_null(col_ind, rowdata, null_byte_offsets, null_bitmasks);
-    data_ptr = rowdata + ptrdiff_t(*(offsets + col_ind));
+    data_ptr = rowdata + col_offsets[col_ind];
+    auto is_null = (fld->is_nullable()) ? is_field_null(col_ind, rowdata, null_byte_offsets, null_bitmasks) : false;
     if (is_null) {
       data_len = UNIV_SQL_NULL;
       data_ptr = nullptr;
@@ -863,15 +899,38 @@ int PartTable::write(const Rapid_load_context *context, uchar *rowdata, size_t l
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int PartTable::delete_row(const Rapid_load_context *context, row_id_t rowid) {
-  for (auto it = m_fields.begin(); it != m_fields.end();) {
-    if (!it->second->delete_row(context, rowid)) {
-      return HA_ERR_GENERIC;
-    }
-    ++it;
-  }
+int PartTable::rollback_changes_by_trxid(Transaction::ID trxid) {
+  for (auto &cu : m_fields) {
+    auto chunk_sz = cu.second.get()->chunks();
+    for (auto index = 0u; index < chunk_sz; index++) {
+      auto &version_infos = cu.second.get()->chunk(index)->header()->m_smu->version_info();
+      if (!version_infos.size()) continue;
 
-  return SHANNON_SUCCESS;
+      for (auto &ver : version_infos) {
+        std::lock_guard<std::mutex> lock(ver.second.vec_mutex);
+        auto rowid = ver.first;
+
+        std::for_each(ver.second.items.begin(), ver.second.items.end(), [&](ReadView::SMU_item &item) {
+          if (item.trxid == trxid) {
+            // To update rows status.
+            if (item.oper_type == OPER_TYPE::OPER_INSERT) {                      //
+              if (!cu.second.get()->chunk(index)->header()->m_del_mask.get()) {  // the del mask not exists now.
+                cu.second.get()->chunk(index)->header()->m_del_mask =
+                    std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
+              }
+              Utils::Util::bit_array_set(cu.second.get()->chunk(index)->header()->m_del_mask.get(), rowid);
+            }
+            if (item.oper_type == OPER_TYPE::OPER_DELETE) {
+              Utils::Util::bit_array_reset(cu.second.get()->chunk(index)->header()->m_del_mask.get(), rowid);
+            }
+            item.tm_committed = ShannonBase::SHANNON_MAX_STMP;  // reset commit timestamp to max, mean it rollbacked.
+                                                                // has been rollbacked, invisible to all readview.
+          }
+        });
+      }
+    }
+  }
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int PartTable::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
@@ -914,6 +973,17 @@ int PartTable::update_row_from_log(const Rapid_load_context *context, row_id_t r
   }
 
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+int PartTable::delete_row(const Rapid_load_context *context, row_id_t rowid) {
+  for (auto it = m_fields.begin(); it != m_fields.end();) {
+    if (!it->second->delete_row(context, rowid)) {
+      return HA_ERR_GENERIC;
+    }
+    ++it;
+  }
+
+  return SHANNON_SUCCESS;
 }
 
 int PartTable::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) {

@@ -557,36 +557,7 @@ int Imcs::update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
 
 int Imcs::rollback_changes_by_trxid(Transaction::ID trxid) {
   for (auto &tb : m_tables) {
-    for (auto &cu : tb.second.get()->get_fields()) {
-      auto chunk_sz = cu.second.get()->chunks();
-      for (auto index = 0u; index < chunk_sz; index++) {
-        auto &version_infos = cu.second.get()->chunk(index)->header()->m_smu->version_info();
-        if (!version_infos.size()) continue;
-
-        for (auto &ver : version_infos) {
-          std::lock_guard<std::mutex> lock(ver.second.vec_mutex);
-          auto rowid = ver.first;
-
-          std::for_each(ver.second.items.begin(), ver.second.items.end(), [&](ReadView::SMU_item &item) {
-            if (item.trxid == trxid) {
-              // To update rows status.
-              if (item.oper_type == OPER_TYPE::OPER_INSERT) {                      //
-                if (!cu.second.get()->chunk(index)->header()->m_del_mask.get()) {  // the del mask not exists now.
-                  cu.second.get()->chunk(index)->header()->m_del_mask =
-                      std::make_unique<ShannonBase::bit_array_t>(SHANNON_ROWS_IN_CHUNK);
-                }
-                Utils::Util::bit_array_set(cu.second.get()->chunk(index)->header()->m_del_mask.get(), rowid);
-              }
-              if (item.oper_type == OPER_TYPE::OPER_DELETE) {
-                Utils::Util::bit_array_reset(cu.second.get()->chunk(index)->header()->m_del_mask.get(), rowid);
-              }
-              item.tm_committed = ShannonBase::SHANNON_MAX_STMP;  // reset commit timestamp to max, mean it rollbacked.
-                                                                  // has been rollbacked, invisible to all readview.
-            }
-          });
-        }
-      }
-    }
+    tb.second.get()->rollback_changes_by_trxid(trxid);
   }
   return ShannonBase::SHANNON_SUCCESS;
 }
