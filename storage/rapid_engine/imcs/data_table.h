@@ -108,6 +108,9 @@ class DataTable : public MemoryObject {
   // index read next
   int index_next(uchar *buf);
 
+  // index read prev
+  int index_prev(uchar *buf);
+
   inline uchar *ensure_buffer_size(size_t needed_size) {
     if (needed_size > m_buffer_size) {
       m_row_buffer = std::make_unique<uchar[]>(needed_size);
@@ -125,6 +128,9 @@ class DataTable : public MemoryObject {
   enum class FETCH_STATUS : uint8 { FETCH_ERROR, FETCH_OK, FETCH_CONTINUE, FETCH_NEXT_ROW };
 
   DataTable::FETCH_STATUS fetch_next_row(ulong current_chunk, ulong offset_in_chunk, Field *source_fld);
+
+  // Helper method to encode key parts for ART storage
+  void encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key_info);
 
  private:
   std::atomic<bool> m_initialized{false};

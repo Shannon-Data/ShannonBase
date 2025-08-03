@@ -1,0 +1,67 @@
+create database tpch_1024;
+alter database tpch_1024 CHARACTER SET ascii COLLATE ascii_bin;
+use tpch_1024;
+CREATE TABLE SUPPLIER ( S_SUPPKEY     INTEGER NOT NULL,
+S_NAME        CHAR(25) NOT NULL,
+S_ADDRESS     VARCHAR(40) NOT NULL,
+S_NATIONKEY   INTEGER NOT NULL,
+S_PHONE       CHAR(15) NOT NULL,
+S_ACCTBAL     DECIMAL(15,2) NOT NULL,
+S_COMMENT     VARCHAR(101) NOT NULL,
+PRIMARY KEY (S_SUPPKEY));
+alter table SUPPLIER secondary_engine NULL;
+alter table SUPPLIER change S_NAME S_NAME CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_ADDRESS S_ADDRESS VARCHAR(40) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_PHONE S_PHONE CHAR(15) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
+count(*)
+40000
+show variables like "%rapid%";
+Variable_name	Value
+rapid_rapid_async_column_threshold	16
+rapid_rapid_memory_size_max	8589934592
+rapid_rapid_parallel_load_max	10000
+rapid_rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	0.700000
+rapid_self_load_enabled	FALSE
+rapid_self_load_interval_seconds	86400.000000
+rapid_self_load_skip_quiet_check	FALSE
+rapid_use_dynamic_offload	ON
+alter table SUPPLIER secondary_engine RAPID;
+alter table SUPPLIER SECONDARY_LOAD;
+set use_secondary_engine=forced;
+explain select * from SUPPLIER order by S_SUPPKEY limit 10;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	SUPPLIER	NULL	ALL	NULL	NULL	NULL	NULL	40000	100.00	Using filesort; Using secondary engine Rapid
+select * from SUPPLIER order by S_SUPPKEY limit 10;
+S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
+1	Supplier#000000001	 N kD4on9OM Ipw3,gf0JBoQDd7tgrzrddZ	17	27-918-335-1736	5755.94	each slyly above the careful
+2	Supplier#000000002	89eJ5ksX3ImxJQBvxObC,	5	15-679-861-2259	4032.68	 slyly bold instructions. idle dependen
+3	Supplier#000000003	q1,G3Pj6OjIuUYfUoH18BFTKP5aU9bEV3	1	11-383-516-1199	4192.40	blithely silent requests after the express dependencies are sl
+4	Supplier#000000004	Bk7ah4CK8SYQTepEmvMkkgMwg	15	25-843-787-7479	4641.08	riously even requests above the exp
+5	Supplier#000000005	Gcdm2rJRzl5qlTVzc	11	21-151-690-3663	-283.84	. slyly regular pinto bea
+6	Supplier#000000006	tQxuVm7s7CnK	14	24-696-997-4969	1365.79	final accounts. regular dolphins use against the furiously ironic decoys. 
+7	Supplier#000000007	s,4TicNGB4uO6PaSqNBUq	23	33-990-965-2201	6820.35	s unwind silently furiously regular courts. final requests are deposits. requests wake quietly blit
+8	Supplier#000000008	9Sq4bBH2FQEmaFOocY45sRTxo6yuoG	17	27-498-742-3860	7627.85	al pinto beans. asymptotes haggl
+9	Supplier#000000009	1KhUgZegwM3ua7dsYmekYBsK	10	20-403-398-8662	5302.37	s. unusual, even requests along the furiously regular pac
+10	Supplier#000000010	Saygah3gYWMp72i PY	24	34-852-489-8585	3891.91	ing waters. regular requests ar
+explain select * from SUPPLIER where S_SUPPKEY = 100;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	SUPPLIER	NULL	const	PRIMARY	PRIMARY	4	const	1	100.00	Using secondary engine Rapid
+select * from SUPPLIER where S_SUPPKEY = 100;
+S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
+100	Supplier#000000100	rIlN li8zvW22l2slbcx ECP4fL	21	31-351-324-5062	3191.70	es. regular instructions sleep carefully. slyly ironic packages across the foxes boost 
+explain select * from SUPPLIER where S_NAME ='Supplier#000000005';
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	SUPPLIER	NULL	ALL	NULL	NULL	NULL	NULL	40000	10.00	Using where; Using secondary engine Rapid
+select * from SUPPLIER where S_NAME ='Supplier#000000005';
+S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
+5	Supplier#000000005	Gcdm2rJRzl5qlTVzc	11	21-151-690-3663	-283.84	. slyly regular pinto bea
+explain select * from SUPPLIER where S_ACCTBAL = 5755.94;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	SUPPLIER	NULL	ALL	NULL	NULL	NULL	NULL	40000	10.00	Using where; Using secondary engine Rapid
+select * from SUPPLIER where S_ACCTBAL = 5755.94;
+S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
+1	Supplier#000000001	 N kD4on9OM Ipw3,gf0JBoQDd7tgrzrddZ	17	27-918-335-1736	5755.94	each slyly above the careful
+drop database tpch_1024;

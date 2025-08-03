@@ -1,0 +1,58 @@
+##############################################################################
+# ShannonBase test case for Large Data scenairo.
+# ShannonBase copyright 2023-
+##############################################################################
+
+--disable_warnings
+create database tpch_1024;
+alter database tpch_1024 CHARACTER SET ascii COLLATE ascii_bin; 
+use tpch_1024;
+
+
+CREATE TABLE SUPPLIER ( S_SUPPKEY     INTEGER NOT NULL,
+                        S_NAME        CHAR(25) NOT NULL,
+                        S_ADDRESS     VARCHAR(40) NOT NULL,
+                        S_NATIONKEY   INTEGER NOT NULL,
+                        S_PHONE       CHAR(15) NOT NULL,
+                        S_ACCTBAL     DECIMAL(15,2) NOT NULL,
+                        S_COMMENT     VARCHAR(101) NOT NULL,
+                        PRIMARY KEY (S_SUPPKEY));
+
+alter table SUPPLIER secondary_engine NULL;
+
+#-- optimal encodings
+alter table SUPPLIER change S_NAME S_NAME CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_ADDRESS S_ADDRESS VARCHAR(40) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_PHONE S_PHONE CHAR(15) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table SUPPLIER change S_COMMENT S_COMMENT VARCHAR(101) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=VARLEN';
+
+
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/supplier.tbl' INTO TABLE SUPPLIER  FIELDS TERMINATED BY '|' ;
+select count(*) from SUPPLIER;
+--enable_query_log
+
+#-- mark tables for RAPID
+--disable_warnings
+
+show variables like "%rapid%";
+alter table SUPPLIER secondary_engine RAPID;
+alter table SUPPLIER SECONDARY_LOAD;
+
+set use_secondary_engine=forced;
+
+explain select * from SUPPLIER order by S_SUPPKEY limit 10;
+select * from SUPPLIER order by S_SUPPKEY limit 10;
+
+explain select * from SUPPLIER where S_SUPPKEY = 100;
+select * from SUPPLIER where S_SUPPKEY = 100;
+
+explain select * from SUPPLIER where S_NAME ='Supplier#000000005';
+select * from SUPPLIER where S_NAME ='Supplier#000000005';
+
+explain select * from SUPPLIER where S_ACCTBAL = 5755.94;
+select * from SUPPLIER where S_ACCTBAL = 5755.94;
+--enable_warnings
+
+drop database tpch_1024;
