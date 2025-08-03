@@ -52,6 +52,8 @@ class ARTIterator {
 
   void init_scan(const key_t *startkey, int startkey_len, bool start_inclusive, const key_t *endkey, int endkey_len,
                  bool end_inclusive) {
+    if (!m_art) return;
+
     // Convert keys to unsigned char format
     m_start_key = const_cast<key_t *>(startkey);
     m_start_keylen = startkey_len;
@@ -68,37 +70,54 @@ class ARTIterator {
     m_finished = false;
 
     if (m_art->root()) {
-      m_stack.push_back({m_art->root(), 0, false, 0});
+      if (startkey) {
+        find_start_position();
+      } else {
+        m_stack.push_back({m_art->root(), 0, false, 0});
+      }
     }
   }
 
-  bool next(const key_t *key_out, uint32_t *key_len_out, value_t *value_out) {
-    while (!m_stack.empty()) {
-      auto &state = m_stack.back();
+  bool next(const key_t **key_out, uint32_t *key_len_out, value_t *value_out) {
+    if (!key_out || !key_len_out || !value_out) return false;
 
-      if (state.is_leaf) {
-        ART::Art_leaf *leaf = LEAF_RAW(state.node);
-        if (state.value_idx == 0 && !key_in_range(leaf)) {
+    while (!m_stack.empty()) {
+      TraversalState current_state = m_stack.back();
+
+      if (current_state.is_leaf) {
+        ART::Art_node *tagged_node = m_stack.back().node;
+        uint32_t value_idx = m_stack.back().value_idx;
+
+        if (!tagged_node || !IS_LEAF(tagged_node)) {
           m_stack.pop_back();
           continue;
         }
 
-        //*key_len_out = leaf->key_len;
-        // memcpy(key_out, leaf->key, *key_len_out);
-        *value_out = *reinterpret_cast<value_t *>(leaf->values[state.value_idx]);
-
-        if (++state.value_idx < leaf->vcount) {
-          m_stack.back().value_idx = state.value_idx;
-        } else {
+        ART::Art_leaf *leaf = LEAF_RAW(tagged_node);
+        if (!leaf || value_idx >= leaf->vcount) {
           m_stack.pop_back();
+          continue;
+        }
+
+        if (!key_in_range(leaf)) {
+          m_stack.pop_back();
+          continue;
+        }
+
+        *key_out = reinterpret_cast<const key_t *>(leaf->key);
+        *key_len_out = leaf->key_len;
+        *value_out = *reinterpret_cast<value_t *>(leaf->values[current_state.value_idx]);
+
+        if (current_state.value_idx + 1 >= leaf->vcount) {
+          m_stack.pop_back();
+        } else {
+          m_stack.back().value_idx = current_state.value_idx + 1;
         }
         return true;
       }
 
-      if (auto child = get_next_child(state)) {
-        m_stack.pop_back();
-        m_stack.push_back(state);
-
+      ART::Art_node *child = get_next_child(m_stack.back());
+      if (child) {
         if (IS_LEAF(child)) {
           m_stack.push_back({child, 0, true, 0});
         } else {
@@ -112,15 +131,15 @@ class ARTIterator {
   }
 
  private:
-  // Helper functions
   int compare_keys(const key_t *k1, int len1, const key_t *k2, int len2) {
-    int cmp = memcmp(k1, k2, std::min(len1, len2));
+    int min_len = std::min(len1, len2);
+    int cmp = memcmp(k1, k2, min_len);
     return cmp;
-    // if (cmp != 0) return cmp;
-    // return len1 - len2;
   }
 
   bool key_in_range(ART::Art_leaf *leaf) {
+    if (!leaf) return false;
+
     if (m_start_key) {
       int cmp_start = compare_keys(leaf->key, leaf->key_len, m_start_key, m_start_keylen);
       if (cmp_start < 0) return false;
@@ -135,54 +154,18 @@ class ARTIterator {
     return true;
   }
 
-  void push_children(ART::Art_node *n) {
-    switch (n->type) {
-      case ART::NodeType::NODE4: {
-        auto node4 = reinterpret_cast<ART::Art_node4 *>(n);
-        for (int i = node4->n.num_children - 1; i >= 0; --i) {
-          m_stack.push_back({node4->children[i], i, IS_LEAF(node4->children[i])});
-        }
-        break;
-      }
-      case ART::NodeType::NODE16: {
-        auto node16 = reinterpret_cast<ART::Art_node16 *>(n);
-        for (int i = node16->n.num_children - 1; i >= 0; --i) {
-          m_stack.push_back({node16->children[i], i, IS_LEAF(node16->children[i])});
-        }
-        break;
-      }
-      case ART::NodeType::NODE48: {
-        auto node48 = reinterpret_cast<ART::Art_node48 *>(n);
-        for (int i = 255; i >= 0; --i) {
-          if (node48->keys[i]) {
-            m_stack.push_back(
-                {node48->children[node48->keys[i] - 1], i, IS_LEAF(node48->children[node48->keys[i] - 1])});
-          }
-        }
-        break;
-      }
-      case ART::NodeType::NODE256: {
-        auto node256 = reinterpret_cast<ART::Art_node256 *>(n);
-        for (int i = 255; i >= 0; --i) {
-          if (node256->children[i]) {
-            m_stack.push_back({node256->children[i], i, IS_LEAF(node256->children[i])});
-          }
-        }
-        break;
-      }
-      default:
-        abort();
-    }
+  void find_start_position() {
+    if (!m_start_key || !m_art->root()) return;
+
+    m_stack.push_back({m_art->root(), 0, false, 0});
   }
 
   void expand_node(ART::Art_node *node) {
-    TraversalState state{node, 0, false, 0};
+    if (!node) return;
 
+    TraversalState state{node, 0, false, 0};
     switch (node->type) {
-      case ART::NodeType::NODE4: {
-        state.child_pos = 0;
-        break;
-      }
+      case ART::NodeType::NODE4:
       case ART::NodeType::NODE16: {
         state.child_pos = 0;
         break;
@@ -204,14 +187,14 @@ class ARTIterator {
         break;
       }
       default:
-        abort();
+        return;
     }
 
     m_stack.push_back(state);
   }
 
   ART::Art_node *get_next_child(TraversalState &state) {
-    if (state.is_leaf) return nullptr;
+    if (state.is_leaf || !state.node) return nullptr;
 
     ART::Art_node *child = nullptr;
     switch (state.node->type) {
@@ -256,7 +239,7 @@ class ARTIterator {
         break;
       }
       default:
-        abort();
+        return nullptr;
     }
     return child;
   }

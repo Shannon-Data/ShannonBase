@@ -96,6 +96,30 @@ int DataTable::init() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+void DataTable::encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key_info) {
+  if (!encoded_key || !original_key || !key_info) return;
+
+  auto offset{0u};
+  std::memcpy(encoded_key, original_key, key_len);
+
+  for (auto part = 0u; part < actual_key_parts(key_info); part++) {
+    auto key_part_info = key_info->key_part + part;
+    offset += (key_part_info->null_bit) ? 1 : 0;
+    auto type = key_part_info->field->type();
+
+    if (type == MYSQL_TYPE_DOUBLE || type == MYSQL_TYPE_FLOAT || type == MYSQL_TYPE_DECIMAL ||
+        type == MYSQL_TYPE_NEWDECIMAL) {
+      uchar encoding[8] = {0};
+      double val = Utils::Util::get_field_numeric<double>(key_part_info->field, original_key + offset, nullptr);
+      Utils::Encoder<double>::EncodeFloat(val, encoding);
+      std::memcpy(encoded_key + offset, encoding, key_part_info->length);
+    }
+
+    offset += key_part_info->length;
+    if (offset > key_len) break;
+  }
+}
+
 DataTable::FETCH_STATUS DataTable::fetch_next_row(ulong current_chunk, ulong offset_in_chunk, Field *source_fld) {
   auto rpd_field = m_rapid_table->get_field(source_fld->field_name);
   ut_a(rpd_field);
@@ -411,10 +435,12 @@ int DataTable::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fu
   auto key_info = m_data_source->s->key_info + m_active_index;
   auto offset{0u};
 
-  m_key = std::make_unique<uchar[]>(key_len);
-  std::memcpy(m_key.get(), key, key_len);
+  if (key_len == 0 && key != nullptr) return HA_ERR_WRONG_COMMAND;
 
-  if (key) {
+  if (key && key_len > 0) {
+    m_key = std::make_unique<uchar[]>(key_len);
+    std::memcpy(m_key.get(), key, key_len);
+
     for (auto part = 0u; part < actual_key_parts(key_info); part++) {
       auto key_part_info = key_info->key_part + part;
       offset += (key_part_info->null_bit) ? 1 : 0;
@@ -431,6 +457,8 @@ int DataTable::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fu
     }
   }
 
+  if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
+
   switch (find_flag) {
     case HA_READ_KEY_EXACT: {
       if (!m_index_iter->initialized()) m_index_iter->init_scan(m_key.get(), key_len, true, m_key.get(), key_len, true);
@@ -439,7 +467,7 @@ int DataTable::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fu
       if (!m_index_iter->initialized()) m_index_iter->init_scan(m_key.get(), key_len, true, nullptr, 0, false);
       break;
     case HA_READ_KEY_OR_PREV:
-      m_index_iter->init_scan(m_key.get(), key_len, true, nullptr, 0, true);
+      m_index_iter->init_scan(nullptr, 0, true, m_key.get(), key_len, true);
       break;
     case HA_READ_AFTER_KEY:
       if (!m_index_iter->initialized()) m_index_iter->init_scan(m_key.get(), key_len, false, nullptr, 0, false);
@@ -451,10 +479,11 @@ int DataTable::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fu
       return HA_ERR_WRONG_COMMAND;
   }
 
-  const uchar *keykey{nullptr};
-  uint32_t keykey_len{0};
-  row_id_t value{std::numeric_limits<size_t>::max()};
-  if (m_index_iter->next(keykey, &keykey_len, (void *)&value)) {
+  const uchar *result_key{nullptr};
+  uint32_t result_key_len{0};
+  row_id_t value{std::numeric_limits<row_id_t>::max()};
+
+  if (m_index_iter->next(&result_key, &result_key_len, &value)) {
     m_rowid.store(value);
     auto ret = next(buf);
     if (ret) {
@@ -467,12 +496,16 @@ int DataTable::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fu
 }
 
 int DataTable::index_next(uchar *buf) {
-  const uchar *keykey{nullptr};
-  uint32_t keykey_len{0};
-  row_id_t value{std::numeric_limits<size_t>::max()};
+  const uchar *result_key{nullptr};
+  uint32_t result_key_len{0};
+  row_id_t value{std::numeric_limits<row_id_t>::max()};
   int err{HA_ERR_END_OF_FILE};
 
-  if (m_index_iter->next(keykey, &keykey_len, (void *)&value)) {
+  if (!m_index_iter) {
+    return HA_ERR_INTERNAL_ERROR;
+  }
+
+  if (m_index_iter->next(&result_key, &result_key_len, &value)) {
     m_rowid.store(value);
     auto ret = next(buf);
     if (ret) {
@@ -483,6 +516,8 @@ int DataTable::index_next(uchar *buf) {
 
   return err;
 }
+
+int DataTable::index_prev(uchar *buf) { return HA_ERR_WRONG_COMMAND; }
 
 row_id_t DataTable::find(uchar *buf) {
   row_id_t rowid{0u};

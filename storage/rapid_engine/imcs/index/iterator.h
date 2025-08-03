@@ -58,27 +58,42 @@ class Iterator {
   virtual void init_scan(const uchar *startkey, int startkey_len, bool start_inclusive, const uchar *endkey,
                          int endkey_len, bool end_inclusive) = 0;
 
-  // get the next key-value pair.
-  virtual bool next(const uchar *key_out, uint32_t *key_len_out, void *value_out) = 0;
+  virtual bool next(const uchar **key_out, uint32_t *key_len_out, void *value_out) = 0;
 
   virtual bool initialized() = 0;
 };
 
 class Art_Iterator : public Iterator {
  public:
-  explicit Art_Iterator(ART *art) : Iterator(art), m_tree(art->tree()) {
-    m_art_iter = std::make_unique<ARTIterator<uchar, row_id_t>>(art);
+  explicit Art_Iterator(ART *art) : Iterator(art), m_tree(art ? art->tree() : nullptr) {
+    if (art) {
+      m_art_iter = std::make_unique<ARTIterator<uchar, row_id_t>>(art);
+    }
   }
   ~Art_Iterator() = default;
 
   void init_scan(const uchar *startkey, int startkey_len, bool start_inclusive, const uchar *endkey, int endkey_len,
                  bool end_inclusive) override {
-    m_art_iter->init_scan(startkey, startkey_len, start_inclusive, endkey, endkey_len, end_inclusive);
-    m_initialized = true;
+    if (m_art_iter) {
+      m_art_iter->init_scan(startkey, startkey_len, start_inclusive, endkey, endkey_len, end_inclusive);
+      m_initialized = true;
+    }
   }
 
-  bool next(const uchar *key_out, uint32_t *key_len_out, void *value_out) override {
-    return m_art_iter->next(key_out, key_len_out, (row_id_t *)value_out);
+  bool next(const uchar **key_out, uint32_t *key_len_out, void *value_out) override {
+    if (!m_art_iter) return false;
+
+    const uchar *temp_key;
+    row_id_t temp_value;
+
+    bool result = m_art_iter->next(&temp_key, key_len_out, &temp_value);
+
+    if (result) {
+      *key_out = temp_key;
+      *static_cast<row_id_t *>(value_out) = temp_value;
+    }
+
+    return result;
   }
 
   bool initialized() override { return m_initialized; }
