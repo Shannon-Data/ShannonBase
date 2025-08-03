@@ -35,6 +35,7 @@
 #include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/trx/transaction.h"
 
 class TABLE;
 class Field;
@@ -96,6 +97,7 @@ class RapidTable : public MemoryObject {
   virtual std::string &name() = 0;
   virtual row_id_t reserver_rowid() = 0;
   virtual int truncate() = 0;
+  virtual int rollback_changes_by_trxid(Transaction::ID trxid) = 0;
 
  protected:
   TYPE m_type;
@@ -160,6 +162,9 @@ class Table : public RapidTable {
     assert(false);
     return ShannonBase::SHANNON_SUCCESS;
   }
+
+  // rollback a modified record.
+  virtual int rollback_changes_by_trxid(Transaction::ID trxid) final;
 
   // gets the # of physical rows.
   virtual row_id_t rows(const Rapid_load_context *) final { return m_prows.load(); }
@@ -242,6 +247,9 @@ class PartTable : public RapidTable {
     assert(false);
     return ShannonBase::SHANNON_SUCCESS;
   }
+
+  // rollback a modified record.
+  virtual int rollback_changes_by_trxid(Transaction::ID trxid) final;
 
   // gets the # of physical rows.
   virtual row_id_t rows(const Rapid_load_context *) final { return m_prows.load(); }
