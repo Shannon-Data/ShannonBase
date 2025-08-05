@@ -37,10 +37,11 @@
 #include "storage/rapid_engine/trx/readview.h"
 #include "storage/rapid_engine/utils/concurrent.h"  //asio
 #include "storage/rapid_engine/utils/cpu.h"         //SimpleRatioAdjuster
+
 class TABLE;
+class key_range;
 namespace ShannonBase {
 class Rapid_load_context;
-
 namespace Imcs {
 class Imcs;
 class Cu;
@@ -102,7 +103,7 @@ class DataTable : public MemoryObject {
   // for index scan end.
   int index_end();
 
-  // index read.
+  // index read. start_key is true, if start_key is not null or start_key is false.
   int index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag);
 
   // index read next
@@ -119,6 +120,8 @@ class DataTable : public MemoryObject {
     return m_row_buffer.get();
   }
 
+  inline void set_end_range(key_range *end_range) { m_end_range = end_range; }
+
  private:
   struct IteratorDeleter {
     void operator()(Index::Iterator *p) const {
@@ -127,7 +130,7 @@ class DataTable : public MemoryObject {
   };
   enum class FETCH_STATUS : uint8 { FETCH_ERROR, FETCH_OK, FETCH_CONTINUE, FETCH_NEXT_ROW };
 
-  DataTable::FETCH_STATUS fetch_next_row(ulong current_chunk, ulong offset_in_chunk, Field *source_fld);
+  DataTable::FETCH_STATUS fetch_row_field(ulong current_chunk, ulong offset_in_chunk, Field *source_fld);
 
   // Helper method to encode key parts for ART storage
   void encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key_info);
@@ -153,12 +156,17 @@ class DataTable : public MemoryObject {
   // active index no.
   int8_t m_active_index{MAX_KEY};
 
-  // key
+  // key buff to store the encoded key data.
   std::unique_ptr<uchar[]> m_key{nullptr};
+
+  // end key buff to store the encoded key data if it end_range is available.
+  std::unique_ptr<uchar[]> m_end_key{nullptr};
 
   // Reusable buffer
   std::unique_ptr<uchar[]> m_row_buffer;
   size_t m_buffer_size = 0;
+
+  key_range *m_end_range{nullptr};
 
   static ShannonBase::Utils::SimpleRatioAdjuster m_adaptive_ratio;
 };

@@ -58,6 +58,7 @@ SET(SHANNON_IMCS_SOURCES
    imcs/cu.cpp
    imcs/chunk.cpp
    imcs/index/art/art.cpp
+   imcs/index/encoder.cpp
    utils/utils.cpp
    utils/SIMD.cpp
    imcs/purge/purge.cpp

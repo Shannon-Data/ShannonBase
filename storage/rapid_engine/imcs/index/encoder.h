@@ -19,45 +19,25 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   The fundmental code for imcs.
-
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+
+   The fundmental code for imcs.
 */
-
-#ifndef __SHANNONBASE_RAPID_ML_H__
-#define __SHANNONBASE_RAPID_ML_H__
-
-#include <string>
-#include "LightGBM/c_api.h"  //lightgbm
-
-class THD;
-class JOIN;
+#ifndef __SHANNONBASE_INDEX_ENCODER_H__
+#define __SHANNONBASE_INDEX_ENCODER_H__
 
 namespace ShannonBase {
-namespace ML {
-class Query_arbitrator {
+namespace Imcs {
+namespace Index {
+
+template <typename T>
+class Encoder {
  public:
-  static float TO_RAPID_THRESHOLD;
-  enum class WHERE2GO { TO_PRIMARY, TO_SECONDARY };
-
-  Query_arbitrator() = default;
-  ~Query_arbitrator() {
-    if (m_booster) {
-      LGBM_BoosterFree(m_booster);
-      m_booster = nullptr;
-    }
-  }
-
-  void set_model_path(const std::string &model_path) { m_model_path = model_path; }
-  // load the trainned model, which was based on query information-`JOIN`.
-  virtual void load_model(const std::string &model_path);
-  virtual WHERE2GO predict(JOIN *);
-
- private:
-  std::string m_model_path;
-  BoosterHandle m_booster{nullptr};
+  static void EncodeData(T value, unsigned char *key);
+  static T DecodeData(const unsigned char *key);
 };
 
-}  // namespace ML
+}  // namespace Index
+}  // namespace Imcs
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_RAPID_ML_H__
+#endif  //#define __SHANNONBASE_INDEX_ENCODER_H__
