@@ -50,9 +50,10 @@
 #include "storage/innobase/include/row0upd.h"
 #include "storage/innobase/rem/rec.h"
 
-#include "storage/rapid_engine/imcs/chunk.h"             //chunk
-#include "storage/rapid_engine/imcs/cu.h"                //cu
-#include "storage/rapid_engine/imcs/imcs.h"              //imcs
+#include "storage/rapid_engine/imcs/chunk.h"  //chunk
+#include "storage/rapid_engine/imcs/cu.h"     //cu
+#include "storage/rapid_engine/imcs/imcs.h"   //imcs
+#include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/table.h"             //RapidTable
 #include "storage/rapid_engine/include/rapid_context.h"  //Rapid_load_context
 #include "storage/rapid_engine/include/rapid_status.h"   //LoaedTables
@@ -202,8 +203,26 @@ int LogParser::build_key(const Rapid_load_context *context,
           auto field_ptr = rpd_tb->get_field(key_field)->header()->m_source_fld;
           uchar encoding[8] = {0};
           auto val = Utils::Util::get_field_numeric<double>(field_ptr, mysql_field.data.get(), nullptr);
-          Utils::Encoder<double>::EncodeFloat(val, encoding);
+          ShannonBase::Imcs::Index::Encoder<double>::EncodeData(val, encoding);
           std::memcpy(key_buff.get() + key_offset, encoding, mysql_field.mlength);
+          key_offset += mysql_field.mlength;
+        } break;
+        case DATA_INT: {
+          if (key_offset + mysql_field.mlength > key_len) {
+            return HA_ERR_GENERIC;
+          }
+          ut_a(mysql_field.mlength == mysql_field.plength);
+          auto field_ptr = rpd_tb->get_field(key_field)->header()->m_source_fld;
+          switch (field_ptr->type()) {
+            case MYSQL_TYPE_LONG: {
+              uchar encoding[4] = {0};
+              auto val = Utils::Util::get_field_numeric<int32_t>(field_ptr, mysql_field.data.get(), nullptr);
+              ShannonBase::Imcs::Index::Encoder<int32_t>::EncodeData(val, encoding);
+              std::memcpy(key_buff.get() + key_offset, encoding, mysql_field.mlength);
+            } break;
+            default: {
+            } break;
+          }
           key_offset += mysql_field.mlength;
         } break;
         default: {
