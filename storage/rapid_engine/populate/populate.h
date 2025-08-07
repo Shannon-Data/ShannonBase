@@ -31,6 +31,8 @@
 #ifndef __SHANNONBASE_POPULATE_H__
 #define __SHANNONBASE_POPULATE_H__
 #include <memory>
+#include <set>
+#include <shared_mutex>
 #include <unordered_map>
 
 #include "my_inttypes.h"
@@ -99,6 +101,8 @@ item by a co-routine to promot the performance.
  * opers.
  */
 extern std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
+extern std::shared_mutex g_processing_table_mutex;
+extern std::set<std::string> g_processing_tables;
 
 class Populator {
  public:
@@ -111,7 +115,11 @@ class Populator {
   // to print thread infos.
   static void print_info(FILE *file);
   // to check whether the specific table are still do populating.
-  static bool check_status(std::string &table_name);
+  // true is in pop queue, otherwise return false; tabel_name format: `schema_name/table_name`
+  static inline bool check_status(std::string &table_name) {
+    std::shared_lock<std::shared_mutex> lk(g_processing_table_mutex);
+    return (g_processing_tables.find(table_name) != g_processing_tables.end()) ? true : false;
+  }
   // to send notify to populator main thread to start do propagation.
   static void send_notify();
 

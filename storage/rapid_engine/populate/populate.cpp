@@ -143,10 +143,11 @@ static void parse_log_func_main(log_t *log_ptr) {
     // we only use a half of threads to do propagation.
     std::vector<std::future<uint64_t>> results;
     size_t thread_num = std::thread::hardware_concurrency() / 2;
+
+    mutex_enter(&log_sys->rapid_populator_mutex);
     thread_num = (thread_num >= sys_pop_buff.size()) ? sys_pop_buff.size() : thread_num;
     auto curr_iter = sys_pop_buff.begin();
     for (size_t counter = 0; counter < thread_num; counter++) {
-      mutex_enter(&log_sys->rapid_populator_mutex);
       byte *from_ptr = curr_iter->second.data.get();
       auto size = curr_iter->second.size;
 
@@ -154,10 +155,9 @@ static void parse_log_func_main(log_t *log_ptr) {
       results.emplace_back(
           std::async(std::launch::async, parse_mtr_log_worker, curr_iter->first, from_ptr, from_ptr + size, size));
       curr_iter++;
-      mutex_exit(&log_sys->rapid_populator_mutex);
-
       if (curr_iter == sys_pop_buff.end()) break;
     }
+    mutex_exit(&log_sys->rapid_populator_mutex);
 
     for (auto &res : results) {  // gets the result from worker thread.
       auto ret_lsn = res.get();
@@ -293,8 +293,5 @@ void Populator::print_info(FILE *file) { /* in: output stream */
           ShannonBase::Populate::sys_pop_started ? "running" : "stopped", ShannonBase::Populate::sys_rapid_loop_count,
           ShannonBase::Populate::sys_pop_data_sz / 1024, ShannonBase::Populate::sys_pop_buff.size());
 }
-
-bool Populator::check_status(std::string &table_name) { return false; }
-
 }  // namespace Populate
 }  // namespace ShannonBase

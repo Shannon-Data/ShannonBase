@@ -218,11 +218,13 @@ bool Util::dynamic_feature_normalization(THD *thd) {
   }
 
   // to checkts whether query involves tables are still in pop queue. if yes, go innodb.
-  for (auto &table_ref : stmt_context->get_query_tables()) {
-    std::string table_name(table_ref->db);
-    table_name += ":";
-    table_name += table_ref->table_name;
-    if (ShannonBase::Populate::Populator::check_status(table_name)) return false;
+  if (thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED) {
+    for (auto &table_ref : stmt_context->get_query_tables()) {
+      std::string table_name(table_ref->db);
+      table_name += "/";
+      table_name += table_ref->table_name;
+      if (ShannonBase::Populate::Populator::check_status(table_name)) return false;
+    }
   }
 
   return false;

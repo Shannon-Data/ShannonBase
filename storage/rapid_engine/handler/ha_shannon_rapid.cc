@@ -774,25 +774,23 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
 
   auto shannon_statement_context = thd->secondary_engine_statement_context();
   auto primary_plan_info = shannon_statement_context->get_cached_primary_plan_info();
+  ut_a(primary_plan_info);
 
-  // 1: to check whether the sys_pop_data_sz has too many data to populate.
+  // 1: to check whether there're changes in sys_pop_buff, which will be used for query.
+  // if there're still do populating, then goes to innodb. and gets cardinality of tables.
+  ut_a(thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED);
+  for (auto &table_ref : shannon_statement_context->get_query_tables()) {
+    std::string table_name(table_ref->db);
+    table_name.append("/").append(table_ref->table_name);
+    if (ShannonBase::Populate::Populator::check_status(table_name)) return true;
+  }
+
+  // 2: to check whether the sys_pop_data_sz has too many data to populate.
   uint64 too_much_pop_threshold =
       static_cast<uint64_t>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
   if (ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
     SetSecondaryEngineOffloadFailedReason(thd, "too much changes need to populate.");
     return true;
-  }
-
-  // 2: to check whether there're changes in sys_pop_buff, which will be used for query.
-  // if there're still do populating, then goes to innodb. and gets cardinality of tables.
-  for (uint i = primary_plan_info->tables; i < primary_plan_info->tables; i++) {
-    // primary_plan_info->query_expression()->first_query_block()->leaf_tables;
-    // for (Table_ref *tr = leaf_tables; tr != nullptr; tr = tr->next_leaf)
-    std::string db_tb;
-    if (ShannonBase::Populate::Populator::check_status(db_tb)) {
-      SetSecondaryEngineOffloadFailedReason(thd, "table queried is populating.");
-      return true;
-    }
   }
 
   // 3: checks dict encoding projection, and varlen project size, etc.

@@ -33,6 +33,7 @@
 
 #include "storage/rapid_engine/populate/log_parser.h"
 #include <algorithm>
+#include <set>
 
 #include "current_thd.h"
 #include "sql/table.h"
@@ -64,6 +65,12 @@ extern int rpd_async_column_threshold;
 namespace Populate {
 // to cache the found index_t usd by log parser, and used for next time.
 std::unordered_map<uint64, const dict_index_t *> g_index_cache;
+
+// to cache the which tables are processing. in populating queue. In query stage, we will check `g_processing_tables`
+// to find out the rapid table is updated or not. If tables in query statement are still in do populating, then query
+// should go to innnodb or go to rapid.
+std::shared_mutex g_processing_table_mutex;
+std::set<std::string> g_processing_tables;
 
 // if using dict_index_t->table->get_table_name, it seems to slow, using cache
 // to accelerate it.
@@ -2102,6 +2109,12 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
 
   new_ptr = const_cast<byte *>(mlog_parse_initial_log_record(ptr, end_ptr, type, space_id, page_no));
   *body = new_ptr;
+  {
+    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+    fil_space_t *space = fil_space_acquire(*space_id);
+    if (space && space->name) g_processing_tables.emplace(space->name);
+    fil_space_release(space);
+  }
 
   if (new_ptr == nullptr) {  // skip it, go to next.
     return (std::ptrdiff_t(end_ptr - ptr));
@@ -2131,18 +2144,25 @@ ulint LogParser::parse_single_rec(Rapid_load_context *context, byte *ptr, byte *
   page_no_t page_no = 0;
   space_id_t space_id = 0;
 
-  return parse_log_rec(context, &type, ptr, end_ptr, &space_id, &page_no, &body);
+  auto ret = parse_log_rec(context, &type, ptr, end_ptr, &space_id, &page_no, &body);
+  {  // the log processed done.
+    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+    fil_space_t *space = fil_space_acquire(space_id);
+    if (space && space->name) g_processing_tables.erase(space->name);
+    fil_space_release(space);
+  }
+  return ret;
 }
 
 ulint LogParser::parse_multi_rec(Rapid_load_context *context, byte *ptr, byte *end_ptr) {
   ut_a(end_ptr >= ptr);
   ulint parsed_bytes{0}, n_recs{0};
 
+  space_id_t space_id = 0;
   for (;;) {
     mlog_id_t type = MLOG_BIGGEST_TYPE;
     byte *body;
     page_no_t page_no = 0;
-    space_id_t space_id = 0;
 
     ulint len = parse_log_rec(context, &type, ptr, end_ptr, &space_id, &page_no, &body);
     if (len == 0) {
@@ -2185,6 +2205,13 @@ ulint LogParser::parse_multi_rec(Rapid_load_context *context, byte *ptr, byte *e
         break;
     }
   }
+  {  // the log processed done. `fil_space_get` is not thread-safe, using `fil_space_acquire`/`fil_space_release`.
+    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+    fil_space_t *space = fil_space_acquire(space_id);
+    if (space && space->name) g_processing_tables.erase(space->name);
+    fil_space_release(space);
+  }
+
   return parsed_bytes;
 }
 
