@@ -40,12 +40,127 @@
 #include "storage/rapid_engine/imcs/chunk.h"  //CHUNK
 #include "storage/rapid_engine/imcs/cu.h"     //CU
 
+#include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/utils/utils.h"  //Blob
 
 namespace ShannonBase {
 namespace Imcs {
+
+static void encode_row_key(uchar *to_key, const uchar *from_record, const KEY *key_info, uint key_len) {
+  if (!to_key || !from_record || !key_info || key_len == 0) return;
+
+  memset(to_key, 0x0, key_len);
+
+  uint length{0u};
+  auto remain_len = key_len;
+
+  for (KEY_PART_INFO *key_part = key_info->key_part; remain_len > 0; key_part++) {
+    if (key_part->null_bit) {
+      bool is_null = from_record[key_part->null_offset] & key_part->null_bit;
+      *to_key++ = (is_null ? 1 : 0);
+      remain_len--;
+    }
+
+    length = std::min<uint>(remain_len, key_part->length);
+    Field *field = key_part->field;
+    const CHARSET_INFO *cs = field->charset();
+
+    if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
+      remain_len -= HA_KEY_BLOB_LENGTH;
+      length = std::min<uint>(remain_len, key_part->length);
+      field->get_key_image(to_key, length, Field::itRAW);
+      to_key += HA_KEY_BLOB_LENGTH;
+    } else {
+      switch (field->type()) {
+        case MYSQL_TYPE_DOUBLE:
+        case MYSQL_TYPE_FLOAT:
+        case MYSQL_TYPE_DECIMAL:
+        case MYSQL_TYPE_NEWDECIMAL: {
+          uchar encoding[8] = {0};
+          Index::Encoder<double>::EncodeData(field->val_real(), encoding);
+          memcpy(to_key, encoding, length);  // decimal stored length: 5 not 8.
+        } break;
+        case MYSQL_TYPE_LONG: {
+          ut_a(length == sizeof(int32_t));
+          uchar encoding[4] = {0};
+          Index::Encoder<int32_t>::EncodeData((int32_t)field->val_int(), encoding);
+          memcpy(to_key, encoding, length);
+        } break;
+        default: {
+          ut_a(length == field->pack_length());
+          size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
+          if (bytes < length) {
+            cs->cset->fill(cs, reinterpret_cast<char *>(to_key + bytes), length - bytes, ' ');
+          }
+        } break;
+      }
+    }
+
+    to_key += length;
+    remain_len -= length;
+  }
+}
+
+static void encode_key_from_row(const uchar *rowdata, const ulong *col_offsets, const ulong *null_byte_offsets,
+                                const ulong *null_bitmasks, const KEY *key, uchar *key_buff,
+                                std::shared_mutex &key_buff_mutex) {
+  if (!rowdata || !key) return;
+
+  auto to_key = key_buff;
+
+  uint length{0u};
+  KEY_PART_INFO *key_part;
+  auto key_length = key->key_length;
+  { /* Copy the key parts */
+    std::unique_lock<std::shared_mutex> ex_lk(key_buff_mutex);
+    for (key_part = key->key_part; (int)key_length > 0; key_part++) {
+      Field *field = key_part->field;
+      const CHARSET_INFO *cs = field->charset();
+      auto fld_ptr = rowdata + ptrdiff_t(col_offsets[field->field_index()]);
+      field->set_field_ptr(const_cast<uchar *>(fld_ptr));
+
+      if (key_part->null_bit) {
+        bool key_is_null = rowdata[key_part->null_offset] & key_part->null_bit;
+        // ut_a(is_field_null(field->field_index(), rowdata, null_byte_offsets, null_bitmasks) == key_is_null);
+        *to_key++ = (key_is_null ? 1 : 0);
+        key_length--;
+      }
+
+      if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
+        key_length -= HA_KEY_BLOB_LENGTH;
+        length = std::min<uint>(key_length, key_part->length);
+        field->get_key_image(to_key, length, Field::itRAW);
+        to_key += HA_KEY_BLOB_LENGTH;
+      } else {
+        length = std::min<uint>(key_length, key_part->length);
+        switch (field->type()) {
+          case MYSQL_TYPE_DOUBLE:
+          case MYSQL_TYPE_FLOAT:
+          case MYSQL_TYPE_DECIMAL:
+          case MYSQL_TYPE_NEWDECIMAL: {
+            uchar encoding[8] = {0};
+            Index::Encoder<double>::EncodeData(field->val_real(), encoding);  // decimal stored length: 5 not 8.
+            memcpy(to_key, encoding, length);
+          } break;
+          case MYSQL_TYPE_LONG: {
+            ut_a(length == sizeof(int32_t));
+            uchar encoding[4] = {0};
+            Index::Encoder<int32_t>::EncodeData((int32_t)field->val_int(), encoding);
+            memcpy(to_key, encoding, length);
+          } break;
+          default: {
+            const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
+            if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
+          } break;
+        }
+      }
+      to_key += length;
+      key_length -= length;
+    }
+  }  // scope lock end.
+}
 
 int Table::create_fields_memo(const Rapid_load_context *context) {
   ut_a(context && context->m_table);
@@ -116,6 +231,8 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
   // this is come from ha_innodb.cc postion(), when postion() changed, the part should be changed respondingly.
   // why we dont not change the impl of postion() directly? because the postion() is impled in innodb engine.
   // we want to decouple with innodb engine.
+  // ref: void key_copy(uchar *to_key, const uchar *from_record, const KEY *key_info,
+  //            uint key_length). Due to we should encoding the float/double/decimal types.
   auto source = context->m_table;
 
   if (key == nullptr) {
@@ -137,40 +254,7 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
     memset(context->m_extra_info.m_key_buff.get(), 0x0, key->key_length);
     auto to_key = context->m_extra_info.m_key_buff.get();
-
-    uint length{0u};
-    KEY_PART_INFO *key_part;
-    /* Copy the key parts */
-    auto key_length = key->key_length;
-    for (key_part = key->key_part; (int)key_length > 0; key_part++) {
-      if (key_part->null_bit) {
-        bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
-        *to_key++ = (key_is_null ? 1 : 0);
-        key_length--;
-      }
-
-      if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
-        key_length -= HA_KEY_BLOB_LENGTH;
-        length = std::min<uint>(key_length, key_part->length);
-        key_part->field->get_key_image(to_key, length, Field::itRAW);
-        to_key += HA_KEY_BLOB_LENGTH;
-      } else {
-        length = std::min<uint>(key_length, key_part->length);
-        Field *field = key_part->field;
-        const CHARSET_INFO *cs = field->charset();
-        if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
-            field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
-          uchar encoding[8] = {0};
-          Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
-          memcpy(to_key, encoding, length);
-        } else {
-          const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
-          if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
-        }
-      }
-      to_key += length;
-      key_length -= length;
-    }
+    encode_row_key(to_key, from_record, key, key->key_length);
   }
   auto keypart = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
   {
@@ -206,52 +290,11 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
     memcpy(key_buff.get(), source->file->ref, key_len);
   } else {
     /* Copy primary key as the row reference */
-    auto from_record = rowdata;
-
     key_len = key->key_length;
     key_buff.reset(new uchar[key_len]);
     memset(key_buff.get(), 0x0, key_len);
     auto to_key = key_buff.get();
-
-    uint length{0u};
-    KEY_PART_INFO *key_part;
-    auto key_length = key->key_length;
-    { /* Copy the key parts */
-      std::unique_lock<std::shared_mutex> ex_lk(m_key_buff_mutex);
-      for (key_part = key->key_part; (int)key_length > 0; key_part++) {
-        Field *field = key_part->field;
-        const CHARSET_INFO *cs = field->charset();
-        auto fld_ptr = rowdata + ptrdiff_t(col_offsets[field->field_index()]);
-        field->set_field_ptr(fld_ptr);
-
-        if (key_part->null_bit) {
-          bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
-          ut_a(is_field_null(field->field_index(), rowdata, null_byte_offsets, null_bitmasks) == key_is_null);
-          *to_key++ = (key_is_null ? 1 : 0);
-          key_length--;
-        }
-
-        if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
-          key_length -= HA_KEY_BLOB_LENGTH;
-          length = std::min<uint>(key_length, key_part->length);
-          field->get_key_image(to_key, length, Field::itRAW);
-          to_key += HA_KEY_BLOB_LENGTH;
-        } else {
-          length = std::min<uint>(key_length, key_part->length);
-          if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
-              field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
-            uchar encoding[8] = {0};
-            Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
-            memcpy(to_key, encoding, length);
-          } else {
-            const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
-            if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
-          }
-        }
-        to_key += length;
-        key_length -= length;
-      }
-    }  // scope lock end.
+    encode_key_from_row(rowdata, col_offsets, null_byte_offsets, null_bitmasks, key, to_key, m_key_buff_mutex);
   }
 
   auto keypart = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
@@ -627,40 +670,7 @@ int PartTable::build_index_impl(const Rapid_load_context *context, const KEY *ke
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
     memset(context->m_extra_info.m_key_buff.get(), 0x0, key->key_length);
     auto to_key = context->m_extra_info.m_key_buff.get();
-
-    uint length{0u};
-    KEY_PART_INFO *key_part;
-    /* Copy the key parts */
-    auto key_length = key->key_length;
-    for (key_part = key->key_part; (int)key_length > 0; key_part++) {
-      if (key_part->null_bit) {
-        bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
-        *to_key++ = (key_is_null ? 1 : 0);
-        key_length--;
-      }
-
-      if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
-        key_length -= HA_KEY_BLOB_LENGTH;
-        length = std::min<uint>(key_length, key_part->length);
-        key_part->field->get_key_image(to_key, length, Field::itRAW);
-        to_key += HA_KEY_BLOB_LENGTH;
-      } else {
-        length = std::min<uint>(key_length, key_part->length);
-        Field *field = key_part->field;
-        const CHARSET_INFO *cs = field->charset();
-        if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
-            field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
-          uchar encoding[8] = {0};
-          Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
-          memcpy(to_key, encoding, length);
-        } else {
-          const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
-          if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
-        }
-      }
-      to_key += length;
-      key_length -= length;
-    }
+    encode_row_key(to_key, from_record, key, key->key_length);
   }
 
   auto keyname = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;
@@ -698,53 +708,11 @@ int PartTable::build_index_impl(const Rapid_load_context *context, const KEY *ke
     memcpy(key_buff.get(), source->file->ref, key_len);
   } else {
     /* Copy primary key as the row reference */
-    auto from_record = rowdata;
-
     key_len = key->key_length;
     key_buff = std::make_unique<uchar[]>(key_len);
     memset(key_buff.get(), 0x0, key_len);
     auto to_key = key_buff.get();
-
-    uint length{0u};
-    KEY_PART_INFO *key_part;
-    /* Copy the key parts */
-    auto key_length = key->key_length;
-    {
-      std::unique_lock<std::shared_mutex> ex_lk(m_key_buff_mutex);
-      for (key_part = key->key_part; (int)key_length > 0; key_part++) {
-        Field *field = key_part->field;
-        const CHARSET_INFO *cs = field->charset();
-        auto fld_ptr = rowdata + ptrdiff_t(col_offsets[field->field_index()]);
-        field->set_field_ptr(fld_ptr);
-
-        if (key_part->null_bit) {
-          bool key_is_null = from_record[key_part->null_offset] & key_part->null_bit;
-          ut_a(is_field_null(field->field_index(), rowdata, null_byte_offsets, null_bitmasks) == key_is_null);
-          *to_key++ = (key_is_null ? 1 : 0);
-          key_length--;
-        }
-
-        if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
-          key_length -= HA_KEY_BLOB_LENGTH;
-          length = std::min<uint>(key_length, key_part->length);
-          field->get_key_image(to_key, length, Field::itRAW);
-          to_key += HA_KEY_BLOB_LENGTH;
-        } else {
-          length = std::min<uint>(key_length, key_part->length);
-          if (field->type() == MYSQL_TYPE_DOUBLE || field->type() == MYSQL_TYPE_FLOAT ||
-              field->type() == MYSQL_TYPE_DECIMAL || field->type() == MYSQL_TYPE_NEWDECIMAL) {
-            uchar encoding[8] = {0};
-            Utils::Encoder<double>::EncodeFloat(field->val_real(), encoding);
-            memcpy(to_key, encoding, length);
-          } else {
-            const size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
-            if (bytes < length) cs->cset->fill(cs, (char *)to_key + bytes, length - bytes, ' ');
-          }
-        }
-        to_key += length;
-        key_length -= length;
-      }
-    }
+    encode_key_from_row(rowdata, col_offsets, null_byte_offsets, null_bitmasks, key, to_key, m_key_buff_mutex);
   }
 
   auto keyname = key ? key->name : ShannonBase::SHANNON_PRIMARY_KEY_NAME;

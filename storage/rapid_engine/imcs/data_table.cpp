@@ -33,13 +33,15 @@
 
 #include <sstream>
 
-#include "include/ut0dbg.h"  //ut_a
-#include "sql/field.h"       //field
-#include "sql/table.h"       //TABLE
+#include "include/my_base.h"  //key_range
+#include "include/ut0dbg.h"   //ut_a
+#include "sql/field.h"        //field
+#include "sql/table.h"        //TABLE
 #include "storage/innobase/include/mach0data.h"
 #include "storage/rapid_engine/imcs/chunk.h"  //CHUNK
 #include "storage/rapid_engine/imcs/cu.h"     //CU
 #include "storage/rapid_engine/imcs/imcs.h"   //IMCS
+#include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/table.h"  //RapidTable
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/populate.h"  //sys_pop_buff
@@ -96,7 +98,47 @@ int DataTable::init() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-DataTable::FETCH_STATUS DataTable::fetch_next_row(ulong current_chunk, ulong offset_in_chunk, Field *source_fld) {
+void DataTable::encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key_info) {
+  if (!encoded_key || !original_key || !key_info) return;
+
+  auto offset{0u};
+  std::memcpy(encoded_key, original_key, key_len);
+
+  for (auto part = 0u; part < actual_key_parts(key_info); part++) {
+    auto key_part_info = key_info->key_part + part;
+    if (key_part_info->null_bit) offset += 1;
+
+    switch (key_part_info->field->type()) {
+      case MYSQL_TYPE_DOUBLE:
+      case MYSQL_TYPE_FLOAT: {
+        uchar encoding[8] = {0};
+        auto val = Utils::Util::get_field_numeric<double>(key_part_info->field, original_key + offset, nullptr);
+        Index::Encoder<double>::EncodeData(val, encoding);
+        std::memcpy(encoded_key + offset, encoding, key_part_info->length);
+      } break;
+      case MYSQL_TYPE_DECIMAL:
+      case MYSQL_TYPE_NEWDECIMAL: {
+        uchar encoding[8] = {0};
+        auto val = Utils::Util::get_field_numeric<double>(key_part_info->field, original_key + offset, nullptr);
+        Index::Encoder<double>::EncodeData(val, encoding);
+        std::memcpy(encoded_key + offset, encoding, key_part_info->length);
+      } break;
+      case MYSQL_TYPE_LONG: {
+        ut_a(key_part_info->length == sizeof(int32_t));
+        uchar encoding[4] = {0};
+        auto val = Utils::Util::get_field_numeric<int32_t>(key_part_info->field, original_key + offset, nullptr);
+        Index::Encoder<int32_t>::EncodeData(val, encoding);
+        std::memcpy(encoded_key + offset, encoding, key_part_info->length);
+      } break;
+      default:
+        break;
+    }
+    offset += key_part_info->field->pack_length();
+    if (offset >= key_len) break;
+  }
+}
+
+DataTable::FETCH_STATUS DataTable::fetch_row_field(ulong current_chunk, ulong offset_in_chunk, Field *source_fld) {
   auto rpd_field = m_rapid_table->get_field(source_fld->field_name);
   ut_a(rpd_field);
 
@@ -199,7 +241,7 @@ start:
             });
 
             try {
-              auto res = fetch_next_row(current_chunk, offset_in_chunk, source_fld);
+              auto res = fetch_row_field(current_chunk, offset_in_chunk, source_fld);
 
               if (res == DataTable::FETCH_STATUS::FETCH_NEXT_ROW || res == DataTable::FETCH_STATUS::FETCH_ERROR) {
                 if (!promise_set->exchange(true)) {
@@ -251,7 +293,7 @@ start:
   for (auto ind = 0u; ind < m_data_source->s->fields; ind++) {
     auto source_fld = *(m_data_source->field + ind);
     if (!bitmap_is_set(m_data_source->read_set, ind) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-    auto res = fetch_next_row(current_chunk, offset_in_chunk, source_fld);
+    auto res = fetch_row_field(current_chunk, offset_in_chunk, source_fld);
     if (res == DataTable::FETCH_STATUS::FETCH_NEXT_ROW) {
       m_rowid.fetch_add(1);
       goto start;
@@ -405,31 +447,16 @@ int DataTable::index_end() {
 
 // index read.
 int DataTable::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) {
-  int err{HA_ERR_KEY_NOT_FOUND};
-
   ut_a(m_active_index != MAX_KEY);
-  auto key_info = m_data_source->s->key_info + m_active_index;
-  auto offset{0u};
+  if (key_len == 0 && key != nullptr) return HA_ERR_WRONG_COMMAND;
 
-  m_key = std::make_unique<uchar[]>(key_len);
-  std::memcpy(m_key.get(), key, key_len);
-
-  if (key) {
-    for (auto part = 0u; part < actual_key_parts(key_info); part++) {
-      auto key_part_info = key_info->key_part + part;
-      offset += (key_part_info->null_bit) ? 1 : 0;
-      auto type = key_part_info->field->type();
-      if (type == MYSQL_TYPE_DOUBLE || type == MYSQL_TYPE_FLOAT || type == MYSQL_TYPE_DECIMAL ||
-          type == MYSQL_TYPE_NEWDECIMAL) {
-        uchar encoding[8] = {0};
-        double val = Utils::Util::get_field_numeric<double>(key_part_info->field, key + offset, nullptr);
-        Utils::Encoder<double>::EncodeFloat(val, encoding);
-        std::memcpy(m_key.get() + offset, encoding, key_part_info->length);
-      }
-      offset += key_part_info->length;
-      if (offset > key_len) break;
-    }
+  if (key && key_len > 0) {
+    auto key_info = m_data_source->s->key_info + m_active_index;
+    m_key = std::make_unique<uchar[]>(key_len);
+    encode_key_parts(m_key.get(), key, key_len, key_info);
   }
+
+  if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
 
   switch (find_flag) {
     case HA_READ_KEY_EXACT: {
@@ -439,40 +466,62 @@ int DataTable::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fu
       if (!m_index_iter->initialized()) m_index_iter->init_scan(m_key.get(), key_len, true, nullptr, 0, false);
       break;
     case HA_READ_KEY_OR_PREV:
-      m_index_iter->init_scan(m_key.get(), key_len, true, nullptr, 0, true);
+      m_index_iter->init_scan(nullptr, 0, true, m_key.get(), key_len, true);
       break;
-    case HA_READ_AFTER_KEY:
-      if (!m_index_iter->initialized()) m_index_iter->init_scan(m_key.get(), key_len, false, nullptr, 0, false);
+    case HA_READ_AFTER_KEY:  // "key <= "
+      if (!m_index_iter->initialized()) {
+        const uchar *start_key_ptr{nullptr}, *end_key_ptr{nullptr};
+        uint start_key_len{0}, end_key_len{0};
+
+        start_key_ptr = m_key.get();
+        start_key_len = key_len;
+
+        if (m_end_range) {
+          start_key_ptr = nullptr;
+          start_key_len = 0;
+          auto key_info = m_data_source->s->key_info + m_active_index;
+          m_end_key = std::make_unique<uchar[]>(m_end_range->length);
+          encode_key_parts(m_end_key.get(), m_end_range->key, m_end_range->length, key_info);
+          end_key_ptr = m_end_key.get();
+          end_key_len = m_end_range->length;
+        }
+        m_index_iter->init_scan(start_key_ptr, start_key_len, true, end_key_ptr, end_key_len, true);
+      }
       break;
-    case HA_READ_BEFORE_KEY:
-      if (!m_index_iter->initialized()) m_index_iter->init_scan(nullptr, 0, true, m_key.get(), key_len, false);
+    case HA_READ_BEFORE_KEY:  // "key <  "
+      if (!m_index_iter->initialized()) {
+        m_end_range ? m_index_iter->init_scan(nullptr, 0, true, m_key.get(), key_len, false)
+                    : m_index_iter->init_scan(m_key.get(), key_len, false, nullptr, 0, true);
+      }
       break;
     default:
       return HA_ERR_WRONG_COMMAND;
   }
 
-  const uchar *keykey{nullptr};
-  uint32_t keykey_len{0};
-  row_id_t value{std::numeric_limits<size_t>::max()};
-  if (m_index_iter->next(keykey, &keykey_len, (void *)&value)) {
+  const uchar *result_key{nullptr};
+  uint32_t result_key_len{0};
+  row_id_t value{std::numeric_limits<row_id_t>::max()};
+
+  if (m_index_iter->next(&result_key, &result_key_len, &value)) {
     m_rowid.store(value);
     auto ret = next(buf);
-    if (ret) {
-      return ret;
-    }
-    err = ShannonBase::SHANNON_SUCCESS;
+    return (ret) ? ret : ShannonBase::SHANNON_SUCCESS;
   }
 
-  return err;
+  return HA_ERR_KEY_NOT_FOUND;
 }
 
 int DataTable::index_next(uchar *buf) {
-  const uchar *keykey{nullptr};
-  uint32_t keykey_len{0};
-  row_id_t value{std::numeric_limits<size_t>::max()};
+  const uchar *result_key{nullptr};
+  uint32_t result_key_len{0};
+  row_id_t value{std::numeric_limits<row_id_t>::max()};
   int err{HA_ERR_END_OF_FILE};
 
-  if (m_index_iter->next(keykey, &keykey_len, (void *)&value)) {
+  if (!m_index_iter) {
+    return HA_ERR_INTERNAL_ERROR;
+  }
+
+  if (m_index_iter->next(&result_key, &result_key_len, &value)) {
     m_rowid.store(value);
     auto ret = next(buf);
     if (ret) {
@@ -483,6 +532,8 @@ int DataTable::index_next(uchar *buf) {
 
   return err;
 }
+
+int DataTable::index_prev(uchar *buf) { return HA_ERR_WRONG_COMMAND; }
 
 row_id_t DataTable::find(uchar *buf) {
   row_id_t rowid{0u};

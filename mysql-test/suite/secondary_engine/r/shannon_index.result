@@ -1,5 +1,7 @@
 create database sh_index;
 use sh_index;
+#connection_1, cconnection_2
+[conn1]
 SET USE_SECONDARY_ENGINE=FORCED;
 CREATE TABLE employees (
 id INT,
@@ -162,8 +164,19 @@ id	name	department	salary
 EXPLAIN SELECT * FROM employees WHERE salary >= 7000.00 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	employees	NULL	range	idx_salary	idx_salary	6	NULL	3	100.00	Using where; Using filesort; Using secondary engine Rapid
+SELECT * FROM employees WHERE salary >= 7000.00 order by id;
+id	name	department	salary
+1002	Bob	Engineering	8000.00
+1003	Charlie	Sales	7000.00
+1004	David	Engineering	9000.00
+EXPLAIN SELECT * FROM employees WHERE salary <= 7000.00 order by id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	employees	NULL	range	idx_salary	idx_salary	6	NULL	3	100.00	Using where; Using filesort; Using secondary engine Rapid
 SELECT * FROM employees WHERE salary <= 7000.00 order by id;
 id	name	department	salary
+1001	Alice	HR	6000.00
+1003	Charlie	Sales	7000.00
+1005	Eve	HR	6500.00
 SELECT * FROM employees WHERE salary >= 3000.00 AND salary <= 7000.00 order by id;
 id	name	department	salary
 1001	Alice	HR	6000.00
@@ -226,26 +239,48 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 1	SIMPLE	employees	NULL	ref	idx_dept_salary	idx_dept_salary	409	const,const	1	100.00	Using secondary engine Rapid
 SELECT * FROM employees WHERE department = 'HR' AND salary = 6500.00;
 id	name	department	salary
+1005	Eve	HR	6500.00
 EXPLAIN SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	employees	NULL	range	idx_dept_salary	idx_dept_salary	409	NULL	2	100.00	Using where; Using filesort; Using secondary engine Rapid
 SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id;
 id	name	department	salary
+1001	Alice	HR	6000.00
+1005	Eve	HR	6500.00
 EXPLAIN SELECT * FROM employees WHERE department = 'HR' AND salary >= 6000.00 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	employees	NULL	range	idx_dept_salary	idx_dept_salary	409	NULL	2	100.00	Using where; Using filesort; Using secondary engine Rapid
 SELECT * FROM employees WHERE department = 'HR' AND salary <= 9000.00 order by id;
 id	name	department	salary
+1001	Alice	HR	6000.00
+1005	Eve	HR	6500.00
 EXPLAIN SELECT * FROM employees WHERE department <= 'HR' order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	employees	NULL	range	idx_dept_salary	idx_dept_salary	403	NULL	4	100.00	Using where; Using filesort; Using secondary engine Rapid
 SELECT * FROM employees WHERE department <= 'HR' order by id;
 id	name	department	salary
+1001	Alice	HR	6000.00
+1005	Eve	HR	6500.00
 EXPLAIN SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	employees	NULL	range	idx_dept_salary	idx_dept_salary	403	NULL	4	100.00	Using where; Using filesort; Using secondary engine Rapid
 SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
 id	name	department	salary
+1002	Bob	Engineering	8000.00
+1004	David	Engineering	9000.00
+[conn2]
+insert into employees values(1006, 'PPT', 'Sales', 4530.32);
+insert into employees values(1007, 'TPP', 'Sales', 5430.32);
+[conn1]
+explain select * from employees where id = 1006;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	employees	NULL	const	PRIMARY	PRIMARY	4	const	1	100.00	Using secondary engine Rapid
+select * from employees where id = 1006;
+id	name	department	salary
+1006	PPT	Sales	4530.32
+select * from employees where id = 1007;
+id	name	department	salary
+1007	TPP	Sales	5430.32
 DROP TABLE employees;
 CREATE TABLE test_composite_index2 (
 `id` int NOT NULL,

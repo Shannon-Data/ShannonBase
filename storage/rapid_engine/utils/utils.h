@@ -286,14 +286,6 @@ class Util {
   }
 };
 
-template <typename T>
-class Encoder {
- public:
-  static void EncodeFloat(T value, unsigned char *key);
-
-  static T DecodeFloat(const unsigned char *key);
-};
-
 class ColumnMapGuard {
   TABLE *table;
   my_bitmap_map *old_map;

@@ -182,6 +182,7 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
     m_data_table.reset(new ShannonBase::Imcs::DataTable(table, Imcs::Imcs::instance()->get_table(key)));
   }
   m_data_table->open();
+  if (end_range) m_data_table->set_end_range(end_range);
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -486,6 +487,7 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fun
   int err{HA_ERR_END_OF_FILE};
   ut_ad(m_start_of_scan && inited == handler::INDEX);
 
+  m_data_table->set_end_range(end_range);
   err = m_data_table->index_read(buf, key, key_len, find_flag);
   ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
 
@@ -493,6 +495,7 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fun
 }
 
 int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
+  m_data_table->set_end_range(end_range);
   return (m_data_table->index_read(buf, key, key_len, HA_READ_PREFIX_LAST));
 }
 
@@ -517,9 +520,10 @@ int ha_rapid::index_first(uchar *buf) {
   ha_statistic_increment(&System_status_var::ha_read_first_count);
 
   int error;
-  if (end_range)
+  if (end_range) {
+    m_data_table->set_end_range(end_range);
     error = m_data_table->index_read(buf, end_range->key, end_range->length, end_range->flag);
-  else
+  } else
     error = m_data_table->index_next(buf);
   return error;
 }
@@ -534,6 +538,7 @@ int ha_rapid::index_last(uchar *buf) {
 
   ha_statistic_increment(&System_status_var::ha_read_last_count);
 
+  m_data_table->set_end_range(end_range);
   int error = m_data_table->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
 
   /* MySQL does not seem to allow this to return HA_ERR_KEY_NOT_FOUND */

@@ -7,6 +7,12 @@ create database sh_index;
 use sh_index;
 --disable_warnings
 
+--echo #connection_1, cconnection_2
+--connect(connection_1,localhost,root,,sh_index)
+--connect(connection_2,localhost,root,,sh_index)
+
+--connection connection_1
+--echo [conn1]
 SET USE_SECONDARY_ENGINE=FORCED;
 
 # test for no use defined key
@@ -101,6 +107,9 @@ EXPLAIN SELECT * FROM employees WHERE salary = 7000.00;
 SELECT * FROM employees WHERE salary = 7000.00;
 
 EXPLAIN SELECT * FROM employees WHERE salary >= 7000.00 order by id;
+SELECT * FROM employees WHERE salary >= 7000.00 order by id;
+
+EXPLAIN SELECT * FROM employees WHERE salary <= 7000.00 order by id;
 SELECT * FROM employees WHERE salary <= 7000.00 order by id;
 SELECT * FROM employees WHERE salary >= 3000.00 AND salary <= 7000.00 order by id;
 
@@ -162,6 +171,21 @@ SELECT * FROM employees WHERE department <= 'HR' order by id;
 
 EXPLAIN SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
 SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
+
+--connection connection_2
+--echo [conn2]
+insert into employees values(1006, 'PPT', 'Sales', 4530.32);
+insert into employees values(1007, 'TPP', 'Sales', 5430.32);
+
+--sleep 2
+
+--connection connection_1
+--echo [conn1]
+
+explain select * from employees where id = 1006;
+select * from employees where id = 1006;
+select * from employees where id = 1007;
+
 DROP TABLE employees;
 
 # (DOUBLE, DOUBLE) COMPSITE INDEX, SAME TYPE

@@ -44,6 +44,7 @@
 #include "storage/innobase/include/mach0data.h"
 #include "storage/innobase/include/univ.i"    //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
+#include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/populate/populate.h"
@@ -168,7 +169,7 @@ int Imcs::build_indexes_from_log(const Rapid_load_context *context, std::map<std
           ut_a(field_values[keykey].mlength == 8);
           uchar encoding[8] = {0};
           auto val = *(double *)field_values[keykey].data.get();
-          Utils::Encoder<double>::EncodeFloat(val, encoding);
+          Index::Encoder<double>::EncodeData(val, encoding);
           std::memcpy(key_buff.get() + key_offset, encoding, field_values[keykey].mlength);
           key_offset += field_values[keykey].mlength;
         } else {

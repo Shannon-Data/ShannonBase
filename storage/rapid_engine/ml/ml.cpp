@@ -26,13 +26,12 @@
 
 #include "ml.h"
 
-#include "LightGBM/c_api.h"  //lightgbm
 #include "sql/sql_class.h"
 #include "sql/sql_optimizer.h"
 
 namespace ShannonBase {
 namespace ML {
-
+float Query_arbitrator::TO_RAPID_THRESHOLD = 0.6;
 void Query_arbitrator::load_model(const std::string &model_path) {}
 
 /**
@@ -47,17 +46,23 @@ void Query_arbitrator::load_model(const std::string &model_path) {}
  */
 Query_arbitrator::WHERE2GO Query_arbitrator::predict(JOIN *join) {
   // to the all query plan info then use these features to do classification.
-  DatasetHandle train_dataset_handler{nullptr};
-  int out_num_iterations;
-  int status = LGBM_BoosterCreateFromModelfile(m_model_path.c_str(), &out_num_iterations, &train_dataset_handler);
-  if (status != 0) {
+  if (m_model_path.empty()) {
     return Query_arbitrator::WHERE2GO::TO_PRIMARY;
   }
 
-  std::vector<double> features, label;
+  if (m_booster == nullptr) {
+    int num_iterations = 0;
+    int status = LGBM_BoosterCreateFromModelfile(m_model_path.c_str(), &num_iterations, &m_booster);
+    if (status != 0 || m_booster == nullptr) {
+      m_booster = nullptr;
+      return Query_arbitrator::WHERE2GO::TO_PRIMARY;
+    }
+  }
+  std::vector<double> features;
+  std::vector<double> is_olap;  // the label data to indicate whehter it's OLAP or not. 1 means OLAP, 0 mean OLTP.
   std::vector<const char *> feature_names;
-  // list the avaliable features we used in this mode, therefore, you can your own
-  // mode to predict the result.
+
+  // the features has been used to test whether it's a OLAP or OLTP.
   feature_names.push_back("table_count");
   features.push_back(0.0);
 
@@ -70,40 +75,39 @@ Query_arbitrator::WHERE2GO Query_arbitrator::predict(JOIN *join) {
   feature_names.push_back("has_rollup");
   features.push_back(0.0);
 
-  // to add more features below.
-
   assert(features.size() == feature_names.size());
-  int num_features = features.size();
-  int num_samples = 1;
+
+  const int num_features = static_cast<int>(features.size());
+  const int num_samples = 1;
 
   std::vector<double> out_result(1);
-  int64_t out_len;
-  // predict[for an example]
+  int64_t out_len = 0;
+
   // clang-format off
-  status = LGBM_BoosterPredictForMat(train_dataset_handler,
-                                     features.data(),
-                                     C_API_DTYPE_FLOAT64,
-                                     num_samples,
-                                     num_features,
-                                     1,
-                                     0,
-                                     C_API_PREDICT_NORMAL,
-                                     -1,
-                                     "",
-                                     &out_len, out_result.data());
+  LGBM_DatasetSetField(m_booster, "label", is_olap.data(), is_olap.size(), C_API_DTYPE_FLOAT64);
+  LGBM_DatasetSetFeatureNames(m_booster, feature_names.data(), feature_names.size());
+
+  int status = LGBM_BoosterPredictForMat(
+                                        m_booster,
+                                        features.data(),
+                                        C_API_DTYPE_FLOAT64,
+                                        num_samples,
+                                        num_features,
+                                        1,                     // is_row_major
+                                        0,                     // start_iteration (0 = from start)
+                                        C_API_PREDICT_NORMAL,  // prediction type
+                                        -1,                    // num_iteration (<=0 means use best)
+                                        "",                    // parameter
+                                        &out_len,
+                                        out_result.data());
   // clang-format on
 
-  LGBM_DatasetSetField(train_dataset_handler, "label", label.data(), label.size(), C_API_DTYPE_FLOAT64);
-  LGBM_DatasetSetFeatureNames(train_dataset_handler, feature_names.data(), feature_names.size());
-
-  if (status != 0) {
-    LGBM_BoosterFree(train_dataset_handler);
+  if (status != 0 || out_len != 1) {
     return Query_arbitrator::WHERE2GO::TO_PRIMARY;
   }
 
-  // std::cout << "Prediction result: " << out_result[0] << std::endl;
-  LGBM_BoosterFree(train_dataset_handler);
-  return Query_arbitrator::WHERE2GO::TO_SECONDARY;
+  return out_result[0] > Query_arbitrator::TO_RAPID_THRESHOLD ? Query_arbitrator::WHERE2GO::TO_SECONDARY
+                                                              : Query_arbitrator::WHERE2GO::TO_PRIMARY;
 }
 
 }  // namespace ML
