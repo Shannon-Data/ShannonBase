@@ -56,8 +56,11 @@ mysql_pfs_key_t rapid_purge_thread_key;
 #endif /* UNIV_PFS_THREAD */
 
 namespace ShannonBase {
+namespace Populate {
+extern std::shared_mutex g_processing_table_mutex;
+extern std::set<std::string> g_processing_tables;
+}  // namespace Populate
 namespace Purge {
-
 std::atomic<purge_state_t> Purger::m_state{purge_state_t::PURGE_STATE_EXIT};
 std::mutex Purger::m_notify_mutex;
 std::condition_variable Purger::m_notify_cv;
@@ -305,9 +308,13 @@ void Purger::print_info(FILE *file) {
   fprintf(file, "  Time since last purge: %ldms\n", last_purge_ms);
 }
 
+// to check if table is currently being pop. table_name format: "schema_name/table_name"
 bool Purger::check_pop_status(std::string &table_name) {
-  // Implementation would check if table is currently being purged
-  return false;
+  std::shared_lock lk(ShannonBase::Populate::g_processing_table_mutex);
+  if (ShannonBase::Populate::g_processing_tables.find(table_name) != ShannonBase::Populate::g_processing_tables.end())
+    return true;
+  else
+    return false;
 }
 
 }  // namespace Purge

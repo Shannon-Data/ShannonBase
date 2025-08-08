@@ -53,6 +53,12 @@ class Dictionary;
 namespace Utils {
 class Util {
  public:
+  // open a table via schema name and table name.
+  static TABLE *open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type mode);
+
+  // close a opened table.
+  static int close_table(TABLE *table);
+
   // to check whether this type is supported or not.
   static bool is_support_type(enum_field_types type);
 

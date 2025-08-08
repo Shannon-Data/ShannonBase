@@ -101,20 +101,6 @@ enum rapid_use_dynamic_offload {
   DYNAMIC_OFFLOAD_ON = 1
 };
 
-/** Values for rapid_self_load_enabled sysvar. */
-enum rapid_self_load_enabled {
-  SELFLOAD_FALSE = 0,
-  SELFLOAD_TRUE = 1
-};
-
-/** Values for rapid_self_load_skip_quiet_check sysvar. */
-enum rapid_self_load_skip_quiet_check {
-  SKIP_QUIET_CHECK_FALSE = 0,
-  SKIP_QUIET_CHECK_TRUE = 1
-};
-
-constexpr double rapid_very_fast_query_threshold = 10.0;
-
 /**
   Values for explain_format sysvar.
 
@@ -399,19 +385,6 @@ struct System_variables {
 
   /** Used for controlling preparation of queries against secondary engine. */
   ulong rapid_use_dynamic_offload;
-
-  /** Used for controlling secondary engine self load. */
-  ulong rapid_self_load_enabled;
-
-  /* Should the Self-Load thread run even if the system is not 'quiet'. */
-  ulong rapid_self_load_skip_quiet_check;
-
-  /* Wake-up interval of the Self-Load thread */
-  double rapid_self_load_interval_seconds;
-
-  /*Percentage of base memory quota above which the self-load thread
-    will not attempt to load more tables */
-  double rapid_self_load_base_relation_fill_percentage;
 
   /**
     Used for controlling which statements to execute in a secondary

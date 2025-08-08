@@ -91,6 +91,10 @@ uint64 rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
 ulonglong rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
 ulonglong rpd_para_load_threshold = ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD;
 int rpd_async_column_threshold = ShannonBase::DEFAULT_N_FIELD_PARALLEL;
+bool rpd_self_load_enabled = false;
+ulonglong rpd_self_load_interval_seconds = SHANNON_DEFAULT_SELF_LOAD_INTERVAL;  // 24hurs
+bool rpd_self_load_skip_quiet_check = false;
+int rpd_self_load_base_relation_fill_percentage = SHANNON_DEFAULT_SELF_LOAD_FILL_PERCENTAGE;  // percentage.
 
 std::atomic<size_t> rapid_allocated_mem_size = 0;
 rpd_columns_container rpd_columns_info;
@@ -1032,6 +1036,17 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_parallel_load_max", (char *)&ShannonBase::rpd_para_load_threshold, SHOW_LONG, SHOW_SCOPE_GLOBAL},
     /*the max column number of used to aysnc reading or parsing log*/
     {"rapid_async_column_threshold", (char *)&ShannonBase::rpd_async_column_threshold, SHOW_INT, SHOW_SCOPE_GLOBAL},
+    /*to enable self load or disable*/
+    {"rapid_self_load_enabled", (char *)&ShannonBase::rpd_self_load_enabled, SHOW_BOOL, SHOW_SCOPE_GLOBAL},
+    /*the interval value of self load in second*/
+    {"rapid_self_load_interval_seconds", (char *)&ShannonBase::rpd_self_load_interval_seconds, SHOW_LONG,
+     SHOW_SCOPE_GLOBAL},
+    /*to skip the quiet check or not*/
+    {"rapid_self_load_skip_quiet_check", (char *)&ShannonBase::rpd_self_load_skip_quiet_check, SHOW_BOOL,
+     SHOW_SCOPE_GLOBAL},
+    /*the value of fill percentage of main memory*/
+    {"rapid_self_load_base_relation_fill_percentage", (char *)&ShannonBase::rpd_self_load_base_relation_fill_percentage,
+     SHOW_INT, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_INT, SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
@@ -1202,8 +1217,35 @@ static int rpd_async_threshold_validate(THD *,                          /*!< in:
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void *save) {
+  bool new_value = *static_cast<const bool *>(save);
+  *static_cast<bool *>(var_ptr) = new_value;
+  ShannonBase::rpd_self_load_enabled = *static_cast<const bool *>(save);
+}
+
+static void update_self_load_interval(THD *, SYS_VAR *, void *var_ptr, const void *save) {
+  auto new_value = *static_cast<const int *>(save);
+  *static_cast<int *>(var_ptr) = new_value;
+
+  ShannonBase::rpd_self_load_interval_seconds = new_value;
+}
+
+static void update_skip_quiet_check(THD *, SYS_VAR *, void *var_ptr, const void *save) {
+  bool new_value = *static_cast<const bool *>(save);
+  *static_cast<bool *>(var_ptr) = new_value;
+
+  ShannonBase::rpd_self_load_skip_quiet_check = new_value;
+}
+
+static void update_memory_fill_percentage(THD *, SYS_VAR *, void *var_ptr, const void *save) {
+  int new_value = *static_cast<const int *>(save);
+  *static_cast<int *>(var_ptr) = new_value;
+
+  ShannonBase::rpd_self_load_base_relation_fill_percentage = new_value;
+}
+
 // clang-format off
-static MYSQL_SYSVAR_ULONG(rapid_memory_size_max,
+static MYSQL_SYSVAR_ULONG(memory_size_max,
                           ShannonBase::rpd_mem_sz_max,
                           PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                           "Number of memory size that used for rapid engine, and it must "
@@ -1215,7 +1257,7 @@ static MYSQL_SYSVAR_ULONG(rapid_memory_size_max,
                           ShannonBase::SHANNON_MAX_MEMRORY_SIZE,
                           0);
 
-static MYSQL_SYSVAR_ULONGLONG(rapid_pop_buffer_size_max,
+static MYSQL_SYSVAR_ULONGLONG(pop_buffer_size_max,
                               ShannonBase::rpd_pop_buff_sz_max,
                               PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                               "Number of memory used for populating the changes "
@@ -1227,19 +1269,19 @@ static MYSQL_SYSVAR_ULONGLONG(rapid_pop_buffer_size_max,
                               ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE,
                               0);
 
-static MYSQL_SYSVAR_ULONGLONG(rapid_parallel_load_max,
+static MYSQL_SYSVAR_ULONGLONG(parallel_load_max,
                               ShannonBase::rpd_para_load_threshold,
                               PLUGIN_VAR_OPCMDARG,
                               "Max number of rows used to use parallel load for secondary_load "
                               "from innodb to rapid engine..",
                               rpd_para_load_threshold_validate,
                               rpd_para_load_threshold_update,
-                              10000,
-                              1000,
-                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD,
+                              10000, //default val
+                              1000,  //min
+                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD, //max
                               0);
 
-static MYSQL_SYSVAR_INT(rapid_async_column_threshold,
+static MYSQL_SYSVAR_INT(async_column_threshold,
                         ShannonBase::rpd_async_column_threshold,
                         PLUGIN_VAR_OPCMDARG,
                         "Max number of columns will do async-corountine for reading data or parsing log ",
@@ -1249,13 +1291,67 @@ static MYSQL_SYSVAR_INT(rapid_async_column_threshold,
                         1,
                         ShannonBase::MAX_N_FIELD_PARALLEL,
                         0);
+
+static MYSQL_SYSVAR_BOOL(self_load_enabled, 
+                         ShannonBase::rpd_self_load_enabled,
+                         PLUGIN_VAR_OPCMDARG,
+                        "self-loaded, tables will not interfere with user-issued secondary loads under any "
+                        "resource constraint. For example, if there is not enough memory in the "
+                        "system for an incoming user load, some self-loaded tables will have to "
+                        "be unloaded to make room for the newly user-loaded table. default value: false.",
+                         nullptr,
+                         update_self_load_enabled,
+                         false);
+
+static MYSQL_SYSVAR_ULONGLONG(self_load_interval_seconds,
+                         ShannonBase::rpd_self_load_interval_seconds,
+                         PLUGIN_VAR_OPCMDARG,
+                         "Wake-up interval of the Self-Load thread "
+                         "Default value: 86400s (24h). Note that if the interval is changed while "
+                         "rapid_self_load_enabled=TRUE, the new value might not be picked up "
+                         "until the next wakeup of the Self-Load Worker. Therefore, the recommended order of "
+                         "setting the variables is: 1. rapid_self_load_interval_seconds=<new value>; "
+                         "2. rapid_self_load_enabled=TRUE;",
+                         nullptr,
+                         update_self_load_interval,
+                         86400/**24hrs */,
+                         60 /*a hr*/,
+                         86400 * 7/*a week */,
+                         0);
+
+static MYSQL_SYSVAR_BOOL(self_load_skip_quiet_check,
+                         ShannonBase::rpd_self_load_skip_quiet_check,
+                         PLUGIN_VAR_OPCMDARG,
+                         "self-loaded, tables will not interfere with user-issued secondary loads under any "
+                         "resource constraint. For example, if there is not enough memory in the "
+                         "system for an incoming user load, some self-loaded tables will have to "
+                         "be unloaded to make room for the newly user-loaded table. ",
+                         nullptr,
+                         update_skip_quiet_check,
+                         false);
+
+static MYSQL_SYSVAR_INT(self_load_base_relation_fill_percentage,
+                         ShannonBase::rpd_self_load_base_relation_fill_percentage,
+                         PLUGIN_VAR_OPCMDARG,
+                         "Percentage of base memory quota above which the self-load thread "
+                         "rpdserver and rpdmaster. Default value: 70%.",
+                         nullptr,
+                         update_memory_fill_percentage,
+                         70,
+                         1,
+                         100,
+                         0);
 // clang-format on
 
 static struct SYS_VAR *rapid_system_variables[] = {
-    MYSQL_SYSVAR(rapid_memory_size_max),
-    MYSQL_SYSVAR(rapid_pop_buffer_size_max),
-    MYSQL_SYSVAR(rapid_parallel_load_max),
-    MYSQL_SYSVAR(rapid_async_column_threshold),
+    MYSQL_SYSVAR(memory_size_max),
+    MYSQL_SYSVAR(pop_buffer_size_max),
+    MYSQL_SYSVAR(parallel_load_max),
+    MYSQL_SYSVAR(async_column_threshold),
+    MYSQL_SYSVAR(self_load_enabled),
+    MYSQL_SYSVAR(self_load_interval_seconds),
+    MYSQL_SYSVAR(self_load_skip_quiet_check),
+    MYSQL_SYSVAR(self_load_base_relation_fill_percentage),
     nullptr,
 };
 

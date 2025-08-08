@@ -6979,48 +6979,6 @@ static Sys_var_enum Sys_rapid_use_dynamic_offload(
     rapid_use_dynamic_offloads, DEFAULT(DYNAMIC_OFFLOAD_ON), NO_MUTEX_GUARD,
     NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
 
-static const char *rapid_self_load_values [] = {"FALSE", "TRUE", nullptr};
-static Sys_var_enum Sys_rapid_self_load_enabled(
-    "rapid_self_load_enabled",
-    "self-loaded, tables will not interfere with user-issued secondary loads under any "
-    "resource constraint. For example, if there is not enough memory in the "
-    "system for an incoming user load, some self-loaded tables will have to "
-    "be unloaded to make room for the newly user-loaded table. default value: false.",
-    HINT_UPDATEABLE SESSION_ONLY(rapid_self_load_enabled), NO_CMD_LINE,
-    rapid_self_load_values, DEFAULT(SELFLOAD_FALSE), NO_MUTEX_GUARD,
-    NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
-
-static const char *rapid_self_load_skip_quiet_check_values [] = {"FALSE", "TRUE", nullptr};
-static Sys_var_enum Sys_rapid_self_load_skip_quiet_check(
-    "rapid_self_load_skip_quiet_check",
-    "self-loaded, tables will not interfere with user-issued secondary loads under any "
-    "resource constraint. For example, if there is not enough memory in the "
-    "system for an incoming user load, some self-loaded tables will have to "
-    "be unloaded to make room for the newly user-loaded table. ",
-    HINT_UPDATEABLE SESSION_ONLY(rapid_self_load_skip_quiet_check), NO_CMD_LINE,
-    rapid_self_load_skip_quiet_check_values, DEFAULT(SKIP_QUIET_CHECK_FALSE), NO_MUTEX_GUARD,
-    NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
-
-static Sys_var_double Sys_rapid_self_load_interval_seconds(
-    "rapid_self_load_interval_seconds",
-    "Wake-up interval of the Self-Load thread "
-    "Default value: 86400s (24h). Note that if the interval is changed while "
-    "rapid_self_load_enabled=TRUE, the new value might not be picked up "
-    "until the next wakeup of the Self-Load Worker. Therefore, the recommended order of "
-    "setting the variables is: 1. rapid_self_load_interval_seconds=<new value>; "
-    "2. rapid_self_load_enabled=TRUE;",
-    HINT_UPDATEABLE SESSION_VAR(rapid_self_load_interval_seconds),
-    CMD_LINE(OPT_ARG), VALID_RANGE(0, DBL_MAX), DEFAULT(86400), NO_MUTEX_GUARD,
-    NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
-
-static Sys_var_double Sys_rapid_self_load_base_relation_fill_percentage(
-    "rapid_self_load_base_relation_fill_percentage",
-    "Percentage of base memory quota above which the self-load thread "
-    "rpdserver and rpdmaster. Default value: 70%.",
-    HINT_UPDATEABLE SESSION_VAR(rapid_self_load_base_relation_fill_percentage),
-    CMD_LINE(OPT_ARG), VALID_RANGE(0, 1.0), DEFAULT(0.7), NO_MUTEX_GUARD,
-    NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
-
 static Sys_var_session_special Sys_statement_id(
     "statement_id",
     "statement_id: represents the id of the query "
