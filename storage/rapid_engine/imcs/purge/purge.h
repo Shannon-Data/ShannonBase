@@ -30,21 +30,27 @@
 #ifndef __SHANNONBASE_PURGE_H__
 #define __SHANNONBASE_PURGE_H__
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <functional>
 #include <mutex>
 #include <string>
 
-#include "storage/innobase/include/os0thread.h"  //IBThread
+#include "storage/rapid_engine/imcs/chunk.h"
+#include "storage/rapid_engine/trx/readview.h"
+
+class ReadView;
 namespace ShannonBase {
 namespace Purge {
-
 /** Default value of spin delay (in spin rounds)
  * 1000 spin round takes 4us,  25000 takes 1ms for busy waiting. therefore, 200ms means
  * 5000000 spin rounds. for the more detail infor ref to : comment of
- * `innodb_log_writer_spin_delay`.
+ * `innodb_log_writer_spin_delay`. TODO: makes all the params configurable.
  */
-constexpr uint64_t MAX_PURGER_TIMEOUT = 10000;
+constexpr uint64_t MAX_PURGER_TIMEOUT = 5000;       // timeout value.
+constexpr size_t PURGE_BATCH_SIZE = 64;             // Process chunks in batches
+constexpr size_t MIN_VERSIONS_FOR_PURGE = 10;       // Minimum versions before considering purge.
+constexpr double PURGE_EFFICIENCY_THRESHOLD = 0.1;  // Only purge if >10% can be cleaned
 
 using purge_func_t = std::function<void(void)>;
 
@@ -54,6 +60,23 @@ enum class purge_state_t {
   PURGE_STATE_STOP,    /*!< Purge should be stopped */
   PURGE_STATE_EXIT,    /*!< Purge has been shutdown */
   PURGE_STATE_DISABLED /*!< Purge was never started */
+};
+
+// statistics info of purger workers.
+struct PurgeStats {
+  std::atomic<uint64_t> chunks_processed{0};
+  std::atomic<uint64_t> versions_purged{0};
+  std::atomic<uint64_t> bytes_freed{0};
+  std::atomic<uint64_t> purge_cycles{0};
+  std::chrono::steady_clock::time_point last_purge_time;
+
+  void reset() {
+    chunks_processed.store(0);
+    versions_purged.store(0);
+    bytes_freed.store(0);
+    purge_cycles.store(0);
+    last_purge_time = std::chrono::steady_clock::now();
+  }
 };
 
 class Purger {
@@ -73,17 +96,46 @@ class Purger {
   // to check whether the specific table are still do populating.
   static bool check_pop_status(std::string &table_name);
 
-  static inline void set_status(purge_state_t stat) { Purger::m_state.store(stat, std::memory_order_seq_cst); }
+  // Enhanced status management
+  static inline void set_status(purge_state_t stat) { m_state.store(stat, std::memory_order_release); }
 
-  static inline purge_state_t get_status() { return Purger::m_state.load(std::memory_order_seq_cst); }
+  static inline purge_state_t get_status() { return m_state.load(std::memory_order_acquire); }
 
+  // Get purge statistics
+  static const PurgeStats &get_stats() { return m_stats; }
+
+  // Force immediate purge cycle
+  static void trigger_purge() {
+    std::unique_lock<std::mutex> lock(m_notify_mutex);
+    m_immediate_purge = true;
+    m_notify_cv.notify_all();
+  }
+
+  static std::atomic<purge_state_t> m_state;
   static std::mutex m_notify_mutex;
   static std::condition_variable m_notify_cv;
+  static PurgeStats m_stats;
+  static std::atomic<bool> m_immediate_purge;
+};
+
+// chunk purge logic
+struct PurgeCandidate {
+  ShannonBase::Imcs::Chunk *chunk;
+  size_t version_count;
+  size_t estimated_cleanup_bytes;
+  double efficiency_score;
+
+  bool operator>(const PurgeCandidate &other) const { return efficiency_score > other.efficiency_score; }
+};
+
+class ChunkPurgeOptimizer {
+ public:
+  // Analyze chunks and prioritize purge candidates
+  static std::vector<PurgeCandidate> analyze_purge_candidates(const std::vector<ShannonBase::Imcs::Chunk *> &);
 
  private:
-  static std::atomic<purge_state_t> m_state;
-  // purge workers.
-  IB_thread *m_purge_workers;
+  static size_t estimate_purgeable_versions(ShannonBase::Imcs::Chunk *, ShannonBase::ReadView::Snapshot_meta_unit *,
+                                            const ::ReadView *);
 };
 
 }  // namespace Purge

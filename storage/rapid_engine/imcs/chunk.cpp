@@ -519,20 +519,43 @@ void Chunk::truncate() {
 }
 
 int Chunk::purge() {
-  auto ret{SHANNON_SUCCESS};
+  // Quick exit if no versions to purge
+  if (!m_header || !m_header->m_smu || m_header->m_smu->version_info().empty()) {
+    return SHANNON_SUCCESS;
+  }
 
-  if (ShannonBase::is_greater_than_or_eq((m_header->m_smu->version_info().size() * 1.0 / m_header->m_prows.load()),
-                                         ShannonBase::SHANNON_GC_RATIO_THRESHOLD)) {
-    // need to do fully GC.
-    ret = this->GC();
+  auto smu = m_header->m_smu.get();
+  size_t total_versions = smu->version_info().size();
+  size_t physical_rows = m_header->m_prows.load(std::memory_order_acquire);
+
+  if (total_versions == 0 || physical_rows == 0) {
+    return SHANNON_SUCCESS;
+  }
+
+  // Check if GC ratio threshold is met
+  double version_ratio = static_cast<double>(total_versions) / physical_rows;
+  bool needs_full_gc = ShannonBase::is_greater_than_or_eq(version_ratio, ShannonBase::SHANNON_GC_RATIO_THRESHOLD);
+
+  int result = SHANNON_SUCCESS;
+
+  if (needs_full_gc) {
+    // Perform full garbage collection
+    result = this->GC();
   } else {
+    // Perform selective purge of old versions
     ::ReadView oldest_view;
     trx_sys->mvcc->clone_oldest_view(&oldest_view);
+
     auto table_name = m_header->m_owner->header()->m_owner->name();
-    ret = m_header->m_smu->purge(table_name.c_str(), &oldest_view);
-    m_header->m_last_gc_tm = std::chrono::steady_clock::now();
+    result = smu->purge(table_name.c_str(), &oldest_view);
+
+    // Update timestamp only on successful purge
+    if (result == SHANNON_SUCCESS) {
+      m_header->m_last_gc_tm = std::chrono::steady_clock::now();
+    }
   }
-  return ret;
+
+  return result;
 }
 
 int Chunk::GC() { return SHANNON_SUCCESS; }

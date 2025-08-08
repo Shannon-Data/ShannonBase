@@ -28,6 +28,7 @@
 
 #include <deque>
 #include <mutex>
+#include <shared_mutex>
 #include <tuple>
 #include <unordered_map>
 
@@ -166,7 +167,7 @@ class Snapshot_meta_unit {
 
   // gets the rowid's versions.
   inline SMU_items &versions(ShannonBase::row_id_t rowid) {
-    std::scoped_lock lk(m_version_mutex);
+    std::shared_lock lk(m_version_mutex);
     if (m_version_info.find(rowid) != m_version_info.end())
       return m_version_info[rowid];
     else  // not found, insert a empty vect in.
@@ -174,12 +175,12 @@ class Snapshot_meta_unit {
   }
 
   inline void add_version(ShannonBase::row_id_t rowid, SMU_items &siv) {
-    std::scoped_lock lk(m_version_mutex);
+    std::unique_lock lk(m_version_mutex);
     m_version_info.emplace(rowid, std::move(siv));
   }
 
   inline std::unordered_map<row_id_t, ReadView::SMU_items> &version_info() {
-    std::scoped_lock lk(m_version_mutex);
+    std::shared_lock lk(m_version_mutex);
     return m_version_info;
   }
 
@@ -187,7 +188,7 @@ class Snapshot_meta_unit {
   int purge(const char *tname, ::ReadView *rv);
 
  private:
-  std::mutex m_version_mutex;
+  std::shared_mutex m_version_mutex;
   std::unordered_map<row_id_t, ReadView::SMU_items> m_version_info;
   ShannonBase::Imcs::Chunk *m_owner;
 };

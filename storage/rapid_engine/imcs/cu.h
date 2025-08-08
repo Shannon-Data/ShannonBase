@@ -119,12 +119,14 @@ class Cu : public MemoryObject {
 
   // gets the base address of CU.
   inline uchar *base() {
+    std::shared_lock lk(m_mutex);
     if (!m_chunks.size()) return nullptr;
     return m_chunks[0].get()->base();
   }
 
   // get the pointer of chunk with its id.
   inline Chunk *chunk(uint id) {
+    std::shared_lock lk(m_mutex);
     if (id >= m_chunks.size()) return nullptr;
     return m_chunks[id].get();
   }
@@ -134,29 +136,33 @@ class Cu : public MemoryObject {
 
   // returns the normalized length, the text type encoded with uint32.
   inline size_t normalized_pack_length() {
-    ut_a(m_chunks.size());
+    std::shared_lock lk(m_mutex);
+    if (m_chunks.empty()) return 0;
     return m_chunks[0]->normalized_pack_length();
   }
 
   // return the real pack length: field->pack_length.
   inline size_t pack_length() {
-    ut_a(m_chunks.size());
+    std::shared_lock lk(m_mutex);
+    if (m_chunks.empty()) return 0;
     return m_chunks[0]->pack_length();
   }
 
   inline size_t field_length() {
-    ut_a(m_chunks.size());
+    std::shared_lock lk(m_mutex);
+    if (m_chunks.empty()) return 0;
     return m_chunks[0]->field_length();
   }
 
   inline size_t field_length_bytes() {
-    ut_a(m_chunks.size());
+    std::shared_lock lk(m_mutex);
+    if (m_chunks.empty()) return 0;
     return m_chunks[0]->field_length_bytes();
   }
 
   inline std::string &keystr() { return m_cu_key; }
 
-  inline std::mutex &get_mutex() { return m_mutex; }
+  inline std::shared_mutex &get_mutex() { return m_mutex; }
 
   void get_current_statistics(bool force_recalc = false) {
     if (force_recalc || m_stats_dirty.load(std::memory_order_relaxed)) {
@@ -207,7 +213,7 @@ class Cu : public MemoryObject {
 
  private:
   // mutex of cu
-  std::mutex m_mutex;
+  std::shared_mutex m_mutex;
 
   // header info of this Cu.
   std::unique_ptr<Cu_header> m_header{nullptr};
