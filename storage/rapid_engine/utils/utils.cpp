@@ -27,6 +27,7 @@
 
 #include "include/decimal.h"  //my_decimal
 #include "include/my_bitmap.h"
+#include "sql/sql_base.h"
 
 #include "sql/opt_trace.h"
 #include "sql/sql_class.h"     //Secondary_engine_statement_context
@@ -43,6 +44,49 @@
 
 namespace ShannonBase {
 namespace Utils {
+// open table by name. return table ptr, otherwise return nullptr.
+TABLE *Util::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
+  THD *thd = current_thd;
+  /**
+   * due to in function, `select xxxx`, when the statment executed, it enter lock table mode
+   * but there's not even a opened table, so that, here we try to open a table, it failed before
+   * exiting the lock table mode. such as executing `selecct ml_predict_row(xxx) int xx;`
+   */
+  auto table_already_open{false};
+  for (auto table = thd->open_tables; table; table = table->next) {
+    if (!strcmp(schema_name.c_str(), table->s->db.str) && !strcmp(table_name.c_str(), table->s->table_name.str)) {
+      table_already_open = true;
+      break;
+    }
+  }
+
+  auto old_mode = thd->locked_tables_mode;
+  if (!table_already_open && thd->locked_tables_mode == LTM_PRELOCKED) {
+    thd->locked_tables_mode = LTM_NONE;
+  }
+
+  Open_table_context table_ref_context(thd, MYSQL_OPEN_IGNORE_GLOBAL_READ_LOCK);
+
+  Table_ref table_ref(schema_name.c_str(), table_name.c_str(), lk_mode);
+  table_ref.open_strategy = Table_ref::OPEN_NORMAL;
+
+  if (open_table(thd, &table_ref, &table_ref_context) || !table_ref.table->file) {
+    return nullptr;
+  }
+
+  auto table_ptr = table_ref.table;
+  if (!table_ptr->next_number_field)  // in case.
+    table_ptr->next_number_field = table_ptr->found_next_number_field;
+
+  thd->locked_tables_mode = old_mode;
+  return table_ptr;
+}
+
+int Util::close_table(TABLE *table [[maybe_unused]]) {
+  assert(table);
+  // it will close in close_thread_tables(). so here do nothing.
+  return 0;
+}
 
 std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
 bool Util::is_support_type(enum_field_types type) {

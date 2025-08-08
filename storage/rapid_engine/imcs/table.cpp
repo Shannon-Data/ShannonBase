@@ -539,7 +539,7 @@ int Table::delete_row(const Rapid_load_context *context, row_id_t rowid) {
     ++it;
   }
 
-  m_prows.fetch_sub(1);
+  m_stats.prows.fetch_sub(1);
   return SHANNON_SUCCESS;
 }
 
@@ -915,7 +915,7 @@ int PartTable::write_row_from_log(const Rapid_load_context *context, row_id_t ro
     }
   }
 
-  m_prows.fetch_add(1);
+  m_stats.prows.fetch_add(1);
   return ShannonBase::SHANNON_SUCCESS;
 }
 

@@ -124,6 +124,7 @@
 #include "storage/perfschema/table_rpd_preload_stats.h"
 #include "storage/perfschema/table_rpd_table_id.h"
 #include "storage/perfschema/table_rpd_tables.h"
+#include "storage/perfschema/table_rpd_mirror.h"
 /* For replication related perfschema tables. */
 #include "storage/perfschema/table_log_status.h"
 #include "storage/perfschema/table_replication_asynchronous_connection_failover.h"
@@ -595,6 +596,7 @@ static PFS_engine_table_share *all_shares[] = {
     &table_rpd_columns::m_share,
     &table_rpd_table_id::m_share,
     &table_rpd_tables::m_share,
+    &table_rpd_mirror::m_share,
     &table_rpd_preload_stats::m_share,    
     &table_log_status::m_share,
 

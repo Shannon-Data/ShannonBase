@@ -2,26 +2,26 @@ create database sh_para_load;
 use sh_para_load;
 SHOW  VARIABLES like "%rapid%";
 Variable_name	Value
-rapid_rapid_async_column_threshold	16
-rapid_rapid_memory_size_max	8589934592
-rapid_rapid_parallel_load_max	10000
-rapid_rapid_pop_buffer_size_max	134217728
-rapid_self_load_base_relation_fill_percentage	0.700000
-rapid_self_load_enabled	FALSE
-rapid_self_load_interval_seconds	86400.000000
-rapid_self_load_skip_quiet_check	FALSE
+rapid_async_column_threshold	16
+rapid_memory_size_max	8589934592
+rapid_parallel_load_max	10000
+rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	70
+rapid_self_load_enabled	OFF
+rapid_self_load_interval_seconds	86400
+rapid_self_load_skip_quiet_check	OFF
 rapid_use_dynamic_offload	ON
-SET GLOBAL rapid_rapid_parallel_load_max=10;
+SET GLOBAL rapid_parallel_load_max=10;
 SHOW VARIABLES like "%rapid%";
 Variable_name	Value
-rapid_rapid_async_column_threshold	16
-rapid_rapid_memory_size_max	8589934592
-rapid_rapid_parallel_load_max	10
-rapid_rapid_pop_buffer_size_max	134217728
-rapid_self_load_base_relation_fill_percentage	0.700000
-rapid_self_load_enabled	FALSE
-rapid_self_load_interval_seconds	86400.000000
-rapid_self_load_skip_quiet_check	FALSE
+rapid_async_column_threshold	16
+rapid_memory_size_max	8589934592
+rapid_parallel_load_max	10
+rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	70
+rapid_self_load_enabled	OFF
+rapid_self_load_interval_seconds	86400
+rapid_self_load_skip_quiet_check	OFF
 rapid_use_dynamic_offload	ON
 SET USE_SECONDARY_ENGINE = FORCED;
 CREATE TABLE with_primary_key (
@@ -243,16 +243,16 @@ EXPLAIN SELECT * FROM with_secondary_index WHERE order_id = 'ORD20230011';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	with_secondary_index	NULL	const	PRIMARY	PRIMARY	82	const	1	100.00	Using secondary engine Rapid
 ALTER TABLE with_secondary_index SECONDARY_UNLOAD;
-SET GLOBAL rapid_rapid_parallel_load_max = 10000;
+SET GLOBAL rapid_parallel_load_max = 10000;
 SHOW  VARIABLES like "%rapid%";
 Variable_name	Value
-rapid_rapid_async_column_threshold	16
-rapid_rapid_memory_size_max	8589934592
-rapid_rapid_parallel_load_max	10000
-rapid_rapid_pop_buffer_size_max	134217728
-rapid_self_load_base_relation_fill_percentage	0.700000
-rapid_self_load_enabled	FALSE
-rapid_self_load_interval_seconds	86400.000000
-rapid_self_load_skip_quiet_check	FALSE
+rapid_async_column_threshold	16
+rapid_memory_size_max	8589934592
+rapid_parallel_load_max	10000
+rapid_pop_buffer_size_max	134217728
+rapid_self_load_base_relation_fill_percentage	70
+rapid_self_load_enabled	OFF
+rapid_self_load_interval_seconds	86400
+rapid_self_load_skip_quiet_check	OFF
 rapid_use_dynamic_offload	ON
 DROP DATABASE sh_para_load;

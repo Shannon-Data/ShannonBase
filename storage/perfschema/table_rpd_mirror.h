@@ -24,11 +24,11 @@
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
 
-#ifndef __TABLE_SHANNONBASE_RPD_TABLES_H__
-#define __TABLE_SHANNONBASE_RPD_TABLES_H__
+#ifndef __TABLE_SHANNONBASE_RPD_MIRROR_H__
+#define __TABLE_SHANNONBASE_RPD_MIRROR_H__
 /**
-  @file storage/perfschema/table_rpd_table.h
-  Table table_rpd_table (declarations).
+  @file storage/perfschema/table_rpd_mirror.h
+  Table table_rpd_mirror (declarations).
 */
 
 #include <stddef.h>
@@ -42,37 +42,32 @@
 #include "storage/perfschema/pfs_engine_table.h"
 
 /**
-  @addtogroup performance_schema_tables
+  @addtogroup performance_schema_mirror
   @{
 */
 
 /**
-  A row in node status table. The fields with string values have an additional
-  length field denoted by @<field_name@>_length.
+  The rpd_mirror table keeps track of all existing tables in the DB System, whose engine is InnoDB.
 */
-struct st_row_rpd_tables {
-  ulonglong id {0};
-  ulonglong snapshot_scn {0};
-  ulonglong persisted_scn {0};
-  ulonglong pool_type {0};
-  ulonglong data_placement_type{0};
-  ulonglong table_nrows{0};
-  ulonglong load_status{0};
-  ulonglong load_progress{0};
-  ulonglong size_byte{0};
-  ulonglong transformation_bytes{0};
-  ulonglong extranl_nrows{0};
-  ulonglong query_count{0};
-  double last_queried{0};
-  double load_start_timestamp{0};
-  double load_end_timestamp{0};
-  char recovery_source[NAME_LEN] {0};
-  double reconvery_start_timestamp{0};
-  double reconvery_end_timestamp{0};
+struct st_row_rpd_mirror {
+  //The schema name.
+  char schema_name[NAME_LEN] {0};
+  //The table name.
+  char table_name[NAME_LEN] {0};
+  //Number of times the table has been accessed by the DB System.
+  ulonglong msyql_access_count{0};
+  //Number of times the table has been accessed by the MySQL HeatWave Cluster.
+  ulonglong rpd_access_count{0};
+  //The timestamp of the last DB System query that referenced the table.
+  double last_queried_timestamp{0};
+  //The timestamp of the last MySQL HeatWave query that referenced the table.
+  double last_queried_in_rpd_timestamp{0};
+  //The table state: loaded or not loaded.
+  uint8 state{0};
 };
 
 /** Table PERFORMANCE_SCHEMA.RPD_TABLES. */
-class table_rpd_tables : public PFS_engine_table {
+class table_rpd_mirror : public PFS_engine_table {
   typedef PFS_simple_index pos_t;
 
  private:
@@ -84,7 +79,7 @@ class table_rpd_tables : public PFS_engine_table {
   static Plugin_table m_table_def;
 
   /** Current row */
-  st_row_rpd_tables m_row;
+  st_row_rpd_mirror m_row;
   /** Current position. */
   pos_t m_pos;
   /** Next position. */
@@ -102,10 +97,10 @@ class table_rpd_tables : public PFS_engine_table {
   int read_row_values(TABLE *table, unsigned char *buf, Field **fields,
                       bool read_all) override;
 
-  table_rpd_tables();
+  table_rpd_mirror();
 
  public:
-  ~table_rpd_tables() override;
+  ~table_rpd_mirror() override;
 
   /** Table share. */
   static PFS_engine_table_share m_share;
@@ -117,4 +112,4 @@ class table_rpd_tables : public PFS_engine_table {
 };
 
 /** @} */
-#endif //__TABLE_SHANNONBASE_RPD_TABLES_H__
+#endif //__TABLE_SHANNONBASE_RPD_MIRROR_H__

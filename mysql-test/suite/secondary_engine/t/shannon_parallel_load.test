@@ -5,8 +5,8 @@ create database sh_para_load;
 use sh_para_load;
 --disable_warnings
 SHOW  VARIABLES like "%rapid%";
---let $old_rapid_parallel_load = `SELECT @@GLOBAL.rapid_rapid_parallel_load_max`
-SET GLOBAL rapid_rapid_parallel_load_max=10;
+--let $old_rapid_parallel_load = `SELECT @@GLOBAL.rapid_parallel_load_max`
+SET GLOBAL rapid_parallel_load_max=10;
 SHOW VARIABLES like "%rapid%";
 
 SET USE_SECONDARY_ENGINE = FORCED;
@@ -187,7 +187,7 @@ if ($restore_value == '')
 {
   --let $restore_value = 10000
 }
---eval SET GLOBAL rapid_rapid_parallel_load_max = $restore_value
+--eval SET GLOBAL rapid_parallel_load_max = $restore_value
 SHOW  VARIABLES like "%rapid%";
 --enable_warnings
 DROP DATABASE sh_para_load;
