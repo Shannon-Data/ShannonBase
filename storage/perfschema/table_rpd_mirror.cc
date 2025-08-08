@@ -25,11 +25,10 @@
 */
 
 /**
-  @file storage/perfschema/table_rpd_table_id.cc
-  Table table_rpd_table_id (implementation).
+  @file storage/perfschema/table_rpd_mirror.cc
+  Table table_rpd_mirror (implementation).
 */
-
-#include "storage/perfschema/table_rpd_table_id.h"
+#include "storage/perfschema/table_rpd_mirror.h"
 
 #include <stddef.h>
 
@@ -46,33 +45,36 @@
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
 #include "storage/rapid_engine/include/rapid_status.h"
-#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 /*
-  Callbacks implementation for RPD_TABLE_ID.
+  Callbacks implementation for RPD_TABLES.
 */
-THR_LOCK table_rpd_table_id::m_table_lock;
 
-Plugin_table table_rpd_table_id::m_table_def(
+THR_LOCK table_rpd_mirror::m_table_lock;
+
+Plugin_table table_rpd_mirror::m_table_def(
     /* Schema name */
     "performance_schema",
     /* Name */
-    "rpd_table_id",
+    "rpd_mirror",
     /* Definition */
-    "  ID BIGINT unsigned not null,\n"
-    "  NAME CHAR(64) collate utf8mb4_bin not null,\n"
-    "  SCHEMA_NAME CHAR(64) collate utf8mb4_bin not null,\n"
-    "  TABLE_NAME CHAR(64) collate utf8mb4_bin not null\n",
+    "  SCHEMA_NAME CHAR(128) collate utf8mb4_bin not null,\n"
+    "  TABLE_NAME CHAR(128) collate utf8mb4_bin not null,\n"
+    "  MYSQL_ACCESS_COUNT BIGINT unsigned not null,\n"
+    "  HEATWAVE_ACCESS_COUNT BIGINT unsigned not null,\n"
+    "  LAST_QUERIED timestamp not null,\n"
+    "  LAST_QUERIED_IN_RAPID timestamp not null,\n"
+    "  STATE ENUM('LOADED', 'NOT_LOADED') NOT NULL\n",
     /* Options */
     " ENGINE=PERFORMANCE_SCHEMA",
     /* Tablespace */
     nullptr);
 
-PFS_engine_table_share table_rpd_table_id::m_share = {
+PFS_engine_table_share table_rpd_mirror::m_share = {
     &pfs_readonly_acl,
-    &table_rpd_table_id::create,
+    &table_rpd_mirror::create,
     nullptr, /* write_row */
     nullptr, /* delete_all_rows */
-    table_rpd_table_id::get_row_count,
+    table_rpd_mirror::get_row_count,
     sizeof(pos_t), /* ref length */
     &m_table_lock,
     &m_table_def,
@@ -82,33 +84,36 @@ PFS_engine_table_share table_rpd_table_id::m_share = {
     false /* m_in_purgatory */
 };
 
-PFS_engine_table *table_rpd_table_id::create(
+PFS_engine_table *table_rpd_mirror::create(
     PFS_engine_table_share *) {
-  return new table_rpd_table_id();
+  return new table_rpd_mirror();
 }
 
-table_rpd_table_id::table_rpd_table_id()
+table_rpd_mirror::table_rpd_mirror()
     : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
-  m_row.table_id = 0;
-  memset (m_row.full_table_name, 0x0, NAME_LEN);
+  m_row.msyql_access_count=0;
+  m_row.rpd_access_count=0;
+  m_row.last_queried_timestamp=0;
+  m_row.last_queried_in_rpd_timestamp=0;
+  m_row.state=0;
   memset (m_row.schema_name, 0x0, NAME_LEN);
   memset (m_row.table_name, 0x0, NAME_LEN);
 }
 
-table_rpd_table_id::~table_rpd_table_id() {
+table_rpd_mirror::~table_rpd_mirror() {
   //clear.
 }
 
-void table_rpd_table_id::reset_position() {
+void table_rpd_mirror::reset_position() {
   m_pos.m_index = 0;
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_table_id::get_row_count() {
-  return ShannonBase::shannon_loaded_tables->size();
+ha_rows table_rpd_mirror::get_row_count() {
+  return ShannonBase::rpd_columns_info.size();
 }
 
-int table_rpd_table_id::rnd_next() {
+int table_rpd_mirror::rnd_next() {
   for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count();
        m_pos.next()) {
     make_row(m_pos.m_index);
@@ -119,7 +124,7 @@ int table_rpd_table_id::rnd_next() {
   return HA_ERR_END_OF_FILE;
 }
 
-int table_rpd_table_id::rnd_pos(const void *pos) {
+int table_rpd_mirror::rnd_pos(const void *pos) {
   if (get_row_count() == 0) {
     return HA_ERR_END_OF_FILE;
   }
@@ -132,25 +137,14 @@ int table_rpd_table_id::rnd_pos(const void *pos) {
   return make_row(m_pos.m_index);
 }
 
-int table_rpd_table_id::make_row(uint index[[maybe_unused]]) {
+int table_rpd_mirror::make_row(uint index[[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::shannon_loaded_tables->size()) {
-    return HA_ERR_END_OF_FILE;
-  } else {
-    std::string schema, table, full_name;
-    ulonglong tableid{0};
-    ShannonBase::shannon_loaded_tables->table_infos(index, tableid, schema, table);
-    m_row.table_id = tableid;
-    full_name = schema + "\\" + table;
-    strncpy(m_row.full_table_name, full_name.c_str(), full_name.length());
-    strncpy(m_row.schema_name,schema.c_str(), schema.length());
-    strncpy(m_row.table_name, table.c_str(), table.length());
-  }
+  //TODO: to set the row data for this table.
   return 0;
 }
 
-int table_rpd_table_id::read_row_values(TABLE *table,
+int table_rpd_mirror::read_row_values(TABLE *table,
                                          unsigned char *buf,
                                          Field **fields,
                                          bool read_all) {
@@ -162,17 +156,26 @@ int table_rpd_table_id::read_row_values(TABLE *table,
   for (; (f = *fields); fields++) {
     if (read_all || bitmap_is_set(table->read_set, f->field_index())) {
       switch (f->field_index()) {
-        case 0: /** TABLE_ID */
-          set_field_ulonglong(f, m_row.table_id);
-          break;
-        case 1: /** full table name */
-          set_field_char_utf8mb4(f, m_row.full_table_name, strlen(m_row.full_table_name));
-          break;
-        case 2: /** schema_name */
+        case 0: /** SCHEMA_NAME */
           set_field_char_utf8mb4(f, m_row.schema_name, strlen(m_row.schema_name));
           break;
-        case 3: /** table_name */
+        case 1: /** TABLE_NAME */
           set_field_char_utf8mb4(f, m_row.table_name, strlen(m_row.table_name));
+          break;
+        case 2: /** msyql_access_count */
+          set_field_ulonglong(f, m_row.msyql_access_count);
+          break;
+        case 3: /**rpd_access_count */
+          set_field_ulonglong(f, m_row.rpd_access_count);
+          break;
+        case 4: /**last_queried_timestamp */
+          set_field_timestamp(f, m_row.last_queried_timestamp);
+          break;
+        case 5: /**last_queried_in_rpd_timestamp */
+          set_field_timestamp(f, m_row.last_queried_in_rpd_timestamp);
+          break;
+        case 6: /**state */
+          set_field_enum(f, m_row.state);
           break;
         default:
           assert(false);

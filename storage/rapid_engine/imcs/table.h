@@ -25,8 +25,8 @@
 */
 #ifndef __SHANNONBASE_RAPID_TABLE_H__
 #define __SHANNONBASE_RAPID_TABLE_H__
-
 #include <atomic>
+#include <ctime>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -45,7 +45,38 @@ namespace Imcs {
 class Cu;
 class RapidTable : public MemoryObject {
  public:
+  enum class LoadType {
+    NOT_LOADED = 0,  // un-loaded
+    SELF_LOADED,     // system-auto-loaded
+    USER_LOADED      // user-loaded.
+  };
+
+  struct TableStats {
+    std::shared_mutex m_stats_lock;                         // to protect the stats modification.
+    std::atomic<uint64_t> mysql_access_count{0};            // MySQL access counts.
+    std::atomic<uint64_t> heatwave_access_count{0};         // Rapid access counts.
+    double importance{0.0};                                 // importance score.
+    std::atomic<time_t> last_accessed{std::time(nullptr)};  // the laste access time.
+    LoadType load_type{LoadType::NOT_LOADED};               // load type.
+    // the phyiscal # of rows in this table.
+    // physical row count. If you want to get logical rows, you should consider
+    // MVCC to decide that whether this phyical row is visiable or not to this
+    // transaction.
+    std::atomic<row_id_t> prows{0};
+    void update_access_time() { last_accessed.store(std::time(nullptr), std::memory_order_relaxed); }
+
+    // to get homw many seconds last since the last access.
+    // usage: if (stats.seconds_since_last_access() > 3600)
+    // more than 1 hr, maybe cold data.
+    time_t seconds_since_last_access() const {
+      time_t now = std::time(nullptr);
+      return now - last_accessed.load(std::memory_order_relaxed);
+    }
+    TableStats() = default;
+  };
+
   enum class TYPE : uint8 { UNKONWN = 0, NORAMAL, PARTTABLE };
+
   RapidTable() = default;
   RapidTable(std::string schema, std::string table) : m_schema_name(schema), m_table_name(table) {}
   virtual ~RapidTable() = default;
@@ -101,17 +132,18 @@ class RapidTable : public MemoryObject {
 
  protected:
   TYPE m_type;
+
+  // self load or user load.
+  LoadType m_load_type;
+
   // name of schema.
   std::string m_schema_name;
 
   // name of this table.
   std::string m_table_name;
 
-  // the phyiscal # of rows in this table.
-  // physical row count. If you want to get logical rows, you should consider
-  // MVCC to decide that whether this phyical row is visiable or not to this
-  // transaction.
-  std::atomic<row_id_t> m_prows{0};
+  // the statistic of this table.
+  TableStats m_stats;
 
   // the loaded cus. key format: field/column name.
   std::shared_mutex m_fields_mutex;
@@ -167,10 +199,10 @@ class Table : public RapidTable {
   virtual int rollback_changes_by_trxid(Transaction::ID trxid) final;
 
   // gets the # of physical rows.
-  virtual row_id_t rows(const Rapid_load_context *) final { return m_prows.load(); }
+  virtual row_id_t rows(const Rapid_load_context *) final { return m_stats.prows.load(); }
 
   // to reserer a row place for this operation.
-  virtual row_id_t reserve_id(const Rapid_load_context *) final { return m_prows.fetch_add(1); }
+  virtual row_id_t reserve_id(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
 
   virtual Cu *first_field() final { return m_fields.begin()->second.get(); }
 
@@ -189,7 +221,7 @@ class Table : public RapidTable {
 
   virtual std::string &schema_name() final { return m_schema_name; }
   virtual std::string &name() final { return m_table_name; }
-  virtual row_id_t reserver_rowid() final { return m_prows.fetch_add(1); }
+  virtual row_id_t reserver_rowid() final { return m_stats.prows.fetch_add(1); }
 
  private:
   bool is_field_null(int field_index, const uchar *rowdata, const ulong *null_byte_offsets,
@@ -252,10 +284,10 @@ class PartTable : public RapidTable {
   virtual int rollback_changes_by_trxid(Transaction::ID trxid) final;
 
   // gets the # of physical rows.
-  virtual row_id_t rows(const Rapid_load_context *) final { return m_prows.load(); }
+  virtual row_id_t rows(const Rapid_load_context *) final { return m_stats.prows.load(); }
 
   // to reserer a row place for this operation.
-  virtual row_id_t reserve_id(const Rapid_load_context *) final { return m_prows.fetch_add(1); }
+  virtual row_id_t reserve_id(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
 
   virtual Cu *first_field() final { return m_fields.begin()->second.get(); }
 
@@ -274,7 +306,7 @@ class PartTable : public RapidTable {
 
   virtual std::string &schema_name() final { return m_schema_name; }
   virtual std::string &name() final { return m_table_name; }
-  virtual row_id_t reserver_rowid() final { return m_prows.fetch_add(1); }
+  virtual row_id_t reserver_rowid() final { return m_stats.prows.fetch_add(1); }
 
  private:
   bool is_field_null(int field_index, const uchar *rowdata, const ulong *null_byte_offsets,

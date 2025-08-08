@@ -155,6 +155,7 @@ table_rpd_column_id.h
 table_rpd_columns.h
 table_rpd_table_id.h
 table_rpd_tables.h
+table_rpd_mirror.h
 table_rpd_preload_stats.h
 table_replication_group_members.h
 table_session_account_connect_attrs.h
@@ -333,6 +334,7 @@ table_rpd_column_id.cc
 table_rpd_columns.cc
 table_rpd_table_id.cc
 table_rpd_tables.cc
+table_rpd_mirror.cc
 table_rpd_preload_stats.cc
 table_session_account_connect_attrs.cc
 table_session_connect.cc
