@@ -248,7 +248,7 @@ void Cu::recalculate_statistics() {
 }
 
 void Cu::ensure_new_chunks(size_t required_chunk_id) {
-  std::scoped_lock lk(m_mutex);
+  std::unique_lock lk(m_mutex);
   while (required_chunk_id >= m_chunks.size()) {
     auto chunk = std::make_unique<Chunk>(this, m_header->m_source_fld);
     if (!chunk) {
@@ -300,7 +300,7 @@ uchar *Cu::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   auto chunk_id = rowid / SHANNON_ROWS_IN_CHUNK;
   if (chunk_id > m_chunks.size()) return del_from;  // out of chunk rnage.
 
-  std::scoped_lock lk(m_mutex);
+  std::unique_lock lk(m_mutex);
   auto offset_in_chunk = rowid % SHANNON_ROWS_IN_CHUNK;
   if (!(del_from = m_chunks[chunk_id]->remove(context, offset_in_chunk))) {  // ret to deleted row addr.
     return del_from;

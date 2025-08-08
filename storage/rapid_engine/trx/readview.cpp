@@ -125,7 +125,7 @@ int Snapshot_meta_unit::purge(const char *tname, ::ReadView *rv) {
 
   int ret{SHANNON_SUCCESS};
   table_name_t name{const_cast<char *>(tname)};
-  std::scoped_lock lk(m_version_mutex);
+  std::unique_lock lk(m_version_mutex);
   for (auto it = m_version_info.begin(); it != m_version_info.end(); /* no ++ here */) {
     auto &smu_items = it->second;
     {
@@ -140,6 +140,9 @@ int Snapshot_meta_unit::purge(const char *tname, ::ReadView *rv) {
       items.erase(
           std::remove_if(items.begin(), items.end(),
                          [&](ShannonBase::ReadView::SMU_item &smu_it) {
+                           // Only satisfied when:
+                           // 1. Committed (tm_committed != SHANNON_MAX_STMP)
+                           // 2. Invisible to the current read view (i.e., no active transaction is accessing)
                            return (rv->changes_visible(smu_it.trxid, name) && smu_it.tm_committed == SHANNON_MAX_STMP);
                          }),
           items.end());
