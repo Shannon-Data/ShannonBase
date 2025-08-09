@@ -62,6 +62,7 @@ SET(SHANNON_IMCS_SOURCES
    utils/utils.cpp
    utils/SIMD.cpp
    imcs/purge/purge.cpp
+   autopilot/loader.cpp
 )
 SET(SHANNON_POPULATE_SOURCES
    populate/log_parser.cpp
