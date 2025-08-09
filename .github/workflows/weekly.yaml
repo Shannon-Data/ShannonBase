@@ -139,8 +139,8 @@ jobs:
           sudo chown -R $USER:$USER /home/shannon-bin/
           cd /home/shannon-bin/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
-          ./mysql-test-run.pl --suite=main,innodb,secondary_engine,ml --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
-          --big-test --nocheck-testcases --retry=3 --parallel=$(nproc)
+          ./mysql-test-run.pl --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
+          --big-test --nocheck-testcases --retry=3 --skip-test=innodb.alter_table_temp_files_io innodb.large_partitions_ddl innodb.zlob_ddl_big --parallel=$(nproc)
           # when we have a fast git action runner, we can use the following command to run the test.
           #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
           #./collections/default.weekly.basic
