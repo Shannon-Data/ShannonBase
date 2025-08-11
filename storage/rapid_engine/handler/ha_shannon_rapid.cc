@@ -58,6 +58,7 @@
 
 #include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
 #include "storage/innobase/include/dict0dd.h"    //dd_is_partitioned
+#include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
 #include "storage/rapid_engine/imcs/data_table.h"      //DataTable
@@ -72,6 +73,7 @@
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
 #include "storage/rapid_engine/utils/utils.h"
+
 #include "template_utils.h"
 #include "thr_lock.h"
 
@@ -1221,6 +1223,10 @@ static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void
   bool new_value = *static_cast<const bool *>(save);
   *static_cast<bool *>(var_ptr) = new_value;
   ShannonBase::rpd_self_load_enabled = *static_cast<const bool *>(save);
+  if (ShannonBase::rpd_self_load_enabled)  // to start AutoLoader thread.
+    ShannonBase::Autopilot::SelfLoadManager::instance()->start_self_load_worker();
+  else
+    ShannonBase::Autopilot::SelfLoadManager::instance()->stop_self_load_worker();
 }
 
 static void update_self_load_interval(THD *, SYS_VAR *, void *var_ptr, const void *save) {

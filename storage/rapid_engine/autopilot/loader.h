@@ -87,6 +87,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -99,8 +100,6 @@
 class Field;
 namespace ShannonBase {
 namespace Autopilot {
-constexpr uint64_t MAX_LOADER_TIMEOUT = 5000;  // timeout value.
-
 enum class loader_state_t {
   LOADER_STATE_INIT,    /*!< self-loader thread instance created */
   LOADER_STATE_RUN,     /*!< self-loader thread should be running */
@@ -137,9 +136,9 @@ struct TableInfo {
 
 class SelfLoadManager {
  public:
-  static SelfLoadManager &instance() {
-    static SelfLoadManager instance;
-    return instance;
+  static SelfLoadManager *&instance() {
+    std::call_once(one, [&] { m_instance = new SelfLoadManager(); });
+    return m_instance;
   }
 
   int initialize();
@@ -159,18 +158,8 @@ class SelfLoadManager {
   void start_self_load_worker();
   void stop_self_load_worker();
 
-  std::shared_ptr<TableInfo> get_table_info(const std::string &schema, const std::string &table);
-  std::vector<std::shared_ptr<TableInfo>> get_all_tables();
-
-  void set_enabled(bool enabled) { self_load_enabled.store(enabled); }
-  void set_interval_seconds(uint32_t seconds) { interval_seconds.store(seconds); }
-  void set_skip_quiet_check(bool skip) { skip_quiet_check.store(skip); }
-  void set_memory_fill_percentage(uint32_t percentage) { memory_fill_percentage.store(percentage); }
-
-  bool is_enabled() const { return self_load_enabled.load(); }
-  uint32_t get_interval_seconds() const { return interval_seconds.load(); }
-  bool should_skip_quiet_check() const { return skip_quiet_check.load(); }
-  uint32_t get_memory_fill_percentage() const { return memory_fill_percentage.load(); }
+  TableInfo *get_table_info(const std::string &schema, const std::string &table);
+  std::vector<TableInfo *> get_all_tables();
 
  private:
   SelfLoadManager() = default;
@@ -196,21 +185,6 @@ class SelfLoadManager {
   TABLE *get_mysql_table(const std::string &schema, const std::string &table);
 
  private:
-  std::atomic<bool> self_load_enabled{false};
-  std::atomic<uint32_t> interval_seconds{86400};  // 24hurs
-  std::atomic<bool> skip_quiet_check{false};
-  std::atomic<uint32_t> memory_fill_percentage{70};
-
-  // thread management.
-  std::atomic<bool> worker_running{false};
-  std::unique_ptr<std::thread> worker_thread;
-  std::condition_variable worker_cv;
-  std::mutex worker_mutex;
-
-  // (RPD Mirror)
-  std::shared_mutex tables_mutex;
-  std::unordered_map<std::string, std::shared_ptr<TableInfo>> tables;
-
   // load/unload strategies.
   struct LoadCandidate {
     std::string full_name;
@@ -231,6 +205,18 @@ class SelfLoadManager {
     }
   };
 
+  static std::once_flag one;
+  static SelfLoadManager *m_instance;
+  // thread management.
+  std::atomic<loader_state_t> m_worker_state{loader_state_t::LOADER_STATE_EXIT};
+  std::unique_ptr<std::thread> m_worker_thread;
+  std::condition_variable m_worker_cv;
+  std::mutex m_worker_mutex;
+
+  // (RPD Mirror)
+  std::shared_mutex m_tables_mutex;
+  std::unordered_map<std::string, std::unique_ptr<TableInfo>> m_rpd_mirror_tables;
+
   static constexpr int QUIET_WAIT_SECONDS = 300;
   static constexpr int MAX_QUIET_WAIT_ATTEMPTS = 10;
   static constexpr int QUERY_QUIET_MINUTES = 5;
@@ -238,43 +224,6 @@ class SelfLoadManager {
   static constexpr double IMPORTANCE_DECAY_FACTOR = 0.9;  // decline 10% a dya.
   static constexpr double IMPORTANCE_THRESHOLD = 0.001;   // 99.9% threshold of decline.
   static constexpr int COLD_TABLE_DAYS = 3;
-};
-
-class AutoLoader : public MemoryObject {
- public:
-  AutoLoader() = default;
-  virtual ~AutoLoader() = default;
-
-  // to launch log pop main thread.
-  static void start();
-
-  // to stop lop pop main thread.
-  static void end();
-
-  // whether the log pop main thread is active or not. true is alive, false dead.
-  static bool active();
-
-  // to print thread infos.
-  static void print_info(FILE *file);
-
-  // Enhanced status management
-  static inline void set_status(loader_state_t stat) { m_state.store(stat, std::memory_order_release); }
-
-  static inline loader_state_t get_status() { return m_state.load(std::memory_order_acquire); }
-
-  static IB_thread m_rapid_loader_cordinator;
-  static std::atomic<loader_state_t> m_state;
-  static std::mutex m_notify_mutex;
-  static std::condition_variable m_notify_cv;
-
-  std::atomic<bool> m_running{false};
-  std::thread m_worker;
-  std::chrono::seconds m_interval{86400};  // 24hrs
-
- private:
-  void unload_cold_tables() {}
-  void execute_load_unload() {}
-  void run() {}
 };
 
 }  // namespace Autopilot

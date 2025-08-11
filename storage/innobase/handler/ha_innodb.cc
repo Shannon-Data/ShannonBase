@@ -880,7 +880,8 @@ static PSI_thread_info all_innodb_threads[] = {
     PSI_THREAD_KEY(bulk_alloc_thread, "ib_bl_alloc", PSI_FLAG_SINGLETON, 0,
                    PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(rapid_populate_thread, "ib_rpd_pop",0, 0, PSI_DOCUMENT_ME),
-    PSI_THREAD_KEY(rapid_purge_thread, "ib_rpd_purge",0, 0, PSI_DOCUMENT_ME)};
+    PSI_THREAD_KEY(rapid_purge_thread, "ib_rpd_purge",0, 0, PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(rapid_self_load_thread, "ib_rpd_slfld",0, 0, PSI_DOCUMENT_ME)};
 #endif /* UNIV_PFS_THREAD */
 
 #ifdef UNIV_PFS_IO

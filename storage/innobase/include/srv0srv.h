@@ -252,6 +252,8 @@ struct Srv_threads {
   /** Thread for rapid IMCS*/
   IB_thread m_rapid_purg_cordinator;
 
+  /** Thread for rapid self-load*/
+  IB_thread m_rapid_self_load_cordinator;
 #ifdef UNIV_DEBUG
   /** Used in test scenario to delay threads' cleanup until the pre_dd_shutdown
   is ended and final plugin's shutdown is started (when plugin is DELETED).
@@ -830,6 +832,7 @@ extern mysql_pfs_key_t bulk_flusher_thread_key;
 extern mysql_pfs_key_t bulk_alloc_thread_key;
 extern mysql_pfs_key_t rapid_populate_thread_key;
 extern mysql_pfs_key_t rapid_purge_thread_key;
+extern mysql_pfs_key_t rapid_self_load_thread_key;
 #endif /* UNIV_PFS_THREAD */
 #endif /* !UNIV_HOTBACKUP */
 
