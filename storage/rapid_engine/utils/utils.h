@@ -54,10 +54,10 @@ namespace Utils {
 class Util {
  public:
   // open a table via schema name and table name.
-  static TABLE *open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type mode);
+  static TABLE *open_table_by_name(THD *thd, std::string schema_name, std::string table_name, thr_lock_type mode);
 
   // close a opened table.
-  static int close_table(TABLE *table);
+  static int close_table(THD *thd, TABLE *table);
 
   // to check whether this type is supported or not.
   static bool is_support_type(enum_field_types type);
@@ -294,7 +294,7 @@ class Util {
 
 class ColumnMapGuard {
   TABLE *table;
-  my_bitmap_map *old_map;
+  my_bitmap_map *old_wmap, *old_rmap;
 
  public:
   ColumnMapGuard(TABLE *t);

@@ -143,7 +143,7 @@ class SelfLoadManager {
 
   int initialize();
   int deinitialize();
-
+  inline bool initialized() { return m_intialized.load(); }
   // RPD Mirror management.
   int add_table(const std::string &schema, const std::string &table,
                 const std::string &secondary_engine = ShannonBase::rapid_hton_name);
@@ -159,7 +159,7 @@ class SelfLoadManager {
   void stop_self_load_worker();
 
   TableInfo *get_table_info(const std::string &schema, const std::string &table);
-  std::vector<TableInfo *> get_all_tables();
+  std::unordered_map<std::string, std::unique_ptr<TableInfo>> &get_all_tables();
 
  private:
   SelfLoadManager() = default;
@@ -184,6 +184,10 @@ class SelfLoadManager {
   int perform_self_unload(const std::string &schema, const std::string &table);
   TABLE *get_mysql_table(const std::string &schema, const std::string &table);
 
+  int load_tables_info();
+  int load_schema_info();
+  int load_tables_statistics();
+
  private:
   // load/unload strategies.
   struct LoadCandidate {
@@ -207,6 +211,7 @@ class SelfLoadManager {
 
   static std::once_flag one;
   static SelfLoadManager *m_instance;
+  std::atomic<bool> m_intialized{false};
   // thread management.
   std::atomic<loader_state_t> m_worker_state{loader_state_t::LOADER_STATE_EXIT};
   std::unique_ptr<std::thread> m_worker_thread;
@@ -217,6 +222,12 @@ class SelfLoadManager {
   std::shared_mutex m_tables_mutex;
   std::unordered_map<std::string, std::unique_ptr<TableInfo>> m_rpd_mirror_tables;
 
+  // format: <schema_id, schema_name>
+  std::unordered_map<int, std::string> m_schema_tables;
+
+  // format: <schema_name+":"+table_name, estimated_size>
+  std::unordered_map<std::string, uint64_t> m_table_stats;
+
   static constexpr int QUIET_WAIT_SECONDS = 300;
   static constexpr int MAX_QUIET_WAIT_ATTEMPTS = 10;
   static constexpr int QUERY_QUIET_MINUTES = 5;
@@ -224,6 +235,31 @@ class SelfLoadManager {
   static constexpr double IMPORTANCE_DECAY_FACTOR = 0.9;  // decline 10% a dya.
   static constexpr double IMPORTANCE_THRESHOLD = 0.001;   // 99.9% threshold of decline.
   static constexpr int COLD_TABLE_DAYS = 3;
+
+  // mysql.tables.
+  // schema_id
+  static constexpr uint FIELD_SCH_ID_OFFSET_TABLES = 1;
+  // schema_name
+  static constexpr uint FIELD_NAME_OFFSET_TABLES = 2;
+  // engine
+  static constexpr uint FIELD_ENGINE_OFFSET_TABLES = 4;
+  // comment
+  static constexpr uint FIELD_COMMENT_OFFSET_TABLES = 8;
+  // options
+  static constexpr uint FIELD_OPTIONS_OFFSET_TABLES = 10;
+
+  // mysql.schemata.
+  // schema id
+  static constexpr uint FIELD_CAT_ID_OFFSET_SCHEMA = 0;
+  // schema name
+  static constexpr uint FIELD_CAT_NAME_OFFSET_SCHEMA = 2;
+
+  // mysql.table_stats
+  static constexpr uint FIELD_SCH_NAME_OFFSET_STATS = 0;
+  static constexpr uint FIELD_TABLE_NAME_OFFSET_STATS = 1;
+  static constexpr uint FIELD_TABLE_ROWS_OFFSET_STATS = 2;
+  static constexpr uint FIELD_DATA_LEN_OFFSET_STATS = 4;
+  static constexpr uint FIELD_INDEX_LEN_OFFSET_STATS = 6;
 };
 
 }  // namespace Autopilot

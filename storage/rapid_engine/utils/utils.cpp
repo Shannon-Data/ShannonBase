@@ -29,6 +29,8 @@
 #include "include/my_bitmap.h"
 #include "sql/sql_base.h"
 
+#include "sql/dd/cache/dictionary_client.h"
+#include "sql/dd/types/table.h"
 #include "sql/opt_trace.h"
 #include "sql/sql_class.h"     //Secondary_engine_statement_context
 #include "sql/sql_executor.h"  //QEP_TBA
@@ -45,8 +47,7 @@
 namespace ShannonBase {
 namespace Utils {
 // open table by name. return table ptr, otherwise return nullptr.
-TABLE *Util::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
-  THD *thd = current_thd;
+TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
   /**
    * due to in function, `select xxxx`, when the statment executed, it enter lock table mode
    * but there's not even a opened table, so that, here we try to open a table, it failed before
@@ -79,10 +80,24 @@ TABLE *Util::open_table_by_name(std::string schema_name, std::string table_name,
     table_ptr->next_number_field = table_ptr->found_next_number_field;
 
   thd->locked_tables_mode = old_mode;
+
+  const dd::Table *table_obj{nullptr};
+  const dd::cache::Dictionary_client::Auto_releaser releaser(current_thd->dd_client());
+  if (!table_ptr && table_ptr->s->table_category != TABLE_UNKNOWN_CATEGORY) {
+    if (current_thd->dd_client()->acquire(table_ptr->s->db.str, table_ptr->s->table_name.str, &table_obj)) {
+      return nullptr;
+    }
+  }
+
+  if (table_ptr->file && table_ptr->file->ha_external_lock(thd, F_RDLCK)) {
+    table_ptr->file->ha_close();
+    return nullptr;
+  }
+
   return table_ptr;
 }
 
-int Util::close_table(TABLE *table [[maybe_unused]]) {
+int Util::close_table(THD *thd, TABLE *table [[maybe_unused]]) {
   assert(table);
   // it will close in close_thread_tables(). so here do nothing.
   return 0;
@@ -323,10 +338,14 @@ uint Util::normalized_length(const Field *field) {
              : field->pack_length();
 }
 
-ColumnMapGuard::ColumnMapGuard(TABLE *t) : table(t) { old_map = tmp_use_all_columns(table, table->write_set); }
+ColumnMapGuard::ColumnMapGuard(TABLE *t) : table(t) {
+  old_wmap = tmp_use_all_columns(table, table->write_set);
+  old_rmap = tmp_use_all_columns(table, table->read_set);
+}
 
 ColumnMapGuard::~ColumnMapGuard() {
-  if (old_map) tmp_restore_column_map(table->write_set, old_map);
+  if (old_wmap) tmp_restore_column_map(table->write_set, old_wmap);
+  if (old_rmap) tmp_restore_column_map(table->read_set, old_rmap);
 }
 
 }  // namespace Utils
