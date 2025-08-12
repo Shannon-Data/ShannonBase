@@ -130,11 +130,13 @@ class RapidTable : public MemoryObject {
   virtual int truncate() = 0;
   virtual int rollback_changes_by_trxid(Transaction::ID trxid) = 0;
 
+  void set_load_type(LoadType load_type) { m_load_type = load_type; }
+
  protected:
-  TYPE m_type;
+  TYPE m_type{TYPE::UNKONWN};
 
   // self load or user load.
-  LoadType m_load_type;
+  LoadType m_load_type{LoadType::NOT_LOADED};
 
   // name of schema.
   std::string m_schema_name;

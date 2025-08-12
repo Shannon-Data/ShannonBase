@@ -96,6 +96,8 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   // step 2: build indexes.
   if ((ret = table.get()->create_index_memo(context))) return ret;
 
+  table.get()->set_load_type(RapidTable::LoadType::USER_LOADED);
+
   // Adding the Table meta obj into m_tables/loaded tables meta information.
   std::string keypart;
   keypart.append(source->s->db.str).append(":").append(source->s->table_name.str);

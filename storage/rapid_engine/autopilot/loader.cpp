@@ -24,11 +24,17 @@
    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/autopilot/loader.h"
+#if !defined(_WIN32)
+#include <pthread.h>  // For pthread_setname_np
+#else
+#include <Windows.h>  // For SetThreadDescription
+#endif
 
 #include <limits.h>
 #include <queue>
 
 #include "sql/table.h"
+#include "storage/innobase/include/srv0srv.h"
 
 #include "storage/innobase/include/srv0shutdown.h"
 #include "storage/rapid_engine/imcs/imcs.h"
@@ -37,73 +43,22 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 #ifdef UNIV_PFS_THREAD
-mysql_pfs_key_t self_loader_thread_key;
+mysql_pfs_key_t rapid_self_load_thread_key;
 #endif /* UNIV_PFS_THREAD */
 
 namespace ShannonBase {
+extern bool rpd_self_load_enabled;
+extern ulonglong rpd_self_load_interval_seconds;  // default 24hurs
+extern bool rpd_self_load_skip_quiet_check;
+extern int rpd_self_load_base_relation_fill_percentage;  // default percentage 70%.
+
 namespace Autopilot {
-std::atomic<loader_state_t> AutoLoader::m_state{loader_state_t::LOADER_STATE_EXIT};
-std::mutex AutoLoader::m_notify_mutex;
-std::condition_variable AutoLoader::m_notify_cv;
-IB_thread AutoLoader::m_rapid_loader_cordinator;
-
-// main purge coordinator. First collecting all needed chunks, and puts into candidates vector
-// , then start the workers to do real purge job.
-static void loader_coordinator_main() {
-#if !defined(_WIN32)
-  pthread_setname_np(pthread_self(), "rapid_self_loader_coordinator_opt");
-#else
-  SetThreadDescription(GetCurrentThread(), L"rapid_self_loader_coordinator_opt");
-#endif
-
-  auto last_full_scan [[maybe_unused]] = std::chrono::steady_clock::now();
-  constexpr auto FULL_SCAN_INTERVAL = std::chrono::minutes(5);
-
-  while (srv_shutdown_state.load(std::memory_order_acquire) == SRV_SHUTDOWN_NONE &&
-         AutoLoader::get_status() == loader_state_t::LOADER_STATE_RUN) {
-    {
-      std::unique_lock<std::mutex> lk(AutoLoader::m_notify_mutex);
-      AutoLoader::m_notify_cv.wait_for(lk, std::chrono::milliseconds(MAX_LOADER_TIMEOUT));
-      if (AutoLoader::get_status() == loader_state_t::LOADER_STATE_STOP) {
-        return;
-      }
-    }
-  }
-  ut_a(AutoLoader::get_status() == loader_state_t::LOADER_STATE_STOP);
-}
-
-void AutoLoader::start() {
-  if (!active() && shannon_loaded_tables && shannon_loaded_tables->size() > 0) {
-    m_rapid_loader_cordinator = os_thread_create(self_loader_thread_key, 0, loader_coordinator_main);
-    set_status(loader_state_t::LOADER_STATE_RUN);
-    m_rapid_loader_cordinator.start();
-    ut_a(active());
-  }
-}
-
-void AutoLoader::end() {
-  if (active()) {
-    set_status(loader_state_t::LOADER_STATE_STOP);
-    m_notify_cv.notify_all();
-    m_rapid_loader_cordinator.join();
-    ut_a(!active());
-  }
-}
-
-bool AutoLoader::active() { return thread_is_active(m_rapid_loader_cordinator); }
-
-void AutoLoader::print_info(FILE *file) {
-  fprintf(file, "Rapid Autopilot Statistics:\n");
-  // fprintf(file, "  Purge cycles: %lu\n", stats.purge_cycles.load());
-
-  // auto now = std::chrono::steady_clock::now();
-  // auto last_read_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - stats.last_purge_time).count();
-  // fprintf(file, "  Time since last read: %ldms\n", last_read_ms);
-}
+std::once_flag SelfLoadManager::one;
+SelfLoadManager *SelfLoadManager::m_instance{nullptr};
 
 int SelfLoadManager::initialize() {
-  // to initialize RPD Mirror, scan information_schema.tables to get all table info.
-  auto cat_tables_ptr = Utils::Util::open_table_by_name("information_schema", "tables", TL_READ);
+  // to initialize RPD Mirror, scan information_schema.m_rpd_mirror_tables to get all table info.
+  auto cat_tables_ptr = Utils::Util::open_table_by_name("information_schema", "m_rpd_mirror_tables", TL_READ);
   if (!cat_tables_ptr) {
     Utils::Util::close_table(cat_tables_ptr);
     return HA_ERR_GENERIC;
@@ -121,6 +76,10 @@ int SelfLoadManager::initialize() {
     /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
      without locks. Now, do full scan, but multi-thread scan will impl in future. */
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+
+    auto tb_info = std::make_unique<TableInfo>();
+    std::string sch_tb_name;
+    m_rpd_mirror_tables.emplace(sch_tb_name, std::move(tb_info));
   }
   Utils::Util::close_table(cat_tables_ptr);
   return SHANNON_SUCCESS;
@@ -128,25 +87,25 @@ int SelfLoadManager::initialize() {
 
 int SelfLoadManager::deinitialize() {
   stop_self_load_worker();
-  std::unique_lock lock(tables_mutex);
-  tables.clear();
+  std::unique_lock lock(m_tables_mutex);
+  m_rpd_mirror_tables.clear();
   return SHANNON_SUCCESS;
 }
 
-std::shared_ptr<TableInfo> SelfLoadManager::get_table_info(const std::string &schema, const std::string &table) {
-  std::shared_lock lock(tables_mutex);
+TableInfo *SelfLoadManager::get_table_info(const std::string &schema, const std::string &table) {
+  std::shared_lock lock(m_tables_mutex);
   std::string full_name = schema + ":" + table;
 
-  auto it = tables.find(full_name);
-  return (it != tables.end()) ? it->second : nullptr;
+  auto it = m_rpd_mirror_tables.find(full_name);
+  return (it != m_rpd_mirror_tables.end()) ? it->second.get() : nullptr;
 }
 
-std::vector<std::shared_ptr<TableInfo>> SelfLoadManager::get_all_tables() {
-  std::shared_lock lock(tables_mutex);
-  std::vector<std::shared_ptr<TableInfo>> result;
+std::vector<TableInfo *> SelfLoadManager::get_all_tables() {
+  std::shared_lock lock(m_tables_mutex);
+  std::vector<TableInfo *> result;
 
-  for (const auto &[full_name, table_info] : tables) {
-    result.push_back(table_info);
+  for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
+    result.push_back(table_info.get());
   }
 
   return result;
@@ -154,9 +113,9 @@ std::vector<std::shared_ptr<TableInfo>> SelfLoadManager::get_all_tables() {
 
 int SelfLoadManager::add_table(const std::string &schema, const std::string &table,
                                const std::string &secondary_engine) {
-  std::shared_lock lock(tables_mutex);
+  std::shared_lock lock(m_tables_mutex);
 
-  auto table_info = std::make_shared<TableInfo>();
+  auto table_info = std::make_unique<TableInfo>();
   table_info->schema_name = schema;
   table_info->table_name = table;
   table_info->secondary_engine = secondary_engine;
@@ -166,24 +125,24 @@ int SelfLoadManager::add_table(const std::string &schema, const std::string &tab
     table_info->excluded_from_self_load = true;
   }
 
-  tables[table_info->full_name()] = table_info;
+  m_rpd_mirror_tables.emplace(table_info->full_name(), std::move(table_info));
   return SHANNON_SUCCESS;
 }
 
 int SelfLoadManager::remove_table(const std::string &schema, const std::string &table) {
-  std::unique_lock lock(tables_mutex);
+  std::unique_lock lock(m_tables_mutex);
   std::string full_name = schema + ":" + table;
-  tables.erase(full_name);
+  m_rpd_mirror_tables.erase(full_name);
   return SHANNON_SUCCESS;
 }
 
 int SelfLoadManager::update_table_state(const std::string &schema, const std::string &table,
                                         TableAccessStats::State state, TableAccessStats::LoadType load_type) {
-  std::shared_lock lock(tables_mutex);
+  std::shared_lock lock(m_tables_mutex);
   std::string full_name = schema + ":" + table;
 
-  auto it = tables.find(full_name);
-  if (it != tables.end()) {
+  auto it = m_rpd_mirror_tables.find(full_name);
+  if (it != m_rpd_mirror_tables.end()) {
     std::lock_guard<std::mutex> stats_lock(it->second->stats.stats_mutex);
     it->second->stats.state = state;
     it->second->stats.load_type = load_type;
@@ -194,11 +153,11 @@ int SelfLoadManager::update_table_state(const std::string &schema, const std::st
 
 void SelfLoadManager::update_access_stats(const std::string &schema, const std::string &table, bool executed_in_rpd,
                                           double execution_time, uint64_t table_size, uint64_t total_query_size) {
-  std::shared_lock lock(tables_mutex);
+  std::shared_lock lock(m_tables_mutex);
   std::string full_name = schema + ":" + table;
 
-  auto it = tables.find(full_name);
-  if (it == tables.end() || it->second->excluded_from_self_load) {
+  auto it = m_rpd_mirror_tables.find(full_name);
+  if (it == m_rpd_mirror_tables.end() || it->second->excluded_from_self_load) {
     return;
   }
 
@@ -224,39 +183,43 @@ void SelfLoadManager::update_access_stats(const std::string &schema, const std::
   }
 }
 
+static void self_load_coordinator_main() {}
 void SelfLoadManager::start_self_load_worker() {
-  if (!worker_running.load()) {
-    worker_running.store(true);
-    worker_thread = std::make_unique<std::thread>(&SelfLoadManager::self_load_worker_thread, this);
+  if (m_worker_state.load() == loader_state_t::LOADER_STATE_EXIT) {
+    m_worker_state.store(loader_state_t::LOADER_STATE_RUN);
+    m_worker_thread = std::make_unique<std::thread>(&SelfLoadManager::self_load_worker_thread, this);
+    srv_threads.m_rapid_self_load_cordinator =
+        os_thread_create(rapid_self_load_thread_key, 0, self_load_coordinator_main);
   }
 }
 
 void SelfLoadManager::stop_self_load_worker() {
-  if (worker_running.load()) {
-    worker_running.store(false);
-    worker_cv.notify_all();
-    if (worker_thread && worker_thread->joinable()) {
-      worker_thread->join();
+  if (m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) {
+    m_worker_state.store(loader_state_t::LOADER_STATE_EXIT);
+    m_worker_cv.notify_all();
+    if (m_worker_thread && m_worker_thread->joinable()) {
+      m_worker_thread->join();
     }
-    worker_thread.reset();
+    m_worker_thread.reset();
   }
 }
 
 void SelfLoadManager::self_load_worker_thread() {
-  while (worker_running.load()) {
-    std::unique_lock<std::mutex> lock(worker_mutex);
+  while (m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) {
+    std::unique_lock<std::mutex> lock(m_worker_mutex);
 
-    auto timeout = std::chrono::seconds(interval_seconds.load());
-    if (worker_cv.wait_for(lock, timeout, [this]() { return !worker_running.load(); })) {
+    auto timeout = std::chrono::seconds(ShannonBase::rpd_self_load_interval_seconds);
+    if (m_worker_cv.wait_for(lock, timeout,
+                             [this]() { return m_worker_state.load() != loader_state_t::LOADER_STATE_RUN; })) {
       break;
     }
 
-    if (!self_load_enabled.load()) {
+    if (!ShannonBase::rpd_self_load_enabled) {
       continue;
     }
 
     // should be silient or not.
-    if (!skip_quiet_check.load()) {
+    if (!ShannonBase::rpd_self_load_skip_quiet_check) {
       int attempts = 0;
       while (!is_system_quiet() && attempts < MAX_QUIET_WAIT_ATTEMPTS) {
         std::this_thread::sleep_for(std::chrono::seconds(QUIET_WAIT_SECONDS));
@@ -276,8 +239,8 @@ bool SelfLoadManager::is_system_quiet() {
   auto now = std::chrono::system_clock::now();
   auto quiet_threshold = now - std::chrono::minutes(QUERY_QUIET_MINUTES);
 
-  std::shared_lock lock(tables_mutex);
-  for (const auto &[full_name, table_info] : tables) {
+  std::shared_lock lock(m_tables_mutex);
+  for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
     std::lock_guard<std::mutex> stats_lock(table_info->stats.stats_mutex);
     if (table_info->stats.last_queried_time > quiet_threshold) {
       return false;
@@ -294,7 +257,7 @@ void SelfLoadManager::run_self_load_algorithm() {
   // step 1: decline the importance.
   decay_importance();
 
-  // step 2: unload the clod tables.
+  // step 2: unload the clod m_rpd_mirror_tables.
   unload_cold_tables();
 
   // step 3: perform load/unload queue.
@@ -307,8 +270,8 @@ void SelfLoadManager::run_self_load_algorithm() {
 void SelfLoadManager::decay_importance() {
   auto now = std::chrono::system_clock::now();
 
-  std::shared_lock lock(tables_mutex);
-  for (auto &[full_name, table_info] : tables) {
+  std::shared_lock lock(m_tables_mutex);
+  for (auto &[full_name, table_info] : m_rpd_mirror_tables) {
     std::lock_guard<std::mutex> stats_lock(table_info->stats.stats_mutex);
 
     // Calculate the number of days since last accessed
@@ -337,8 +300,8 @@ void SelfLoadManager::unload_cold_tables() {
   std::vector<std::string> tables_to_unload;
 
   {
-    std::shared_lock lock(tables_mutex);
-    for (const auto &[full_name, table_info] : tables) {
+    std::shared_lock lock(m_tables_mutex);
+    for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
       std::lock_guard<std::mutex> stats_lock(table_info->stats.stats_mutex);
 
       // Check if it's a cold self-loaded table
@@ -370,8 +333,8 @@ void SelfLoadManager::run_load_unload_algorithm() {
   std::priority_queue<UnloadCandidate> unload_queue;
 
   {
-    std::shared_lock lock(tables_mutex);
-    for (const auto &[full_name, table_info] : tables) {
+    std::shared_lock lock(m_tables_mutex);
+    for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
       if (table_info->excluded_from_self_load) {
         continue;
       }
@@ -402,7 +365,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
     auto load_candidate = load_queue.top();
     load_queue.pop();
 
-    // If more memory is needed, first unload the least important tables
+    // If more memory is needed, first unload the least important m_rpd_mirror_tables
     while (!unload_queue.empty() && current_memory + load_candidate.estimated_size > memory_threshold) {
       auto unload_candidate = unload_queue.top();
       unload_queue.pop();
@@ -437,7 +400,7 @@ uint64_t SelfLoadManager::get_current_memory_usage() { return ShannonBase::rapid
 
 uint64_t SelfLoadManager::get_memory_threshold() {
   uint64_t max_memory = ShannonBase::rpd_mem_sz_max;
-  uint32_t fill_percentage = memory_fill_percentage.load();
+  uint32_t fill_percentage = ShannonBase::rpd_self_load_base_relation_fill_percentage;
   return (max_memory * fill_percentage) / 100;
 }
 
@@ -527,7 +490,7 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   // Checks if it's a user-loaded table
   auto table_info = get_table_info(schema, table);
   if (table_info && table_info->stats.load_type == TableAccessStats::USER) {
-    // User-loaded tables are downgraded to self-loaded but not actually unloaded
+    // User-loaded m_rpd_mirror_tables are downgraded to self-loaded but not actually unloaded
     update_table_state(schema, table, TableAccessStats::LOADED, TableAccessStats::SELF);
 
     // my_printf_error(ER_SECONDARY_ENGINE_PLUGIN,
