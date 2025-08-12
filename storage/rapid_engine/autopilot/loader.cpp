@@ -32,6 +32,7 @@
 
 #include <limits.h>
 #include <queue>
+#include <string>
 
 #include "sql/table.h"
 #include "storage/innobase/include/srv0srv.h"
@@ -56,39 +57,189 @@ namespace Autopilot {
 std::once_flag SelfLoadManager::one;
 SelfLoadManager *SelfLoadManager::m_instance{nullptr};
 
-int SelfLoadManager::initialize() {
-  // to initialize RPD Mirror, scan information_schema.m_rpd_mirror_tables to get all table info.
-  auto cat_tables_ptr = Utils::Util::open_table_by_name("information_schema", "m_rpd_mirror_tables", TL_READ);
+class HandlerGuard {
+ public:
+  HandlerGuard(THD *thd, TABLE *tb) : m_thd(thd), m_table_ptr(tb) {}
+  ~HandlerGuard() { m_table_ptr->file->ha_external_lock(current_thd, F_UNLCK); }
+
+ private:
+  THD *m_thd{nullptr};
+  TABLE *m_table_ptr{nullptr};
+};
+
+// to scan mysq.schema, to get all schem information. such as schema_id, schema_name, etc.
+int SelfLoadManager::load_schema_info() {
+  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "schemata", TL_READ_DEFAULT);
   if (!cat_tables_ptr) {
-    Utils::Util::close_table(cat_tables_ptr);
+    Utils::Util::close_table(current_thd, cat_tables_ptr);
     return HA_ERR_GENERIC;
   }
 
-  auto handler = cat_tables_ptr->file;
-  if (handler->inited == handler::NONE && handler->ha_rnd_init(true)) {
-    handler->ha_rnd_end();
-    Utils::Util::close_table(cat_tables_ptr);
+  // must read from secondary engine.
+  /* Read the traning data into train_data vector from rapid engine. here, we use training data
+  as lablels too */
+  HandlerGuard garud(current_thd, cat_tables_ptr);
+  if (cat_tables_ptr->file->inited == handler::NONE && cat_tables_ptr->file->ha_rnd_init(true)) {
+    Utils::Util::close_table(current_thd, cat_tables_ptr);
     return HA_ERR_GENERIC;
   }
 
   int tmp{HA_ERR_GENERIC};
-  while ((tmp = handler->ha_rnd_next(cat_tables_ptr->record[0])) != HA_ERR_END_OF_FILE) {
+  ShannonBase::Utils::ColumnMapGuard guard(cat_tables_ptr);
+
+  while ((tmp = cat_tables_ptr->file->ha_rnd_next(cat_tables_ptr->record[0])) != HA_ERR_END_OF_FILE) {
+    /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
+     without locks. Now, do full scan, but multi-thread scan will impl in future. */
+    if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+    auto sch_id_fld = *(cat_tables_ptr->field + FIELD_CAT_ID_OFFSET_SCHEMA);
+    auto sch_id = sch_id_fld->val_int();
+
+    auto sch_name_fld = *(cat_tables_ptr->field + FIELD_CAT_NAME_OFFSET_SCHEMA);
+    String sch_name_str;
+    auto sch_name = std::string(sch_name_fld->val_str(&sch_name_str)->c_ptr());
+    m_schema_tables.emplace(sch_id, sch_name);
+  }
+  cat_tables_ptr->file->ha_rnd_end();
+
+  Utils::Util::close_table(current_thd, cat_tables_ptr);
+  m_intialized.store(true);
+
+  return SHANNON_SUCCESS;
+}
+
+// to scan mysq.table_stats, to get all statistics information. such as row count, data size, index size, etc.
+int SelfLoadManager::load_tables_statistics() {
+  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "table_stats", TL_READ_DEFAULT);
+  if (!cat_tables_ptr) {
+    Utils::Util::close_table(current_thd, cat_tables_ptr);
+    return HA_ERR_GENERIC;
+  }
+
+  // must read from secondary engine.
+  /* Read the traning data into train_data vector from rapid engine. here, we use training data
+  as lablels too */
+  HandlerGuard garud(current_thd, cat_tables_ptr);
+  if (cat_tables_ptr->file->inited == handler::NONE && cat_tables_ptr->file->ha_rnd_init(true)) {
+    Utils::Util::close_table(current_thd, cat_tables_ptr);
+    return HA_ERR_GENERIC;
+  }
+
+  int tmp{HA_ERR_GENERIC};
+  ShannonBase::Utils::ColumnMapGuard guard(cat_tables_ptr);
+
+  while ((tmp = cat_tables_ptr->file->ha_rnd_next(cat_tables_ptr->record[0])) != HA_ERR_END_OF_FILE) {
     /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
      without locks. Now, do full scan, but multi-thread scan will impl in future. */
     if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
-    auto tb_info = std::make_unique<TableInfo>();
-    std::string sch_tb_name;
-    m_rpd_mirror_tables.emplace(sch_tb_name, std::move(tb_info));
+    auto sch_name_fld = *(cat_tables_ptr->field + FIELD_SCH_NAME_OFFSET_STATS);
+    String sch_strstr;
+    auto sch_str = std::string(sch_name_fld->val_str(&sch_strstr)->c_ptr());
+
+    auto tb_name_fld = *(cat_tables_ptr->field + FIELD_TABLE_NAME_OFFSET_STATS);
+    String tb_name_strstr;
+    auto tb_name_str = std::string(tb_name_fld->val_str(&tb_name_strstr)->c_ptr());
+
+    auto row_cnt_fld = *(cat_tables_ptr->field + FIELD_TABLE_ROWS_OFFSET_STATS);
+    auto row_cnt = row_cnt_fld->val_real() ? row_cnt_fld->val_real() : 1;
+
+    auto data_len_fld = *(cat_tables_ptr->field + FIELD_DATA_LEN_OFFSET_STATS);
+    auto data_len = data_len_fld->val_real();
+
+    auto index_data_len_fld = *(cat_tables_ptr->field + FIELD_DATA_LEN_OFFSET_STATS);
+    auto index_data_len = index_data_len_fld->val_real();
+
+    auto size_mb = ((data_len + index_data_len) * row_cnt) / (1024 * 1024);
+    m_table_stats.emplace(sch_str + ":" + tb_name_str, size_mb ? size_mb : 1);
   }
-  Utils::Util::close_table(cat_tables_ptr);
+  cat_tables_ptr->file->ha_rnd_end();
+
+  Utils::Util::close_table(current_thd, cat_tables_ptr);
+  m_intialized.store(true);
   return SHANNON_SUCCESS;
+}
+
+// to scan mysq.tables, to get all schem information. such as table_name, secondary_engine info, etc.
+int SelfLoadManager::load_tables_info() {
+  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "tables", TL_READ_DEFAULT);
+  if (!cat_tables_ptr) {
+    Utils::Util::close_table(current_thd, cat_tables_ptr);
+    return HA_ERR_GENERIC;
+  }
+
+  // must read from secondary engine.
+  /* Read the traning data into train_data vector from rapid engine. here, we use training data
+  as lablels too */
+  HandlerGuard garud(current_thd, cat_tables_ptr);
+  if (cat_tables_ptr->file->inited == handler::NONE && cat_tables_ptr->file->ha_rnd_init(true)) {
+    Utils::Util::close_table(current_thd, cat_tables_ptr);
+    return HA_ERR_GENERIC;
+  }
+
+  int tmp{HA_ERR_GENERIC};
+  ShannonBase::Utils::ColumnMapGuard guard(cat_tables_ptr);
+
+  while ((tmp = cat_tables_ptr->file->ha_rnd_next(cat_tables_ptr->record[0])) != HA_ERR_END_OF_FILE) {
+    /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
+     without locks. Now, do full scan, but multi-thread scan will impl in future. */
+    if (tmp == HA_ERR_KEY_NOT_FOUND) break;
+
+    auto sch_id_fld = *(cat_tables_ptr->field + FIELD_SCH_ID_OFFSET_TABLES);
+    auto sch_id = sch_id_fld->val_int();
+    auto name_fld = *(cat_tables_ptr->field + FIELD_NAME_OFFSET_TABLES);
+    String name_strstr;
+    auto name_str = std::string(name_fld->val_str(&name_strstr)->c_ptr());
+
+    auto eng_name_fld = *(cat_tables_ptr->field + FIELD_ENGINE_OFFSET_TABLES);
+    String eng_strstr;
+    auto eng_str = std::string(eng_name_fld->val_str(&eng_strstr)->c_ptr());
+    std::transform(eng_str.begin(), eng_str.end(), eng_str.begin(), [](unsigned char c) { return std::toupper(c); });
+    if (eng_str.find("INNODB") == std::string::npos) continue;
+
+    auto option_txt_fld = *(cat_tables_ptr->field + FIELD_OPTIONS_OFFSET_TABLES);
+    String opt_strstr;
+    auto opt_str = std::string(option_txt_fld->val_str(&opt_strstr)->c_ptr());
+    std::transform(opt_str.begin(), opt_str.end(), opt_str.begin(), [](unsigned char c) { return std::toupper(c); });
+    // valid option: `secondary_engine=rapid` or `secondary_engine=`
+    // invalid option will be skipped. such as `secondary_engine=asdfasd`
+    if ((opt_str.find("SECONDARY_ENGINE=RAPID") == std::string::npos) ||
+        (opt_str.find("SECONDARY_ENGINE=NULL") == std::string::npos) ||
+        (opt_str.find("SECONDARY_ENGINE=") == std::string::npos))
+      continue;
+
+    ut_a(m_schema_tables.find(sch_id) != m_schema_tables.end());
+    auto tb_info = std::make_unique<TableInfo>();
+    tb_info.get()->schema_name = m_schema_tables[sch_id];
+    tb_info.get()->table_name = name_str;
+    tb_info.get()->secondary_engine = std::string("SECONDARY_ENGINE=RAPID");
+
+    auto key_str = tb_info.get()->schema_name + ":" + tb_info.get()->table_name;
+    ut_a(m_table_stats.find(key_str) != m_table_stats.end());
+    tb_info.get()->estimated_size = m_table_stats[key_str];
+    tb_info.get()->excluded_from_self_load = false;
+    m_rpd_mirror_tables.emplace(key_str, std::move(tb_info));
+  }
+  cat_tables_ptr->file->ha_rnd_end();
+
+  Utils::Util::close_table(current_thd, cat_tables_ptr);
+  m_intialized.store(true);
+
+  return SHANNON_SUCCESS;
+}
+
+int SelfLoadManager::initialize() {
+  auto ret{SHANNON_SUCCESS};
+  ret = load_schema_info() || load_tables_statistics() || load_tables_info();
+  return ret;
 }
 
 int SelfLoadManager::deinitialize() {
   stop_self_load_worker();
   std::unique_lock lock(m_tables_mutex);
   m_rpd_mirror_tables.clear();
+  m_schema_tables.clear();
+  m_table_stats.clear();
+  m_intialized.store(false);
   return SHANNON_SUCCESS;
 }
 
@@ -100,15 +251,9 @@ TableInfo *SelfLoadManager::get_table_info(const std::string &schema, const std:
   return (it != m_rpd_mirror_tables.end()) ? it->second.get() : nullptr;
 }
 
-std::vector<TableInfo *> SelfLoadManager::get_all_tables() {
+std::unordered_map<std::string, std::unique_ptr<TableInfo>> &SelfLoadManager::get_all_tables() {
   std::shared_lock lock(m_tables_mutex);
-  std::vector<TableInfo *> result;
-
-  for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
-    result.push_back(table_info.get());
-  }
-
-  return result;
+  return m_rpd_mirror_tables;
 }
 
 int SelfLoadManager::add_table(const std::string &schema, const std::string &table,

@@ -1223,10 +1223,16 @@ static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void
   bool new_value = *static_cast<const bool *>(save);
   *static_cast<bool *>(var_ptr) = new_value;
   ShannonBase::rpd_self_load_enabled = *static_cast<const bool *>(save);
-  if (ShannonBase::rpd_self_load_enabled)  // to start AutoLoader thread.
-    ShannonBase::Autopilot::SelfLoadManager::instance()->start_self_load_worker();
-  else
-    ShannonBase::Autopilot::SelfLoadManager::instance()->stop_self_load_worker();
+  auto instance = ShannonBase::Autopilot::SelfLoadManager::instance();
+  if (ShannonBase::rpd_self_load_enabled) {  // to start AutoLoader thread.
+    if (!instance->initialized()) {
+      instance->initialize();
+      instance->start_self_load_worker();
+    }
+  } else {
+    instance->stop_self_load_worker();
+    instance->deinitialize();
+  }
 }
 
 static void update_self_load_interval(THD *, SYS_VAR *, void *var_ptr, const void *save) {
