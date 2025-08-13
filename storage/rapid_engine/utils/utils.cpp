@@ -78,19 +78,10 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
   auto table_ptr = table_ref.table;
   if (!table_ptr->next_number_field)  // in case.
     table_ptr->next_number_field = table_ptr->found_next_number_field;
-
   thd->locked_tables_mode = old_mode;
 
-  const dd::Table *table_obj{nullptr};
-  const dd::cache::Dictionary_client::Auto_releaser releaser(current_thd->dd_client());
-  if (!table_ptr && table_ptr->s->table_category != TABLE_UNKNOWN_CATEGORY) {
-    if (current_thd->dd_client()->acquire(table_ptr->s->db.str, table_ptr->s->table_name.str, &table_obj)) {
-      return nullptr;
-    }
-  }
-
-  if (table_ptr->file && table_ptr->file->ha_external_lock(thd, F_RDLCK)) {
-    table_ptr->file->ha_close();
+  if (!table_ptr->file) return nullptr;
+  if (table_ptr->file->ha_external_lock(thd, F_WRLCK)) {
     return nullptr;
   }
 
@@ -100,7 +91,9 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
 int Util::close_table(THD *thd, TABLE *table [[maybe_unused]]) {
   assert(table);
   // it will close in close_thread_tables(). so here do nothing.
-  return 0;
+  if (table) table->file->ha_external_lock(thd, F_UNLCK);
+
+  return SHANNON_SUCCESS;
 }
 
 std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;

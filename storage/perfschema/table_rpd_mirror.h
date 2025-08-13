@@ -40,7 +40,7 @@
 #include "mysql_com.h"
 #include "sql/sql_const.h"  // UUID_LENGTH
 #include "storage/perfschema/pfs_engine_table.h"
-
+#include "storage/rapid_engine/autopilot/loader.h"
 /**
   @addtogroup performance_schema_mirror
   @{
@@ -49,6 +49,12 @@
 /**
   The rpd_mirror table keeps track of all existing tables in the DB System, whose engine is InnoDB.
 */
+enum STAT_ENUM {
+  NOT_LOADED = 1,
+  LOADED,
+  INSUFFICIENT_MEMORY
+};
+
 struct st_row_rpd_mirror {
   //The schema name.
   char schema_name[NAME_LEN] {0};
@@ -59,11 +65,11 @@ struct st_row_rpd_mirror {
   //Number of times the table has been accessed by the MySQL HeatWave Cluster.
   ulonglong rpd_access_count{0};
   //The timestamp of the last DB System query that referenced the table.
-  double last_queried_timestamp{0};
+  ulonglong last_queried_timestamp{0};
   //The timestamp of the last MySQL HeatWave query that referenced the table.
-  double last_queried_in_rpd_timestamp{0};
+  ulonglong last_queried_in_rpd_timestamp{0};
   //The table state: loaded or not loaded.
-  uint8 state{0};
+  STAT_ENUM state{STAT_ENUM::NOT_LOADED};
 };
 
 /** Table PERFORMANCE_SCHEMA.RPD_TABLES. */
@@ -84,6 +90,8 @@ class table_rpd_mirror : public PFS_engine_table {
   pos_t m_pos;
   /** Next position. */
   pos_t m_next_pos;
+
+  std::unordered_map<std::string, std::unique_ptr<ShannonBase::Autopilot::TableInfo>>::iterator m_it;
 
  protected:
   /**
