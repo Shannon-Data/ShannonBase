@@ -31,6 +31,8 @@
 #include "storage/perfschema/table_rpd_mirror.h"
 
 #include <stddef.h>
+#include <chrono>
+#include <ctime>
 
 #include "thr_lock.h"
 #include "my_compiler.h"
@@ -44,7 +46,7 @@
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
-#include "storage/rapid_engine/include/rapid_status.h"
+
 /*
   Callbacks implementation for RPD_TABLES.
 */
@@ -63,7 +65,7 @@ Plugin_table table_rpd_mirror::m_table_def(
     "  HEATWAVE_ACCESS_COUNT BIGINT unsigned not null,\n"
     "  LAST_QUERIED timestamp not null,\n"
     "  LAST_QUERIED_IN_RAPID timestamp not null,\n"
-    "  STATE ENUM('LOADED', 'NOT_LOADED') NOT NULL\n",
+    "  STATE ENUM('NOT_LOADED', 'LOADED', 'INSUFFICIENT_MEMORY') NOT NULL\n",
     /* Options */
     " ENGINE=PERFORMANCE_SCHEMA",
     /* Tablespace */
@@ -91,13 +93,14 @@ PFS_engine_table *table_rpd_mirror::create(
 
 table_rpd_mirror::table_rpd_mirror()
     : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
-  m_row.msyql_access_count=0;
-  m_row.rpd_access_count=0;
-  m_row.last_queried_timestamp=0;
-  m_row.last_queried_in_rpd_timestamp=0;
-  m_row.state=0;
+  m_row.msyql_access_count = 0;
+  m_row.rpd_access_count = 0;
+  m_row.last_queried_timestamp = 0;
+  m_row.last_queried_in_rpd_timestamp = 0;
+  m_row.state = STAT_ENUM::NOT_LOADED;
   memset (m_row.schema_name, 0x0, NAME_LEN);
   memset (m_row.table_name, 0x0, NAME_LEN);
+  m_it = ShannonBase::Autopilot::SelfLoadManager::instance()->get_all_tables().begin();
 }
 
 table_rpd_mirror::~table_rpd_mirror() {
@@ -107,10 +110,11 @@ table_rpd_mirror::~table_rpd_mirror() {
 void table_rpd_mirror::reset_position() {
   m_pos.m_index = 0;
   m_next_pos.m_index = 0;
+  m_it = ShannonBase::Autopilot::SelfLoadManager::instance()->get_all_tables().begin();
 }
 
 ha_rows table_rpd_mirror::get_row_count() {
-  return ShannonBase::rpd_columns_info.size();
+  return ShannonBase::Autopilot::SelfLoadManager::instance()->get_all_tables().size();
 }
 
 int table_rpd_mirror::rnd_next() {
@@ -139,8 +143,37 @@ int table_rpd_mirror::rnd_pos(const void *pos) {
 
 int table_rpd_mirror::make_row(uint index[[maybe_unused]]) {
   DBUG_TRACE;
-  // Set default values.
-  //TODO: to set the row data for this table.
+  assert(index < ShannonBase::Autopilot::SelfLoadManager::instance()->get_all_tables().size());
+
+  auto rpd_mirr_table = m_it->second.get();
+
+  memset(m_row.schema_name, 0x0, NAME_LEN);
+  strncpy(m_row.schema_name, rpd_mirr_table->schema_name.c_str(),
+         (rpd_mirr_table->schema_name.length() > NAME_LEN) ? NAME_LEN : rpd_mirr_table->schema_name.length());
+
+  memset(m_row.table_name, 0x0, NAME_LEN);
+  strncpy(m_row.table_name, rpd_mirr_table->table_name.c_str(),
+         (rpd_mirr_table->table_name.length() > NAME_LEN) ? NAME_LEN : rpd_mirr_table->table_name.length());
+
+  auto last_qt_rpd = rpd_mirr_table->stats.last_queried_time_in_rpd.time_since_epoch();
+  m_row.last_queried_in_rpd_timestamp =
+    std::chrono::duration_cast<std::chrono::duration<ulonglong>>(last_qt_rpd).count();
+
+  auto last_qt = rpd_mirr_table->stats.last_queried_time.time_since_epoch();
+  m_row.last_queried_timestamp =
+    std::chrono::duration_cast<std::chrono::duration<ulonglong>>(last_qt).count();
+
+  m_row.msyql_access_count = rpd_mirr_table->stats.mysql_access_count.load();
+  m_row.rpd_access_count = rpd_mirr_table->stats.heatwave_access_count.load();
+
+  if (rpd_mirr_table->stats.state == ShannonBase::Autopilot::TableAccessStats::NOT_LOADED)
+    m_row.state = STAT_ENUM::NOT_LOADED;
+  else if (rpd_mirr_table->stats.state == ShannonBase::Autopilot::TableAccessStats::LOADED)
+    m_row.state = STAT_ENUM::LOADED;
+  else
+    m_row.state = STAT_ENUM::INSUFFICIENT_MEMORY;
+
+  std::advance(m_it, 1);
   return 0;
 }
 

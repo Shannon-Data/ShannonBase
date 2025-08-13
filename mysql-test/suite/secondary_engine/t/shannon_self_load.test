@@ -1,0 +1,86 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+# USED FOR self load.
+create database sh_self_load;
+use sh_self_load;
+--disable_warnings
+
+--echo #connection_1, cconnection_2
+--connect(connection_1,localhost,root,,sh_self_load)
+--connect(connection_2,localhost,root,,sh_self_load)
+
+--connection connection_1
+CREATE TABLE simple_enum_table (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_name VARCHAR(50) NOT NULL,
+    account_status ENUM('active', 'inactive', 'suspended') NOT NULL DEFAULT 'active'
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+
+# insert example rows
+INSERT INTO simple_enum_table (user_name, account_status) VALUES
+('张三', 'active'),
+('李四', 'inactive'),
+('bob', 'inactive'),
+('grace', 'active'),
+('王五', 'suspended');
+
+ANALYZE TABLE simple_enum_table;
+
+CREATE TABLE simple_enum_table_1 (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_name VARCHAR(50) NOT NULL,
+    account_status ENUM('active', 'inactive', 'suspended') NOT NULL DEFAULT 'active'
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+
+ANALYZE TABLE simple_enum_table_1;
+
+CREATE TABLE simple_enum_table_2 (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_name VARCHAR(50) NOT NULL,
+    account_status ENUM('active', 'inactive', 'suspended') NOT NULL DEFAULT 'active'
+) ENGINE=InnoDB SECONDARY_ENGINE=Rapid;
+
+ANALYZE TABLE simple_enum_table_2;
+
+CREATE TABLE simple_enum_table_3 (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_name VARCHAR(50) NOT NULL,
+    account_status ENUM('active', 'inactive', 'suspended') NOT NULL DEFAULT 'active'
+) ENGINE=InnoDB SECONDARY_ENGINE=Null;
+
+ANALYZE TABLE simple_enum_table_3;
+
+CREATE TABLE simple_enum_table_4 (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_name VARCHAR(50) NOT NULL,
+    account_status ENUM('active', 'inactive', 'suspended') NOT NULL DEFAULT 'active'
+) ENGINE=InnoDB SECONDARY_ENGINE=Null;
+
+ANALYZE TABLE simple_enum_table_4;
+
+CREATE TABLE simple_enum_table_5 (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_name VARCHAR(50) NOT NULL,
+    account_status ENUM('active', 'inactive', 'suspended') NOT NULL DEFAULT 'active'
+) ENGINE=InnoDB SECONDARY_ENGINE=asdfd;
+
+ANALYZE TABLE simple_enum_table_5;
+
+SHOW CREATE TABLE performance_schema.rpd_mirror;
+
+--replace_column 145 IGNORE 15 IGNORE 16 IGNORE
+select * from information_schema.tables  where table_schema = 'sh_self_load';
+
+--sleep 10
+
+--connection connection_2
+SET GLOBAL rapid_self_load_enabled=on;
+
+SHOW VARIABLES LIKE "%rapid_self_load_enabled%";
+
+SET GLOBAL rapid_self_load_enabled=off;
+--enable_warnings
+DROP DATABASE sh_self_load;

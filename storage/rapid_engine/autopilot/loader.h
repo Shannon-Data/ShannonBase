@@ -92,12 +92,11 @@
 #include <shared_mutex>
 #include <string>
 
-#include "storage/innobase/include/os0thread-create.h"
-
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
 
 class Field;
+class TABLE;
+class THD;
 namespace ShannonBase {
 namespace Autopilot {
 enum class loader_state_t {
@@ -113,13 +112,15 @@ struct TableAccessStats {
   std::atomic<uint64_t> heatwave_access_count{0};
   std::atomic<double> importance{0.0};
   std::chrono::system_clock::time_point last_queried_time;
+  std::chrono::system_clock::time_point last_queried_time_in_rpd;
 
-  enum State { NOT_LOADED, LOADED, INSUFFICIENT_MEMORY } state{NOT_LOADED};
-
+  enum State { NOT_LOADED = 0, LOADED, INSUFFICIENT_MEMORY } state{NOT_LOADED};
   enum LoadType { SELF, USER } load_type{SELF};
 
   std::mutex stats_mutex;
-  TableAccessStats() : last_queried_time(std::chrono::system_clock::now()) {}
+  TableAccessStats()
+      : last_queried_time(std::chrono::system_clock::now()),
+        last_queried_time_in_rpd(std::chrono::system_clock::now()) {}
 };
 
 // RPD Mirror Table Info.
@@ -184,9 +185,9 @@ class SelfLoadManager {
   int perform_self_unload(const std::string &schema, const std::string &table);
   TABLE *get_mysql_table(const std::string &schema, const std::string &table);
 
-  int load_tables_info();
-  int load_schema_info();
-  int load_tables_statistics();
+  int load_mysql_schema_info();
+  int load_mysql_table_stats();
+  int load_mysql_tables_info();
 
  private:
   // load/unload strategies.

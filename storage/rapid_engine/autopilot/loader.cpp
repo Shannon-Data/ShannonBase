@@ -37,7 +37,9 @@
 #include "sql/table.h"
 #include "storage/innobase/include/srv0srv.h"
 
+#include "storage/innobase/include/os0thread-create.h"
 #include "storage/innobase/include/srv0shutdown.h"
+
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
@@ -60,7 +62,7 @@ SelfLoadManager *SelfLoadManager::m_instance{nullptr};
 class HandlerGuard {
  public:
   HandlerGuard(THD *thd, TABLE *tb) : m_thd(thd), m_table_ptr(tb) {}
-  ~HandlerGuard() { m_table_ptr->file->ha_external_lock(current_thd, F_UNLCK); }
+  ~HandlerGuard() {}
 
  private:
   THD *m_thd{nullptr};
@@ -68,8 +70,8 @@ class HandlerGuard {
 };
 
 // to scan mysq.schema, to get all schem information. such as schema_id, schema_name, etc.
-int SelfLoadManager::load_schema_info() {
-  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "schemata", TL_READ_DEFAULT);
+int SelfLoadManager::load_mysql_schema_info() {
+  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "schemata", TL_READ_WITH_SHARED_LOCKS);
   if (!cat_tables_ptr) {
     Utils::Util::close_table(current_thd, cat_tables_ptr);
     return HA_ERR_GENERIC;
@@ -102,14 +104,12 @@ int SelfLoadManager::load_schema_info() {
   cat_tables_ptr->file->ha_rnd_end();
 
   Utils::Util::close_table(current_thd, cat_tables_ptr);
-  m_intialized.store(true);
-
   return SHANNON_SUCCESS;
 }
 
 // to scan mysq.table_stats, to get all statistics information. such as row count, data size, index size, etc.
-int SelfLoadManager::load_tables_statistics() {
-  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "table_stats", TL_READ_DEFAULT);
+int SelfLoadManager::load_mysql_table_stats() {
+  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "table_stats", TL_READ_WITH_SHARED_LOCKS);
   if (!cat_tables_ptr) {
     Utils::Util::close_table(current_thd, cat_tables_ptr);
     return HA_ERR_GENERIC;
@@ -160,8 +160,8 @@ int SelfLoadManager::load_tables_statistics() {
 }
 
 // to scan mysq.tables, to get all schem information. such as table_name, secondary_engine info, etc.
-int SelfLoadManager::load_tables_info() {
-  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "tables", TL_READ_DEFAULT);
+int SelfLoadManager::load_mysql_tables_info() {
+  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "tables", TL_READ_WITH_SHARED_LOCKS);
   if (!cat_tables_ptr) {
     Utils::Util::close_table(current_thd, cat_tables_ptr);
     return HA_ERR_GENERIC;
@@ -202,9 +202,8 @@ int SelfLoadManager::load_tables_info() {
     std::transform(opt_str.begin(), opt_str.end(), opt_str.begin(), [](unsigned char c) { return std::toupper(c); });
     // valid option: `secondary_engine=rapid` or `secondary_engine=`
     // invalid option will be skipped. such as `secondary_engine=asdfasd`
-    if ((opt_str.find("SECONDARY_ENGINE=RAPID") == std::string::npos) ||
-        (opt_str.find("SECONDARY_ENGINE=NULL") == std::string::npos) ||
-        (opt_str.find("SECONDARY_ENGINE=") == std::string::npos))
+    if ((opt_str.find("SECONDARY_ENGINE=RAPID") == std::string::npos) &&
+        (opt_str.find("SECONDARY_ENGINE=NULL") == std::string::npos))
       continue;
 
     ut_a(m_schema_tables.find(sch_id) != m_schema_tables.end());
@@ -214,9 +213,16 @@ int SelfLoadManager::load_tables_info() {
     tb_info.get()->secondary_engine = std::string("SECONDARY_ENGINE=RAPID");
 
     auto key_str = tb_info.get()->schema_name + ":" + tb_info.get()->table_name;
-    ut_a(m_table_stats.find(key_str) != m_table_stats.end());
-    tb_info.get()->estimated_size = m_table_stats[key_str];
+    // ut_a(m_table_stats.find(key_str) != m_table_stats.end());
+    if (m_table_stats.find(key_str) != m_table_stats.end())
+      tb_info.get()->estimated_size = m_table_stats[key_str];
+    else
+      tb_info.get()->estimated_size = 0;
+
     tb_info.get()->excluded_from_self_load = false;
+    tb_info.get()->stats.last_queried_time = std::chrono::system_clock::now();
+    tb_info.get()->stats.last_queried_time_in_rpd = std::chrono::system_clock::now();
+
     m_rpd_mirror_tables.emplace(key_str, std::move(tb_info));
   }
   cat_tables_ptr->file->ha_rnd_end();
@@ -229,7 +235,8 @@ int SelfLoadManager::load_tables_info() {
 
 int SelfLoadManager::initialize() {
   auto ret{SHANNON_SUCCESS};
-  ret = load_schema_info() || load_tables_statistics() || load_tables_info();
+  ret = load_mysql_schema_info() || load_mysql_table_stats() || load_mysql_tables_info();
+  if (ret == SHANNON_SUCCESS) m_intialized.store(true);
   return ret;
 }
 

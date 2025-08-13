@@ -33,3 +33,4 @@ MODEL_ID	MODEL_HANDLE	MODEL_OBJECT	MODEL_OWNER	task	feature_names
 2	census_test_imported	NULL	root	CLASSIFICATION	["age", "workclass", "fnlwgt", "education", "education-num", "marital-status", "occupation", "relationship", "race", "sex", "capital-gain", "capital-loss", "hours-per-week", "native-country"]
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE census_train SECONDARY_UNLOAD;
+DROP DATABASE IF EXISTS shannon_ml;
