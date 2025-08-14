@@ -607,6 +607,7 @@ void *ART::Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *ke
 
   // If we are at a leaf, we need to replace it with a node
   if (IS_LEAF(n)) {
+    std::unique_lock lk(m_node_mutex);
     Art_leaf *l = LEAF_RAW(n);
     // Check if we are updating an existing value
     if (!Leaf_matches(l, key, key_len, depth)) {
@@ -840,6 +841,7 @@ ART::Art_leaf *ART::Recursive_delete(Art_node *n, Art_node **ref, const unsigned
 
   // If the child is leaf, delete from this node
   if (IS_LEAF(*child)) {
+    std::unique_lock lk(m_node_mutex);
     Art_leaf *l = LEAF_RAW(*child);
     if (!Leaf_matches(l, key, key_len, depth)) {
       Remove_child(n, ref, key[depth], child);
@@ -872,6 +874,7 @@ int ART::Recursive_iter(Art_node *n, ART_Func &cb, void *data) {
   // Handle base cases
   if (!n) return 0;
   if (IS_LEAF(n)) {
+    std::shared_lock lk(m_node_mutex);
     Art_leaf *l = LEAF_RAW(n);
     return cb(data, l, (const unsigned char *)l->key, l->key_len, l->values[0], 0);
   }
