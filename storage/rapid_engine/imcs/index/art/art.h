@@ -36,8 +36,9 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <vector>
-
 #include "my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
@@ -183,6 +184,7 @@ class ART {
   int ART_iter(ART_Func cb, void *data);
 
  private:
+  std::shared_mutex m_node_mutex;
   Art_tree *m_tree{nullptr};
   bool m_inited{false};
   std::vector<Art_leaf *> m_current_values;
