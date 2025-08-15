@@ -71,6 +71,8 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
     return ha_thd();
   }
 
+  int se_create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *);
+
   int load_table(const TABLE &table, bool *skip_metadata_update) override;
 
   int unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) override;
@@ -85,9 +87,9 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
     return false;
   }
 
-  void set_eq_range(bool eq_range_arg) override { assert(false); }
+  void set_eq_range(bool) override { assert(false); }
 
-  void set_range_key_part(KEY_PART_INFO *key_part) override { assert(false); }
+  void set_range_key_part(KEY_PART_INFO *) override { assert(false); }
 
   int write_row_in_part(uint, uchar *) override {
     assert(false);

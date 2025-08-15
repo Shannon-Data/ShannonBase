@@ -31,7 +31,9 @@
 #endif
 
 #include <limits.h>
+#include <optional>
 #include <queue>
+#include <regex>
 #include <string>
 
 #include "sql/table.h"
@@ -68,6 +70,24 @@ class HandlerGuard {
   THD *m_thd{nullptr};
   TABLE *m_table_ptr{nullptr};
 };
+
+std::optional<std::string> SelfLoadManager::extract_secondary_engine(const std::string &input) {
+  const std::string key = "SECONDARY_ENGINE=";
+  size_t pos = input.find(key);
+
+  if (pos == std::string::npos) {
+    return std::nullopt;
+  }
+
+  pos += key.length();
+  size_t end_pos = input.find_first_of(";", pos);
+
+  if (end_pos == std::string::npos) {
+    end_pos = input.length();
+  }
+
+  return input.substr(pos, end_pos - pos);
+}
 
 // to scan mysq.schema, to get all schem information. such as schema_id, schema_name, etc.
 int SelfLoadManager::load_mysql_schema_info() {
@@ -202,9 +222,13 @@ int SelfLoadManager::load_mysql_tables_info() {
     std::transform(opt_str.begin(), opt_str.end(), opt_str.begin(), [](unsigned char c) { return std::toupper(c); });
     // valid option: `secondary_engine=rapid` or `secondary_engine=`
     // invalid option will be skipped. such as `secondary_engine=asdfasd`
-    if ((opt_str.find("SECONDARY_ENGINE=RAPID") == std::string::npos) &&
-        (opt_str.find("SECONDARY_ENGINE=NULL") == std::string::npos))
+    auto res = extract_secondary_engine(opt_str);
+    if (!res)
       continue;
+    else {
+      auto val = res.value();
+      if (val.find("RAPID") == std::string::npos && val.find("NULL") == std::string::npos && !val.empty()) continue;
+    }
 
     ut_a(m_schema_tables.find(sch_id) != m_schema_tables.end());
     auto tb_info = std::make_unique<TableInfo>();
@@ -273,8 +297,13 @@ int SelfLoadManager::add_table(const std::string &schema, const std::string &tab
   table_info->secondary_engine = secondary_engine;
 
   // to check should we remove this table or not.
-  if (!secondary_engine.empty() && secondary_engine != "RAPID" && secondary_engine != "NULL") {
-    table_info->excluded_from_self_load = true;
+  auto eng_str = secondary_engine;
+  std::transform(eng_str.begin(), eng_str.end(), eng_str.begin(), [](unsigned char c) { return std::toupper(c); });
+  auto res = extract_secondary_engine(eng_str);
+  if (res) {
+    auto val = res.value();
+    if (val.find("RAPID") == std::string::npos && val.find("NULL") == std::string::npos && !val.empty())
+      table_info->excluded_from_self_load = false;
   }
 
   m_rpd_mirror_tables.emplace(table_info->full_name(), std::move(table_info));

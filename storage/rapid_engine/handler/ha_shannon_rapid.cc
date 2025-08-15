@@ -193,6 +193,12 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+int ha_rapid::se_create(const char *name, TABLE *form, HA_CREATE_INFO *info, dd::Table *table_def) {
+  auto &self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+  return self_load_inst->add_table(form->s->db.str, form->s->table_name.str, info->secondary_engine.str);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
 int ha_rapid::close() {
   m_data_table->close();
   return ShannonBase::SHANNON_SUCCESS;

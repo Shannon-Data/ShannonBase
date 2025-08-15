@@ -40,7 +40,7 @@ namespace Index {
 
 class Iterator {
  public:
-  explicit Iterator(ART *art) {}
+  explicit Iterator(ART *) {}
   virtual ~Iterator() = default;
 
   /* initialize the scan.
