@@ -6979,6 +6979,38 @@ static Sys_var_enum Sys_rapid_use_dynamic_offload(
     rapid_use_dynamic_offloads, DEFAULT(DYNAMIC_OFFLOAD_ON), NO_MUTEX_GUARD,
     NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
 
+static Sys_var_ulong Sys_rapid_max_purger_timeout(
+    "rapid_max_purger_timeout",
+    "Default value of spin delay (in spin rounds)"
+    "1000 spin round takes 4us, 25000 takes 1ms for busy waiting. therefore, 200ms means"
+    "5000000 spin rounds. for the more detail infor ref to : comment of"
+    "`innodb_log_writer_spin_delay`.",
+    HINT_UPDATEABLE SESSION_ONLY(rapid_max_purger_timeout), NO_CMD_LINE,
+    VALID_RANGE(256, ULLONG_MAX), DEFAULT(5000), BLOCK_SIZE(1), NO_MUTEX_GUARD,
+    NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
+
+static Sys_var_ulong Sys_rapid_purge_batch_size(
+    "rapid_purge_batch_size",
+    "Process chunks in batches, number of chunks to process in a single purge batch",
+    HINT_UPDATEABLE SESSION_ONLY(rapid_purge_batch_size), NO_CMD_LINE,
+    VALID_RANGE(1, 65536), DEFAULT(64), BLOCK_SIZE(1), NO_MUTEX_GUARD,
+    NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
+
+static Sys_var_ulong Sys_rapid_min_versions_for_purge(
+    "rapid_min_versions_for_purge",
+    "Minimum number of versions required for a chunk to be eligible for purging",
+    HINT_UPDATEABLE SESSION_ONLY(rapid_min_versions_for_purge), NO_CMD_LINE,
+    VALID_RANGE(10, ULLONG_MAX), DEFAULT(10), BLOCK_SIZE(1), NO_MUTEX_GUARD,
+    NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
+
+static Sys_var_double Sys_rapid_purge_efficiency_threshold(
+    "rapid_purge_efficiency_threshold",
+    "Purge efficiency threshold, only purge if >10% can be cleaned",
+    HINT_UPDATEABLE SESSION_VAR(rapid_purge_efficiency_threshold), NO_CMD_LINE,
+    VALID_RANGE(0.1, 1), DEFAULT(0.1), NO_MUTEX_GUARD,
+    NOT_IN_BINLOG, ON_CHECK(nullptr), ON_UPDATE(nullptr));
+
+
 static Sys_var_session_special Sys_statement_id(
     "statement_id",
     "statement_id: represents the id of the query "
