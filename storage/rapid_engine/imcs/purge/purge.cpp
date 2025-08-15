@@ -90,7 +90,7 @@ size_t ChunkPurgeOptimizer::estimate_purgeable_versions(ShannonBase::Imcs::Chunk
 
 // Analyze chunks and prioritize purge candidates
 std::vector<PurgeCandidate> ChunkPurgeOptimizer::analyze_purge_candidates(
-    const std::vector<ShannonBase::Imcs::Chunk *> &chunks) {
+    const std::vector<ShannonBase::Imcs::Chunk *> &chunks, THD *thd) {
   std::vector<PurgeCandidate> candidates;
   candidates.reserve(chunks.size());
 
@@ -105,13 +105,13 @@ std::vector<PurgeCandidate> ChunkPurgeOptimizer::analyze_purge_candidates(
     if (!smu) continue;
 
     size_t total_versions_cnt = smu->version_info().size();
-    if (total_versions_cnt < MIN_VERSIONS_FOR_PURGE) continue;
+    if (total_versions_cnt < thd->variables.rapid_min_versions_for_purge) continue;
 
     size_t purgeable_versions_cnt = estimate_purgeable_versions(chunk, smu, &oldest_view);
     if (!purgeable_versions_cnt) continue;
 
     double efficiency = static_cast<double>(purgeable_versions_cnt) / (!total_versions_cnt) ? 1 : total_versions_cnt;
-    if (efficiency < PURGE_EFFICIENCY_THRESHOLD) continue;
+    if (efficiency < thd->variables.rapid_purge_efficiency_threshold) continue;
 
     size_t estimated_bytes = purgeable_versions_cnt * chunk->normalized_pack_length();
 
@@ -175,7 +175,7 @@ static int purger_purge_worker(const std::vector<PurgeCandidate> &candidates) {
 
 // main purge coordinator. First collecting all needed chunks, and puts into candidates vector
 // , then start the workers to do real purge job.
-static void purge_coordinator_main() {
+static void purge_coordinator_main(THD *thd) {
 #if !defined(_WIN32)
   pthread_setname_np(pthread_self(), "rapid_purge_coordinator_opt");
 #else
@@ -191,7 +191,7 @@ static void purge_coordinator_main() {
       std::unique_lock<std::mutex> lk(Purger::m_notify_mutex);
       bool immediate_purge = Purger::m_immediate_purge.exchange(false);
       if (!immediate_purge) {
-        Purger::m_notify_cv.wait_for(lk, std::chrono::milliseconds(MAX_PURGER_TIMEOUT));
+        Purger::m_notify_cv.wait_for(lk, std::chrono::milliseconds(thd->variables.rapid_max_purger_timeout));
       }
       if (Purger::get_status() == purge_state_t::PURGE_STATE_STOP) {
         return;
@@ -226,7 +226,7 @@ static void purge_coordinator_main() {
     }
 
     // Analyze and prioritize chunks for purging
-    auto candidates = ChunkPurgeOptimizer::analyze_purge_candidates(all_chunks);
+    auto candidates = ChunkPurgeOptimizer::analyze_purge_candidates(all_chunks, thd);
 
     if (candidates.empty()) {
       // No chunks need purging, wait longer
@@ -274,10 +274,11 @@ static void purge_coordinator_main() {
 }
 
 // Implementation of Purger methods
-void Purger::start() {
+void Purger::start(THD *thd) {
   if (!active() && shannon_loaded_tables && shannon_loaded_tables->size() > 0) {
     m_stats.reset();
-    srv_threads.m_rapid_purg_cordinator = os_thread_create(rapid_purge_thread_key, 0, purge_coordinator_main);
+    srv_threads.m_rapid_purg_cordinator = os_thread_create(rapid_purge_thread_key, 0, purge_coordinator_main,
+    thd);
     set_status(purge_state_t::PURGE_STATE_RUN);
     srv_threads.m_rapid_purg_cordinator.start();
     ut_a(active());

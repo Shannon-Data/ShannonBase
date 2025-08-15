@@ -2809,7 +2809,7 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table,
 
 
   //start imcs purger thread to purge dead tuples.
-  ShannonBase::Purge::Purger::start();
+  ShannonBase::Purge::Purger::start(thd);
 
   //start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();

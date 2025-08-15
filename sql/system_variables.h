@@ -387,6 +387,29 @@ struct System_variables {
   ulong rapid_use_dynamic_offload;
 
   /**
+  Default value of spin delay (in spin rounds)
+  1000 spin round takes 4us,  25000 takes 1ms for busy waiting. therefore, 200ms means
+  5000000 spin rounds. for the more detail infor ref to : comment of
+  `innodb_log_writer_spin_delay`.
+  */
+  ulong rapid_max_purger_timeout;
+
+  /*
+  Number of chunks to process in a single purge batch.
+  */
+  ulong rapid_purge_batch_size;
+
+  /*
+  Minimum number of versions required for a chunk to be eligible for purging
+  */
+  ulong rapid_min_versions_for_purge;
+
+  /*
+  Purge efficiency threshold, Only purge if >10% can be cleaned
+  */
+  double rapid_purge_efficiency_threshold;
+
+  /**
     Used for controlling which statements to execute in a secondary
     storage engine. Only queries with an estimated cost higher than
     this value will be attempted executed in a secondary storage
