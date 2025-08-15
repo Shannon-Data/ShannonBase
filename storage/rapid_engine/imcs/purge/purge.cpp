@@ -56,6 +56,10 @@ mysql_pfs_key_t rapid_purge_thread_key;
 #endif /* UNIV_PFS_THREAD */
 
 namespace ShannonBase {
+extern ulonglong rpd_min_versions_for_purge;
+extern double rpd_purge_efficiency_threshold;
+extern ulonglong rpd_max_purger_timeout;
+
 namespace Populate {
 extern std::shared_mutex g_processing_table_mutex;
 extern std::set<std::string> g_processing_tables;
@@ -105,13 +109,13 @@ std::vector<PurgeCandidate> ChunkPurgeOptimizer::analyze_purge_candidates(
     if (!smu) continue;
 
     size_t total_versions_cnt = smu->version_info().size();
-    if (total_versions_cnt < MIN_VERSIONS_FOR_PURGE) continue;
+    if (total_versions_cnt < ShannonBase::rpd_min_versions_for_purge) continue;
 
     size_t purgeable_versions_cnt = estimate_purgeable_versions(chunk, smu, &oldest_view);
     if (!purgeable_versions_cnt) continue;
 
     double efficiency = static_cast<double>(purgeable_versions_cnt) / (!total_versions_cnt) ? 1 : total_versions_cnt;
-    if (efficiency < PURGE_EFFICIENCY_THRESHOLD) continue;
+    if (efficiency < ShannonBase::rpd_purge_efficiency_threshold) continue;
 
     size_t estimated_bytes = purgeable_versions_cnt * chunk->normalized_pack_length();
 
@@ -191,7 +195,7 @@ static void purge_coordinator_main() {
       std::unique_lock<std::mutex> lk(Purger::m_notify_mutex);
       bool immediate_purge = Purger::m_immediate_purge.exchange(false);
       if (!immediate_purge) {
-        Purger::m_notify_cv.wait_for(lk, std::chrono::milliseconds(MAX_PURGER_TIMEOUT));
+        Purger::m_notify_cv.wait_for(lk, std::chrono::milliseconds(ShannonBase::rpd_max_purger_timeout));
       }
       if (Purger::get_status() == purge_state_t::PURGE_STATE_STOP) {
         return;

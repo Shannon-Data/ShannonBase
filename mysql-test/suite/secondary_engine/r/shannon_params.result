@@ -14,9 +14,13 @@ INSERT INTO t1 (user_name, account_status) VALUES
 SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
+rapid_max_purger_timeout	5000
 rapid_memory_size_max	8589934592
+rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_pop_buffer_size_max	134217728
+rapid_purge_batch_size	64
+rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
@@ -28,9 +32,13 @@ SET GLOBAL rapid_async_column_threshold=11;
 SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	11
+rapid_max_purger_timeout	5000
 rapid_memory_size_max	8589934592
+rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_pop_buffer_size_max	134217728
+rapid_purge_batch_size	64
+rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
@@ -44,9 +52,13 @@ SET GLOBAL rapid_async_column_threshold=10;
 SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	10
+rapid_max_purger_timeout	5000
 rapid_memory_size_max	8589934592
+rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_pop_buffer_size_max	134217728
+rapid_purge_batch_size	64
+rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
@@ -58,9 +70,13 @@ SET GLOBAL rapid_self_load_interval_seconds=864;
 SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	10
+rapid_max_purger_timeout	5000
 rapid_memory_size_max	8589934592
+rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_pop_buffer_size_max	134217728
+rapid_purge_batch_size	64
+rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	80
 rapid_self_load_enabled	ON
 rapid_self_load_interval_seconds	864
