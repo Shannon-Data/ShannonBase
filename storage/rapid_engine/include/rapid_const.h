@@ -84,6 +84,16 @@ constexpr uint64 SHANNON_POP_BUFF_THRESHOLD_COUNT = 10000;
 constexpr uint64 SHANNON_PARALLEL_LOAD_THRESHOLD = 1000000;
 constexpr uint64 SHANNON_DEFAULT_SELF_LOAD_INTERVAL = 86400;
 constexpr uint64 SHANNON_DEFAULT_SELF_LOAD_FILL_PERCENTAGE = 70;
+constexpr uint64 SHANNON_DEFAULT_MAX_PURGER_TIMEOUT = 5000;
+constexpr uint SHANNON_MIN_PURGER_TIMEOUT = 256;
+// rapid_purge_batch_size related
+constexpr uint SHANNON_DEFAULT_PURGE_BATCH_SIZE = 64;
+constexpr uint SHANNON_MIN_PURGE_BATCH_SIZE = 1;
+constexpr uint SHANNON_MAX_PURGE_BATCH_SIZE = 65536;
+// rapid_min_versions_for_purge related
+constexpr uint SHANNON_DEFAULT_MIN_VERSIONS_FOR_PURGE = 10;
+// rapid_purge_efficiency_threshold
+constexpr double SHANNON_DEFAULT_PURGE_EFFICIENCY_THRESHOLD = 0.1;
 
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
 
