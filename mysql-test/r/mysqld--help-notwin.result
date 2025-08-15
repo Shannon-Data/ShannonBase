@@ -1069,15 +1069,30 @@ The following options may be given as the first argument:
  --rapid-async-column-threshold[=#] 
  Max number of columns will do async-corountine for
  reading data or parsing log 
+ --rapid-max-purger-timeout[=#] 
+ Default value of spin delay (in spin rounds)1000 spin
+ round takes 4us, 25000 takes 1ms for busy waiting.
+ therefore, 200ms means5000000 spin rounds. for the more
+ detail infor ref to : comment
+ of`innodb_log_writer_spin_delay`.
  --rapid-memory-size-max[=#] 
  Number of memory size that used for rapid engine, and it
  must not be oversize half of physical mem size.
+ --rapid-min-versions-for-purge[=#] 
+ Minimum number of versions required for a chunk to be
+ eligible for purging
  --rapid-parallel-load-max[=#] 
  Max number of rows used to use parallel load for
  secondary_load from innodb to rapid engine..
  --rapid-pop-buffer-size-max[=#] 
  Number of memory used for populating the changes in
  innodb to rapid engine..
+ --rapid-purge-batch-size[=#] 
+ Process chunks in batches, number of chunks to process in
+ a single purge batch
+ --rapid-purge-efficiency-threshold=# 
+ Purge efficiency threshold, only purge if >10% can be
+ cleaned
  --rapid-self-load-base-relation-fill-percentage[=#] 
  Percentage of base memory quota above which the self-load
  thread rpdserver and rpdmaster. Default value: 70%.
@@ -1932,9 +1947,13 @@ query-prealloc-size 8192
 range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
 rapid-async-column-threshold 16
+rapid-max-purger-timeout 5000
 rapid-memory-size-max 8589934592
+rapid-min-versions-for-purge 10
 rapid-parallel-load-max 10000
 rapid-pop-buffer-size-max 134217728
+rapid-purge-batch-size 64
+rapid-purge-efficiency-threshold 0.1
 rapid-self-load-base-relation-fill-percentage 70
 rapid-self-load-enabled FALSE
 rapid-self-load-interval-seconds 86400

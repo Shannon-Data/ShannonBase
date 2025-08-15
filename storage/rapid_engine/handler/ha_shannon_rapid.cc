@@ -98,7 +98,12 @@ int rpd_async_column_threshold = ShannonBase::DEFAULT_N_FIELD_PARALLEL;
 bool rpd_self_load_enabled = false;
 ulonglong rpd_self_load_interval_seconds = SHANNON_DEFAULT_SELF_LOAD_INTERVAL;  // 24hurs
 bool rpd_self_load_skip_quiet_check = false;
+bool rprapid_max_purger_timeoutd_self_load_skip_quiet_check = false;
 int rpd_self_load_base_relation_fill_percentage = SHANNON_DEFAULT_SELF_LOAD_FILL_PERCENTAGE;  // percentage.
+ulonglong rpd_max_purger_timeout = SHANNON_DEFAULT_MAX_PURGER_TIMEOUT;
+ulonglong rpd_purge_batch_size = SHANNON_DEFAULT_MAX_PURGER_TIMEOUT;
+ulonglong rpd_min_versions_for_purge = SHANNON_DEFAULT_MAX_PURGER_TIMEOUT;
+double rpd_purge_efficiency_threshold = SHANNON_DEFAULT_PURGE_EFFICIENCY_THRESHOLD;
 
 std::atomic<size_t> rapid_allocated_mem_size = 0;
 rpd_columns_container rpd_columns_info;
@@ -1104,6 +1109,12 @@ static SHOW_VAR rapid_status_variables[] = {
     /*the value of fill percentage of main memory*/
     {"rapid_self_load_base_relation_fill_percentage", (char *)&ShannonBase::rpd_self_load_base_relation_fill_percentage,
      SHOW_INT, SHOW_SCOPE_GLOBAL},
+    /*to enable self load or disable*/
+    {"rapid_max_purger_timeout", (char *)&ShannonBase::rpd_max_purger_timeout, SHOW_LONG, SHOW_SCOPE_GLOBAL},
+    {"rapid_purge_batch_size", (char *)&ShannonBase::rpd_purge_batch_size, SHOW_LONG, SHOW_SCOPE_GLOBAL},
+    {"rapid_min_versions_for_purge", (char *)&ShannonBase::rpd_min_versions_for_purge, SHOW_LONG, SHOW_SCOPE_GLOBAL},
+    {"rapid_purge_efficiency_threshold", (char *)&ShannonBase::rpd_purge_efficiency_threshold, SHOW_DOUBLE,
+     SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_INT, SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
@@ -1311,6 +1322,146 @@ static void update_memory_fill_percentage(THD *, SYS_VAR *, void *var_ptr, const
   ShannonBase::rpd_self_load_base_relation_fill_percentage = new_value;
 }
 
+/** Validate passed-in "value" is a valid monitor counter name.
+ This function is registered as a callback with MySQL.
+ @return 0 for valid name */
+static int rpd_max_purger_timeout_validate(THD *,                          /*!< in: thread handle */
+                                           SYS_VAR *,                      /*!< in: pointer to system
+                                                                                           variable */
+                                           void *save,                     /*!< out: immediate result
+                                                                           for update function */
+                                           struct st_mysql_value *value) { /*!< in: incoming string */
+  longlong input_val;
+  if (value->val_int(value, &input_val)) {
+    return 1;
+  }
+
+  if (input_val < ShannonBase::SHANNON_MIN_PURGER_TIMEOUT) {
+    return 1;
+  }
+
+  *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+/** Update the system variable rapid_max_purger_timeout.
+This function is registered as a callback with MySQL.
+@param[in]  thd       thread handle
+@param[out] var_ptr   where the formal string goes
+@param[in]  save      immediate result from check function */
+static void rpd_max_purger_timeout_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+
+  *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
+  ShannonBase::rpd_max_purger_timeout = *static_cast<const ulong *>(save);
+}
+
+/** Validate passed-in "value" is a valid monitor counter name.
+ This function is registered as a callback with MySQL.
+ @return 0 for valid name */
+static int rpd_purge_batch_size_validate(THD *,                          /*!< in: thread handle */
+                                         SYS_VAR *,                      /*!< in: pointer to system
+                                                                                         variable */
+                                         void *save,                     /*!< out: immediate result
+                                                                         for update function */
+                                         struct st_mysql_value *value) { /*!< in: incoming string */
+  long long input_val;
+  if (value->val_int(value, &input_val)) {
+    return 1;
+  }
+
+  if (input_val < ShannonBase::SHANNON_MIN_PURGE_BATCH_SIZE || input_val > ShannonBase::SHANNON_MAX_PURGE_BATCH_SIZE) {
+    return 1;
+  }
+
+  *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+/** Update the system variable rapid_purge_batch_size.
+This function is registered as a callback with MySQL.
+@param[in]  thd       thread handle
+@param[out] var_ptr   where the formal string goes
+@param[in]  save      immediate result from check function */
+static void rpd_purge_batch_size_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+
+  *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
+  ShannonBase::rpd_purge_batch_size = *static_cast<const ulong *>(save);
+}
+
+/** Validate passed-in "value" is a valid monitor counter name.
+ This function is registered as a callback with MySQL.
+ @return 0 for valid name */
+static int rpd_min_versions_for_purge_validate(THD *,                          /*!< in: thread handle */
+                                               SYS_VAR *,                      /*!< in: pointer to system
+                                                                                               variable */
+                                               void *save,                     /*!< out: immediate result
+                                                                               for update function */
+                                               struct st_mysql_value *value) { /*!< in: incoming string */
+  long long input_val;
+  if (value->val_int(value, &input_val)) {
+    return 1;
+  }
+
+  if (input_val < ShannonBase::SHANNON_MIN_PURGE_BATCH_SIZE || input_val > ShannonBase::SHANNON_MAX_PURGE_BATCH_SIZE) {
+    return 1;
+  }
+
+  *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+/** Update the system variable rapid_min_versions_for_purge.
+This function is registered as a callback with MySQL.
+@param[in]  thd       thread handle
+@param[out] var_ptr   where the formal string goes
+@param[in]  save      immediate result from check function */
+static void rpd_min_versions_for_purge_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+
+  *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
+  ShannonBase::rpd_min_versions_for_purge = *static_cast<const ulong *>(save);
+}
+
+/** Update the system variable rpd_purge_efficiency_threshold.
+This function is registered as a callback with MySQL.
+@param[in]  thd       thread handle
+@param[out] var_ptr   where the formal string goes
+@param[in]  save      immediate result from check function */
+static void rpd_purge_efficiency_threshold_update(THD *thd,         /*!< in: thread handle */
+                                                  SYS_VAR *,        /*!< in: pointer to
+                                                                                    system variable */
+                                                  void *var_ptr,    /*!< out: where the
+                                                             formal string goes */
+                                                  const void *save) /*!< in: immediate result
+                                                                    from check function */
+{
+  /* check if there is an actual change */
+  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+
+  double in_val = *static_cast<const double *>(save);
+
+  if (in_val < 0.1) {
+    push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
+                        "rapid_purge_efficiency_threshold cannot be"
+                        " set lower than 0.1.");
+    in_val = 0.1;
+  }
+
+  if (in_val > 1) {
+    push_warning_printf(thd, Sql_condition::SL_WARNING, ER_WRONG_ARGUMENTS,
+                        "rapid_purge_efficiency_threshold cannot be"
+                        " set upper than 1");
+    in_val = 1;
+  }
+
+  ShannonBase::rpd_purge_efficiency_threshold = in_val;
+}
+
 // clang-format off
 static MYSQL_SYSVAR_ULONG(memory_size_max,
                           ShannonBase::rpd_mem_sz_max,
@@ -1408,8 +1559,55 @@ static MYSQL_SYSVAR_INT(self_load_base_relation_fill_percentage,
                          1,
                          100,
                          0);
-// clang-format on
 
+static MYSQL_SYSVAR_ULONGLONG(max_purger_timeout,
+                              ShannonBase::rpd_max_purger_timeout,
+                              PLUGIN_VAR_OPCMDARG,
+                              "Default value of spin delay (in spin rounds)"
+                              "1000 spin round takes 4us, 25000 takes 1ms for busy waiting. therefore, 200ms means"
+                              "5000000 spin rounds. for the more detail infor ref to : comment of"
+                              "`innodb_log_writer_spin_delay`.",
+                              rpd_max_purger_timeout_validate,
+                              rpd_max_purger_timeout_update,
+                              ShannonBase::SHANNON_DEFAULT_MAX_PURGER_TIMEOUT, // default val
+                              ShannonBase::SHANNON_MIN_PURGER_TIMEOUT,  // min
+                              ULLONG_MAX, // max
+                              0);
+
+static MYSQL_SYSVAR_ULONGLONG(purge_batch_size,
+                              ShannonBase::rpd_purge_batch_size,
+                              PLUGIN_VAR_OPCMDARG,
+                              "Process chunks in batches, number of chunks to process in a single purge batch",
+                              rpd_purge_batch_size_validate,
+                              rpd_purge_batch_size_update,
+                              ShannonBase::SHANNON_DEFAULT_PURGE_BATCH_SIZE, // default val
+                              ShannonBase::SHANNON_MIN_PURGE_BATCH_SIZE,  // min
+                              ShannonBase::SHANNON_MAX_PURGE_BATCH_SIZE, // max
+                              0);
+                    
+static MYSQL_SYSVAR_ULONGLONG(min_versions_for_purge,
+                              ShannonBase::rpd_min_versions_for_purge,
+                              PLUGIN_VAR_OPCMDARG,
+                              "Minimum number of versions required for a chunk to be eligible for purging",
+                              rpd_min_versions_for_purge_validate,
+                              rpd_min_versions_for_purge_update,
+                              ShannonBase::SHANNON_DEFAULT_MIN_VERSIONS_FOR_PURGE, // default val
+                              ShannonBase::SHANNON_DEFAULT_MIN_VERSIONS_FOR_PURGE,  // min
+                              ULLONG_MAX, // max
+                              0);
+
+static MYSQL_SYSVAR_DOUBLE(purge_efficiency_threshold,
+                           ShannonBase::rpd_purge_efficiency_threshold,
+                           PLUGIN_VAR_RQCMDARG,
+                           "Purge efficiency threshold, only purge if >10% can be cleaned",
+                           nullptr,
+                           rpd_purge_efficiency_threshold_update, 
+                           0.1,
+                           0.1,
+                           1,
+                           0);
+
+// clang-format on
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
     MYSQL_SYSVAR(pop_buffer_size_max),
@@ -1419,6 +1617,10 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(self_load_interval_seconds),
     MYSQL_SYSVAR(self_load_skip_quiet_check),
     MYSQL_SYSVAR(self_load_base_relation_fill_percentage),
+    MYSQL_SYSVAR(max_purger_timeout),
+    MYSQL_SYSVAR(purge_batch_size),
+    MYSQL_SYSVAR(min_versions_for_purge),
+    MYSQL_SYSVAR(purge_efficiency_threshold),
     nullptr,
 };
 
