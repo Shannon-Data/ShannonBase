@@ -132,7 +132,8 @@
 #include "string_with_len.h"
 #include "template_utils.h"
 #include "uniques.h"  // Unique_on_insert
-
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
+#include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
 /**
   @def MYSQL_TABLE_IO_WAIT
   Instrumentation helper for table io_waits.
@@ -5316,6 +5317,35 @@ int ha_create_table(THD *thd, const char *path, const char *db,
     }
   }
   (void)closefrm(&table, false);
+
+  if (!error && !dd::get_dictionary()->is_dd_schema_name(db)
+      && !dd::get_dictionary()->is_system_table_name(db, table_name)
+      && create_info->secondary_engine.str) {
+
+    plugin_ref plugin =
+      ha_resolve_by_name(thd, &create_info->secondary_engine, false);
+    if ((plugin == nullptr) || !plugin_is_ready(create_info->secondary_engine,
+                                              MYSQL_STORAGE_ENGINE_PLUGIN)) {
+      return error;
+    }
+
+    // The engine must support being used as a secondary engine.
+    handlerton *secondary_engine_hton = plugin_data<handlerton *>(plugin);
+    if (!(secondary_engine_hton->flags & HTON_IS_SECONDARY_ENGINE)) {
+      return error;
+    }
+
+    const bool is_partitioned = share.m_part_info != nullptr;
+    unique_ptr_destroy_only<handler> sec_handler(
+        get_new_handler(&share, is_partitioned, thd->mem_root, const_cast<handlerton *>(secondary_engine_hton)));
+
+    std::string full_name{db};
+    full_name.append(":").append(table_name);
+    if (is_partitioned)
+      error = down_cast<ShannonBase::ha_rapidpart*>(sec_handler.get())->se_create(full_name.c_str(), &table, create_info, table_def);
+    else
+      error = down_cast<ShannonBase::ha_rapid*>(sec_handler.get())->se_create(full_name.c_str(), &table, create_info, table_def);
+  }
 err:
   free_table_share(&share);
   return error != 0;

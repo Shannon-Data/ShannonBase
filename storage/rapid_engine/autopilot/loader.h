@@ -130,7 +130,7 @@ struct TableInfo {
   std::string secondary_engine;
   uint64_t estimated_size{0};
   TableAccessStats stats;
-  bool excluded_from_self_load{false};
+  bool excluded_from_self_load{true};
 
   std::string full_name() const { return schema_name + ":" + table_name; }
 };
@@ -188,6 +188,8 @@ class SelfLoadManager {
   int load_mysql_schema_info();
   int load_mysql_table_stats();
   int load_mysql_tables_info();
+
+  std::optional<std::string> extract_secondary_engine(const std::string &input);
 
  private:
   // load/unload strategies.
