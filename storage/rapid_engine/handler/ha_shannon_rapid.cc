@@ -193,12 +193,6 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int ha_rapid::se_create(const char *name, TABLE *form, HA_CREATE_INFO *info, dd::Table *table_def) {
-  auto &self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
-  return self_load_inst->add_table(form->s->db.str, form->s->table_name.str, info->secondary_engine.str);
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
 int ha_rapid::close() {
   m_data_table->close();
   return ShannonBase::SHANNON_SUCCESS;
@@ -769,6 +763,23 @@ SecondaryEngineGraphSimplificationRequestParameters SecondaryEngineCheckOptimize
   params.subgraph_pair_limit = 0;
   return params;
 }
+
+void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const char *table_name) {
+  if (!dd::get_dictionary()->is_dd_schema_name(db) && !dd::get_dictionary()->is_system_table_name(db, table_name) &&
+      create_info->secondary_engine.str) {
+    auto &self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+    self_load_inst->add_table(db, table_name, create_info->secondary_engine.str);
+  }
+}
+
+void NotifyAfterInsert(THD *thd, TABLE *table, COPY_INFO *info) {}
+
+// old_row = table->record[1], new_row = table->record[0]
+void NotifyAfterUpdate(THD *thd, TABLE *table /*, uchar *old_row, uchar *new_row*/) {}
+
+void NotifyAfterDelete(THD *thd, TABLE *table) {}
+
+void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {}
 
 // In this function, Dynamic offload combines mysql plan features
 // retrieved from rapid_statement_context
@@ -1386,6 +1397,11 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->state = SHOW_OPTION_YES;
   shannon_rapid_hton->flags = HTON_IS_SECONDARY_ENGINE;
   shannon_rapid_hton->db_type = DB_TYPE_RAPID;
+  shannon_rapid_hton->notify_create_table = NotifyCreateTable;
+  shannon_rapid_hton->notify_after_insert = NotifyAfterInsert;
+  shannon_rapid_hton->notify_after_update = NotifyAfterUpdate;
+  shannon_rapid_hton->notify_after_delete = NotifyAfterDelete;
+
   shannon_rapid_hton->prepare_secondary_engine = PrepareSecondaryEngine;
   shannon_rapid_hton->secondary_engine_pre_prepare_hook = SecondaryEnginePrePrepareHook;
   shannon_rapid_hton->optimize_secondary_engine = OptimizeSecondaryEngine;
@@ -1395,6 +1411,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->get_secondary_engine_offload_or_exec_fail_reason = GetSecondaryEngineOffloadorExecFailedReason;
   shannon_rapid_hton->set_secondary_engine_offload_fail_reason = SetSecondaryEngineOffloadFailedReason;
   shannon_rapid_hton->secondary_engine_check_optimizer_request = SecondaryEngineCheckOptimizerRequest;
+  shannon_rapid_hton->notify_after_select = NotifyAfterSelect;
 
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;

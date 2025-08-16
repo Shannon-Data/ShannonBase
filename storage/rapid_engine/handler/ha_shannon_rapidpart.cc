@@ -46,10 +46,6 @@ namespace ShannonBase {
 ha_rapidpart::ha_rapidpart(handlerton *hton, TABLE_SHARE *table)
     : ha_rapid(hton, table), Partition_helper(this), m_thd(ha_thd()), m_share(nullptr) {}
 
-int ha_rapidpart::se_create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) {
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
 int ha_rapidpart::records(ha_rows *num_rows) { return ShannonBase::SHANNON_SUCCESS; }
 
 int ha_rapidpart::rnd_pos(uchar *record, uchar *pos) { return ShannonBase::SHANNON_SUCCESS; }
