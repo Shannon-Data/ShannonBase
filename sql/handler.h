@@ -90,6 +90,7 @@ class String;
 class THD;
 class handler;
 class partition_info;
+class COPY_INFO;
 struct System_status_var;
 
 namespace dd {
@@ -2598,6 +2599,12 @@ using notify_after_select_t = void (*)(THD *thd, SelectExecutedIn executed_in);
 using notify_create_table_t = void (*)(struct HA_CREATE_INFO *create_info,
                                        const char *db, const char *table_name);
 
+using notify_after_insert_t = void (*)(THD *thd, TABLE *table, COPY_INFO *info);
+
+//old_row = table->record[1], new_row = table->record[0]
+using notify_after_update_t = void (*)(THD *thd, TABLE *table /*, uchar *old_row, uchar *new_row*/);
+
+using notify_after_delete_t = void (*)(THD *thd, TABLE *table);
 /**
   Secondary engine hook called after PRIMARY_TENTATIVELY optimization is
   complete, and decides if secondary engine optimization will be performed, and
@@ -2997,6 +3004,10 @@ struct handlerton {
   se_before_rollback_t se_before_rollback;
 
   notify_after_select_t notify_after_select;
+
+  notify_after_insert_t notify_after_insert;
+  notify_after_update_t notify_after_update;
+  notify_after_delete_t notify_after_delete;
 
   notify_create_table_t notify_create_table;
   notify_drop_table_t notify_drop_table;

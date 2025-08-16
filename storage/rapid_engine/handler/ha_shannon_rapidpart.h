@@ -71,8 +71,6 @@ class ha_rapidpart : public ha_rapid, public Partition_helper, public Partition_
     return ha_thd();
   }
 
-  int se_create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *);
-
   int load_table(const TABLE &table, bool *skip_metadata_update) override;
 
   int unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) override;
