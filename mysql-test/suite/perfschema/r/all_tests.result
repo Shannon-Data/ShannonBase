@@ -28,6 +28,7 @@ ddl_replication_asynchronous_connection_failover.test
 ddl_replication_asynchronous_connection_failover_managed.test
 ddl_rpd_column_id.test
 ddl_rpd_columns.test
+ddl_rpd_mirror.test
 ddl_rpd_preload_stats.test
 ddl_rpd_table_id.test
 ddl_rpd_tables.test
@@ -35,6 +36,7 @@ dml_replication_asynchronous_connection_failover.test
 dml_replication_asynchronous_connection_failover_managed.test
 dml_rpd_column_id.test
 dml_rpd_columns.test
+dml_rpd_mirror.test
 dml_rpd_preload_stats.test
 dml_rpd_table_id.test
 dml_rpd_tables.test
@@ -46,6 +48,7 @@ idx_replication_asynchronous_connection_failover.test
 idx_replication_asynchronous_connection_failover_managed.test
 idx_rpd_column_id.test
 idx_rpd_columns.test
+idx_rpd_mirror.test
 idx_rpd_preload_stats.test
 idx_rpd_table_id.test
 idx_rpd_tables.test

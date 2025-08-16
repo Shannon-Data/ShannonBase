@@ -87,6 +87,7 @@ performance_schema	replication_group_member_stats	def
 performance_schema	replication_group_members	def
 performance_schema	rpd_column_id	def
 performance_schema	rpd_columns	def
+performance_schema	rpd_mirror	def
 performance_schema	rpd_preload_stats	def
 performance_schema	rpd_table_id	def
 performance_schema	rpd_tables	def
@@ -209,6 +210,7 @@ replication_group_member_stats	BASE TABLE	PERFORMANCE_SCHEMA
 replication_group_members	BASE TABLE	PERFORMANCE_SCHEMA
 rpd_column_id	BASE TABLE	PERFORMANCE_SCHEMA
 rpd_columns	BASE TABLE	PERFORMANCE_SCHEMA
+rpd_mirror	BASE TABLE	PERFORMANCE_SCHEMA
 rpd_preload_stats	BASE TABLE	PERFORMANCE_SCHEMA
 rpd_table_id	BASE TABLE	PERFORMANCE_SCHEMA
 rpd_tables	BASE TABLE	PERFORMANCE_SCHEMA
@@ -331,6 +333,7 @@ replication_group_member_stats	10	Dynamic
 replication_group_members	10	Fixed
 rpd_column_id	10	Fixed
 rpd_columns	10	Fixed
+rpd_mirror	10	Fixed
 rpd_preload_stats	10	Fixed
 rpd_table_id	10	Fixed
 rpd_tables	10	Fixed
@@ -451,6 +454,7 @@ replication_group_member_stats	0
 replication_group_members	0
 rpd_column_id	0
 rpd_columns	0
+rpd_mirror	0
 rpd_preload_stats	0
 rpd_table_id	0
 rpd_tables	0
@@ -581,6 +585,7 @@ replication_group_member_stats	0	0
 replication_group_members	0	0
 rpd_column_id	0	0
 rpd_columns	0	0
+rpd_mirror	0	0
 rpd_preload_stats	0	0
 rpd_table_id	0	0
 rpd_tables	0	0
@@ -703,6 +708,7 @@ replication_group_member_stats	0	0	NULL
 replication_group_members	0	0	NULL
 rpd_column_id	0	0	NULL
 rpd_columns	0	0	NULL
+rpd_mirror	0	0	NULL
 rpd_preload_stats	0	0	NULL
 rpd_table_id	0	0	NULL
 rpd_tables	0	0	NULL
@@ -825,6 +831,7 @@ replication_group_member_stats	NULL	NULL	NULL
 replication_group_members	NULL	NULL	NULL
 rpd_column_id	NULL	NULL	NULL
 rpd_columns	NULL	NULL	NULL
+rpd_mirror	NULL	NULL	NULL
 rpd_preload_stats	NULL	NULL	NULL
 rpd_table_id	NULL	NULL	NULL
 rpd_tables	NULL	NULL	NULL
@@ -947,6 +954,7 @@ replication_group_member_stats	utf8mb4_0900_ai_ci	NULL
 replication_group_members	utf8mb4_0900_ai_ci	NULL
 rpd_column_id	utf8mb4_0900_ai_ci	NULL
 rpd_columns	utf8mb4_0900_ai_ci	NULL
+rpd_mirror	utf8mb4_0900_ai_ci	NULL
 rpd_preload_stats	utf8mb4_0900_ai_ci	NULL
 rpd_table_id	utf8mb4_0900_ai_ci	NULL
 rpd_tables	utf8mb4_0900_ai_ci	NULL
@@ -1069,6 +1077,7 @@ replication_group_member_stats
 replication_group_members	
 rpd_column_id	
 rpd_columns	
+rpd_mirror	
 rpd_preload_stats	
 rpd_table_id	
 rpd_tables	
@@ -1191,6 +1200,7 @@ replication_group_member_stats
 replication_group_members	
 rpd_column_id	
 rpd_columns	
+rpd_mirror	
 rpd_preload_stats	
 rpd_table_id	
 rpd_tables	
