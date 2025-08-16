@@ -1188,6 +1188,13 @@ def	performance_schema	rpd_columns	DICT_SIZE_BTYES	6	NULL	NO	bigint	NULL	NULL	20
 def	performance_schema	rpd_column_id	ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_column_id	TABLE_ID	2	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_column_id	COLUMN_NAME	3	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	SCHEMA_NAME	1	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	TABLE_NAME	2	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	MYSQL_ACCESS_COUNT	3	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	HEATWAVE_ACCESS_COUNT	4	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	LAST_QUERIED	5	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	LAST_QUERIED_IN_RAPID	6	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	STATE	7	NULL	NO	enum	19	76	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	enum('NOT_LOADED','LOADED','INSUFFICIENT_MEMORY')			select,insert,update,references			NULL
 def	performance_schema	rpd_preload_stats	TABLE_SCHEMA	1	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
 def	performance_schema	rpd_preload_stats	TABLE_NAME	2	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
 def	performance_schema	rpd_preload_stats	COLUMN_NAME	3	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
