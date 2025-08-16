@@ -92,6 +92,7 @@ replication_group_member_stats
 replication_group_members
 rpd_column_id
 rpd_columns
+rpd_mirror
 rpd_preload_stats
 rpd_table_id
 rpd_tables
