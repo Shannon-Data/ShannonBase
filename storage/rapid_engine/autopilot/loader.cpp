@@ -36,6 +36,7 @@
 #include <regex>
 #include <string>
 
+#include "sql/sql_table.h"
 #include "sql/table.h"
 #include "storage/innobase/include/srv0srv.h"
 
@@ -243,7 +244,16 @@ int SelfLoadManager::load_mysql_tables_info() {
     else
       tb_info.get()->estimated_size = 0;
 
-    tb_info.get()->excluded_from_self_load = false;
+    if (ShannonBase::shannon_loaded_tables->get(tb_info.get()->schema_name, tb_info.get()->table_name)) {
+      tb_info.get()->excluded_from_self_load = true;
+      tb_info.get()->stats.state = TableAccessStats::State::LOADED;
+      tb_info.get()->stats.load_type = TableAccessStats::LoadType::USER;
+    } else {
+      tb_info.get()->excluded_from_self_load = false;
+      tb_info.get()->stats.state = TableAccessStats::State::NOT_LOADED;
+      tb_info.get()->stats.load_type = TableAccessStats::LoadType::SELF;
+    }
+
     tb_info.get()->stats.last_queried_time = std::chrono::system_clock::now();
     tb_info.get()->stats.last_queried_time_in_rpd = std::chrono::system_clock::now();
 
@@ -306,65 +316,123 @@ int SelfLoadManager::add_table(const std::string &schema, const std::string &tab
       table_info->excluded_from_self_load = false;
   }
 
+  if (ShannonBase::shannon_loaded_tables->get(schema, table)) {
+    table_info->excluded_from_self_load = true;
+    table_info->stats.state = TableAccessStats::State::LOADED;
+    table_info->stats.load_type = TableAccessStats::LoadType::USER;
+  } else {
+    table_info->stats.state = TableAccessStats::State::NOT_LOADED;
+    table_info->stats.load_type = TableAccessStats::LoadType::SELF;
+  }
   m_rpd_mirror_tables.emplace(table_info->full_name(), std::move(table_info));
   return SHANNON_SUCCESS;
 }
 
-int SelfLoadManager::remove_table(const std::string &schema, const std::string &table) {
-  std::unique_lock lock(m_tables_mutex);
-  std::string full_name = schema + ":" + table;
-  m_rpd_mirror_tables.erase(full_name);
-  return SHANNON_SUCCESS;
-}
-
-int SelfLoadManager::update_table_state(const std::string &schema, const std::string &table,
-                                        TableAccessStats::State state, TableAccessStats::LoadType load_type) {
-  std::shared_lock lock(m_tables_mutex);
-  std::string full_name = schema + ":" + table;
-
-  auto it = m_rpd_mirror_tables.find(full_name);
-  if (it != m_rpd_mirror_tables.end()) {
-    std::lock_guard<std::mutex> stats_lock(it->second->stats.stats_mutex);
-    it->second->stats.state = state;
-    it->second->stats.load_type = load_type;
+TableInfo *SelfLoadManager::get_table_info(TABLE *table) {
+  if (!table || !table->s) {
+    return nullptr;
   }
 
-  return SHANNON_SUCCESS;
+  std::string schema_name(table->s->db.str, table->s->db.length);
+  std::string table_name(table->s->table_name.str, table->s->table_name.length);
+  std::string full_name = schema_name + ":" + table_name;
+
+  std::shared_lock<std::shared_mutex> lock(m_tables_mutex);
+  auto it = m_rpd_mirror_tables.find(full_name);
+  if (it != m_rpd_mirror_tables.end()) {
+    return it->second.get();
+  }
+  return nullptr;
 }
 
-void SelfLoadManager::update_access_stats(const std::string &schema, const std::string &table, bool executed_in_rpd,
-                                          double execution_time, uint64_t table_size, uint64_t total_query_size) {
-  std::shared_lock lock(m_tables_mutex);
-  std::string full_name = schema + ":" + table;
+void SelfLoadManager::update_table_importance(TableInfo *table_info, uint64_t total_query_size,
+                                              double query_execution_time, SelectExecutedIn executed_in) {
+  if (!table_info || total_query_size == 0 || query_execution_time <= 0) return;
 
-  auto it = m_rpd_mirror_tables.find(full_name);
-  if (it == m_rpd_mirror_tables.end() || it->second->excluded_from_self_load) {
+  // calc: importance = |T1| / (|T1| + ... + |Tq|) * QET
+  double size_ratio = static_cast<double>(table_info->estimated_size) / static_cast<double>(total_query_size);
+  double base_importance = size_ratio * query_execution_time;
+
+  // Adjust weights based on execution location
+  // Queries executed by MySQL receive a higher importance increment (due to longer execution time)
+  // Queries executed by HeatWave receive a smaller importance increment (due to shorter execution time)
+  double weight_factor = 1.0;
+  if (executed_in == SelectExecutedIn::kSecondaryEngine) {
+    // HeatWave has shorter execution times, so reduce the importance increment to balance the difference
+    weight_factor = 0.5;  // This coefficient can be adjusted based on actual performance differences
+  }
+
+  double adjusted_importance = base_importance * weight_factor;
+
+  // Update the importance score using weighted averaging
+  // For frequently accessed tables, use a smaller weight to smooth out fluctuations
+  double current_importance = table_info->stats.importance.load();
+  double updated_importance;
+
+  do {
+    current_importance = table_info->stats.importance.load();
+    updated_importance = current_importance * (1.0 - UPDATE_WEIGHT) + adjusted_importance * UPDATE_WEIGHT;
+  } while (!table_info->stats.importance.compare_exchange_weak(current_importance, updated_importance));
+
+#ifndef NDEBUG
+  sql_print_information(
+      "Table %s importance updated: size_ratio=%.4f, QET=%.2fms, "
+      "executed_in=%s, base=%.2f, adjusted=%.2f, final=%.2f",
+      table_info->full_name().c_str(), size_ratio, query_execution_time,
+      (executed_in == SelectExecutedIn::kPrimaryEngine) ? "MySQL" : "Rapid", base_importance, adjusted_importance,
+      updated_importance);
+#endif
+  return;
+}
+
+void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in) {
+  auto query_start_time = thd->start_utime;
+  double query_execution_time = (my_micro_time() / 1000) - query_start_time;  // in ms.
+
+  std::vector<TableInfo *> query_tables;
+  uint64_t total_query_size = 0;
+
+  // travers all the tables in the query statement.
+  for (Table_ref *table = table_lists; table; table = table->next_global) {
+    if (table->table && table->table->file) {
+      auto table_info = get_table_info(table->table);
+      if (table_info) {
+        query_tables.push_back(table_info);
+        total_query_size += table_info->estimated_size;
+      }
+    }
+  }
+
+  if (query_tables.empty()) {
     return;
   }
 
-  auto &stats = it->second->stats;
-  std::lock_guard<std::mutex> stats_lock(stats.stats_mutex);
+  auto current_time = std::chrono::system_clock::now();
 
-  if (executed_in_rpd) {
-    stats.heatwave_access_count++;
-  } else {
-    stats.mysql_access_count++;
+  for (auto &table_info : query_tables) {
+    {
+      std::unique_lock lock(table_info->stats.stats_mutex);
+
+      if (executed_in == SelectExecutedIn::kPrimaryEngine) {
+        table_info->stats.last_queried_time = current_time;
+      } else if (executed_in == SelectExecutedIn::kSecondaryEngine) {
+        table_info->stats.last_queried_time_in_rpd = current_time;
+      }
+    }
+
+    if (executed_in == SelectExecutedIn::kPrimaryEngine) {
+      table_info->stats.mysql_access_count.fetch_add(1, std::memory_order_relaxed);
+    } else if (executed_in == SelectExecutedIn::kSecondaryEngine) {
+      table_info->stats.heatwave_access_count.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    update_table_importance(table_info, total_query_size, query_execution_time, executed_in);
   }
-
-  stats.last_queried_time = std::chrono::system_clock::now();
-
-  // compute importance: importance = |T1|/(|T1|+...+|Tq|) * QET
-  if (total_query_size > 0) {
-    double size_ratio = static_cast<double>(table_size) / total_query_size;
-    double new_importance = size_ratio * execution_time;
-
-    // accumlate the importance.
-    double current_importance = stats.importance.load();
-    stats.importance.store(current_importance + new_importance);
-  }
+  return;
 }
 
 static void self_load_coordinator_main() {}
+
 void SelfLoadManager::start_self_load_worker() {
   if (m_worker_state.load() == loader_state_t::LOADER_STATE_EXIT) {
     m_worker_state.store(loader_state_t::LOADER_STATE_RUN);
@@ -422,7 +490,7 @@ bool SelfLoadManager::is_system_quiet() {
 
   std::shared_lock lock(m_tables_mutex);
   for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
-    std::lock_guard<std::mutex> stats_lock(table_info->stats.stats_mutex);
+    std::shared_lock stats_lock(table_info->stats.stats_mutex);
     if (table_info->stats.last_queried_time > quiet_threshold) {
       return false;
     }
@@ -453,7 +521,7 @@ void SelfLoadManager::decay_importance() {
 
   std::shared_lock lock(m_tables_mutex);
   for (auto &[full_name, table_info] : m_rpd_mirror_tables) {
-    std::lock_guard<std::mutex> stats_lock(table_info->stats.stats_mutex);
+    std::unique_lock stats_lock(table_info->stats.stats_mutex);
 
     // Calculate the number of days since last accessed
     auto time_since_query = now - table_info->stats.last_queried_time;
@@ -483,7 +551,7 @@ void SelfLoadManager::unload_cold_tables() {
   {
     std::shared_lock lock(m_tables_mutex);
     for (const auto &[full_name, table_info] : m_rpd_mirror_tables) {
-      std::lock_guard<std::mutex> stats_lock(table_info->stats.stats_mutex);
+      std::shared_lock stats_lock(table_info->stats.stats_mutex);
 
       // Check if it's a cold self-loaded table
       if (table_info->stats.load_type == TableAccessStats::SELF &&
@@ -520,7 +588,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
         continue;
       }
 
-      std::lock_guard<std::mutex> stats_lock(table_info->stats.stats_mutex);
+      std::unique_lock stats_lock(table_info->stats.stats_mutex);
 
       if (table_info->stats.state == TableAccessStats::NOT_LOADED && table_info->stats.importance.load() > 0.0) {
         LoadCandidate candidate;
