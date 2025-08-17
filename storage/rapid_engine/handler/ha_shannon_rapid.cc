@@ -61,8 +61,9 @@
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
-#include "storage/rapid_engine/imcs/data_table.h"      //DataTable
-#include "storage/rapid_engine/imcs/imcs.h"            // IMCS
+#include "storage/rapid_engine/imcs/data_table.h"  //DataTable
+#include "storage/rapid_engine/imcs/imcs.h"        // IMCS
+#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_const.h"  //const
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"  //column stats
@@ -779,7 +780,27 @@ void NotifyAfterUpdate(THD *thd, TABLE *table /*, uchar *old_row, uchar *new_row
 
 void NotifyAfterDelete(THD *thd, TABLE *table) {}
 
-void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {}
+void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
+  if (executed_in == SelectExecutedIn::kPrimaryEngine) return;
+
+  if (!thd || !thd->lex) {
+    return;
+  }
+
+  double query_cost = 0.0f;
+  if (thd->lex->query_block && thd->lex->query_block->join && thd->lex->query_block->join->best_read) {
+    query_cost = thd->lex->query_block->join->best_read *
+                 (ShannonBase::SHANNON_HD_READ_FACTOR + ShannonBase::SHANNON_RAM_READ_FACTOR);
+  }
+
+  double cost_threshold = thd->variables.secondary_engine_cost_threshold;
+  if (query_cost <= cost_threshold) {  // update only if query coast is higher than threshold.
+    return;
+  }
+
+  auto &self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+  self_load_inst->update_table_stats(thd, thd->lex->query_tables, executed_in);
+}
 
 // In this function, Dynamic offload combines mysql plan features
 // retrieved from rapid_statement_context

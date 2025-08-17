@@ -169,5 +169,13 @@ constexpr int PREFETCH_AHEAD = 2;
 // key_part_len, the field length of that key part. and the field name of that key part.
 using key_meta_t = std::pair<uint, std::vector<std::string>>;
 
+// optimization factors.
+// read factor.
+constexpr double SHANNON_HD_READ_FACTOR = 0.8f;
+constexpr double SHANNON_RAM_READ_FACTOR = 0.2f;
+
+// cpu factor.
+constexpr double SHANNON_CPU_FACTOR = 0.05f;
+
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CONST_H__

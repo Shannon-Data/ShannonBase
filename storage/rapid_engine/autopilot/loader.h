@@ -92,11 +92,14 @@
 #include <shared_mutex>
 #include <string>
 
+#include "sql/handler.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
 class Field;
-class TABLE;
 class THD;
+class Table_ref;
+struct TABLE;
+
 namespace ShannonBase {
 namespace Autopilot {
 enum class loader_state_t {
@@ -117,7 +120,7 @@ struct TableAccessStats {
   enum State { NOT_LOADED = 0, LOADED, INSUFFICIENT_MEMORY } state{NOT_LOADED};
   enum LoadType { SELF, USER } load_type{SELF};
 
-  std::mutex stats_mutex;
+  std::shared_mutex stats_mutex;
   TableAccessStats()
       : last_queried_time(std::chrono::system_clock::now()),
         last_queried_time_in_rpd(std::chrono::system_clock::now()) {}
@@ -145,15 +148,19 @@ class SelfLoadManager {
   int initialize();
   int deinitialize();
   inline bool initialized() { return m_intialized.load(); }
+
   // RPD Mirror management.
   int add_table(const std::string &schema, const std::string &table,
                 const std::string &secondary_engine = ShannonBase::rapid_hton_name);
-  int remove_table(const std::string &schema, const std::string &table);
-  int update_table_state(const std::string &schema, const std::string &table, TableAccessStats::State state,
-                         TableAccessStats::LoadType load_type);
 
-  void update_access_stats(const std::string &schema, const std::string &table, bool executed_in_rpd,
-                           double execution_time, uint64_t table_size, uint64_t total_query_size);
+  inline int remove_table(const std::string &schema, const std::string &table) {
+    std::unique_lock lock(m_tables_mutex);
+    std::string full_name = schema + ":" + table;
+    m_rpd_mirror_tables.erase(full_name);
+    return SHANNON_SUCCESS;
+  }
+
+  void update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in);
 
   // Self-Load thread management.
   void start_self_load_worker();
@@ -188,6 +195,26 @@ class SelfLoadManager {
   int load_mysql_schema_info();
   int load_mysql_table_stats();
   int load_mysql_tables_info();
+
+  TableInfo *get_table_info(TABLE *table);
+
+  inline int update_table_state(const std::string &schema, const std::string &table, TableAccessStats::State state,
+                                TableAccessStats::LoadType load_type) {
+    std::shared_lock lock(m_tables_mutex);
+    std::string full_name = schema + ":" + table;
+
+    auto it = m_rpd_mirror_tables.find(full_name);
+    if (it != m_rpd_mirror_tables.end()) {
+      std::unique_lock stats_lock(it->second->stats.stats_mutex);
+      it->second->stats.state = state;
+      it->second->stats.load_type = load_type;
+    }
+
+    return SHANNON_SUCCESS;
+  }
+
+  void update_table_importance(TableInfo *table_info, uint64_t total_query_size, double query_execution_time,
+                               SelectExecutedIn executed_in);
 
   std::optional<std::string> extract_secondary_engine(const std::string &input);
 
@@ -239,6 +266,7 @@ class SelfLoadManager {
   static constexpr double IMPORTANCE_THRESHOLD = 0.001;   // 99.9% threshold of decline.
   static constexpr int COLD_TABLE_DAYS = 3;
 
+  static constexpr double UPDATE_WEIGHT = 0.2;  // A smaller weight makes importance changes smoother
   // mysql.tables.
   // schema_id
   static constexpr uint FIELD_SCH_ID_OFFSET_TABLES = 1;
