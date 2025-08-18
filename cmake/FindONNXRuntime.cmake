@@ -87,9 +87,11 @@ set(_install_dir "${_extract_dir}/onnxruntime")
 
 # Try system-wide ONNX Runtime installation first
 find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_c_api.h 
-  PATHS /usr/include /usr/local/include /opt/include)
+  PATHS /usr/include /usr/local/include /opt/include
+  NO_DEFAULT_PATH)
 find_library(ONNXRUNTIME_LIBRARY onnxruntime 
-  PATHS /usr/lib /usr/local/lib /opt/lib /usr/lib/aarch64-linux-gnu /usr/lib/arm-linux-gnueabihf)
+  PATHS /usr/lib /usr/local/lib /opt/lib /usr/lib/aarch64-linux-gnu /usr/lib/arm-linux-gnueabihf
+  NO_DEFAULT_PATH)
 
 if (ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
   set(ONNXRUNTIME_FOUND TRUE)
