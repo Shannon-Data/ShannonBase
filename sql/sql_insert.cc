@@ -92,6 +92,7 @@
 #include "sql/sql_gipk.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
+#include "sql/sql_plugin.h"
 #include "sql/sql_resolver.h"  // validate_gc_assignment
 #include "sql/sql_select.h"    // check_privileges_for_list
 #include "sql/sql_show.h"      // store_create_info
@@ -318,6 +319,27 @@ bool validate_default_values_of_unset_fields(THD *thd, TABLE *table) {
   }
 
   return false;
+}
+
+void notify_plugins_after_insert(THD *thd, TABLE *table, COPY_INFO *info, COPY_INFO *update) {
+  if (!thd || !table || !info || !update) return;
+
+  struct comb_args {
+    TABLE* arg1;
+    COPY_INFO* arg2;
+    COPY_INFO* arg3;
+  } comb_args{table, info, update};
+
+  plugin_foreach(
+      thd,
+      [](THD *t, plugin_ref plugin, void *arg) -> bool {
+        handlerton *hton = plugin_data<handlerton *>(plugin);
+        if (hton->notify_after_insert != nullptr) {
+          hton->notify_after_insert(t, arg);
+        }
+        return false;
+      },
+      MYSQL_STORAGE_ENGINE_PLUGIN, &comb_args);
 }
 
 /**
@@ -634,6 +656,8 @@ bool Sql_cmd_insert_values::execute_inner(THD *thd) {
         break;
       }
       thd->get_stmt_da()->inc_current_row_for_condition();
+
+      notify_plugins_after_insert(thd, insert_table, &info, &update);
     }
   }  // Statement plan is available within these braces
 
@@ -2387,6 +2411,8 @@ bool Query_result_insert::send_data(THD *thd,
   error = write_record(thd, table, &info, &update);
 
   DEBUG_SYNC(thd, "create_select_after_write_rows_event");
+
+  notify_plugins_after_insert(thd, table, &info, &update);
 
   if (!error &&
       (table->triggers || info.get_duplicate_handling() == DUP_UPDATE)) {

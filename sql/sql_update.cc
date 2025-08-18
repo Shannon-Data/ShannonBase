@@ -1071,6 +1071,8 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         error = 1;
         break;
       }
+
+      notify_plugins_after_update(thd, table);
     }
     end_semi_consistent_read.reset();
 
@@ -1468,6 +1470,21 @@ bool should_switch_to_multi_table_if_subqueries(const THD *thd,
     }
   }
   return false;
+}
+
+void notify_plugins_after_update(THD *thd, TABLE *table) {
+  if (!thd || !table) return;
+
+  plugin_foreach(
+      thd,
+      [](THD *t, plugin_ref plugin, void *arg) -> bool {
+        handlerton *hton = plugin_data<handlerton *>(plugin);
+        if (hton->notify_after_update != nullptr) {
+          hton->notify_after_update(t, static_cast<TABLE*>(arg));
+        }
+        return false;
+      },
+      MYSQL_STORAGE_ENGINE_PLUGIN, table);
 }
 
 bool Sql_cmd_update::prepare_inner(THD *thd) {

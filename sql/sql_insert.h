@@ -55,6 +55,13 @@ bool check_that_all_fields_are_given_values(THD *thd, TABLE *entry,
 void prepare_triggers_for_insert_stmt(THD *thd, TABLE *table);
 bool write_record(THD *thd, TABLE *table, COPY_INFO *info, COPY_INFO *update);
 bool validate_default_values_of_unset_fields(THD *thd, TABLE *table);
+/**
+  Notify plugins about an executed SELECT statement.
+
+  @param thd the current session
+  @param cmd command to be notified about
+*/
+void notify_plugins_after_insert(THD *thd, TABLE *table, COPY_INFO *info, COPY_INFO *update);
 
 class Query_result_insert : public Query_result_interceptor {
  public:

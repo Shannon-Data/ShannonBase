@@ -773,12 +773,33 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
   }
 }
 
-void NotifyAfterInsert(THD *thd, TABLE *table, COPY_INFO *info) {}
+// To after insrt into primary engine, this function will be invoked. Then, you can get all chages from
+// table->record[0], table->record[1] and COPY_INFO, etc. After that you can insert these changes to rapid. The other
+// way is we use now, the redo log.
+void NotifyAfterInsert(THD *thd, void *args) {
+  if (!thd || !args) return;
+  struct comb_args {
+    TABLE *arg1;
+    COPY_INFO *arg2;
+    COPY_INFO *arg3;
+  };
+
+  auto params = static_cast<comb_args *>(args);
+  auto table = params->arg1;
+  auto info = params->arg2;
+  auto update = params->arg3;
+
+  if (!params || !table || !info || !update) return;
+}
 
 // old_row = table->record[1], new_row = table->record[0]
-void NotifyAfterUpdate(THD *thd, TABLE *table /*, uchar *old_row, uchar *new_row*/) {}
+void NotifyAfterUpdate(THD *thd, TABLE *table /*, uchar *old_row, uchar *new_row*/) {
+  if (!thd || !table) return;
+}
 
-void NotifyAfterDelete(THD *thd, TABLE *table) {}
+void NotifyAfterDelete(THD *thd, TABLE *table) {
+  if (!thd || !table) return;
+}
 
 void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
   if (executed_in == SelectExecutedIn::kPrimaryEngine) return;

@@ -2599,7 +2599,7 @@ using notify_after_select_t = void (*)(THD *thd, SelectExecutedIn executed_in);
 using notify_create_table_t = void (*)(struct HA_CREATE_INFO *create_info,
                                        const char *db, const char *table_name);
 
-using notify_after_insert_t = void (*)(THD *thd, TABLE *table, COPY_INFO *info);
+using notify_after_insert_t = void (*)(THD *thd, void* arg);
 
 //old_row = table->record[1], new_row = table->record[0]
 using notify_after_update_t = void (*)(THD *thd, TABLE *table /*, uchar *old_row, uchar *new_row*/);
