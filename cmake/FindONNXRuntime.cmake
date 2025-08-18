@@ -10,6 +10,8 @@ if (NOT ONNXRUNTIME_VERSION)
   set(ONNXRUNTIME_VERSION "1.22.0")
 endif()
 
+set (ONNXRUNTIME_LIB_VERSION "1")
+
 # Automatically determine backend: cpu or gpu
 if (DEFINED ENV{USE_GPU})
   message(STATUS "[ONNXRuntime] USE_GPU is set in the environment. Using GPU backend.")
@@ -139,11 +141,13 @@ endif()
 # Register the ONNX Runtime include and lib paths
 set(ONNXRUNTIME_FOUND TRUE)
 set(ONNXRUNTIME_INCLUDE_DIRS "${_install_dir}/include")
+set(ONNXRUNTIME_LIB_DIR "${_install_dir}/lib/")
+
 if (_os STREQUAL "win")
-  set(ONNXRUNTIME_LIBRARY "${_install_dir}/lib/onnxruntime.lib")
+  set(ONNXRUNTIME_LIBRARY "${_install_dir}/lib/onnxruntime.lib.${ONNXRUNTIME_LIB_VERSION}")
 elseif(APPLE)
-  set(ONNXRUNTIME_LIBRARY "${_install_dir}/lib/libonnxruntime.dylib")
+  set(ONNXRUNTIME_LIBRARY "${_install_dir}/lib/libonnxruntime.dylib.${ONNXRUNTIME_LIB_VERSION}")
 else()
-  set(ONNXRUNTIME_LIBRARY "${_install_dir}/lib/libonnxruntime.so")
+  set(ONNXRUNTIME_LIBRARY "${_install_dir}/lib/libonnxruntime.so.${ONNXRUNTIME_LIB_VERSION}")
 endif()
 set(ONNXRUNTIME_LIBRARIES ${ONNXRUNTIME_LIBRARY})
