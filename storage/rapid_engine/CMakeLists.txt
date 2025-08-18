@@ -149,6 +149,24 @@ ENDIF()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 find_package(ONNXRuntime REQUIRED)
 
+if(ONNXRUNTIME_FOUND)
+  install(DIRECTORY ${ONNXRUNTIME_INCLUDE_DIRS}/
+    DESTINATION include/onnxruntime
+    FILES_MATCHING
+    PATTERN "*.h"
+    PATTERN "*.hpp"
+    PATTERN "tests" EXCLUDE
+  )
+
+  install(DIRECTORY ${ONNXRUNTIME_LIB_DIR}/
+    DESTINATION lib/onnxruntime
+    FILES_MATCHING
+    PATTERN "libonnxruntime*"
+    PATTERN "*.so*"
+    PATTERN "cmake" EXCLUDE
+  )
+endif()
+
 INCLUDE_DIRECTORIES(${ONNXRUNTIME_INCLUDE_DIRS})
 
 SET (SHANNON_ITERATOR_SOURCES
