@@ -619,6 +619,8 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
         error = -1;
         break;
       }
+
+      notify_plugins_after_delete(thd, table);
     }
 
     killed_status = thd->killed;
@@ -997,6 +999,21 @@ bool CheckSqlSafeUpdate(THD *thd, const JOIN *join) {
   }
 
   return false;
+}
+
+void notify_plugins_after_delete(THD *thd, TABLE *table) {
+  if (!thd || !table) return;
+
+  plugin_foreach(
+      thd,
+      [](THD *t, plugin_ref plugin, void *arg) -> bool {
+        handlerton *hton = plugin_data<handlerton *>(plugin);
+        if (hton->notify_after_delete != nullptr) {
+          hton->notify_after_delete(t, static_cast<TABLE*>(arg));
+        }
+        return false;
+      },
+      MYSQL_STORAGE_ENGINE_PLUGIN, table);
 }
 
 bool DeleteRowsIterator::Init() {
