@@ -53,14 +53,22 @@ mysql_pfs_key_t rapid_self_load_thread_key;
 #endif /* UNIV_PFS_THREAD */
 
 namespace ShannonBase {
+namespace Populate {
+extern std::shared_mutex g_processing_table_mutex;
+extern std::set<std::string> g_processing_tables;
+}  // namespace Populate
 extern bool rpd_self_load_enabled;
 extern ulonglong rpd_self_load_interval_seconds;  // default 24hurs
 extern bool rpd_self_load_skip_quiet_check;
 extern int rpd_self_load_base_relation_fill_percentage;  // default percentage 70%.
 
 namespace Autopilot {
+// static members initialization.
 std::once_flag SelfLoadManager::one;
 SelfLoadManager *SelfLoadManager::m_instance{nullptr};
+std::atomic<loader_state_t> SelfLoadManager::m_worker_state{loader_state_t::LOADER_STATE_EXIT};
+std::condition_variable SelfLoadManager::m_worker_cv;
+std::mutex SelfLoadManager::m_worker_mutex;
 
 class HandlerGuard {
  public:
@@ -271,11 +279,14 @@ int SelfLoadManager::initialize() {
   auto ret{SHANNON_SUCCESS};
   ret = load_mysql_schema_info() || load_mysql_table_stats() || load_mysql_tables_info();
   if (ret == SHANNON_SUCCESS) m_intialized.store(true);
+
+  start_self_load_worker();
   return ret;
 }
 
 int SelfLoadManager::deinitialize() {
   stop_self_load_worker();
+
   std::unique_lock lock(m_tables_mutex);
   m_rpd_mirror_tables.clear();
   m_schema_tables.clear();
@@ -431,57 +442,68 @@ void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, Selec
   return;
 }
 
-static void self_load_coordinator_main() {}
+static void self_load_coordinator_main() {
+#if !defined(_WIN32)  // here we
+  pthread_setname_np(pthread_self(), "self_load_coordinator");
+#else
+  SetThreadDescription(GetCurrentThread(), L"self_load_coordinator");
+#endif
 
-void SelfLoadManager::start_self_load_worker() {
-  if (m_worker_state.load() == loader_state_t::LOADER_STATE_EXIT) {
-    m_worker_state.store(loader_state_t::LOADER_STATE_RUN);
-    m_worker_thread = std::make_unique<std::thread>(&SelfLoadManager::self_load_worker_thread, this);
-    srv_threads.m_rapid_self_load_cordinator =
-        os_thread_create(rapid_self_load_thread_key, 0, self_load_coordinator_main);
-  }
-}
-
-void SelfLoadManager::stop_self_load_worker() {
-  if (m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) {
-    m_worker_state.store(loader_state_t::LOADER_STATE_EXIT);
-    m_worker_cv.notify_all();
-    if (m_worker_thread && m_worker_thread->joinable()) {
-      m_worker_thread->join();
-    }
-    m_worker_thread.reset();
-  }
-}
-
-void SelfLoadManager::self_load_worker_thread() {
-  while (m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) {
-    std::unique_lock<std::mutex> lock(m_worker_mutex);
+  auto self_load_inst = SelfLoadManager::instance();
+  while (SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) {
+    std::unique_lock<std::mutex> lock(SelfLoadManager::m_worker_mutex);
 
     auto timeout = std::chrono::seconds(ShannonBase::rpd_self_load_interval_seconds);
-    if (m_worker_cv.wait_for(lock, timeout,
-                             [this]() { return m_worker_state.load() != loader_state_t::LOADER_STATE_RUN; })) {
+    if (SelfLoadManager::m_worker_cv.wait_for(lock, timeout, []() {
+          return SelfLoadManager::m_worker_state.load() != loader_state_t::LOADER_STATE_RUN;
+        })) {
       break;
     }
 
-    if (!ShannonBase::rpd_self_load_enabled) {
-      continue;
-    }
+    if (!ShannonBase::rpd_self_load_enabled) continue;
 
-    // should be silient or not.
+    /** If the system is not quiet, self-load thread waits for 300 seconds for a maximum of 10 times before checking
+      again. If the system is still busy, the current self-load invocation is skipped until the next wake-up interval,
+      as determined by rapid_self_load_interval_seconds.*/
     if (!ShannonBase::rpd_self_load_skip_quiet_check) {
       int attempts = 0;
-      while (!is_system_quiet() && attempts < MAX_QUIET_WAIT_ATTEMPTS) {
-        std::this_thread::sleep_for(std::chrono::seconds(QUIET_WAIT_SECONDS));
+      while (!self_load_inst->is_system_quiet() && attempts < SelfLoadManager::MAX_QUIET_WAIT_ATTEMPTS) {
+        std::this_thread::sleep_for(std::chrono::seconds(SelfLoadManager::QUIET_WAIT_SECONDS));
         attempts++;
       }
 
-      if (attempts >= MAX_QUIET_WAIT_ATTEMPTS) {
+      if (attempts >= SelfLoadManager::MAX_QUIET_WAIT_ATTEMPTS) {
         continue;
       }
     }
 
-    run_self_load_algorithm();
+    self_load_inst->run_self_load_algorithm();
   }
+
+  return;
+}
+
+bool SelfLoadManager::worker_active() { return thread_is_active(srv_threads.m_rapid_self_load_cordinator); }
+
+void SelfLoadManager::start_self_load_worker() {
+  if (SelfLoadManager::m_worker_state.load() != loader_state_t::LOADER_STATE_RUN) {
+    srv_threads.m_rapid_self_load_cordinator =
+        os_thread_create(rapid_self_load_thread_key, 0, self_load_coordinator_main);
+    SelfLoadManager::m_worker_state.store(loader_state_t::LOADER_STATE_RUN);
+    srv_threads.m_rapid_self_load_cordinator.start();
+  }
+
+  ut_a(worker_active());
+}
+
+void SelfLoadManager::stop_self_load_worker() {
+  if (SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) {
+    SelfLoadManager::m_worker_state.store(loader_state_t::LOADER_STATE_STOP);
+    m_worker_cv.notify_all();
+    srv_threads.m_rapid_self_load_cordinator.join();
+  }
+
+  ut_a(!worker_active());
 }
 
 bool SelfLoadManager::is_system_quiet() {
@@ -494,10 +516,12 @@ bool SelfLoadManager::is_system_quiet() {
     if (table_info->stats.last_queried_time > quiet_threshold) {
       return false;
     }
-  }
 
-  // TODO: to check the table are under loading.
-  // TODO: to check Change Propagation's delay.
+    // to check Change Propagation's delay.
+    std::shared_lock lk(ShannonBase::Populate::g_processing_table_mutex);
+    if (ShannonBase::Populate::g_processing_tables.find(full_name) != ShannonBase::Populate::g_processing_tables.end())
+      return false;  // is still in change propagating.
+  }
 
   return true;
 }
@@ -574,7 +598,7 @@ void SelfLoadManager::unload_cold_tables() {
 }
 
 void SelfLoadManager::prepare_load_unload_queues() {
-  // in run_load_unload_algorithm
+  // in run_load_unload_algorithm[do nothing]
 }
 
 void SelfLoadManager::run_load_unload_algorithm() {
@@ -662,91 +686,54 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   if (!table_info) {
     return HA_ERR_GENERIC;
   }
+
   int result{SHANNON_SUCCESS};
-#if 0
-    //* Use Autopilot to estimate table size (if available)
-    auto &autopilot = AutopilotIntegration::instance();
-    uint64_t estimated_size = autopilot.estimate_table_size(schema, table);
-    table_info->estimated_size = estimated_size;
+  // Check if memory is sufficient
+  if (!can_load_table(table_info->estimated_size)) {
+    update_table_state(schema, table, TableAccessStats::INSUFFICIENT_MEMORY, TableAccessStats::SELF);
+    return HA_ERR_GENERIC;
+  }
 
-    // Check if memory is sufficient
-    if (!can_load_table(estimated_size)) {
-      update_table_state(schema, table, TableAccessStats::INSUFFICIENT_MEMORY, TableAccessStats::SELF);
-      return HA_ERR_GENERIC;
-    }
+  Rapid_load_context context;
+  context.m_schema_name = schema;
+  context.m_table_name = table;
+  context.m_thd = current_thd;
 
-    // Check for unsupported columns
-    auto unsupported_columns = autopilot.get_unsupported_columns(schema, table);
-    if (!unsupported_columns.empty()) {
-      // Log warnings but continue loading
-      // TODO: Record unsupported column information
-    }
+  TABLE *source_table = Utils::Util::open_table_by_name(current_thd, schema, table, TL_READ_WITH_SHARED_LOCKS);
+  if (!source_table) {
+    return HA_ERR_GENERIC;
+  }
+  context.m_table = source_table;
 
-    Rapid_load_context context;
-    context.m_schema_name = schema;
-    context.m_table_name = table;
-    context.m_thd = current_thd;
+  if (context.m_extra_info.m_partition_infos.size() > 0) {
+    result = Imcs::Imcs::instance()->load_parttable(&context, source_table);
+  } else {
+    result = Imcs::Imcs::instance()->load_table(&context, source_table);
+  }
+  Utils::Util::close_table(current_thd, source_table);
 
-    TABLE *mysql_table = get_mysql_table(schema, table);
-    if (!mysql_table) {
-      return HA_ERR_GENERIC;
-    }
+  if (result == SHANNON_SUCCESS) {
+    // update the state to loaded.
+    update_table_state(schema, table, TableAccessStats::LOADED, TableAccessStats::SELF);
 
-    context.m_table = mysql_table;
+    //  Updates the actually used memory (if different from estimate)
+    // TODO: Get actual memory usage and update table_info->estimated_size
 
-    int optimal_threads [[maybe_unused]]= autopilot.get_optimal_load_threads(schema, table);
-    // TODO: set the thread num.
+  } else {
+    // failed，set the state to INSUFFICIENT_MEMORY.
+    update_table_state(schema, table, TableAccessStats::INSUFFICIENT_MEMORY, TableAccessStats::SELF);
+  }
 
-    auto &imcs = *Imcs::Imcs::instance();
-    int result = SHANNON_SUCCESS;
-
-    if (context.m_extra_info.m_partition_infos.size() > 0) {
-      result = imcs.load_parttable(&context, mysql_table);
-    } else {
-      result = imcs.load_table(&context, mysql_table);
-    }
-
-    if (result == SHANNON_SUCCESS) {
-      // update the state to loaded.
-      update_table_state(schema, table, TableAccessStats::LOADED, TableAccessStats::SELF);
-
-      //  Updates the actually used memory (if different from estimate)
-      // TODO: Get actual memory usage and update table_info->estimated_size
-
-    } else {
-      //failed，set the state to INSUFFICIENT_MEMORY.
-      update_table_state(schema, table, TableAccessStats::INSUFFICIENT_MEMORY, TableAccessStats::SELF);
-    }
-#endif
   return result;
-}
-
-TABLE *SelfLoadManager::get_mysql_table(const std::string &schema, const std::string &table) {
-  /**
-   * TODO: Implement logic to fetch table definition from MySQL system
-   * This requires integration with MySQL's table cache and definition system
-   *
-   * Temporarily returns nullptr. Actual implementation needs to:
-   * 1. Open table definition
-   * 2. Verify table exists and is accessible
-   * 3. Check secondary_engine setting
-   * 4. Return TABLE structure pointer
-   */
-  return nullptr;
 }
 
 int SelfLoadManager::perform_self_unload(const std::string &schema, const std::string &table) {
   // Checks if it's a user-loaded table
   auto table_info = get_table_info(schema, table);
-  if (table_info && table_info->stats.load_type == TableAccessStats::USER) {
+  if (table_info && table_info->stats.load_type == TableAccessStats::USER &&
+      table_info->stats.state == TableAccessStats::LOADED) {
     // User-loaded m_rpd_mirror_tables are downgraded to self-loaded but not actually unloaded
     update_table_state(schema, table, TableAccessStats::LOADED, TableAccessStats::SELF);
-
-    // my_printf_error(ER_SECONDARY_ENGINE_PLUGIN,
-    //                 "Self-Load feature is enabled: table `%s`.`%s` demoted to self-loaded. "
-    //                 "To unload it from the system completely run secondary unload again.",
-    //                 MYF(ME_JUST_WARNING), schema.c_str(), table.c_str());
-
     return SHANNON_SUCCESS;
   }
 
@@ -754,14 +741,11 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   context.m_schema_name = schema;
   context.m_table_name = table;
 
-  auto &imcs = *Imcs::Imcs::instance();
-  int result = imcs.unload_table(&context, schema.c_str(), table.c_str(), false);
-
+  int result = Imcs::Imcs::instance()->unload_table(&context, schema.c_str(), table.c_str(), false);
   if (result == SHANNON_SUCCESS) {
     // update state to unloaded.
     update_table_state(schema, table, TableAccessStats::NOT_LOADED, TableAccessStats::SELF);
   }
-
   return result;
 }
 

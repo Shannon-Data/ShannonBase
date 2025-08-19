@@ -99,6 +99,7 @@ class Field;
 class THD;
 class Table_ref;
 struct TABLE;
+class IB_thread;
 
 namespace ShannonBase {
 namespace Autopilot {
@@ -161,13 +162,29 @@ class SelfLoadManager {
   }
 
   void update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in);
+  TableInfo *get_table_info(const std::string &schema, const std::string &table);
+  std::unordered_map<std::string, std::unique_ptr<TableInfo>> &get_all_tables();
 
+  bool is_system_quiet();
+
+ public:
   // Self-Load thread management.
   void start_self_load_worker();
   void stop_self_load_worker();
 
-  TableInfo *get_table_info(const std::string &schema, const std::string &table);
-  std::unordered_map<std::string, std::unique_ptr<TableInfo>> &get_all_tables();
+  void run_self_load_algorithm();
+
+  static std::atomic<loader_state_t> m_worker_state;
+  static std::condition_variable m_worker_cv;
+  static std::mutex m_worker_mutex;
+
+  static constexpr int QUIET_WAIT_SECONDS = 300;
+  static constexpr int MAX_QUIET_WAIT_ATTEMPTS = 10;
+  static constexpr int QUERY_QUIET_MINUTES = 5;
+  static constexpr double IMPORTANCE_DECAY_FACTOR = 0.9;  // decline 10% a dya.
+  static constexpr double IMPORTANCE_THRESHOLD = 0.001;   // 99.9% threshold of decline.
+  static constexpr int COLD_TABLE_DAYS = 3;
+  static constexpr double UPDATE_WEIGHT = 0.2;  // A smaller weight makes importance changes smoother
 
  private:
   SelfLoadManager() = default;
@@ -176,9 +193,6 @@ class SelfLoadManager {
   SelfLoadManager &operator=(const SelfLoadManager &) = delete;
 
   // Self-Load jobs.
-  void self_load_worker_thread();
-  bool is_system_quiet();
-  void run_self_load_algorithm();
   void decay_importance();
   void unload_cold_tables();
   void prepare_load_unload_queues();
@@ -190,7 +204,6 @@ class SelfLoadManager {
 
   int perform_self_load(const std::string &schema, const std::string &table);
   int perform_self_unload(const std::string &schema, const std::string &table);
-  TABLE *get_mysql_table(const std::string &schema, const std::string &table);
 
   int load_mysql_schema_info();
   int load_mysql_table_stats();
@@ -218,6 +231,8 @@ class SelfLoadManager {
 
   std::optional<std::string> extract_secondary_engine(const std::string &input);
 
+  bool worker_active();
+
  private:
   // load/unload strategies.
   struct LoadCandidate {
@@ -242,11 +257,6 @@ class SelfLoadManager {
   static std::once_flag one;
   static SelfLoadManager *m_instance;
   std::atomic<bool> m_intialized{false};
-  // thread management.
-  std::atomic<loader_state_t> m_worker_state{loader_state_t::LOADER_STATE_EXIT};
-  std::unique_ptr<std::thread> m_worker_thread;
-  std::condition_variable m_worker_cv;
-  std::mutex m_worker_mutex;
 
   // (RPD Mirror)
   std::shared_mutex m_tables_mutex;
@@ -258,15 +268,6 @@ class SelfLoadManager {
   // format: <schema_name+":"+table_name, estimated_size>
   std::unordered_map<std::string, uint64_t> m_table_stats;
 
-  static constexpr int QUIET_WAIT_SECONDS = 300;
-  static constexpr int MAX_QUIET_WAIT_ATTEMPTS = 10;
-  static constexpr int QUERY_QUIET_MINUTES = 5;
-
-  static constexpr double IMPORTANCE_DECAY_FACTOR = 0.9;  // decline 10% a dya.
-  static constexpr double IMPORTANCE_THRESHOLD = 0.001;   // 99.9% threshold of decline.
-  static constexpr int COLD_TABLE_DAYS = 3;
-
-  static constexpr double UPDATE_WEIGHT = 0.2;  // A smaller weight makes importance changes smoother
   // mysql.tables.
   // schema_id
   static constexpr uint FIELD_SCH_ID_OFFSET_TABLES = 1;
