@@ -52,6 +52,37 @@ namespace Index {
 
 class ART {
  public:
+  ART() : m_tree(nullptr), m_inited(false) {}
+
+  ~ART() {
+    if (m_inited) {
+      ART_tree_destroy();
+    }
+  }
+
+  ART(const ART &other) = delete;
+  ART &operator=(const ART &other) = delete;
+
+  ART(ART &&other)
+  noexcept : m_tree(other.m_tree), m_inited(other.m_inited), m_current_values(std::move(other.m_current_values)) {
+    other.m_tree = nullptr;
+    other.m_inited = false;
+  }
+
+  ART &operator=(ART &&other) noexcept {
+    if (this != &other) {
+      if (m_inited) {
+        ART_tree_destroy();
+      }
+      m_tree = other.m_tree;
+      m_inited = other.m_inited;
+      m_current_values = std::move(other.m_current_values);
+      other.m_tree = nullptr;
+      other.m_inited = false;
+    }
+    return *this;
+  }
+
   enum NodeType { UNKNOWN = 0, NODE4 = 1, NODE16, NODE48, NODE256 };
   static constexpr uint MAX_PREFIX_LEN = 512;
   static constexpr uint initial_capacity = 16;
@@ -146,6 +177,8 @@ class ART {
   int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
   int Leaf_prefix_matches2(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
 
+  void Free_leaf(Art_leaf *l);
+
  public:
   inline int ART_tree_init() {
     if (!m_tree) {
@@ -158,12 +191,15 @@ class ART {
   }
 
   inline int ART_tree_destroy() {
-    Destroy_node(m_tree->root);
+    if (m_tree && m_tree->root) {
+      Destroy_node(m_tree->root);
+      m_tree->root = nullptr;
+    }
     if (m_tree) {
       delete m_tree;
       m_tree = nullptr;
-      m_inited = false;
     }
+    m_inited = false;
     return 0;
   }
 

@@ -62,18 +62,20 @@ ART::Art_node *ART::Alloc_node(NodeType type) {
       n = (Art_node *)calloc(1, sizeof(Art_node256));
       break;
     default:
-      abort();
+      return nullptr;
   }
   n->type = type;
   return n;
 }
+
 void ART::Destroy_node(Art_node *n) {
   // Break if null
   if (!n) return;
 
   // Special case leafs
   if (IS_LEAF(n)) {
-    free(LEAF_RAW(n));
+    Art_leaf *l = LEAF_RAW(n);
+    Free_leaf(l);
     return;
   }
 
@@ -418,14 +420,29 @@ ART::Art_leaf *ART::ART_maximum() { return Maximum((Art_node *)m_tree->root); }
 
 ART::Art_leaf *ART::Make_leaf(const unsigned char *key, int key_len, void *value, uint value_len) {
   Art_leaf *l = (Art_leaf *)calloc(1, sizeof(Art_leaf) + key_len);
+  if (!l) {
+    return nullptr;
+  }
+
   l->values = (void **)calloc(initial_capacity, sizeof(void *));
+  if (!l->values) {
+    free(l);
+    return nullptr;
+  }
+
+  // alloc the first elem space.
+  l->values[0] = calloc(1, value_len);
+  if (!l->values[0]) {
+    free(l->values);
+    free(l);
+    return nullptr;
+  }
+
   l->value_len = value_len;
   l->capacity = initial_capacity;
   l->vcount = 1;
   l->key_len = key_len;
   memcpy(l->key, key, key_len);
-
-  l->values[0] = calloc(1, value_len);
   memcpy(l->values[0], value, value_len);
   return l;
 }
@@ -460,6 +477,9 @@ void ART::Add_child48(Art_node48 *n, Art_node **ref, unsigned char c, void *chil
     n->n.num_children++;
   } else {
     Art_node256 *new_node = (Art_node256 *)Alloc_node(NodeType::NODE256);
+    if (!new_node) {
+      return;
+    }
     for (int i = 0; i < 256; i++) {
       if (n->keys[i]) {
         new_node->children[i] = n->children[n->keys[i] - 1];
@@ -521,6 +541,9 @@ void ART::Add_child16(Art_node16 *n, Art_node **ref, unsigned char c, void *chil
     n->n.num_children++;
   } else {
     Art_node48 *new_node = (Art_node48 *)Alloc_node(NodeType::NODE48);
+    if (!new_node) {
+      return;
+    }
     // Copy the child pointers and populate the key map
     memcpy(new_node->children, n->children, sizeof(void *) * n->n.num_children);
     for (int i = 0; i < n->n.num_children; i++) {
@@ -551,6 +574,9 @@ void ART::Add_child4(Art_node4 *n, Art_node **ref, unsigned char c, void *child)
 
   } else {
     Art_node16 *new_node = (Art_node16 *)Alloc_node(NodeType::NODE16);
+    if (!new_node) {
+      return;
+    }
     // Copy the child pointers and the key map
     memcpy(new_node->children, n->children, sizeof(void *) * n->n.num_children);
     memcpy(new_node->keys, n->keys, sizeof(unsigned char) * n->n.num_children);
@@ -614,10 +640,21 @@ void *ART::Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *ke
       // key exits, then add new value.
       if (l->vcount == l->capacity) {
         // extend capacity.
-        l->capacity *= 2;
-        l->values = (void **)realloc(l->values, l->capacity * sizeof(void *));
+        uint32_t new_capacity = l->capacity * 2;
+        void **new_values = (void **)realloc(l->values, new_capacity * sizeof(void *));
+        if (!new_values) {
+          return nullptr;
+        }
+        l->values = new_values;
+        l->capacity = new_capacity;
       }
+
+      // alloc value space.
       l->values[l->vcount] = calloc(1, value_len);
+      if (!l->values[l->vcount]) {  // alloc failed.
+        return nullptr;
+      }
+
       memcpy(l->values[l->vcount], value, value_len);
       l->vcount++;
       return nullptr;
@@ -628,6 +665,10 @@ void *ART::Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *ke
 
     // Create a new leaf
     Art_leaf *l2 = Make_leaf(key, key_len, value, value_len);
+    if (!l2) {
+      free(new_node);
+      return nullptr;
+    }
 
     // Determine longest prefix
     int longest_prefix = Longest_common_prefix(l, l2, depth);
@@ -673,6 +714,9 @@ void *ART::Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *ke
 
     // Insert the new leaf
     Art_leaf *l = Make_leaf(key, key_len, value, value_len);
+    if (!l) {  // failed.
+      return nullptr;
+    }
     Add_child4(new_node, ref, key[depth + prefix_diff], SET_LEAF(l));
     return nullptr;
   }
@@ -685,8 +729,26 @@ RECURSE_SEARCH:;
 
   // No child, node goes within us
   Art_leaf *l = Make_leaf(key, key_len, value, value_len);
+  if (!l) {
+    return nullptr;
+  }
   Add_child(n, ref, key[depth], SET_LEAF(l));
   return nullptr;
+}
+
+void ART::Free_leaf(Art_leaf *l) {
+  if (!l) return;
+
+  if (l->values) {
+    for (uint32_t i = 0; i < l->vcount; ++i) {
+      if (l->values[i]) {
+        free(l->values[i]);
+      }
+    }
+    free(l->values);
+  }
+
+  free(l);
 }
 
 void *ART::ART_insert(const unsigned char *key, int key_len, void *value, uint value_len) {
@@ -864,6 +926,7 @@ void *ART::ART_delete(const unsigned char *key, int key_len) {
       free(l->values[i]);
     }
 
+    free(l->values);
     free(l);
     return old;
   }

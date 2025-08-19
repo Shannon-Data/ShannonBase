@@ -147,26 +147,8 @@ IF((LINUX OR WIN32) AND WITH_LAKEHOUSE STREQUAL "system")
 ENDIF()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
 find_package(ONNXRuntime REQUIRED)
-
-if(ONNXRUNTIME_FOUND)
-  install(DIRECTORY ${ONNXRUNTIME_INCLUDE_DIRS}/
-    DESTINATION include/onnxruntime
-    FILES_MATCHING
-    PATTERN "*.h"
-    PATTERN "*.hpp"
-    PATTERN "tests" EXCLUDE
-  )
-
-  install(DIRECTORY ${ONNXRUNTIME_LIB_DIR}/
-    DESTINATION lib/onnxruntime
-    FILES_MATCHING
-    PATTERN "libonnxruntime*"
-    PATTERN "*.so*"
-    PATTERN "cmake" EXCLUDE
-  )
-endif()
-
 INCLUDE_DIRECTORIES(${ONNXRUNTIME_INCLUDE_DIRS})
 
 SET (SHANNON_ITERATOR_SOURCES
@@ -222,6 +204,8 @@ MYSQL_ADD_PLUGIN(shannon_rapid
   MODULE_OUTPUT_NAME ha_rapid
   LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES} ${ONNXRUNTIME_LIBRARIES})
 
+TARGET_LINK_DIRECTORIES(shannon_rapid PRIVATE ${ONNXRUNTIME_LIB_DIR})
+
 # Avoid generating Hardware Capabilities due to crc32 instructions
 IF(SOLARIS_INTEL)
   MY_CHECK_CXX_COMPILER_FLAG("-Wa,-nH" HAVE_WA_NH)
@@ -252,3 +236,20 @@ IF(HAS_WARN_FLAG)
     COMPILE_FLAGS "${HAS_WARN_FLAG}")
 ENDIF()
 
+if(ONNXRUNTIME_FOUND)
+  install(DIRECTORY ${ONNXRUNTIME_INCLUDE_DIRS}/
+    DESTINATION include/onnxruntime
+    FILES_MATCHING
+    PATTERN "*.h"
+    PATTERN "*.hpp"
+    PATTERN "tests" EXCLUDE
+  )
+
+  install(DIRECTORY ${ONNXRUNTIME_LIB_DIR}/
+    DESTINATION lib/onnxruntime
+    FILES_MATCHING
+    PATTERN "libonnxruntime*"
+    PATTERN "*.so*"
+    PATTERN "cmake" EXCLUDE
+  )
+endif()
