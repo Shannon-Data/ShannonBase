@@ -44,7 +44,9 @@
  */
 
 #include "storage/rapid_engine/imcs/index/encoder.h"
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include "include/my_inttypes.h"
 
 namespace ShannonBase {
@@ -70,23 +72,42 @@ void Encoder<float>::EncodeData(float value, unsigned char *key) {
 
 template <>
 void Encoder<double>::EncodeData(double value, unsigned char *key) {
-  uint64_t val;
-  std::memcpy(&val, &value, sizeof(double));
+  uint64_t u;
+  std::memcpy(&u, &value, sizeof(double));
 
-  if (val & (1ULL << 63)) {
-    val = ~val;
-  } else {
-    val ^= (1ULL << 63);
+  if (std::isnan(value)) {
+    uint64_t nan_value = std::numeric_limits<uint64_t>::max();
+    for (int i = 0; i < 8; i++) {
+      key[i] = static_cast<unsigned char>((nan_value >> (56 - i * 8)) & 0xFF);
+    }
+    return;
   }
 
-  key[0] = (val >> 56) & 0xFF;
-  key[1] = (val >> 48) & 0xFF;
-  key[2] = (val >> 40) & 0xFF;
-  key[3] = (val >> 32) & 0xFF;
-  key[4] = (val >> 24) & 0xFF;
-  key[5] = (val >> 16) & 0xFF;
-  key[6] = (val >> 8) & 0xFF;
-  key[7] = val & 0xFF;
+  if (std::isinf(value)) {
+    uint64_t inf_value;
+    if (value > 0) {
+      inf_value = std::numeric_limits<uint64_t>::max() - 1;  // +Inf
+    } else {
+      inf_value = std::numeric_limits<uint64_t>::max() - 2;  // -Inf
+    }
+    for (int i = 0; i < 8; i++) {
+      key[i] = static_cast<unsigned char>((inf_value >> (56 - i * 8)) & 0xFF);
+    }
+    return;
+  }
+
+  if (u & (1ULL << 63)) {
+    // neg value.
+    u = ~u;
+  } else {
+    // positive.
+    u ^= (1ULL << 63);
+  }
+
+  // to big-endian.
+  for (int i = 0; i < 8; i++) {
+    key[i] = static_cast<unsigned char>((u >> (56 - i * 8)) & 0xFF);
+  }
 }
 
 template <>
@@ -111,26 +132,30 @@ float Encoder<float>::DecodeData(const unsigned char *key) {
 
 template <>
 double Encoder<double>::DecodeData(const unsigned char *key) {
-  uint64_t val = 0;
-
-  val |= (uint64_t)key[0] << 56;
-  val |= (uint64_t)key[1] << 48;
-  val |= (uint64_t)key[2] << 40;
-  val |= (uint64_t)key[3] << 32;
-  val |= (uint64_t)key[4] << 24;
-  val |= (uint64_t)key[5] << 16;
-  val |= (uint64_t)key[6] << 8;
-  val |= (uint64_t)key[7];
-
-  if (val & (1ULL << 63)) {
-    val ^= (1ULL << 63);
-  } else {
-    val = ~val;
+  uint64_t u = 0;
+  for (int i = 0; i < 8; i++) {
+    u = (u << 8) | key[i];
   }
 
-  double result;
-  std::memcpy(&result, &val, sizeof(double));
-  return result;
+  if (u == std::numeric_limits<uint64_t>::max()) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  if (u == std::numeric_limits<uint64_t>::max() - 1) {
+    return std::numeric_limits<double>::infinity();
+  }
+  if (u == std::numeric_limits<uint64_t>::max() - 2) {
+    return -std::numeric_limits<double>::infinity();
+  }
+
+  if (u & (1ULL << 63)) {
+    u ^= (1ULL << 63);
+  } else {
+    u = ~u;
+  }
+
+  double value;
+  std::memcpy(&value, &u, sizeof(double));
+  return value;
 }
 
 template <>

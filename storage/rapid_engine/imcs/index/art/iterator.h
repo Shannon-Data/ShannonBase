@@ -30,6 +30,7 @@
 #include <cstring>
 #include <memory>
 #include <stack>
+#include <unordered_set>
 #include <vector>
 
 #include "storage/rapid_engine/imcs/index/art/art.h"
@@ -45,6 +46,7 @@ class ARTIterator {
     int child_pos;
     bool is_leaf;
     uint32_t value_idx;
+    uint32_t depth{0};
   };
 
  public:
@@ -54,212 +56,369 @@ class ARTIterator {
                  bool end_inclusive) {
     if (!m_art) return;
 
-    // Convert keys to unsigned char format
-    m_start_key = const_cast<key_t *>(startkey);
+    m_stack.clear();
+    m_seen_nodes.clear();
+    m_finished = false;
+
+    m_start_key = reinterpret_cast<const unsigned char *>(startkey);
     m_start_keylen = startkey_len;
     m_start_incl = start_inclusive;
-    m_end_key = const_cast<key_t *>(endkey);
+
+    m_end_key = reinterpret_cast<const unsigned char *>(endkey);
     m_end_keylen = endkey_len;
     m_end_incl = end_inclusive;
-    m_current_val_idx = 0;
-
-    // Initialize traversal
-    m_stack.clear();
-    current_leaf_ = nullptr;
-    m_started = false;
-    m_finished = false;
 
     if (m_art->root()) {
       if (startkey) {
         find_start_position();
       } else {
-        m_stack.push_back({m_art->root(), 0, false, 0});
+        find_leftmost_leaf();
       }
     }
   }
 
   bool next(const key_t **key_out, uint32_t *key_len_out, value_t *value_out) {
     if (!key_out || !key_len_out || !value_out) return false;
+    if (m_finished) return false;
 
     while (!m_stack.empty()) {
-      TraversalState current_state = m_stack.back();
+      TraversalState &current_state = m_stack.back();
 
       if (current_state.is_leaf) {
-        ART::Art_node *tagged_node = m_stack.back().node;
-        uint32_t value_idx = m_stack.back().value_idx;
-
-        if (!tagged_node || !IS_LEAF(tagged_node)) {
+        ART::Art_leaf *leaf = LEAF_RAW(current_state.node);
+        if (!leaf || m_seen_nodes.count(leaf)) {
           m_stack.pop_back();
           continue;
         }
 
-        ART::Art_leaf *leaf = LEAF_RAW(tagged_node);
-        if (!leaf || value_idx >= leaf->vcount) {
+        if (current_state.value_idx >= leaf->vcount) {  // all the values of this leaf have been processed.
+          m_seen_nodes.insert(leaf);
           m_stack.pop_back();
           continue;
         }
 
-        if (!key_in_range(leaf)) {
-          m_stack.pop_back();
-          continue;
+        // Iterate through all values in the leaf
+        for (; current_state.value_idx < leaf->vcount; ++current_state.value_idx) {
+          void *val_ptr = leaf->values[current_state.value_idx];
+          if (!val_ptr) continue;
+
+          // Strict range check for each value
+          if (!key_in_range_value(leaf->key, leaf->key_len)) {
+            continue;  // Skip if out of range
+          }
+
+          *key_out = reinterpret_cast<const key_t *>(leaf->key);
+          *key_len_out = leaf->key_len;
+          *value_out = *reinterpret_cast<value_t *>(val_ptr);
+          current_state.value_idx++;  // Continue with next value in leaf
+          return true;
         }
 
-        *key_out = reinterpret_cast<const key_t *>(leaf->key);
-        *key_len_out = leaf->key_len;
-        *value_out = *reinterpret_cast<value_t *>(leaf->values[current_state.value_idx]);
-
-        if (current_state.value_idx + 1 >= leaf->vcount) {
-          m_stack.pop_back();
-        } else {
-          m_stack.back().value_idx = current_state.value_idx + 1;
-        }
-        return true;
+        // All values processed, pop the leaf
+        m_seen_nodes.insert(leaf);
+        m_stack.pop_back();
+        continue;
       }
 
-      ART::Art_node *child = get_next_child(m_stack.back());
+      // Non-leaf node: get next child
+      ART::Art_node *child = get_next_child(current_state);
       if (child) {
         if (IS_LEAF(child)) {
-          m_stack.push_back({child, 0, true, 0});
+          m_stack.push_back({child, 0, true, 0, current_state.depth + 1});
         } else {
-          expand_node(child);
+          navigate_to_leftmost_leaf_from(child, current_state.depth + 1);
         }
       } else {
         m_stack.pop_back();
       }
     }
+
+    m_finished = true;
     return false;
   }
 
  private:
-  int compare_keys(const key_t *k1, int len1, const key_t *k2, int len2) {
-    int min_len = std::min(len1, len2);
-    int cmp = memcmp(k1, k2, min_len);
-    return cmp;
+  inline int compare_keys(const unsigned char *k1, uint32_t len1, const unsigned char *k2, uint32_t n) {
+    uint32_t min_len = std::min(len1, n);
+    return memcmp(k1, k2, min_len);
   }
 
-  bool key_in_range(ART::Art_leaf *leaf) {
-    if (!leaf) return false;
+  bool key_in_range_value(const unsigned char *key, uint32_t key_len) {
+    if (!key || !key_len) return false;
 
     if (m_start_key) {
-      int cmp_start = compare_keys(leaf->key, leaf->key_len, m_start_key, m_start_keylen);
+      int cmp_start = compare_keys(key, key_len, m_start_key, m_start_keylen);
       if (cmp_start < 0) return false;
-      if (!m_start_incl && cmp_start == 0) return false;
+      if (cmp_start == 0 && !m_start_incl) {
+        return false;
+      }
     }
 
     if (m_end_key) {
-      int cmp_end = compare_keys(leaf->key, leaf->key_len, m_end_key, m_end_keylen);
+      int cmp_end = compare_keys(key, key_len, m_end_key, m_end_keylen);
       if (cmp_end > 0) return false;
-      if (!m_end_incl && cmp_end == 0) return false;
+      if (cmp_end == 0 && !m_end_incl) return false;
     }
+
     return true;
   }
 
   void find_start_position() {
     if (!m_start_key || !m_art->root()) return;
-
-    m_stack.push_back({m_art->root(), 0, false, 0});
+    find_position_ge(m_start_key, m_start_keylen);
   }
 
-  void expand_node(ART::Art_node *node) {
-    if (!node) return;
+  void find_position_ge(const unsigned char *target_key, uint32_t target_len) {
+    ART::Art_node *current = m_art->root();
+    uint32_t depth = 0;
 
-    TraversalState state{node, 0, false, 0};
-    switch (node->type) {
-      case ART::NodeType::NODE4:
-      case ART::NodeType::NODE16: {
-        state.child_pos = 0;
-        break;
-      }
-      case ART::NodeType::NODE48: {
-        auto node48 = reinterpret_cast<ART::Art_node48 *>(node);
-        state.child_pos = 0;
-        while (state.child_pos < 256 && !node48->keys[state.child_pos]) {
-          ++state.child_pos;
+    while (current && !IS_LEAF(current)) {
+      if (current->partial_len > 0) {  // Handle node prefix
+        uint32_t compare_len = std::min(current->partial_len, target_len - depth);
+        if (compare_len > 0) {
+          int prefix_cmp = memcmp(target_key + depth, current->partial, compare_len);
+          if (prefix_cmp < 0) {
+            navigate_to_leftmost_leaf_from(current, depth);
+            return;
+          } else if (prefix_cmp > 0) {
+            find_next_branch_gt(current, target_key, depth);
+            return;
+          }
         }
-        break;
-      }
-      case ART::NodeType::NODE256: {
-        auto node256 = reinterpret_cast<ART::Art_node256 *>(node);
-        state.child_pos = 0;
-        while (state.child_pos < 256 && !node256->children[state.child_pos]) {
-          ++state.child_pos;
+        depth += current->partial_len;
+        if (depth >= target_len) {
+          navigate_to_leftmost_leaf_from(current, depth);
+          return;
         }
-        break;
       }
-      default:
+
+      unsigned char target_byte = target_key[depth];
+      ART::Art_node *child = find_child_ge(current, target_byte);
+
+      if (!child) {
+        navigate_to_leftmost_leaf_from(current, depth);
         return;
+      }
+
+      // Push current node state to enable sibling traversal in next()
+      m_stack.push_back({current, 0, false, 0, depth});
+
+      current = child;
+      depth++;
     }
 
-    m_stack.push_back(state);
+    if (current && IS_LEAF(current)) {
+      m_stack.push_back({current, 0, true, 0, depth});
+    }
+  }
+
+  void find_next_branch_gt(ART::Art_node *node, const unsigned char *target_key, uint32_t depth) {
+    unsigned char target_byte = target_key[depth];
+    ART::Art_node *next_child = find_child_gt(node, target_byte);
+    if (!next_child) {
+      m_finished = true;
+      return;
+    }
+    navigate_to_leftmost_leaf_from(next_child, depth + 1);
+  }
+
+  ART::Art_node *find_child_ge(ART::Art_node *node, unsigned char target_byte) {
+    if (!node) return nullptr;
+
+    switch (node->type) {
+      case ART::NODE4: {
+        auto *n = reinterpret_cast<ART::Art_node4 *>(node);
+        for (int i = 0; i < n->n.num_children; ++i) {
+          if (n->keys[i] >= target_byte) {
+            return n->children[i];
+          }
+        }
+        break;
+      }
+      case ART::NODE16: {
+        auto *n = reinterpret_cast<ART::Art_node16 *>(node);
+        for (int i = 0; i < n->n.num_children; ++i) {
+          if (n->keys[i] >= target_byte) {
+            return n->children[i];
+          }
+        }
+        break;
+      }
+      case ART::NODE48: {
+        auto *n = reinterpret_cast<ART::Art_node48 *>(node);
+        for (int lbl = target_byte; lbl < 256; ++lbl) {
+          uint8_t idx = n->keys[lbl];
+          if (idx != 0) {
+            return n->children[idx - 1];
+          }
+        }
+        break;
+      }
+      case ART::NODE256: {
+        auto *n = reinterpret_cast<ART::Art_node256 *>(node);
+        for (int lbl = target_byte; lbl < 256; ++lbl) {
+          if (n->children[lbl]) {
+            return n->children[lbl];
+          }
+        }
+        break;
+      }
+    }
+    return nullptr;
+  }
+
+  ART::Art_node *find_child_gt(ART::Art_node *node, unsigned char target_byte) {
+    if (!node) return nullptr;
+
+    switch (node->type) {
+      case ART::NODE4: {
+        auto *n = reinterpret_cast<ART::Art_node4 *>(node);
+        for (int i = 0; i < n->n.num_children; ++i) {
+          if (n->keys[i] > target_byte) {
+            return n->children[i];
+          }
+        }
+        break;
+      }
+      case ART::NODE16: {
+        auto *n = reinterpret_cast<ART::Art_node16 *>(node);
+        for (int i = 0; i < n->n.num_children; ++i) {
+          if (n->keys[i] > target_byte) {
+            return n->children[i];
+          }
+        }
+        break;
+      }
+      case ART::NODE48: {
+        auto *n = reinterpret_cast<ART::Art_node48 *>(node);
+        for (int lbl = target_byte + 1; lbl < 256; ++lbl) {
+          uint8_t idx = n->keys[lbl];
+          if (idx != 0) {
+            return n->children[idx - 1];
+          }
+        }
+        break;
+      }
+      case ART::NODE256: {
+        auto *n = reinterpret_cast<ART::Art_node256 *>(node);
+        for (int lbl = target_byte + 1; lbl < 256; ++lbl) {
+          if (n->children[lbl]) {
+            return n->children[lbl];
+          }
+        }
+        break;
+      }
+    }
+    return nullptr;
+  }
+
+  void navigate_to_leftmost_leaf_from(ART::Art_node *node, uint32_t depth) {
+    if (!node) return;
+
+    if (IS_LEAF(node)) {
+      m_stack.push_back({node, 0, true, 0, depth});
+      return;
+    }
+
+    m_stack.push_back({node, 0, false, 0, depth});
+
+    ART::Art_node *leftmost_child = get_leftmost_child(node);
+    if (leftmost_child) {
+      navigate_to_leftmost_leaf_from(leftmost_child, depth + 1);
+    }
+  }
+
+  ART::Art_node *get_leftmost_child(ART::Art_node *node) {
+    if (!node || IS_LEAF(node)) return nullptr;
+
+    switch (node->type) {
+      case ART::NODE4: {
+        auto *n = reinterpret_cast<ART::Art_node4 *>(node);
+        return n->children[0];
+      }
+      case ART::NODE16: {
+        auto *n = reinterpret_cast<ART::Art_node16 *>(node);
+        return n->children[0];
+      }
+      case ART::NODE48: {
+        auto *n = reinterpret_cast<ART::Art_node48 *>(node);
+        for (int i = 0; i < 256; ++i) {
+          if (n->keys[i] != 0) {
+            return n->children[n->keys[i] - 1];
+          }
+        }
+        break;
+      }
+      case ART::NODE256: {
+        auto *n = reinterpret_cast<ART::Art_node256 *>(node);
+        for (int i = 0; i < 256; ++i) {
+          if (n->children[i]) {
+            return n->children[i];
+          }
+        }
+        break;
+      }
+    }
+    return nullptr;
+  }
+
+  void find_leftmost_leaf() {
+    if (!m_art || !m_art->root()) return;
+    navigate_to_leftmost_leaf_from(m_art->root(), 0);
   }
 
   ART::Art_node *get_next_child(TraversalState &state) {
     if (state.is_leaf || !state.node) return nullptr;
 
-    ART::Art_node *child = nullptr;
     switch (state.node->type) {
-      case ART::NodeType::NODE4: {
-        auto node4 = reinterpret_cast<ART::Art_node4 *>(state.node);
-        if (state.child_pos < node4->n.num_children) {
-          child = node4->children[state.child_pos];
-          ++state.child_pos;
-        }
-        break;
+      case ART::NODE4: {
+        auto *n = reinterpret_cast<ART::Art_node4 *>(state.node);
+        if (state.child_pos >= n->n.num_children) return nullptr;
+        return n->children[state.child_pos++];
       }
-      case ART::NodeType::NODE16: {
-        auto node16 = reinterpret_cast<ART::Art_node16 *>(state.node);
-        if (state.child_pos < node16->n.num_children) {
-          child = node16->children[state.child_pos];
-          ++state.child_pos;
-        }
-        break;
+      case ART::NODE16: {
+        auto *n = reinterpret_cast<ART::Art_node16 *>(state.node);
+        if (state.child_pos >= n->n.num_children) return nullptr;
+        return n->children[state.child_pos++];
       }
-      case ART::NodeType::NODE48: {
-        auto node48 = reinterpret_cast<ART::Art_node48 *>(state.node);
+      case ART::NODE48: {
+        auto *n = reinterpret_cast<ART::Art_node48 *>(state.node);
         while (state.child_pos < 256) {
-          if (node48->keys[state.child_pos]) {
-            child = node48->children[node48->keys[state.child_pos] - 1];
-            ++state.child_pos;
-            break;
+          int lbl = state.child_pos++;
+          uint8_t idx = n->keys[lbl];
+          if (idx != 0) {
+            return n->children[idx - 1];
           }
-          ++state.child_pos;
         }
         break;
       }
-      case ART::NodeType::NODE256: {
-        auto node256 = reinterpret_cast<ART::Art_node256 *>(state.node);
+      case ART::NODE256: {
+        auto *n = reinterpret_cast<ART::Art_node256 *>(state.node);
         while (state.child_pos < 256) {
-          if (node256->children[state.child_pos]) {
-            child = node256->children[state.child_pos];
-            ++state.child_pos;
-            break;
+          int lbl = state.child_pos++;
+          if (n->children[lbl]) {
+            return n->children[lbl];
           }
-          ++state.child_pos;
         }
         break;
       }
-      default:
-        return nullptr;
     }
-    return child;
+    return nullptr;
   }
 
  private:
   ART *m_art;
+  std::unordered_set<ART::Art_leaf *> m_seen_nodes;
   std::vector<TraversalState> m_stack;
-  ART::Art_leaf *current_leaf_{nullptr};
-
-  bool m_started{false};
   bool m_finished{false};
 
-  // Scan range
-  key_t *m_start_key{nullptr};
+  const unsigned char *m_start_key{nullptr};
   int m_start_keylen{0};
   bool m_start_incl{false};
-  key_t *m_end_key{nullptr};
+
+  const unsigned char *m_end_key{nullptr};
   int m_end_keylen{0};
   bool m_end_incl{false};
-  uint32_t m_current_val_idx{0};
 };
 
 }  // namespace Index
