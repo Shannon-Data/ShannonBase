@@ -139,48 +139,47 @@ void ART::Find_children(Art_node *n, unsigned char c, std::vector<Art_node *> &c
         if (((unsigned char *)p.p1->keys)[i] == c) children.emplace_back(p.p1->children[i]);
       }
       break;
-      {
-        case NodeType::NODE16:
-          p.p2 = (Art_node16 *)n;
+
+    case NodeType::NODE16:
+      p.p2 = (Art_node16 *)n;
 
 // support non-86 architectures
 #ifdef __i386__
-          // Compare the key to all 16 stored keys
-          __m128i cmp;
-          cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c), _mm_loadu_si128((__m128i *)p.p2->keys));
+      // Compare the key to all 16 stored keys
+      __m128i cmp;
+      cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c), _mm_loadu_si128((__m128i *)p.p2->keys));
 
-          // Use a mask to ignore children that don't exist
-          mask = (1 << n->num_children) - 1;
-          bitfield = _mm_movemask_epi8(cmp) & mask;
+      // Use a mask to ignore children that don't exist
+      mask = (1 << n->num_children) - 1;
+      bitfield = _mm_movemask_epi8(cmp) & mask;
 #else
 #ifdef __amd64__
-          // Compare the key to all 16 stored keys
-          __m128i cmp;
-          cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c), _mm_loadu_si128((__m128i *)p.p2->keys));
+      // Compare the key to all 16 stored keys
+      __m128i cmp;
+      cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c), _mm_loadu_si128((__m128i *)p.p2->keys));
 
-          // Use a mask to ignore children that don't exist
-          mask = (1 << n->num_children) - 1;
-          bitfield = _mm_movemask_epi8(cmp) & mask;
+      // Use a mask to ignore children that don't exist
+      mask = (1 << n->num_children) - 1;
+      bitfield = _mm_movemask_epi8(cmp) & mask;
 #else
-          // Compare the key to all 16 stored keys
-          bitfield = 0;
-          for (i = 0; i < 16; ++i) {
-            if (p.p2->keys[i] == c) bitfield |= (1 << i);
-          }
-
-          // Use a mask to ignore children that don't exist
-          mask = (1 << n->num_children) - 1;
-          bitfield &= mask;
-#endif
-#endif
-          /*
-           * If we have a match (any bit set) then we can
-           * return the pointer match using ctz to get
-           * the index.
-           */
-          if (bitfield) children.emplace_back(p.p2->children[__builtin_ctz(bitfield)]);
-          break;
+      // Compare the key to all 16 stored keys
+      bitfield = 0;
+      for (i = 0; i < 16; ++i) {
+        if (p.p2->keys[i] == c) bitfield |= (1 << i);
       }
+
+      // Use a mask to ignore children that don't exist
+      mask = (1 << n->num_children) - 1;
+      bitfield &= mask;
+#endif
+#endif
+      /*
+       * If we have a match (any bit set) then we can
+       * return the pointer match using ctz to get
+       * the index.
+       */
+      if (bitfield) children.emplace_back(p.p2->children[__builtin_ctz(bitfield)]);
+      break;
     case NodeType::NODE48:
       p.p3 = (Art_node48 *)n;
       i = p.p3->keys[c];
@@ -214,48 +213,46 @@ ART::Art_node **ART::Find_child(Art_node *n, unsigned char c) {
         if (((unsigned char *)p.p1->keys)[i] == c) return &p.p1->children[i];
       }
       break;
-      {
-        case NodeType::NODE16:
-          p.p2 = (Art_node16 *)n;
+    case NodeType::NODE16:
+      p.p2 = (Art_node16 *)n;
 
 // support non-86 architectures
 #ifdef __i386__
-          // Compare the key to all 16 stored keys
-          __m128i cmp;
-          cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c), _mm_loadu_si128((__m128i *)p.p2->keys));
+      // Compare the key to all 16 stored keys
+      __m128i cmp;
+      cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c), _mm_loadu_si128((__m128i *)p.p2->keys));
 
-          // Use a mask to ignore children that don't exist
-          mask = (1 << n->num_children) - 1;
-          bitfield = _mm_movemask_epi8(cmp) & mask;
+      // Use a mask to ignore children that don't exist
+      mask = (1 << n->num_children) - 1;
+      bitfield = _mm_movemask_epi8(cmp) & mask;
 #else
 #ifdef __amd64__
-          // Compare the key to all 16 stored keys
-          __m128i cmp;
-          cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c), _mm_loadu_si128((__m128i *)p.p2->keys));
+      // Compare the key to all 16 stored keys
+      __m128i cmp;
+      cmp = _mm_cmpeq_epi8(_mm_set1_epi8(c), _mm_loadu_si128((__m128i *)p.p2->keys));
 
-          // Use a mask to ignore children that don't exist
-          mask = (1 << n->num_children) - 1;
-          bitfield = _mm_movemask_epi8(cmp) & mask;
+      // Use a mask to ignore children that don't exist
+      mask = (1 << n->num_children) - 1;
+      bitfield = _mm_movemask_epi8(cmp) & mask;
 #else
-          // Compare the key to all 16 stored keys
-          bitfield = 0;
-          for (i = 0; i < 16; ++i) {
-            if (p.p2->keys[i] == c) bitfield |= (1 << i);
-          }
-
-          // Use a mask to ignore children that don't exist
-          mask = (1 << n->num_children) - 1;
-          bitfield &= mask;
-#endif
-#endif
-          /*
-           * If we have a match (any bit set) then we can
-           * return the pointer match using ctz to get
-           * the index.
-           */
-          if (bitfield) return &p.p2->children[__builtin_ctz(bitfield)];
-          break;
+      // Compare the key to all 16 stored keys
+      bitfield = 0;
+      for (i = 0; i < 16; ++i) {
+        if (p.p2->keys[i] == c) bitfield |= (1 << i);
       }
+
+      // Use a mask to ignore children that don't exist
+      mask = (1 << n->num_children) - 1;
+      bitfield &= mask;
+#endif
+#endif
+      /*
+       * If we have a match (any bit set) then we can
+       * return the pointer match using ctz to get
+       * the index.
+       */
+      if (bitfield) return &p.p2->children[__builtin_ctz(bitfield)];
+      break;
     case NodeType::NODE48:
       p.p3 = (Art_node48 *)n;
       i = p.p3->keys[c];
