@@ -73,7 +73,8 @@ class ARTIterator {
       if (startkey) {
         find_start_position();
       } else {
-        m_stack.push_back({m_art->root(), 0, false, 0});
+        bool is_leaf = IS_LEAF(m_art->root());  // if only has one data, root is leaf.
+        m_stack.push_back({m_art->root(), 0, is_leaf, 0});
       }
     }
   }
@@ -157,11 +158,12 @@ class ARTIterator {
   void find_start_position() {
     if (!m_start_key || !m_art->root()) return;
 
-    m_stack.push_back({m_art->root(), 0, false, 0});
+    bool is_leaf = IS_LEAF(m_art->root());  // if only has one data, root is leaf.
+    m_stack.push_back({m_art->root(), 0, is_leaf, 0});
   }
 
   void expand_node(ART::Art_node *node) {
-    if (!node) return;
+    if (!node || IS_LEAF(node)) return;
 
     TraversalState state{node, 0, false, 0};
     switch (node->type) {
@@ -195,6 +197,7 @@ class ARTIterator {
 
   ART::Art_node *get_next_child(TraversalState &state) {
     if (state.is_leaf || !state.node) return nullptr;
+    assert(!IS_LEAF(state.node));
 
     ART::Art_node *child = nullptr;
     switch (state.node->type) {

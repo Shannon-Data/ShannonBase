@@ -33,13 +33,13 @@
 
 #include <assert.h>
 #include <stdint.h>
-
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
-#include "my_inttypes.h"
+#include "include/my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase {
@@ -89,47 +89,52 @@ class ART {
   using ART_Func = std::function<int(void *data, void *leaf, const unsigned char *key, uint32 key_len, void *value,
                                      uint32 value_len)>;
   typedef struct {
+    std::atomic<uint32> ref_count{1};
     uint32 partial_len{0};
     uint8 type{NodeType::UNKNOWN};
     uint8 num_children{0};
+    mutable std::shared_mutex node_mutex;
     unsigned char partial[ART::MAX_PREFIX_LEN];
   } Art_node;
 
   typedef struct {
     Art_node n;
     unsigned char keys[4];
-    Art_node *children[4];
+    std::atomic<Art_node *> children[4];
   } Art_node4;
 
   typedef struct {
     Art_node n;
     unsigned char keys[16];
-    Art_node *children[16];
+    std::atomic<Art_node *> children[16];
   } Art_node16;
 
   typedef struct {
     Art_node n;
     unsigned char keys[256];
-    Art_node *children[48];
+    std::atomic<Art_node *> children[48];
   } Art_node48;
 
   typedef struct {
     Art_node n;
-    Art_node *children[256];
+    std::atomic<Art_node *> children[256];
   } Art_node256;
 
   typedef struct {
-    void **values;
-    uint32_t value_len;
-    uint32_t vcount;
-    uint32_t capacity;
+    std::atomic<uint32> ref_count{1};
+    mutable std::shared_mutex leaf_mutex;
+    std::atomic<void **> values;
+    std::atomic<uint32_t> value_len;
+    std::atomic<uint32_t> vcount;
+    std::atomic<uint32_t> capacity;
     uint32_t key_len;
     unsigned char key[];
   } Art_leaf;
 
   typedef struct {
-    Art_node *root;
-    uint64 size;
+    std::atomic<Art_node *> root;
+    std::atomic<size_t> size;
+    mutable std::shared_mutex tree_mutex;
   } Art_tree;
 
   typedef struct {
@@ -144,9 +149,19 @@ class ART {
   void Destroy_node(Art_node *n);
 
   int Check_prefix(const Art_node *n, const unsigned char *key, int key_len, int depth);
-  Art_node **Find_child(Art_node *n, unsigned char c);
+  std::atomic<Art_node *> *Find_child(Art_node *n, unsigned char c);
 
  private:
+  // add ref.
+  void AddRef(Art_node *node);
+  void Release(Art_node *node);
+  void AddRefLeaf(Art_leaf *leaf);
+  void ReleaseLeaf(Art_leaf *leaf);
+
+  // safe node access.
+  Art_node *GetChildSafe(Art_node *parent, unsigned char c);
+  void SetChildSafe(Art_node *parent, unsigned char c, Art_node *child);
+
   void Find_children(Art_node *n, unsigned char c, std::vector<Art_node *> &children);
 
   int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
@@ -158,20 +173,26 @@ class ART {
   Art_leaf *Make_leaf(const unsigned char *key, int key_len, void *value, uint value_len);
   int Longest_common_prefix(Art_leaf *l1, Art_leaf *l2, int depth);
   void Copy_header(Art_node *dest, Art_node *src);
-  void Add_child256(Art_node256 *n, Art_node **ref, unsigned char c, void *child);
-  void Add_child48(Art_node48 *n, Art_node **ref, unsigned char c, void *child);
-  void Add_child16(Art_node16 *n, Art_node **ref, unsigned char c, void *child);
-  void Add_child4(Art_node4 *n, Art_node **ref, unsigned char c, void *child);
-  void Add_child(Art_node *n, Art_node **ref, unsigned char c, void *child);
+
+  void Add_child256(Art_node256 *n, std::atomic<Art_node *> *ref, unsigned char c, Art_node *child);
+  void Add_child48(Art_node48 *n, std::atomic<Art_node *> *ref, unsigned char c, Art_node *child);
+  void Add_child16(Art_node16 *n, std::atomic<Art_node *> *ref, unsigned char c, Art_node *child);
+  void Add_child4(Art_node4 *n, std::atomic<Art_node *> *ref, unsigned char c, Art_node *child);
+  void Add_child(Art_node *n, std::atomic<Art_node *> *ref, unsigned char c, Art_node *child);
+
   int Prefix_mismatch(const Art_node *n, const unsigned char *key, int key_len, int depth);
-  void *Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, void *value, int value_len,
-                         int depth, int *old, int replace);
-  void Remove_child256(Art_node256 *n, Art_node **ref, unsigned char c);
-  void Remove_child48(Art_node48 *n, Art_node **ref, unsigned char c);
-  void Remove_child16(Art_node16 *n, Art_node **ref, Art_node **l);
-  void Remove_child4(Art_node4 *n, Art_node **ref, Art_node **l);
-  void Remove_child(Art_node *n, Art_node **ref, unsigned char c, Art_node **l);
-  Art_leaf *Recursive_delete(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, int depth);
+  void *Recursive_insert(Art_node *n, std::atomic<Art_node *> *ref, const unsigned char *key, int key_len, void *value,
+                         int value_len, int depth, int *old, int replace);
+
+  void Remove_child256(Art_node256 *n, std::atomic<Art_node *> *ref, unsigned char c);
+  void Remove_child48(Art_node48 *n, std::atomic<Art_node *> *ref, unsigned char c);
+  void Remove_child16(Art_node16 *n, std::atomic<Art_node *> *ref, std::atomic<Art_node *> *l);
+  void Remove_child4(Art_node4 *n, std::atomic<Art_node *> *ref, std::atomic<Art_node *> *l);
+  void Remove_child(Art_node *n, std::atomic<Art_node *> *ref, unsigned char c, std::atomic<Art_node *> *l);
+  void RemoveChildSafe(Art_node *parent, unsigned char c);
+
+  Art_leaf *Recursive_delete(Art_node *n, std::atomic<Art_node *> *ref, const unsigned char *key, int key_len,
+                             int depth);
   int Recursive_iter(Art_node *n, ART_Func &cb, void *data);
   int Recursive_iter_with_key(Art_node *n, const unsigned char *key, int key_len);
   int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
@@ -179,23 +200,30 @@ class ART {
 
   void Free_leaf(Art_leaf *l);
 
+  void *safe_malloc(size_t size);
+  void *safe_calloc(size_t count, size_t size);
+  void *safe_realloc(void *ptr, size_t size);
+
  public:
   inline int ART_tree_init() {
+    std::unique_lock lock(m_node_mutex);
     if (!m_tree) {
       m_tree = new Art_tree();
     }
-    m_tree->root = nullptr;
-    m_tree->size = 0;
+    m_tree->root.store(nullptr, std::memory_order_release);
+    m_tree->size.store(0, std::memory_order_release);
     m_inited = true;
     return 0;
   }
 
   inline int ART_tree_destroy() {
-    if (m_tree && m_tree->root) {
-      Destroy_node(m_tree->root);
-      m_tree->root = nullptr;
-    }
+    std::unique_lock lock(m_node_mutex);
     if (m_tree) {
+      Art_node *root = m_tree->root.load(std::memory_order_acquire);
+      if (root) {
+        Destroy_node(root);
+        m_tree->root.store(nullptr, std::memory_order_release);
+      }
       delete m_tree;
       m_tree = nullptr;
     }
@@ -203,9 +231,18 @@ class ART {
     return 0;
   }
 
-  inline bool Art_initialized() { return m_inited; }
-  inline Art_tree *tree() const { return m_tree; }
-  inline Art_node *root() const { return (m_inited) ? m_tree->root : nullptr; }
+  inline bool Art_initialized() {
+    std::shared_lock lock(m_node_mutex);
+    return m_inited;
+  }
+  inline Art_tree *tree() const {
+    std::shared_lock lock(m_node_mutex);
+    return m_tree;
+  }
+  inline Art_node *root() const {
+    std::shared_lock lock(m_node_mutex);
+    return (m_inited && m_tree) ? m_tree->root.load(std::memory_order_acquire) : nullptr;
+  }
 
   void *ART_insert(const unsigned char *key, int key_len, void *value, uint value_len);
   void *ART_insert_with_replace(const unsigned char *key, int key_len, void *value, uint value_len);
@@ -220,7 +257,7 @@ class ART {
   int ART_iter(ART_Func cb, void *data);
 
  private:
-  std::shared_mutex m_node_mutex;
+  mutable std::shared_mutex m_node_mutex;
   Art_tree *m_tree{nullptr};
   bool m_inited{false};
   std::vector<Art_leaf *> m_current_values;
