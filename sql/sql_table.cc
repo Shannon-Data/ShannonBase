@@ -2843,6 +2843,12 @@ static bool secondary_engine_unload_table(THD *thd, const char *db_name,
   assert(thd->mdl_context.owns_equal_or_stronger_lock(
       MDL_key::TABLE, db_name, table_name, MDL_EXCLUSIVE));
 
+  //then stop the purge thread.
+  ShannonBase::Purge::Purger::end();
+
+  //stop the main pop monitor thread.
+  ShannonBase::Populate::Populator::end();
+
   // Nothing to unload if table has no secondary engine defined.
   LEX_CSTRING secondary_engine;
   if (!table_def.options().exists("secondary_engine") ||
@@ -2896,11 +2902,6 @@ static bool secondary_engine_unload_table(THD *thd, const char *db_name,
             ++it;
   }
 
-  //at first, stop the main pop monitor thread.
-  ShannonBase::Populate::Populator::end();
-
-  //then stop the purge thread.
-  ShannonBase::Purge::Purger::end();
   return false;
 }
 

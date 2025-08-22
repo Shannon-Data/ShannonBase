@@ -275,7 +275,7 @@ static void purge_coordinator_main() {
 
 // Implementation of Purger methods
 void Purger::start() {
-  if (!active() && shannon_loaded_tables && shannon_loaded_tables->size() > 0) {
+  if (!active() && shannon_loaded_tables->size()) {
     m_stats.reset();
     srv_threads.m_rapid_purg_cordinator = os_thread_create(rapid_purge_thread_key, 0, purge_coordinator_main);
     set_status(purge_state_t::PURGE_STATE_RUN);
