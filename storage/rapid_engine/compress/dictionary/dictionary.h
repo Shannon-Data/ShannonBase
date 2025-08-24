@@ -35,11 +35,11 @@
 #include "include/my_inttypes.h"
 #include "include/mysql/strings/m_ctype.h"  //CHARSET_INFO
 #include "include/sql_string.h"             //String
+#include "storage/rapid_engine/compress/algorithms.h"
 
 namespace ShannonBase {
 namespace Compress {
 
-enum class Encoding_type : uint8 { NONE, SORTED, VARLEN };
 // Dictionary, which store all the dictionary data.
 class Dictionary {
  public:
@@ -57,16 +57,13 @@ class Dictionary {
   virtual uint32 store(const uchar *, size_t, Encoding_type type = Encoding_type::NONE);
 
   // get the string by string id. surcess return 0 and string, otherwise not found return -1.;
-  virtual int32 get(uint64 strid, String &ret_val);
+  virtual int32 id(uint64 strid, String &ret_val);
 
   // get the string id by string. if not found, return empty string.
   virtual std::string get(uint64 strid);
 
   // get the string id by string. if not found, return -1.
-  virtual int64 get(const std::string &str);
-
-  // set the algorithm type.
-  virtual void set_algo(Encoding_type type) { m_encoding_type = type; }
+  virtual int64 id(const std::string &str);
 
   // get the algorithm type.
   virtual inline Encoding_type get_algo() const { return m_encoding_type; }
