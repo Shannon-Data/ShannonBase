@@ -261,10 +261,12 @@ void Cu::ensure_new_chunks(size_t required_chunk_id) {
 
 uchar *Cu::write_row(const Rapid_load_context *context, row_id_t rowid, uchar *data, size_t len) {
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
+
   auto dlen = (len == UNIV_SQL_NULL) ? sizeof(uint32) : ((len < sizeof(uint32)) ? sizeof(uint32) : len);
   std::unique_ptr<uchar[]> datum(dlen < MAX_FIELD_WIDTH ? nullptr : new uchar[dlen]);
   uchar *pdatum{nullptr};
   if (data) {  // not null.
+    ut_a(len != UNIV_SQL_NULL);
     pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff.data : datum.get();
     std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
     std::memcpy(pdatum, data, len);
