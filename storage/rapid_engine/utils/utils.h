@@ -77,7 +77,7 @@ class Util {
           buf.set_charset(field->charset());
           field->val_str(&buf);
           std::string str(buf.ptr(), buf.length());
-          auto vdata_val = dictionary ? const_cast<Compress::Dictionary *>(dictionary)->get(str) : -1;
+          auto vdata_val = dictionary ? const_cast<Compress::Dictionary *>(dictionary)->id(str) : -1;
           data_val = static_cast<T>(vdata_val);
         } break;
         case MYSQL_TYPE_INT24:

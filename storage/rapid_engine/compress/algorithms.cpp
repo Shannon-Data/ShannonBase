@@ -38,7 +38,7 @@ namespace ShannonBase {
 namespace Compress {
 
 std::once_flag CompressFactory::m_alg_once;
-CompressFactory *CompressFactory::m_factory_instance = nullptr;
+std::unique_ptr<CompressFactory> CompressFactory::m_factory_instance{nullptr};
 
 zstd_compress::zstd_compress() { m_result.reserve(Compress_algorithm::MAX_BUFF_LEN); }
 
@@ -150,30 +150,6 @@ std::string &lz4_compress::decompressString(std::string &compressed_str) {
 
   m_result.assign(comp_data.get(), decompressedSize);
   return m_result;
-}
-
-void CompressFactory::make_elements() {
-  // important: the inserted index should same as its algo type value.
-  m_factory.emplace_back(std::make_unique<zstd_compress>());
-  m_factory.emplace_back(std::make_unique<zstd_compress>());
-  m_factory.emplace_back(std::make_unique<zlib_compress>());
-  m_factory.emplace_back(std::make_unique<zstd_compress>());
-  m_factory.emplace_back(std::make_unique<lz4_compress>());
-}
-
-std::unique_ptr<Compress_algorithm> CompressFactory::get_instance(compress_algos algo) {
-  std::call_once(m_alg_once, [&] { m_factory_instance = new CompressFactory(); });
-
-  if (algo == compress_algos::DEFAULT || algo == compress_algos::NONE)
-    return std::move(std::make_unique<zstd_compress>());
-  else if (algo == compress_algos::LZ4)
-    return std::move(std::make_unique<lz4_compress>());
-  else if (algo == compress_algos::ZLIB)
-    return std::move(std::make_unique<zlib_compress>());
-  else if (algo == compress_algos::ZSTD)
-    return std::move(std::make_unique<zstd_compress>());
-  else
-    return std::move(std::make_unique<zstd_compress>());
 }
 
 }  // namespace Compress

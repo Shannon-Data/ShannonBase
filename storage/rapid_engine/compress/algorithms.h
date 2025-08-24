@@ -37,7 +37,8 @@
 namespace ShannonBase {
 namespace Compress {
 
-enum compress_algos { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
+enum class Encoding_type { NONE, SORTED, VARLEN };
+enum class compress_algos { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
 
 class Compress_algorithm {
  public:
@@ -85,24 +86,56 @@ class lz4_compress : public Compress_algorithm {
 
 class CompressFactory {
  public:
-  static std::unique_ptr<Compress_algorithm> get_instance(compress_algos algo);
-  // using AlgorithmFactoryT = std::map<compress_algos,
-  // std::unique_ptr<Compress_algorithm>>;
+  static std::unique_ptr<Compress_algorithm> get_instance(compress_algos algo) {
+    std::call_once(m_alg_once, [&] { m_factory_instance = std::make_unique<CompressFactory>(); });
+    return create_algorithm_instance(algo);
+  }
+
+  static std::unique_ptr<Compress_algorithm> get_instance(Encoding_type type) {
+    std::call_once(m_alg_once, [&] { m_factory_instance = std::make_unique<CompressFactory>(); });
+    return create_algorithm_instance(type);
+  }
+
   using AlgorithmFactoryT = std::vector<std::unique_ptr<Compress_algorithm>>;
 
- private:
   CompressFactory() = default;
-  virtual ~CompressFactory() = delete;
+  virtual ~CompressFactory() = default;
+
+ private:
   CompressFactory(CompressFactory &&) = delete;
   CompressFactory(CompressFactory &) = delete;
   CompressFactory &operator=(const CompressFactory &) = delete;
   CompressFactory &operator=(const CompressFactory &&) = delete;
-  void make_elements();
+
+  static std::unique_ptr<Compress_algorithm> create_algorithm_instance(compress_algos algo) {
+    switch (algo) {
+      case compress_algos::LZ4:
+        return std::move(std::make_unique<lz4_compress>());
+      case compress_algos::ZLIB:
+        return std::move(std::make_unique<zlib_compress>());
+      case compress_algos::ZSTD:
+      case compress_algos::DEFAULT:
+      case compress_algos::NONE:
+      default:
+        return std::move(std::make_unique<zstd_compress>());
+    }
+  }
+
+  static std::unique_ptr<Compress_algorithm> create_algorithm_instance(Encoding_type type) {
+    switch (type) {
+      case Encoding_type::SORTED:
+        return std::move(std::make_unique<zstd_compress>());
+      case Encoding_type::VARLEN:
+        return std::move(std::make_unique<lz4_compress>());
+      case Encoding_type::NONE:
+      default:
+        return std::move(std::make_unique<zstd_compress>());
+    }
+  }
 
  private:
   static std::once_flag m_alg_once;
-  static CompressFactory *m_factory_instance;
-  AlgorithmFactoryT m_factory;
+  static std::unique_ptr<CompressFactory> m_factory_instance;
 };
 
 }  // namespace Compress

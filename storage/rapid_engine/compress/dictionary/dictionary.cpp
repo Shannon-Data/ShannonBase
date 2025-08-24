@@ -32,7 +32,6 @@
 #include "include/my_inttypes.h"
 #include "include/ut0dbg.h"
 
-#include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 
 /**
@@ -50,28 +49,13 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
   // returns dictionary id. //encoding alg pls ref to: heatwave document.
   if (!str || !len) return Dictionary::DEFAULT_STRID;
 
-  compress_algos alg{compress_algos::NONE};
-  switch (m_encoding_type) {
-    case Encoding_type::SORTED:
-      alg = compress_algos::ZSTD;
-      break;
-    case Encoding_type::VARLEN:
-      alg = compress_algos::LZ4;
-      break;
-    case Encoding_type::NONE:
-      alg = compress_algos::ZSTD;
-      break;
-    default:
-      break;
-  }
+  std::string strstr(reinterpret_cast<const char *>(str), len);
+  auto algr = CompressFactory::get_instance(type);
+  std::string compressed_str(algr->compressString(strstr));
 
-  std::scoped_lock lk(m_content_mtx);
-  std::string origin_str((char *)str, len);
-  auto algr = CompressFactory::get_instance(alg);
-  std::string compressed_str(algr->compressString(origin_str));
   {
+    std::scoped_lock lk(m_content_mtx);
     auto content_pos = m_content.find(compressed_str);
-    // found it, then return it.
     if (content_pos != m_content.end()) return content_pos->second;
 
     // not found, then insert a new one.
@@ -90,9 +74,10 @@ uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
   return Dictionary::DEFAULT_STRID;
 }
 
-int32 Dictionary::get(uint64 strid, String &ret_val) {
+int32 Dictionary::id(uint64 strid, String &ret_val) {
+  std::scoped_lock lk(m_content_mtx);
   auto compressed_str = get(strid);
-  if (compressed_str.length()) return -1;
+  if (compressed_str.empty()) return -1;
 
   String strs(compressed_str.c_str(), compressed_str.length(), ret_val.charset());
   copy_if_not_alloced(&ret_val, &strs, strs.length());
@@ -101,39 +86,23 @@ int32 Dictionary::get(uint64 strid, String &ret_val) {
 }
 
 std::string Dictionary::get(uint64 strid) {
-  compress_algos alg [[maybe_unused]]{compress_algos::NONE};
-  switch (m_encoding_type) {
-    case Encoding_type::SORTED:
-      alg = compress_algos::ZSTD;
-      break;
-    case Encoding_type::VARLEN:
-      alg = compress_algos::LZ4;
-      break;
-    case Encoding_type::NONE:
-      alg = compress_algos::ZSTD;
-      break;
-    default:
-      break;
-  }
-
   {
     std::scoped_lock lk(m_content_mtx);
     auto id_pos = m_id2content.find(strid);
     if (id_pos != m_id2content.end()) {
       auto compressed_str = id_pos->second;
-      return CompressFactory::get_instance(alg)->decompressString(compressed_str);
+      return CompressFactory::get_instance(m_encoding_type)->decompressString(compressed_str);
     }
   }
 
-  return std::string("");
+  return std::string();
 }
 
-int64 Dictionary::get(const std::string &str) {
+int64 Dictionary::id(const std::string &str) {
   std::scoped_lock lk(m_content_mtx);
   auto content_pos = m_content.find(str);
-  if (content_pos != m_content.end()) return content_pos->second;
-
-  return Dictionary::INVALID_STRID;
+  return (content_pos != m_content.end()) ? content_pos->second : Dictionary::INVALID_STRID;
 }
+
 }  // namespace Compress
 }  // namespace ShannonBase
