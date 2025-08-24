@@ -24,8 +24,7 @@
    The fundmental code for imcs.
 */
 /** Adaptive Radix Tree from https://github.com/armon/libart, which's in c.
- *  re-impl in c++. But from source code of DuckDB, it does not use mmx
- *  instructions to accelerate the performance.
+ *  re-impl in c++.
  */
 
 #ifndef __SHANNONBASE_ART_H__
@@ -34,21 +33,21 @@
 #include <assert.h>
 #include <stdint.h>
 
+#include <array>
+#include <atomic>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
-#include "my_inttypes.h"
+
+#include "include/my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-
-#define IS_LEAF(x) (((uintptr_t)x & 1))
-#define SET_LEAF(x) ((void *)((uintptr_t)x | 1))
-#define LEAF_RAW(x) ((ART::Art_leaf *)((void *)((uintptr_t)x & ~1)))
 
 class ART {
  public:
@@ -63,167 +62,442 @@ class ART {
   ART(const ART &other) = delete;
   ART &operator=(const ART &other) = delete;
 
-  ART(ART &&other)
-  noexcept : m_tree(other.m_tree), m_inited(other.m_inited), m_current_values(std::move(other.m_current_values)) {
-    other.m_tree = nullptr;
-    other.m_inited = false;
-  }
+  ART(ART &&other) noexcept : m_tree(std::move(other.m_tree)), m_inited(other.m_inited) { other.m_inited = false; }
 
   ART &operator=(ART &&other) noexcept {
     if (this != &other) {
       if (m_inited) {
         ART_tree_destroy();
       }
-      m_tree = other.m_tree;
+      m_tree = std::move(other.m_tree);
       m_inited = other.m_inited;
-      m_current_values = std::move(other.m_current_values);
-      other.m_tree = nullptr;
       other.m_inited = false;
     }
     return *this;
   }
 
-  enum NodeType { UNKNOWN = 0, NODE4 = 1, NODE16, NODE48, NODE256 };
-  static constexpr uint MAX_PREFIX_LEN = 512;
-  static constexpr uint initial_capacity = 16;
-  using ART_Func = std::function<int(void *data, void *leaf, const unsigned char *key, uint32 key_len, void *value,
-                                     uint32 value_len)>;
-  typedef struct {
-    uint32 partial_len{0};
-    uint8 type{NodeType::UNKNOWN};
-    uint8 num_children{0};
-    unsigned char partial[ART::MAX_PREFIX_LEN];
-  } Art_node;
+  enum NodeType { UNKNOWN = 0, NODE4 = 1, NODE16, NODE48, NODE256, LEAF };
+  static constexpr uint32_t MAX_PREFIX_LEN = 512;
+  static constexpr uint32_t VALUE_INITIAL_CAPACITY = 16;
 
-  typedef struct {
-    Art_node n;
+  using ART_Func =
+      std::function<int(void *data, const void *key, uint32_t key_len, const void *value, uint32_t value_len)>;
+
+  struct Art_node {
+    Art_node() {
+      partial_len = 0;
+      num_children = 0;
+      std::memset(partial, 0x0, MAX_PREFIX_LEN);
+    }
+
+    virtual ~Art_node() = default;
+    virtual NodeType type() const = 0;
+
+    Art_node(const Art_node &other) : partial_len(other.partial_len), num_children(other.num_children) {
+      std::memcpy(partial, other.partial, MAX_PREFIX_LEN);
+    }
+
+    Art_node(Art_node &&other) noexcept : partial_len(other.partial_len), num_children(other.num_children) {
+      std::memcpy(partial, other.partial, MAX_PREFIX_LEN);
+      other.partial_len = 0;
+      other.num_children = 0;
+      std::memset(other.partial, 0, MAX_PREFIX_LEN);
+    }
+
+    Art_node &operator=(const Art_node &other) {
+      if (this != &other) {
+        partial_len = other.partial_len;
+        num_children = other.num_children;
+        std::memcpy(partial, other.partial, MAX_PREFIX_LEN);
+      }
+      return *this;
+    }
+
+    Art_node &operator=(Art_node &&other) noexcept {
+      if (this != &other) {
+        partial_len = other.partial_len;
+        num_children = other.num_children;
+        std::memcpy(partial, other.partial, MAX_PREFIX_LEN);
+
+        other.partial_len = 0;
+        other.num_children = 0;
+        std::memset(other.partial, 0, MAX_PREFIX_LEN);
+      }
+      return *this;
+    }
+
+    uint32_t partial_len{0};
+    uint8_t num_children{0};
+    mutable std::shared_mutex node_mutex;
+    unsigned char partial[MAX_PREFIX_LEN];
+  };
+
+  struct Art_leaf : public Art_node {
+    Art_leaf() = default;
+    virtual ~Art_leaf() {}
+
+    Art_leaf(const unsigned char *key_data, int key_length, void *value_data, uint32_t value_length) {
+      key.assign(key_data, key_data + key_length);
+      add_value(value_data, value_length);
+    }
+
+    Art_leaf(const Art_leaf &other) : Art_node(other), key(other.key), vcount(other.vcount.load()) {
+      std::shared_lock lock(other.leaf_mutex);
+      values = other.values;
+    }
+
+    Art_leaf(Art_leaf &&other) noexcept
+        : Art_node(std::move(other)),
+          key(std::move(other.key)),
+          values(std::move(other.values)),
+          vcount(other.vcount.load()) {
+      other.vcount.store(0);
+    }
+
+    Art_leaf &operator=(const Art_leaf &other) {
+      if (this != &other) {
+        Art_node::operator=(other);
+
+        std::unique_lock this_lock(leaf_mutex, std::defer_lock);
+        std::shared_lock other_lock(other.leaf_mutex, std::defer_lock);
+        std::lock(this_lock, other_lock);
+
+        key = other.key;
+        values = other.values;
+        vcount.store(other.vcount.load());
+      }
+      return *this;
+    }
+
+    Art_leaf &operator=(Art_leaf &&other) noexcept {
+      if (this != &other) {
+        Art_node::operator=(std::move(other));
+
+        std::unique_lock this_lock(leaf_mutex);
+
+        key = std::move(other.key);
+        values = std::move(other.values);
+        vcount.store(other.vcount.load());
+        other.vcount.store(0);
+      }
+      return *this;
+    }
+
+    NodeType type() const override { return LEAF; }
+
+    mutable std::shared_mutex leaf_mutex;
+    std::vector<unsigned char> key;
+    std::vector<std::vector<uint8_t>> values;
+    std::atomic<uint32_t> vcount{0};
+
+    inline void add_value(const void *value, uint32_t value_len) {
+      values.emplace_back(static_cast<const uint8_t *>(value), static_cast<const uint8_t *>(value) + value_len);
+      vcount.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    inline std::vector<uint8_t> *get_value(size_t index) {
+      std::shared_lock lock(leaf_mutex);
+      return (index < values.size()) ? &values[index] : nullptr;
+    }
+
+    inline size_t get_value_count() const {
+      assert(values.size() == vcount);
+      return vcount.load(std::memory_order_acquire);
+    }
+  };
+
+  struct Art_node4 : public Art_node {
+    Art_node4() {
+      std::memset(keys, 0, sizeof(keys));
+      children.fill(nullptr);
+    }
+
+    Art_node4(const Art_node4 &other) : Art_node(other) {
+      std::memcpy(keys, other.keys, sizeof(keys));
+      children = other.children;  // copy of shared_ptr
+    }
+
+    Art_node4(Art_node4 &&other) noexcept : Art_node(std::move(other)) {
+      std::memcpy(keys, other.keys, sizeof(keys));
+      children = std::move(other.children);
+      std::memset(other.keys, 0, sizeof(keys));
+    }
+
+    Art_node4 &operator=(const Art_node4 &other) {
+      if (this != &other) {
+        Art_node::operator=(other);
+        std::memcpy(keys, other.keys, sizeof(keys));
+        children = other.children;
+      }
+      return *this;
+    }
+
+    Art_node4 &operator=(Art_node4 &&other) noexcept {
+      if (this != &other) {
+        Art_node::operator=(std::move(other));
+        std::memcpy(keys, other.keys, sizeof(keys));
+        children = std::move(other.children);
+        std::memset(other.keys, 0, sizeof(keys));
+      }
+      return *this;
+    }
+
+    NodeType type() const override { return NODE4; }
     unsigned char keys[4];
-    Art_node *children[4];
-  } Art_node4;
+    std::array<std::shared_ptr<Art_node>, 4> children;
+  };
 
-  typedef struct {
-    Art_node n;
+  struct Art_node16 : public Art_node {
+    Art_node16() {
+      std::memset(keys, 0, sizeof(keys));
+      children.fill(nullptr);
+    }
+
+    Art_node16(const Art_node16 &other) : Art_node(other) {
+      std::memcpy(keys, other.keys, sizeof(keys));
+      children = other.children;
+    }
+
+    Art_node16(Art_node16 &&other) noexcept : Art_node(std::move(other)) {
+      std::memcpy(keys, other.keys, sizeof(keys));
+      children = std::move(other.children);
+      std::memset(other.keys, 0, sizeof(keys));
+    }
+
+    Art_node16 &operator=(const Art_node16 &other) {
+      if (this != &other) {
+        Art_node::operator=(other);
+        std::memcpy(keys, other.keys, sizeof(keys));
+        children = other.children;
+      }
+      return *this;
+    }
+
+    Art_node16 &operator=(Art_node16 &&other) noexcept {
+      if (this != &other) {
+        Art_node::operator=(std::move(other));
+        std::memcpy(keys, other.keys, sizeof(keys));
+        children = std::move(other.children);
+        std::memset(other.keys, 0, sizeof(keys));
+      }
+      return *this;
+    }
+
+    NodeType type() const override { return NODE16; }
     unsigned char keys[16];
-    Art_node *children[16];
-  } Art_node16;
+    std::array<std::shared_ptr<Art_node>, 16> children;
+  };
 
-  typedef struct {
-    Art_node n;
+  struct Art_node48 : public Art_node {
+    Art_node48() {
+      std::memset(keys, 0, sizeof(keys));
+      children.fill(nullptr);
+    }
+
+    Art_node48(const Art_node48 &other) : Art_node(other) {
+      std::memcpy(keys, other.keys, sizeof(keys));
+      children = other.children;
+    }
+
+    Art_node48(Art_node48 &&other) noexcept : Art_node(std::move(other)) {
+      std::memcpy(keys, other.keys, sizeof(keys));
+      children = std::move(other.children);
+      std::memset(other.keys, 0, sizeof(keys));
+    }
+
+    Art_node48 &operator=(const Art_node48 &other) {
+      if (this != &other) {
+        Art_node::operator=(other);
+        std::memcpy(keys, other.keys, sizeof(keys));
+        children = other.children;
+      }
+      return *this;
+    }
+
+    Art_node48 &operator=(Art_node48 &&other) noexcept {
+      if (this != &other) {
+        Art_node::operator=(std::move(other));
+        std::memcpy(keys, other.keys, sizeof(keys));
+        children = std::move(other.children);
+        std::memset(other.keys, 0, sizeof(keys));
+      }
+      return *this;
+    }
+
+    NodeType type() const override { return NODE48; }
     unsigned char keys[256];
-    Art_node *children[48];
-  } Art_node48;
+    std::array<std::shared_ptr<Art_node>, 48> children;
+  };
 
-  typedef struct {
-    Art_node n;
-    Art_node *children[256];
-  } Art_node256;
+  struct Art_node256 : public Art_node {
+    Art_node256() { children.fill(nullptr); }
 
-  typedef struct {
-    void **values;
-    uint32_t value_len;
-    uint32_t vcount;
-    uint32_t capacity;
-    uint32_t key_len;
-    unsigned char key[];
-  } Art_leaf;
+    Art_node256(const Art_node256 &other) : Art_node(other) { children = other.children; }
 
-  typedef struct {
-    Art_node *root;
-    uint64 size;
-  } Art_tree;
+    Art_node256(Art_node256 &&other) noexcept : Art_node(std::move(other)) { children = std::move(other.children); }
 
-  typedef struct {
-    const Art_node *node;  // current node
-    int child_idx;         // current sub node idx
-    const unsigned char *key;
-    size_t key_len;
-    void *value;  // value（if node is leaf node）
-  } Art_iterator;
+    Art_node256 &operator=(const Art_node256 &other) {
+      if (this != &other) {
+        Art_node::operator=(other);
+        children = other.children;
+      }
+      return *this;
+    }
 
-  Art_node *Alloc_node(NodeType type);
-  void Destroy_node(Art_node *n);
+    Art_node256 &operator=(Art_node256 &&other) noexcept {
+      if (this != &other) {
+        Art_node::operator=(std::move(other));
+        children = std::move(other.children);
+      }
+      return *this;
+    }
 
-  int Check_prefix(const Art_node *n, const unsigned char *key, int key_len, int depth);
-  Art_node **Find_child(Art_node *n, unsigned char c);
+    NodeType type() const override { return NODE256; }
+    std::array<std::shared_ptr<Art_node>, 256> children;
+  };
 
- private:
-  void Find_children(Art_node *n, unsigned char c, std::vector<Art_node *> &children);
+  using ArtNodePtr = std::shared_ptr<Art_node>;
+  using ArtNode4Ptr = std::shared_ptr<Art_node4>;
+  using ArtNode16Ptr = std::shared_ptr<Art_node16>;
+  using ArtNode48Ptr = std::shared_ptr<Art_node48>;
+  using ArtNode256Ptr = std::shared_ptr<Art_node256>;
+  using ArtLeafPtr = std::shared_ptr<Art_leaf>;
 
-  int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
-  int Leaf_partial_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
-  inline uint64 art_size() { return m_tree->size; }
+  template <typename T, typename... Args>
+  std::shared_ptr<T> make_art_node(Args &&...args) {
+    static_assert(std::is_base_of_v<Art_node, T>, "T must inherit from Art_node");
+    return std::make_shared<T>(std::forward<Args>(args)...);
+  }
 
-  Art_leaf *Minimum(const Art_node *n);
-  Art_leaf *Maximum(const Art_node *n);
-  Art_leaf *Make_leaf(const unsigned char *key, int key_len, void *value, uint value_len);
-  int Longest_common_prefix(Art_leaf *l1, Art_leaf *l2, int depth);
-  void Copy_header(Art_node *dest, Art_node *src);
-  void Add_child256(Art_node256 *n, Art_node **ref, unsigned char c, void *child);
-  void Add_child48(Art_node48 *n, Art_node **ref, unsigned char c, void *child);
-  void Add_child16(Art_node16 *n, Art_node **ref, unsigned char c, void *child);
-  void Add_child4(Art_node4 *n, Art_node **ref, unsigned char c, void *child);
-  void Add_child(Art_node *n, Art_node **ref, unsigned char c, void *child);
-  int Prefix_mismatch(const Art_node *n, const unsigned char *key, int key_len, int depth);
-  void *Recursive_insert(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, void *value, int value_len,
-                         int depth, int *old, int replace);
-  void Remove_child256(Art_node256 *n, Art_node **ref, unsigned char c);
-  void Remove_child48(Art_node48 *n, Art_node **ref, unsigned char c);
-  void Remove_child16(Art_node16 *n, Art_node **ref, Art_node **l);
-  void Remove_child4(Art_node4 *n, Art_node **ref, Art_node **l);
-  void Remove_child(Art_node *n, Art_node **ref, unsigned char c, Art_node **l);
-  Art_leaf *Recursive_delete(Art_node *n, Art_node **ref, const unsigned char *key, int key_len, int depth);
-  int Recursive_iter(Art_node *n, ART_Func &cb, void *data);
-  int Recursive_iter_with_key(Art_node *n, const unsigned char *key, int key_len);
-  int Leaf_prefix_matches(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
-  int Leaf_prefix_matches2(const Art_leaf *n, const unsigned char *prefix, int prefix_len);
+  struct Art_tree {
+    ArtNodePtr root;
+    std::atomic<size_t> size{0};
+    mutable std::shared_mutex tree_mutex;
+  };
+  using ArtTreePtr = std::unique_ptr<Art_tree>;
 
-  void Free_leaf(Art_leaf *l);
+  static bool is_leaf(const Art_node *node) { return node && node->type() == LEAF; }
 
- public:
+  static const Art_leaf *to_leaf(const Art_node *node) {
+    return is_leaf(node) ? static_cast<const Art_leaf *>(node) : nullptr;
+  }
+
   inline int ART_tree_init() {
+    std::unique_lock lock(m_node_mutex);
     if (!m_tree) {
-      m_tree = new Art_tree();
+      m_tree = std::make_unique<Art_tree>();
     }
     m_tree->root = nullptr;
-    m_tree->size = 0;
+    m_tree->size.store(0, std::memory_order_release);
     m_inited = true;
     return 0;
   }
 
   inline int ART_tree_destroy() {
-    if (m_tree && m_tree->root) {
-      Destroy_node(m_tree->root);
-      m_tree->root = nullptr;
-    }
+    std::unique_lock lock(m_node_mutex);
     if (m_tree) {
-      delete m_tree;
-      m_tree = nullptr;
+      m_tree->root = nullptr;
+      m_tree.reset();
     }
     m_inited = false;
     return 0;
   }
 
-  inline bool Art_initialized() { return m_inited; }
-  inline Art_tree *tree() const { return m_tree; }
-  inline Art_node *root() const { return (m_inited) ? m_tree->root : nullptr; }
+  inline bool Art_initialized() const {
+    std::shared_lock lock(m_node_mutex);
+    return m_inited;
+  }
 
-  void *ART_insert(const unsigned char *key, int key_len, void *value, uint value_len);
-  void *ART_insert_with_replace(const unsigned char *key, int key_len, void *value, uint value_len);
+  inline Art_tree *tree() const {
+    std::shared_lock lock(m_node_mutex);
+    return m_tree.get();
+  }
+
+  inline Art_node *root() const {
+    std::shared_lock lock(m_node_mutex);
+    return (m_inited && m_tree) ? m_tree->root.get() : nullptr;
+  }
+
+  void *ART_insert(const unsigned char *key, int key_len, void *value, uint32_t value_len);
   void *ART_delete(const unsigned char *key, int key_len);
   void *ART_search(const unsigned char *key, int key_len);
-  std::vector<void *> ART_search_all(const unsigned char *key, int key_len);
+  std::vector<std::vector<uint8_t>> ART_search_all(const unsigned char *key, int key_len);
+  int ART_iter(ART_Func cb, void *data);
 
   Art_leaf *ART_minimum();
   Art_leaf *ART_maximum();
 
-  int ART_iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, void *data, int data_len);
-  int ART_iter(ART_Func cb, void *data);
+ private:
+  void *Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_len, void *value, uint32_t value_len,
+                         int depth, int *old, int replace);
+
+  ArtNodePtr Recursive_delete(ArtNodePtr &node, const unsigned char *key, int key_len, int depth, void *&result);
+
+  ArtLeafPtr Make_leaf(const unsigned char *key, int key_len, void *value, uint32_t value_len) {
+    if (!key || key_len <= 0 || !value || value_len == 0) return nullptr;
+
+    auto leaf = make_art_node<Art_leaf>();
+
+    leaf->key.assign(key, key + key_len);
+
+    leaf->add_value(value, value_len);
+
+    return leaf;
+  }
+
+  ArtNodePtr &Find_child(const ArtNodePtr &n, unsigned char c);
+  void Find_children(const ArtNodePtr &n, unsigned char c, std::vector<ArtNodePtr> &children);
+
+  inline uint64_t art_size() const { return m_tree ? m_tree->size.load(std::memory_order_acquire) : 0; }
+
+  // the min key node.
+  Art_leaf *Minimum(const ArtNodePtr &n);
+
+  // the max key node.
+  Art_leaf *Maximum(const ArtNodePtr &n);
+
+  // copy header info.
+  void Copy_header(Art_node *dest, const Art_node *src);
+
+  // add a new node to some node.
+  void Add_child(ArtNodePtr &new_node, ArtNodePtr &old_node, unsigned char c, const ArtNodePtr &child);
+  ArtNodePtr Add_child256(ArtNodePtr old_node, unsigned char c, const ArtNodePtr &child);
+  ArtNodePtr Add_child48(ArtNodePtr old_node, unsigned char c, const ArtNodePtr &child);
+  ArtNodePtr Add_child16(ArtNodePtr old_node, unsigned char c, const ArtNodePtr &child);
+  ArtNodePtr Add_child4(ArtNodePtr old_node, unsigned char c, const ArtNodePtr &child);
+
+  // remove the child nodes.
+  void Remove_child(ArtNodePtr &node, unsigned char c, const ArtNodePtr &child);
+  void Remove_child256(ArtNodePtr &node, unsigned char c);
+  void Remove_child48(ArtNodePtr &node, unsigned char c);
+  void Remove_child16(ArtNodePtr &node, const ArtNodePtr &child);
+  void Remove_child4(ArtNodePtr &node, const ArtNodePtr &child);
+
+  int Recursive_iter(Art_node *node, ART_Func &cb, void *data);
+  int Recursive_iter_with_key(const ArtNodePtr &n, const unsigned char *key, int key_len);
+  int Iter_prefix(const unsigned char *key, int key_len, ART_Func &cb, void *data, int data_len);
+
+  // the the prefix of a node is matched the key or not.
+  int Check_prefix(const ArtNodePtr &n, const unsigned char *key, int key_len, int depth);
+
+  // return the pos of the mis-matched position.
+  int Prefix_mismatch(const ArtNodePtr &n, const unsigned char *key, int key_len, int depth);
+
+  // the longest common prefix length
+  int Longest_common_prefix(const Art_leaf *l1, const Art_leaf *l2, int depth);
+
+  // to test the leaf node is match the key, return 0 matched, otherwise the memcmp result.
+  int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
+
+  // to test the leaf node's key is matched the key or not with depth. return 0 matched, otherwise the memcmp result.
+  int Leaf_partial_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
 
  private:
-  std::shared_mutex m_node_mutex;
-  Art_tree *m_tree{nullptr};
+  mutable std::shared_mutex m_node_mutex;
+  std::unique_ptr<Art_tree> m_tree{nullptr};
   bool m_inited{false};
-  std::vector<Art_leaf *> m_current_values;
+
+  static ArtNodePtr null_ptr;
 };
 
 }  // namespace Index
