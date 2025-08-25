@@ -42,15 +42,6 @@
 class ReadView;
 namespace ShannonBase {
 namespace Purge {
-/** Default value of spin delay (in spin rounds)
- * 1000 spin round takes 4us,  25000 takes 1ms for busy waiting. therefore, 200ms means
- * 5000000 spin rounds. for the more detail infor ref to : comment of
- * `innodb_log_writer_spin_delay`. TODO: makes all the params configurable.
- */
-constexpr uint64_t MAX_PURGER_TIMEOUT = 5000;       // timeout value.
-constexpr size_t PURGE_BATCH_SIZE = 64;             // Process chunks in batches
-constexpr size_t MIN_VERSIONS_FOR_PURGE = 10;       // Minimum versions before considering purge.
-constexpr double PURGE_EFFICIENCY_THRESHOLD = 0.1;  // Only purge if >10% can be cleaned
 
 using purge_func_t = std::function<void(void)>;
 

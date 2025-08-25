@@ -61,6 +61,7 @@ extern bool rpd_self_load_enabled;
 extern ulonglong rpd_self_load_interval_seconds;  // default 24hurs
 extern bool rpd_self_load_skip_quiet_check;
 extern int rpd_self_load_base_relation_fill_percentage;  // default percentage 70%.
+extern ulonglong rpd_purge_batch_size;
 
 namespace Autopilot {
 // static members initialization.
