@@ -230,7 +230,7 @@ class ARTIterator {
         auto *n = reinterpret_cast<ART::Art_node4 *>(node);
         for (int i = 0; i < n->n.num_children; ++i) {
           if (n->keys[i] >= target_byte) {
-            return n->children[i];
+            return n->children[i].load().get();
           }
         }
         break;
@@ -239,7 +239,7 @@ class ARTIterator {
         auto *n = reinterpret_cast<ART::Art_node16 *>(node);
         for (int i = 0; i < n->n.num_children; ++i) {
           if (n->keys[i] >= target_byte) {
-            return n->children[i];
+            return n->children[i].load().get();
           }
         }
         break;
@@ -249,7 +249,7 @@ class ARTIterator {
         for (int lbl = target_byte; lbl < 256; ++lbl) {
           uint8_t idx = n->keys[lbl];
           if (idx != 0) {
-            return n->children[idx - 1];
+            return n->children[idx - 1].load().get();
           }
         }
         break;
@@ -257,8 +257,8 @@ class ARTIterator {
       case ART::NODE256: {
         auto *n = reinterpret_cast<ART::Art_node256 *>(node);
         for (int lbl = target_byte; lbl < 256; ++lbl) {
-          if (n->children[lbl]) {
-            return n->children[lbl];
+          if (n->children[lbl].load().get()) {
+            return n->children[lbl].load().get();
           }
         }
         break;
@@ -275,7 +275,7 @@ class ARTIterator {
         auto *n = reinterpret_cast<ART::Art_node4 *>(node);
         for (int i = 0; i < n->n.num_children; ++i) {
           if (n->keys[i] > target_byte) {
-            return n->children[i];
+            return n->children[i].load().get();
           }
         }
         break;
@@ -284,7 +284,7 @@ class ARTIterator {
         auto *n = reinterpret_cast<ART::Art_node16 *>(node);
         for (int i = 0; i < n->n.num_children; ++i) {
           if (n->keys[i] > target_byte) {
-            return n->children[i];
+            return n->children[i].load().get();
           }
         }
         break;
@@ -294,7 +294,7 @@ class ARTIterator {
         for (int lbl = target_byte + 1; lbl < 256; ++lbl) {
           uint8_t idx = n->keys[lbl];
           if (idx != 0) {
-            return n->children[idx - 1];
+            return n->children[idx - 1].load().get();
           }
         }
         break;
@@ -302,8 +302,8 @@ class ARTIterator {
       case ART::NODE256: {
         auto *n = reinterpret_cast<ART::Art_node256 *>(node);
         for (int lbl = target_byte + 1; lbl < 256; ++lbl) {
-          if (n->children[lbl]) {
-            return n->children[lbl];
+          if (n->children[lbl].load().get()) {
+            return n->children[lbl].load().get();
           }
         }
         break;
@@ -334,17 +334,17 @@ class ARTIterator {
     switch (node->type) {
       case ART::NODE4: {
         auto *n = reinterpret_cast<ART::Art_node4 *>(node);
-        return n->children[0];
+        return n->children[0].load().get();
       }
       case ART::NODE16: {
         auto *n = reinterpret_cast<ART::Art_node16 *>(node);
-        return n->children[0];
+        return n->children[0].load().get();
       }
       case ART::NODE48: {
         auto *n = reinterpret_cast<ART::Art_node48 *>(node);
         for (int i = 0; i < 256; ++i) {
           if (n->keys[i] != 0) {
-            return n->children[n->keys[i] - 1];
+            return n->children[n->keys[i] - 1].load().get();
           }
         }
         break;
@@ -352,8 +352,8 @@ class ARTIterator {
       case ART::NODE256: {
         auto *n = reinterpret_cast<ART::Art_node256 *>(node);
         for (int i = 0; i < 256; ++i) {
-          if (n->children[i]) {
-            return n->children[i];
+          if (n->children[i].load().get()) {
+            return n->children[i].load().get();
           }
         }
         break;
@@ -374,12 +374,12 @@ class ARTIterator {
       case ART::NODE4: {
         auto *n = reinterpret_cast<ART::Art_node4 *>(state.node);
         if (state.child_pos >= n->n.num_children) return nullptr;
-        return n->children[state.child_pos++];
+        return n->children[state.child_pos++].load().get();
       }
       case ART::NODE16: {
         auto *n = reinterpret_cast<ART::Art_node16 *>(state.node);
         if (state.child_pos >= n->n.num_children) return nullptr;
-        return n->children[state.child_pos++];
+        return n->children[state.child_pos++].load().get();
       }
       case ART::NODE48: {
         auto *n = reinterpret_cast<ART::Art_node48 *>(state.node);
@@ -387,7 +387,7 @@ class ARTIterator {
           int lbl = state.child_pos++;
           uint8_t idx = n->keys[lbl];
           if (idx != 0) {
-            return n->children[idx - 1];
+            return n->children[idx - 1].load().get();
           }
         }
         break;
@@ -396,8 +396,8 @@ class ARTIterator {
         auto *n = reinterpret_cast<ART::Art_node256 *>(state.node);
         while (state.child_pos < 256) {
           int lbl = state.child_pos++;
-          if (n->children[lbl]) {
-            return n->children[lbl];
+          if (n->children[lbl].load().get()) {
+            return n->children[lbl].load().get();
           }
         }
         break;
