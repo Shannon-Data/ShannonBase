@@ -386,6 +386,7 @@ struct System_variables {
   /** Used for controlling preparation of queries against secondary engine. */
   ulong rapid_use_dynamic_offload;
 
+
   /**
     Used for controlling which statements to execute in a secondary
     storage engine. Only queries with an estimated cost higher than
