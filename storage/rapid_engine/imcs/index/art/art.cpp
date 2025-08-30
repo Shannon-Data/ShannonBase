@@ -156,6 +156,8 @@ void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_
 
   if (depth >= key_len) return nullptr;
 
+  // Here, should be reference, because in below `Recursive_insert`, will change it from leave node to `NodeXXX`.
+  // the structure of the ART tree will be moidified. Otherwise, it the wrong results will be.
   auto &child = Find_child(node, key[depth]);
   if (!child) {
     auto new_leaf = make_art_node<Art_leaf>(key, key_len, value, value_len);

@@ -38,7 +38,8 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-
+// ARTIterator for key_t/value_t
+// Supports range queries with optional start/end keys and inclusive/exclusive bounds
 template <typename key_t, typename value_t>
 class ARTIterator {
   struct TraversalState {
@@ -47,6 +48,9 @@ class ARTIterator {
     uint32_t value_idx;
     uint32_t depth{0};
   };
+
+  // Range check result enum
+  enum class RangeCheckResult { IN_RANGE, OUT_OF_RANGE, BEYOND_END };
 
  public:
   explicit ARTIterator(ART *art) : m_art(art) {}
@@ -59,13 +63,23 @@ class ARTIterator {
     m_seen_nodes.clear();
     m_finished = false;
 
-    m_start_key = reinterpret_cast<const unsigned char *>(startkey);
-    m_start_keylen = startkey_len;
-    m_start_incl = start_inclusive;
+    // Encode start key if provided
+    if (startkey && startkey_len > 0) {
+      m_start_key.assign(reinterpret_cast<const unsigned char *>(startkey),
+                         reinterpret_cast<const unsigned char *>(startkey) + startkey_len);
+      m_start_incl = start_inclusive;
+    } else {
+      m_start_key.clear();
+    }
 
-    m_end_key = reinterpret_cast<const unsigned char *>(endkey);
-    m_end_keylen = endkey_len;
-    m_end_incl = end_inclusive;
+    // Encode end key if provided
+    if (endkey && endkey_len > 0) {
+      m_end_key.assign(reinterpret_cast<const unsigned char *>(endkey),
+                       reinterpret_cast<const unsigned char *>(endkey) + endkey_len);
+      m_end_incl = end_inclusive;
+    } else {
+      m_end_key.clear();
+    }
 
     if (m_art->root()) {
       if (startkey) {
@@ -76,6 +90,7 @@ class ARTIterator {
     }
   }
 
+  // Fetch the next key/value in the range
   bool next(const key_t **key_out, uint32_t *key_len_out, value_t *value_out) {
     if (!key_out || !key_len_out || !value_out) return false;
     if (m_finished) return false;
@@ -102,7 +117,7 @@ class ARTIterator {
           if (!val_ptr) continue;
 
           // Strict range check for each value
-          if (!key_in_range_value(leaf->key.data(), leaf->key.size())) {
+          if (key_in_range_value(leaf->key.data(), leaf->key.size()) != RangeCheckResult::IN_RANGE) {
             continue;  // Skip if out of range
           }
 
@@ -142,29 +157,28 @@ class ARTIterator {
     return memcmp(k1, k2, min_len);
   }
 
-  bool key_in_range_value(const unsigned char *key, uint32_t key_len) {
-    if (!key || !key_len) return false;
+  // Check if a leaf key is within the start/end range
+  RangeCheckResult key_in_range_value(const unsigned char *key, uint32_t key_len) {
+    if (!key || !key_len) return RangeCheckResult::OUT_OF_RANGE;
 
-    if (m_start_key) {
-      int cmp_start = compare_keys(key, key_len, m_start_key, m_start_keylen);
-      if (cmp_start < 0) return false;
-      if (cmp_start == 0 && !m_start_incl) {
-        return false;
-      }
+    if (!m_start_key.empty()) {
+      int cmp_start = compare_keys(key, key_len, m_start_key.data(), m_start_key.size());
+      if (cmp_start < 0) return RangeCheckResult::OUT_OF_RANGE;
+      if (cmp_start == 0 && !m_start_incl) return RangeCheckResult::OUT_OF_RANGE;
     }
 
-    if (m_end_key) {
-      int cmp_end = compare_keys(key, key_len, m_end_key, m_end_keylen);
-      if (cmp_end > 0) return false;
-      if (cmp_end == 0 && !m_end_incl) return false;
+    if (!m_end_key.empty()) {
+      int cmp_end = compare_keys(key, key_len, m_end_key.data(), m_end_key.size());
+      if (cmp_end > 0) return RangeCheckResult::BEYOND_END;
+      if (cmp_end == 0 && !m_end_incl) return RangeCheckResult::OUT_OF_RANGE;
     }
 
-    return true;
+    return RangeCheckResult::IN_RANGE;
   }
 
   void find_start_position() {
-    if (!m_start_key || !m_art->root()) return;
-    find_position_ge(m_start_key, m_start_keylen);
+    if (m_start_key.empty() || !m_art->root()) return;
+    find_position_ge(m_start_key.data(), m_start_key.size());
   }
 
   void find_position_ge(const unsigned char *target_key, uint32_t target_len) {
@@ -419,12 +433,10 @@ class ARTIterator {
   std::vector<TraversalState> m_stack;
   bool m_finished{false};
 
-  const unsigned char *m_start_key{nullptr};
-  int m_start_keylen{0};
+  std::vector<unsigned char> m_start_key;
   bool m_start_incl{false};
 
-  const unsigned char *m_end_key{nullptr};
-  int m_end_keylen{0};
+  std::vector<unsigned char> m_end_key;
   bool m_end_incl{false};
 };
 
