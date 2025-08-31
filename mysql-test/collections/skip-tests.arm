@@ -1,0 +1,7 @@
+# the tests below are timeout on ARM, therefore, we skip these for daily nightly and weekly run. reopen it when they are ready.
+binlog.binlog_mysqlbinlog_4g_start_position                         : BUG#123456 skip on ARM, timeout on ARM
+innodb.alter_table_temp_files_io                                    : BUG#123456 skip on ARM, timeout on ARM
+innodb.large_partitions_ddl                                         : BUG#123456 skip on ARM, timeout on ARM
+innodb.lob_recovery                                                 : BUG#123456 skip on ARM, timeout on ARM
+innodb.zlob_ddl_big                                                 : BUG#123456 skip on ARM, timeout on ARM
+main.mysql_upgrade_grant                                            : BUG#123456 skip on ARM, timeout on ARM

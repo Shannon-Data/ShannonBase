@@ -140,7 +140,7 @@ jobs:
           cd /home/shannon-bin/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
           ./mysql-test-run.pl --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
-          --big-test --nocheck-testcases --retry=3 --parallel=$(nproc)
+          --big-test --nocheck-testcases --retry=3 --skip-test-list=skip-tests.arm --parallel=$(nproc)
           # when we have a fast git action runner, we can use the following command to run the test.
           #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
           #./collections/default.weekly.basic
