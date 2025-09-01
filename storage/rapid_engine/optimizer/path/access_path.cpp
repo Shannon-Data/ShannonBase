@@ -77,7 +77,6 @@ AccessPath *AccessPathFactory::CreateTableScan(TABLE *table, THD *thd, bool vect
   path->count_examined_rows = true;
   path->table_scan().table = table;
 
-  // TODO: to build a new iterator for this acess path if you needed.
   path->iterator = nullptr;
   path->secondary_engine_data = nullptr;
   return path;
@@ -89,7 +88,6 @@ AccessPath *AccessPathFactory::CreateHashJoin(AccessPath *outer, AccessPath *inn
   path->hash_join().outer = outer;
   path->hash_join().inner = inner;
 
-  // to build iterator for Hash_join AccessPath.
   path->iterator = nullptr;
   return path;
 }
@@ -266,6 +264,7 @@ static RowIterator *FindSingleIteratorOfType(AccessPath *path, AccessPath::Type 
  * hash join, etc.
  */
 unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath(THD *thd, MEM_ROOT *mem_root,
+                                                                                 OptimizeContext *context,
                                                                                  AccessPath *top_path, JOIN *top_join,
                                                                                  bool top_eligible_for_batch_mode) {
   unique_ptr_destroy_only<RowIterator> ret;
@@ -309,9 +308,11 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
     switch (path->type) {
       case AccessPath::TABLE_SCAN: {
         const auto &param = path->table_scan();
-        // iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(
-        //     thd, mem_root, param.table, path->num_output_rows(), examined_rows);
-        iterator = NewIterator<TableScanIterator>(thd, mem_root, param.table, path->num_output_rows(), examined_rows);
+        if (/*context->can_vectorized*/ false)
+          iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(
+              thd, mem_root, param.table, path->num_output_rows(), examined_rows);
+        else
+          iterator = NewIterator<TableScanIterator>(thd, mem_root, param.table, path->num_output_rows(), examined_rows);
         break;
       }
       case AccessPath::INDEX_SCAN: {
@@ -993,9 +994,10 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
   return ret;
 }
 
-unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath(THD *thd, AccessPath *path, JOIN *join,
+unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath(THD *thd, OptimizeContext *context,
+                                                                                 AccessPath *path, JOIN *join,
                                                                                  bool eligible_for_batch_mode) {
-  return PathGenerator::CreateIteratorFromAccessPath(thd, thd->mem_root, path, join, eligible_for_batch_mode);
+  return PathGenerator::CreateIteratorFromAccessPath(thd, thd->mem_root, context, path, join, eligible_for_batch_mode);
 }
 
 }  // namespace Optimizer

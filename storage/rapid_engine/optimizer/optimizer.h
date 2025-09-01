@@ -39,14 +39,19 @@ class JOIN;
 class AccessPath;
 
 namespace ShannonBase {
-class OptimizeContext;
 namespace Optimizer {
+class Statistics;
+
+typedef struct {
+  bool can_vectorized{false};
+  Statistics *Rpd_statistics;  // to replace with the real statistics data.
+} OptimizeContext;
 
 class Rule;
 class CostEstimator;
 class CardinalityEstimator;
 
-AccessPath *OptimizeAndRewriteAccessPath(AccessPath *path, const JOIN *join);
+AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join);
 
 // here, to optimize the secondary engine with its own optimizer.
 void OptimzieAccessPath(AccessPath *path, JOIN *join);

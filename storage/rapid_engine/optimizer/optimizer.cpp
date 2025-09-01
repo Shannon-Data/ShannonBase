@@ -104,13 +104,13 @@ void OptimzieAccessPath(AccessPath *path, JOIN *join) {
 // For example: add a new AccessPath Type: VECTOR_TABLE_SCAN, then create a new AccessPath
 // for this type VectorizedTableSan, then in PathGenerator::CreateIteratorFromAccessPath
 // to create its corressponding iterator.
-AccessPath *OptimizeAndRewriteAccessPath(AccessPath *path, const JOIN *join) {
+AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join) {
   switch (path->type) {
     case AccessPath::TABLE_SCAN: {
       TABLE *table = path->table_scan().table;
       auto secondary_engine = table->s->is_secondary_engine();
       auto can_vectorized = (table->file->stats.records >= SHANNON_VECTOR_WIDTH) ? true : false;
-
+      context->can_vectorized = can_vectorized;
       // create vectorized table scan if it can.
       return AccessPathFactory::CreateTableScan(table, nullptr, secondary_engine && can_vectorized);
     } break;

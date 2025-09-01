@@ -71,6 +71,7 @@
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/writable_access_path.h"
 #include "storage/rapid_engine/populate/populate.h"
+#include "storage/rapid_engine/statistics/statistics.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -964,7 +965,7 @@ static void AssertSupportedPath(const AccessPath *path) {
 //  In this function, Dynamic offload retrieves info from rapid_statement_context and
 // additionally looks at Change  propagation lag to decide if query should be offloaded
 // to rapid returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
-static bool RapidOptimize(THD *thd, LEX *lex) {
+static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD *thd, LEX *lex) {
   if (likely(thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)) {
     SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, set use_secondary_engine to false.");
     return true;
@@ -984,22 +985,15 @@ static bool RapidOptimize(THD *thd, LEX *lex) {
   JOIN *join = lex->unit->first_query_block()->join;
   ShannonBase::Optimizer::WalkAndRewriteAccessPaths(root_access_path, join, WalkAccessPathPolicy::ENTIRE_TREE,
                                                     [&](AccessPath *path, const JOIN *join) -> AccessPath * {
-                                                      return ShannonBase::Optimizer::OptimizeAndRewriteAccessPath(path,
-                                                                                                                  join);
+                                                      return ShannonBase::Optimizer::OptimizeAndRewriteAccessPath(
+                                                          context, path, join);
                                                     });
-  // WalkAccessPaths(lex->unit->root_access_path(), join, WalkAccessPathPolicy::ENTIRE_TREE,
-  //                 [&](AccessPath *path, const JOIN *join) {
-  //                   ShannonBase::Optimizer::OptimzieAccessPath(path, const_cast<JOIN *>(join));
-  //                   return false;
-  //                 });
-
   // Here, because we cannot get the parent node of corresponding iterator, we reset the type of access
   // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`
   // AP workload. But, we will replace the itertor when we traverse iterator tree from root to leaves.
   lex->unit->release_root_iterator().reset();
   auto new_root_iter = ShannonBase::Optimizer::PathGenerator::PathGenerator::CreateIteratorFromAccessPath(
-      thd, lex->unit->root_access_path(), join,
-      /*eligible_for_batch_mode=*/true);
+      thd, context, lex->unit->root_access_path(), join, /*eligible_for_batch_mode=*/true);
 
   lex->unit->set_root_iterator(new_root_iter);
   return false;
@@ -1024,7 +1018,9 @@ static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
                     });
   }
 
-  return RapidOptimize(thd, lex);
+  auto optimizer_context = std::make_unique<ShannonBase::Optimizer::OptimizeContext>();
+  optimizer_context->Rpd_statistics = ShannonBase::Optimizer::StatisticsFactory::get_statistics();
+  return RapidOptimize(optimizer_context.get(), thd, lex);
 }
 
 static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, bool *use_best_so_far, bool *cheaper,

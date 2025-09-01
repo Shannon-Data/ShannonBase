@@ -28,6 +28,7 @@
 
 namespace ShannonBase {
 namespace Optimizer {
+Statistics *StatisticsFactory::m_statistics;
 
 uint CardinalityStatis::cost() { return ShannonBase::SHANNON_SUCCESS; }
 }  // namespace Optimizer

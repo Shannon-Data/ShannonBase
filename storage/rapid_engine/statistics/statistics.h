@@ -45,6 +45,14 @@ class CardinalityStatis : public Statistics {
   uint cost() override;
 };
 
+class StatisticsFactory {
+ public:
+  static Statistics *get_statistics() { return m_statistics; }
+
+ private:
+  static Statistics *m_statistics;
+};
+
 }  // namespace Optimizer
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_STATISTICS_H__
