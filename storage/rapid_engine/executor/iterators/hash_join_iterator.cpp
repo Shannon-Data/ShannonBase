@@ -41,7 +41,7 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(THD *thd, unique_ptr_dest
                                                        const std::vector<HashJoinCondition> &join_conditions,
                                                        JoinType join_type, size_t max_memory_available,
                                                        size_t batch_size)
-    : RowIterator(thd, RowIterator::Type::ROWITERATOR_VECTORIZED),
+    : RowIterator(thd),
       m_build_input(std::move(build_input)),
       m_probe_input(std::move(probe_input)),
       m_join_conditions(join_conditions),
@@ -140,18 +140,6 @@ void VectorizedHashJoinIterator::UnlockRow() {
   if (m_state == State::PROBING_HASH_TABLE) {
     m_probe_input->UnlockRow();
   }
-}
-
-size_t VectorizedHashJoinIterator::ReadCount() { return m_current_output_size; }
-
-uchar *VectorizedHashJoinIterator::GetData(size_t index) {
-  if (index >= m_current_output_size) {
-    return nullptr;
-  }
-
-  // Return pointer to the row data in the output columns
-  // Implementation depends on how output data is structured
-  return nullptr;  // Placeholder
 }
 }  // namespace Executor
 }  // namespace ShannonBase

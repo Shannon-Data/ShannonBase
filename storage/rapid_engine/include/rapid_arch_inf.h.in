@@ -29,9 +29,9 @@
 // cache line size
 #define CACHE_LINE_SIZE @CACHE_LINE_SIZE@
 
-#define CACHE_L1_SIZE @CACHE_L1_SIZE@
-#define CACHE_L2_SIZE @CACHE_L2_SIZE@
-#define CACHE_L3_SIZE @CACHE_L3_SIZE@
+#define CACHE_L1_SIZE @CACHE_L1@
+#define CACHE_L2_SIZE @CACHE_L2@
+#define CACHE_L3_SIZE @CACHE_L3@
 
 // clang-format off
 /* prefetch

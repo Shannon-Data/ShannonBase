@@ -53,8 +53,6 @@ class VectorizedHashJoinIterator final : public RowIterator {
   int Read() override;
   void SetNullRowFlag(bool is_null_row) override;
   void UnlockRow() override;
-  size_t ReadCount() override;
-  uchar *GetData(size_t index) override;
 
  private:
   enum class State { BUILDING_HASH_TABLE, PROBING_HASH_TABLE, END_OF_ROWS };

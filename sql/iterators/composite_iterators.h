@@ -97,9 +97,6 @@ class FilterIterator final : public RowIterator {
   }
   void UnlockRow() override { m_source->UnlockRow(); }
 
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
-
  private:
   unique_ptr_destroy_only<RowIterator> m_source;
   Item *m_condition;
@@ -153,9 +150,6 @@ class LimitOffsetIterator final : public RowIterator {
     m_source->EndPSIBatchModeIfStarted();
   }
   void UnlockRow() override { m_source->UnlockRow(); }
-
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   unique_ptr_destroy_only<RowIterator> m_source;
@@ -231,9 +225,6 @@ class AggregateIterator final : public RowIterator {
     // and we also can't unlock the _current_ row, since that belongs to a
     // different group. Thus, do nothing.
   }
-
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   enum {
@@ -376,9 +367,6 @@ class NestedLoopIterator final : public RowIterator {
     }
   }
 
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
-
  private:
   enum {
     NEEDS_OUTER_ROW,
@@ -428,9 +416,6 @@ class CacheInvalidatorIterator final : public RowIterator {
   }
 
   void UnlockRow() override { m_source_iterator->UnlockRow(); }
-
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
   int64_t generation() const { return m_generation; }
   std::string name() const { return m_name; }
@@ -690,8 +675,6 @@ class WeedoutIterator final : public RowIterator {
     m_source->EndPSIBatchModeIfStarted();
   }
   void UnlockRow() override { m_source->UnlockRow(); }
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   unique_ptr_destroy_only<RowIterator> m_source;
@@ -728,8 +711,6 @@ class RemoveDuplicatesIterator final : public RowIterator {
     m_source->EndPSIBatchModeIfStarted();
   }
   void UnlockRow() override { m_source->UnlockRow(); }
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   unique_ptr_destroy_only<RowIterator> m_source;
@@ -761,9 +742,6 @@ class RemoveDuplicatesOnIndexIterator final : public RowIterator {
     m_source->EndPSIBatchModeIfStarted();
   }
   void UnlockRow() override { m_source->UnlockRow(); }
-
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   unique_ptr_destroy_only<RowIterator> m_source;
@@ -832,9 +810,6 @@ class NestedLoopSemiJoinWithDuplicateRemovalIterator final
     m_source_inner->UnlockRow();
   }
 
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
-
  private:
   unique_ptr_destroy_only<RowIterator> const m_source_outer;
   unique_ptr_destroy_only<RowIterator> const m_source_inner;
@@ -872,9 +847,6 @@ class MaterializeInformationSchemaTableIterator final : public RowIterator {
   // locks to other transactions.
   void UnlockRow() override {}
 
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
-
  private:
   /// The iterator that reads from the materialized table.
   unique_ptr_destroy_only<RowIterator> m_table_iterator;
@@ -901,9 +873,6 @@ class AppendIterator final : public RowIterator {
 
   void SetNullRowFlag(bool is_null_row) override;
   void UnlockRow() override;
-
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
 
  private:
   std::vector<unique_ptr_destroy_only<RowIterator>> m_sub_iterators;

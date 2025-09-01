@@ -59,49 +59,46 @@ extern MEM_ROOT rapid_mem_root;
 class MemoryObject {};
 
 typedef struct alignas(CACHE_LINE_SIZE) BitArray {
-  BitArray(size_t rows) {
-    size = rows / 8 + 1;
+  BitArray() = delete;
+
+  explicit BitArray(size_t rows) {
+    size = (rows + 7) / 8;
     data = new uint8_t[size];
     std::memset(data, 0x0, size);
   }
 
-  BitArray(BitArray &&other) noexcept {
-    data = other.data;
+  BitArray(const BitArray &other) {
     size = other.size;
-    other.data = nullptr;
-    other.size = 0;
+    if (size > 0) {
+      data = new uint8_t[size];
+      std::memcpy(data, other.data, size);
+    }
   }
 
-  ~BitArray() {
-    if (data) {
-      delete[] data;
-      data = nullptr;
-      size = 0;
+  BitArray(BitArray &&other) noexcept : data(std::exchange(other.data, nullptr)), size(std::exchange(other.size, 0)) {}
+
+  ~BitArray() { delete[] data; }
+
+  BitArray &operator=(const BitArray &other) {
+    if (this != &other) {
+      BitArray tmp(other);
+      swap(tmp);
     }
+    return *this;
   }
 
   BitArray &operator=(BitArray &&other) noexcept {
     if (this != &other) {
-      delete[] data;  // release itself.
-      data = other.data;
-      size = other.size;
-      other.data = nullptr;
-      other.size = 0;
+      delete[] data;
+      data = std::exchange(other.data, nullptr);
+      size = std::exchange(other.size, 0);
     }
     return *this;
   }
 
-  BitArray(const BitArray &other) {
-    size = other.size;
-    data = new uint8_t[size];
-    std::memcpy(data, other.data, size);
-  }
-
-  BitArray &operator=(const BitArray &other) {
-    size = other.size;
-    data = new uint8_t[size];
-    std::memcpy(data, other.data, size);
-    return *this;
+  void swap(BitArray &other) noexcept {
+    std::swap(data, other.data);
+    std::swap(size, other.size);
   }
 
   // data of BA, where to store the real bitmap.

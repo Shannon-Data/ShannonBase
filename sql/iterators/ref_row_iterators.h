@@ -281,9 +281,6 @@ class AlternativeIterator final : public RowIterator {
 
   void UnlockRow() override { m_iterator->UnlockRow(); }
 
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
-
  private:
   // If any of these are false during Init(), we are having a NULL IN ( ... ),
   // and need to fall back to table scan. Extracted from m_ref.

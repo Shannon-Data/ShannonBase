@@ -136,9 +136,6 @@ class BKAIterator final : public RowIterator {
     }
   }
 
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
-
   void EndPSIBatchModeIfStarted() override {
     m_outer_input->EndPSIBatchModeIfStarted();
     m_inner_input->EndPSIBatchModeIfStarted();

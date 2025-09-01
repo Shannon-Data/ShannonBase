@@ -74,6 +74,8 @@ class DataTable : public MemoryObject {
   DataTable(TABLE *source_table, RapidTable *rpd);
   virtual ~DataTable();
 
+  RapidTable *source() { return m_rapid_table; }
+
   // open a cursor on db_table to read/write.
   int open();
 
