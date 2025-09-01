@@ -355,9 +355,6 @@ class HashJoinIterator final : public RowIterator {
     // them.
   }
 
-  size_t ReadCount() override { assert (false); return 0;}
-  uchar* GetData(size_t)  override { assert (false); return nullptr; }
-
   int ChunkCount() { return m_chunk_files_on_disk.size(); }
 
  private:

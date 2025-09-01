@@ -396,8 +396,10 @@ start:
           col_chunk.add(data_ptr, source_fld->pack_length(), false);
         } else {
           uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
-          auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
-          col_chunk.add((uchar *)str_ptr.c_str(), strlen(str_ptr.c_str()), false);
+          ut_a(normalized_length == sizeof(uint32));
+
+          // auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
+          col_chunk.add((uchar *)&str_id, normalized_length, false);
         }
       } else {
         col_chunk.add(data_ptr, normalized_length, false);

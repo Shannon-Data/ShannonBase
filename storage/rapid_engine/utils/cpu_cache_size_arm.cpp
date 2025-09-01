@@ -41,7 +41,7 @@ void get_arm_cache_size() {
 
     if (fgets(buffer, sizeof(buffer), fp)) {
       // Print cache size string
-      printf("CACHE_INDEX_%d_SIZE=%s", index, buffer);
+      printf("CACHE_L%d=%s\n", index, buffer);
     }
 
     fclose(fp);

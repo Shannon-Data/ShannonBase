@@ -34,9 +34,36 @@
 #include "sql/mem_root_array.h"
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
+#include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/data_table.h"
+#include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
+/**
+ * Usage:
+ *
+ * // 1. create and initialization.
+ * auto iterator = std::make_unique<VectorizedTableScanIterator>(thd, table, expected_rows, &examined_rows);
+ * if (iterator->Init()) {
+ *   return HA_ERR_INITIALIZATION;
+ * }
+ *
+ * // 2. read the data
+ * while (true) {
+ *   int result = iterator->Read();
+ *   if (result == HA_ERR_END_OF_FILE) break;
+ *   if (result != 0) return result;
+ *
+ *   // data has been fill up into table->field.
+ *   ProcessRow(table);
+ * }
+ *
+ * // 3. option：the performance metrics
+ * size_t total_rows, total_batches;
+ * double avg_batch_time, throughput;
+ * iterator->GetPerformanceStats(&total_rows, &total_batches, &avg_batch_time, &throughput);
+ */
 
 class TABLE;
 namespace ShannonBase {
@@ -45,34 +72,110 @@ namespace Executor {
 class VectorizedTableScanIterator : public TableRowIterator {
  public:
   VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
-  virtual ~VectorizedTableScanIterator();
+  virtual ~VectorizedTableScanIterator() override {}
 
   bool Init() override;
   int Read() override;
 
-  size_t ReadCount() override { return m_read_cnt; }
-
-  uchar *GetData(size_t rowid) override;
-
   void set_filter(filter_func_t filter) { m_filter = filter; }
 
+  size_t GetCurrentBatchSize() const { return m_batch_size; }
+
  private:
-  TABLE *m_table{nullptr};
+  size_t EstimateRowSize() const;
 
-  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table{nullptr};
+  // to calculate the optimial batch size. cache line, and row size, etc. are considered.
+  size_t CalculateOptimalBatchSize(double expected_rows);
 
-  std::vector<ColumnChunk> m_col_chunks;
+  void CacheActiveFields();
 
-  // Optional filter for predicate pushdown
+  void PreallocateColumnChunks();
+
+  int ReadNextBatch();
+
+  void ClearBatchData() {
+    for (auto &chunk : m_col_chunks) {
+      chunk.clear();
+    }
+  }
+
+  void UpdatePerformanceMetrics(std::chrono::high_resolution_clock::time_point start_time);
+
+  void AdaptBatchSize();
+
+  int PopulateCurrentRow();
+
+  inline void ProcessFieldData(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
+    if (Utils::Util::is_string(field->type()) || Utils::Util::is_blob(field->type())) {
+      ProcessStringField(field, col_chunk, rowid);
+    } else {
+      ProcessNumericField(field, col_chunk, rowid);
+    }
+  }
+
+  inline void ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
+    if (field->real_type() == MYSQL_TYPE_ENUM) {
+      field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
+    } else {
+      const char *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
+      auto str_id = *(uint32 *)data_ptr;
+
+      std::string fld_name(field->field_name);
+      auto rpd_field = m_data_table.get()->source()->get_field(fld_name);
+      if (!rpd_field) return;
+
+      auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
+      field->store(str_ptr.c_str(), strlen(str_ptr.c_str()), field->charset());
+    }
+  }
+
+  inline void ProcessNumericField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
+    field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), col_chunk.width());
+  }
+
+ private:
+  TABLE *m_table;
+
+  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;
+  std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;
+
   filter_func_t m_filter;
 
-  // the row read a chunk. chunk-a-time.
-  size_t m_read_cnt{0};
+  size_t m_batch_size;               // batch size
+  size_t m_optimal_batch_size;       // optimial batch size
+  size_t m_current_batch_size{0};    // the current batch size
+  size_t m_current_row_in_batch{0};  // pos in batch.
+  bool m_batch_exhausted{true};      // current batch has been processed.
+  bool m_eof_reached{false};         // EOF. end of file.
 
-  // total rows read since started.
-  size_t m_total_read{0};
+  std::vector<Field *> m_active_fields;  // store the field we read.
+  std::vector<uint> m_field_indices;     // field index.
+  bool m_fields_cached{false};
 
-  size_t m_batch_size{1};
+  struct PerformanceMetrics {
+    std::chrono::high_resolution_clock::time_point start_time;
+    std::chrono::high_resolution_clock::time_point last_batch_time;
+    size_t total_rows{0};
+    size_t total_batches{0};
+    size_t error_count{0};
+    double avg_batch_time{0.0};
+    double total_read_time{0.0};
+
+    void reset() {
+      start_time = std::chrono::high_resolution_clock::now();
+      last_batch_time = start_time;
+      total_rows = 0;
+      total_batches = 0;
+      error_count = 0;
+      avg_batch_time = 0.0;
+      total_read_time = 0.0;
+    }
+  };
+
+  mutable PerformanceMetrics m_metrics;
+  int m_last_error{0};
+
+  alignas(CACHE_LINE_SIZE) char m_padding[CACHE_LINE_SIZE];
 };
 
 }  // namespace Executor

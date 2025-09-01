@@ -41,6 +41,6 @@ unsigned int get_cache_line_size() {
 
 int main() {
   unsigned int line_size = get_cache_line_size();
-  printf("Cache line size: %u bytes\n", line_size);
+  printf("%u \n", line_size);
   return 0;
 }
