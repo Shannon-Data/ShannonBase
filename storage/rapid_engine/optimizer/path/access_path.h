@@ -30,6 +30,7 @@
 #include "sql/iterators/row_iterator.h"
 #include "sql/join_optimizer/access_path.h"
 
+#include "storage/rapid_engine/optimizer/optimizer.h"
 // SQL optimization AccessPath class.
 class AccessPath;
 class THD;
@@ -42,14 +43,15 @@ namespace Optimizer {
 class PathGenerator {
  private:
   static unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(THD *thd, MEM_ROOT *mem_root,
-                                                                           AccessPath *path, JOIN *join,
-                                                                           bool eligible_for_batch_mode);
+                                                                           OptimizeContext *context, AccessPath *path,
+                                                                           JOIN *join, bool eligible_for_batch_mode);
 
  public:
   // A short form of CreateIteratorFromAccessPath() that implicitly uses the THD's
   // MEM_ROOT for storage, which is nearly always what you want. (The only caller
   // that does anything else is DynamicRangeIterator.)
-  static unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(THD *thd, AccessPath *path, JOIN *join,
+  static unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(THD *thd, OptimizeContext *context,
+                                                                           AccessPath *path, JOIN *join,
                                                                            bool eligible_for_batch_mode);
 };
 
