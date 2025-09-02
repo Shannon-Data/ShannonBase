@@ -43,14 +43,22 @@ namespace Executor {
 
 VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows,
                                                          ha_rows *examined_rows)
-    : TableRowIterator(thd, table), m_table{table} {
+    : TableRowIterator(thd, table),
+      m_table{table},
+      m_batch_size{0},
+      m_optimal_batch_size{0},
+      m_current_batch_size{0},
+      m_current_row_in_batch{0},
+      m_batch_exhausted{true},
+      m_eof_reached{false},
+      m_fields_cached{false} {
   m_optimal_batch_size = CalculateOptimalBatchSize(expected_rows);
   m_batch_size = m_optimal_batch_size;
 
   m_metrics.reset();
 
-  std::string key(table->s->db.str);
-  key.append(":").append(table->s->table_name.str);
+  std::string key(m_table->s->db.str);
+  key.append(":").append(m_table->s->table_name.str);
 
   const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
   const dd::Table *table_def = nullptr;
@@ -122,7 +130,7 @@ void VectorizedTableScanIterator::PreallocateColumnChunks() {
       m_col_chunks.emplace_back(field, 0);
     } else {  // using larger memory to reduce `allocate/new`
       auto initial_capacity =
-          std::max((int)m_batch_size, 512 /*static_cast<size_t>(ShannonBase::SHANNON_ROWS_IN_CHUNK / 100)*/);
+          std::max(m_batch_size, static_cast<size_t>(((ShannonBase::SHANNON_ROWS_IN_CHUNK + 7) / 8) + 1));
       m_col_chunks.emplace_back(field, initial_capacity);
     }
   }
@@ -158,6 +166,7 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
   for (size_t i = 0; i < m_active_fields.size(); ++i) {
     Field *field = m_active_fields[i];
     uint field_idx = m_field_indices[i];
+    assert(field->is_flag_set(NOT_SECONDARY_FLAG) == false);
 
     Utils::ColumnMapGuard guard(m_table);
     if (m_col_chunks[field_idx].nullable(rowid)) {
@@ -193,19 +202,19 @@ bool VectorizedTableScanIterator::Init() {
 int VectorizedTableScanIterator::Read() {
   if (m_batch_exhausted && !m_eof_reached) {
     int result = ReadNextBatch();
-    if (result != 0) {
+    if (result) {
       if (result == HA_ERR_END_OF_FILE && m_current_batch_size == 0) {
-        return HA_ERR_END_OF_FILE;
+        return HandleError(HA_ERR_END_OF_FILE);
       }
       if (result != HA_ERR_END_OF_FILE) {
-        return result;
+        return HandleError(result);
       }
     }
   }
 
   if (m_current_row_in_batch >= m_current_batch_size) {
     if (m_eof_reached) {
-      return HA_ERR_END_OF_FILE;
+      return HandleError(HA_ERR_END_OF_FILE);
     } else {  // read the next batch.
       m_batch_exhausted = true;
       return Read();
@@ -214,8 +223,8 @@ int VectorizedTableScanIterator::Read() {
 
   // fill up the data to table->field
   int result = PopulateCurrentRow();
-  if (result != 0) {
-    return result;
+  if (result) {
+    return HandleError(result);
   }
 
   // move to the next row.
@@ -241,15 +250,13 @@ int VectorizedTableScanIterator::ReadNextBatch() {
   if (result != 0) {
     if (result == HA_ERR_END_OF_FILE) {
       m_eof_reached = true;
-      if (read_cnt > 0) {  // the last batch.
-        m_current_batch_size = read_cnt;
-        m_current_row_in_batch = 0;
+      if (read_cnt) {
         m_batch_exhausted = false;
         m_metrics.total_batches++;
-
         UpdatePerformanceMetrics(batch_start);
-        return HA_ERR_END_OF_FILE;
       }
+      m_current_batch_size = read_cnt;
+      m_current_row_in_batch = 0;
       return HA_ERR_END_OF_FILE;
     }
 
