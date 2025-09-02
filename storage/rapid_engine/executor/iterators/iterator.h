@@ -181,10 +181,6 @@ class ColumnChunk {
 
   // null bitmap of all data in this Column Chunk.
   std::unique_ptr<ShannonBase::bit_array_t> m_null_mask{nullptr};
-
-  // padding
-  alignas(CACHE_LINE_SIZE) char m_padding[CACHE_LINE_SIZE -
-                                          (sizeof(std::atomic<size_t>) + sizeof(size_t) * 2) % CACHE_LINE_SIZE];
 };
 
 }  // namespace Executor

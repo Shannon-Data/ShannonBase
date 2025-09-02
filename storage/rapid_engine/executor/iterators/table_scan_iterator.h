@@ -72,7 +72,6 @@ namespace Executor {
 class VectorizedTableScanIterator : public TableRowIterator {
  public:
   VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
-  virtual ~VectorizedTableScanIterator() override {}
 
   bool Init() override;
   int Read() override;
@@ -173,9 +172,6 @@ class VectorizedTableScanIterator : public TableRowIterator {
   };
 
   mutable PerformanceMetrics m_metrics;
-  int m_last_error{0};
-
-  alignas(CACHE_LINE_SIZE) char m_padding[CACHE_LINE_SIZE];
 };
 
 }  // namespace Executor

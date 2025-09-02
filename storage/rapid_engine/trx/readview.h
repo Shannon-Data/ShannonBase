@@ -148,7 +148,11 @@ using SMU_items = struct smu_item_vec_t {
 class Snapshot_meta_unit {
  public:
   Snapshot_meta_unit() = default;
-  virtual ~Snapshot_meta_unit() = default;
+  virtual ~Snapshot_meta_unit() {
+    std::unique_lock lk(m_version_mutex);
+    m_version_info.clear();
+    m_version_info.rehash(0);
+  }
 
   void set_owner(ShannonBase::Imcs::Chunk *owner);
   /** an item of SMU. consist of <trxid, new_data>. pair of row_id_t and sum_item indicates
@@ -167,11 +171,17 @@ class Snapshot_meta_unit {
 
   // gets the rowid's versions.
   inline SMU_items &versions(ShannonBase::row_id_t rowid) {
-    std::shared_lock lk(m_version_mutex);
-    if (m_version_info.find(rowid) != m_version_info.end())
-      return m_version_info[rowid];
-    else  // not found, insert a empty vect in.
-      return m_version_info[rowid];
+    {
+      std::shared_lock lk(m_version_mutex);
+      auto it = m_version_info.find(rowid);
+      if (it != m_version_info.end()) {
+        return it->second;
+      }
+    }
+
+    std::unique_lock lk(m_version_mutex);
+    auto [it, inserted] = m_version_info.try_emplace(rowid);
+    return it->second;
   }
 
   inline void add_version(ShannonBase::row_id_t rowid, SMU_items &siv) {

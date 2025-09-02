@@ -107,7 +107,7 @@ void ColumnChunk::initialize_buffers() {
   m_cols_buffer = std::make_unique<uchar[]>(buffer_size);
   std::memset(m_cols_buffer.get(), 0, buffer_size);
 
-  size_t null_mask_size = (m_chunk_size + 7) / 8;
+  size_t null_mask_size = (m_chunk_size + 7) / 8 + 1;
   m_null_mask = std::make_unique<ShannonBase::bit_array_t>(null_mask_size);
 }
 
