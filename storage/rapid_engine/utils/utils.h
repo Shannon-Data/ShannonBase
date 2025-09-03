@@ -51,6 +51,27 @@ namespace Compress {
 class Dictionary;
 }
 namespace Utils {
+
+class MemoryPool {
+ public:
+  void *allocate(size_t size) {
+    if (m_current_offset + size > m_block_size) {
+      m_memory_blocks.emplace_back(std::make_unique<char[]>(m_block_size));
+      m_current_offset = 0;
+    }
+    void *ptr = m_memory_blocks.back().get() + m_current_offset;
+    m_current_offset += size;
+    return ptr;
+  }
+
+  void reset() { m_current_offset = 0; }
+
+ private:
+  std::vector<std::unique_ptr<char[]>> m_memory_blocks;
+  size_t m_block_size;
+  size_t m_current_offset;
+};
+
 class Util {
  public:
   // open a table via schema name and table name.

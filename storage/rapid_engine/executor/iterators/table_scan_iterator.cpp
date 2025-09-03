@@ -88,19 +88,24 @@ size_t VectorizedTableScanIterator::EstimateRowSize() const {
 }
 
 size_t VectorizedTableScanIterator::CalculateOptimalBatchSize(double expected_rows) {
-  size_t base_size = SHANNON_VECTOR_WIDTH;
-  size_t l3_cache_size{0};
+  const size_t base_size = std::max<size_t>(SHANNON_VECTOR_WIDTH, 128);
+  size_t l3_cache_size{8 * 1024 * 1024};
 #if defined(CACHE_L3_SIZE)
   l3_cache_size = CACHE_L3_SIZE;
-#else
-  l3_cache_size = 8 * 1024 * 1024;
 #endif
 
   size_t row_size = EstimateRowSize();
   size_t cache_optimal = l3_cache_size / (row_size * 4);
 
-  size_t rows_based = std::min(static_cast<size_t>(expected_rows / 10), static_cast<size_t>(10000));
-  return std::max(base_size, std::min(cache_optimal, rows_based));
+  size_t rows_based = 0;
+  if (expected_rows > 0) {
+    rows_based = static_cast<size_t>(std::min(expected_rows / 10.0, 10000.0));
+  }
+
+  size_t candidate = rows_based ? std::min(cache_optimal, rows_based) : cache_optimal;
+  candidate = std::clamp(candidate, base_size, static_cast<size_t>(131072));
+  candidate = (candidate + 3) & ~size_t(3);  // align to 4
+  return candidate;
 }
 
 void VectorizedTableScanIterator::CacheActiveFields() {
@@ -163,12 +168,12 @@ void VectorizedTableScanIterator::AdaptBatchSize() {
 int VectorizedTableScanIterator::PopulateCurrentRow() {
   size_t rowid = m_current_row_in_batch;
 
+  Utils::ColumnMapGuard guard(m_table);
   for (size_t i = 0; i < m_active_fields.size(); ++i) {
     Field *field = m_active_fields[i];
     uint field_idx = m_field_indices[i];
     assert(field->is_flag_set(NOT_SECONDARY_FLAG) == false);
 
-    Utils::ColumnMapGuard guard(m_table);
     if (m_col_chunks[field_idx].nullable(rowid)) {
       field->set_null();
     } else {
