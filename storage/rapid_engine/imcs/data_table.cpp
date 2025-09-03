@@ -308,30 +308,6 @@ start:
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-/** TODO:
- * First perform visibility checks in a row-wise manner, then process column data.
-for exam:：
-std::vector<rowid_t> visible_rows;
-std::vector<RowVersionInfo> row_versions;
-
-while (visible_rows.size() < batch_size) {
-    // Perform visibility checks in a unified manner (read versioned_ptr only once).
-    auto status = ...;
-    if (status is visible) {
-        visible_rows.push_back(m_rowid);
-        row_versions.push_back(...);
-    }
-    m_rowid++;
-}
-
-// Then, for each column, batch process the visible_rows.
-for (col : cols) {
-    for (i = 0; i < visible_rows.size(); ++i) {
-        auto rid = visible_rows[i];
-        // directly decode the column data corresponding to each rid and write it into col_chunk[i].
-    }
-}
- */
 // IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `DataTable::next`
 // CORRESPONDINGLY.
 int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt) {
