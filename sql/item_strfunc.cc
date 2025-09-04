@@ -4241,6 +4241,150 @@ String *Item_func_from_vector::val_str(String *str) {
   return &buffer;
 }
 
+bool Item_func_ml_embed_row::resolve_type(THD* thd) {
+  if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_VARCHAR)) return true;
+  if (arg_count > 1) {
+    if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_JSON)) return true;
+  }
+
+  set_data_type_string(65535U); // LONGTEXT
+  set_nullable(true);
+  return false;
+}
+
+String *Item_func_ml_embed_row::val_str(String *str) {
+  assert(fixed);
+    
+  String *text_arg = args[0]->val_str(str);
+  if (!text_arg || args[0]->null_value) {
+      null_value = true;
+      return nullptr;
+  }
+
+  return str;
+}
+
+bool Item_func_ml_embed_table::resolve_type(THD*) {
+  return false;
+}
+
+String *Item_func_ml_embed_table::val_str(String *) {
+  return nullptr;
+}
+
+bool Item_func_ml_generate::resolve_type(THD* thd) {
+  if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_VARCHAR)) return true;
+  if (arg_count > 1) {
+    if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_JSON)) return true;
+  }
+
+  set_data_type_string(65535U); // LONGTEXT
+  set_nullable(true);
+  return false;
+}
+
+String *Item_func_ml_generate::val_str(String *str) {
+  assert(fixed);
+    
+  String *text_arg = args[0]->val_str(str);
+  if (!text_arg || args[0]->null_value) {
+      null_value = true;
+      return nullptr;
+  }
+
+  return str;
+}
+
+bool Item_func_ml_generate_table::resolve_type(THD*) {
+  return false;
+}
+
+String *Item_func_ml_generate_table::val_str(String *) {
+  return nullptr;
+}
+
+bool Item_func_ml_rag::resolve_type(THD* thd) {
+  if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_VARCHAR)) return true;
+  if (arg_count > 1) {
+    if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_JSON)) return true;
+  }
+
+  set_data_type_string(65535U); // LONGTEXT
+  set_nullable(true);
+  return false;
+}
+
+String *Item_func_ml_rag::val_str(String *str) {
+  assert(fixed);
+    
+  String *text_arg = args[0]->val_str(str);
+  if (!text_arg || args[0]->null_value) {
+      null_value = true;
+      return nullptr;
+  }
+
+  return str;
+}
+
+bool Item_func_ml_rag_table::resolve_type(THD*) {
+  return false;
+}
+
+String *Item_func_ml_rag_table::val_str(String *) {
+  return nullptr;
+}
+
+bool Item_func_ml_chat::resolve_type(THD *thd)  {
+  if (Item_str_func::resolve_type(thd)) {
+    return true;
+  }
+  if (args[0]->result_type() != STRING_RESULT ||
+      args[0]->data_type() == MYSQL_TYPE_JSON) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+    return true;
+  }
+  if (reject_geometry_args()) return true;
+
+  set_data_type_string(65535U); // LONGTEXT
+  set_nullable(true);
+  return false;
+}
+
+String *Item_func_ml_chat::val_str(String *str) {
+  assert(fixed);
+    
+  String *text_arg = args[0]->val_str(str);
+  if (!text_arg || args[0]->null_value) {
+      null_value = true;
+      return nullptr;
+  }
+
+  return str;  
+}
+
+bool Item_func_ml_nl2sql::resolve_type(THD* thd) {
+  if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_VARCHAR)) return true;
+  if (arg_count > 1) {
+    if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_JSON)) return true;
+  }
+
+  set_data_type_string(65535U); // LONGTEXT
+  set_nullable(true);
+  return false;
+}
+
+String *Item_func_ml_nl2sql::val_str(String *str) {
+  assert(fixed);
+    
+  String *text_arg = args[0]->val_str(str);
+  if (!text_arg || args[0]->null_value) {
+      null_value = true;
+      return nullptr;
+  }
+
+  return str;
+}
+
 String *Item_func_uncompress::val_str(String *str) {
   assert(fixed);
   String *res = args[0]->val_str(str);

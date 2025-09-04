@@ -116,6 +116,10 @@ ADD_SUBDIRECTORY(protobuf)
 SET(ML_SOURCES
   ../ml/auto_ml.cpp
   ../ml/ml_algorithm.h
+  ../ml/ml_embedding.cpp
+  ../ml/ml_generate.cpp
+  ../ml/ml_nl2sql.cpp
+  ../ml/ml_rag.cpp
   ../ml/ml_regression.cpp
   ../ml/ml_classification.cpp
   ../ml/ml_forecasting.cpp
