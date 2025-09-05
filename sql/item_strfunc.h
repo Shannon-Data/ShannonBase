@@ -1266,6 +1266,8 @@ class Item_func_ml_embed_row : public Item_str_func {
   bool resolve_type(THD *) override;
   String *val_str(String *str) override;
   enum Item_result result_type() const override { return STRING_RESULT; }
+ private:
+  String buffer;
 };
 
 class Item_func_ml_embed_table : public Item_str_func {
@@ -1277,6 +1279,8 @@ class Item_func_ml_embed_table : public Item_str_func {
   }
   bool resolve_type(THD *) override;
   String *val_str(String *str) override;
+ private:
+  String buffer;
 };
 
 class Item_func_ml_generate : public Item_str_func {

@@ -148,9 +148,6 @@ ENDIF()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
-find_package(ONNXRuntime REQUIRED)
-INCLUDE_DIRECTORIES(SYSTEM ${ONNXRUNTIME_INCLUDE_DIRS})
-
 SET (SHANNON_ITERATOR_SOURCES
     executor/iterators/iterator.cpp
     executor/iterators/hash_join_iterator.cpp
@@ -166,7 +163,6 @@ set (SHANNON_OPTIMIZE
 )
 set (SHANNON_ML
     ml/ml.cpp
-    ml/sentence_transform.cpp
 )
 set (SHANNON_PERSISTENCE
 )
@@ -203,7 +199,7 @@ MYSQL_ADD_PLUGIN(shannon_rapid
   STORAGE_ENGINE
   MANDATORY
   MODULE_OUTPUT_NAME ha_rapid
-  LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES} ${ONNXRUNTIME_LIBRARIES})
+  LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES})
 
 TARGET_LINK_DIRECTORIES(shannon_rapid PRIVATE ${ONNXRUNTIME_LIB_DIR})
 
@@ -236,21 +232,3 @@ IF(HAS_WARN_FLAG)
   ADD_COMPILE_FLAGS(
     COMPILE_FLAGS "${HAS_WARN_FLAG}")
 ENDIF()
-
-if(ONNXRUNTIME_FOUND)
-  install(DIRECTORY ${ONNXRUNTIME_INCLUDE_DIRS}/
-    DESTINATION include/onnxruntime
-    FILES_MATCHING
-    PATTERN "*.h"
-    PATTERN "*.hpp"
-    PATTERN "tests" EXCLUDE
-  )
-
-  install(DIRECTORY ${ONNXRUNTIME_LIB_DIR}/
-    DESTINATION lib/onnxruntime
-    FILES_MATCHING
-    PATTERN "libonnxruntime*"
-    PATTERN "*.so*"
-    PATTERN "cmake" EXCLUDE
-  )
-endif()

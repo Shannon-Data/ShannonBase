@@ -75,7 +75,9 @@
 #include "template_utils.h"  // down_cast
 
 #include "ml/auto_ml.h" //auto_ml
-
+#include "ml/infra_component/sentence_transform.h" //onnxruntime
+#include "ml/ml_utils.h"  //Utils
+#include "ml/ml_info.h"  //OPTION_VALUE_T
 class PT_item_list;
 
 /** Helper routines */
@@ -3001,6 +3003,55 @@ bool Item_func_ml_predicte_row::val_json(Json_wrapper* wr) {
   auto ret = auto_ml->
     predict_row(input_data, handle_name_cptr, predict_options, *wr);
   return (ret == 0) ? false : true;
+}
+
+extern char mysql_home[FN_REFLEN];
+extern char mysql_llm_home[FN_REFLEN];
+bool Item_func_ml_model_list::val_json(Json_wrapper* wr) {
+  std::string path_path(mysql_llm_home);
+  if (!path_path.length()) {
+    path_path.append(mysql_home);
+  }
+
+  path_path.append("/llm-models/");
+  if (!std::filesystem::exists(path_path)) return error_json();
+
+  std::vector<std::string> directories;
+  DIR* dir = opendir(path_path.c_str());
+  if (!dir) {
+    return error_json();
+  }
+
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != nullptr) {
+    if (strcmp(entry->d_name, ".") == 0 ||
+        strcmp(entry->d_name, "..") == 0) {
+        continue;
+    }
+
+    std::string fullPath = path_path + "/" + entry->d_name;
+    struct stat statbuf;
+    if (stat(fullPath.c_str(), &statbuf) == 0 && S_ISDIR(statbuf.st_mode)) {
+        directories.push_back(entry->d_name);
+    }
+  }
+  closedir(dir);
+  std::sort(directories.begin(), directories.end());
+
+  Json_array *json_array = new (std::nothrow) Json_array();
+  if (!json_array) return false;
+
+  for (const auto& model_name : directories) {
+    std::unique_ptr<Json_object> model_info(new (std::nothrow) Json_object());
+    model_info->add_alias("name", std::unique_ptr<Json_dom>(new (std::nothrow) Json_string(model_name)));
+
+    std::string status{"ready"};
+    model_info->add_alias("status", std::unique_ptr<Json_dom>(new (std::nothrow) Json_string(status)));
+    json_array->append_alias(std::move(model_info));
+  }
+
+  *wr = Json_wrapper(std::move(json_array));
+  return false;
 }
 
 String *Item_func_json_quote::val_str(String *str) {

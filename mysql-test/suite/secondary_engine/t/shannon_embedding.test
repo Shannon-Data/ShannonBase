@@ -1,0 +1,23 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+# USED FOR embedding.
+create database sh_embedding;
+use sh_embedding;
+--disable_warnings
+
+SELECT ML_MODEL_LIST();
+
+--replace_column 1 IGNORE
+SELECT ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2"));
+
+--replace_column 1 IGNORE
+SELECT ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+
+--replace_column 1 IGNORE
+SELECT VECTOR_TO_STRING(ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")));
+
+--enable_warnings
+DROP DATABASE sh_embedding;
