@@ -1,0 +1,15 @@
+create database sh_embedding;
+use sh_embedding;
+SELECT ML_MODEL_LIST();
+ML_MODEL_LIST()
+[{"name": "all-MiniLM-L12-v2", "status": "ready"}]
+SELECT ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2"));
+ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2"))
+IGNORE
+SELECT ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"))
+0x49474E4F5245
+SELECT VECTOR_TO_STRING(ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")));
+VECTOR_TO_STRING(ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")))
+IGNORE
+DROP DATABASE sh_embedding;

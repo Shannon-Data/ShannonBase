@@ -113,6 +113,9 @@ ADD_DEFINITIONS(-DMYSQL_SERVER)
 ADD_SUBDIRECTORY(server_component)
 ADD_SUBDIRECTORY(protobuf)
 
+FIND_PACKAGE(ONNXRuntime REQUIRED)
+INCLUDE_DIRECTORIES(SYSTEM ${ONNXRUNTIME_INCLUDE_DIRS})
+
 SET(ML_SOURCES
   ../ml/auto_ml.cpp
   ../ml/ml_algorithm.h
@@ -126,6 +129,7 @@ SET(ML_SOURCES
   ../ml/ml_anomaly_detection.cpp
   ../ml/ml_recommendation.cpp
   ../ml/ml_utils.cpp
+  ../ml/infra_component/sentence_transform.cpp
 )
 
 SET(DD_SOURCES
@@ -1017,7 +1021,7 @@ SET_TARGET_PROPERTIES(sql_dd PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 ADD_LIBRARY(sql_ml STATIC ${ML_SOURCES})
 #gomp required by lightgbm
-TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp)
+TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp ${ONNXRUNTIME_LIBRARIES})
 TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC 
                            ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include
                            ${CMAKE_SOURCE_DIR}/extra/lightgbm/include)
@@ -1519,3 +1523,21 @@ ADD_CUSTOM_TARGET(distclean
 ADD_CUSTOM_TARGET(show-dist-name
   COMMAND ${CMAKE_COMMAND} -E echo "${CPACK_PACKAGE_FILE_NAME}"
 )
+
+IF(ONNXRUNTIME_FOUND)
+  INSTALL(DIRECTORY ${ONNXRUNTIME_INCLUDE_DIRS}/
+    DESTINATION include/onnxruntime
+    FILES_MATCHING
+    PATTERN "*.h"
+    PATTERN "*.hpp"
+    PATTERN "tests" EXCLUDE
+  )
+
+  INSTALL(DIRECTORY ${ONNXRUNTIME_LIB_DIR}/
+    DESTINATION lib/onnxruntime
+    FILES_MATCHING
+    PATTERN "libonnxruntime*"
+    PATTERN "*.so*"
+    PATTERN "cmake" EXCLUDE
+  )
+ENDIF()
