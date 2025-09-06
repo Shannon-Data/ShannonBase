@@ -26,7 +26,9 @@
 
 #include <assert.h>
 #include <sys/types.h>
-
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <cstdint>
 #include <memory>
 #include <utility>  // std::forward
@@ -901,6 +903,20 @@ class Item_func_ml_predicte_row : public Item_json_func {
    }
  };
 
+class Item_func_ml_model_list : public Item_json_func {
+  public:
+   Item_func_ml_model_list(THD *thd, const POS &pos, PT_item_list* a)
+       : Item_json_func(thd, pos, a) {}
+   enum Functype functype() const override { return JSON_OBJECT_FUNC; }
+   bool val_json(Json_wrapper* wr) override;
+   const char *func_name() const override {
+     return "ML_MODEL_LIST";
+   }
+   bool resolve_type(THD *thd) override {
+    if (Item_json_func::resolve_type(thd)) return true;
+     return false;
+   }
+ };
 /**
   Represents the JSON function JSON_QUOTE()
 */

@@ -1528,6 +1528,7 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"ML_RAG_TABLE", SQL_FN_V_LIST(Item_func_ml_rag_table, 2, 3)},
     {"ML_CHAT", SQL_FN(Item_func_ml_chat, 1)},
     {"ML_NL_SQL", SQL_FN_V_LIST(Item_func_ml_nl2sql, 2, 3)},
+    {"ML_MODEL_LIST", SQL_FN_V_THD(Item_func_ml_model_list, 0, 0)},
     {"MONTHNAME", SQL_FN(Item_func_monthname, 1)},
     {"NAME_CONST", SQL_FN(Item_name_const, 2)},
     {"NULLIF", SQL_FN(Item_func_nullif, 2)},
