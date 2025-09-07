@@ -25,6 +25,7 @@ ROUTINE_NAME
 create_synonym_db
 diagnostics
 execute_prepared_stmt
+ml_embed_table
 ml_explain
 ml_explain_row
 ml_explain_table
@@ -33,7 +34,6 @@ ml_model_export
 ml_model_import
 ml_model_load
 ml_model_unload
-ml_predict_row
 ml_predict_table
 ml_score
 ml_train
@@ -71,6 +71,7 @@ format_statement
 format_time
 list_add
 list_drop
+ml_embed_row
 ml_predict_row
 ps_is_account_enabled
 ps_is_consumer_enabled

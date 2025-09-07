@@ -34,6 +34,7 @@
 
 #include "sql-common/json_dom.h"  //Json_wrapper.
 
+#include "ml/infra_component/sentence_transform.h"  //onnxruntime
 #include "ml_algorithm.h"
 
 class Json_wrapper;
@@ -42,21 +43,80 @@ namespace ML {
 
 class ML_embedding : public ML_algorithm {
  public:
+  using EmbeddingVector = SentenceTransform::MiniLMEmbedding::EmbeddingVector;
   ML_embedding() = default;
-  virtual ~ML_embedding() override = default;
-  virtual void GenerateEmbedding() = 0;
+  virtual ~ML_embedding() = default;
+
+  /**
+   * options: JSON_OBJECT(keyvalue[, keyvalue] ...)
+  keyvalue:
+  {
+    'model_id', {'ModelID'}
+    |'truncate', {true|false}
+  }
+   */
+  virtual EmbeddingVector GenerateEmbedding(std::string &text, Json_wrapper &option) = 0;
+
+  /** options. JSON
+   * 'model_id', {'ModelID'}
+    |'truncate', {true|false}
+    |'batch_size', BatchSize
+    |'details_column', 'ErrorDetailsColumnName'
+  */
+  virtual int GenerateTableEmbedding(std::string &InputTableColumn, std::string &OutputTableColumn,
+                                     Json_wrapper &option) = 0;
 };
 
 class ML_embedding_row : public ML_embedding {
+ public:
   ML_embedding_row();
   virtual ~ML_embedding_row() override {}
-  virtual void GenerateEmbedding() override;
+  virtual EmbeddingVector GenerateEmbedding(std::string &text, Json_wrapper &option) override;
+  virtual int GenerateTableEmbedding(std::string &InputTableColumn, std::string &OutputTableColumn,
+                                     Json_wrapper &option) override;
+  virtual ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::EMBEDDING; }
+
+ private:
+  virtual int train() override { return false; }
+  virtual int load(std::string &) override { return false; }
+  virtual int load_from_file(std::string &, std::string &) override { return false; }
+  virtual int unload(std::string &) override { return false; }
+  virtual int import(Json_wrapper &, Json_wrapper &, std::string &) override { return false; }
+  virtual double score(std::string &, std::string &, std::string &, std::string &, Json_wrapper &) override {
+    return 0.0f;
+  }
+
+  virtual int explain(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
+  virtual int explain_row() override { return false; }
+  virtual int explain_table() override { return false; }
+  virtual int predict_row(Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override { return false; }
+  virtual int predict_table(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
 };
 
 class ML_embedding_table : public ML_embedding {
+ public:
   ML_embedding_table();
   virtual ~ML_embedding_table() override {}
-  virtual void GenerateEmbedding() override;
+  virtual EmbeddingVector GenerateEmbedding(std::string &text, Json_wrapper &option) override;
+  virtual int GenerateTableEmbedding(std::string &InputTableColumn, std::string &OutputTableColumn,
+                                     Json_wrapper &option) override;
+  virtual ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::EMBEDDING; }
+
+ private:
+  virtual int train() override { return false; }
+  virtual int load(std::string &) override { return false; }
+  virtual int load_from_file(std::string &, std::string &) override { return false; }
+  virtual int unload(std::string &) override { return false; }
+  virtual int import(Json_wrapper &, Json_wrapper &, std::string &) override { return false; }
+  virtual double score(std::string &, std::string &, std::string &, std::string &, Json_wrapper &) override {
+    return 0.0f;
+  }
+
+  virtual int explain(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
+  virtual int explain_row() override { return false; }
+  virtual int explain_table() override { return false; }
+  virtual int predict_row(Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override { return false; }
+  virtual int predict_table(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
 };
 
 }  // namespace ML

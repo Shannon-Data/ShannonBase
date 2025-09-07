@@ -193,6 +193,53 @@ class Utils {
   // disable copy ctor, operator=, etc.
 };
 
+class TableGuard {
+ public:
+  explicit TableGuard(TABLE *table = nullptr) : m_table(table) {}
+
+  ~TableGuard() {
+    if (m_table != nullptr) {
+      Utils::close_table(m_table);
+    }
+  }
+
+  TableGuard(const TableGuard &) = delete;
+  TableGuard &operator=(const TableGuard &) = delete;
+
+  TableGuard(TableGuard &&other) noexcept : m_table(other.m_table) { other.m_table = nullptr; }
+
+  TableGuard &operator=(TableGuard &&other) noexcept {
+    if (this != &other) {
+      if (m_table != nullptr) {
+        Utils::close_table(m_table);
+      }
+      m_table = other.m_table;
+      other.m_table = nullptr;
+    }
+    return *this;
+  }
+
+  TABLE *get() const { return m_table; }
+
+  TABLE *release() {
+    TABLE *temp = m_table;
+    m_table = nullptr;
+    return temp;
+  }
+
+  void reset(TABLE *new_table = nullptr) {
+    if (m_table != nullptr) {
+      Utils::close_table(m_table);
+    }
+    m_table = new_table;
+  }
+
+  explicit operator bool() const { return m_table != nullptr; }
+
+ private:
+  TABLE *m_table;
+};
+
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  // __SHANNONBASE_ML_REGRESSION_H__

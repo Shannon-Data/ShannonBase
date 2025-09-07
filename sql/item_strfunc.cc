@@ -131,9 +131,8 @@
 #include "typelib.h"
 #include "unhex.h"
 
-#include "ml/infra_component/sentence_transform.h" //onnxruntime
+#include "ml/ml_embedding.h"
 #include "ml/ml_utils.h"  //Utils
-#include "ml/ml_info.h"  //OPTION_VALUE_T
 extern uint *my_aes_opmode_key_sizes;
 
 using std::max;
@@ -4269,8 +4268,7 @@ bool Item_func_ml_embed_row::resolve_type(THD* thd) {
       Field_vector::dimension_bytes(Field_vector::max_dimensions)));
   return false;
 }
-extern char mysql_home[FN_REFLEN];
-extern char mysql_llm_home[FN_REFLEN];
+
 String *Item_func_ml_embed_row::val_str(String *str) {
   assert(fixed);
 
@@ -4281,62 +4279,95 @@ String *Item_func_ml_embed_row::val_str(String *str) {
   if (res->is_empty()) return error_str();
   std::string input_text(res->ptr(), res->length());
 
-  std::string model_name("all-MiniLM-L12-v2"); //default model.
+  std::string model_name;
+  Json_wrapper options;
   if (arg_count == 2) {
-    Json_wrapper options;
     if (args[1]->val_json(&options)) return error_str();
-
-    ShannonBase::ML::OPTION_VALUE_T opt_values;
-    std::string keystr;
-    ShannonBase::ML::Utils::parse_json(options, opt_values, keystr, 0);
-
-    keystr = "model_id";
-    if (opt_values.find(keystr) != opt_values.end())
-      model_name = opt_values[keystr].size() ? opt_values[keystr][0] : "";
   }
 
-  std::string path_path(mysql_llm_home);
-  if (!path_path.length()) {
-    path_path.append(mysql_home);
-  }
-  path_path.append("/llm-models/").append(model_name).append("/onnx/");
-  if (!std::filesystem::exists(path_path)) return error_str();
-
-  ShannonBase::ML::SentenceTransform::DocumentEmbeddingManager doc_manger(path_path);
-  if (doc_manger.ProcessText(input_text, 1024)) {
-    std::string err("Embedding Text failed.");
-    my_error(ER_ML_FAIL, MYF(0), err.c_str());
-    return error_str();
-  }
-
-  auto embeded_res = doc_manger.Results();
+  auto embed_row_ptr = std::make_unique<ShannonBase::ML::ML_embedding_row>();
+  auto embeded_res = embed_row_ptr->GenerateEmbedding(input_text, options);
   if (!embeded_res.size()) {
-    std::string err("Embedding Text unsuccessfull.");
+    std::string err("embedding text unsuccessfull, pleas check your model");
     my_error(ER_ML_FAIL, MYF(0), err.c_str());
     return error_str();
   }
 
-  auto eb_vector = embeded_res[0].embedding;
-  uint32 input_dims = eb_vector.size();
+  uint32 input_dims = embeded_res.size();
   if (input_dims == UINT32_MAX) {
-    my_error(ER_TO_VECTOR_CONVERSION, MYF(0), eb_vector.size(), eb_vector.data());
+    my_error(ER_TO_VECTOR_CONVERSION, MYF(0), embeded_res.size(), embeded_res.data());
     return error_str();
   }
 
   uint32 out_length = input_dims * Field_vector::precision;
   if (buffer.mem_realloc(out_length)) return error_str();
 
-  memcpy(buffer.ptr(), eb_vector.data(), out_length);
+  memcpy(buffer.ptr(), embeded_res.data(), out_length);
   buffer.length(out_length);
   return &buffer;
 }
 
-bool Item_func_ml_embed_table::resolve_type(THD*) {
+bool Item_func_ml_embed_table::resolve_type(THD* thd) {
+  assert(arg_count <= 3);
+  if (Item_str_func::resolve_type(thd)) {
+    return true;
+  }
+
+  if (args[0]->result_type() != STRING_RESULT ||
+      args[0]->data_type() == MYSQL_TYPE_JSON) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+    return true;
+  }
+
+  if (args[1]->result_type() != STRING_RESULT ||
+      args[1]->data_type() == MYSQL_TYPE_JSON) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+    return true;
+  }
+
+  if (arg_count == 3) {
+   if (args[2]->result_type() != STRING_RESULT ||
+      args[2]->data_type() != MYSQL_TYPE_JSON) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+    return true;
+    }
+  }
+
+  if (reject_geometry_args()) return true;
+  set_data_type_string(65535u);
   return false;
 }
 
-String *Item_func_ml_embed_table::val_str(String *) {
-  return nullptr;
+String *Item_func_ml_embed_table::val_str(String *str) {
+  assert(fixed);
+
+  String* res;
+  if (!(res = args[0]->val_str(str))) {
+    return error_str();
+  }
+  if (res->is_empty()) return error_str();
+  std::string input_col(res->ptr(), res->length());
+
+  if (!(res = args[1]->val_str(str))) {
+    return error_str();
+  }
+  if (res->is_empty()) return error_str();
+  std::string output_col(res->ptr(), res->length());
+
+  Json_wrapper options;
+  if (arg_count == 3) {
+    if (args[2]->val_json(&options)) return error_str();
+  }
+
+  auto embed_row_ptr = std::make_unique<ShannonBase::ML::ML_embedding_row>();
+  auto embeded_res = embed_row_ptr->GenerateTableEmbedding(input_col, output_col, options);
+  if (embeded_res) {
+    std::string err("Embedding Text unsuccessfull.");
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+    return error_str();
+  }
+
+  return &buffer;
 }
 
 bool Item_func_ml_generate::resolve_type(THD* thd) {

@@ -10,14 +10,14 @@ use sh_embedding;
 
 SELECT ML_MODEL_LIST();
 
---replace_column 1 IGNORE
-SELECT ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2"));
+--ERROR 6141
+SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2"));
 
 --replace_column 1 IGNORE
-SELECT ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
 
 --replace_column 1 IGNORE
-SELECT VECTOR_TO_STRING(ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")));
+SELECT VECTOR_TO_STRING(sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")));
 
 --enable_warnings
 DROP DATABASE sh_embedding;
