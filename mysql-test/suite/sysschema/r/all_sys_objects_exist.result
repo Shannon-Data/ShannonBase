@@ -112,6 +112,7 @@ format_statement	FUNCTION
 format_time	FUNCTION
 list_add	FUNCTION
 list_drop	FUNCTION
+ml_embed_row	FUNCTION
 ml_predict_row	FUNCTION
 ps_is_account_enabled	FUNCTION
 ps_is_consumer_enabled	FUNCTION
@@ -130,6 +131,7 @@ version_patch	FUNCTION
 create_synonym_db	PROCEDURE
 diagnostics	PROCEDURE
 execute_prepared_stmt	PROCEDURE
+ml_embed_table	PROCEDURE
 ml_explain	PROCEDURE
 ml_explain_row	PROCEDURE
 ml_explain_table	PROCEDURE
@@ -138,7 +140,6 @@ ml_model_export	PROCEDURE
 ml_model_import	PROCEDURE
 ml_model_load	PROCEDURE
 ml_model_unload	PROCEDURE
-ml_predict_row	PROCEDURE
 ml_predict_table	PROCEDURE
 ml_score	PROCEDURE
 ml_train	PROCEDURE
