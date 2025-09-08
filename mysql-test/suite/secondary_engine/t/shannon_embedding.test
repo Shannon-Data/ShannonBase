@@ -19,5 +19,29 @@ SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_i
 --replace_column 1 IGNORE
 SELECT VECTOR_TO_STRING(sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")));
 
+CREATE TABLE tt (score int, name char(10), id int primary key, gender char(1));
+INSERT INTO tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "sh_embedding.tt.embed_vect", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+
+#duplicate column: Duplicate column name 'embed_vect
+--ERROR 1060 
+CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "test.tt.embed_vect", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
+
+#wrong source table: Input table does not exist
+--ERROR 1644 
+CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
+
+# wrong option format: model_id is required in options
+--ERROR 1644
+CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect", JSON_OBJECT("odel_id", "all-MiniLM-L12-v2"));
+
+# wrong model name: ML operation failed. can not find the model:aall-MiniLM-L12-v2.
+--ERROR 1644
+CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect1", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
+
+--replace_column 5 IGNORE
+SELECT * FROM tt;
+SHOW CREATE TABLE tt;
+
 --enable_warnings
 DROP DATABASE sh_embedding;
