@@ -1,0 +1,31 @@
+create database sh_rag;
+use sh_rag;
+CREATE TABLE demo_embeddings (
+id INT AUTO_INCREMENT PRIMARY KEY,
+segment VARCHAR(255) NOT NULL,
+text VARCHAR(255) NOT NULL,
+document_name VARCHAR(100) DEFAULT NULL,
+segment_number INT DEFAULT 1,
+metadata JSON DEFAULT (JSON_OBJECT())
+) ENGINE=InnoDB;
+INSERT INTO demo_embeddings (segment, text, document_name, segment_number, metadata)
+VALUES 
+('What is AutoML?', ('AutoML explanation example text'), 'doc1', 1, JSON_OBJECT('category', 'AI')),
+('AutoML automates model building', ('AutoML automates model building'), 'doc1', 2, JSON_OBJECT('category', 'AI')),
+('Machine learning basics', ('Basics of machine learning'), 'doc2', 1, JSON_OBJECT('category', 'ML')),
+('ShannonBase is an AI-native SQL engine', ('ShannonBase overview'), 'doc3', 1, JSON_OBJECT('category', 'DB'));
+CALL sys.ML_EMBED_TABLE("sh_rag.demo_embeddings.text", "sh_rag.demo_embeddings.embedding", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+SET @options = JSON_OBJECT(
+'vector_store', JSON_ARRAY('sh_rag.demo_embeddings'),
+'n_citations', 2,
+'embed_model_id', 'all-MiniLM-L12-v2',
+'vector_store_columns', JSON_OBJECT(
+'segment', 'segment',
+'segment_embedding', 'embedding',
+'document_name', 'document_name',
+'metadata', 'metadata',
+'segment_number', 'segment_number'
+    )
+);
+CALL sys.ml_rag('Explain AutoML', @output, @options);
+DROP DATABASE sh_rag;

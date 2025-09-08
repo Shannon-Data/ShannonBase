@@ -31,6 +31,7 @@
 #include "ml_rag.h"
 
 #include <chrono>
+#include <filesystem>
 #include <string>
 
 #include "include/my_inttypes.h"
@@ -50,11 +51,46 @@
 
 #include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
 
+extern char mysql_home[FN_REFLEN];
+extern char mysql_llm_home[FN_REFLEN];
 namespace ShannonBase {
 namespace ML {
-void ML_RAG_row::Generate() {}
+std::string ML_RAG_row::ProcessRAG(const std::string &query_text, const Json_wrapper &options) {
+  std::string result;
 
-void ML_RAG_table::Generate() {}
+  Json_wrapper rag_opt = options;
+  ShannonBase::ML::OPTION_VALUE_T opt_values;
+  std::string keystr;
+  if (ShannonBase::ML::Utils::parse_json(rag_opt, opt_values, keystr, 0)) {
+    std::string err("can not parse the option");
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+    return result;
+  }
+
+  std::string model_name("all-MiniLM-L12-v2");
+  keystr = "model_id";
+  if (opt_values.find(keystr) != opt_values.end()) model_name = opt_values[keystr].size() ? opt_values[keystr][0] : "";
+
+  std::string path_path(mysql_llm_home);
+  if (!path_path.length()) {
+    path_path.append(mysql_home);
+  }
+  path_path.append("/llm-models/").append(model_name).append("/onnx/");
+  if (!std::filesystem::exists(path_path)) {
+    std::string err("can not find the model:");
+    err.append(model_name);
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+    return result;
+  }
+
+  return result;
+}
+
+std::string ML_RAG_table::ProcessRAG(const std::string &query_text, const Json_wrapper &options) {
+  std::string result;
+
+  return result;
+}
 
 }  // namespace ML
 }  // namespace ShannonBase

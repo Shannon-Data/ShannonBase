@@ -141,6 +141,8 @@ ml_model_import	PROCEDURE
 ml_model_load	PROCEDURE
 ml_model_unload	PROCEDURE
 ml_predict_table	PROCEDURE
+ml_rag	PROCEDURE
+ml_rag_table	PROCEDURE
 ml_score	PROCEDURE
 ml_train	PROCEDURE
 ps_setup_disable_background_threads	PROCEDURE

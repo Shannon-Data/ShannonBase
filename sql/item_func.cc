@@ -4225,6 +4225,138 @@ longlong Item_func_vector_dim::val_int() {
   return (longlong)dimensions;
 }
 
+bool Item_func_vector_distance::resolve_type(THD *thd) {
+  // Check first argument (vector1)
+  if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_VECTOR)) {
+    return true;
+  }
+  bool valid_type1 = (args[0]->data_type() == MYSQL_TYPE_VECTOR) ||
+                     (args[0]->result_type() == STRING_RESULT &&
+                      args[0]->collation.collation == &my_charset_bin);
+
+  // Check second argument (vector2)
+  if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_VECTOR)) {
+    return true;
+  }
+  bool valid_type2 = (args[1]->data_type() == MYSQL_TYPE_VECTOR) ||
+                     (args[1]->result_type() == STRING_RESULT &&
+                      args[1]->collation.collation == &my_charset_bin);
+
+  // Check third argument (distance metric string)
+  bool valid_type3 = (args[2]->result_type() == STRING_RESULT);
+
+  if (!valid_type1 || !valid_type2 || !valid_type3) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+    return true;
+  }
+
+  decimals = DECIMAL_NOT_SPECIFIED;
+  max_length = float_length(decimals);
+  return false;
+}
+
+double Item_func_vector_distance::calculate_cosine_distance(const float* vec1, const float* vec2, uint32 dim) {
+  double dot_product = 0.0;
+  double norm1 = 0.0;
+  double norm2 = 0.0;
+
+  for (uint32 i = 0; i < dim; i++) {
+    dot_product += vec1[i] * vec2[i];
+    norm1 += vec1[i] * vec1[i];
+    norm2 += vec2[i] * vec2[i];
+  }
+
+  if (norm1 == 0.0 || norm2 == 0.0) {
+    return 1.0; // Maximum cosine distance
+  }
+
+  double cosine_similarity = dot_product / (sqrt(norm1) * sqrt(norm2));
+  return 1.0 - cosine_similarity;
+}
+
+double Item_func_vector_distance::calculate_dot_distance(const float* vec1, const float* vec2, uint32 dim) {
+  double dot_product = 0.0;
+  for (uint32 i = 0; i < dim; i++) {
+    dot_product += vec1[i] * vec2[i];
+  }
+  return -dot_product; // Negative dot product as distance
+}
+
+double Item_func_vector_distance::calculate_euclidean_distance(const float* vec1, const float* vec2, uint32 dim) {
+  double sum = 0.0;
+  for (uint32 i = 0; i < dim; i++) {
+    double diff = vec1[i] - vec2[i];
+    sum += diff * diff;
+  }
+  return sqrt(sum);
+}
+
+double Item_func_vector_distance:: val_real() {
+  assert(fixed);
+
+  // Get first vector
+  String *res1 = args[0]->val_str(&m_value1);
+  null_value = false;
+  if (res1 == nullptr || res1->ptr() == nullptr) {
+    return error_real();
+  }
+
+  // Get second vector
+  String *res2 = args[1]->val_str(&m_value2);
+  if (res2 == nullptr || res2->ptr() == nullptr) {
+    return error_real();
+  }
+
+  // Get distance metric
+  String *metric_str = args[2]->val_str(&m_metric);
+  if (metric_str == nullptr || metric_str->ptr() == nullptr) {
+    return error_real();
+  }
+
+  // Get dimensions for both vectors
+  uint32 dim1 = get_dimensions(res1->length(), Field_vector::precision);
+  uint32 dim2 = get_dimensions(res2->length(), Field_vector::precision);
+
+  if (dim1 == UINT32_MAX) {
+    my_error(ER_TO_VECTOR_CONVERSION, MYF(0), res1->length(), res1->ptr());
+    return error_real();
+  }
+
+  if (dim2 == UINT32_MAX) {
+    my_error(ER_TO_VECTOR_CONVERSION, MYF(0), res2->length(), res2->ptr());
+    return error_real();
+  }
+
+  // Check if dimensions match
+  if (dim1 != dim2) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), "Vector dimensions must match");
+    return error_real();
+  }
+
+  // Parse vectors to float arrays
+  const float* vec1 = reinterpret_cast<const float*>(res1->ptr());
+  const float* vec2 = reinterpret_cast<const float*>(res2->ptr());
+
+  // Parse distance metric
+  String metric_upper;
+  metric_upper.copy(*metric_str);
+  my_caseup_str(&my_charset_latin1, metric_upper.c_ptr_safe());
+
+  const char* metric = metric_upper.c_ptr_safe();
+
+  // Calculate distance based on metric
+  if (strcmp(metric, "COSINE") == 0) {
+    return calculate_cosine_distance(vec1, vec2, dim1);
+  } else if (strcmp(metric, "DOT") == 0) {
+    return calculate_dot_distance(vec1, vec2, dim1);
+  } else if (strcmp(metric, "EUCLIDEAN") == 0) {
+    return calculate_euclidean_distance(vec1, vec2, dim1);
+  } else {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), "Invalid distance metric. Supported: COSINE, DOT, EUCLIDEAN");
+    return error_real();
+  }
+}
+
 longlong Item_func_char_length::val_int() {
   assert(fixed);
   String *res = args[0]->val_str(&value);
