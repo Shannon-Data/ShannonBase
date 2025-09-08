@@ -118,7 +118,6 @@ class ML_embedding_table : public ML_embedding {
   virtual int predict_row(Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override { return false; }
   virtual int predict_table(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ML_EMBEDDING_H__

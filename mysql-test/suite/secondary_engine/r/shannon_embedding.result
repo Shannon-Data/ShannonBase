@@ -11,4 +11,35 @@ IGNORE
 SELECT VECTOR_TO_STRING(sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")));
 VECTOR_TO_STRING(sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2")))
 IGNORE
+CREATE TABLE tt (score int, name char(10), id int primary key, gender char(1));
+INSERT INTO tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "sh_embedding.tt.embed_vect", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+COUNT(*)
+3
+CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "test.tt.embed_vect", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
+COUNT(*)
+3
+ERROR 42S21: Duplicate column name 'id'
+CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
+ERROR 45000: Input table does not exist
+CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect", JSON_OBJECT("odel_id", "all-MiniLM-L12-v2"));
+ERROR 45000: model_id is required in options
+CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect1", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
+ERROR 45000: Input table does not exist
+SELECT * FROM tt;
+score	name	id	gender	embed_vect	details
+1	n1	1	m	IGNORE	NULL
+2	n2	2	f	IGNORE	NULL
+3	n3	3	m	IGNORE	NULL
+SHOW CREATE TABLE tt;
+Table	Create Table
+tt	CREATE TABLE `tt` (
+  `score` int DEFAULT NULL,
+  `name` char(10) DEFAULT NULL,
+  `id` int NOT NULL,
+  `gender` char(1) DEFAULT NULL,
+  `embed_vect` vector(2048) DEFAULT NULL,
+  `details` text,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 DROP DATABASE sh_embedding;
