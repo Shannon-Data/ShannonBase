@@ -1,5 +1,14 @@
 create database sh_embedding;
 use sh_embedding;
+SELECT DISTANCE(STRING_TO_VECTOR("[1.01231, 2.0123123, 3.0123123, 4.01231231]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "COSINE");
+DISTANCE(STRING_TO_VECTOR("[1.01231, 2.0123123, 3.0123123, 4.01231231]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "COSINE")
+0.0000016399679474421447
+SELECT DISTANCE(STRING_TO_VECTOR("[1.01231, 2.0123123, 3.0123123, 4.01231231]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "DOT");
+DISTANCE(STRING_TO_VECTOR("[1.01231, 2.0123123, 3.0123123, 4.01231231]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "DOT")
+-30.123122215270996
+SELECT DISTANCE(STRING_TO_VECTOR("[1.01231, 2.0123123, 3.0123123, 4.01231231]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "EUCLIDEAN");
+DISTANCE(STRING_TO_VECTOR("[1.01231, 2.0123123, 3.0123123, 4.01231231]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "EUCLIDEAN")
+0.02462363251759866
 SELECT ML_MODEL_LIST();
 ML_MODEL_LIST()
 [{"name": "all-MiniLM-L12-v2", "status": "ready"}]
@@ -14,11 +23,7 @@ IGNORE
 CREATE TABLE tt (score int, name char(10), id int primary key, gender char(1));
 INSERT INTO tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "sh_embedding.tt.embed_vect", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
-COUNT(*)
-3
 CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "test.tt.embed_vect", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
-COUNT(*)
-3
 ERROR 42S21: Duplicate column name 'id'
 CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
 ERROR 45000: Input table does not exist

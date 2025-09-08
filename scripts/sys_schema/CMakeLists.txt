@@ -200,6 +200,8 @@ SET(SYS_SCHEMA_SOURCES
   procedures/ml_train.sql
   procedures/ml_predict_table.sql
   procedures/ml_embed_table.sql
+  procedures/ml_rag.sql
+  procedures/ml_rag_table.sql
   after_setup.sql
   )
 

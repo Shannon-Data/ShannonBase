@@ -174,12 +174,6 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Input column cannot be part of the primary key';
     END IF;
 
-    -- Check if input table is empty
-    SET @sql = CONCAT('SELECT COUNT(*) FROM `', v_input_db, '`.`', v_input_table, '`');
-    PREPARE stmt FROM @sql;
-    EXECUTE stmt;
-    DEALLOCATE PREPARE stmt;
-
     -- Check if input and output tables are the same
     IF v_input_db = v_output_db AND v_input_table = v_output_table THEN
         SET v_input_same_as_output = TRUE;

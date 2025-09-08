@@ -1779,6 +1779,22 @@ class Item_func_vector_dim : public Item_int_func {
   }
 };
 
+class Item_func_vector_distance : public Item_real_func {
+ public:
+  Item_func_vector_distance(const POS &pos, PT_item_list *list)
+    : Item_real_func(pos, list) {}
+
+  double val_real() override;
+  const char *func_name() const override { return "distance"; }
+  bool resolve_type(THD *thd) override;
+ private:
+  double calculate_cosine_distance(const float* vec1, const float* vec2, uint32 dim);
+  double calculate_dot_distance(const float* vec1, const float* vec2, uint32 dim);
+  double calculate_euclidean_distance(const float* vec1, const float* vec2, uint32 dim);
+ private:
+   String m_value1, m_value2, m_metric;
+};
+
 class Item_func_bit_length final : public Item_func_length {
  public:
   Item_func_bit_length(const POS &pos, Item *a) : Item_func_length(pos, a) {}
