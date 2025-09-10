@@ -11,7 +11,7 @@ DISTANCE(STRING_TO_VECTOR("[1.01231, 2.0123123, 3.0123123, 4.01231231]"), STRING
 0.02462363251759866
 SELECT ML_MODEL_LIST();
 ML_MODEL_LIST()
-[{"name": "all-MiniLM-L12-v2", "status": "ready"}]
+[{"name": "all-MiniLM-L12-v2", "status": "ready"}, {"name": "llama3.2-3b-instruct-v1", "status": "ready"}, {"name": "multilingual-e5-small", "status": "ready"}]
 SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2"));
 ERROR HY000: ML operation failed. can not find the model:all_minilm_l12_v2.
 SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
