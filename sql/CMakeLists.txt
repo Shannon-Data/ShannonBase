@@ -130,6 +130,7 @@ SET(ML_SOURCES
   ../ml/ml_recommendation.cpp
   ../ml/ml_utils.cpp
   ../ml/infra_component/sentence_transform.cpp
+  ../ml/infra_component/llm_generate.cpp
 )
 
 SET(DD_SOURCES
@@ -978,7 +979,9 @@ MYSQL_ADD_PLUGIN(mysql_native_password
 
 TARGET_INCLUDE_DIRECTORIES(sql_main SYSTEM PUBLIC
   ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include
-  ${CMAKE_SOURCE_DIR}/extra/jerryscript/jerry-core/include)
+  ${CMAKE_SOURCE_DIR}/extra/jerryscript/jerry-core/include
+  ${CMAKE_SOURCE_DIR}/extra/tokenizer-ffi/include
+  )
 
 TARGET_LINK_LIBRARIES(sql_main ${MYSQLD_STATIC_PLUGIN_LIBS}
   mysql_server_component_services mysys strings vio
@@ -1019,12 +1022,29 @@ ADD_DEPENDENCIES(sql_dd GenKeywordList)
 TARGET_LINK_LIBRARIES(sql_dd sql_gis sql_main)
 SET_TARGET_PROPERTIES(sql_dd PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
+IF(CMAKE_SYSTEM_PROCESSOR MATCHES "arm" OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    SET(ARCH_SUFFIX "aarch64")
+ELSEIF(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "amd64")
+    SET(ARCH_SUFFIX "x86_64")
+ELSEIF(CMAKE_SYSTEM_PROCESSOR MATCHES "i386" OR CMAKE_SYSTEM_PROCESSOR MATCHES "i686")
+    SET(ARCH_SUFFIX "x86")
+ELSE()
+    MESSAGE(WARNING "Unknown architecture: ${CMAKE_SYSTEM_PROCESSOR}, using default naming")
+    SET(ARCH_SUFFIX ${CMAKE_SYSTEM_PROCESSOR})
+ENDIF()
+
+SET(TOKENIZER_FFI_LIB 
+    ${CMAKE_SOURCE_DIR}/extra/tokenizer-ffi/lib/${CMAKE_STATIC_LIBRARY_PREFIX}tokenizer_ffi.${ARCH_SUFFIX}${CMAKE_STATIC_LIBRARY_SUFFIX}
+)
+
 ADD_LIBRARY(sql_ml STATIC ${ML_SOURCES})
 #gomp required by lightgbm
-TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp ${ONNXRUNTIME_LIBRARIES})
+TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp ${ONNXRUNTIME_LIBRARIES} ${TOKENIZER_FFI_LIB})
 TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC 
                            ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include
-                           ${CMAKE_SOURCE_DIR}/extra/lightgbm/include)
+                           ${CMAKE_SOURCE_DIR}/extra/lightgbm/include
+                           ${CMAKE_SOURCE_DIR}/extra/rapidjson/include
+                           )
 SET_TARGET_PROPERTIES(sql_ml PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 #

@@ -47,13 +47,61 @@
 #include "ml_utils.h"                         //ml utils
 #include "storage/innobase/include/ut0dbg.h"  //for ut_a
 
+#include "infra_component/llm_generate.h"
 #include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
 
+extern char mysql_home[FN_REFLEN];
+extern char mysql_llm_home[FN_REFLEN];
 namespace ShannonBase {
 namespace ML {
-void ML_generate_row::Generate() {}
+std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
+  std::string result;
 
-void ML_generate_table::Generate() {}
+  ShannonBase::ML::OPTION_VALUE_T opt_values;
+  std::string keystr;
+  if (ShannonBase::ML::Utils::parse_json(option, opt_values, keystr, 0)) {
+    std::string err("can not parse the option");
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+    return result;
+  }
+
+  std::string model_name("Llama-3.2-3B-Instruct");  // default model used.
+  keystr = "model_id";
+  if (opt_values.find(keystr) != opt_values.end()) model_name = opt_values[keystr].size() ? opt_values[keystr][0] : "";
+
+  std::string home_path(mysql_llm_home);
+  if (!home_path.length()) {
+    home_path.append(mysql_home);
+  }
+
+  std::string model_path(home_path);
+  model_path.append("llm-models/").append(model_name).append("/onnx/");
+  if (!std::filesystem::exists(model_path)) {
+    std::string err("can not find the model:");
+    err.append(model_name);
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+    return result;
+  }
+
+  std::string token_path(home_path);
+  token_path.append("llm-models/").append(model_name).append("/");
+  if (!std::filesystem::exists(token_path)) {
+    std::string err("can not find the token path:");
+    err.append(model_name);
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+    return result;
+  }
+
+  auto tg = std::make_unique<LLM_Generate::TextGenerator>(model_path, token_path, model_name);
+  LLM_Generate::TextGenerator::Result gen_res = tg->Generate(text);
+  result = gen_res.output;
+  return result;
+}
+
+std::string ML_generate_table::Generate(std::string &, Json_wrapper &) {
+  std::string result;
+  return result;
+}
 
 }  // namespace ML
 }  // namespace ShannonBase

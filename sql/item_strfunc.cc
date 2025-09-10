@@ -21,6 +21,8 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+   Copyright (c) 2023-, Shannon Data AI and/or its affiliates.
 */
 
 /**
@@ -134,6 +136,7 @@
 #include "ml/ml_utils.h"  //Utils
 #include "ml/ml_embedding.h"
 #include "ml/ml_rag.h"
+#include "ml/ml_generate.h"
 extern uint *my_aes_opmode_key_sizes;
 
 using std::max;
@@ -4335,7 +4338,7 @@ bool Item_func_ml_embed_table::resolve_type(THD* thd) {
   }
 
   if (reject_geometry_args()) return true;
-  set_data_type_string(65535u);
+  set_data_type_string(MAX_BLOB_WIDTH, default_charset());
   return false;
 }
 
@@ -4372,26 +4375,52 @@ String *Item_func_ml_embed_table::val_str(String *str) {
 }
 
 bool Item_func_ml_generate::resolve_type(THD* thd) {
-  if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_VARCHAR)) return true;
-  if (arg_count > 1) {
-    if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_JSON)) return true;
+  assert(arg_count <= 2);
+  if (Item_str_func::resolve_type(thd)) {
+    return true;
   }
 
-  set_data_type_string(65535U); // LONGTEXT
-  set_nullable(true);
+  if (args[0]->result_type() != STRING_RESULT ||
+      args[0]->data_type() == MYSQL_TYPE_JSON) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+    return true;
+  }
+
+  if (arg_count == 2) {
+   if (args[1]->result_type() != STRING_RESULT ||
+      args[1]->data_type() != MYSQL_TYPE_JSON) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+    return true;
+    }
+  }
+
+  if (reject_geometry_args()) return true;
+  set_data_type_string(MAX_BLOB_WIDTH, default_charset());
+  set_nullable(false);
   return false;
 }
 
 String *Item_func_ml_generate::val_str(String *str) {
   assert(fixed);
     
-  String *text_arg = args[0]->val_str(str);
-  if (!text_arg || args[0]->null_value) {
-      null_value = true;
-      return nullptr;
+  String* res;
+  if (!(res = args[0]->val_str(str))) {
+    return error_str();
+  }
+  if (res->is_empty()) return error_str();
+  std::string input_text(res->ptr(), res->length());
+
+  Json_wrapper options;
+  if (arg_count == 2) {
+    if (args[1]->val_json(&options)) return error_str();
   }
 
-  return str;
+  auto generate_row_ptr = std::make_unique<ShannonBase::ML::ML_generate_row>();
+  auto generate_text = generate_row_ptr->Generate(input_text, options);
+  if (!generate_text.length()) error_str();
+
+  buffer.copy(generate_text.c_str(), generate_text.length(), &my_charset_utf8mb4_bin);
+  return &buffer;
 }
 
 bool Item_func_ml_generate_table::resolve_type(THD*) {

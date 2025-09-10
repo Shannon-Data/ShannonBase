@@ -45,21 +45,76 @@ class ML_generate : public ML_algorithm {
  public:
   ML_generate() = default;
   virtual ~ML_generate() override = default;
-  virtual void Generate() = 0;
+
+  /**options
+   * 'task', {'generation'|'summarization'}
+   * |'model_id', 'ModelID'
+   * |'context', 'Context'
+   * |'language', 'Language'
+   * |'temperature', Temperature
+   * |'max_tokens', MaxTokens
+   * |'top_k', K
+   * |'top_p', P
+   * |'repeat_penalty', RepeatPenalty
+   * |'frequency_penalty', FrequencyPenalty
+   * |'presence_penalty', PresencePenalty
+   * |'stop_sequences', JSON_ARRAY('StopSequence'[, 'StopSequence'] ...)
+   * |'speculative_decoding', {true|false}
+   * |'image', Base64ImageEncoding
+   */
+  virtual std::string Generate(std::string &text, Json_wrapper &option) = 0;
 };
 
 class ML_generate_row : public ML_generate {
  public:
   ML_generate_row() = default;
   virtual ~ML_generate_row() override = default;
-  virtual void Generate() override;
+
+  virtual ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::GENERATE; }
+
+  virtual std::string Generate(std::string &text, Json_wrapper &option) override;
+
+ private:
+  virtual int train() override { return false; }
+  virtual int load(std::string &) override { return false; }
+  virtual int load_from_file(std::string &, std::string &) override { return false; }
+  virtual int unload(std::string &) override { return false; }
+  virtual int import(Json_wrapper &, Json_wrapper &, std::string &) override { return false; }
+  virtual double score(std::string &, std::string &, std::string &, std::string &, Json_wrapper &) override {
+    return 0.0f;
+  }
+
+  virtual int explain(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
+  virtual int explain_row() override { return false; }
+  virtual int explain_table() override { return false; }
+  virtual int predict_row(Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override { return false; }
+  virtual int predict_table(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
 };
 
 class ML_generate_table : public ML_generate {
  public:
   ML_generate_table() = default;
   virtual ~ML_generate_table() override = default;
-  virtual void Generate() override;
+
+  virtual ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::GENERATE; }
+
+  virtual std::string Generate(std::string &text, Json_wrapper &option) override;
+
+ private:
+  virtual int train() override { return false; }
+  virtual int load(std::string &) override { return false; }
+  virtual int load_from_file(std::string &, std::string &) override { return false; }
+  virtual int unload(std::string &) override { return false; }
+  virtual int import(Json_wrapper &, Json_wrapper &, std::string &) override { return false; }
+  virtual double score(std::string &, std::string &, std::string &, std::string &, Json_wrapper &) override {
+    return 0.0f;
+  }
+
+  virtual int explain(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
+  virtual int explain_row() override { return false; }
+  virtual int explain_table() override { return false; }
+  virtual int predict_row(Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override { return false; }
+  virtual int predict_table(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
 };
 
 }  // namespace ML

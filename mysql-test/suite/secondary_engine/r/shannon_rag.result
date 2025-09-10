@@ -28,4 +28,5 @@ SET @options = JSON_OBJECT(
     )
 );
 CALL sys.ml_rag('Explain AutoML', @output, @options);
+ERROR HY000: ML operation failed. can not find the model:Llama-3.2-3B-Instruct.
 DROP DATABASE sh_rag;

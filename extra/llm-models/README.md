@@ -38,9 +38,13 @@ optimum-cli export onnx --model all-MiniLM-L12-v2 all-MiniLM-L12-v2-ONNX/
 
 ```
 
+OR, YOU CAN DOWNLOAD THE ONNX FILES FROM https://huggingface.co/onnx-community
+
 2025-09-10
 
 make dirs for models used in ShannonBase without ONNX files(its size too large, you should
 copy these ONNX files to its corresponding folder by your own).
 
 
+Llama-3.2-3B-Instruct https://huggingface.co/onnx-community/Llama-3.2-3B-Instruct/tree/main
+all-MiniLM-L12-v2 https://huggingface.co/sentence-transformers/all-MiniLM-L12-v2/tree/main
