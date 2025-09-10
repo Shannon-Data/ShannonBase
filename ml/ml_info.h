@@ -53,7 +53,8 @@ enum class ML_TASK_TYPE_T {
    ANOMALY_DETECTION,
    RECOMMENDATION,
    EMBEDDING,
-   RAG
+   RAG,
+   GENERATE
 };
 
 enum class MODEL_STATUS_T {

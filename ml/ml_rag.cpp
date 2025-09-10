@@ -55,7 +55,7 @@ extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];
 namespace ShannonBase {
 namespace ML {
-std::string ML_RAG_row::ProcessRAG(const std::string &query_text, const Json_wrapper &options) {
+std::string ML_RAG_row::ProcessRAG(const std::string &, const Json_wrapper &options) {
   std::string result;
 
   Json_wrapper rag_opt = options;
@@ -86,7 +86,7 @@ std::string ML_RAG_row::ProcessRAG(const std::string &query_text, const Json_wra
   return result;
 }
 
-std::string ML_RAG_table::ProcessRAG(const std::string &query_text, const Json_wrapper &options) {
+std::string ML_RAG_table::ProcessRAG(const std::string &, const Json_wrapper &) {
   std::string result;
 
   return result;

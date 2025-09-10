@@ -143,7 +143,7 @@ int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::
     } break;
     case enum_json_type::J_DECIMAL: {
       int length = DECIMAL_MAX_STR_LENGTH + 1;
-      auto buffer = std::unique_ptr<char[]>(new char[length + 1]);
+      auto buffer = std::unique_ptr<char[]>(new char[length + 10]);
       char *ptr = buffer.get() + length;
 
       my_decimal m;
