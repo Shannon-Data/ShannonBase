@@ -1,6 +1,8 @@
 IN THIS DIRECTORY, THE LOCAL LLM MODELS IN ONNX FORMAT ARE HERE. SHANNONBASE WILL USE FOR EMBEDDING OR INFERRENCING.
 YOU CAN COPY OR DOWNLOAD YOUR OWN LLM MODELS FOR YOUR PURPOSE.
 
+THE MODEL NAME IS CASE-SENSTIVE. AND SHOULD PUT ALL ONNX FILES INTO `onnx` subdirectory(create it if it does not exists).
+
 you can use a converter to convert your pretrained PyTorch, TensorFlow, or JAX models to ONNX using Optimum.
 https://github.com/huggingface/optimum.
 
@@ -35,4 +37,10 @@ optimum-cli export onnx --help
 optimum-cli export onnx --model all-MiniLM-L12-v2 all-MiniLM-L12-v2-ONNX/
 
 ```
+
+2025-09-10
+
+make dirs for models used in ShannonBase without ONNX files(its size too large, you should
+copy these ONNX files to its corresponding folder by your own).
+
 
