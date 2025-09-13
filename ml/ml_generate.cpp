@@ -92,7 +92,79 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
     return result;
   }
 
-  auto tg = std::make_unique<LLM_Generate::TextGenerator>(model_path, token_path, model_name);
+  LLM_Generate::GenerationOptions gen_options;
+  gen_options.model_id = model_name;
+
+  std::string oper_type;
+  keystr = "task";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    std::transform(oper_type.begin(), oper_type.end(), oper_type.begin(), ::tolower);
+    gen_options.task = oper_type;
+  }
+  keystr = "context";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    std::transform(oper_type.begin(), oper_type.end(), oper_type.begin(), ::tolower);
+    gen_options.context = oper_type;
+  }
+
+  keystr = "language";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    std::transform(oper_type.begin(), oper_type.end(), oper_type.begin(), ::tolower);
+    gen_options.language = oper_type;
+  }
+
+  keystr = "temperature";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    gen_options.temperature = std::atof(oper_type.c_str());
+  }
+
+  keystr = "max_tokens";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    gen_options.max_tokens = std::atoi(oper_type.c_str());
+  }
+
+  keystr = "top_k";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    gen_options.top_k = std::atoi(oper_type.c_str());
+  }
+
+  keystr = "top_p";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    gen_options.top_p = std::atof(oper_type.c_str());
+  }
+
+  keystr = "repeat_penalty";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    gen_options.repeat_penalty = std::atof(oper_type.c_str());
+  }
+
+  keystr = "presence_penalty";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    gen_options.presence_penalty = std::atof(oper_type.c_str());
+  }
+
+  keystr = "stop_sequences";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    gen_options.stop_sequences = opt_values[keystr];
+  }
+
+  keystr = "speculative_decoding";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    std::transform(oper_type.begin(), oper_type.end(), oper_type.begin(), ::tolower);
+    gen_options.presence_penalty = (oper_type == "true") ? true : false;
+  }
+
+  auto tg = std::make_unique<LLM_Generate::TextGenerator>(model_path, token_path, gen_options);
   LLM_Generate::TextGenerator::Result gen_res = tg->Generate(text);
   result = gen_res.output;
   return result;
