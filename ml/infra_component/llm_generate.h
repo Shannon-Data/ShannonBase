@@ -113,6 +113,32 @@ class CPUDetector {
 ModelSelection select_model_variant(const std::string &model_dir, const std::string &user_precision = "",
                                     const std::string &user_variant = "");
 
+typedef struct {
+  std::string task = "generation";  // 'generation' or 'summarization'
+  std::string model_id = "";        // Model identifier, llma, mistral, phi, etc.
+  std::string context = "";         // Additional context
+  std::string language = "en";      // Language setting
+
+  float temperature = 1.0f;  // Sampling temperature (0.0-2.0)
+  int max_tokens = 100;      // Maximum tokens to generate
+  int top_k = 50;            // Top-k sampling
+  float top_p = 0.9f;        // Nucleus sampling
+
+  float repeat_penalty = 1.0f;     // Repetition penalty
+  float frequency_penalty = 0.0f;  // Frequency penalty
+  float presence_penalty = 0.0f;   // Presence penalty
+
+  std::vector<std::string> stop_sequences;  // Stop sequences
+  bool speculative_decoding = false;        // Speculative decoding
+  std::string image_base64 = "";            // Base64 encoded image
+
+  bool validate() const {
+    return temperature >= 0.0f && temperature <= 5.0f && max_tokens > 0 && max_tokens <= 4096 && top_k >= 0 &&
+           top_p >= 0.0f && top_p <= 1.0f && repeat_penalty > 0.0f && (task == "generation" || task == "summarization");
+  }
+
+} GenerationOptions;
+
 struct ModelConfig {
   size_t num_layers = 0;       // 0 means auto dective
   size_t num_query_heads = 0;  // 0 means auto dective
@@ -128,7 +154,7 @@ class TextGenerator {
     std::vector<int64_t> tokens;
   };
 
-  TextGenerator(const std::string &modelPath, const std::string &tokenizerPath, const std::string &modelType);
+  TextGenerator(const std::string &modelPath, const std::string &tokenizerPath, const GenerationOptions &option);
   virtual ~TextGenerator();
 
   inline bool Initialized() const { return m_initialized; }
@@ -145,6 +171,10 @@ class TextGenerator {
    * @return Result containing generated text and token sequence
    */
   Result Generate(const std::string &userPrompt, int maxNewTokens = 128);
+
+  void SetVocabularySize(size_t size) { m_vocabularySize = size; }
+
+  size_t GetMaxSequenceLength() const;
 
  private:
   /**
@@ -205,7 +235,24 @@ class TextGenerator {
 
   bool ValidateTensorBufferSize(const Ort::Value &tensor, const void *buffer, size_t bufferSize);
 
+  void InitializeTokenTracking(size_t vocabSize);
+  void UpdateTokenTracking(int64_t token);
+
+  int64_t SampleWithTemperature(const float *logits, size_t vocabSize, float temperature);
+  int64_t SampleTopK(const float *logits, size_t vocabSize, int topK, float temperature);
+  int64_t SampleTopP(const float *logits, size_t vocabSize, float topP, float temperature);
+
+  // Penalty
+  void ApplyRepeatPenalty(float *logits, size_t vocabSize, const std::vector<int64_t> &generatedTokens, float penalty);
+  void ApplyFrequencyPenalty(float *logits, size_t vocabSize, float penalty);
+  void ApplyPresencePenalty(float *logits, size_t vocabSize, float penalty);
+
+  bool ShouldStop(const std::vector<int64_t> &tokens, const std::vector<std::string> &stopSequences);
+
  private:
+  // Generation Options.
+  GenerationOptions m_gen_option;
+
   // End-of-Sequence Token ID
   int64_t m_eosTokenId = -1;
 
@@ -235,6 +282,15 @@ class TextGenerator {
 
   // model type: llma-3b, mistral, phi, etc.
   std::string m_modelType;
+
+  // token Frequency
+  std::vector<int64_t> m_tokenFrequency;
+
+  // token Presence
+  std::vector<int64_t> m_tokenPresence;
+
+  // Vocabulary Size
+  size_t m_vocabularySize = 0;
 
   // initialized or not.
   bool m_initialized = false;

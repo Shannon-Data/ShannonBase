@@ -27,11 +27,13 @@
 #include "ml/infra_component/llm_generate.h"
 #include "my_rapidjson_size_t.h"
 
+#include <optional>
+#include <random>
+#include <set>
+
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/rapidjson.h>
-#include <optional>
-#include <set>
 
 namespace ShannonBase {
 namespace ML {
@@ -208,10 +210,12 @@ ModelSelection select_model_variant(const std::string &model_dir, const std::str
   return result;
 }
 
+std::mt19937 g_rng(std::random_device{}());
+
 // TextGenerator Implementation
 TextGenerator::TextGenerator(const std::string &modelPath, const std::string &tokenizerPath,
-                             const std::string &modelType)
-    : m_modelPath(modelPath), m_tokenizerPath(tokenizerPath), m_modelType(modelType) {
+                             const GenerationOptions &option)
+    : m_gen_option(option), m_modelPath(modelPath), m_tokenizerPath(tokenizerPath), m_modelType(option.model_id) {
   auto ms = select_model_variant(m_modelPath);
   m_modelPath = (fs::path(m_modelPath) / ms.filename).string();
   m_initialized = !(InitializeONNX() || InitializeTokenizer() || LoadTokenizerConfig());
@@ -657,9 +661,178 @@ bool TextGenerator::ValidateTensorBufferSize(const Ort::Value &tensor, const voi
   return true;
 }
 
+int64_t TextGenerator::SampleWithTemperature(const float *logits, size_t vocabSize, float temperature) {
+  if (temperature <= 0.0f) {
+    return Argmax(logits, vocabSize);
+  }
+
+  std::vector<float> scaledLogits(vocabSize);
+  for (size_t i = 0; i < vocabSize; ++i) {
+    scaledLogits[i] = logits[i] / temperature;
+  }
+
+  // Softmax
+  float maxLogit = *std::max_element(scaledLogits.begin(), scaledLogits.end());
+  float sum = 0.0f;
+  for (size_t i = 0; i < vocabSize; ++i) {
+    scaledLogits[i] = std::exp(scaledLogits[i] - maxLogit);
+    sum += scaledLogits[i];
+  }
+
+  for (size_t i = 0; i < vocabSize; ++i) {
+    scaledLogits[i] /= sum;
+  }
+
+  // random sampling
+  std::discrete_distribution<int64_t> dist(scaledLogits.begin(), scaledLogits.end());
+  return dist(g_rng);
+}
+
+int64_t TextGenerator::SampleTopK(const float *logits, size_t vocabSize, int topK, float temperature) {
+  std::vector<std::pair<float, int64_t>> logitPairs;
+  logitPairs.reserve(vocabSize);
+
+  for (size_t i = 0; i < vocabSize; ++i) {
+    logitPairs.emplace_back(logits[i], static_cast<int64_t>(i));
+  }
+
+  // sort by logit value desc
+  std::partial_sort(logitPairs.begin(), logitPairs.begin() + std::min(topK, static_cast<int>(vocabSize)),
+                    logitPairs.end(), std::greater<>());
+
+  // only keep top-k
+  int actualK = std::min(topK, static_cast<int>(vocabSize));
+  std::vector<float> topKLogits(actualK);
+  std::vector<int64_t> topKIndices(actualK);
+
+  for (int i = 0; i < actualK; ++i) {
+    topKLogits[i] = logitPairs[i].first;
+    topKIndices[i] = logitPairs[i].second;
+  }
+
+  // in top-k with temp sampling.
+  int64_t selectedIdx = SampleWithTemperature(topKLogits.data(), actualK, temperature);
+  return topKIndices[selectedIdx];
+}
+
+int64_t TextGenerator::SampleTopP(const float *logits, size_t vocabSize, float topP, float temperature) {
+  std::vector<std::pair<float, int64_t>> logitPairs;
+  logitPairs.reserve(vocabSize);
+
+  for (size_t i = 0; i < vocabSize; ++i) {
+    logitPairs.emplace_back(logits[i], static_cast<int64_t>(i));
+  }
+
+  std::sort(logitPairs.begin(), logitPairs.end(), std::greater<>());
+
+  // calc softmax prob
+  float maxLogit = logitPairs[0].first;
+  float sum = 0.0f;
+  std::vector<float> probs(vocabSize);
+
+  for (size_t i = 0; i < vocabSize; ++i) {
+    probs[i] = std::exp(logitPairs[i].first - maxLogit);
+    sum += probs[i];
+  }
+
+  for (size_t i = 0; i < vocabSize; ++i) {
+    probs[i] /= sum;
+  }
+
+  // find cumulateive top_p pos.
+  float cumulativeProb = 0.0f;
+  size_t cutoff = vocabSize;
+
+  for (size_t i = 0; i < vocabSize; ++i) {
+    cumulativeProb += probs[i];
+    if (cumulativeProb >= topP) {
+      cutoff = i + 1;
+      break;
+    }
+  }
+
+  // normalize the tokens
+  std::vector<float> selectedLogits(cutoff);
+  std::vector<int64_t> selectedIndices(cutoff);
+
+  for (size_t i = 0; i < cutoff; ++i) {
+    selectedLogits[i] = logitPairs[i].first;
+    selectedIndices[i] = logitPairs[i].second;
+  }
+
+  int64_t selectedIdx = SampleWithTemperature(selectedLogits.data(), cutoff, temperature);
+  return selectedIndices[selectedIdx];
+}
+
+void TextGenerator::ApplyRepeatPenalty(float *logits, size_t vocabSize, const std::vector<int64_t> &generatedTokens,
+                                       float penalty) {
+  if (penalty == 1.0f) return;
+
+  for (int64_t token : generatedTokens) {
+    if (token >= 0 && token < static_cast<int64_t>(vocabSize)) {
+      if (logits[token] > 0) {
+        logits[token] /= penalty;
+      } else {
+        logits[token] *= penalty;
+      }
+    }
+  }
+}
+
+void TextGenerator::ApplyFrequencyPenalty(float *logits, size_t vocabSize, float penalty) {
+  if (penalty == 0.0f) return;
+
+  for (size_t i = 0; i < vocabSize && i < m_tokenFrequency.size(); ++i) {
+    logits[i] -= penalty * static_cast<float>(m_tokenFrequency[i]);
+  }
+}
+
+void TextGenerator::ApplyPresencePenalty(float *logits, size_t vocabSize, float penalty) {
+  if (penalty == 0.0f) return;
+
+  for (size_t i = 0; i < vocabSize && i < m_tokenPresence.size(); ++i) {
+    if (m_tokenPresence[i] > 0) {
+      logits[i] -= penalty;
+    }
+  }
+}
+
+bool TextGenerator::ShouldStop(const std::vector<int64_t> &tokens, const std::vector<std::string> &stopSequences) {
+  if (stopSequences.empty()) return false;
+
+  // decode recent tokens
+  size_t checkLength = std::min(tokens.size(), size_t(50));  // check the lastest 50 tokens
+  std::vector<uint32_t> recentTokens;
+  for (size_t i = tokens.size() - checkLength; i < tokens.size(); ++i) {
+    recentTokens.push_back(static_cast<uint32_t>(tokens[i]));
+  }
+
+  std::string recentText = m_tokenizer->decode(recentTokens, true);
+
+  for (const auto &stopSeq : stopSequences) {
+    if (recentText.find(stopSeq) != std::string::npos) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void TextGenerator::InitializeTokenTracking(size_t vocabSize) {
+  m_tokenFrequency.assign(vocabSize, 0);
+  m_tokenPresence.assign(vocabSize, 0);
+}
+
+void TextGenerator::UpdateTokenTracking(int64_t token) {
+  if (token >= 0 && token < static_cast<int64_t>(m_tokenFrequency.size())) {
+    m_tokenFrequency[token]++;
+    m_tokenPresence[token] = 1;
+  }
+}
+
 TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int maxNewTokens) {
   Result result;
-  if (!Initialized()) return result;
+  if (!Initialized() || !m_gen_option.validate()) return result;
 
   m_stepFloatBuffers.clear();
   m_stepInt64Buffers.clear();
@@ -669,7 +842,12 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     m_shouldClearKVCache = false;
   }
 
-  std::string inputText = ApplyChatTemplate(userPrompt);
+  std::string inputText;
+  if (m_gen_option.task == "summarization") {
+    inputText = ApplyChatTemplate("Please summarize the following text: " + userPrompt);
+  } else {
+    inputText = ApplyChatTemplate(userPrompt);
+  }
 
   // encoding the input text into token ids.
   auto encoding = m_tokenizer->encode(inputText, true);
@@ -681,6 +859,8 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   for (auto id : inputIds) {
     inputIds64.push_back(static_cast<int64_t>(id));
   }
+
+  InitializeTokenTracking(m_vocabularySize > 0 ? m_vocabularySize : 50000);  // default 50k vocabulary.
 
   Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
   Ort::AllocatorWithDefaultOptions allocator;
@@ -707,8 +887,6 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   newTokens.reserve(maxNewTokens);
 
   for (int step = 0; step < maxNewTokens; ++step) {
-    std::cout << "Generation step " << step + 1 << "/" << maxNewTokens << std::endl;
-
     m_stepFloatBuffers.clear();
     m_stepInt64Buffers.clear();
 
@@ -827,11 +1005,35 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
       logitsOffset = (seqLen - 1) * static_cast<size_t>(vocabSize);
     }
 
-    int64_t nextToken = Argmax(logitsData + logitsOffset, static_cast<size_t>(vocabSize));
+    std::vector<float> currentLogits(logitsData + logitsOffset, logitsData + logitsOffset + vocabSize);
+
+    // Apply penalty strategies.
+    ApplyRepeatPenalty(currentLogits.data(), vocabSize, generatedTokens, m_gen_option.repeat_penalty);
+    ApplyFrequencyPenalty(currentLogits.data(), vocabSize, m_gen_option.frequency_penalty);
+    ApplyPresencePenalty(currentLogits.data(), vocabSize, m_gen_option.presence_penalty);
+
+    // According to the options values to choose sample strategy.
+    int64_t nextToken;
+    if (m_gen_option.top_k > 0 && m_gen_option.top_p < 1.0f) {
+      // top-k and top-p
+      nextToken = SampleTopK(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.temperature);
+    } else if (m_gen_option.top_k > 0) {
+      nextToken = SampleTopK(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.temperature);
+    } else if (m_gen_option.top_p < 1.0f) {
+      nextToken = SampleTopP(currentLogits.data(), vocabSize, m_gen_option.top_p, m_gen_option.temperature);
+    } else {
+      nextToken = SampleWithTemperature(currentLogits.data(), vocabSize, m_gen_option.temperature);
+    }
+
+    // Check EOS or stop serial.
     if (nextToken == m_eosTokenId) break;
 
     generatedTokens.push_back(nextToken);
     newTokens.push_back(nextToken);
+    UpdateTokenTracking(nextToken);
+    if (ShouldStop(generatedTokens, m_gen_option.stop_sequences)) {
+      break;
+    }
     UpdateKVCache(outputTensors, outputNames, memInfo);
   }
 
@@ -848,7 +1050,6 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   result.tokens = std::move(generatedTokens);
   return result;
 }
-
 }  // namespace LLM_Generate
 }  // namespace ML
 }  // namespace ShannonBase
