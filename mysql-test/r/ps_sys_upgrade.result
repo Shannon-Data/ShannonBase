@@ -74,6 +74,7 @@ format_time
 list_add
 list_drop
 ml_embed_row
+ml_generate
 ml_predict_row
 ps_is_account_enabled
 ps_is_consumer_enabled
