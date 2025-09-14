@@ -135,6 +135,7 @@ ml_embed_table	PROCEDURE
 ml_explain	PROCEDURE
 ml_explain_row	PROCEDURE
 ml_explain_table	PROCEDURE
+ml_generate_table	PROCEDURE
 ml_model_active	PROCEDURE
 ml_model_export	PROCEDURE
 ml_model_import	PROCEDURE

@@ -203,6 +203,7 @@ SET(SYS_SCHEMA_SOURCES
   procedures/ml_embed_table.sql
   procedures/ml_rag.sql
   procedures/ml_rag_table.sql
+  procedures/ml_generate_table.sql
   after_setup.sql
   )
 
