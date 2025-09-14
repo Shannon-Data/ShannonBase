@@ -25,7 +25,7 @@ At last, ShannonBase Multilingual Engine Component. ShannonBase includes a light
 
 ## Getting Started with ShannonBase:
 ### Compilation, Installation and Start ShannonBase
-#### 1: Folk or clone the repo.
+#### 1: Fork or clone the repo.
 ```
 git clone --recursive git@github.com:Shannon-Data/ShannonBase.git
 ```
@@ -161,7 +161,35 @@ CALL sys.ML_MODEL_LOAD(@census_model, NULL);
 SELECT sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
 ```
 
-#### 3: Creating javascript language stored procedure.
+#### 4: Using GenAI.
+ShannonBase GenAI routines reside in the MySQL sys schema. Using system rountines to do text (or image)embedding, then do RAG.
+Or you can run LLM model with ONNXRuntime.
+```
+SELECT ml_model_list();
+
+SELECT ml_model_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+
+CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect3", JSON_OBJECT("model_id", "all-MiniLM-L12-v2"));
+
+SELECT sys.ML_GENERATE("What is AI?", JSON_OBJECT("task", "generation", "model_id", "Llama-3.2-3B-Instruct", "language", "en"));
+
+SET @options = JSON_OBJECT(
+    'vector_store', JSON_ARRAY('test.demo_embeddings'),
+    'n_citations', 2,
+    'embed_model_id', 'all-MiniLM-L12-v2',
+    'vector_store_columns', JSON_OBJECT(
+        'segment', 'segment',
+        'segment_embedding', 'embedding',
+        'document_name', 'document_name',
+        'metadata', 'metadata',
+        'segment_number', 'segment_number'
+    )
+);
+
+CALL sys.ml_rag('Explain AutoML', @output, @options);
+```
+
+#### 5: Creating javascript language stored procedure.
 To specify the language as `JavaScript`, you can create a stored procedure in JavaScript
 ```
 DELIMITER |;
