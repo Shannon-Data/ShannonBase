@@ -29,6 +29,7 @@ ml_embed_table
 ml_explain
 ml_explain_row
 ml_explain_table
+ml_generate_table
 ml_model_active
 ml_model_export
 ml_model_import
