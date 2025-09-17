@@ -171,6 +171,12 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
     case AccessPath::BKA_JOIN: {
     } break;
     case AccessPath::HASH_JOIN: {
+      auto inner = path->hash_join().inner;
+      auto outer = path->hash_join().outer;
+
+      context->can_vectorized = true;
+      // create vectorized table scan if it can.
+      return AccessPathFactory::CreateHashJoin(outer, inner, true);
     } break;
 
     // Composite access paths.

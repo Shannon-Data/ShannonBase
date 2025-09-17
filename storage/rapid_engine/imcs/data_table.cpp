@@ -311,81 +311,96 @@ start:
 // IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `DataTable::next`
 // CORRESPONDINGLY.
 int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt) {
-start:
   assert(m_initialized.load());
-  while (read_cnt < batch_size) {
-    if (m_rowid >= m_rapid_table->rows(nullptr)) return HA_ERR_END_OF_FILE;
+  read_cnt = 0;
+  ShannonBase::row_id_t start_row = m_rowid.load();
+  if (start_row >= m_rapid_table->rows(nullptr)) return HA_ERR_END_OF_FILE;
 
-    auto current_chunk = m_rowid / SHANNON_ROWS_IN_CHUNK;
-    auto offset_in_chunk = m_rowid % SHANNON_ROWS_IN_CHUNK;
+  auto current_chunk = start_row / SHANNON_ROWS_IN_CHUNK;
+  auto offset_in_chunk = start_row % SHANNON_ROWS_IN_CHUNK;
+  size_t max_rows_in_chunk = SHANNON_ROWS_IN_CHUNK - offset_in_chunk;
 
-    for (auto ind = 0u; ind < m_data_source->s->fields; ind++) {
-      auto source_fld = *(m_data_source->field + ind);
-      if (!bitmap_is_set(m_data_source->read_set, ind) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+  size_t n_to_scan = std::min(batch_size * 2, max_rows_in_chunk);
+  n_to_scan = std::min(n_to_scan, static_cast<size_t>(m_rapid_table->rows(nullptr) - start_row));
 
-      auto rpd_field = m_rapid_table->get_field(source_fld->field_name);
-      ut_a(rpd_field);
-
-      auto &col_chunk = data[ind];
-      auto normalized_length = rpd_field->normalized_pack_length();
-      DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
-        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "secondary_engine_rapid_next_error");
-        return HA_ERR_GENERIC;
-      });
-
-      // to check version link to check its old value.
-      auto current_chunk_ptr = rpd_field->chunk(current_chunk);
-      auto current_data_ptr = current_chunk_ptr->base() + offset_in_chunk * normalized_length;
-      if ((uintptr_t(current_data_ptr) & (CACHE_LINE_SIZE - 1)) == 0)
-        SHANNON_PREFETCH_R(current_data_ptr + PREFETCH_AHEAD * CACHE_LINE_SIZE);
-
-      auto data_len = normalized_length;
-      auto data_ptr = ensure_buffer_size(data_len);
-      std::memcpy(data_ptr, current_data_ptr, data_len);
-
-      uint8 status{0};
-      auto versioned_ptr = current_chunk_ptr->header()->m_smu->build_prev_vers(m_context.get(), offset_in_chunk,
-                                                                               data_ptr, data_len, status);
-      if (!versioned_ptr &&
-          (status & static_cast<uint8>(
-                        ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_ROLLBACKED))) {  // means rollbacked rows.
-        m_rowid.fetch_add(1);
-        goto start;
-      }
-      if (status &
-          static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_NULL)) {  // the original value is null.
-        ut_a(data_len == UNIV_SQL_NULL);
-        // source_fld->set_null();
-        col_chunk.set_null(read_cnt);
-        read_cnt++;
-        continue;
-      }
-      if (status & static_cast<uint8>(ShannonBase::ReadView::RECONSTRUCTED_STATUS::STAT_DELETED)) {
-        m_rowid.fetch_add(1);
-        goto start;
-      }
-
-      // source_fld->set_notnull();
-      ut_a(source_fld->type() == rpd_field->header()->m_source_fld->type());
-      if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_blob(source_fld->type())) {
-        if (source_fld->real_type() == MYSQL_TYPE_ENUM) {
-          col_chunk.add(data_ptr, source_fld->pack_length(), false);
-        } else {
-          uint32 str_id = *reinterpret_cast<uint32 *>(data_ptr);
-          ut_a(normalized_length == sizeof(uint32));
-
-          // auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
-          col_chunk.add((uchar *)&str_id, normalized_length, false);
-        }
-      } else {
-        col_chunk.add(data_ptr, normalized_length, false);
-      }
+  // find a representative field (first read-set field) to compute chunk_base_ptr and normalized_len
+  uint32_t rep_ind = UINT32_MAX;
+  for (uint32_t ind = 0; ind < m_data_source->s->fields; ++ind) {
+    Field *src = *(m_data_source->field + ind);
+    if (bitmap_is_set(m_data_source->read_set, ind) && !src->is_flag_set(NOT_SECONDARY_FLAG)) {
+      rep_ind = ind;
+      break;
     }
+  }
+  if (rep_ind == UINT32_MAX) return HA_ERR_GENERIC;  // no column to read
 
-    m_rowid.fetch_add(1);
-    read_cnt++;
+  auto rep_field = m_rapid_table->get_field((*(m_data_source->field + rep_ind))->field_name);
+  size_t normalized_len = rep_field->normalized_pack_length();
+  const uchar *chunk_base_ptr = rep_field->chunk(current_chunk)->base() + offset_in_chunk * normalized_len;
+  DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "secondary_engine_rapid_next_error");
+    return HA_ERR_GENERIC;
+  });
+
+  // allocate temporary reconstruct buffer (on heap or thread-local)
+  std::unique_ptr<uchar[]> reconstruct_buf(new uchar[n_to_scan * normalized_len]);
+  // call the new batch bitmap
+  ReadView::BitmapResult bm = rep_field->chunk(current_chunk)
+                                  ->header()
+                                  ->m_smu->build_prev_vers_batch(m_context.get(), start_row, n_to_scan, chunk_base_ptr,
+                                                                 normalized_len, reconstruct_buf.get());
+
+  if (bm.visible_count == 0) {
+    // advance position past scanned area to avoid spinning on deleted/rollbacked rows
+    m_rowid.store(start_row + static_cast<ShannonBase::row_id_t>(n_to_scan));
+    // try again or return EOF accordingly
+    if (start_row + static_cast<ShannonBase::row_id_t>(n_to_scan) >= m_rapid_table->rows(nullptr))
+      return HA_ERR_END_OF_FILE;
+    return next_batch(batch_size, data, read_cnt);
   }
 
+  std::vector<ShannonBase::row_id_t> sel_vec;
+  sel_vec.reserve(bm.visible_count);
+  size_t total_bits = n_to_scan;
+  for (size_t byte_idx = 0; byte_idx < bm.bitmask.size(); ++byte_idx) {
+    uint8_t byte = bm.bitmask[byte_idx];
+    while (byte) {
+      unsigned tz = std::countr_zero(byte);
+      size_t idx = (byte_idx << 3) + tz;
+      if (idx < total_bits) {
+        sel_vec.push_back(start_row + static_cast<ShannonBase::row_id_t>(idx));
+      }
+      byte &= static_cast<uint8_t>(byte - 1);  // clear lowest set bit
+    }
+  }
+
+  // materialize columns using sel_vec
+  for (uint32_t ind = 0; ind < m_data_source->s->fields; ++ind) {
+    Field *src = *(m_data_source->field + ind);
+    if (!bitmap_is_set(m_data_source->read_set, ind) || src->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    auto rpd_field = m_rapid_table->get_field(src->field_name);
+    size_t col_len = rpd_field->normalized_pack_length();
+    auto &col_chunk = data[ind];
+
+    for (ShannonBase::row_id_t rid : sel_vec) {
+      auto chunk_id = rid / SHANNON_ROWS_IN_CHUNK;
+      auto off = rid % SHANNON_ROWS_IN_CHUNK;
+      auto chunk_ptr = rpd_field->chunk(chunk_id);
+      const uchar *cur_ptr = chunk_ptr->base() + off * col_len;
+
+      uchar *buf = ensure_buffer_size(col_len);
+      std::memcpy(buf, cur_ptr, col_len);
+
+      // if this column also has its own SMU entries and needs reconstruction,
+      // you can selectively call its reconstruct (but in practice we used rep_field to filter)
+      col_chunk.add(buf, col_len, false);
+    }
+  }
+
+  // advance m_rowid to last selected + 1
+  m_rowid.store(sel_vec.back() + 1);
+  read_cnt = sel_vec.size();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
