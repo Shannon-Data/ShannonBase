@@ -889,7 +889,7 @@ int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samp
   predictions.resize(n_samples, 0.0);
   int64_t out_len;
   // clang-format off
-  auto ret = LGBM_BoosterPredictForMat(handler,               /* model handler */
+  auto ret = LGBM_BoosterPredictForMat(handler,    /* model handler */
                             testing_data.data(),   /* test data */
                             C_API_DTYPE_FLOAT64,             /* testing data type */
                             n_samples,             /* # of testing data */
@@ -911,10 +911,14 @@ int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samp
   return 0;
 }
 
-int Utils::ML_predict_row(int type, std::string &model_handle_name, std::vector<ml_record_type_t> &input_data, txt2numeric_map_t& txt2numeric_dict, std::vector<double> &predictions) {
+int Utils::ML_predict_row(int type, std::string &model_handle_name,
+                         std::vector<ml_record_type_t> &input_data,
+                         txt2numeric_map_t& txt2numeric_dict,
+                         std::vector<double> &predictions) {
 
   assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE ||
          type == C_API_PREDICT_LEAF_INDEX || type == C_API_PREDICT_CONTRIB);
+
   std::string model_content;
   {
     std::lock_guard<std::mutex> lock(models_mutex);
@@ -927,41 +931,74 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name, std::vector<
 
   auto n_feature = input_data.size();
   int64 num_results;
-  predictions.resize(n_feature);
+
+  // First time, get the result dims.
+  std::vector<double> temp_predictions(10);
 
   std::vector<double> sample_data;
   for (auto &field : input_data) {
     auto value = 0.0;
-    if (txt2numeric_dict.find(field.first) == txt2numeric_dict.end()) {  // not a txt field.
+    if (txt2numeric_dict.find(field.first) == txt2numeric_dict.end()) {
       value = std::stod(field.second);
-    } else {  // find in txt2num_dict.
+    } else {
+      // Text field, to find mapping value.
       auto txt2num = txt2numeric_dict[field.first];
-      if (txt2num.size())
-        value = std::distance(txt2num.begin(), std::find(txt2num.begin(), txt2num.end(), field.second));
-      else value = 0.0;   
+      if (txt2num.size()) {
+        auto it = std::find(txt2num.begin(), txt2num.end(), field.second);
+        if (it != txt2num.end()) {
+          value = std::distance(txt2num.begin(), it);
+        } else { // unknown.
+          value = txt2num.size();
+        }
+      } else {
+        value = 0.0;
+      }
     }
     sample_data.push_back(value);
   }
 
   // clang-format off
+  // The first time, gets the real result number.
   auto ret = LGBM_BoosterPredictForMat(booster,
                                        sample_data.data(),
                                        C_API_DTYPE_FLOAT64,
-                                       1,                   // # of row
-                                       n_feature,           // # of col
-                                       1,                    // row oriented
-                                       type,                 // prediction type
-                                       0,                    // start iter
-                                       -1,                   // stop iter
-                                       "",                   // contribution params
-                                       &num_results,         // # of results
-                                       predictions.data());
-  // clang-format on
-  LGBM_BoosterFree(booster);
+                                       1,
+                                       n_feature,
+                                       1,
+                                       type,
+                                       0,
+                                       -1,
+                                       "",
+                                       &num_results,
+                                       temp_predictions.data());
+
   if (ret) {
+    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
-  return 0;
+
+  predictions.resize(num_results);
+
+  if (num_results != (int64)temp_predictions.size()) { //re-caculate
+    ret = LGBM_BoosterPredictForMat(booster,
+                                   sample_data.data(),
+                                   C_API_DTYPE_FLOAT64,
+                                   1,
+                                   n_feature,
+                                   1,
+                                   type,
+                                   0,
+                                   -1,
+                                   "",
+                                   &num_results,
+                                   predictions.data());
+  } else {
+    predictions.assign(temp_predictions.begin(), temp_predictions.begin() + num_results);
+  }
+  // clang-format on
+
+  LGBM_BoosterFree(booster);
+  return ret ? HA_ERR_GENERIC : 0;
 }
 
 }  // namespace ML

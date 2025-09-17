@@ -57,7 +57,7 @@ ML_forecasting::~ML_forecasting() {}
 ML_TASK_TYPE_T ML_forecasting::type() { return ML_TASK_TYPE_T::FORECASTING; }
 
 int ML_forecasting::train() {
-  // target_name can be set to null in forcasting. For time series forecasting tasks,
+  // target_name can be set to null in forecasting. For time series forecasting tasks,
   // a regression objective function is typically used because the goal of time series
   // forecasting is to predict continuous values (such as stock prices, temperatures,
   // sales, etc.), rather than discrete categories in classification tasks.
@@ -69,8 +69,9 @@ int ML_forecasting::train() {
   std::string keystr;
   if (!m_options.empty() && Utils::parse_json(m_options, options, keystr, 0)) return HA_ERR_GENERIC;
 
+  std::string dt_index;
   if (options.find(ML_KEYWORDS::datetime_index) != options.end()) {
-    auto dt_index = options[ML_KEYWORDS::datetime_index][0];
+    dt_index = options[ML_KEYWORDS::datetime_index][0];
   }
 
   auto source_table_ptr = Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ);
@@ -94,15 +95,21 @@ int ML_forecasting::train() {
   // if it's a multi-target, then minus the size of target columns.
   auto n_feature = features_name.size();
   std::ostringstream oss;
-  oss << "task=train boosting_type=gbdt objective=regression metric_freq=1"
+
+  // Time series forecasting specific parameters
+  oss << "task=train boosting_type=gbdt objective=regression metric=rmse metric_freq=1"
       << " is_training_metric=true max_bin=255 num_trees=100 learning_rate=0.05"
-      << " num_leaves=31 tree_learner=serial";
+      << " num_leaves=31 tree_learner=serial feature_fraction=0.8"
+      << " bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=20"
+      << " min_sum_hessian_in_leaf=1.0 is_enable_sparse=true use_two_round_loading=false";
+
   std::string model_content, mode_params(oss.str().c_str());
 
   std::vector<const char *> feature_names_cstr;
   for (const auto &name : features_name) {
     feature_names_cstr.push_back(name.c_str());
   }
+
   // clang-format off
   auto start = std::chrono::steady_clock::now();
   if (Utils::ML_train(mode_params,

@@ -65,7 +65,7 @@ int ML_anomaly_detection::train() {
   std::string keystr;
   if (!m_options.empty() && Utils::parse_json(m_options, options, keystr, 0)) return HA_ERR_GENERIC;
 
-  auto contamination [[maybe_unused]] = ML_anomaly_detection::default_contamination;
+  auto contamination = ML_anomaly_detection::default_contamination;
   if (options.find(ML_KEYWORDS::contamination) != options.end())
     contamination = std::stof(options[ML_KEYWORDS::contamination][0]);
 
@@ -82,24 +82,33 @@ int ML_anomaly_detection::train() {
   std::vector<std::string> features_name;
   int n_class{0};
   txt2numeric_map_t txt2num_dict;
-  std::string unsuppervised_target{""};
+  std::string unsupervised_target{""};
   auto n_sample = Utils::read_data(source_table_ptr, train_data, features_name,
-                                   unsuppervised_target /*unsupervised mode*/, label_data, n_class, txt2num_dict);
+                                   unsupervised_target /*unsupervised mode*/, label_data, n_class, txt2num_dict);
   Utils::close_table(source_table_ptr);
 
   auto n_feature = features_name.size();
   std::ostringstream oss;
-  oss << "task=train boosting_type=gbdt objective=regression"
-      << " max_bin=255 num_trees=100 learning_rate=0.05"
-      << " num_leaves=31 tree_learner=serial";
+
+  // Anomaly detection using regression objective for reconstruction error approach
+  // or use a simpler parameter set suitable for unsupervised learning
+  oss << "task=train boosting_type=gbdt objective=regression metric=rmse"
+      << " max_bin=255 num_trees=50 learning_rate=0.1"
+      << " num_leaves=31 tree_learner=serial feature_fraction=0.8"
+      << " bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=10"
+      << " min_sum_hessian_in_leaf=1.0 is_enable_sparse=true";
+
   std::string model_content, mode_params(oss.str().c_str());
 
   std::vector<const char *> feature_names_cstr;
   for (const auto &name : features_name) {
     feature_names_cstr.push_back(name.c_str());
   }
+
   // clang-format off
   auto start = std::chrono::steady_clock::now();
+  // For anomaly detection without labels, we might pass nullptr for label_data
+  // or use a synthetic target (like reconstruction error approach)
   if (Utils::ML_train(mode_params,
                       C_API_DTYPE_FLOAT64,
                       train_data.data(),
@@ -107,7 +116,7 @@ int ML_anomaly_detection::train() {
                       feature_names_cstr.data(),
                       n_feature,
                       C_API_DTYPE_FLOAT32,
-                      label_data.data(),
+                      label_data.empty() ? nullptr : label_data.data(),
                       model_content))
     return HA_ERR_GENERIC;
   auto end = std::chrono::steady_clock::now();
@@ -140,12 +149,12 @@ int ML_anomaly_detection::train() {
                                                 TASK_NAMES_MAP[type()], /**task algo name */
                                                 0,              /*train score*/
                                                 n_sample,       /*# of rows in training tbl*/
-                                                n_feature + 1,  /*# of columns in training tbl*/
+                                                n_feature,      /*# of columns in training tbl (no target)*/
                                                 n_sample,       /*# of rows selected by adaptive sampling*/
                                                 n_feature,      /*# of columns selected by feature selection.*/
                                                 opt_metrics,    /* optimization metric */
                                                 features_name,  /* names of the columns selected by feature selection*/
-                                                0,              /*contamination*/
+                                                contamination,  /*contamination*/
                                                 &m_options,     /*options of ml_train*/
                                                 mode_params,    /**training_params */
                                                 nullptr,        /**onnx_inputs_info */
