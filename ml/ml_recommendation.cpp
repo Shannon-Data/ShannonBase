@@ -84,10 +84,10 @@ int ML_recommendation::train() {
   }
 
   if (!m_options.empty()) {
-    auto users_nmae{options[ML_KEYWORDS::users][0]}, items_name{options[ML_KEYWORDS::items][0]};
+    auto users_name{options[ML_KEYWORDS::users][0]}, items_name{options[ML_KEYWORDS::items][0]};
     for (auto index = 0u; index < source_table_ptr->s->fields; index++) {
       auto field_ptr = *(source_table_ptr->field + index);
-      if (!strcmp(field_ptr->field_name, users_nmae.c_str()) || !strcmp(field_ptr->field_name, items_name.c_str())) {
+      if (!strcmp(field_ptr->field_name, users_name.c_str()) || !strcmp(field_ptr->field_name, items_name.c_str())) {
         if (field_ptr->type() == MYSQL_TYPE_VARCHAR || field_ptr->type() == MYSQL_TYPE_VAR_STRING ||
             field_ptr->type() == MYSQL_TYPE_STRING)
           continue;
@@ -114,15 +114,21 @@ int ML_recommendation::train() {
   // if it's a multi-target, then minus the size of target columns.
   auto n_feature = features_name.size();
   std::ostringstream oss;
+
+  // For recommendation systems, use appropriate objective and metrics
   oss << "task=train boosting_type=gbdt objective=rank_xendcg"
-      << " max_bin=255 num_trees=100 learning_rate=0.05"
-      << " num_leaves=31 tree_learner=serial";
+      << " metric=ndcg eval_at=5,10 max_bin=255 num_trees=100 learning_rate=0.05"
+      << " num_leaves=31 tree_learner=serial feature_fraction=0.8"
+      << " bagging_freq=5 bagging_fraction=0.8 min_data_in_leaf=10"
+      << " is_enable_sparse=true use_two_round_loading=false";
+
   std::string model_content, mode_params(oss.str().c_str());
 
   std::vector<const char *> feature_names_cstr;
   for (const auto &name : features_name) {
     feature_names_cstr.push_back(name.c_str());
   }
+
   // clang-format off
   auto start = std::chrono::steady_clock::now();
   if (Utils::ML_train(mode_params,
