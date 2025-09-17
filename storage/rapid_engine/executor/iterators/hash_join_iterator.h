@@ -34,6 +34,7 @@
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/hash_join_buffer.h"
 #include "sql/iterators/hash_join_chunk.h"
+#include "sql/iterators/hash_join_iterator.h"
 #include "sql/join_type.h"  //JoinType
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/imcs/chunk.h"
@@ -45,9 +46,13 @@ namespace Executor {
 class VectorizedHashJoinIterator final : public RowIterator {
  public:
   VectorizedHashJoinIterator(THD *thd, unique_ptr_destroy_only<RowIterator> build_input,
+                             const Prealloced_array<TABLE *, 4> &build_input_tables, double estimated_build_rows,
                              unique_ptr_destroy_only<RowIterator> probe_input,
-                             const std::vector<HashJoinCondition> &join_conditions, JoinType join_type,
-                             size_t max_memory_available = 256 * 1024 * 1024, size_t batch_size = 4096);
+                             const Prealloced_array<TABLE *, 4> &probe_input_tables, bool store_rowids,
+                             table_map tables_to_get_rowid_for, size_t max_memory_available,
+                             const std::vector<HashJoinCondition> &join_conditions, bool allow_spill_to_disk,
+                             JoinType join_type, const Mem_root_array<Item *> &extra_conditions,
+                             HashJoinInput first_input, bool probe_input_batch_mode, uint64_t *hash_table_generation);
 
   bool Init() override;
   int Read() override;

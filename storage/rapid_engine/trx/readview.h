@@ -41,6 +41,13 @@ class Chunk;
 }
 
 namespace ReadView {
+
+// Bit mask, used for visibile row count.
+struct BitmapResult {
+  std::vector<uint8_t> bitmask;  // bit i => row_start + ith visibility: 1 visible, 0 invisible
+  size_t visible_count{0};
+};
+
 // a bit to describe one status.
 enum class RECONSTRUCTED_STATUS : uint8 { STAT_NORMAL = 0, STAT_NULL = 1, STAT_DELETED = 2, STAT_ROLLBACKED = 4 };
 
@@ -168,6 +175,18 @@ class Snapshot_meta_unit {
   // such as is null or not, is deleted marked or not.
   uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid, uchar *in_place,
                          size_t &in_place_len, uint8 &status);
+
+  // - row_start: starting global row id
+  // - row_count: number of contiguous rows to examine (should not cross chunk boundary ideally)
+  // - chunk_base_ptr: pointer to chunk->base() + offset_in_chunk * normalized_len for row_start,
+  //                   i.e. the in-place buffer base address such that row i corresponds to
+  //                   chunk_base_ptr + i * normalized_len
+  // - normalized_len: per-row normalized length
+  // - reconstruct_buf: caller-provided buffer of size >= row_count * normalized_len
+  //
+  // Returns BitmapResult where bit i indicates visibility of row (row_start + i).
+  BitmapResult build_prev_vers_batch(Rapid_load_context *context, ShannonBase::row_id_t row_start, size_t row_count,
+                                     const uchar *chunk_base_ptr, size_t normalized_len, uchar *reconstruct_buf);
 
   // gets the rowid's versions.
   inline SMU_items &versions(ShannonBase::row_id_t rowid) {

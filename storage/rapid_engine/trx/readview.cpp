@@ -29,13 +29,14 @@
    by Thomas Neumann, Tobias Mühlbauer and Alfons Kemper.
 */
 #include "storage/rapid_engine/trx/readview.h"
+#include "include/my_inttypes.h"
 
 #include "storage/innobase/include/dict0mem.h"
 #include "storage/innobase/include/read0types.h"
 
-#include "include/my_inttypes.h"
 #include "storage/rapid_engine/imcs/chunk.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/utils/SIMD.h"
 
 namespace ShannonBase {
 namespace ReadView {
@@ -118,6 +119,72 @@ uchar *Snapshot_meta_unit::build_prev_vers(Rapid_load_context *context, ShannonB
   return (m_version_info.find(rowid) == m_version_info.end())
              ? in_place
              : m_version_info[rowid].reconstruct_data(context, in_place, in_place_len, status);
+}
+
+BitmapResult Snapshot_meta_unit::build_prev_vers_batch(Rapid_load_context *context, ShannonBase::row_id_t row_start,
+                                                       size_t row_count, const uchar *chunk_base_ptr,
+                                                       size_t normalized_len, uchar *reconstruct_buf) {
+  BitmapResult result;
+  if (row_count == 0) {
+    result.visible_count = 0;
+    return result;
+  }
+  size_t bytes = (row_count + 7) / 8;
+  result.bitmask.assign(bytes, 0);
+
+  // 1) collect pointers to SMU_items if exists, under shared lock to m_version_info
+  std::vector<ReadView::SMU_items *> smu_ptrs;
+  smu_ptrs.resize(row_count, nullptr);
+
+  {
+    std::shared_lock lk(m_version_mutex);
+    for (size_t i = 0; i < row_count; ++i) {
+      ShannonBase::row_id_t rid = row_start + static_cast<ShannonBase::row_id_t>(i);
+      auto it = m_version_info.find(rid);
+      if (it != m_version_info.end()) {
+        smu_ptrs[i] = &it->second;
+      }
+    }
+  }
+
+  // 2) iterate rows in this range, compute status and fill bit
+  // reconstruct_buf must be at least row_count * normalized_len bytes
+  for (size_t i = 0; i < row_count; ++i) {
+    ShannonBase::row_id_t rid = row_start + static_cast<ShannonBase::row_id_t>(i);
+    uint8 status = 0;
+    size_t in_place_len = normalized_len;
+    uchar *in_place = reconstruct_buf ? (reconstruct_buf + i * normalized_len)
+                                      : const_cast<uchar *>(chunk_base_ptr + i * normalized_len);
+
+    // quick check: owner-level flags
+    if (m_owner->is_deleted(context, rid)) status |= static_cast<uint8>(ReadView::RECONSTRUCTED_STATUS::STAT_DELETED);
+    if (m_owner->is_null(context, rid)) {
+      status |= static_cast<uint8>(ReadView::RECONSTRUCTED_STATUS::STAT_NULL);
+      in_place_len = UNIV_SQL_NULL;
+    }
+
+    // if there's SMU versions, reconstruct into in_place
+    if (smu_ptrs[i] != nullptr) {
+      // reconstruct_data will lock SMU_items::vec_mutex internally
+      uchar *res_ptr = smu_ptrs[i]->reconstruct_data(context, in_place, in_place_len, status);
+      // reconstruct_data may set STAT_ROLLBACKED and return nullptr
+      (void)res_ptr;  // we don't need pointer content here; just status
+    }
+
+    // determine visibility: visible if not deleted and not rollbacked
+    bool visible = !(status & static_cast<uint8>(ReadView::RECONSTRUCTED_STATUS::STAT_DELETED)) &&
+                   !(status & static_cast<uint8>(ReadView::RECONSTRUCTED_STATUS::STAT_ROLLBACKED));
+
+    if (visible) {
+      size_t byte_idx = i >> 3;
+      uint8_t bit_mask = static_cast<uint8_t>(1u << (i & 7));
+      result.bitmask[byte_idx] |= bit_mask;
+    }
+  }
+
+  // 3) compute popcount (visible_count)
+  result.visible_count = ShannonBase::Utils::SIMD::popcount_bitmap(result.bitmask);
+  return result;
 }
 
 int Snapshot_meta_unit::purge(const char *tname, ::ReadView *rv) {

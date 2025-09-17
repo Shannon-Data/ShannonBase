@@ -64,6 +64,7 @@
 #include "sql/range_optimizer/reverse_index_range_scan.h"
 #include "sql/range_optimizer/rowid_ordered_retrieval.h"
 
+#include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 namespace ShannonBase {
@@ -679,7 +680,7 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
                 ? HashJoinInput::kProbe
                 : HashJoinInput::kBuild;
 
-        iterator = NewIterator<HashJoinIterator>(
+        iterator = NewIterator<ShannonBase::Executor::VectorizedHashJoinIterator>(
             thd, mem_root, std::move(job.children[1]), GetUsedTables(param.inner, /*include_pruned_tables=*/true),
             estimated_build_rows, std::move(job.children[0]),
             GetUsedTables(param.outer, /*include_pruned_tables=*/true), param.store_rowids,

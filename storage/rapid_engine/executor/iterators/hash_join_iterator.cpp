@@ -36,23 +36,21 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 namespace ShannonBase {
 namespace Executor {
-VectorizedHashJoinIterator::VectorizedHashJoinIterator(THD *thd, unique_ptr_destroy_only<RowIterator> build_input,
-                                                       unique_ptr_destroy_only<RowIterator> probe_input,
-                                                       const std::vector<HashJoinCondition> &join_conditions,
-                                                       JoinType join_type, size_t max_memory_available,
-                                                       size_t batch_size)
+VectorizedHashJoinIterator::VectorizedHashJoinIterator(
+    THD *thd, unique_ptr_destroy_only<RowIterator> build_input, const Prealloced_array<TABLE *, 4> &build_input_tables,
+    double estimated_build_rows, unique_ptr_destroy_only<RowIterator> probe_input,
+    const Prealloced_array<TABLE *, 4> &probe_input_tables, bool store_rowids, table_map tables_to_get_rowid_for,
+    size_t max_memory_available, const std::vector<HashJoinCondition> &join_conditions, bool allow_spill_to_disk,
+    JoinType join_type, const Mem_root_array<Item *> &extra_conditions, HashJoinInput first_input,
+    bool probe_input_batch_mode, uint64_t *hash_table_generation)
     : RowIterator(thd),
       m_build_input(std::move(build_input)),
-      m_probe_input(std::move(probe_input)),
-      m_join_conditions(join_conditions),
-      m_join_type(join_type),
-      m_max_memory_available(max_memory_available),
-      m_batch_size(batch_size),
-      m_state(State::BUILDING_HASH_TABLE),
-      m_current_output_size(0),
-      m_current_output_pos(0) {
-  m_hash_table.resize(m_hash_table_size);
-}
+      m_probe_input(std::move(probe_input))
+// For (LEFT)OUTER and ANTI-join we may have to return rows even if the
+// build input is empty. Therefore we check the probe input for emptiness
+// first. If 'probe' is empty, there is no need to read from 'build',
+// while the converse is not the case.
+{}
 
 bool VectorizedHashJoinIterator::Init() {
   if (m_build_input->Init() || m_probe_input->Init()) {

@@ -27,6 +27,6 @@
 
 namespace ShannonBase {
 namespace Utils {
-namespace SIMD {}
+namespace SIMD {}  // namespace SIMD
 }  // namespace Utils
 }  // namespace ShannonBase
