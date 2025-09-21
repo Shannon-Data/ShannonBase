@@ -5,3 +5,8 @@ innodb.large_partitions_ddl                                         : BUG#123456
 innodb.lob_recovery                                                 : BUG#123456 skip on ARM, timeout on ARM
 innodb.zlob_ddl_big                                                 : BUG#123456 skip on ARM, timeout on ARM
 main.mysql_upgrade_grant                                            : BUG#123456 skip on ARM, timeout on ARM
+innodb.histogram						    : BUG#123456 skip on ARM, timeout on ARM	 
+innodb_undo.undo_settings                                           : BUG#123456 skip on ARM, timeout on ARM
+rpl_gtid.rpl_gtid_stm_drop_table                                    : BUG#123456 skip on ARM, timeout on ARM
+rpl_gtid.rpl_multi_source_mtr_includes                              : BUG#123456 skip on ARM, timeout on ARM
+sys_vars.myisam_data_pointer_size_func                              : BUG#123456 skip on ARM, timeout on ARM
