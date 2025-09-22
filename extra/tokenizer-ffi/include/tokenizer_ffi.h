@@ -1,4 +1,3 @@
-
 /*
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
@@ -36,23 +35,47 @@ It's auto-generated, DO NOT MODIFY.
 extern "C" {
 #endif
 
-// Forward declarations
+// =============================================================================
+// FORWARD DECLARATIONS
+// =============================================================================
+
 typedef struct TokenizerHandle TokenizerHandle;
 
-// Encoding result structure
-typedef struct {
-    uint32_t* ids;
-    size_t length;
-    uint32_t* attention_mask;
-    char** tokens;
+// =============================================================================
+// STRUCTURES - HuggingFace Compatible
+// =============================================================================
+
+/**
+ * Encoding result structure - matches HuggingFace tokenizer output
+ * This structure contains all the standard outputs from HuggingFace tokenizers
+ */
+typedef struct EncodingResult {
+    uint32_t* input_ids;           // Primary token IDs (equivalent to HF's input_ids)
+    size_t length;                 // Length of all arrays
+    uint32_t* attention_mask;      // Attention mask (1 for real tokens, 0 for padding)
+    char** tokens;                 // String representation of tokens
+    uint32_t* token_type_ids;      // Token type IDs (for models like BERT)
+    uint32_t* special_tokens_mask; // Special tokens mask (1 for special tokens)
+    struct EncodingResult** overflowing; // Overflowing tokens (if truncation occurred)
+    size_t overflowing_length;     // Number of overflowing encodings
 } EncodingResult;
 
-// Error handling functions
+/**
+ * Batch encoding result
+ */
+typedef struct BatchEncodingResult {
+    EncodingResult** encodings;    // Array of encoding results
+    size_t length;                 // Number of encodings
+} BatchEncodingResult;
+
+// =============================================================================
+// ERROR HANDLING - HuggingFace Compatible
+// =============================================================================
+
 /**
  * Get the last error message for the current thread.
  * Returns NULL if no error occurred.
- * The returned pointer is valid until the next tokenizer function call
- * on the same thread, or until the thread exits.
+ * The returned pointer is valid until the next tokenizer function call.
  */
 const char* tokenizer_get_last_error(void);
 
@@ -67,52 +90,130 @@ bool tokenizer_has_error(void);
  */
 void tokenizer_clear_error(void);
 
-// Tokenizer creation functions
+// =============================================================================
+// TOKENIZER CREATION - HuggingFace Compatible
+// =============================================================================
+
 /**
- * Create a tokenizer from a file path.
- * Returns NULL on failure. Check tokenizer_get_last_error() for details.
+ * Create tokenizer from file path.
+ * Equivalent to: tokenizer = Tokenizer.from_file("path/to/tokenizer.json")
+ * 
+ * @param path Path to tokenizer.json file
+ * @return Tokenizer handle or NULL on error
  */
 TokenizerHandle* tokenizer_from_file(const char* path);
 
 /**
- * Create a tokenizer from a JSON string.
- * Returns NULL on failure. Check tokenizer_get_last_error() for details.
+ * Create tokenizer from raw bytes.
+ * Equivalent to: tokenizer = Tokenizer.from_bytes(data)
+ * 
+ * @param data Raw byte data
+ * @param length Length of data
+ * @return Tokenizer handle or NULL on error
+ */
+TokenizerHandle* tokenizer_from_bytes(const uint8_t* data, size_t length);
+
+/**
+ * Create tokenizer from JSON string.
+ * Equivalent to: tokenizer = Tokenizer.from_json(json_str)
+ * 
+ * @param json JSON string
+ * @return Tokenizer handle or NULL on error
  */
 TokenizerHandle* tokenizer_from_json(const char* json);
 
-// Tokenizer operations
+// =============================================================================
+// ENCODING FUNCTIONS - HuggingFace Compatible
+// =============================================================================
+
 /**
- * Encode a single text string.
- * Returns NULL on failure. Check tokenizer_get_last_error() for details.
+ * Encode single text string.
+ * Equivalent to: tokenizer.encode(text, add_special_tokens=add_special_tokens)
+ * 
+ * @param handle Tokenizer handle
+ * @param text Input text to encode
+ * @param add_special_tokens Whether to add special tokens (CLS, SEP, etc.)
+ * @return EncodingResult or NULL on error. Must be freed with encoding_result_free()
  */
 EncodingResult* tokenizer_encode(TokenizerHandle* handle, const char* text, bool add_special_tokens);
 
 /**
- * Encode multiple text strings in batch.
- * Returns NULL on failure. Check tokenizer_get_last_error() for details.
+ * Encode batch of text strings.
+ * Equivalent to: tokenizer.encode_batch(texts, add_special_tokens=add_special_tokens)
+ * 
+ * @param handle Tokenizer handle
+ * @param texts Array of input texts
+ * @param count Number of texts in array
+ * @param add_special_tokens Whether to add special tokens
+ * @return BatchEncodingResult or NULL on error. Must be freed with batch_encoding_result_free()
  */
-EncodingResult** tokenizer_encode_batch(TokenizerHandle* handle, const char** texts, size_t count, bool add_special_tokens);
+BatchEncodingResult* tokenizer_encode_batch(TokenizerHandle* handle, const char** texts, size_t count, bool add_special_tokens);
 
 /**
  * Decode token IDs back to text.
- * Returns NULL on failure. Check tokenizer_get_last_error() for details.
- * The returned string must be freed with string_free().
+ * Equivalent to: tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+ * 
+ * @param handle Tokenizer handle
+ * @param ids Array of token IDs
+ * @param length Number of token IDs
+ * @param skip_special_tokens Whether to skip special tokens in output
+ * @return Decoded text string or NULL on error. Must be freed with string_free()
  */
 char* tokenizer_decode(TokenizerHandle* handle, const uint32_t* ids, size_t length, bool skip_special_tokens);
 
-/**
- * Get the vocabulary size of the tokenizer.
- * Returns 0 on failure. Check tokenizer_get_last_error() for details.
- */
-uint32_t tokenizer_get_vocab_size(TokenizerHandle* handle);
+// =============================================================================
+// VOCABULARY FUNCTIONS - HuggingFace Compatible
+// =============================================================================
 
-// Utility functions
+/**
+ * Get vocabulary size.
+ * Equivalent to: tokenizer.get_vocab_size(with_added_tokens=with_added_tokens)
+ * 
+ * @param handle Tokenizer handle
+ * @param with_added_tokens Whether to include added tokens in count
+ * @return Vocabulary size or 0 on error
+ */
+uint32_t tokenizer_get_vocab_size(TokenizerHandle* handle, bool with_added_tokens);
+
+/**
+ * Get full vocabulary as key-value pairs.
+ * Equivalent to: tokenizer.get_vocab(with_added_tokens=with_added_tokens)
+ * 
+ * @param handle Tokenizer handle
+ * @param with_added_tokens Whether to include added tokens
+ * @param keys Output array of token strings. Must be freed with vocab_free()
+ * @param values Output array of token IDs. Must be freed with vocab_free()
+ * @param length Output length of arrays
+ * @return true on success, false on error
+ */
+bool tokenizer_get_vocab(TokenizerHandle* handle, bool with_added_tokens, 
+                        char*** keys, uint32_t** values, size_t* length);
+
+/**
+ * Get tokenizer information.
+ * 
+ * @param handle Tokenizer handle
+ * @param model_type Output model type string. Must be freed with string_free()
+ * @param vocab_size Output base vocabulary size
+ * @param added_tokens_count Output number of added tokens
+ * @return true on success, false on error
+ */
+bool tokenizer_get_info(TokenizerHandle* handle, char** model_type, 
+                       uint32_t* vocab_size, uint32_t* added_tokens_count);
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
 /**
  * Check if a tokenizer handle is valid (non-null).
  */
 bool tokenizer_is_valid(const TokenizerHandle* handle);
 
-// Memory management functions
+// =============================================================================
+// MEMORY MANAGEMENT FUNCTIONS
+// =============================================================================
+
 /**
  * Free a tokenizer handle.
  * Safe to call with NULL pointer.
@@ -126,10 +227,20 @@ void tokenizer_free(TokenizerHandle* handle);
 void encoding_result_free(EncodingResult* result);
 
 /**
- * Free an array of encoding results.
+ * Free a batch encoding result.
  * Safe to call with NULL pointer.
  */
-void encoding_result_array_free(EncodingResult** results, size_t count);
+void batch_encoding_result_free(BatchEncodingResult* result);
+
+/**
+ * Free vocabulary arrays returned by tokenizer_get_vocab().
+ * Safe to call with NULL pointers.
+ * 
+ * @param keys Array of token strings
+ * @param values Array of token IDs
+ * @param length Length of arrays
+ */
+void vocab_free(char** keys, uint32_t* values, size_t length);
 
 /**
  * Free a C string returned by tokenizer functions.
