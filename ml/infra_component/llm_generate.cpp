@@ -219,6 +219,8 @@ TextGenerator::TextGenerator(const std::string &modelPath, const std::string &to
   auto ms = select_model_variant(m_modelPath);
   m_modelPath = (fs::path(m_modelPath) / ms.filename).string();
   m_initialized = !(InitializeONNX() || InitializeTokenizer() || LoadTokenizerConfig());
+
+  m_modelType = NormalizeModelType(m_modelType);
 }
 
 TextGenerator::~TextGenerator() {
@@ -250,60 +252,130 @@ bool TextGenerator::InitializeONNX() {
 bool TextGenerator::InitializeTokenizer() {
   auto token_path = fs::path(m_tokenizerPath) / "tokenizer.json";
   m_tokenizer = std::make_shared<tokenizers::Tokenizer>(token_path.string());
-  if (!m_tokenizer->is_valid()) return true;
+  if (!m_tokenizer->is_valid()) {
+    m_error_string = m_tokenizer->get_last_error();
+    return true;
+  }
+
   return false;
 }
 
 bool TextGenerator::LoadTokenizerConfig() {
   fs::path configPath = fs::path(m_tokenizerPath) / "tokenizer_config.json";
   std::ifstream configFile(configPath);
-  if (!configFile.is_open()) return true;
+  if (!configFile.is_open()) {
+    m_eosTokenId = -1;
+    m_bosTokenId = -1;
+    m_padTokenId = -1;
+  } else {
+    std::string jsonStr((std::istreambuf_iterator<char>(configFile)), std::istreambuf_iterator<char>());
+    configFile.close();
 
-  std::string jsonStr((std::istreambuf_iterator<char>(configFile)), std::istreambuf_iterator<char>());
-  configFile.close();
+    rapidjson::Document config;
+    if (config.Parse(jsonStr.c_str()).HasParseError()) {
+      return true;
+    }
 
-  rapidjson::Document config;
-  if (config.Parse(jsonStr.c_str()).HasParseError()) return true;
-
-  auto extractTokenId = [&](const char *tokenName) -> std::optional<int64_t> {
-    if (config.HasMember(tokenName)) {
+    auto extractTokenId = [&](const char *tokenName) -> std::optional<int64_t> {
+      if (!config.HasMember(tokenName)) return std::nullopt;
       const rapidjson::Value &token = config[tokenName];
-      if (token.IsObject() && token.HasMember("id") && token["id"].IsInt64()) {
+      if (token.IsString()) {
+        std::string tokenStr = token.GetString();
+        if (!tokenStr.empty()) {
+          auto encoding = m_tokenizer->encode(tokenStr, false);
+          if (!encoding.ids().empty()) return static_cast<int64_t>(encoding.ids()[0]);
+        }
+      } else if (token.IsObject() && token.HasMember("id") && token["id"].IsInt64()) {
         return token["id"].GetInt64();
       } else if (token.IsInt64()) {
         return token.GetInt64();
       }
+      return std::nullopt;
+    };
+
+    if (auto eosId = extractTokenId("eos_token")) m_eosTokenId = *eosId;
+    if (auto bosId = extractTokenId("bos_token")) m_bosTokenId = *bosId;
+    if (auto padId = extractTokenId("pad_token")) m_padTokenId = *padId;
+
+    if (config.HasMember("eos_token_id") && config["eos_token_id"].IsInt64())
+      m_eosTokenId = config["eos_token_id"].GetInt64();
+    if (config.HasMember("bos_token_id") && config["bos_token_id"].IsInt64())
+      m_bosTokenId = config["bos_token_id"].GetInt64();
+    if (config.HasMember("pad_token_id") && config["pad_token_id"].IsInt64())
+      m_padTokenId = config["pad_token_id"].GetInt64();
+  }
+
+  if (m_eosTokenId < 0) {
+    auto enc = m_tokenizer->encode("<|endoftext|>", false);
+    if (!enc.ids().empty()) m_eosTokenId = enc.ids()[0];
+  }
+  if (m_bosTokenId < 0) {
+    auto enc = m_tokenizer->encode("<|im_start|>", false);
+    if (!enc.ids().empty()) m_bosTokenId = enc.ids()[0];
+  }
+  if (m_padTokenId < 0) {
+    auto enc = m_tokenizer->encode("<|im_end|>", false);
+    if (!enc.ids().empty()) m_padTokenId = enc.ids()[0];
+  }
+
+  std::string modelTypeLower = m_modelType;
+  std::transform(modelTypeLower.begin(), modelTypeLower.end(), modelTypeLower.begin(), ::tolower);
+  if (modelTypeLower.find("qwen") != std::string::npos) {
+    if (m_eosTokenId < 0) {
+      auto enc = m_tokenizer->encode("<|endoftext|>", false);
+      if (!enc.ids().empty()) m_eosTokenId = enc.ids()[0];
     }
-    return std::nullopt;
-  };
-
-  if (auto eosId = extractTokenId("eos_token")) m_eosTokenId = *eosId;
-  if (auto bosId = extractTokenId("bos_token")) m_bosTokenId = *bosId;
-  if (auto padId = extractTokenId("pad_token")) m_padTokenId = *padId;
-
-  if (config.HasMember("eos_token_id") && config["eos_token_id"].IsInt64())
-    m_eosTokenId = config["eos_token_id"].GetInt64();
-  if (config.HasMember("bos_token_id") && config["bos_token_id"].IsInt64())
-    m_bosTokenId = config["bos_token_id"].GetInt64();
-  if (config.HasMember("pad_token_id") && config["pad_token_id"].IsInt64())
-    m_padTokenId = config["pad_token_id"].GetInt64();
+    if (m_padTokenId < 0) {
+      auto enc = m_tokenizer->encode("<|im_end|>", false);
+      if (!enc.ids().empty()) m_padTokenId = enc.ids()[0];
+    }
+  }
 
   return false;
 }
 
-std::string TextGenerator::ApplyChatTemplate(const std::string &userInput) {
+std::string TextGenerator::ApplyChatTemplate(const std::string &userInput, const std::string &systemPrompt) {
   std::string modelTypeLower = m_modelType;
   std::transform(modelTypeLower.begin(), modelTypeLower.end(), modelTypeLower.begin(), ::tolower);
+  auto vocab = m_tokenizer->get_vocab(true);
+  bool has_im_start{false}, has_im_end{false};
+
+  auto lang = m_gen_option.language;
+  auto capitalizeFirstChar = [](const std::string &str) -> std::string {
+    if (str.empty()) return str;
+
+    std::string result = str;
+    std::locale loc;
+    result[0] = std::toupper(result[0], loc);
+    return result;
+  };
+  lang = capitalizeFirstChar(lang);
+
+  if (modelTypeLower.find("qwen") != std::string::npos) {
+    has_im_start = vocab.find("<|im_start|>") != vocab.end();
+    has_im_end = vocab.find("<|im_end|>") != vocab.end();
+    std::ostringstream oss;
+    if (!systemPrompt.empty()) {
+      oss << "<|im_start|>system\n"
+          << systemPrompt << lang << "."
+          << "<|im_end|>\n";
+    }
+
+    if (has_im_start && has_im_end)
+      oss << "<|im_start|>user\n"
+          << userInput << "<|im_end|>\n"
+          << "<|im_start|>assistant\n";
+    else
+      oss << userInput;
+
+    return oss.str();
+  }
 
   if (modelTypeLower.find("llama") != std::string::npos) {
-    if (modelTypeLower.find("llama-3") != std::string::npos || modelTypeLower.find("llama3") != std::string::npos ||
-        modelTypeLower.find("llama-3.2") != std::string::npos || modelTypeLower.find("llama3.2") != std::string::npos) {
-      return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" + userInput +
-             "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
-    }
-  } else if (modelTypeLower.find("mistral") != std::string::npos) {
-    return "<s>[INST] " + userInput + " [/INST]";
-  } else if (modelTypeLower.find("codellama") != std::string::npos) {
+    return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" + userInput +
+           "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+  } else if (modelTypeLower.find("mistral") != std::string::npos ||
+             modelTypeLower.find("codellama") != std::string::npos) {
     return "<s>[INST] " + userInput + " [/INST]";
   } else if (modelTypeLower.find("phi") != std::string::npos) {
     return "Instruct: " + userInput + "\nOutput:";
@@ -311,6 +383,62 @@ std::string TextGenerator::ApplyChatTemplate(const std::string &userInput) {
     return "<bos><start_of_turn>user\n" + userInput + "<end_of_turn>\n<start_of_turn>model\n";
   }
   return userInput;
+}
+
+void TextGenerator::TestTokenizerCompatibility() {
+  if (!m_tokenizer || !m_tokenizer->is_valid()) {
+    std::cout << "[ERROR] Tokenizer not initialized" << std::endl;
+    return;
+  }
+
+  std::cout << "\n=== Tokenizer Compatibility Test ===" << std::endl;
+
+  std::string testText = "Hello, how are you?";
+  auto encoding = m_tokenizer->encode(testText, false);
+  auto tokenIds = encoding.ids();
+
+  std::vector<uint32_t> decodeIds(tokenIds.begin(), tokenIds.end());
+  std::string decoded = m_tokenizer->decode(decodeIds, true);
+
+  std::cout << "Original: " << testText << std::endl;
+  std::cout << "Decoded:  " << decoded << std::endl;
+  std::cout << "Match: " << (testText == decoded ? "YES" : "NO") << std::endl;
+
+  std::vector<std::pair<std::string, std::string>> specialTokens = {{"<|im_start|>", "Chat template start token"},
+                                                                    {"<|im_end|>", "Chat template end token"},
+                                                                    {"<|endoftext|>", "End of text token"},
+                                                                    {"<|extra_0|>", "Extra token (if exists)"}};
+
+  for (const auto &[token, desc] : specialTokens) {
+    auto enc = m_tokenizer->encode(token, false);
+    if (!enc.ids().empty()) {
+      auto dec = m_tokenizer->decode(enc.ids(), false);
+      std::cout << desc << ": " << token << " -> ID(" << enc.ids()[0] << ") -> " << dec;
+      std::cout << " [" << (token == dec ? "OK" : "MISMATCH") << "]" << std::endl;
+    } else {
+      std::cout << desc << ": " << token << " -> [NOT FOUND]" << std::endl;
+    }
+  }
+
+  std::string userInput = "What is AI?";
+  std::string chatTemplate = ApplyChatTemplate(userInput, "ShannonBase AI assistant");
+
+  std::cout << "\nChat Template Test:" << std::endl;
+  std::cout << "Template: " << chatTemplate << std::endl;
+
+  auto chatEncoding = m_tokenizer->encode(chatTemplate, true);
+  std::string chatDecoded = m_tokenizer->decode(chatEncoding.ids(), true);
+  std::cout << "Decode chat template: " << chatDecoded << std::endl;
+
+  std::cout << "Roundtrip match: " << (chatTemplate == chatDecoded ? "YES" : "NO") << std::endl;
+  std::cout << "Token count: " << chatEncoding.ids().size() << std::endl;
+
+  std::cout << "\nConfigured special tokens:" << std::endl;
+  std::cout << "EOS token ID: " << m_eosTokenId << std::endl;
+  std::cout << "BOS token ID: " << m_bosTokenId << std::endl;
+  std::cout << "PAD token ID: " << m_padTokenId << std::endl;
+
+  std::cout << "=== Test Complete ===" << std::endl;
 }
 
 int64_t TextGenerator::Argmax(const float *data, size_t size) {
@@ -456,7 +584,7 @@ void TextGenerator::GetModelMetadata() {
   }
 }
 
-void TextGenerator::DetectQueryHeadsFromOutputs(const std::vector<std::string> &outputNames) {
+void TextGenerator::DetectQueryHeadsFromOutputs(const std::vector<std::string> &) {
   Ort::AllocatorWithDefaultOptions allocator;
 
   // Look for attention output or similar that might reveal query heads
@@ -480,19 +608,9 @@ void TextGenerator::DetectQueryHeadsFromOutputs(const std::vector<std::string> &
       }
     }
   }
-
-  // For Llama-3.2-3B specifically, use the correct configuration
-  if (m_numQueryHeads == 0 && m_numKVHeads == 8) {
-    // Llama-3.2-3B has 24 query heads and 8 KV heads (3:1 ratio)
-    if (m_modelType.find("llama-3.2") != std::string::npos || m_modelType.find("llama3.2") != std::string::npos) {
-      m_numQueryHeads = 24;  // Correct value for Llama-3.2-3B
-    } else {                 // General fallback
-      m_numQueryHeads = m_numKVHeads * 3;
-    }
-  }
 }
 
-void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &inputNames,
+void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &,
                                             const std::vector<std::string> &outputNames) {
   m_numLayers = 0;
   m_numQueryHeads = 0;
@@ -543,6 +661,8 @@ void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &inpu
   if (m_numQueryHeads == 0 && m_numKVHeads > 0) {
     if (m_modelType.find("llama-3") != std::string::npos || m_modelType.find("llama3") != std::string::npos)
       m_numQueryHeads = m_numKVHeads * 3;  // Llama-3, 3:1
+    else if (m_modelType.find("qwen2.5") != std::string::npos)
+      m_numQueryHeads = m_numKVHeads * 7;  // Qwen2.5, 7:1 ratio
     else
       m_numQueryHeads = m_numKVHeads;  // default 1:1
   }
@@ -550,6 +670,27 @@ void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &inpu
   // step 5: check the results.
   if (m_numLayers == 0 || m_numKVHeads == 0 || m_headDim == 0) {
     if (m_headDim == 0) m_headDim = (m_modelType.find("llama") != std::string::npos) ? 128 : 64;
+  }
+
+  // Model-specific architecture
+  std::string lowerModel = m_modelType;
+  std::transform(lowerModel.begin(), lowerModel.end(), lowerModel.begin(), ::tolower);
+
+  if (lowerModel.find("qwen2.5-0.5b") != std::string::npos) {
+    // Qwen2.5-0.5B specific parameters
+    if (m_numLayers == 0) m_numLayers = 24;
+    if (m_numQueryHeads == 0) m_numQueryHeads = 14;
+    if (m_numKVHeads == 0) m_numKVHeads = 2;
+    if (m_headDim == 0) m_headDim = 64;
+  } else if (lowerModel.find("qwen") != std::string::npos && lowerModel.find("0.5b") != std::string::npos) {
+    // Qwen 0.5B models generally
+    if (m_headDim == 0) m_headDim = 64;
+    if (m_numKVHeads == 0) m_numKVHeads = 2;
+  }
+
+  // Validation
+  if (m_numLayers == 0 || m_numKVHeads == 0 || m_headDim == 0) {  // Could not detect all architecture parameters
+    assert(false);
   }
 }
 
@@ -577,7 +718,7 @@ void TextGenerator::ClearKVCache() {
 
 std::pair<size_t, bool> TextGenerator::ParseKVCacheInputName(const std::string &name) const {
   size_t layerIdx = 0;
-  bool isKey = true;
+  bool isKey = false;  // default to false
 
   std::vector<std::regex> layerPatterns = {std::regex(R"(\.(\d+)\.)"),    std::regex(R"(_(\d+)_)"),
                                            std::regex(R"(layer\.(\d+))"), std::regex(R"(layers\.(\d+))"),
@@ -591,10 +732,13 @@ std::pair<size_t, bool> TextGenerator::ParseKVCacheInputName(const std::string &
     }
   }
 
-  if (name.find("value") != std::string::npos || name.find("val") != std::string::npos) {
-    isKey = false;
-  } else if (name.find("key") != std::string::npos) {
+  if (name.find(".key") != std::string::npos) {
     isKey = true;
+  } else if (name.find(".value") != std::string::npos) {
+    isKey = false;
+  } else {
+    // Fallback - shouldn't happen with proper naming
+    assert(false);  //[ERROR] Cannot determine key/value type
   }
 
   return {layerIdx, isKey};
@@ -605,25 +749,33 @@ std::pair<size_t, bool> TextGenerator::ParseKVCacheOutputName(const std::string 
 }
 
 void TextGenerator::UpdateKVCache(const std::vector<Ort::Value> &outputTensors,
-                                  const std::vector<std::string> &outputNames, const Ort::MemoryInfo &memInfo) {
-  for (size_t i = 1; i < outputTensors.size(); ++i) {
+                                  const std::vector<std::string> &outputNames, const Ort::MemoryInfo &) {
+  for (size_t i = 0; i < outputTensors.size(); ++i) {
     const std::string &outputName = outputNames[i];
+
+    // Look for present_key_values outputs (not just "present")
     if (outputName.find("present") == std::string::npos && outputName.find("key_values") == std::string::npos) {
       continue;
     }
 
     auto [layerIdx, isKey] = ParseKVCacheOutputName(outputName);
-    if (layerIdx < m_keyCache.size()) {
-      const float *data = outputTensors[i].GetTensorData<float>();
-      auto shapeInfo = outputTensors[i].GetTensorTypeAndShapeInfo();
-      size_t elementCount = shapeInfo.GetElementCount();
+    if (layerIdx >= m_numLayers) continue;
 
-      auto &cache = isKey ? m_keyCache[layerIdx] : m_valueCache[layerIdx];
-      if (cache.size() != elementCount) {
-        cache.resize(elementCount);
-      }
-      std::memcpy(cache.data(), data, elementCount * sizeof(float));
+    const float *data = outputTensors[i].GetTensorData<float>();
+    auto shapeInfo = outputTensors[i].GetTensorTypeAndShapeInfo();
+    auto shape = shapeInfo.GetShape();
+    size_t elementCount = shapeInfo.GetElementCount();
+
+    // Ensure cache vectors are properly sized
+    if (layerIdx >= m_keyCache.size()) {
+      m_keyCache.resize(layerIdx + 1);
+      m_valueCache.resize(layerIdx + 1);
     }
+
+    auto &cache = isKey ? m_keyCache[layerIdx] : m_valueCache[layerIdx];
+
+    // Copy new cache data
+    cache.assign(data, data + elementCount);
   }
 }
 
@@ -797,20 +949,62 @@ void TextGenerator::ApplyPresencePenalty(float *logits, size_t vocabSize, float 
   }
 }
 
-bool TextGenerator::ShouldStop(const std::vector<int64_t> &tokens, const std::vector<std::string> &stopSequences) {
-  if (stopSequences.empty()) return false;
+std::vector<std::string> TextGenerator::GetModelSpecificStopTokens(const std::string &modelType) {
+  std::vector<std::string> stopTokens;
 
-  // decode recent tokens
-  size_t checkLength = std::min(tokens.size(), size_t(50));  // check the lastest 50 tokens
+  std::string lowerModelType = modelType;
+  std::transform(lowerModelType.begin(), lowerModelType.end(), lowerModelType.begin(), ::tolower);
+
+  if (lowerModelType.find("qwen") != std::string::npos) {
+    stopTokens = {"<|im_end|>", "<|im_start|>", "<|endoftext|>"};
+  } else if (lowerModelType.find("llama") != std::string::npos) {
+    stopTokens = {"</s>", "<|eot_id|>"};  // Llama 3<|eot_id|>
+  } else if (lowerModelType.find("mistral") != std::string::npos) {
+    stopTokens = {"</s>", "[INST]", "[/INST]"};
+  } else if (lowerModelType.find("phi") != std::string::npos) {
+    stopTokens = {"<|endoftext|>", "<|end|>"};
+  } else if (lowerModelType.find("gemma") != std::string::npos) {
+    stopTokens = {"<end_of_turn>", "<eos>", "<bos>"};
+  } else if (lowerModelType.find("chatglm") != std::string::npos) {
+    stopTokens = {"<|endoftext|>", "</s>"};
+  } else if (lowerModelType.find("baichuan") != std::string::npos) {
+    stopTokens = {"</s>", "<|endoftext|>"};
+  } else if (lowerModelType.find("yi") != std::string::npos) {
+    stopTokens = {"<|im_end|>", "<|im_start|>"};  // like Qwen
+  } else {
+    // fallback
+    stopTokens = {"\n\n", "<|endoftext|>", "</s>", "<|im_end|>"};
+  }
+
+  return stopTokens;
+}
+
+bool TextGenerator::ShouldStop(const std::vector<int64_t> &tokens, const std::vector<std::string> &stopSequences) {
+  if (tokens.empty()) return false;
+
+  if (tokens.back() == m_eosTokenId) {
+    return true;
+  }
+
+  // merge all stop words.
+  std::vector<std::string> allStopSequences = stopSequences;
+  auto modelSpecificStops = GetModelSpecificStopTokens(m_modelType);
+  allStopSequences.insert(allStopSequences.end(), modelSpecificStops.begin(), modelSpecificStops.end());
+
+  if (allStopSequences.empty()) return false;
+
+  size_t checkLength = std::min(tokens.size(), size_t(20));
   std::vector<uint32_t> recentTokens;
+  recentTokens.reserve(checkLength);
+
   for (size_t i = tokens.size() - checkLength; i < tokens.size(); ++i) {
     recentTokens.push_back(static_cast<uint32_t>(tokens[i]));
   }
 
   std::string recentText = m_tokenizer->decode(recentTokens, true);
 
-  for (const auto &stopSeq : stopSequences) {
-    if (recentText.find(stopSeq) != std::string::npos) {
+  for (const auto &stopSeq : allStopSequences) {
+    if (!stopSeq.empty() && recentText.find(stopSeq) != std::string::npos) {
       return true;
     }
   }
@@ -830,6 +1024,37 @@ void TextGenerator::UpdateTokenTracking(int64_t token) {
   }
 }
 
+void TextGenerator::PrintTopKLogits(const std::vector<float> &logits, int top_k) const {
+  float max_logit = *std::max_element(logits.begin(), logits.end());
+
+  std::vector<std::pair<int, float>> idx_logits;
+  idx_logits.reserve(logits.size());
+  for (int i = 0; i < (int)logits.size(); ++i) {
+    idx_logits.emplace_back(i, logits[i]);
+  }
+
+  std::partial_sort(idx_logits.begin(), idx_logits.begin() + top_k, idx_logits.end(),
+                    [](auto &a, auto &b) { return a.second > b.second; });
+
+  // softmax
+  float denom = 0.0f;
+  for (int i = 0; i < top_k; ++i) {
+    denom += std::exp(idx_logits[i].second - max_logit);
+  }
+
+  std::cout << "[Debug] Top-" << top_k << " token probabilities:" << std::endl;
+  for (int i = 0; i < top_k; ++i) {
+    auto [idx, logit] = idx_logits[i];
+    float prob = std::exp(logit - max_logit) / denom;
+
+    std::string token_str;
+    token_str = m_tokenizer->decode({static_cast<uint32_t>(idx)});
+
+    std::cout << "  [" << i << "] token_id=" << idx << ", token='" << token_str << "'"
+              << ", logit=" << logit << ", prob=" << prob * 100 << "%" << std::endl;
+  }
+}
+
 TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int maxNewTokens) {
   Result result;
   if (!Initialized() || !m_gen_option.validate()) return result;
@@ -837,16 +1062,16 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   m_stepFloatBuffers.clear();
   m_stepInt64Buffers.clear();
 
-  if (m_shouldClearKVCache) {
-    ClearKVCache();
-    m_shouldClearKVCache = false;
+  if (m_lastPrompt != userPrompt) {
+    KVCache_Reset();
+    m_lastPrompt = userPrompt;
   }
 
   std::string inputText;
   if (m_gen_option.task == "summarization") {
-    inputText = ApplyChatTemplate("Please summarize the following text: " + userPrompt);
-  } else {
-    inputText = ApplyChatTemplate(userPrompt);
+    inputText = ApplyChatTemplate("Please summarize the following text: " + userPrompt, m_system_prompt);
+  } else {  // generation.
+    inputText = ApplyChatTemplate(userPrompt, m_system_prompt);
   }
 
   // encoding the input text into token ids.
@@ -1045,7 +1270,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     }
     result.output = m_tokenizer->decode(decodeTokens, true);
   } else  // No new tokens generated
-    result.output = "";
+    result.output = "[No tokens generated: possibly EOS or empty output]";
 
   result.tokens = std::move(generatedTokens);
   return result;

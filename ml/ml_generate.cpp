@@ -92,10 +92,20 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
     return result;
   }
 
+  std::string oper_type;
   LLM_Generate::GenerationOptions gen_options;
+  keystr = "language";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    std::transform(oper_type.begin(), oper_type.end(), oper_type.begin(), ::tolower);
+    gen_options.setLanguage(oper_type);
+  }
   gen_options.model_id = model_name;
 
-  std::string oper_type;
+  gen_options.setModelDefaults(model_name);
+  gen_options.optimizeForModelSize();
+
+  // If user specify its value, then use user input value.
   keystr = "task";
   if (opt_values.find(keystr) != opt_values.end()) {
     oper_type = opt_values[keystr][0];
@@ -107,13 +117,6 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
     oper_type = opt_values[keystr][0];
     std::transform(oper_type.begin(), oper_type.end(), oper_type.begin(), ::tolower);
     gen_options.context = oper_type;
-  }
-
-  keystr = "language";
-  if (opt_values.find(keystr) != opt_values.end()) {
-    oper_type = opt_values[keystr][0];
-    std::transform(oper_type.begin(), oper_type.end(), oper_type.begin(), ::tolower);
-    gen_options.language = oper_type;
   }
 
   keystr = "temperature";
