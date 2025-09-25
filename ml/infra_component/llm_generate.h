@@ -354,7 +354,7 @@ class TextGenerator {
    * @param systemPrompt Raw system prompt
    * @return Formatted prompt with appropriate chat template
    */
-  std::string ApplyChatTemplate(const std::string &userInput, const std::string &systemPrompt);
+  std::string ApplyChatTemplate(const std::string &userInput, const std::string &);
 
   /**
    * Find the index of maximum value in logits array (greedy sampling)

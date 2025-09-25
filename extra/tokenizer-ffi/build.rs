@@ -146,6 +146,11 @@ typedef struct BatchEncodingResult {
     size_t length;                 // Number of encodings
 } BatchEncodingResult;
 
+typedef struct ChatMessage{
+    const char* role;
+    const char* content;
+} ChatMessage;
+
 // =============================================================================
 // ERROR HANDLING - HuggingFace Compatible
 // =============================================================================
@@ -238,6 +243,50 @@ BatchEncodingResult* tokenizer_encode_batch(TokenizerHandle* handle, const char*
  * @return Decoded text string or NULL on error. Must be freed with string_free()
  */
 char* tokenizer_decode(TokenizerHandle* handle, const uint32_t* ids, size_t length, bool skip_special_tokens);
+
+/**
+ * Apply chat template to messages.
+ * 
+ * @param handle Tokenizer handle
+ * @param messages Array of chat messages
+ * @param messages_count Number of messages in the array
+ * @param add_generation_prompt Whether to add generation prompt at the end
+ * @param chat_template Optional custom template (NULL to use tokenizer's default)
+ * @return Formatted text string, or NULL on failure
+ *         The returned string must be freed with string_free()
+ */
+char* tokenizer_apply_chat_template(TokenizerHandle* handle, const ChatMessage* messages, size_t messages_count, bool add_generation_prompt, const char* chat_template);
+
+/**
+ * Apply chat template and encode the result in one step.
+ * 
+ * @param handle Tokenizer handle
+ * @param messages Array of chat messages
+ * @param messages_count Number of messages in the array
+ * @param add_generation_prompt Whether to add generation prompt at the end
+ * @param chat_template Optional custom template (NULL to use tokenizer's default)
+ * @param add_special_tokens Whether to add special tokens during encoding
+ * @return EncodingResult, or NULL on failure
+ *         The returned result must be freed with encoding_result_free()
+ */
+EncodingResult* tokenizer_apply_chat_template_and_encode(TokenizerHandle* handle, const ChatMessage* messages, size_t messages_count, bool add_generation_prompt, const char* chat_template, bool add_special_tokens);
+
+/**
+ * Check if tokenizer has a chat template configured.
+ * 
+ * @param handle Tokenizer handle
+ * @return true if chat template is available, false otherwise
+ */
+bool tokenizer_has_chat_template(TokenizerHandle* handle);
+
+/**
+ * Get the chat template string from the tokenizer.
+ * 
+ * @param handle Tokenizer handle
+ * @return Chat template string, or NULL if not available
+ *         The returned string must be freed with string_free()
+ */
+char* tokenizer_get_chat_template(TokenizerHandle* handle);
 
 // =============================================================================
 // VOCABULARY FUNCTIONS - HuggingFace Compatible
