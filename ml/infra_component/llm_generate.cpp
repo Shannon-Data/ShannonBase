@@ -230,22 +230,26 @@ TextGenerator::~TextGenerator() {
 }
 
 bool TextGenerator::InitializeONNX() {
-  m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "TextGenerator");
-  m_sessionOptions = std::make_unique<Ort::SessionOptions>();
+  try {
+    m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "TextGenerator");
+    m_sessionOptions = std::make_unique<Ort::SessionOptions>();
 
-  int numThreads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
-  m_sessionOptions->SetIntraOpNumThreads(numThreads);
-  m_sessionOptions->SetInterOpNumThreads(1);
-  m_sessionOptions->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-  m_sessionOptions->EnableMemPattern();
-  m_sessionOptions->EnableCpuMemArena();
+    int numThreads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    m_sessionOptions->SetIntraOpNumThreads(numThreads);
+    m_sessionOptions->SetInterOpNumThreads(1);
+    m_sessionOptions->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    m_sessionOptions->EnableMemPattern();
+    m_sessionOptions->EnableCpuMemArena();
 
 #ifdef _WIN32
-  std::wstring wModelPath(m_modelPath.begin(), m_modelPath.end());
-  m_session = std::make_unique<Ort::Session>(*m_env, wModelPath.c_str(), *m_sessionOptions);
+    std::wstring wModelPath(m_modelPath.begin(), m_modelPath.end());
+    m_session = std::make_unique<Ort::Session>(*m_env, wModelPath.c_str(), *m_sessionOptions);
 #else
-  m_session = std::make_unique<Ort::Session>(*m_env, m_modelPath.c_str(), *m_sessionOptions);
+    m_session = std::make_unique<Ort::Session>(*m_env, m_modelPath.c_str(), *m_sessionOptions);
 #endif
+  } catch (...) {
+    return true;
+  }
   return false;
 }
 
