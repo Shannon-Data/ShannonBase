@@ -334,55 +334,26 @@ bool TextGenerator::LoadTokenizerConfig() {
   return false;
 }
 
-std::string TextGenerator::ApplyChatTemplate(const std::string &userInput, const std::string &systemPrompt) {
-  std::string modelTypeLower = m_modelType;
-  std::transform(modelTypeLower.begin(), modelTypeLower.end(), modelTypeLower.begin(), ::tolower);
-  auto vocab = m_tokenizer->get_vocab(true);
-  bool has_im_start{false}, has_im_end{false};
+std::string TextGenerator::ApplyChatTemplate(const std::string &userInput, const std::string &) {
+  if (!m_tokenizer->has_chat_template()) return "";
 
   auto lang = m_gen_option.language;
-  auto capitalizeFirstChar = [](const std::string &str) -> std::string {
-    if (str.empty()) return str;
-
-    std::string result = str;
-    std::locale loc;
-    result[0] = std::toupper(result[0], loc);
-    return result;
-  };
-  lang = capitalizeFirstChar(lang);
-
-  if (modelTypeLower.find("qwen") != std::string::npos) {
-    has_im_start = vocab.find("<|im_start|>") != vocab.end();
-    has_im_end = vocab.find("<|im_end|>") != vocab.end();
-    std::ostringstream oss;
-    if (!systemPrompt.empty()) {
-      oss << "<|im_start|>system\n"
-          << systemPrompt << lang << "."
-          << "<|im_end|>\n";
-    }
-
-    if (has_im_start && has_im_end)
-      oss << "<|im_start|>user\n"
-          << userInput << "<|im_end|>\n"
-          << "<|im_start|>assistant\n";
-    else
-      oss << userInput;
-
-    return oss.str();
+  std::string sys_prompt;
+  if (lang == "chinese") {
+    sys_prompt = "你是一个有用的中文助手。请用中文回答用户的问题。";
+  } else if (lang == "english") {
+    sys_prompt = "You are a helpful English assistant. Please respond in English.";
+  } else {
+    sys_prompt = "You are a helpful assistant.";
   }
 
-  if (modelTypeLower.find("llama") != std::string::npos) {
-    return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" + userInput +
-           "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
-  } else if (modelTypeLower.find("mistral") != std::string::npos ||
-             modelTypeLower.find("codellama") != std::string::npos) {
-    return "<s>[INST] " + userInput + " [/INST]";
-  } else if (modelTypeLower.find("phi") != std::string::npos) {
-    return "Instruct: " + userInput + "\nOutput:";
-  } else if (modelTypeLower.find("gemma") != std::string::npos) {
-    return "<bos><start_of_turn>user\n" + userInput + "<end_of_turn>\n<start_of_turn>model\n";
-  }
-  return userInput;
+  std::vector<tokenizers::ChatMessage> messages = {{"system", sys_prompt.c_str()},
+                                                   {"user", "Hello!"},
+                                                   {"assistant", "Hi! How can I help you?"},
+                                                   {"user", userInput.c_str()}};
+
+  std::string formatted_chat = m_tokenizer->apply_chat_template(messages, true);
+  return formatted_chat;
 }
 
 void TextGenerator::TestTokenizerCompatibility() {
