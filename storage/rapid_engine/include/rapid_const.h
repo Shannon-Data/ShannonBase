@@ -31,28 +31,50 @@
 #include "my_inttypes.h"
 #include "rapid_arch_inf.h"
 
-#if defined(__arm__) || defined(__aarch64__)
+#if defined(__APPLE__) && defined(__arm64__)
+#define SHANNON_APPLE_PLATFORM
 #define SHANNON_ARM_PLATFORM
+#include <arm_neon.h>
+
+#elif defined(__arm__) || defined(__aarch64__)
+#define SHANNON_ARM_PLATFORM
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
 #elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
 #define SHANNON_X86_PLATFORM
-#elif defined(__APPLE__) && defined(__arm64__)
-#define SHANNON_APPLE_PLATFORM
+
+#if defined(__AVX2__) || defined(__AVX__)
+#include <immintrin.h>
+#define SHANNON_AVX_VECT_SUPPORTED
+#elif defined(__SSE4_2__) || defined(__SSE4_1__) || defined(__SSE2__) || defined(__SSE__)
+#include <emmintrin.h>
+#define SHANNON_SSE_VECT_SUPPORTED
+#endif
+
+#elif defined(_MSC_VER)
+#if defined(__AVX2__) || defined(__AVX__)
+#include <immintrin.h>
+#define SHANNON_AVX_VECT_SUPPORTED
+#elif defined(_M_IX86_FP) && _M_IX86_FP >= 2
+#include <emmintrin.h>
+#define SHANNON_SSE_VECT_SUPPORTED
+#endif
+
+#else
+#error "Unsupported platform for ShannonBase"
+#endif
+
+#if defined(SHANNON_ARM_PLATFORM) && defined(SHANNON_X86_PLATFORM)
+#error "Conflicting platform macros detected!"
 #endif
 
 #define SHANNON_ALIGNAS alignas(CACHE_LINE_SIZE)
-
-#if defined(__SSE__) || defined(__SSE2__)
-#define SHANNON_SSE_VECT_SUPPORTED
-#include <emmintrin.h>
-#elif defined(__AVX__) || defined(__AVX2__)
-#include <immintrin.h>
-#define SHANNON_AVX_VECT_SUPPORTED
-#endif
-
 #if defined(SHANNON_SSE_VECT_SUPPORTED) || defined(SHANNON_AVX_VECT_SUPPORTED)
 #define SHANNON_VECTORIZE_SUPPORT
 #endif
-#define SHANNON_VECTOR_WIDTH 8
+#define SHANNON_VECTOR_WIDTH 256
 
 extern char *mysql_llm_home_ptr;
 namespace ShannonBase {

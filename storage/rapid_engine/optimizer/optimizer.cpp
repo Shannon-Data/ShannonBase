@@ -29,6 +29,7 @@
 #include "sql/iterators/hash_join_iterator.h"  //HashJoinIterator
 #include "sql/iterators/timing_iterator.h"
 #include "sql/join_optimizer/access_path.h"
+#include "sql/join_optimizer/cost_model.h"
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"                      //Query_expression
 #include "sql/sql_optimizer.h"                //JOIN
@@ -37,14 +38,15 @@
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/optimizer/rules/const_fold_rule.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/populate/populate.h"
 
 namespace ShannonBase {
 namespace Optimizer {
-
 Timer::Timer() { m_begin = std::chrono::steady_clock::now(); }
 std::chrono::nanoseconds Timer::lap() {
   const auto now = std::chrono::steady_clock::now();
@@ -60,59 +62,46 @@ std::string Timer::lap_formatted() {
 // ctor
 Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr, const std::shared_ptr<CostEstimator> &cost_estimator) {}
 
-void OptimzieAccessPath(AccessPath *path, JOIN *join) {
-  switch (path->type) {
-    // The only supported join type is hash join. Other join types are disabled
-    // in handlerton::secondary_engine_flags.
-    case AccessPath::TABLE_SCAN: {
-      auto table = path->table_scan().table;
-      if (table->s->is_secondary_engine() && table->file->stats.records >= SHANNON_VECTOR_WIDTH) {
-        // this table is used by query and the table has been loaded into rapid engine. then start
-        // a propagation.
-        ShannonBase::Populate::Populator::send_notify();
-      }
-    } break;
-    case AccessPath::HASH_JOIN: {
-      auto hash_iter [[maybe_unused]] = reinterpret_cast<HashJoinIterator *>(path->iterator);
-      assert(hash_iter);
-    } break;
-    case AccessPath::NESTED_LOOP_JOIN: /* purecov: deadcode */
-    case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
-    case AccessPath::BKA_JOIN:
-    // Index access is disabled in ha_rapid::table_flags(), so we should see
-    // none of these access types.
-    case AccessPath::INDEX_SCAN:
-    case AccessPath::REF_OR_NULL:
-    case AccessPath::EQ_REF:
-    case AccessPath::PUSHED_JOIN_REF:
-    case AccessPath::INDEX_SKIP_SCAN:
-    case AccessPath::GROUP_INDEX_SKIP_SCAN:
-    case AccessPath::ROWID_INTERSECTION:
-    case AccessPath::ROWID_UNION:
-    case AccessPath::DYNAMIC_INDEX_RANGE_SCAN:
-      break;
-    default:
-      break;
-  }
-
-  // This secondary storage engine does not yet store anything in the auxiliary
-  // data member of AccessPath.
-  assert(path->secondary_engine_data == nullptr);
-}
-
-// To build the customerized access path（such as: Vectorized Table Scan、GPU Join, etc.）
-// For example: add a new AccessPath Type: VECTOR_TABLE_SCAN, then create a new AccessPath
-// for this type VectorizedTableSan, then in PathGenerator::CreateIteratorFromAccessPath
-// to create its corressponding iterator.
+/**
+ * @brief Builds customized access paths for secondary engine optimization
+ *
+ * Creates specialized AccessPath types (Vectorized Table Scan, GPU Join, etc.)
+ * for secondary engine execution. The function examines each AccessPath type
+ * and creates optimized versions when possible.
+ *
+ * Why not use original AccessPath directly?
+ * - Future extensions may require custom AccessPath types (e.g., RapidAccessPath)
+ * - Original AccessPath tree will be freed and replaced with rapid_path
+ * - Enables specialized iterators in PathGenerator::CreateIteratorFromAccessPath
+ *
+ * @param context Optimization context with vectorization capabilities
+ * @param path Input AccessPath to optimize
+ * @param join JOIN structure for query context
+ * @return AccessPath* Optimized AccessPath, or nullptr if no optimization applied
+ */
 AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join) {
   switch (path->type) {
     case AccessPath::TABLE_SCAN: {
+      // create vectorized table scan if it can.
       TABLE *table = path->table_scan().table;
       auto secondary_engine = table->s->is_secondary_engine();
+
+      auto loaded{false};
+      if (shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str)) loaded = true;
+
       auto can_vectorized = (table->file->stats.records >= SHANNON_VECTOR_WIDTH) ? true : false;
-      context->can_vectorized = can_vectorized;
+      context->can_vectorized = secondary_engine && loaded && can_vectorized;
+
       // create vectorized table scan if it can.
-      return AccessPathFactory::CreateTableScan(table, nullptr, secondary_engine && can_vectorized);
+      auto rapid_path = new (current_thd->mem_root) AccessPath();
+      rapid_path->vectorized = context->can_vectorized;
+      rapid_path->type = AccessPath::TABLE_SCAN;
+      rapid_path->count_examined_rows = true;
+      rapid_path->table_scan().table = table;
+      rapid_path->iterator = nullptr;
+      rapid_path->secondary_engine_data = nullptr;
+
+      return rapid_path;
     } break;
     case AccessPath::INDEX_SCAN: {
     } break;
@@ -171,12 +160,22 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
     case AccessPath::BKA_JOIN: {
     } break;
     case AccessPath::HASH_JOIN: {
-      auto inner = path->hash_join().inner;
-      auto outer = path->hash_join().outer;
+      auto hash_join = path->hash_join();
+      if (hash_join.join_predicate != nullptr &&
+          (hash_join.rewrite_semi_to_inner || hash_join.allow_spill_to_disk == false)) {
+        context->can_vectorized = true;
+      }
 
-      context->can_vectorized = true;
-      // create vectorized table scan if it can.
-      return AccessPathFactory::CreateHashJoin(outer, inner, true);
+      if (hash_join.allow_spill_to_disk || hash_join.store_rowids) context->can_vectorized = false;
+
+      auto rapid_path = new (current_thd->mem_root) AccessPath();
+      rapid_path->vectorized = context->can_vectorized;
+      rapid_path->type = AccessPath::HASH_JOIN;
+      rapid_path->hash_join().outer = hash_join.outer;
+      rapid_path->hash_join().inner = hash_join.inner;
+      rapid_path->iterator = nullptr;
+
+      return rapid_path;
     } break;
 
     // Composite access paths.
@@ -185,8 +184,37 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
     case AccessPath::SORT: {
     } break;
     case AccessPath::AGGREGATE: {
+      if (path->num_output_rows() == kUnknownRowCount) {
+        EstimateAggregateCost(join->thd, path, join->query_block);
+      }
+      auto n_records = path->num_output_rows_before_filter;
+      if ((size_t)n_records >= SHANNON_VECTOR_WIDTH) context->can_vectorized = true;
+
+      auto rapid_path = new (current_thd->mem_root) AccessPath();
+      rapid_path->vectorized = context->can_vectorized;
+      rapid_path->type = AccessPath::AGGREGATE;
+      rapid_path->aggregate().child = path->aggregate().child;
+      rapid_path->aggregate().olap = path->aggregate().olap;
+      rapid_path->has_group_skip_scan = path->has_group_skip_scan;
+      rapid_path->set_num_output_rows(path->num_output_rows());
+      rapid_path->iterator = nullptr;
+
+      return rapid_path;
     } break;
     case AccessPath::TEMPTABLE_AGGREGATE: {
+      auto n_records = path->num_output_rows_before_filter;
+      if ((size_t)n_records >= SHANNON_VECTOR_WIDTH) context->can_vectorized = true;
+
+      auto rapid_path = new (current_thd->mem_root) AccessPath();
+      rapid_path->vectorized = context->can_vectorized;
+      rapid_path->type = AccessPath::TEMPTABLE_AGGREGATE;
+      rapid_path->temptable_aggregate().subquery_path = path->temptable_aggregate().subquery_path;
+      rapid_path->temptable_aggregate().temp_table_param = path->temptable_aggregate().temp_table_param;
+      rapid_path->temptable_aggregate().table = path->temptable_aggregate().table;
+      rapid_path->temptable_aggregate().table_path = path->temptable_aggregate().table_path;
+      rapid_path->temptable_aggregate().ref_slice = path->temptable_aggregate().ref_slice;
+
+      return rapid_path;
     } break;
     case AccessPath::LIMIT_OFFSET: {
     } break;
@@ -220,7 +248,7 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
       break;
   }
 
-  return nullptr;
+  return path;
 }
 
 }  // namespace Optimizer

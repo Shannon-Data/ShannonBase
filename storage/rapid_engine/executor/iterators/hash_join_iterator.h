@@ -43,6 +43,7 @@
 class Item_eq_base;
 namespace ShannonBase {
 namespace Executor {
+// this vectorized version of HashJoinIterator. The More Hash Iterator, refere to HashJoinIterator.
 class VectorizedHashJoinIterator final : public RowIterator {
  public:
   VectorizedHashJoinIterator(THD *thd, unique_ptr_destroy_only<RowIterator> build_input,
@@ -58,9 +59,10 @@ class VectorizedHashJoinIterator final : public RowIterator {
   int Read() override;
   void SetNullRowFlag(bool is_null_row) override;
   void UnlockRow() override;
+  void EndPSIBatchModeIfStarted() override;
 
  private:
-  enum class State { BUILDING_HASH_TABLE, PROBING_HASH_TABLE, END_OF_ROWS };
+  enum class State { BUILDING_HASH_TABLE, PROBING_HASH_TABLE, READING_FROM_OUTPUT_BUFFER, END_OF_ROWS };
 
   // Build hash table from build input
   bool BuildHashTable();
@@ -71,16 +73,45 @@ class VectorizedHashJoinIterator final : public RowIterator {
   // Hash computation using actual HashJoinCondition interface
   uint64_t ComputeHashFromItem(Item_eq_base *condition, const uchar *row_data);
 
+  uint64_t ComputeHashFromJoinConditions(const std::vector<ColumnChunk> &columns, size_t row_idx);
+
   // Read batches from input iterators
   bool ReadBuildBatch();
   bool ReadProbeBatch();
 
+  // Extract data from table record buffers to column chunks
+  bool ExtractRowToColumnChunks(const pack_rows::TableCollection &tables, std::vector<ColumnChunk> &chunks);
+
+  // Load data from column chunks back to table record buffers
+  bool LoadRowFromColumnChunks(const std::vector<ColumnChunk> &chunks, size_t row_idx,
+                               const pack_rows::TableCollection &tables);
+
+  // Join condition evaluation for vectorized processing
+  bool EvaluateJoinConditions(const std::vector<ColumnChunk> &build_columns, size_t build_row,
+                              const std::vector<ColumnChunk> &probe_columns, size_t probe_row);
+
+  // Extra condition evaluation
+  bool EvaluateExtraConditions();
+
+  // Initialize column chunks based on table schema
+  bool InitializeColumnChunks(const pack_rows::TableCollection &tables, std::vector<ColumnChunk> &chunks);
+
+ private:
   unique_ptr_destroy_only<RowIterator> m_build_input;
   unique_ptr_destroy_only<RowIterator> m_probe_input;
+
+  // Table collections for managing input tables
+  pack_rows::TableCollection m_build_input_tables;
+  pack_rows::TableCollection m_probe_input_tables;
+
   std::vector<HashJoinCondition> m_join_conditions;
   JoinType m_join_type;
   size_t m_max_memory_available;
   size_t m_batch_size;
+  bool m_allow_spill_to_disk;
+  bool m_probe_input_batch_mode;
+  table_map m_tables_to_get_rowid_for;
+  HashJoinInput m_first_input;
 
   State m_state;
 
@@ -89,18 +120,39 @@ class VectorizedHashJoinIterator final : public RowIterator {
   std::vector<ColumnChunk> m_probe_columns;
   std::vector<ColumnChunk> m_output_columns;
 
-  // Simplified hash table structure
+  // Hash table structure - use unordered_multimap for better performance
   struct HashEntry {
     std::vector<uchar> key_data;
     size_t build_row_idx;
-    std::unique_ptr<HashEntry> next;
+    HashEntry *next;  // For chaining
   };
 
   std::vector<std::unique_ptr<HashEntry>> m_hash_table;
-  static const uint m_hash_table_size{356};
+  static const size_t m_hash_table_size = 65536;  // Power of 2 for efficient modulo
 
-  size_t m_current_output_size;
+  // Output buffer management
+  struct OutputRow {
+    size_t build_row_idx;
+    size_t probe_row_idx;
+    bool is_null_complemented;
+  };
+
+  std::vector<OutputRow> m_output_buffer;
   size_t m_current_output_pos;
+
+  // Batch processing state
+  size_t m_current_build_size;
+  size_t m_current_probe_size;
+
+  // Extra conditions
+  Item *m_extra_condition;
+
+  // Buffer for join key construction
+  String m_join_key_buffer;
+
+  // Hash table generation for optimization
+  uint64_t *m_hash_table_generation;
+  uint64_t m_last_hash_table_generation;
 };
 }  // namespace Executor
 }  // namespace ShannonBase
