@@ -323,6 +323,8 @@ struct AccessPath {
   /// Whether this access path contains a GROUP_INDEX_SKIP_SCAN
   bool has_group_skip_scan : 1;
 
+  /// Whether is using vectorized.
+  bool vectorized : 1;
 #ifndef NDEBUG
   /// Whether this access path is forced preferred over all others by means
   /// of a SET DEBUG force_subplan_0x... statement.

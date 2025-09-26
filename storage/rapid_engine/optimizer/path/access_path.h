@@ -37,6 +37,10 @@ class THD;
 class MEM_ROOT;
 class JOIN;
 
+struct RapidAccessPath : public AccessPath {
+  bool m_vectorized{false};
+};
+
 namespace ShannonBase {
 namespace Optimizer {
 
@@ -53,14 +57,6 @@ class PathGenerator {
   static unique_ptr_destroy_only<RowIterator> CreateIteratorFromAccessPath(THD *thd, OptimizeContext *context,
                                                                            AccessPath *path, JOIN *join,
                                                                            bool eligible_for_batch_mode);
-};
-
-class AccessPathFactory {
- public:
-  static AccessPath *CreateTableScan(TABLE *table, THD *thd = nullptr, bool vectorized = false);
-  static AccessPath *CreateHashJoin(AccessPath *outer, AccessPath *inner, bool vectorized = false);
-
-  // TOD: create more types access path.
 };
 
 }  // namespace Optimizer

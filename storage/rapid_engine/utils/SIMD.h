@@ -38,6 +38,8 @@
 #include <bit>  // for std::countr_zero/popcount
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <type_traits>
 #include <vector>
 
 namespace ShannonBase {
@@ -46,103 +48,111 @@ namespace SIMD {
 // ============================================================================
 // SIMD Capability Detection
 // ============================================================================
+enum class SIMDType {
+  NONE = 0,
+  SSE,     // Basic SSE support
+  SSE2,    // SSE2 support
+  SSE4_1,  // SSE4.1 support
+  SSE4_2,  // SSE4.2 support
+  AVX,     // AVX support
+  AVX2,    // AVX2 support
+  NEON     // ARM NEON support
+};
 
-inline size_t popcount_bitmap_common(const uint8_t *data, size_t bytes) {
-  size_t sum = 0;
-  // process 8 bytes -> uint64_t for faster popcount on 64-bit
-  size_t i = 0;
-  for (; i + 8 <= bytes; i += 8) {
-    uint64_t v;
-    std::memcpy(&v, data + i, sizeof(v));
-    sum += __builtin_popcountll(v);
-  }
-  for (; i < bytes; ++i) sum += std::popcount((unsigned)data[i]);
-  return sum;
-}
+SIMDType detect_simd_support();
 
-inline size_t popcount_bitmap_avx2(const uint8_t *data, size_t bytes) {
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__) && defined(__SSE4_1__)
-  static const uint8_t lut_arr[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
-  __m128i lut128 = _mm_loadu_si128((const __m128i *)lut_arr);
+// ============================================================================
+// Bitmap Operations
+// ============================================================================
 
-  size_t i = 0;
-  const size_t block = 32;
-  __m256i total = _mm256_setzero_si256();
+size_t popcount_bitmap_common(const uint8_t *data, size_t bytes);
+size_t popcount_bitmap_avx2(const uint8_t *data, size_t bytes);
+size_t popcount_bitmap_neon(const uint8_t *data, size_t bytes);
+size_t popcount_bitmap(const std::vector<uint8_t> &bm);
 
-  for (; i + block <= bytes; i += block) {
-    __m256i v = _mm256_loadu_si256((const __m256i *)(data + i));
-  }
+// ============================================================================
+// Arithmetic Operations
+// ============================================================================
 
-  uint64_t lanes[4];
-  _mm256_storeu_si256((__m256i *)lanes, total);
-  size_t sum = (size_t)lanes[0] + (size_t)lanes[1] + (size_t)lanes[2] + (size_t)lanes[3];
+// Sum Oper
+template <typename T>
+T sum_avx2(const T *data, const uint8_t *null_mask, size_t row_count);
+template <typename T>
+T sum_sse4(const T *data, const uint8_t *null_mask, size_t row_count);
+template <typename T>
+T sum_neon(const T *data, const uint8_t *null_mask, size_t row_count);
+template <typename T>
+T sum_generic(const T *data, const uint8_t *null_mask, size_t row_count);
 
-  for (; i < bytes; ++i) sum += std::popcount((unsigned)data[i]);
-  return sum;
-#elif defined(SHANNON_ARM_PLATFORM) && defined(__ARM_NEON)
-  size_t i = 0;
-  const size_t block = 16;
-  uint32x4_t total = vdupq_n_u32(0);
+// Min Oper
+template <typename T>
+T min_avx2(const T *data, const uint8_t *null_mask, size_t row_count);
+template <typename T>
+T min_sse4(const T *data, const uint8_t *null_mask, size_t row_count);
+template <typename T>
+T min_neon(const T *data, const uint8_t *null_mask, size_t row_count);
+template <typename T>
+T min_generic(const T *data, const uint8_t *null_mask, size_t row_count);
 
-  for (; i + block <= bytes; i += block) {
-    uint8x16_t v = vld1q_u8(data + i);
+// Max Oper
+template <typename T>
+T max_avx2(const T *data, const uint8_t *null_mask, size_t row_count);
+template <typename T>
+T max_sse4(const T *data, const uint8_t *null_mask, size_t row_count);
+template <typename T>
+T max_neon(const T *data, const uint8_t *null_mask, size_t row_count);
+template <typename T>
+T max_generic(const T *data, const uint8_t *null_mask, size_t row_count);
 
-    uint8x16_t v0 = vandq_u8(v, vdupq_n_u8(0x55));  // 0x55 = 01010101
-    uint8x16_t v1 = vandq_u8(v, vdupq_n_u8(0xAA));  // 0xAA = 10101010
-    v1 = vshrq_n_u8(v1, 1);
+// ============================================================================
+// Counting Operations
+// ============================================================================
 
-    uint8x16_t sum8 = vaddq_u8(v0, v1);
+size_t count_non_null_avx2(const uint8_t *null_mask, size_t row_count);
+size_t count_non_null_sse4(const uint8_t *null_mask, size_t row_count);
+size_t count_non_null_neon(const uint8_t *null_mask, size_t row_count);
+size_t count_non_null_generic(const uint8_t *null_mask, size_t row_count);
 
-    uint16x8_t sum16 = vpaddlq_u8(sum8);
-    uint32x4_t sum32 = vpaddlq_u16(sum16);
+// ============================================================================
+// Filtering Operations
+// ============================================================================
 
-    total = vaddq_u32(total, sum32);
-  }
+template <typename T>
+size_t filter_avx2(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
+                   std::vector<size_t> &output_indices);
+template <typename T>
+size_t filter_sse4(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
+                   std::vector<size_t> &output_indices);
+template <typename T>
+size_t filter_neon(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
+                   std::vector<size_t> &output_indices);
+template <typename T>
+size_t filter_generic(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
+                      std::vector<size_t> &output_indices);
 
-  uint32_t sum =
-      vgetq_lane_u32(total, 0) + vgetq_lane_u32(total, 1) + vgetq_lane_u32(total, 2) + vgetq_lane_u32(total, 3);
+// ============================================================================
+// High-level Interface
+// ============================================================================
 
-  for (; i < bytes; ++i) {
-    sum += std::popcount((unsigned)data[i]);
-  }
-  return sum;
-#else
-  return popcount_bitmap_common(data, bytes);
-#endif
-}
+// To choose the corresponding instrcutions to execute.
+template <typename T>
+T sum(const T *data, const uint8_t *null_mask, size_t row_count);
 
-inline size_t popcount_bitmap_neon(const uint8_t *data, size_t bytes) {
-#if defined(SHANNON_ARM_PLATFORM) && defined(__ARM_NEON)
-  size_t sum = 0;
-  size_t i = 0;
+template <typename T>
+T min(const T *data, const uint8_t *null_mask, size_t row_count);
 
-  for (; i + 16 <= bytes; i += 16) {
-    uint8x16_t v = vld1q_u8(data + i);
-    sum += vaddvq_u8(vcntq_u8(v));
-  }
+template <typename T>
+T max(const T *data, const uint8_t *null_mask, size_t row_count);
 
-  for (; i < bytes; ++i) {
-    sum += std::popcount((unsigned)data[i]);
-  }
-  return sum;
-#else
-  return popcount_bitmap_common(data, bytes);
-#endif
-}
+size_t count_non_null(const uint8_t *null_mask, size_t row_count);
 
-inline size_t popcount_bitmap(const std::vector<uint8_t> &bm) {
-  if (bm.empty()) return 0;
-
-#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
-  return popcount_bitmap_avx2(bm.data(), bm.size());
-#elif defined(SHANNON_ARM_PLATFORM) && defined(__ARM_NEON)
-  return popcount_bitmap_neon(bm.data(), bm.size());
-#else
-  return popcount_bitmap_common(bm.data(), bm.size());
-#endif
-}
+template <typename T>
+size_t filter(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
+              std::vector<size_t> &output_indices);
 
 }  // namespace SIMD
 }  // namespace Utils
 }  // namespace ShannonBase
+
+#include "storage/rapid_engine/utils/SIMD_Impl.h"
 #endif  //__SHANNONBASE_UTILS_SIMD_H__

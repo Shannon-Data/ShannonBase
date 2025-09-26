@@ -41,9 +41,14 @@ class AccessPath;
 namespace ShannonBase {
 namespace Optimizer {
 class Statistics;
-
-typedef struct {
-  bool can_vectorized{false};
+/**
+ * @brief Optimization context containing vectorization capability flag and statistics
+ *
+ * This structure holds context information used during query optimization,
+ * including whether operations can be vectorized and associated statistics data.
+ */
+typedef struct OptimizeContext {
+  bool can_vectorized;         ///< Flag indicating if operations can be vectorized.
   Statistics *Rpd_statistics;  // to replace with the real statistics data.
 } OptimizeContext;
 
@@ -51,16 +56,36 @@ class Rule;
 class CostEstimator;
 class CardinalityEstimator;
 
+/**
+ * @brief Optimizes and rewrites access paths for secondary engine with custom optimizer
+ *
+ * This function processes AccessPath trees to create optimized versions for
+ * secondary engine execution, including vectorized table scans, GPU joins, etc.
+ *
+ * @param context Optimization context containing vectorization flags and statistics
+ * @param path The AccessPath to optimize and rewrite
+ * @param join The JOIN structure containing query information
+ * @return AccessPath* Newly created optimized AccessPath
+ */
 AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join);
 
-// here, to optimize the secondary engine with its own optimizer.
-void OptimzieAccessPath(AccessPath *path, JOIN *join);
-
+/**
+ * @brief Main optimizer class for query optimization
+ *
+ * The Optimizer class handles query optimization using cost-based optimization
+ * techniques and rule-based transformations.
+ */
 class Optimizer : public MemoryObject {
  public:
   explicit Optimizer(std::shared_ptr<Query_expression> &, const std::shared_ptr<CostEstimator> &);
 };
 
+/**
+ * @brief Metrics collector for optimization rules
+ *
+ * Tracks performance metrics for individual optimization rules,
+ * including rule name and execution duration.
+ */
 class RuleMetrics {
  public:
   explicit RuleMetrics(const std::string &rule_name, const std::chrono::nanoseconds duration)
@@ -70,6 +95,13 @@ class RuleMetrics {
   std::string m_rule_name;
   std::chrono::nanoseconds m_duration;
 };
+
+/**
+ * @brief High-resolution timer for performance measurement
+ *
+ * Utility class for measuring execution times during optimization.
+ * Uses steady_clock for monotonic timing measurements.
+ */
 class Timer final {
  public:
   Timer();

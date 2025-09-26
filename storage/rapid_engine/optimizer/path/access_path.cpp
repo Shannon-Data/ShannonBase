@@ -64,34 +64,15 @@
 #include "sql/range_optimizer/reverse_index_range_scan.h"
 #include "sql/range_optimizer/rowid_ordered_retrieval.h"
 
+#include "storage/rapid_engine/executor/iterators/aggregate_iterator.h"
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
+#include "storage/rapid_engine/utils/utils.h"
 namespace ShannonBase {
 namespace Optimizer {
 
 using pack_rows::TableCollection;
-
-AccessPath *AccessPathFactory::CreateTableScan(TABLE *table, THD *thd, bool vectorized) {
-  auto path = new (current_thd->mem_root) AccessPath();
-  path->type = AccessPath::TABLE_SCAN;
-  path->count_examined_rows = true;
-  path->table_scan().table = table;
-
-  path->iterator = nullptr;
-  path->secondary_engine_data = nullptr;
-  return path;
-}
-
-AccessPath *AccessPathFactory::CreateHashJoin(AccessPath *outer, AccessPath *inner, bool vectorized) {
-  auto path = new (current_thd->mem_root) AccessPath();
-  path->type = AccessPath::HASH_JOIN;
-  path->hash_join().outer = outer;
-  path->hash_join().inner = inner;
-
-  path->iterator = nullptr;
-  return path;
-}
 
 struct IteratorToBeCreated {
   AccessPath *path;
@@ -309,7 +290,9 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
     switch (path->type) {
       case AccessPath::TABLE_SCAN: {
         const auto &param = path->table_scan();
-        if (context->can_vectorized)
+        if (path->vectorized &&
+            param.table->s->table_category ==
+                enum_table_category::TABLE_CATEGORY_USER)  // Here param.table maybe a temp table/in-memory temp table.)
           iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(
               thd, mem_root, param.table, path->num_output_rows(), examined_rows);
         else
@@ -680,13 +663,23 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
                 ? HashJoinInput::kProbe
                 : HashJoinInput::kBuild;
 
-        iterator = NewIterator<ShannonBase::Executor::VectorizedHashJoinIterator>(
-            thd, mem_root, std::move(job.children[1]), GetUsedTables(param.inner, /*include_pruned_tables=*/true),
-            estimated_build_rows, std::move(job.children[0]),
-            GetUsedTables(param.outer, /*include_pruned_tables=*/true), param.store_rowids,
-            param.tables_to_get_rowid_for, thd->variables.join_buff_size, std::move(conditions),
-            param.allow_spill_to_disk, join_type, *extra_conditions, first_input, probe_input_batch_mode,
-            hash_table_generation);
+        if (path->vectorized)
+          iterator = NewIterator<ShannonBase::Executor::VectorizedHashJoinIterator>(
+              thd, mem_root, std::move(job.children[1]), GetUsedTables(param.inner, /*include_pruned_tables=*/true),
+              estimated_build_rows, std::move(job.children[0]),
+              GetUsedTables(param.outer, /*include_pruned_tables=*/true), param.store_rowids,
+              param.tables_to_get_rowid_for, thd->variables.join_buff_size, std::move(conditions),
+              param.allow_spill_to_disk, join_type, *extra_conditions, first_input, probe_input_batch_mode,
+              hash_table_generation);
+
+        else
+          iterator = NewIterator<HashJoinIterator>(
+              thd, mem_root, std::move(job.children[1]), GetUsedTables(param.inner, /*include_pruned_tables=*/true),
+              estimated_build_rows, std::move(job.children[0]),
+              GetUsedTables(param.outer, /*include_pruned_tables=*/true), param.store_rowids,
+              param.tables_to_get_rowid_for, thd->variables.join_buff_size, std::move(conditions),
+              param.allow_spill_to_disk, join_type, *extra_conditions, first_input, probe_input_batch_mode,
+              hash_table_generation);
         break;
       }
       case AccessPath::FILTER: {
@@ -726,11 +719,19 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           continue;
         }
         Prealloced_array<TABLE *, 4> tables = GetUsedTables(param.child, /*include_pruned_tables=*/true);
-        iterator = NewIterator<AggregateIterator>(
-            thd, mem_root, std::move(job.children[0]), join,
-            TableCollection(tables, /*store_rowids=*/false,
-                            /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
-            param.olap == ROLLUP_TYPE);
+
+        if (path->vectorized)
+          iterator = NewIterator<ShannonBase::Executor::VectorizedAggregateIterator>(
+              thd, mem_root, std::move(job.children[0]), join,
+              TableCollection(tables, /*store_rowids=*/false,
+                              /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
+              param.olap == ROLLUP_TYPE);
+        else
+          iterator = NewIterator<AggregateIterator>(
+              thd, mem_root, std::move(job.children[0]), join,
+              TableCollection(tables, /*store_rowids=*/false,
+                              /*tables_to_get_rowid_for=*/0, GetNullableEqRefTables(param.child)),
+              param.olap == ROLLUP_TYPE);
         break;
       }
       case AccessPath::TEMPTABLE_AGGREGATE: {
@@ -747,10 +748,15 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           continue;
         }
 
-        iterator = unique_ptr_destroy_only<RowIterator>(temptable_aggregate_iterator::CreateIterator(
-            thd, std::move(job.children[0]), param.temp_table_param, param.table, std::move(job.children[1]), join,
-            param.ref_slice));
-
+        // TODO: using vectorized temptable_aggregate_iterator to replace it.
+        if (path->vectorized)
+          iterator = unique_ptr_destroy_only<RowIterator>(temptable_aggregate_iterator::CreateIterator(
+              thd, std::move(job.children[0]), param.temp_table_param, param.table, std::move(job.children[1]), join,
+              param.ref_slice));
+        else
+          iterator = unique_ptr_destroy_only<RowIterator>(temptable_aggregate_iterator::CreateIterator(
+              thd, std::move(job.children[0]), param.temp_table_param, param.table, std::move(job.children[1]), join,
+              param.ref_slice));
         break;
       }
       case AccessPath::LIMIT_OFFSET: {

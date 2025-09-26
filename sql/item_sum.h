@@ -1061,6 +1061,8 @@ class Item_sum_sum : public Item_sum_num {
   void update_field() override;
   const char *func_name() const override { return "sum"; }
   Item *copy_or_same(THD *thd) override;
+
+  void add_value(double extra) { sum += extra; }
 };
 
 class Item_sum_count : public Item_sum_int {
@@ -1111,6 +1113,8 @@ class Item_sum_count : public Item_sum_int {
   void update_field() override;
   const char *func_name() const override { return "count"; }
   Item *copy_or_same(THD *thd) override;
+
+  void add_value(longlong extra) { count += extra; }
 };
 
 /* Item to get the value of a stored sum function */
