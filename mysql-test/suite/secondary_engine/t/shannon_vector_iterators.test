@@ -1,0 +1,62 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+create database sh_vector_iterators;
+use sh_vector_iterators;
+--disable_warnings
+
+DROP TABLE IF EXISTS t_innodb;
+CREATE TABLE t_innodb (
+  id  INT NOT NULL,
+  val INT,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+
+DROP TABLE IF EXISTS t_rapid;
+CREATE TABLE t_rapid (
+  id  INT NOT NULL,
+  val INT
+) ENGINE=InnoDB
+SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_innodb VALUES
+(1,10),(2,20),(3,30),(4,40),(5,50);
+
+INSERT INTO t_rapid VALUES
+(1,100),(2,200),(3,300),(4,400),(5,500),
+(6,600),(7,700),(8,800),(9,900),(10,1000);
+
+########### USE INNODB ONLY ###########
+SET USE_SECONDARY_ENGINE = OFF;
+--replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
+EXPLAIN FORMAT=TREE
+SELECT t_innodb.id, t_innodb.val, t_rapid.val
+FROM t_innodb
+JOIN t_rapid
+  ON t_innodb.id = t_rapid.id
+ORDER BY t_innodb.id;
+
+SELECT t_innodb.id, t_innodb.val, t_rapid.val 
+FROM t_innodb 
+JOIN t_rapid   
+  ON t_innodb.id = t_rapid.id 
+ORDER BY t_innodb.id;
+
+########### TEST FOR SECONDARY ENGINE ###########
+ALTER TABLE t_innodb SECONDARY_LOAD;
+ALTER TABLE t_rapid SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE = ON;
+SET rapid_use_dynamic_offload=off;
+SET secondary_engine_cost_threshold=10;
+
+########### it will use vectorized table scan, rapid_table::index_read. nest loop join. ###########
+SELECT t_innodb.id, t_innodb.val, t_rapid.val 
+FROM t_innodb 
+JOIN t_rapid   
+  ON t_innodb.id = t_rapid.id 
+ORDER BY t_innodb.id;
+
+--enable_warnings
+DROP DATABASE sh_vector_iterators;
