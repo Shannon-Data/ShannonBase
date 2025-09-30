@@ -394,29 +394,53 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
       break;
     }
 
-    // Store row data in column chunks
+    bool all_chunks_can_add = true;
     for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
       const auto &agg_info = m_vectorizer.aggregate_infos[i];
       if (agg_info.vectorizable && agg_info.source_field) {
         auto &chunk = m_vectorizer.current_batch.column_chunks[i];
+        if (chunk.full()) {
+          all_chunks_can_add = false;
+          break;
+        }
+      }
+    }
 
+    if (!all_chunks_can_add) {  // chunk is full. the current row is not added to chunk.
+      break;
+    }
+
+    bool row_stored_successfully = true;
+    for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
+      const auto &agg_info = m_vectorizer.aggregate_infos[i];
+      if (agg_info.vectorizable && agg_info.source_field) {
+        auto &chunk = m_vectorizer.current_batch.column_chunks[i];
         Field *field = agg_info.source_field;
         if (field->is_null()) {
           if (!chunk.add(nullptr, 0, true)) {
-            // Chunk full - break and process what we have
+            row_stored_successfully = false;
             break;
           }
         } else {
           const uchar *data = field->data_ptr();
           size_t data_len = field->pack_length();
           if (!chunk.add(const_cast<uchar *>(data), data_len, false)) {
-            // Chunk full - break and process what we have
+            row_stored_successfully = false;
             break;
           }
         }
       }
     }
 
+    if (!row_stored_successfully) {  // add failed, rollback the alread added row.
+      for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
+        const auto &agg_info = m_vectorizer.aggregate_infos[i];
+        if (agg_info.vectorizable && agg_info.source_field) {
+          m_vectorizer.current_batch.column_chunks[i].remove();  // do rollback.
+        }
+      }
+      break;
+    }
     rows_read++;
   }
 
@@ -434,7 +458,6 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates() {
 
     switch (info.type) {
       case Item_sum::COUNT_FUNC:
-      case Item_sum::COUNT_DISTINCT_FUNC:
         count_indices.push_back(i);
         break;
       case Item_sum::SUM_FUNC:
@@ -503,45 +526,40 @@ int VectorizedAggregateIterator::ProcessCountAggregates(const std::vector<size_t
 int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> &sum_indices) {
   for (size_t idx : sum_indices) {
     const auto &info = m_vectorizer.aggregate_infos[idx];
-    auto &chunk = m_vectorizer.current_batch.column_chunks[idx];
+    const auto &chunk = m_vectorizer.current_batch.column_chunks[idx];
 
     // Vectorized summation based on field type
     Field *field = info.source_field;
 
     switch (field->type()) {
-      case MYSQL_TYPE_LONG:
+      case MYSQL_TYPE_LONG: {
+        int64_t sum = ColumnChunkOper::Sum<int32_t>(chunk, m_vectorizer.current_batch.row_count);
+        // Add vectorized sum to aggregate
+        Item_sum_sum *sum_item = down_cast<Item_sum_sum *>(info.item);
+        sum_item->add_value(sum);
+        break;
+      }
       case MYSQL_TYPE_LONGLONG: {
-        int64_t sum = 0;
-        for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
-          if (!chunk.nullable(row)) {
-            const uchar *data = chunk.data(row);
-            int64_t val = Utils::Util::get_field_numeric<int64_t>(field, data, nullptr);
-            sum += val;
-          }
-        }
+        int64_t sum = ColumnChunkOper::Sum<int64_t>(chunk, m_vectorizer.current_batch.row_count);
 
         // Add vectorized sum to aggregate
         Item_sum_sum *sum_item = down_cast<Item_sum_sum *>(info.item);
         sum_item->add_value(sum);
         break;
       }
-
-      case MYSQL_TYPE_DOUBLE:
       case MYSQL_TYPE_FLOAT: {
-        double sum = 0.0;
-        for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
-          if (!chunk.nullable(row)) {
-            const uchar *data = chunk.data(row);
-            double val = Utils::Util::get_field_numeric<double>(field, data, nullptr);
-            sum += val;
-          }
-        }
+        double sum = ColumnChunkOper::Sum<float>(chunk, m_vectorizer.current_batch.row_count);
 
         Item_sum_sum *sum_item = down_cast<Item_sum_sum *>(info.item);
         sum_item->add_value(sum);
         break;
       }
-
+      case MYSQL_TYPE_DOUBLE: {
+        double sum = ColumnChunkOper::Sum<double>(chunk, m_vectorizer.current_batch.row_count);
+        Item_sum_sum *sum_item = down_cast<Item_sum_sum *>(info.item);
+        sum_item->add_value(sum);
+        break;
+      }
       default:
         // Fall back to row-by-row for complex types
         for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
@@ -749,6 +767,5 @@ void VectorizedAggregateIterator::SetRollupLevel(int level) {
     }
   }
 }
-
 }  // namespace Executor
 }  // namespace ShannonBase

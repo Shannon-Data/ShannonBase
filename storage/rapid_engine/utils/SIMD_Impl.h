@@ -95,6 +95,20 @@ inline int32_t horizontal_sum_epi32(__m128i v) {
   return _mm_cvtsi128_si32(sum);
 }
 
+inline int64_t horizontal_sum_epi64(__m128i vec) {
+  __m128i sum64 = _mm_add_epi64(vec, _mm_unpackhi_epi64(vec, vec));
+  return _mm_cvtsi128_si64(sum64);
+}
+
+inline int64_t horizontal_sum_epi64(__m256i vec) {
+  __m128i low = _mm256_extracti128_si256(vec, 0);
+  __m128i high = _mm256_extracti128_si256(vec, 1);
+
+  __m128i sum128 = _mm_add_epi64(low, high);
+
+  return horizontal_sum_epi64(sum128);
+}
+
 // Horizontal min operations
 inline float horizontal_min_ps(__m128 v) {
   __m128 shuf = _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 3, 0, 1));
@@ -348,7 +362,7 @@ inline float sum_sse2_float(const float *data, const uint8_t *null_mask, size_t 
     }
     float sum = horizontal_sum_ps(sum_vec);
     for (; i < row_count; ++i) {
-      sum += data[i];
+      sum += *(const float *)(data + i);
     }
     return sum;
   }
@@ -383,7 +397,7 @@ inline float sum_sse2_float(const float *data, const uint8_t *null_mask, size_t 
   // Process remaining elements
   for (; i < row_count; ++i) {
     if (!is_null(null_mask, i)) {
-      sum += data[i];
+      sum += *(const float *)(data + i);
     }
   }
 
@@ -405,7 +419,7 @@ inline double sum_sse2_double(const double *data, const uint8_t *null_mask, size
     }
     double sum = horizontal_sum_pd(sum_vec);
     for (; i < row_count; ++i) {
-      sum += data[i];
+      sum += *(const double *)(data + i);
     }
     return sum;
   }
@@ -432,9 +446,10 @@ inline double sum_sse2_double(const double *data, const uint8_t *null_mask, size
 
   double result = horizontal_sum_pd(sum_vec);
 
+  // the remains
   for (; i < row_count; ++i) {
     if (!is_null(null_mask, i)) {
-      result += data[i];
+      result += *(const double *)(data + i);
     }
   }
 
@@ -456,7 +471,7 @@ inline int32_t sum_sse2_int32(const int32_t *data, const uint8_t *null_mask, siz
     }
     int32_t sum = horizontal_sum_epi32(sum_vec);
     for (; i < row_count; ++i) {
-      sum += data[i];
+      sum += *(const int32_t *)(data + i);
     }
     return sum;
   }
@@ -484,9 +499,10 @@ inline int32_t sum_sse2_int32(const int32_t *data, const uint8_t *null_mask, siz
 
   int32_t result = horizontal_sum_epi32(sum_vec);
 
+  // the remains.
   for (; i < row_count; ++i) {
     if (!is_null(null_mask, i)) {
-      result += data[i];
+      result += *(const int32_t *)(data + i);
     }
   }
 
@@ -510,7 +526,7 @@ inline int64_t sum_sse2_int64(const int64_t *data, const uint8_t *null_mask, siz
     _mm_store_si128(reinterpret_cast<__m128i *>(temp), sum_vec);
     int64_t sum = temp[0] + temp[1];
     for (; i < row_count; ++i) {
-      sum += data[i];
+      sum += *(const int64_t *)(data + i);
     }
     return sum;
   }
@@ -539,9 +555,10 @@ inline int64_t sum_sse2_int64(const int64_t *data, const uint8_t *null_mask, siz
   _mm_store_si128(reinterpret_cast<__m128i *>(temp), sum_vec);
   int64_t result = temp[0] + temp[1];
 
+  // the remains.
   for (; i < row_count; ++i) {
     if (!is_null(null_mask, i)) {
-      result += data[i];
+      result += *(const int64_t *)(data + i);
     }
   }
 
@@ -1081,6 +1098,65 @@ inline int32_t sum_avx2_int32(const int32_t *data, const uint8_t *null_mask, siz
 #endif
 }
 
+inline int64_t sum_avx2_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count) {
+#if defined(SHANNON_X86_PLATFORM) && defined(__AVX2__)
+  if (row_count == 0) return 0;
+
+  if (!null_mask) {
+    __m256i sum_vec = _mm256_setzero_si256();
+    size_t i = 0;
+    // AVX2 can handler 4 int64_ts
+    for (; i + 4 <= row_count; i += 4) {
+      sum_vec = _mm256_add_epi64(sum_vec, _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i)));
+    }
+
+    // horizontal sum 4 int64_t
+    int64_t sum = horizontal_sum_epi64(sum_vec);
+
+    // remains
+    for (; i < row_count; ++i) {
+      sum += data[i];
+    }
+    return sum;
+  }
+
+  __m256i sum_vec = _mm256_setzero_si256();
+  size_t i = 0;
+
+  // dela with null mask, each step to deal 4 elems.
+  for (; i + 4 <= row_count; i += 4) {
+    __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
+
+    uint32_t valid_mask = 0;
+    for (int j = 0; j < 4; ++j) {
+      size_t idx = i + j;
+      if (!is_null(null_mask, idx)) {
+        valid_mask |= (1 << j);
+      }
+    }
+
+    // build up mask， each int64_t needs same mask
+    __m256i imask = _mm256_set_epi64x((valid_mask & 0x08) ? -1 : 0, (valid_mask & 0x04) ? -1 : 0,
+                                      (valid_mask & 0x02) ? -1 : 0, (valid_mask & 0x01) ? -1 : 0);
+
+    chunk = _mm256_and_si256(chunk, imask);
+    sum_vec = _mm256_add_epi64(sum_vec, chunk);
+  }
+
+  int64_t sum = horizontal_sum_epi64(sum_vec);
+
+  for (; i < row_count; ++i) {
+    if (!is_null(null_mask, i)) {
+      sum += data[i];
+    }
+  }
+
+  return sum;
+#else
+  return sum_sse2_int64(data, null_mask, row_count);
+#endif
+}
+
 // ============================================================================
 // Arithmetic Operations - NEON Implementations
 // ============================================================================
@@ -1267,12 +1343,12 @@ inline size_t count_non_null_sse2(const uint8_t *null_mask, size_t row_count) {
 #if defined(SHANNON_X86_PLATFORM) && (defined(__SSE2__) || defined(SHANNON_SSE_VECT_SUPPORTED))
   if (!null_mask) return row_count;
 
-  // bit=1表示NULL，所以我们需要统计0的个数
+  // bit=1 means NULL，count the # of 0
   size_t null_count = 0;
   size_t byte_count = (row_count + 7) / 8;
   size_t i = 0;
 
-  // 每次处理16字节（128位）= 128行数据的NULL状态
+  // each deal with 16 bytes（128 bits）= 128 rows null bit flags.
   for (; i + 16 <= byte_count; i += 16) {
     __m128i mask_chunk = _mm_loadu_si128(reinterpret_cast<const __m128i *>(null_mask + i));
 
@@ -1284,12 +1360,10 @@ inline size_t count_non_null_sse2(const uint8_t *null_mask, size_t row_count) {
     }
   }
 
-  // 处理剩余字节
   for (; i < byte_count; ++i) {
     null_count += std::popcount(static_cast<unsigned>(null_mask[i]));
   }
 
-  // 返回非NULL的数量 = 总数 - NULL数量
   return row_count - null_count;
 #else
   return count_non_null_generic(null_mask, row_count);
@@ -1371,7 +1445,7 @@ inline size_t count_non_null_neon(const uint8_t *null_mask, size_t row_count) {
   size_t byte_count = (row_count + 7) / 8;
   size_t i = 0;
 
-  // 每次处理16字节（128位）
+  // 16 bytes（128 bits）
   for (; i + 16 <= byte_count; i += 16) {
     uint8x16_t mask_chunk = vld1q_u8(null_mask + i);
     null_count += vaddvq_u8(vcntq_u8(mask_chunk));
@@ -1474,6 +1548,8 @@ T sum(const T *data, const uint8_t *null_mask, size_t row_count) {
         return sum_avx2_double(data, null_mask, row_count);
       } else if constexpr (std::is_same_v<T, int32_t>) {
         return sum_avx2_int32(data, null_mask, row_count);
+      } else if constexpr (std::is_same_v<T, int64_t>) {
+        return sum_avx2_int64(data, null_mask, row_count);
       }
       [[fallthrough]];
     case SIMDType::AVX:

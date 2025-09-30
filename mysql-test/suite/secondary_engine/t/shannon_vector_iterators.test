@@ -52,11 +52,124 @@ SET rapid_use_dynamic_offload=off;
 SET secondary_engine_cost_threshold=10;
 
 ########### it will use vectorized table scan, rapid_table::index_read. nest loop join. ###########
+--replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
+EXPLAIN FORMAT=TREE
+SELECT t_innodb.id, t_innodb.val, t_rapid.val
+FROM t_innodb
+JOIN t_rapid
+  ON t_innodb.id = t_rapid.id
+ORDER BY t_innodb.id;
+
 SELECT t_innodb.id, t_innodb.val, t_rapid.val 
 FROM t_innodb 
 JOIN t_rapid   
   ON t_innodb.id = t_rapid.id 
 ORDER BY t_innodb.id;
+
+#########################Vectorized JOIN/Aggregation #######################
+SET USE_SECONDARY_ENGINE = ON;
+CREATE TABLE customers (
+    customer_id INT PRIMARY KEY AUTO_INCREMENT,
+    customer_name VARCHAR(100),
+    email VARCHAR(100),
+    registration_date DATE,
+    country VARCHAR(50),
+    credit_score INT
+) SECONDARY_ENGINE=rapid;
+
+CREATE TABLE orders (
+    order_id INT PRIMARY KEY AUTO_INCREMENT,
+    customer_id INT,
+    order_date DATE,
+    total_amount DECIMAL(10,2),
+    product_category VARCHAR(50),
+    quantity INT,
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+) SECONDARY_ENGINE=rapid;
+
+# Insert test data using stored procedures
+DELIMITER $$;
+
+CREATE PROCEDURE InsertCustomerData()
+BEGIN
+    DECLARE i INT DEFAULT 1;
+    DECLARE countries VARCHAR(500) DEFAULT 'USA,China,Japan,Germany,UK,France,Canada,Australia,Brazil,India';
+    DECLARE country_count INT DEFAULT 10;
+    
+    WHILE i <= 1000 DO
+        INSERT INTO customers (customer_name, email, registration_date, country, credit_score)
+        VALUES (
+            CONCAT('Customer_', i),
+            CONCAT('user', i, '@example.com'),
+            DATE_SUB(CURDATE(), INTERVAL FLOOR(RAND() * 365) DAY),
+            SUBSTRING_INDEX(SUBSTRING_INDEX(countries, ',', 1 + FLOOR(RAND() * country_count)), ',', -1),
+            300 + FLOOR(RAND() * 700)
+        );
+        SET i = i + 1;
+    END WHILE;
+END$$
+
+CREATE PROCEDURE InsertOrderData()
+BEGIN
+    DECLARE i INT DEFAULT 1;
+    DECLARE categories VARCHAR(500) DEFAULT 'Electronics,Clothing,Books,Home,Food,Sports,Toys,Beauty';
+    DECLARE category_count INT DEFAULT 8;
+    
+    WHILE i <= 2500 DO
+        INSERT INTO orders (customer_id, order_date, total_amount, product_category, quantity)
+        VALUES (
+            1 + FLOOR(RAND() * 150),  -- Randomly associate with existing customers
+            DATE_SUB(CURDATE(), INTERVAL FLOOR(RAND() * 180) DAY),
+            ROUND(10 + (RAND() * 990), 2),  -- Amount between 10-1000
+            SUBSTRING_INDEX(SUBSTRING_INDEX(categories, ',', 1 + FLOOR(RAND() * category_count)), ',', -1),
+            1 + FLOOR(RAND() * 10)  -- Quantity between 1-10
+        );
+        SET i = i + 1;
+    END WHILE;
+END$$
+
+DELIMITER ;$$
+
+# Execute stored procedures to insert data
+CALL InsertCustomerData();
+CALL InsertOrderData();
+
+SELECT COUNT(*) FROM customers;
+SELECT COUNT(*) FROM orders;
+############### GETS THE RESULT FROM INNODB ###########################
+--echo ############### GETS THE RESULT FROM INNODB ###########################
+--replace_column 1 # 2 # 3 # 4 # 5 #
+SELECT 
+    c.country,
+    COUNT(DISTINCT c.customer_id) as customer_count,
+    COUNT(o.order_id) as total_orders,
+    AVG(o.total_amount) as avg_order_value,
+    SUM(o.quantity) as total_quantity
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id
+GROUP BY c.country
+ORDER BY total_orders DESC;
+
+############### GETS THE RESULT FROM RAPID VIA VECTORIZED  EXECUTION ###########################
+--echo ############### GETS THE RESULT FROM RAPID VIA VECTORIZED  EXECUTION ###########################
+SET USE_SECONDARY_ENGINE = FORCED;
+SET secondary_engine_cost_threshold=10;
+SET rapid_use_dynamic_offload=off;
+
+ALTER TABLE customers SECONDARY_LOAD;
+ALTER TABLE orders SECONDARY_LOAD;
+
+--replace_column 1 # 2 # 3 # 4 # 5 #
+SELECT 
+    c.country,
+    COUNT(DISTINCT c.customer_id) as customer_count,
+    COUNT(o.order_id) as total_orders,
+    AVG(o.total_amount) as avg_order_value,
+    SUM(o.quantity) as total_quantity
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id
+GROUP BY c.country
+ORDER BY total_orders DESC;
 
 --enable_warnings
 DROP DATABASE sh_vector_iterators;

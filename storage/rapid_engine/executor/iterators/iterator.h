@@ -32,6 +32,8 @@
 #include <atomic>
 #include <functional>
 #include "include/my_inttypes.h"
+#include "sql-common/my_decimal.h"
+#include "sql/field.h"
 
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/row_iterator.h"
@@ -75,7 +77,7 @@ class ColumnChunk {
   }
 
   // to tell indexth is null or not.
-  inline bool nullable(size_t index) {
+  inline bool nullable(size_t index) const {
     assert(m_null_mask.get());
     assert(index < m_chunk_size);
     return ShannonBase::Utils::Util::bit_array_get(m_null_mask.get(), index);
@@ -83,6 +85,13 @@ class ColumnChunk {
 
   bool add(uchar *data, size_t length, bool null);
   bool add_batch(const std::vector<std::pair<const uchar *, size_t>> &data_batch, const std::vector<bool> &null_flags);
+
+  // remove the last row data.
+  inline bool remove() {
+    if (m_current_size.load(std::memory_order_relaxed) == 0) return true;
+    m_current_size.fetch_sub(1, std::memory_order_acq_rel);
+    return true;
+  }
 
   inline const uchar *data(size_t index) const {
     assert(index < m_current_size.load(std::memory_order_relaxed));
@@ -155,7 +164,7 @@ class ColumnChunk {
     return usage;
   }
 
-  inline ShannonBase::bit_array_t *get_null_mask() { return m_null_mask.get(); }
+  inline ShannonBase::bit_array_t *get_null_mask() const { return m_null_mask.get(); }
 
  private:
   inline void initialize_buffers();
@@ -232,21 +241,15 @@ class ColumnChunkOper {
    */
   template <typename T>
   static T Sum(const ColumnChunk &chunk, size_t row_count) {
-    static_assert(std::is_arithmetic_v<T>, "T must be arithmetic type");
+    static_assert(std::is_arithmetic_v<T> || std::is_same_v<std::decay_t<T>, my_decimal>,
+                  "T must be arithmetic or my_decimal type");
 
-    // Extract contiguous data buffer for potential SIMD optimization
-    std::vector<T> data_buffer;
-    std::vector<uint8_t> null_mask_buffer;
-    extract_data_for_simd(chunk, row_count, data_buffer, null_mask_buffer);
-
-    if (!data_buffer.empty()) {
-      // Use SIMD accelerated sum if data is available
-      return Utils::SIMD::sum(data_buffer.data(), null_mask_buffer.empty() ? nullptr : null_mask_buffer.data(),
-                              row_count);
-    }
-
-    // Fallback to generic scalar implementation
+// Use SIMD accelerated sum.
+#if defined(SHANNON_VECTORIZE_SUPPORT)
+    return Utils::SIMD::sum<T>((T *)chunk.data(0), chunk.get_null_mask()->data, row_count);
+#else  // Fallback to generic scalar implementation
     return genericSum<T>(chunk, row_count);
+#endif
   }
 
   /**
@@ -268,18 +271,14 @@ class ColumnChunkOper {
    */
   template <typename T>
   static T Min(const ColumnChunk &chunk, size_t row_count) {
-    static_assert(std::is_arithmetic_v<T>, "T must be arithmetic type");
+    static_assert(std::is_arithmetic_v<T> || std::is_same_v<std::decay_t<T>, my_decimal>,
+                  "T must be arithmetic or my_decimal type");
 
-    std::vector<T> data_buffer;
-    std::vector<uint8_t> null_mask_buffer;
-    extract_data_for_simd(chunk, row_count, data_buffer, null_mask_buffer);
-
-    if (!data_buffer.empty()) {
-      return Utils::SIMD::min(data_buffer.data(), null_mask_buffer.empty() ? nullptr : null_mask_buffer.data(),
-                              row_count);
-    }
-
+#if defined(SHANNON_VECTORIZE_SUPPORT)
+    return Utils::SIMD::min((T *)chunk.data(0), chunk.get_null_mask()->data, row_count);
+#else
     return genericMin<T>(chunk, row_count);
+#endif
   }
 
   /**
@@ -287,18 +286,13 @@ class ColumnChunkOper {
    */
   template <typename T>
   static T Max(const ColumnChunk &chunk, size_t row_count) {
-    static_assert(std::is_arithmetic_v<T>, "T must be arithmetic type");
+    static_assert(std::is_arithmetic_v<T> || std::is_same_v<std::decay_t<T>, my_decimal>, "T must be arithmetic type");
 
-    std::vector<T> data_buffer;
-    std::vector<uint8_t> null_mask_buffer;
-    extract_data_for_simd(chunk, row_count, data_buffer, null_mask_buffer);
-
-    if (!data_buffer.empty()) {
-      return Utils::SIMD::max(data_buffer.data(), null_mask_buffer.empty() ? nullptr : null_mask_buffer.data(),
-                              row_count);
-    }
-
+#if defined(SHANNON_VECTORIZE_SUPPORT)
+    return Utils::SIMD::max((T *)chunk.data(0), chunk.get_null_mask()->data, row_count);
+#else
     return genericMax<T>(chunk, row_count);
+#endif
   }
 
   /**
@@ -317,16 +311,11 @@ class ColumnChunkOper {
   template <typename T>
   static size_t Filter(const ColumnChunk &chunk, size_t row_count, std::function<bool(T)> predicate,
                        std::vector<size_t> &output_indices) {
-    std::vector<T> data_buffer;
-    std::vector<uint8_t> null_mask_buffer;
-    extract_data_for_simd(chunk, row_count, data_buffer, null_mask_buffer);
-
-    if (!data_buffer.empty()) {
-      return Utils::SIMD::filter(data_buffer.data(), null_mask_buffer.empty() ? nullptr : null_mask_buffer.data(),
-                                 row_count, predicate, output_indices);
-    }
-
+#if defined(SHANNON_VECTORIZE_SUPPORT)
+    return Utils::SIMD::filter((T *)chunk.data(0), chunk.get_null_mask()->data, row_count, predicate, output_indices);
+#else
     return genericFilter<T>(chunk, row_count, predicate, output_indices);
+#endif
   }
 
   /**
@@ -390,28 +379,11 @@ class ColumnChunkOper {
    *        This allows vectorized processing for Sum/Min/Max/Filter.
    */
   template <typename T>
-  static void extract_data_for_simd(ColumnChunk &chunk, size_t row_count, std::vector<T> &data_buffer,
-                                    std::vector<uint8_t> &null_mask_buffer) {
-    data_buffer.resize(row_count);
-    null_mask_buffer.resize((row_count + 7) / 8, 0xFF);  // Assume all non-null initially
-
-    for (size_t i = 0; i < row_count; ++i) {
-      const uchar *row_data = chunk.data(i);
-      data_buffer[i] = *reinterpret_cast<const T *>(row_data);
-
-      // Clear the corresponding bit if row is null
-      if (chunk.nullable(i)) {
-        size_t byte_index = i / 8;
-        size_t bit_index = i % 8;
-        null_mask_buffer[byte_index] &= ~(1 << bit_index);
-      }
-    }
-  }
+  static void extract_data_for_simd(const ColumnChunk &, size_t, std::vector<T> &, std::vector<uint8_t> &) {}
 
   // === Generic fallback implementations (scalar) ===
-
   template <typename T>
-  static T genericSum(ColumnChunk &chunk, size_t row_count) {
+  static T genericSum(const ColumnChunk &chunk, size_t row_count) {
     T sum = 0;
     for (size_t i = 0; i < row_count; ++i) {
       if (!chunk.nullable(i)) {
@@ -423,7 +395,7 @@ class ColumnChunkOper {
   }
 
   template <typename T>
-  static T genericMin(ColumnChunk &chunk, size_t row_count) {
+  static T genericMin(const ColumnChunk &chunk, size_t row_count) {
     T min_val = std::numeric_limits<T>::max();
     bool found = false;
 
@@ -442,7 +414,7 @@ class ColumnChunkOper {
   }
 
   template <typename T>
-  static T genericMax(ColumnChunk &chunk, size_t row_count) {
+  static T genericMax(const ColumnChunk &chunk, size_t row_count) {
     T max_val = std::numeric_limits<T>::lowest();
     bool found = false;
 
@@ -460,9 +432,10 @@ class ColumnChunkOper {
     return found ? max_val : static_cast<T>(0);
   }
 
-  static size_t genericFilter(ColumnChunk &chunk, size_t row_count, filter_func_t predicate,
+  static size_t genericFilter(const ColumnChunk &chunk, size_t row_count, filter_func_t predicate,
                               std::vector<size_t> &output_indices) {
     size_t count = 0;
+
     for (size_t i = 0; i < row_count; ++i) {
       if (!chunk.nullable(i)) {
         const uchar *row_data = chunk.data(i);
@@ -476,9 +449,10 @@ class ColumnChunkOper {
   }
 
   template <typename T>
-  static size_t genericFilter(ColumnChunk &chunk, size_t row_count, std::function<bool(T)> predicate,
+  static size_t genericFilter(const ColumnChunk &chunk, size_t row_count, std::function<bool(T)> predicate,
                               std::vector<size_t> &output_indices) {
     size_t count = 0;
+
     for (size_t i = 0; i < row_count; ++i) {
       if (!chunk.nullable(i)) {
         const uchar *row_data = chunk.data(i);
@@ -492,6 +466,37 @@ class ColumnChunkOper {
     return count;
   }
 };
+
+template <>
+my_decimal ColumnChunkOper::genericSum<my_decimal>(const ColumnChunk &chunk, size_t row_count);
+template <>
+my_decimal ColumnChunkOper::genericMin<my_decimal>(const ColumnChunk &chunk, size_t row_count);
+
+template <>
+my_decimal ColumnChunkOper::genericMax<my_decimal>(const ColumnChunk &chunk, size_t row_count);
+
+template <>
+size_t ColumnChunkOper::genericFilter<my_decimal>(const ColumnChunk &chunk, size_t row_count,
+                                                  std::function<bool(my_decimal)> predicate,
+                                                  std::vector<size_t> &output_indices);
+
+template <>
+my_decimal ColumnChunkOper::Sum<my_decimal>(const ColumnChunk &chunk, size_t row_count);
+
+template <>
+my_decimal ColumnChunkOper::Min<my_decimal>(const ColumnChunk &chunk, size_t row_count);
+
+template <>
+my_decimal ColumnChunkOper::Max<my_decimal>(const ColumnChunk &chunk, size_t row_count);
+
+template <>
+size_t ColumnChunkOper::Filter<my_decimal>(const ColumnChunk &chunk, size_t row_count,
+                                           std::function<bool(my_decimal)> predicate,
+                                           std::vector<size_t> &output_indices);
+
+template <>
+double ColumnChunkOper::Average<my_decimal>(ColumnChunk &chunk, size_t row_count);
+
 }  // namespace Executor
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ITERATOR_H__

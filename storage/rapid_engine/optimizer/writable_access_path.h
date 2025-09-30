@@ -42,8 +42,8 @@ namespace Optimizer {
  */
 
 template <class AccessPathPtr, class JoinPtr, class RewriteFunc>
-void WalkAndRewriteAccessPaths(AccessPathPtr path, JoinPtr join, WalkAccessPathPolicy policy, RewriteFunc &&rewrite,
-                               bool post_order_traversal = false) {
+AccessPathPtr WalkAndRewriteAccessPaths(AccessPathPtr path, JoinPtr join, WalkAccessPathPolicy policy,
+                                        RewriteFunc &&rewrite, bool post_order_traversal = false) {
   static_assert(std::is_convertible<AccessPathPtr, const AccessPath *>::value,
                 "The “path” argument must be AccessPath * or const AccessPath *.");
   static_assert(std::is_convertible<JoinPtr, const JOIN *>::value,
@@ -54,7 +54,6 @@ void WalkAndRewriteAccessPaths(AccessPathPtr path, JoinPtr join, WalkAccessPathP
   if (!post_order_traversal) {
     if (AccessPath *new_path = rewrite(path, join)) {
       path = new_path;
-      return;
     }
   }
 
@@ -84,127 +83,137 @@ void WalkAndRewriteAccessPaths(AccessPathPtr path, JoinPtr join, WalkAccessPathP
       // No children.
       break;
     case AccessPath::NESTED_LOOP_JOIN:
-      WalkAndRewriteAccessPaths(path->nested_loop_join().outer, join, policy, rewrite, post_order_traversal);
+      path->nested_loop_join().outer =
+          WalkAndRewriteAccessPaths(path->nested_loop_join().outer, join, policy, rewrite, post_order_traversal);
 
-      WalkAndRewriteAccessPaths(path->nested_loop_join().inner, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->nested_loop_join().inner = WalkAndRewriteAccessPaths(
+          path->nested_loop_join().inner, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
-      WalkAndRewriteAccessPaths(path->nested_loop_semijoin_with_duplicate_removal().outer, join, policy,
-                                std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
-      WalkAndRewriteAccessPaths(path->nested_loop_semijoin_with_duplicate_removal().inner, join, policy,
-                                std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+      path->nested_loop_semijoin_with_duplicate_removal().outer =
+          WalkAndRewriteAccessPaths(path->nested_loop_semijoin_with_duplicate_removal().outer, join, policy,
+                                    std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+      path->nested_loop_semijoin_with_duplicate_removal().inner =
+          WalkAndRewriteAccessPaths(path->nested_loop_semijoin_with_duplicate_removal().inner, join, policy,
+                                    std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::BKA_JOIN:
-      WalkAndRewriteAccessPaths(path->bka_join().outer, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
-      WalkAndRewriteAccessPaths(path->bka_join().inner, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->bka_join().outer = WalkAndRewriteAccessPaths(path->bka_join().outer, join, policy,
+                                                         std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+      path->bka_join().inner = WalkAndRewriteAccessPaths(path->bka_join().inner, join, policy,
+                                                         std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::HASH_JOIN:
-      WalkAndRewriteAccessPaths(path->hash_join().outer, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
-      WalkAndRewriteAccessPaths(path->hash_join().inner, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->hash_join().outer = WalkAndRewriteAccessPaths(path->hash_join().outer, join, policy,
+                                                          std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+      path->hash_join().inner = WalkAndRewriteAccessPaths(path->hash_join().inner, join, policy,
+                                                          std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::FILTER:
-      WalkAndRewriteAccessPaths(path->filter().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->filter().child = WalkAndRewriteAccessPaths(path->filter().child, join, policy,
+                                                       std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::SORT:
-      WalkAndRewriteAccessPaths(path->sort().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->sort().child = path->sort().child = WalkAndRewriteAccessPaths(
+          path->sort().child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::AGGREGATE:
-      WalkAndRewriteAccessPaths(path->aggregate().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->aggregate().child = WalkAndRewriteAccessPaths(path->aggregate().child, join, policy,
+                                                          std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::TEMPTABLE_AGGREGATE:
-      WalkAndRewriteAccessPaths(path->temptable_aggregate().subquery_path, join, policy,
-                                std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
-      WalkAndRewriteAccessPaths(path->temptable_aggregate().table_path, join, policy,
-                                std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+      path->temptable_aggregate().subquery_path =
+          WalkAndRewriteAccessPaths(path->temptable_aggregate().subquery_path, join, policy,
+                                    std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+      path->temptable_aggregate().table_path =
+          WalkAndRewriteAccessPaths(path->temptable_aggregate().table_path, join, policy,
+                                    std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::LIMIT_OFFSET:
-      WalkAndRewriteAccessPaths(path->limit_offset().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->limit_offset().child = WalkAndRewriteAccessPaths(
+          path->limit_offset().child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::STREAM:
       if (policy == WalkAccessPathPolicy::ENTIRE_TREE ||
           (policy == WalkAccessPathPolicy::ENTIRE_QUERY_BLOCK && path->stream().join == join)) {
-        WalkAndRewriteAccessPaths(path->stream().child, path->stream().join, policy,
-                                  std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+        path->stream().child = WalkAndRewriteAccessPaths(path->stream().child, path->stream().join, policy,
+                                                         std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       }
       break;
     case AccessPath::MATERIALIZE:
-      WalkAndRewriteAccessPaths(path->materialize().table_path, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
-      for (const MaterializePathParameters::Operand &operand : path->materialize().param->m_operands) {
+      path->materialize().table_path = WalkAndRewriteAccessPaths(
+          path->materialize().table_path, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+      for (MaterializePathParameters::Operand &operand : path->materialize().param->m_operands) {
         if (policy == WalkAccessPathPolicy::ENTIRE_TREE ||
             (policy == WalkAccessPathPolicy::ENTIRE_QUERY_BLOCK && operand.join == join)) {
-          WalkAndRewriteAccessPaths(operand.subquery_path, operand.join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                    post_order_traversal);
+          operand.subquery_path = WalkAndRewriteAccessPaths(
+              operand.subquery_path, operand.join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
         }
       }
       break;
     case AccessPath::MATERIALIZE_INFORMATION_SCHEMA_TABLE:
-      WalkAndRewriteAccessPaths(path->materialize_information_schema_table().table_path, join, policy,
-                                std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+      path->materialize_information_schema_table().table_path =
+          WalkAndRewriteAccessPaths(path->materialize_information_schema_table().table_path, join, policy,
+                                    std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::APPEND:
       if (policy == WalkAccessPathPolicy::ENTIRE_TREE) {
-        for (const AppendPathParameters &child : *path->append().children) {
-          WalkAndRewriteAccessPaths(child.path, child.join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                    post_order_traversal);
+        for (AppendPathParameters &child : *path->append().children) {
+          child.path = WalkAndRewriteAccessPaths(child.path, child.join, policy, std::forward<RewriteFunc &&>(rewrite),
+                                                 post_order_traversal);
         }
       }
       break;
     case AccessPath::WINDOW:
-      WalkAndRewriteAccessPaths(path->window().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->window().child = path->window().child = WalkAndRewriteAccessPaths(
+          path->window().child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::WEEDOUT:
-      WalkAndRewriteAccessPaths(path->weedout().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->weedout().child = WalkAndRewriteAccessPaths(path->weedout().child, join, policy,
+                                                        std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::REMOVE_DUPLICATES:
-      WalkAndRewriteAccessPaths(path->remove_duplicates().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->remove_duplicates().child = WalkAndRewriteAccessPaths(
+          path->remove_duplicates().child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::REMOVE_DUPLICATES_ON_INDEX:
-      WalkAndRewriteAccessPaths(path->remove_duplicates_on_index().child, join, policy,
-                                std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+      path->remove_duplicates_on_index().child =
+          WalkAndRewriteAccessPaths(path->remove_duplicates_on_index().child, join, policy,
+                                    std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::ALTERNATIVE:
-      WalkAndRewriteAccessPaths(path->alternative().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->alternative().child = WalkAndRewriteAccessPaths(
+          path->alternative().child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::CACHE_INVALIDATOR:
-      WalkAndRewriteAccessPaths(path->cache_invalidator().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->cache_invalidator().child = WalkAndRewriteAccessPaths(
+          path->cache_invalidator().child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::INDEX_MERGE:
       for (AccessPath *child : *path->index_merge().children) {
-        WalkAndRewriteAccessPaths(child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+        child =
+            WalkAndRewriteAccessPaths(child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       }
       break;
     case AccessPath::ROWID_INTERSECTION:
       for (AccessPath *child : *path->rowid_intersection().children) {
-        WalkAndRewriteAccessPaths(child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+        child =
+            WalkAndRewriteAccessPaths(child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       }
       break;
     case AccessPath::ROWID_UNION:
       for (AccessPath *child : *path->rowid_union().children) {
-        WalkAndRewriteAccessPaths(child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
+        child =
+            WalkAndRewriteAccessPaths(child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       }
       break;
     case AccessPath::DELETE_ROWS:
-      WalkAndRewriteAccessPaths(path->delete_rows().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->delete_rows().child = WalkAndRewriteAccessPaths(
+          path->delete_rows().child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
     case AccessPath::UPDATE_ROWS:
-      WalkAndRewriteAccessPaths(path->update_rows().child, join, policy, std::forward<RewriteFunc &&>(rewrite),
-                                post_order_traversal);
+      path->update_rows().child = WalkAndRewriteAccessPaths(
+          path->update_rows().child, join, policy, std::forward<RewriteFunc &&>(rewrite), post_order_traversal);
       break;
   }
 
@@ -213,6 +222,8 @@ void WalkAndRewriteAccessPaths(AccessPathPtr path, JoinPtr join, WalkAccessPathP
       path = new_path;
     }
   }
+
+  return path;
 }
 
 }  // namespace Optimizer

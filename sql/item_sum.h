@@ -1062,7 +1062,26 @@ class Item_sum_sum : public Item_sum_num {
   const char *func_name() const override { return "sum"; }
   Item *copy_or_same(THD *thd) override;
 
-  void add_value(double extra) { sum += extra; }
+  bool add_value(double extra) {
+    if (hybrid_type == DECIMAL_RESULT) {
+      my_decimal val;
+      double2my_decimal(E_DEC_FATAL_ERROR, (double)extra, &val);
+
+      if (current_thd->is_error()) return true;
+      if (!aggr->arg_is_null(true)) {
+        my_decimal_add(E_DEC_FATAL_ERROR, dec_buffs + (curr_dec_buff ^ 1), &val,
+                      dec_buffs + curr_dec_buff);
+        curr_dec_buff ^= 1;
+        null_value = false;
+      }
+    } else {
+      sum += extra;
+      if (current_thd->is_error()) return true;
+      if (!aggr->arg_is_null(true)) null_value = false;
+    }
+
+    return false;
+  }
 };
 
 class Item_sum_count : public Item_sum_int {
@@ -1114,7 +1133,10 @@ class Item_sum_count : public Item_sum_int {
   const char *func_name() const override { return "count"; }
   Item *copy_or_same(THD *thd) override;
 
-  void add_value(longlong extra) { count += extra; }
+  void add_value(longlong extra) {
+    count += extra;
+    null_value =false;
+  }
 };
 
 /* Item to get the value of a stored sum function */

@@ -988,17 +988,18 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
 
   auto root_access_path = lex->unit->root_access_path();
   JOIN *join = lex->unit->first_query_block()->join;
-  ShannonBase::Optimizer::WalkAndRewriteAccessPaths(root_access_path, join, WalkAccessPathPolicy::ENTIRE_TREE,
-                                                    [&](AccessPath *path, const JOIN *join) -> AccessPath * {
-                                                      return ShannonBase::Optimizer::OptimizeAndRewriteAccessPath(
-                                                          context, path, join);
-                                                    });
+  root_access_path = ShannonBase::Optimizer::WalkAndRewriteAccessPaths(
+      root_access_path, join, WalkAccessPathPolicy::ENTIRE_TREE,
+      [&](AccessPath *path, const JOIN *join) -> AccessPath * {
+        return ShannonBase::Optimizer::OptimizeAndRewriteAccessPath(context, path, join);
+      });
   // Here, because we cannot get the parent node of corresponding iterator, we reset the type of access
   // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`
   // AP workload. But, we will replace the itertor when we traverse iterator tree from root to leaves.
   lex->unit->release_root_iterator().reset();
+
   auto new_root_iter = ShannonBase::Optimizer::PathGenerator::PathGenerator::CreateIteratorFromAccessPath(
-      thd, context, lex->unit->root_access_path(), join, /*eligible_for_batch_mode=*/true);
+      thd, context, root_access_path, join, /*eligible_for_batch_mode=*/true);
 
   lex->unit->set_root_iterator(new_root_iter);
   return false;
