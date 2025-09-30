@@ -73,7 +73,7 @@ jobs:
         -DENABLED_LOCAL_INFILE=1 \
         -DWITH_PROTOBUF=bundled \
         -DWITH_UNIT_TESTS=OFF \
-        -DWITH_HYPERGRAPH_OPTIMIZER=ON \        
+        -DWITH_HYPERGRAPH_OPTIMIZER=ON \
         -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j$(nproc) && \
         sudo make install
     - name: clean_up_shannonbase_build
@@ -129,7 +129,7 @@ jobs:
           -DWITH_UNIT_TESTS=OFF \
           -DWITH_HYPERGRAPH_OPTIMIZER=ON \
           -DCMAKE_C_FLAGS="-march=armv8-a -O2" \
-          -DCMAKE_CXX_FLAGS="-march=armv8-a -O2" \     
+          -DCMAKE_CXX_FLAGS="-march=armv8-a -O2" \
           -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j$(nproc) && \
           sudo make install
       - name: Clean up build

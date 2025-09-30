@@ -84,8 +84,9 @@ jobs:
         sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
-        ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
-        information_schema,sys_vars,opt_trace,ml \
+        ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine \
+        --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
+        ./mysql-test-run.pl --suite=rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,information_schema,sys_vars,opt_trace,ml \
         --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         #sudo chmod +x ./collections/default.push && ./collections/default.daily
@@ -128,7 +129,7 @@ jobs:
           -DWITH_UNIT_TESTS=OFF \
           -DWITH_HYPERGRAPH_OPTIMIZER=ON \
           -DCMAKE_C_FLAGS="-march=armv8-a -O2" \
-          -DCMAKE_CXX_FLAGS="-march=armv8-a -O2" \    
+          -DCMAKE_CXX_FLAGS="-march=armv8-a -O2" \
           -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j$(nproc) && \
           sudo make install
       - name: Clean up build
