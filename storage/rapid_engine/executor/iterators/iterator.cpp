@@ -243,5 +243,365 @@ size_t ColumnChunk::compact() {
   return write_idx;
 }
 
+/**
+ * @brief Calculate scale factor: 10^scale
+ */
+static int64_t get_scale_factor(uint scale) {
+  static const int64_t scale_factors[] = {
+      1LL,                    // 10^0
+      10LL,                   // 10^1
+      100LL,                  // 10^2
+      1000LL,                 // 10^3
+      10000LL,                // 10^4
+      100000LL,               // 10^5
+      1000000LL,              // 10^6
+      10000000LL,             // 10^7
+      100000000LL,            // 10^8
+      1000000000LL,           // 10^9
+      10000000000LL,          // 10^10
+      100000000000LL,         // 10^11
+      1000000000000LL,        // 10^12
+      10000000000000LL,       // 10^13
+      100000000000000LL,      // 10^14
+      1000000000000000LL,     // 10^15
+      10000000000000000LL,    // 10^16
+      100000000000000000LL,   // 10^17
+      1000000000000000000LL,  // 10^18
+  };
+
+  if (scale < sizeof(scale_factors) / sizeof(scale_factors[0])) {
+    return scale_factors[scale];
+  }
+
+  // If scale is too large, fallback to loop calculation
+  int64_t factor = 1;
+  for (uint i = 0; i < scale; ++i) {
+    factor *= 10;
+  }
+  return factor;
+}
+
+/**
+ * @brief Get the scale (number of decimal places) from Field
+ */
+static uint get_decimal_scale(Field *field) {
+  if (field && field->type() == MYSQL_TYPE_NEWDECIMAL) {
+    // Field_new_decimal type provides decimals() information
+    return field->decimals();
+  }
+  return 0;
+}
+
+/**
+ * @brief Get the precision (total number of digits) from Field
+ */
+static uint get_decimal_precision(Field *field) {
+  if (field && field->type() == MYSQL_TYPE_NEWDECIMAL) {
+    Field_new_decimal *dec_field = static_cast<Field_new_decimal *>(field);
+    return dec_field->precision;
+  }
+  return 0;
+}
+
+/**
+ * @brief Check if decimal type can be safely represented using int64_t
+ * @note int64_t range is [-9223372036854775808, 9223372036854775807]
+ *       which corresponds to approximately 18-19 decimal digits
+ */
+static bool can_use_int64_for_decimal(Field *field) {
+  if (!field || field->type() != MYSQL_TYPE_NEWDECIMAL) {
+    return false;
+  }
+
+  uint precision = get_decimal_precision(field);
+  // Conservative estimate: precision <= 18 can safely use int64_t
+  return precision <= 18;
+}
+
+/**
+ * @brief Convert my_decimal to int64_t for SIMD processing
+ * @param dec - input decimal value
+ * @param scale - number of decimal places
+ * @note This conversion scales the decimal value to an integer, preserving original precision
+ */
+static int64_t my_decimal_to_int64(const my_decimal *dec, uint scale) {
+  // Method 1: Direct conversion using decimal2longlong (if scale = 0)
+  if (scale == 0) {
+    longlong result;
+    decimal2longlong(dec, &result);
+    return static_cast<int64_t>(result);
+  }
+
+  // Method 2: Convert to double then scale
+  double val = 0.0;
+  decimal2double(dec, &val);
+  int64_t scale_factor = get_scale_factor(scale);
+  return static_cast<int64_t>(val * scale_factor);
+}
+
+/**
+ * @brief Convert int64_t back to my_decimal
+ * @param val - input integer value
+ * @param scale - number of decimal places
+ * @param dec - output decimal value
+ */
+static void int64_to_my_decimal(int64_t val, uint scale, my_decimal *dec) {
+  if (scale == 0) {
+    int2my_decimal(E_DEC_FATAL_ERROR, val, false, dec);
+    return;
+  }
+
+  int64_t scale_factor = get_scale_factor(scale);
+  double dval = static_cast<double>(val) / static_cast<double>(scale_factor);
+  double2decimal(dval, dec);
+}
+
+/**
+ * @brief my_decimal specialization: Extract data for SIMD processing
+ * @note Converts my_decimal to int64_t to enable vectorized operations
+ *       Uses Field information to obtain accurate scale and precision
+ */
+static void extract_decimal_for_simd(const ColumnChunk &chunk, size_t row_count, std::vector<int64_t> &data_buffer,
+                                     std::vector<uint8_t> &null_mask_buffer) {
+  data_buffer.clear();
+  null_mask_buffer.clear();
+
+  // Check if int64_t is suitable for SIMD processing
+  Field *source_field = chunk.source_field();
+  if (!can_use_int64_for_decimal(source_field)) {
+    // Precision too large, cannot safely use int64_t, return empty buffer
+    // Caller will fallback to scalar implementation
+    return;
+  }
+
+  data_buffer.resize(row_count);
+  null_mask_buffer.resize((row_count + 7) / 8, 0xFF);
+
+  // Get decimal scale information from Field
+  uint scale = get_decimal_scale(source_field);
+
+  for (size_t i = 0; i < row_count; ++i) {
+    const uchar *row_data = chunk.data(i);
+
+    // Convert to int64_t using correct scale
+    my_decimal dec;
+    source_field->set_field_ptr(const_cast<uchar *>(row_data));
+    source_field->val_decimal(&dec);
+
+    data_buffer[i] = my_decimal_to_int64(&dec, scale);
+
+    // Handle NULL values
+    if (chunk.nullable(i)) {
+      size_t byte_index = i / 8;
+      size_t bit_index = i % 8;
+      null_mask_buffer[byte_index] &= ~(1 << bit_index);
+    }
+  }
+}
+
+template <>
+my_decimal ColumnChunkOper::genericSum<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
+  my_decimal sum;
+  int2my_decimal(E_DEC_FATAL_ERROR, 0, false, &sum);  // Initialize to 0
+
+  Field *source_field = chunk.source_field();
+  for (size_t i = 0; i < row_count; ++i) {
+    if (!chunk.nullable(i)) {
+      const uchar *row_data = chunk.data(i);
+      my_decimal val;
+      source_field->set_field_ptr(const_cast<uchar *>(row_data));
+      source_field->val_decimal(&val);
+
+      // Use decimal_add for addition
+      my_decimal temp_result;
+      decimal_add(&sum, &val, &temp_result);
+      sum = temp_result;
+    }
+  }
+  return sum;
+}
+
+template <>
+my_decimal ColumnChunkOper::genericMin<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
+  my_decimal min_val;
+  bool found = false;
+
+  Field *source_field = chunk.source_field();
+  for (size_t i = 0; i < row_count; ++i) {
+    if (!chunk.nullable(i)) {
+      const uchar *row_data = chunk.data(i);
+      my_decimal val;
+      source_field->set_field_ptr(const_cast<uchar *>(row_data));
+      source_field->val_decimal(&val);
+
+      if (!found || decimal_cmp(&val, &min_val) < 0) {
+        min_val = val;
+        found = true;
+      }
+    }
+  }
+
+  if (!found) {
+    int2my_decimal(E_DEC_FATAL_ERROR, 0, false, &min_val);
+  }
+  return min_val;
+}
+
+template <>
+my_decimal ColumnChunkOper::genericMax<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
+  my_decimal max_val;
+  bool found = false;
+
+  Field *source_field = chunk.source_field();
+  for (size_t i = 0; i < row_count; ++i) {
+    if (!chunk.nullable(i)) {
+      const uchar *row_data = chunk.data(i);
+      my_decimal val;
+      source_field->set_field_ptr(const_cast<uchar *>(row_data));
+      source_field->val_decimal(&val);
+
+      if (!found || decimal_cmp(&val, &max_val) > 0) {
+        max_val = val;
+        found = true;
+      }
+    }
+  }
+
+  if (!found) {
+    int2my_decimal(E_DEC_FATAL_ERROR, 0, false, &max_val);
+  }
+  return max_val;
+}
+
+template <>
+size_t ColumnChunkOper::genericFilter<my_decimal>(const ColumnChunk &chunk, size_t row_count,
+                                                  std::function<bool(my_decimal)> predicate,
+                                                  std::vector<size_t> &output_indices) {
+  size_t count = 0;
+
+  Field *source_field = chunk.source_field();
+  for (size_t i = 0; i < row_count; ++i) {
+    if (!chunk.nullable(i)) {
+      const uchar *row_data = chunk.data(i);
+      my_decimal val;
+      source_field->set_field_ptr(const_cast<uchar *>(row_data));
+      source_field->val_decimal(&val);
+
+      if (predicate(val)) {
+        output_indices.push_back(i);
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
+/**
+ * @brief my_decimal specialization: Sum operation
+ */
+template <>
+my_decimal ColumnChunkOper::Sum<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
+  // Get Field scale information
+  Field *source_field = chunk.source_field();
+  uint scale = get_decimal_scale(source_field);
+
+  // Extract data for SIMD acceleration
+  std::vector<int64_t> data_buffer;
+  std::vector<uint8_t> null_mask_buffer;
+  extract_decimal_for_simd(chunk, row_count, data_buffer, null_mask_buffer);
+
+  my_decimal result;
+
+  if (!data_buffer.empty()) {
+    // Use SIMD-accelerated sum (for int64_t)
+    int64_t sum = Utils::SIMD::sum<int64_t>(data_buffer.data(),
+                                            null_mask_buffer.empty() ? nullptr : null_mask_buffer.data(), row_count);
+
+    // Convert back to my_decimal using correct scale
+    int64_to_my_decimal(sum, scale, &result);
+    return result;
+  }
+
+  // Fallback to scalar implementation
+  return genericSum<my_decimal>(chunk, row_count);
+}
+
+/**
+ * @brief my_decimal specialization: Min operation
+ */
+template <>
+my_decimal ColumnChunkOper::Min<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
+  Field *source_field = chunk.source_field();
+  uint scale = get_decimal_scale(source_field);
+
+  std::vector<int64_t> data_buffer;
+  std::vector<uint8_t> null_mask_buffer;
+  extract_decimal_for_simd(chunk, row_count, data_buffer, null_mask_buffer);
+
+  my_decimal result;
+
+  if (!data_buffer.empty()) {
+    int64_t min_val =
+        Utils::SIMD::min(data_buffer.data(), null_mask_buffer.empty() ? nullptr : null_mask_buffer.data(), row_count);
+
+    int64_to_my_decimal(min_val, scale, &result);
+    return result;
+  }
+
+  return genericMin<my_decimal>(chunk, row_count);
+}
+
+/**
+ * @brief my_decimal specialization: Max operation
+ */
+template <>
+my_decimal ColumnChunkOper::Max<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
+  Field *source_field = chunk.source_field();
+  uint scale = get_decimal_scale(source_field);
+
+  std::vector<int64_t> data_buffer;
+  std::vector<uint8_t> null_mask_buffer;
+  extract_decimal_for_simd(chunk, row_count, data_buffer, null_mask_buffer);
+
+  my_decimal result;
+
+  if (!data_buffer.empty()) {
+    int64_t max_val =
+        Utils::SIMD::max(data_buffer.data(), null_mask_buffer.empty() ? nullptr : null_mask_buffer.data(), row_count);
+
+    int64_to_my_decimal(max_val, scale, &result);
+    return result;
+  }
+
+  return genericMax<my_decimal>(chunk, row_count);
+}
+
+/**
+ * @brief my_decimal specialization: Filter operation
+ */
+template <>
+size_t ColumnChunkOper::Filter<my_decimal>(const ColumnChunk &chunk, size_t row_count,
+                                           std::function<bool(my_decimal)> predicate,
+                                           std::vector<size_t> &output_indices) {
+  // Filter operation for my_decimal is not suitable for direct SIMD, use scalar implementation
+  return genericFilter<my_decimal>(chunk, row_count, predicate, output_indices);
+}
+
+/**
+ * @brief my_decimal specialization: Average operation
+ */
+template <>
+double ColumnChunkOper::Average<my_decimal>(ColumnChunk &chunk, size_t row_count) {
+  my_decimal sum = Sum<my_decimal>(chunk, row_count);
+  size_t non_null_count = CountNonNull(chunk, row_count);
+
+  if (non_null_count == 0) return 0.0;
+
+  // Convert my_decimal to double
+  double sum_val = 0.0;
+  decimal2double(&sum, &sum_val);
+
+  return sum_val / non_null_count;
+}
 }  // namespace Executor
 }  // namespace ShannonBase

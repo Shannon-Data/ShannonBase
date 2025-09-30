@@ -91,6 +91,7 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
 
       auto can_vectorized = (table->file->stats.records >= SHANNON_VECTOR_WIDTH) ? true : false;
       context->can_vectorized = secondary_engine && loaded && can_vectorized;
+      if (path->vectorized == context->can_vectorized) return nullptr;  // has vectorized, not need the new AP.
 
       // create vectorized table scan if it can.
       auto rapid_path = new (current_thd->mem_root) AccessPath();
@@ -168,6 +169,8 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
 
       if (hash_join.allow_spill_to_disk || hash_join.store_rowids) context->can_vectorized = false;
 
+      if (path->vectorized == context->can_vectorized) return nullptr;
+
       auto rapid_path = new (current_thd->mem_root) AccessPath();
       rapid_path->vectorized = context->can_vectorized;
       rapid_path->type = AccessPath::HASH_JOIN;
@@ -190,6 +193,8 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
       auto n_records = path->num_output_rows_before_filter;
       if ((size_t)n_records >= SHANNON_VECTOR_WIDTH) context->can_vectorized = true;
 
+      if (path->vectorized == context->can_vectorized) return nullptr;
+
       auto rapid_path = new (current_thd->mem_root) AccessPath();
       rapid_path->vectorized = context->can_vectorized;
       rapid_path->type = AccessPath::AGGREGATE;
@@ -197,13 +202,15 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
       rapid_path->aggregate().olap = path->aggregate().olap;
       rapid_path->has_group_skip_scan = path->has_group_skip_scan;
       rapid_path->set_num_output_rows(path->num_output_rows());
-      rapid_path->iterator = nullptr;
+      rapid_path->iterator = path->iterator;
 
       return rapid_path;
     } break;
     case AccessPath::TEMPTABLE_AGGREGATE: {
       auto n_records = path->num_output_rows_before_filter;
       if ((size_t)n_records >= SHANNON_VECTOR_WIDTH) context->can_vectorized = true;
+
+      if (path->vectorized == context->can_vectorized) return nullptr;
 
       auto rapid_path = new (current_thd->mem_root) AccessPath();
       rapid_path->vectorized = context->can_vectorized;
@@ -248,7 +255,7 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
       break;
   }
 
-  return path;
+  return nullptr;
 }
 
 }  // namespace Optimizer

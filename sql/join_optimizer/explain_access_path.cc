@@ -1087,7 +1087,11 @@ static unique_ptr<Json_object> SetObjectMembers(
   switch (path->type) {
     case AccessPath::TABLE_SCAN: {
       const TABLE &table = *path->table_scan().table;
-      description += string("Table scan on ") + table.alias;
+
+      if (path->vectorized)
+        description += string("Vectorized table scan on ") + table.alias;
+      else
+        description += string("Table scan on ") + table.alias;
       if (table.s->is_secondary_engine()) {
         error |= AddMemberToObject<Json_string>(obj, "secondary_engine",
                                                 table.file->table_type());
@@ -1544,15 +1548,17 @@ static unique_ptr<Json_object> SetObjectMembers(
           description = "Group (no aggregates)";
         } else if (path->aggregate().olap == ROLLUP_TYPE) {
           error |= AddMemberToObject<Json_boolean>(obj, "rollup", true);
-          description = "Group aggregate with rollup: ";
+          description = (path->vectorized) ? "Group vectorized aggregate with rollup: " :
+                                             "Group aggregate with rollup: ";
         } else if (path->aggregate().olap == CUBE_TYPE) {
           error |= AddMemberToObject<Json_boolean>(obj, "cube", true);
-          description = "Group aggregate with cube: ";
+          description = (path->vectorized) ? "Group vectorized aggregate with cube: " :
+                                             "Group aggregate with cube: ";
         } else {
-          description = "Group aggregate: ";
+          description = (path->vectorized) ? "Group vectorized aggregate: " : "Group aggregate: ";
         }
       } else {
-        description = "Aggregate: ";
+        description = (path->vectorized) ? "Vectorized aggregate: " : "Aggregate: ";
       }
 
       unique_ptr<Json_array> funcs(new (std::nothrow) Json_array());

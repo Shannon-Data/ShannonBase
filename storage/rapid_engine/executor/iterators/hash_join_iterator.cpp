@@ -374,7 +374,7 @@ bool VectorizedHashJoinIterator::LoadRowFromColumnChunks(const std::vector<Colum
 
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
-      auto chunk = chunks[chunk_idx];
+      auto &chunk = chunks[chunk_idx];
       if (chunk_idx >= chunks.size() || row_idx >= chunks[chunk_idx].size()) {
         return true;  // Error
       }
@@ -404,7 +404,7 @@ uint64_t VectorizedHashJoinIterator::ComputeHashFromJoinConditions(const std::ve
 
   uint64_t hash = 0;
   for (size_t i = 0; i < std::min(columns.size(), size_t(4)); ++i) {
-    auto col = columns[i];
+    auto &col = columns[i];
     if (row_idx < col.size() && !col.nullable(row_idx)) {
       const uchar *data = col.data(row_idx);
       size_t width = col.width();
