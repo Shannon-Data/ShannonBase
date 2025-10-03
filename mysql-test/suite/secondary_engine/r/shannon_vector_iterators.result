@@ -19,7 +19,7 @@ INSERT INTO t_rapid VALUES
 (6,600),(7,700),(8,800),(9,900),(10,1000);
 SET USE_SECONDARY_ENGINE = OFF;
 EXPLAIN FORMAT=TREE
-SELECT t_innodb.id, t_innodb.val, t_rapid.val
+SELECT /*+ HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val
 FROM t_innodb
 JOIN t_rapid
 ON t_innodb.id = t_rapid.id
@@ -32,7 +32,7 @@ EXPLAIN
             -> Hash
                 -> Table scan on t_innodb  (cost=X rows=X)
 
-SELECT t_innodb.id, t_innodb.val, t_rapid.val 
+SELECT /*+ HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val 
 FROM t_innodb 
 JOIN t_rapid   
 ON t_innodb.id = t_rapid.id 
@@ -48,8 +48,9 @@ ALTER TABLE t_rapid SECONDARY_LOAD;
 SET USE_SECONDARY_ENGINE = ON;
 SET rapid_use_dynamic_offload=off;
 SET secondary_engine_cost_threshold=10;
+SET SESSION optimizer_switch = 'hash_join=off';
 EXPLAIN FORMAT=TREE
-SELECT t_innodb.id, t_innodb.val, t_rapid.val
+SELECT  /*+ NO_HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val
 FROM t_innodb
 JOIN t_rapid
 ON t_innodb.id = t_rapid.id
@@ -61,7 +62,7 @@ EXPLAIN
             -> Table scan on t_rapid  (cost=X rows=X)
             -> Single-row index lookup on t_innodb using PRIMARY (id=t_rapid.id)  (cost=X rows=X)
 
-SELECT t_innodb.id, t_innodb.val, t_rapid.val 
+SELECT  /*+ NO_HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val 
 FROM t_innodb 
 JOIN t_rapid   
 ON t_innodb.id = t_rapid.id 
@@ -72,6 +73,7 @@ id	val	val
 3	30	300
 4	40	400
 5	50	500
+SET SESSION optimizer_switch = 'hash_join=on';
 SET USE_SECONDARY_ENGINE = ON;
 CREATE TABLE customers (
 customer_id INT PRIMARY KEY AUTO_INCREMENT,

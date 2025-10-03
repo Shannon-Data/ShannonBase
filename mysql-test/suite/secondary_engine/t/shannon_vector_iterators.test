@@ -32,13 +32,13 @@ INSERT INTO t_rapid VALUES
 SET USE_SECONDARY_ENGINE = OFF;
 --replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
 EXPLAIN FORMAT=TREE
-SELECT t_innodb.id, t_innodb.val, t_rapid.val
+SELECT /*+ HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val
 FROM t_innodb
 JOIN t_rapid
   ON t_innodb.id = t_rapid.id
 ORDER BY t_innodb.id;
 
-SELECT t_innodb.id, t_innodb.val, t_rapid.val 
+SELECT /*+ HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val 
 FROM t_innodb 
 JOIN t_rapid   
   ON t_innodb.id = t_rapid.id 
@@ -51,22 +51,24 @@ SET USE_SECONDARY_ENGINE = ON;
 SET rapid_use_dynamic_offload=off;
 SET secondary_engine_cost_threshold=10;
 
+SET SESSION optimizer_switch = 'hash_join=off';
 ########### it will use vectorized table scan, rapid_table::index_read. nest loop join. ###########
 --replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
 EXPLAIN FORMAT=TREE
-SELECT t_innodb.id, t_innodb.val, t_rapid.val
+SELECT  /*+ NO_HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val
 FROM t_innodb
 JOIN t_rapid
   ON t_innodb.id = t_rapid.id
 ORDER BY t_innodb.id;
 
-SELECT t_innodb.id, t_innodb.val, t_rapid.val 
+SELECT  /*+ NO_HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val 
 FROM t_innodb 
 JOIN t_rapid   
   ON t_innodb.id = t_rapid.id 
 ORDER BY t_innodb.id;
 
 #########################Vectorized JOIN/Aggregation #######################
+SET SESSION optimizer_switch = 'hash_join=on';
 SET USE_SECONDARY_ENGINE = ON;
 CREATE TABLE customers (
     customer_id INT PRIMARY KEY AUTO_INCREMENT,

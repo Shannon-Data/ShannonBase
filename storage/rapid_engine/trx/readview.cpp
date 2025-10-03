@@ -40,6 +40,89 @@
 
 namespace ShannonBase {
 namespace ReadView {
+/**
+ * Multi-Version Concurrency Control in HTAP Systems: Row-Level vs Column-Level
+ * Current Architecture Analysis
+ * Column-Level Versioning (ShannonBase)
+ * Advantages:
+ *
+ * // OLTP Benefits
+ * - Efficient partial column updates
+ * - Lower write amplification
+ * - Better update concurrency (parallel updates on different columns)
+ * - Optimal for sparse updates common in HTAP
+ *
+ * // OLAP Benefits
+ * - Native columnar storage for analytical queries
+ * - Scan only required column versions
+ * - Better compression for historical data
+ * - Vectorized processing friendly
+ *
+ * Disadvantages:
+ *
+ * // OLTP Challenges
+ * - Cross-column consistency complexity
+ * - Transaction commit requires multi-column coordination
+ * - Higher metadata overhead per column
+ *
+ * // OLAP Challenges
+ * - Row reconstruction requires merging multiple column versions
+ * - Complex predicate pushdown across versions
+ * - Potential consistency issues in cross-column queries
+ *
+ * Row-Level Versioning (DuckDB Approach)
+ * Advantages:
+ * // OLTP Benefits
+ * - Simplified transaction consistency
+ * - Unified version management
+ * - Faster point queries (entire row read together)
+ * - Simpler rollback and recovery
+ *
+ * // OLAP Benefits
+ * - Straightforward row reconstruction
+ * - Direct predicate pushdown
+ * - Consistent snapshot across all columns
+ * - Simplified garbage collection
+ *
+ * Disadvantages:
+ *
+ * // OLTP Challenges
+ * - High cost for partial column updates
+ * - Significant write amplification
+ * - Longer version chains for frequently updated rows
+ * - Memory bloat for wide tables
+ *
+ * // OLAP Challenges
+ * - Scanning unaffected columns still pays version cost
+ * - Less efficient for columnar operations
+ * - Higher storage overhead for historical data
+ *
+ * HTAP-Specific Considerations
+ * Workload Characteristics
+ *
+ * -- Typical HTAP Pattern
+ * -- OLTP: Frequent partial updates
+ * UPDATE user_sessions SET last_activity = NOW() WHERE session_id = 123;
+ * UPDATE inventory SET stock_count = stock_count - 1 WHERE product_id = 456;
+ *
+ * -- OLAP: Complex multi-table analytics
+ * SELECT customer_region, AVG(order_value), COUNT(*)
+ * FROM orders JOIN customers ON orders.customer_id = customers.id
+ * WHERE orders.create_date >= '2024-01-01'
+ * GROUP BY customer_region;
+ *
+ * Performance Trade-offs
+ *
+ * // Column-Level: Better for asymmetric workloads
+ * - When 20% of columns receive 80% of updates
+ * - When analytical queries access subset of columns
+ * - When table schema is wide with sparse updates
+ *
+ * // Row-Level: Better for symmetric workloads
+ * - When updates typically modify multiple columns
+ * - When point queries frequently access entire rows
+ * - When consistency simplicity is paramount
+ */
 
 smu_item_t::smu_item_t(size_t size) {
   sz = size;
@@ -131,6 +214,7 @@ BitmapResult Snapshot_meta_unit::build_prev_vers_batch(Rapid_load_context *conte
   }
   size_t bytes = (row_count + 7) / 8;
   result.bitmask.assign(bytes, 0);
+  result.null_bitmask.assign(bytes, 0);
 
   // 1) collect pointers to SMU_items if exists, under shared lock to m_version_info
   std::vector<ReadView::SMU_items *> smu_ptrs;
@@ -179,6 +263,11 @@ BitmapResult Snapshot_meta_unit::build_prev_vers_batch(Rapid_load_context *conte
       size_t byte_idx = i >> 3;
       uint8_t bit_mask = static_cast<uint8_t>(1u << (i & 7));
       result.bitmask[byte_idx] |= bit_mask;
+
+      bool is_null = (status & static_cast<uint8>(ReadView::RECONSTRUCTED_STATUS::STAT_NULL));
+      if (is_null) {
+        result.null_bitmask[byte_idx] |= bit_mask;
+      }
     }
   }
 
