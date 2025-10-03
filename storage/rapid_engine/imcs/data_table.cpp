@@ -32,6 +32,7 @@
 #include "storage/rapid_engine/imcs/data_table.h"
 
 #include <sstream>
+#include <utility>  // std::pair
 
 #include "include/my_base.h"  //key_range
 #include "include/ut0dbg.h"   //ut_a
@@ -323,57 +324,6 @@ int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::
   size_t n_to_scan = std::min(batch_size * 2, max_rows_in_chunk);
   n_to_scan = std::min(n_to_scan, static_cast<size_t>(m_rapid_table->rows(nullptr) - start_row));
 
-  // find a representative field (first read-set field) to compute chunk_base_ptr and normalized_len
-  uint32_t rep_ind = UINT32_MAX;
-  for (uint32_t ind = 0; ind < m_data_source->s->fields; ++ind) {
-    Field *src = *(m_data_source->field + ind);
-    if (bitmap_is_set(m_data_source->read_set, ind) && !src->is_flag_set(NOT_SECONDARY_FLAG)) {
-      rep_ind = ind;
-      break;
-    }
-  }
-  if (rep_ind == UINT32_MAX) return HA_ERR_GENERIC;  // no column to read
-
-  auto rep_field = m_rapid_table->get_field((*(m_data_source->field + rep_ind))->field_name);
-  size_t normalized_len = rep_field->normalized_pack_length();
-  const uchar *chunk_base_ptr = rep_field->chunk(current_chunk)->base() + offset_in_chunk * normalized_len;
-  DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "secondary_engine_rapid_next_error");
-    return HA_ERR_GENERIC;
-  });
-
-  // allocate temporary reconstruct buffer (on heap or thread-local)
-  std::unique_ptr<uchar[]> reconstruct_buf(new uchar[n_to_scan * normalized_len]);
-  // call the new batch bitmap
-  ReadView::BitmapResult bm = rep_field->chunk(current_chunk)
-                                  ->header()
-                                  ->m_smu->build_prev_vers_batch(m_context.get(), start_row, n_to_scan, chunk_base_ptr,
-                                                                 normalized_len, reconstruct_buf.get());
-
-  if (bm.visible_count == 0) {
-    // advance position past scanned area to avoid spinning on deleted/rollbacked rows
-    m_rowid.store(start_row + static_cast<ShannonBase::row_id_t>(n_to_scan));
-    // try again or return EOF accordingly
-    if (start_row + static_cast<ShannonBase::row_id_t>(n_to_scan) >= m_rapid_table->rows(nullptr))
-      return HA_ERR_END_OF_FILE;
-    return next_batch(batch_size, data, read_cnt);
-  }
-
-  std::vector<ShannonBase::row_id_t> sel_vec;
-  sel_vec.reserve(bm.visible_count);
-  size_t total_bits = n_to_scan;
-  for (size_t byte_idx = 0; byte_idx < bm.bitmask.size(); ++byte_idx) {
-    uint8_t byte = bm.bitmask[byte_idx];
-    while (byte) {
-      unsigned tz = std::countr_zero(byte);
-      size_t idx = (byte_idx << 3) + tz;
-      if (idx < total_bits) {
-        sel_vec.push_back(start_row + static_cast<ShannonBase::row_id_t>(idx));
-      }
-      byte &= static_cast<uint8_t>(byte - 1);  // clear lowest set bit
-    }
-  }
-
   // materialize columns using sel_vec
   for (uint32_t ind = 0; ind < m_data_source->s->fields; ++ind) {
     Field *src = *(m_data_source->field + ind);
@@ -383,7 +333,48 @@ int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::
     size_t col_len = rpd_field->normalized_pack_length();
     auto &col_chunk = data[ind];
 
-    for (ShannonBase::row_id_t rid : sel_vec) {
+    const uchar *chunk_base_ptr = rpd_field->chunk(current_chunk)->base() + offset_in_chunk * col_len;
+    DBUG_EXECUTE_IF("secondary_engine_rapid_next_error", {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "secondary_engine_rapid_next_error");
+      return HA_ERR_GENERIC;
+    });
+
+    // allocate temporary reconstruct buffer (on heap or thread-local)
+    std::unique_ptr<uchar[]> reconstruct_buf(new uchar[n_to_scan * col_len]);
+    // call the new batch bitmap
+    ReadView::BitmapResult bm = rpd_field->chunk(current_chunk)
+                                    ->header()
+                                    ->m_smu->build_prev_vers_batch(m_context.get(), start_row, n_to_scan,
+                                                                   chunk_base_ptr, col_len, reconstruct_buf.get());
+
+    if (bm.visible_count == 0) {
+      // advance position past scanned area to avoid spinning on deleted/rollbacked rows
+      m_rowid.store(start_row + static_cast<ShannonBase::row_id_t>(n_to_scan));
+      // try again or return EOF accordingly
+      if (start_row + static_cast<ShannonBase::row_id_t>(n_to_scan) >= m_rapid_table->rows(nullptr))
+        return HA_ERR_END_OF_FILE;
+      return next_batch(batch_size, data, read_cnt);
+    }
+
+    // pair: visble rowid, and its null status. true is null.
+    std::vector<std::pair<ShannonBase::row_id_t, bool>> sel_vec;
+    sel_vec.reserve(bm.visible_count);
+    size_t total_bits = n_to_scan;
+    for (size_t byte_idx = 0; byte_idx < bm.bitmask.size(); ++byte_idx) {
+      uint8_t visibility_byte = bm.bitmask[byte_idx];
+      uint8_t nullable_byte = bm.null_bitmask[byte_idx];
+      while (visibility_byte) {
+        unsigned tz = std::countr_zero(visibility_byte);
+        size_t idx = (byte_idx << 3) + tz;
+        if (idx < total_bits) {
+          bool is_null = (nullable_byte & (1u << tz)) != 0;
+          sel_vec.push_back({start_row + static_cast<ShannonBase::row_id_t>(idx), is_null});
+        }
+        visibility_byte &= static_cast<uint8_t>(visibility_byte - 1);  // clear lowest set bit
+      }
+    }
+
+    for (auto &[rid, is_null] : sel_vec) {
       auto chunk_id = rid / SHANNON_ROWS_IN_CHUNK;
       auto off = rid % SHANNON_ROWS_IN_CHUNK;
       auto chunk_ptr = rpd_field->chunk(chunk_id);
@@ -394,13 +385,13 @@ int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::
 
       // if this column also has its own SMU entries and needs reconstruction,
       // you can selectively call its reconstruct (but in practice we used rep_field to filter)
-      col_chunk.add(buf, col_len, false);
+      col_chunk.add(buf, col_len, is_null);
     }
+    read_cnt = sel_vec.size();
   }
 
   // advance m_rowid to last selected + 1
-  m_rowid.store(sel_vec.back() + 1);
-  read_cnt = sel_vec.size();
+  m_rowid.store(start_row + static_cast<ShannonBase::row_id_t>(n_to_scan));
   return ShannonBase::SHANNON_SUCCESS;
 }
 

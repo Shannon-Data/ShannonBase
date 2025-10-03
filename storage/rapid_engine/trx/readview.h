@@ -44,7 +44,8 @@ namespace ReadView {
 
 // Bit mask, used for visibile row count.
 struct BitmapResult {
-  std::vector<uint8_t> bitmask;  // bit i => row_start + ith visibility: 1 visible, 0 invisible
+  std::vector<uint8_t> bitmask;       // bit i => row_start + ith visibility: 1 visible, 0 invisible
+  std::vector<uint8_t> null_bitmask;  // NULL bitmap, if it is visiable, then check this for null or not.
   size_t visible_count{0};
 };
 
