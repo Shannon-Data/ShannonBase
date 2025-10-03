@@ -35,11 +35,13 @@
 #define SHANNON_APPLE_PLATFORM
 #define SHANNON_ARM_PLATFORM
 #include <arm_neon.h>
+#define SHANNON_ARM_VECT_SUPPORTED
 
 #elif defined(__arm__) || defined(__aarch64__)
 #define SHANNON_ARM_PLATFORM
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
+#define SHANNON_ARM_VECT_SUPPORTED
 #endif
 
 #elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
@@ -71,10 +73,16 @@
 #endif
 
 #define SHANNON_ALIGNAS alignas(CACHE_LINE_SIZE)
-#if defined(SHANNON_SSE_VECT_SUPPORTED) || defined(SHANNON_AVX_VECT_SUPPORTED)
+
+#if defined(SHANNON_SSE_VECT_SUPPORTED) || defined(SHANNON_AVX_VECT_SUPPORTED) || defined(SHANNON_ARM_VECT_SUPPORTED)
 #define SHANNON_VECTORIZE_SUPPORT
 #endif
-#define SHANNON_VECTOR_WIDTH 256
+
+#if defined(SHANNON_X86_PLATFORM)
+#define SHANNON_VECTOR_WIDTH 256  // x86 AVX2
+#elif defined(SHANNON_ARM_PLATFORM)
+#define SHANNON_VECTOR_WIDTH 128  // ARM NEON
+#endif
 
 extern char *mysql_llm_home_ptr;
 namespace ShannonBase {

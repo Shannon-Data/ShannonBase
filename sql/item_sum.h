@@ -1082,6 +1082,26 @@ class Item_sum_sum : public Item_sum_num {
 
     return false;
   }
+
+  bool add_value(my_decimal extra) {
+    if (hybrid_type == DECIMAL_RESULT) {
+      if (current_thd->is_error()) return true;
+      if (!aggr->arg_is_null(true)) {
+        my_decimal_add(E_DEC_FATAL_ERROR, dec_buffs + (curr_dec_buff ^ 1), &extra,
+                      dec_buffs + curr_dec_buff);
+        curr_dec_buff ^= 1;
+        null_value = false;
+      }
+    } else {
+      double extra_val;
+      my_decimal2double(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, &extra, &extra_val);
+      sum += extra_val;
+      if (current_thd->is_error()) return true;
+      if (!aggr->arg_is_null(true)) null_value = false;
+    }
+
+    return false;
+  }
 };
 
 class Item_sum_count : public Item_sum_int {

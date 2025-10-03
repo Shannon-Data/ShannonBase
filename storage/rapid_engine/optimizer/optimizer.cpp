@@ -191,8 +191,7 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
         EstimateAggregateCost(join->thd, path, join->query_block);
       }
       auto n_records = path->num_output_rows_before_filter;
-      if ((size_t)n_records >= SHANNON_VECTOR_WIDTH) context->can_vectorized = true;
-
+      context->can_vectorized = ((size_t)n_records >= SHANNON_VECTOR_WIDTH) ? true : false;
       if (path->vectorized == context->can_vectorized) return nullptr;
 
       auto rapid_path = new (current_thd->mem_root) AccessPath();
@@ -208,8 +207,7 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
     } break;
     case AccessPath::TEMPTABLE_AGGREGATE: {
       auto n_records = path->num_output_rows_before_filter;
-      if ((size_t)n_records >= SHANNON_VECTOR_WIDTH) context->can_vectorized = true;
-
+      context->can_vectorized = ((size_t)n_records >= SHANNON_VECTOR_WIDTH) ? true : false;
       if (path->vectorized == context->can_vectorized) return nullptr;
 
       auto rapid_path = new (current_thd->mem_root) AccessPath();

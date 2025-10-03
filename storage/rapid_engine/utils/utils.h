@@ -246,7 +246,7 @@ class Util {
 
   // check Nth is 1 or not.
   static inline bool bit_array_get(bit_array_t *ba, size_t n) {
-    if (!ba) return false;
+    if (!ba || !ba->data || n >= ba->size * 8) return false;
 
     size_t byte_index = n / 8;
     size_t bit_index = n % 8;
@@ -255,6 +255,8 @@ class Util {
 
   // set Nth is 1.
   static inline void bit_array_set(bit_array_t *ba, size_t n) {
+    if (!ba || !ba->data || n >= ba->size * 8) return;
+
     size_t byte_index = n / 8;
     size_t bit_index = n % 8;
     ba->data[byte_index] |= (1 << bit_index);

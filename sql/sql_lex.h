@@ -871,7 +871,7 @@ class Query_expression {
     return std::move(m_root_iterator);
   }
   AccessPath *root_access_path() const { return m_root_access_path; }
-
+  AccessPath *& root_access_path() { return m_root_access_path; }
   // Asks each query block to switch to an access path with in2exists
   // conditions removed (if they were ever added).
   // See JOIN::change_to_access_path_without_in2exists().
