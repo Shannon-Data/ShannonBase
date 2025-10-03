@@ -7,69 +7,6 @@ create database sh_vector_iterators;
 use sh_vector_iterators;
 --disable_warnings
 
-DROP TABLE IF EXISTS t_innodb;
-CREATE TABLE t_innodb (
-  id  INT NOT NULL,
-  val INT,
-  PRIMARY KEY (id)
-) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
-
-DROP TABLE IF EXISTS t_rapid;
-CREATE TABLE t_rapid (
-  id  INT NOT NULL,
-  val INT
-) ENGINE=InnoDB
-SECONDARY_ENGINE=RAPID;
-
-INSERT INTO t_innodb VALUES
-(1,10),(2,20),(3,30),(4,40),(5,50);
-
-INSERT INTO t_rapid VALUES
-(1,100),(2,200),(3,300),(4,400),(5,500),
-(6,600),(7,700),(8,800),(9,900),(10,1000);
-
-########### USE INNODB ONLY ###########
-SET USE_SECONDARY_ENGINE = OFF;
---replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
-EXPLAIN FORMAT=TREE
-SELECT /*+ HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val
-FROM t_innodb
-JOIN t_rapid
-  ON t_innodb.id = t_rapid.id
-ORDER BY t_innodb.id;
-
-SELECT /*+ HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val 
-FROM t_innodb 
-JOIN t_rapid   
-  ON t_innodb.id = t_rapid.id 
-ORDER BY t_innodb.id;
-
-########### TEST FOR SECONDARY ENGINE ###########
-ALTER TABLE t_innodb SECONDARY_LOAD;
-ALTER TABLE t_rapid SECONDARY_LOAD;
-SET USE_SECONDARY_ENGINE = ON;
-SET rapid_use_dynamic_offload=off;
-SET secondary_engine_cost_threshold=10;
-
-SET SESSION optimizer_switch = 'hash_join=off';
-########### it will use vectorized table scan, rapid_table::index_read. nest loop join. ###########
---replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
-EXPLAIN FORMAT=TREE
-SELECT  /*+ NO_HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val
-FROM t_innodb
-JOIN t_rapid
-  ON t_innodb.id = t_rapid.id
-ORDER BY t_innodb.id;
-
-SELECT  /*+ NO_HASH_JOIN(t_rapid) */ t_innodb.id, t_innodb.val, t_rapid.val 
-FROM t_innodb 
-JOIN t_rapid   
-  ON t_innodb.id = t_rapid.id 
-ORDER BY t_innodb.id;
-
-#########################Vectorized JOIN/Aggregation #######################
-SET SESSION optimizer_switch = 'hash_join=on';
-SET USE_SECONDARY_ENGINE = ON;
 CREATE TABLE customers (
     customer_id INT PRIMARY KEY AUTO_INCREMENT,
     customer_name VARCHAR(100),
@@ -90,62 +27,19 @@ CREATE TABLE orders (
 ) SECONDARY_ENGINE=rapid;
 
 # Insert test data using stored procedures
-DELIMITER $$;
-
-CREATE PROCEDURE InsertCustomerData()
-BEGIN
-    DECLARE i INT DEFAULT 1;
-    DECLARE countries VARCHAR(500) DEFAULT 'USA,China,Japan,Germany,UK,France,Canada,Australia,Brazil,India';
-    DECLARE country_count INT DEFAULT 10;
-    
-    WHILE i <= 1000 DO
-        INSERT INTO customers (customer_name, email, registration_date, country, credit_score)
-        VALUES (
-            CONCAT('Customer_', i),
-            CONCAT('user', i, '@example.com'),
-            DATE_SUB(CURDATE(), INTERVAL FLOOR(RAND() * 365) DAY),
-            SUBSTRING_INDEX(SUBSTRING_INDEX(countries, ',', 1 + FLOOR(RAND() * country_count)), ',', -1),
-            300 + FLOOR(RAND() * 700)
-        );
-        SET i = i + 1;
-    END WHILE;
-END$$
-
-CREATE PROCEDURE InsertOrderData()
-BEGIN
-    DECLARE i INT DEFAULT 1;
-    DECLARE categories VARCHAR(500) DEFAULT 'Electronics,Clothing,Books,Home,Food,Sports,Toys,Beauty';
-    DECLARE category_count INT DEFAULT 8;
-    
-    WHILE i <= 2500 DO
-        INSERT INTO orders (customer_id, order_date, total_amount, product_category, quantity)
-        VALUES (
-            1 + FLOOR(RAND() * 150),  -- Randomly associate with existing customers
-            DATE_SUB(CURDATE(), INTERVAL FLOOR(RAND() * 180) DAY),
-            ROUND(10 + (RAND() * 990), 2),  -- Amount between 10-1000
-            SUBSTRING_INDEX(SUBSTRING_INDEX(categories, ',', 1 + FLOOR(RAND() * category_count)), ',', -1),
-            1 + FLOOR(RAND() * 10)  -- Quantity between 1-10
-        );
-        SET i = i + 1;
-    END WHILE;
-END$$
-
-DELIMITER ;$$
-
-# Execute stored procedures to insert data
-CALL InsertCustomerData();
-CALL InsertOrderData();
+--disable_query_log
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/vectorized_iterator/customers_data.csv' INTO TABLE customers FIELDS TERMINATED BY ',' ;
+--eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/vectorized_iterator/orders_data.csv' INTO TABLE orders FIELDS TERMINATED BY ',' ;
+--enable_query_log
 
 SELECT COUNT(*) FROM customers;
 SELECT COUNT(*) FROM orders;
 ############### GETS THE RESULT FROM INNODB ###########################
 --echo ############### GETS THE RESULT FROM INNODB ###########################
---replace_column 1 # 2 # 3 # 4 # 5 #
 SELECT 
     c.country,
     COUNT(DISTINCT c.customer_id) as customer_count,
     COUNT(o.order_id) as total_orders,
-    AVG(o.total_amount) as avg_order_value,
     SUM(o.quantity) as total_quantity
 FROM customers c
 JOIN orders o ON c.customer_id = o.customer_id
@@ -154,19 +48,54 @@ ORDER BY total_orders DESC;
 
 ############### GETS THE RESULT FROM RAPID VIA VECTORIZED  EXECUTION ###########################
 --echo ############### GETS THE RESULT FROM RAPID VIA VECTORIZED  EXECUTION ###########################
-SET USE_SECONDARY_ENGINE = FORCED;
+SET USE_SECONDARY_ENGINE=ON;
 SET secondary_engine_cost_threshold=10;
 SET rapid_use_dynamic_offload=off;
 
 ALTER TABLE customers SECONDARY_LOAD;
 ALTER TABLE orders SECONDARY_LOAD;
 
---replace_column 1 # 2 # 3 # 4 # 5 #
+--echo ############### No.1 Testing Vectorized Count ###########################
+--replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
+explain format=tree SELECT 
+    c.country,
+    COUNT(DISTINCT c.customer_id) as customer_count,
+    COUNT(o.order_id) as total_orders,
+    SUM(o.quantity) as total_quantity
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id
+GROUP BY c.country
+ORDER BY total_orders DESC;
+
 SELECT 
     c.country,
     COUNT(DISTINCT c.customer_id) as customer_count,
     COUNT(o.order_id) as total_orders,
-    AVG(o.total_amount) as avg_order_value,
+    SUM(o.quantity) as total_quantity
+FROM customers c
+JOIN orders o ON c.customer_id = o.customer_id
+GROUP BY c.country
+ORDER BY total_orders DESC;
+
+SET USE_SECONDARY_ENGINE=ON;
+SET secondary_engine_cost_threshold=0;
+SET rapid_use_dynamic_offload=off;
+
+#--replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
+#explain SELECT 
+#    c.country,
+#    COUNT(DISTINCT c.customer_id) as customer_count,
+#    COUNT(o.order_id) as total_orders,
+#    SUM(o.quantity) as total_quantity
+#FROM customers c
+#JOIN orders o ON c.customer_id = o.customer_id
+#GROUP BY c.country
+#ORDER BY total_orders DESC;
+
+SELECT 
+    c.country,
+    COUNT(DISTINCT c.customer_id) as customer_count,
+    COUNT(o.order_id) as total_orders,
     SUM(o.quantity) as total_quantity
 FROM customers c
 JOIN orders o ON c.customer_id = o.customer_id

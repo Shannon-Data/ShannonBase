@@ -357,18 +357,14 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
 
   for (;;) {
     // Don't exceed batch capacity
-    if (rows_read >= batch_capacity) {
-      break;
-    }
+    if (rows_read >= batch_capacity) break;
 
     int err = m_source->Read();
-    if (err == 1) return 1;  // Error
-
-    if (err == -1) {
-      // EOF
+    if (err == -1 || err == HA_ERR_END_OF_FILE) {  // EOF
       m_seen_eof = true;
       break;
     }
+    if (err) return 1;  // Error
 
     // Check for group change
     int first_changed_idx = update_item_cache_if_changed(m_join->group_fields);
@@ -410,24 +406,21 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
       break;
     }
 
+    /**In future, all iterator support read batch, we can read from Column Chunks directly.
+     * This part can be removed.
+     */
     bool row_stored_successfully = true;
     for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
       const auto &agg_info = m_vectorizer.aggregate_infos[i];
       if (agg_info.vectorizable && agg_info.source_field) {
         auto &chunk = m_vectorizer.current_batch.column_chunks[i];
         Field *field = agg_info.source_field;
-        if (field->is_null()) {
-          if (!chunk.add(nullptr, 0, true)) {
-            row_stored_successfully = false;
-            break;
-          }
-        } else {
-          const uchar *data = field->data_ptr();
-          size_t data_len = field->pack_length();
-          if (!chunk.add(const_cast<uchar *>(data), data_len, false)) {
-            row_stored_successfully = false;
-            break;
-          }
+        bool is_null = field->is_null();
+        const uchar *data = is_null ? nullptr : field->data_ptr();
+        size_t data_len = is_null ? 0 : field->pack_length();
+        if (!chunk.add(const_cast<uchar *>(data), data_len, field->is_null())) {
+          row_stored_successfully = false;
+          break;
         }
       }
     }
@@ -541,7 +534,6 @@ int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> 
       }
       case MYSQL_TYPE_LONGLONG: {
         int64_t sum = ColumnChunkOper::Sum<int64_t>(chunk, m_vectorizer.current_batch.row_count);
-
         // Add vectorized sum to aggregate
         Item_sum_sum *sum_item = down_cast<Item_sum_sum *>(info.item);
         sum_item->add_value(sum);
@@ -549,15 +541,23 @@ int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> 
       }
       case MYSQL_TYPE_FLOAT: {
         double sum = ColumnChunkOper::Sum<float>(chunk, m_vectorizer.current_batch.row_count);
-
+        // Add vectorized sum to aggregate
         Item_sum_sum *sum_item = down_cast<Item_sum_sum *>(info.item);
         sum_item->add_value(sum);
         break;
       }
       case MYSQL_TYPE_DOUBLE: {
         double sum = ColumnChunkOper::Sum<double>(chunk, m_vectorizer.current_batch.row_count);
+        // Add vectorized sum to aggregate
         Item_sum_sum *sum_item = down_cast<Item_sum_sum *>(info.item);
         sum_item->add_value(sum);
+        break;
+      }
+      case MYSQL_TYPE_NEWDECIMAL: {
+        auto sum_decimal = ColumnChunkOper::Sum<my_decimal>(chunk, m_vectorizer.current_batch.row_count);
+        // Add vectorized sum to aggregate
+        Item_sum_sum *sum_item = down_cast<Item_sum_sum *>(info.item);
+        sum_item->add_value(sum_decimal);
         break;
       }
       default:

@@ -326,10 +326,10 @@ int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::
 
   // materialize columns using sel_vec
   for (uint32_t ind = 0; ind < m_data_source->s->fields; ++ind) {
-    Field *src = *(m_data_source->field + ind);
-    if (!bitmap_is_set(m_data_source->read_set, ind) || src->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    Field *fld = *(m_data_source->field + ind);
+    if (!bitmap_is_set(m_data_source->read_set, ind) || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
-    auto rpd_field = m_rapid_table->get_field(src->field_name);
+    auto rpd_field = m_rapid_table->get_field(fld->field_name);
     size_t col_len = rpd_field->normalized_pack_length();
     auto &col_chunk = data[ind];
 

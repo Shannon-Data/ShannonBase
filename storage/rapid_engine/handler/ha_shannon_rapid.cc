@@ -882,8 +882,20 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   if (context == nullptr) return true;
   lex->set_secondary_engine_execution_context(context);
 
-  // Disable use of constant tables and evaluation of subqueries during
-  // optimization. But, it is not to producce an optima count query plan.
+  /* Disable use of constant tables and evaluation of subqueries during
+   * optimization. But, it is not to producce an optima count query plan.
+   * if we enable the following statement, in JOIN::optimnze, it can not
+   * optimize the aggregate statement. such as:  count(*), min() and max() to const fields if
+   * there is implicit grouping (aggregate functions but no group_list).
+   * In this case, the result set shall only contain one row. ref to:
+   *  if (tables_list && implicit_grouping &&
+   *    !(query_block->active_options() & OPTION_NO_CONST_TABLES)) {
+   *    aggregate_evaluated outcome;
+   *    if (optimize_aggregated_query(thd, query_block, *fields, where_cond,
+   *                                &outcome)) {
+   *  If enable it, will use aggregate access path to the result of `count(*), min() and max()`.
+   */
+
   lex->add_statement_options(OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION);
 
   return RapidPrepareEstimateQueryCosts(thd, lex);
@@ -986,10 +998,13 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
     return true;
   }
 
-  auto root_access_path = lex->unit->root_access_path();
+  if (lex->unit && !lex->unit->is_optimized()) {
+    if (lex->unit->optimize(thd, nullptr, true, true)) return true;
+  }
+
   JOIN *join = lex->unit->first_query_block()->join;
-  root_access_path = ShannonBase::Optimizer::WalkAndRewriteAccessPaths(
-      root_access_path, join, WalkAccessPathPolicy::ENTIRE_TREE,
+  lex->unit->root_access_path() = ShannonBase::Optimizer::WalkAndRewriteAccessPaths(
+      lex->unit->root_access_path(), join, WalkAccessPathPolicy::ENTIRE_TREE,
       [&](AccessPath *path, const JOIN *join) -> AccessPath * {
         return ShannonBase::Optimizer::OptimizeAndRewriteAccessPath(context, path, join);
       });
@@ -999,7 +1014,7 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   lex->unit->release_root_iterator().reset();
 
   auto new_root_iter = ShannonBase::Optimizer::PathGenerator::PathGenerator::CreateIteratorFromAccessPath(
-      thd, context, root_access_path, join, /*eligible_for_batch_mode=*/true);
+      thd, context, lex->unit->root_access_path(), join, /*eligible_for_batch_mode=*/true);
 
   lex->unit->set_root_iterator(new_root_iter);
   return false;

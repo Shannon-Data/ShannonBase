@@ -749,7 +749,7 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         }
 
         // TODO: using vectorized temptable_aggregate_iterator to replace it.
-        if (path->vectorized)
+        if (false)
           iterator = unique_ptr_destroy_only<RowIterator>(temptable_aggregate_iterator::CreateIterator(
               thd, std::move(job.children[0]), param.temp_table_param, param.table, std::move(job.children[1]), join,
               param.ref_slice));
