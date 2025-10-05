@@ -57,19 +57,6 @@ class CostEstimator;
 class CardinalityEstimator;
 
 /**
- * @brief Optimizes and rewrites access paths for secondary engine with custom optimizer
- *
- * This function processes AccessPath trees to create optimized versions for
- * secondary engine execution, including vectorized table scans, GPU joins, etc.
- *
- * @param context Optimization context containing vectorization flags and statistics
- * @param path The AccessPath to optimize and rewrite
- * @param join The JOIN structure containing query information
- * @return AccessPath* Newly created optimized AccessPath
- */
-AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join);
-
-/**
  * @brief Main optimizer class for query optimization
  *
  * The Optimizer class handles query optimization using cost-based optimization
@@ -78,6 +65,55 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
 class Optimizer : public MemoryObject {
  public:
   explicit Optimizer(std::shared_ptr<Query_expression> &, const std::shared_ptr<CostEstimator> &);
+  /**
+   * @brief Optimizes and rewrites access paths for secondary engine with custom optimizer
+   *
+   * This function processes AccessPath trees to create optimized versions for
+   * secondary engine execution, including vectorized table scans, GPU joins, etc.
+   *
+   * @param context Optimization context containing vectorization flags and statistics
+   * @param path The AccessPath to optimize and rewrite
+   * @param join The JOIN structure containing query information
+   * @return AccessPath* Newly created optimized AccessPath
+   */
+  static AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join);
+
+ private:
+  /**
+   * Determines if a given access path can be vectorized based on its type and properties.
+   *
+   * This function analyzes the access path type and its specific characteristics to decide
+   * whether vectorized execution is supported. Some path types are inherently vectorizable
+   * (e.g., TABLE_SCAN, AGGREGATE), while others have specific constraints (e.g., HASH_JOIN
+   * without disk spilling), and some cannot be vectorized at all (e.g., NESTED_LOOP_JOIN).
+   *
+   * @param path The access path to check for vectorization capability
+   * @return true if the path can be vectorized, false otherwise
+   *
+   * @note This function only considers the current path in isolation, without recursively
+   *       checking its children. Use CheckChildVectorization() for full path tree analysis.
+   */
+  static bool CanPathBeVectorized(AccessPath *path);
+
+  /**
+   * Recursively checks if all children in an access path tree support vectorization.
+   *
+   * This function performs a depth-first traversal of the access path tree, verifying
+   * that every node in the execution path supports vectorized execution. It combines
+   * the capabilities of the current node (via CanPathBeVectorized()) with recursive
+   * checks of all child paths.
+   *
+   * For AGGREGATE operations to be vectorized, this ensures that the entire input
+   * pipeline feeding the aggregation can be executed in vectorized mode.
+   *
+   * @param child_path The root of the access path subtree to check
+   * @return true if all paths in the subtree support vectorization, false if any
+   *         node in the path tree cannot be vectorized
+   *
+   * @note Returns true for nullptr inputs, treating empty paths as trivially vectorizable.
+   * @see CanPathBeVectorized()
+   */
+  static bool CheckChildVectorization(AccessPath *child_path);
 };
 
 /**
