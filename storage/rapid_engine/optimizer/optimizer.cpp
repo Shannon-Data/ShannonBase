@@ -62,6 +62,81 @@ std::string Timer::lap_formatted() {
 // ctor
 Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr, const std::shared_ptr<CostEstimator> &cost_estimator) {}
 
+bool Optimizer::CanPathBeVectorized(AccessPath *path) {
+  if (path == nullptr) return true;
+
+  switch (path->type) {
+    case AccessPath::TABLE_SCAN:
+    case AccessPath::INDEX_SCAN: {
+      TABLE *table{nullptr};
+      if (path->type == AccessPath::TABLE_SCAN)
+        table = path->table_scan().table;
+      else if (path->type == AccessPath::INDEX_SCAN)
+        table = path->index_scan().table;
+      bool is_secondary_engine = table->s->is_secondary_engine();
+      bool is_loaded = shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+      bool has_sufficient_data = (table->file->stats.records >= SHANNON_VECTOR_WIDTH);
+      return is_secondary_engine && is_loaded && has_sufficient_data;
+    }
+    case AccessPath::INDEX_RANGE_SCAN:  // INDEX_RANGE_SCAN: Can be vectorized with sufficient data
+    case AccessPath::DYNAMIC_INDEX_RANGE_SCAN:
+      return true;
+    case AccessPath::FILTER:  // FILTER: Vectorizable if the child can be vectorized
+      return true;
+    case AccessPath::SORT:  // SORT: Can be vectorized for in-memory sorts
+      return true;
+    case AccessPath::AGGREGATE: {  // AGGREGATE: Vectorizable with sufficient output rows and child support
+      return true;
+    }
+    case AccessPath::HASH_JOIN: {  // HASH_JOIN: Vectorizable under specific conditions
+      auto &hash_join = path->hash_join();
+      // Cannot vectorize if storing rowids or allowing disk spilling
+      if (hash_join.store_rowids) return false;
+      if (hash_join.allow_spill_to_disk) return false;
+      return hash_join.join_predicate != nullptr;
+    }
+    case AccessPath::NESTED_LOOP_JOIN:  // NESTED_LOOP_JOIN: Generally not suitable for vectorization
+      return false;
+    case AccessPath::FOLLOW_TAIL:  // These access methods are inherently non-vectorizable
+    case AccessPath::MRR:
+    case AccessPath::INDEX_SKIP_SCAN:
+    case AccessPath::GROUP_INDEX_SKIP_SCAN:
+    case AccessPath::ROWID_INTERSECTION:
+    case AccessPath::ROWID_UNION:
+    case AccessPath::INDEX_MERGE:
+      return false;
+    default:  // Default conservative approach: assume vectorizable
+      return true;
+  }
+}
+
+bool Optimizer::CheckChildVectorization(AccessPath *child_path) {
+  if (child_path == nullptr) return true;
+  // Check current path.
+  if (!CanPathBeVectorized(child_path)) return false;
+
+  // recursive all children path.
+  switch (child_path->type) {
+    case AccessPath::HASH_JOIN:
+      return CheckChildVectorization(child_path->hash_join().outer) &&
+             CheckChildVectorization(child_path->hash_join().inner);
+    case AccessPath::NESTED_LOOP_JOIN:
+      return CheckChildVectorization(child_path->nested_loop_join().outer) &&
+             CheckChildVectorization(child_path->nested_loop_join().inner);
+    case AccessPath::FILTER:
+      return CheckChildVectorization(child_path->filter().child);
+    case AccessPath::SORT:
+      return CheckChildVectorization(child_path->sort().child);
+    case AccessPath::AGGREGATE:
+      return CheckChildVectorization(child_path->aggregate().child);
+    case AccessPath::TABLE_SCAN:
+    case AccessPath::INDEX_SCAN:
+      return true;
+    default:
+      return true;
+  }
+}
+
 /**
  * @brief Builds customized access paths for secondary engine optimization
  *
@@ -79,28 +154,21 @@ Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr, const std::shared_
  * @param join JOIN structure for query context
  * @return AccessPath* Optimized AccessPath, or nullptr if no optimization applied
  */
-AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join) {
+AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join) {
   switch (path->type) {
     case AccessPath::TABLE_SCAN: {
       // create vectorized table scan if it can.
-      TABLE *table = path->table_scan().table;
-      auto secondary_engine = table->s->is_secondary_engine();
-
-      auto loaded{false};
-      if (shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str)) loaded = true;
-
-      auto can_vectorized = (table->file->stats.records >= SHANNON_VECTOR_WIDTH) ? true : false;
-      context->can_vectorized = secondary_engine && loaded && can_vectorized;
-      if (path->vectorized == context->can_vectorized) return nullptr;  // has vectorized, not need the new AP.
+      if (path->vectorized == Optimizer::CanPathBeVectorized(path))
+        return nullptr;  // has vectorized, not need the new AP.
 
       // create vectorized table scan if it can.
       auto rapid_path = new (current_thd->mem_root) AccessPath();
       rapid_path->vectorized = context->can_vectorized;
       rapid_path->type = AccessPath::TABLE_SCAN;
       rapid_path->count_examined_rows = true;
-      rapid_path->table_scan().table = table;
+      rapid_path->table_scan().table = path->table_scan().table;
       rapid_path->iterator = nullptr;
-      rapid_path->secondary_engine_data = nullptr;
+      rapid_path->secondary_engine_data = path->secondary_engine_data;
 
       return rapid_path;
     } break;
@@ -187,11 +255,15 @@ AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *p
     case AccessPath::SORT: {
     } break;
     case AccessPath::AGGREGATE: {
+      // Check both data sufficiency AND child path vectorization support
       if (path->num_output_rows() == kUnknownRowCount) {
         EstimateAggregateCost(join->thd, path, join->query_block);
       }
       auto n_records = path->num_output_rows_before_filter;
-      context->can_vectorized = ((size_t)n_records >= SHANNON_VECTOR_WIDTH) ? true : false;
+
+      bool data_sufficient = ((size_t)n_records >= SHANNON_VECTOR_WIDTH);
+      bool child_support = CheckChildVectorization(path->aggregate().child);
+      context->can_vectorized = data_sufficient && child_support;
       if (path->vectorized == context->can_vectorized) return nullptr;
 
       auto rapid_path = new (current_thd->mem_root) AccessPath();

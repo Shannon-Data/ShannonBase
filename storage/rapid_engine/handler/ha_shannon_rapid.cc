@@ -1006,7 +1006,7 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   lex->unit->root_access_path() = ShannonBase::Optimizer::WalkAndRewriteAccessPaths(
       lex->unit->root_access_path(), join, WalkAccessPathPolicy::ENTIRE_TREE,
       [&](AccessPath *path, const JOIN *join) -> AccessPath * {
-        return ShannonBase::Optimizer::OptimizeAndRewriteAccessPath(context, path, join);
+        return ShannonBase::Optimizer::Optimizer::OptimizeAndRewriteAccessPath(context, path, join);
       });
   // Here, because we cannot get the parent node of corresponding iterator, we reset the type of access
   // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`

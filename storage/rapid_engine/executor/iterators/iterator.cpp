@@ -318,34 +318,53 @@ static bool can_use_int64_for_decimal(Field *field) {
 }
 
 /**
+ * @brief Enhanced overflow detection for decimal scaling
+ */
+static bool will_overflow_on_scale(int64_t val, uint scale) {
+  if (scale == 0) return false;
+
+  int64_t scale_factor = get_scale_factor(scale);
+
+  // Check if multiplication will overflow
+  if (scale_factor == 0) return true;
+  if (val > INT64_MAX / scale_factor) return true;
+  if (val < INT64_MIN / scale_factor) return true;
+
+  return false;
+}
+
+/**
  * @brief Convert my_decimal to int64_t for SIMD processing
  * @param dec - input decimal value
  * @param scale - number of decimal places
  * @note This conversion scales the decimal value to an integer, preserving original precision
  */
 static int64_t my_decimal_to_int64(const my_decimal *dec, uint scale) {
-  longlong base_val = 0;
-  if (decimal2longlong(dec, &base_val) == E_DEC_OK && scale == 0) {
-    // When scale = 0, direct conversion is possible
-    return static_cast<int64_t>(base_val);
+  if (scale == 0) {
+    // Simple case: no decimal places
+    longlong base_val = 0;
+    if (decimal2longlong(dec, &base_val) == E_DEC_OK) {
+      return static_cast<int64_t>(base_val);
+    }
   }
 
-  // Otherwise, use binary conversion to avoid double precision loss
-  uchar bin_buf[DECIMAL_MAX_PRECISION];  // Sufficient to hold all decimal values
-  // int bin_size = decimal_bin_size(dec->precision(), dec->frac);
-  decimal2bin(dec, bin_buf, dec->precision(), dec->frac);
+  // For scale > 0, we need to convert decimal to scaled integer
+  // Example: 123.45 with scale=2 -> 12345
 
-  // Directly extract the integer part and scale according to the scale factor
-  int64_t result = 0;
-  my_decimal tmp;
-  bin2decimal(bin_buf, &tmp, dec->precision(), dec->frac);
-
-  longlong scaled_val = 0;
-  decimal2longlong(&tmp, &scaled_val);  // Already converted to integer
+  // Step 1: Multiply decimal by scale_factor
+  my_decimal scaled_dec;
+  my_decimal scale_factor_dec;
   int64_t scale_factor = get_scale_factor(scale);
+  longlong2decimal(scale_factor, &scale_factor_dec);
 
-  result = static_cast<int64_t>(scaled_val * scale_factor);
-  return result;
+  // Multiply: scaled_dec = dec * scale_factor
+  decimal_mul(dec, &scale_factor_dec, &scaled_dec);
+
+  // Step 2: Convert to integer (now safe, as decimal part should be ~0)
+  longlong result_val = 0;
+  decimal2longlong(&scaled_dec, &result_val);
+
+  return static_cast<int64_t>(result_val);
 }
 
 /**
@@ -355,18 +374,23 @@ static int64_t my_decimal_to_int64(const my_decimal *dec, uint scale) {
  * @param dec - output decimal value
  */
 static void int64_to_my_decimal(int64_t val, uint scale, my_decimal *dec) {
-  my_decimal tmp;
-  longlong2decimal(val, &tmp);
-
-  if (scale == 0) {
-    *dec = tmp;
+  if (scale == 0) {  // Simple case: no decimal places
+    longlong2decimal(val, dec);
     return;
   }
 
-  // dive by scale_factor, get the original decimal.
+  // Convert int64_t to decimal
+  my_decimal val_dec;
+  longlong2decimal(val, &val_dec);
+
+  // Divide by scale_factor to restore original scale
+  // Example: 12345 / 100 = 123.45 (with scale=2)
+  my_decimal scale_factor_dec;
   int64_t scale_factor = get_scale_factor(scale);
-  longlong scaled_int = static_cast<longlong>(val / scale_factor);
-  longlong2decimal(scaled_int, dec);
+  longlong2decimal(scale_factor, &scale_factor_dec);
+
+  // Divide: dec = val_dec / scale_factor_dec
+  decimal_div(&val_dec, &scale_factor_dec, dec, scale);
 }
 
 /**
@@ -377,27 +401,64 @@ static void int64_to_my_decimal(int64_t val, uint scale, my_decimal *dec) {
 static void extract_decimal_for_simd(const ColumnChunk &chunk, size_t row_count, std::vector<int64_t> &data_buffer) {
   data_buffer.clear();
 
-  // Check if int64_t is suitable for SIMD processing
   Field *source_field = chunk.source_field();
   if (!can_use_int64_for_decimal(source_field)) {
-    // Precision too large, cannot safely use int64_t, return empty buffer
-    // Caller will fallback to scalar implementation
-    return;
+    return;  // Precision too large, fallback to scalar
   }
-  data_buffer.resize(row_count);
 
-  // Get decimal scale information from Field
+  data_buffer.resize(row_count, 0);  // Initialize with 0
   uint scale = get_decimal_scale(source_field);
+
   for (size_t i = 0; i < row_count; ++i) {
-    if (chunk.nullable(i)) continue;
+    if (chunk.nullable(i)) {
+      data_buffer[i] = 0;  // Set NULL positions to 0
+      continue;
+    }
 
     const uchar *row_data = chunk.data(i);
-    // Convert to int64_t using correct scale
     my_decimal dec;
     source_field->set_field_ptr(const_cast<uchar *>(row_data));
     source_field->val_decimal(&dec);
     data_buffer[i] = my_decimal_to_int64(&dec, scale);
   }
+}
+
+/**
+ * @brief Safe extraction with overflow checking
+ */
+static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_count,
+                                          std::vector<int64_t> &data_buffer) {
+  data_buffer.clear();
+
+  Field *source_field = chunk.source_field();
+  if (!can_use_int64_for_decimal(source_field)) {
+    return false;
+  }
+
+  data_buffer.resize(row_count, 0);
+  uint scale = get_decimal_scale(source_field);
+
+  for (size_t i = 0; i < row_count; ++i) {
+    if (chunk.nullable(i)) {
+      data_buffer[i] = 0;
+      continue;
+    }
+
+    const uchar *row_data = chunk.data(i);
+    my_decimal dec;
+    source_field->set_field_ptr(const_cast<uchar *>(row_data));
+    source_field->val_decimal(&dec);
+
+    // Convert and check for overflow
+    int64_t val = my_decimal_to_int64(&dec, scale);
+    if (will_overflow_on_scale(val, scale)) {
+      return false;  // Overflow detected, fallback to scalar
+    }
+
+    data_buffer[i] = val;
+  }
+
+  return true;
 }
 
 template <>
@@ -455,7 +516,9 @@ my_decimal ColumnChunkOper::genericMax<my_decimal>(const ColumnChunk &chunk, siz
 
   Field *source_field = chunk.source_field();
   for (size_t i = 0; i < row_count; ++i) {
-    if (!chunk.nullable(i)) continue;
+    // Skip NULL values, process non-NULL values
+    if (chunk.nullable(i)) continue;
+
     const uchar *row_data = chunk.data(i);
     my_decimal val;
     source_field->set_field_ptr(const_cast<uchar *>(row_data));
@@ -478,10 +541,11 @@ size_t ColumnChunkOper::genericFilter<my_decimal>(const ColumnChunk &chunk, size
                                                   std::function<bool(my_decimal)> predicate,
                                                   std::vector<size_t> &output_indices) {
   size_t count = 0;
-
   Field *source_field = chunk.source_field();
+
   for (size_t i = 0; i < row_count; ++i) {
-    if (!chunk.nullable(i)) continue;
+    // Skip NULL values correctly
+    if (chunk.nullable(i)) continue;
 
     const uchar *row_data = chunk.data(i);
     my_decimal val;
@@ -501,20 +565,16 @@ size_t ColumnChunkOper::genericFilter<my_decimal>(const ColumnChunk &chunk, size
  */
 template <>
 my_decimal ColumnChunkOper::Sum<my_decimal>(const ColumnChunk &chunk, size_t row_count) {
-  // Get Field scale information
   Field *source_field = chunk.source_field();
   uint scale = get_decimal_scale(source_field);
 
-  // Extract data for SIMD acceleration
   std::vector<int64_t> data_buffer;
-  extract_decimal_for_simd(chunk, row_count, data_buffer);
+  bool simd_safe = extract_decimal_for_simd_safe(chunk, row_count, data_buffer);
 
   my_decimal result;
-  if (!data_buffer.empty()) {
-    // Use SIMD-accelerated sum (for int64_t)
+  if (simd_safe && !data_buffer.empty()) {
+    // Use SIMD-accelerated sum
     int64_t sum = Utils::SIMD::sum<int64_t>(data_buffer.data(), chunk.get_null_mask()->data, row_count);
-
-    // Convert back to my_decimal using correct scale
     int64_to_my_decimal(sum, scale, &result);
     return result;
   }
