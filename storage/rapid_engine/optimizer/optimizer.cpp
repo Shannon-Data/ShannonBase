@@ -158,8 +158,8 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
   switch (path->type) {
     case AccessPath::TABLE_SCAN: {
       // create vectorized table scan if it can.
-      if (path->vectorized == Optimizer::CanPathBeVectorized(path))
-        return nullptr;  // has vectorized, not need the new AP.
+      context->can_vectorized = Optimizer::CanPathBeVectorized(path);
+      if (path->vectorized == context->can_vectorized) return nullptr;  // has vectorized, not need the new AP.
 
       // create vectorized table scan if it can.
       auto rapid_path = new (current_thd->mem_root) AccessPath();
@@ -234,9 +234,7 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
           (hash_join.rewrite_semi_to_inner || hash_join.allow_spill_to_disk == false)) {
         context->can_vectorized = true;
       }
-
       if (hash_join.allow_spill_to_disk || hash_join.store_rowids) context->can_vectorized = false;
-
       if (path->vectorized == context->can_vectorized) return nullptr;
 
       auto rapid_path = new (current_thd->mem_root) AccessPath();
@@ -254,43 +252,37 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
     } break;
     case AccessPath::SORT: {
     } break;
-    case AccessPath::AGGREGATE: {
+    case AccessPath::AGGREGATE:
+    case AccessPath::TEMPTABLE_AGGREGATE: {
       // Check both data sufficiency AND child path vectorization support
       if (path->num_output_rows() == kUnknownRowCount) {
         EstimateAggregateCost(join->thd, path, join->query_block);
       }
       auto n_records = path->num_output_rows_before_filter;
-
       bool data_sufficient = ((size_t)n_records >= SHANNON_VECTOR_WIDTH);
       bool child_support = CheckChildVectorization(path->aggregate().child);
       context->can_vectorized = data_sufficient && child_support;
       if (path->vectorized == context->can_vectorized) return nullptr;
 
       auto rapid_path = new (current_thd->mem_root) AccessPath();
-      rapid_path->vectorized = context->can_vectorized;
-      rapid_path->type = AccessPath::AGGREGATE;
-      rapid_path->aggregate().child = path->aggregate().child;
-      rapid_path->aggregate().olap = path->aggregate().olap;
-      rapid_path->has_group_skip_scan = path->has_group_skip_scan;
-      rapid_path->set_num_output_rows(path->num_output_rows());
-      rapid_path->iterator = path->iterator;
-
-      return rapid_path;
-    } break;
-    case AccessPath::TEMPTABLE_AGGREGATE: {
-      auto n_records = path->num_output_rows_before_filter;
-      context->can_vectorized = ((size_t)n_records >= SHANNON_VECTOR_WIDTH) ? true : false;
-      if (path->vectorized == context->can_vectorized) return nullptr;
-
-      auto rapid_path = new (current_thd->mem_root) AccessPath();
-      rapid_path->vectorized = context->can_vectorized;
-      rapid_path->type = AccessPath::TEMPTABLE_AGGREGATE;
-      rapid_path->temptable_aggregate().subquery_path = path->temptable_aggregate().subquery_path;
-      rapid_path->temptable_aggregate().temp_table_param = path->temptable_aggregate().temp_table_param;
-      rapid_path->temptable_aggregate().table = path->temptable_aggregate().table;
-      rapid_path->temptable_aggregate().table_path = path->temptable_aggregate().table_path;
-      rapid_path->temptable_aggregate().ref_slice = path->temptable_aggregate().ref_slice;
-
+      if (path->type == AccessPath::AGGREGATE) {
+        rapid_path->vectorized = context->can_vectorized;
+        rapid_path->type = AccessPath::AGGREGATE;
+        rapid_path->aggregate().child = path->aggregate().child;
+        rapid_path->aggregate().olap = path->aggregate().olap;
+        rapid_path->has_group_skip_scan = path->has_group_skip_scan;
+        rapid_path->set_num_output_rows(path->num_output_rows());
+        rapid_path->iterator = path->iterator;
+      } else if (path->type == AccessPath::TEMPTABLE_AGGREGATE) {
+        rapid_path->vectorized = context->can_vectorized;
+        rapid_path->type = AccessPath::TEMPTABLE_AGGREGATE;
+        rapid_path->temptable_aggregate().subquery_path = path->temptable_aggregate().subquery_path;
+        rapid_path->temptable_aggregate().temp_table_param = path->temptable_aggregate().temp_table_param;
+        rapid_path->temptable_aggregate().table = path->temptable_aggregate().table;
+        rapid_path->temptable_aggregate().table_path = path->temptable_aggregate().table_path;
+        rapid_path->temptable_aggregate().ref_slice = path->temptable_aggregate().ref_slice;
+      } else
+        assert(false);
       return rapid_path;
     } break;
     case AccessPath::LIMIT_OFFSET: {
