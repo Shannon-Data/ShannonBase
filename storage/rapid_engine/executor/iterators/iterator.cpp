@@ -318,68 +318,19 @@ static bool can_use_int64_for_decimal(Field *field) {
 }
 
 /**
- * @brief Enhanced overflow detection for decimal scaling
- */
-static bool will_overflow_on_scale(int64_t val, uint scale) {
-  if (scale == 0) return false;
-
-  int64_t scale_factor = get_scale_factor(scale);
-
-  // Check if multiplication will overflow
-  if (scale_factor == 0) return true;
-  if (val > INT64_MAX / scale_factor) return true;
-  if (val < INT64_MIN / scale_factor) return true;
-
-  return false;
-}
-
-/**
- * @brief Convert my_decimal to int64_t for SIMD processing
- * @param dec - input decimal value
- * @param scale - number of decimal places
- * @note This conversion scales the decimal value to an integer, preserving original precision
- */
-static int64_t my_decimal_to_int64(const my_decimal *dec, uint scale) {
-  if (scale == 0) {
-    // Simple case: no decimal places
-    longlong base_val = 0;
-    if (decimal2longlong(dec, &base_val) == E_DEC_OK) {
-      return static_cast<int64_t>(base_val);
-    }
-  }
-
-  // For scale > 0, we need to convert decimal to scaled integer
-  // Example: 123.45 with scale=2 -> 12345
-
-  // Step 1: Multiply decimal by scale_factor
-  my_decimal scaled_dec;
-  my_decimal scale_factor_dec;
-  int64_t scale_factor = get_scale_factor(scale);
-  longlong2decimal(scale_factor, &scale_factor_dec);
-
-  // Multiply: scaled_dec = dec * scale_factor
-  decimal_mul(dec, &scale_factor_dec, &scaled_dec);
-
-  // Step 2: Convert to integer (now safe, as decimal part should be ~0)
-  longlong result_val = 0;
-  decimal2longlong(&scaled_dec, &result_val);
-
-  return static_cast<int64_t>(result_val);
-}
-
-/**
  * @brief Convert int64_t back to my_decimal
  * @param val - input integer value
  * @param scale - number of decimal places
  * @param dec - output decimal value
  */
 static void int64_to_my_decimal(int64_t val, uint scale, my_decimal *dec) {
-  if (scale == 0) {  // Simple case: no decimal places
+  if (scale == 0) {
+    // Simple case: no decimal places, direct conversion using MySQL API
     longlong2decimal(val, dec);
     return;
   }
 
-  // Convert int64_t to decimal
+  // Convert int64_t to decimal using MySQL API
   my_decimal val_dec;
   longlong2decimal(val, &val_dec);
 
@@ -389,38 +340,8 @@ static void int64_to_my_decimal(int64_t val, uint scale, my_decimal *dec) {
   int64_t scale_factor = get_scale_factor(scale);
   longlong2decimal(scale_factor, &scale_factor_dec);
 
-  // Divide: dec = val_dec / scale_factor_dec
+  // Divide using MySQL API
   decimal_div(&val_dec, &scale_factor_dec, dec, scale);
-}
-
-/**
- * @brief my_decimal specialization: Extract data for SIMD processing
- * @note Converts my_decimal to int64_t to enable vectorized operations
- *       Uses Field information to obtain accurate scale and precision
- */
-static void extract_decimal_for_simd(const ColumnChunk &chunk, size_t row_count, std::vector<int64_t> &data_buffer) {
-  data_buffer.clear();
-
-  Field *source_field = chunk.source_field();
-  if (!can_use_int64_for_decimal(source_field)) {
-    return;  // Precision too large, fallback to scalar
-  }
-
-  data_buffer.resize(row_count, 0);  // Initialize with 0
-  uint scale = get_decimal_scale(source_field);
-
-  for (size_t i = 0; i < row_count; ++i) {
-    if (chunk.nullable(i)) {
-      data_buffer[i] = 0;  // Set NULL positions to 0
-      continue;
-    }
-
-    const uchar *row_data = chunk.data(i);
-    my_decimal dec;
-    source_field->set_field_ptr(const_cast<uchar *>(row_data));
-    source_field->val_decimal(&dec);
-    data_buffer[i] = my_decimal_to_int64(&dec, scale);
-  }
 }
 
 /**
@@ -444,18 +365,42 @@ static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_c
       continue;
     }
 
+    source_field->set_notnull();
     const uchar *row_data = chunk.data(i);
+    size_t data_len = chunk.width();
+    memcpy((void *)source_field->data_ptr(), row_data, data_len);
     my_decimal dec;
-    source_field->set_field_ptr(const_cast<uchar *>(row_data));
     source_field->val_decimal(&dec);
 
-    // Convert and check for overflow
-    int64_t val = my_decimal_to_int64(&dec, scale);
-    if (will_overflow_on_scale(val, scale)) {
-      return false;  // Overflow detected, fallback to scalar
-    }
+    // Convert using MySQL API
+    longlong result_val = 0;
 
-    data_buffer[i] = val;
+    if (scale == 0) {
+      // Direct conversion
+      int ret = decimal2longlong(&dec, &result_val);
+      if (ret > E_DEC_TRUNCATED) {
+        return false;  // Overflow or fatal error, fallback to scalar
+      }
+      data_buffer[i] = static_cast<int64_t>(result_val);
+    } else {
+      // Scale and convert
+      my_decimal scaled_dec;
+      my_decimal scale_factor_dec;
+      int64_t scale_factor = get_scale_factor(scale);
+      longlong2decimal(scale_factor, &scale_factor_dec);
+
+      int mul_ret = decimal_mul(&dec, &scale_factor_dec, &scaled_dec);
+      if (mul_ret > E_DEC_TRUNCATED) {
+        return false;  // Overflow detected
+      }
+
+      int conv_ret = decimal2longlong(&scaled_dec, &result_val);
+      if (conv_ret > E_DEC_TRUNCATED) {
+        return false;  // Conversion error
+      }
+
+      data_buffer[i] = static_cast<int64_t>(result_val);
+    }
   }
 
   return true;
@@ -468,17 +413,18 @@ my_decimal ColumnChunkOper::genericSum<my_decimal>(const ColumnChunk &chunk, siz
 
   Field *source_field = chunk.source_field();
   for (size_t i = 0; i < row_count; ++i) {
-    if (chunk.nullable(i)) continue;
+    if (chunk.nullable(i)) {
+      source_field->set_null();
+    } else {
+      source_field->set_notnull();
+      const uchar *row_data = chunk.data(i);
+      size_t data_len = chunk.width();
+      memcpy((void *)source_field->data_ptr(), row_data, data_len);
 
-    const uchar *row_data = chunk.data(i);
-    my_decimal val;
-    source_field->set_field_ptr(const_cast<uchar *>(row_data));
-    source_field->val_decimal(&val);
-
-    // Use decimal_add for addition
-    my_decimal temp_result;
-    decimal_add(&sum, &val, &temp_result);
-    sum = temp_result;
+      my_decimal fld_val;
+      source_field->val_decimal(&fld_val);
+      decimal_add(&sum, &fld_val, &sum);
+    }
   }
   return sum;
 }
@@ -490,16 +436,20 @@ my_decimal ColumnChunkOper::genericMin<my_decimal>(const ColumnChunk &chunk, siz
 
   Field *source_field = chunk.source_field();
   for (size_t i = 0; i < row_count; ++i) {
-    if (chunk.nullable(i)) continue;
+    if (chunk.nullable(i))
+      source_field->set_null();
+    else {
+      source_field->set_notnull();
+      const uchar *row_data = chunk.data(i);
+      size_t data_len = chunk.width();
+      memcpy((void *)source_field->data_ptr(), row_data, data_len);
 
-    const uchar *row_data = chunk.data(i);
-    my_decimal val;
-    source_field->set_field_ptr(const_cast<uchar *>(row_data));
-    source_field->val_decimal(&val);
-
-    if (!found || decimal_cmp(&val, &min_val) < 0) {
-      min_val = val;
-      found = true;
+      my_decimal val;
+      source_field->val_decimal(&val);
+      if (!found || decimal_cmp(&val, &min_val) < 0) {
+        min_val = val;
+        found = true;
+      }
     }
   }
 
@@ -517,16 +467,19 @@ my_decimal ColumnChunkOper::genericMax<my_decimal>(const ColumnChunk &chunk, siz
   Field *source_field = chunk.source_field();
   for (size_t i = 0; i < row_count; ++i) {
     // Skip NULL values, process non-NULL values
-    if (chunk.nullable(i)) continue;
-
-    const uchar *row_data = chunk.data(i);
-    my_decimal val;
-    source_field->set_field_ptr(const_cast<uchar *>(row_data));
-    source_field->val_decimal(&val);
-
-    if (!found || decimal_cmp(&val, &max_val) > 0) {
-      max_val = val;
-      found = true;
+    if (chunk.nullable(i))
+      source_field->set_null();
+    else {
+      source_field->set_notnull();
+      const uchar *row_data = chunk.data(i);
+      size_t data_len = chunk.width();
+      memcpy((void *)source_field->data_ptr(), row_data, data_len);
+      my_decimal val;
+      source_field->val_decimal(&val);
+      if (!found || decimal_cmp(&val, &max_val) > 0) {
+        max_val = val;
+        found = true;
+      }
     }
   }
 
@@ -545,16 +498,20 @@ size_t ColumnChunkOper::genericFilter<my_decimal>(const ColumnChunk &chunk, size
 
   for (size_t i = 0; i < row_count; ++i) {
     // Skip NULL values correctly
-    if (chunk.nullable(i)) continue;
+    if (chunk.nullable(i))
+      source_field->set_null();
+    else {
+      source_field->set_notnull();
+      const uchar *row_data = chunk.data(i);
+      size_t data_len = chunk.width();
+      memcpy((void *)source_field->data_ptr(), row_data, data_len);
+      my_decimal val;
+      source_field->val_decimal(&val);
 
-    const uchar *row_data = chunk.data(i);
-    my_decimal val;
-    source_field->set_field_ptr(const_cast<uchar *>(row_data));
-    source_field->val_decimal(&val);
-
-    if (predicate(val)) {
-      output_indices.push_back(i);
-      count++;
+      if (predicate(val)) {
+        output_indices.push_back(i);
+        count++;
+      }
     }
   }
   return count;
@@ -575,6 +532,7 @@ my_decimal ColumnChunkOper::Sum<my_decimal>(const ColumnChunk &chunk, size_t row
   if (simd_safe && !data_buffer.empty()) {
     // Use SIMD-accelerated sum
     int64_t sum = Utils::SIMD::sum<int64_t>(data_buffer.data(), chunk.get_null_mask()->data, row_count);
+    // Convert back using MySQL API
     int64_to_my_decimal(sum, scale, &result);
     return result;
   }
@@ -592,12 +550,13 @@ my_decimal ColumnChunkOper::Min<my_decimal>(const ColumnChunk &chunk, size_t row
   uint scale = get_decimal_scale(source_field);
 
   std::vector<int64_t> data_buffer;
-  extract_decimal_for_simd(chunk, row_count, data_buffer);
+  bool simd_safe = extract_decimal_for_simd_safe(chunk, row_count, data_buffer);
 
   my_decimal result;
-  if (!data_buffer.empty()) {
+  if (simd_safe && !data_buffer.empty()) {
+    // Use SIMD-accelerated min
     int64_t min_val = Utils::SIMD::min<int64_t>(data_buffer.data(), chunk.get_null_mask()->data, row_count);
-
+    // Convert back using MySQL API
     int64_to_my_decimal(min_val, scale, &result);
     return result;
   }
@@ -615,12 +574,13 @@ my_decimal ColumnChunkOper::Max<my_decimal>(const ColumnChunk &chunk, size_t row
   uint scale = get_decimal_scale(source_field);
 
   std::vector<int64_t> data_buffer;
-  extract_decimal_for_simd(chunk, row_count, data_buffer);
+  bool simd_safe = extract_decimal_for_simd_safe(chunk, row_count, data_buffer);
 
   my_decimal result;
-  if (!data_buffer.empty()) {
+  if (simd_safe && !data_buffer.empty()) {
+    // Use SIMD-accelerated max
     int64_t max_val = Utils::SIMD::max<int64_t>(data_buffer.data(), chunk.get_null_mask()->data, row_count);
-
+    // Convert back using MySQL API
     int64_to_my_decimal(max_val, scale, &result);
     return result;
   }
@@ -650,7 +610,7 @@ double ColumnChunkOper::Average<my_decimal>(ColumnChunk &chunk, size_t row_count
 
   if (non_null_count == 0) return 0.0;
 
-  // Convert my_decimal to double
+  // Convert my_decimal to double using MySQL API
   double sum_val = 0.0;
   decimal2double(&sum, &sum_val);
 

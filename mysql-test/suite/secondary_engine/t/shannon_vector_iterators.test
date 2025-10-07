@@ -59,21 +59,25 @@ ALTER TABLE orders SECONDARY_LOAD;
 --replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
 explain format=tree SELECT 
     c.country,
-    COUNT(DISTINCT c.customer_id) as customer_count,
+    COUNT(DISTINCT c.customer_id),
     COUNT(o.order_id) as total_orders,
-    SUM(o.quantity) as total_quantity
+    sum(c.customer_id),
+    sum(o.order_id),
+    sum(o.total_amount)
 FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
+JOIN orders o ON c.customer_id = o.customer_id  
 GROUP BY c.country
 ORDER BY total_orders DESC;
 
 SELECT 
     c.country,
-    COUNT(DISTINCT c.customer_id) as customer_count,
+    COUNT(DISTINCT c.customer_id),
     COUNT(o.order_id) as total_orders,
-    SUM(o.quantity) as total_quantity
+    sum(c.customer_id),
+    sum(o.order_id),
+    sum(o.total_amount)
 FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
+JOIN orders o ON c.customer_id = o.customer_id  
 GROUP BY c.country
 ORDER BY total_orders DESC;
 
@@ -94,11 +98,13 @@ SET rapid_use_dynamic_offload=off;
 
 SELECT 
     c.country,
-    COUNT(DISTINCT c.customer_id) as customer_count,
+    COUNT(DISTINCT c.customer_id),
     COUNT(o.order_id) as total_orders,
-    SUM(o.quantity) as total_quantity
+    sum(c.customer_id),
+    sum(o.order_id),
+    sum(o.total_amount)
 FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
+JOIN orders o ON c.customer_id = o.customer_id  
 GROUP BY c.country
 ORDER BY total_orders DESC;
 
