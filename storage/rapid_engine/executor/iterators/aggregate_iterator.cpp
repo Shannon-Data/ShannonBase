@@ -366,11 +366,14 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
     }
     if (err) return 1;  // Error
 
-    // Check for group change
+    // Check for group change BEFORE trying to add to batch
     int first_changed_idx = update_item_cache_if_changed(m_join->group_fields);
     if (first_changed_idx >= 0) {
-      // Group changed - save new row and break
+      // Group changed - this row belongs to NEXT group.
+      // Save it for next group processing and DON'T add to current batch.
       StoreFromTableBuffers(m_tables, &m_first_row_next_group);
+
+      // Restore current group's first row for aggregate finalization
       LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_group.ptr()));
 
       // Set rollup state
@@ -387,9 +390,11 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
         m_last_unchanged_group_item_idx = 0;
         m_state = LAST_ROW_STARTED_NEW_GROUP;
       }
+      // Break BEFORE adding this row to chunks. This row will be processed as the first row of next group
       break;
     }
 
+    // Row belongs to current group - proceed to add to batch. Pre-check: verify all chunks can accept this row
     bool all_chunks_can_add = true;
     for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
       const auto &agg_info = m_vectorizer.aggregate_infos[i];
@@ -402,13 +407,12 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
       }
     }
 
-    if (!all_chunks_can_add) {  // chunk is full. the current row is not added to chunk.
+    if (!all_chunks_can_add) {
+      // Chunks are full - process current batch. Current row stays buffered in table and will be re-read
       break;
     }
 
-    /**In future, all iterator support read batch, we can read from Column Chunks directly.
-     * This part can be removed.
-     */
+    // Add row to all column chunks atomically
     bool row_stored_successfully = true;
     for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
       const auto &agg_info = m_vectorizer.aggregate_infos[i];
@@ -418,23 +422,25 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
         bool is_null = field->is_null();
         const uchar *data = is_null ? nullptr : field->data_ptr();
         size_t data_len = is_null ? 0 : field->pack_length();
-        if (!chunk.add(const_cast<uchar *>(data), data_len, field->is_null())) {
+
+        if (!chunk.add(const_cast<uchar *>(data), data_len, is_null)) {
           row_stored_successfully = false;
           break;
         }
       }
     }
 
-    if (!row_stored_successfully) {  // add failed, rollback the alread added row.
+    if (!row_stored_successfully) {
+      // Add failed - rollback all chunks for this row
       for (size_t i = 0; i < m_vectorizer.aggregate_infos.size(); ++i) {
         const auto &agg_info = m_vectorizer.aggregate_infos[i];
         if (agg_info.vectorizable && agg_info.source_field) {
-          m_vectorizer.current_batch.column_chunks[i].remove();  // do rollback.
+          m_vectorizer.current_batch.column_chunks[i].remove();
         }
       }
-      break;
+      break;  // This row will be re-read in next batch
     }
-    rows_read++;
+    rows_read++;  // Row successfully added to chunks
   }
 
   m_vectorizer.current_batch.row_count = rows_read;
@@ -442,6 +448,14 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
 }
 
 int VectorizedAggregateIterator::ProcessVectorizedAggregates() {
+  if (m_vectorizer.current_batch.row_count == 0) {
+    // No rows in batch - this can happen legitimately when:
+    // 1. Group change detected on first row read
+    // 2. EOF reached with no rows
+    // Simply return success, aggregates already have correct state
+    return 0;
+  }
+
   // Group aggregates by type for efficient vectorized processing
   std::vector<size_t> count_indices, sum_indices, minmax_indices, avg_indices;
 

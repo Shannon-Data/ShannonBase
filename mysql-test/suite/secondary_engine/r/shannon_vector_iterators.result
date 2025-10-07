@@ -53,17 +53,19 @@ ALTER TABLE orders SECONDARY_LOAD;
 ############### No.1 Testing Vectorized Count ###########################
 explain format=tree SELECT 
 c.country,
-COUNT(DISTINCT c.customer_id) as customer_count,
+COUNT(DISTINCT c.customer_id),
 COUNT(o.order_id) as total_orders,
-SUM(o.quantity) as total_quantity
+sum(c.customer_id),
+sum(o.order_id),
+sum(o.total_amount)
 FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
+JOIN orders o ON c.customer_id = o.customer_id  
 GROUP BY c.country
 ORDER BY total_orders DESC;
 EXPLAIN
 -> Sort: total_orders DESC
     -> Stream results
-        -> Group aggregate: count(distinct customers.customer_id), count(orders.order_id), sum(orders.quantity)
+        -> Group aggregate: count(distinct customers.customer_id), count(orders.order_id), sum(customers.customer_id), sum(orders.order_id), sum(orders.total_amount)
             -> Sort: c.country
                 -> Stream results  (cost=X rows=X)
                     -> Nested loop inner join  (cost=X rows=X)
@@ -73,45 +75,49 @@ EXPLAIN
 
 SELECT 
 c.country,
-COUNT(DISTINCT c.customer_id) as customer_count,
+COUNT(DISTINCT c.customer_id),
 COUNT(o.order_id) as total_orders,
-SUM(o.quantity) as total_quantity
+sum(c.customer_id),
+sum(o.order_id),
+sum(o.total_amount)
 FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
+JOIN orders o ON c.customer_id = o.customer_id  
 GROUP BY c.country
 ORDER BY total_orders DESC;
-country	customer_count	total_orders	total_quantity
-Australia	23	402	2182
-USA	23	393	2233
-India	19	315	1736
-Canada	15	262	1469
-France	14	230	1176
-China	13	215	1122
-UK	11	191	1052
-Germany	10	171	917
-Brazil	11	163	845
-Japan	11	158	895
+country	COUNT(DISTINCT c.customer_id)	total_orders	sum(c.customer_id)	sum(o.order_id)	sum(o.total_amount)
+Australia	23	402	32199	496427	202118.14
+USA	23	393	26363	502045	193044.01
+India	19	315	24914	411106	163247.40
+Canada	15	262	20835	342680	135129.73
+France	14	230	20028	281682	114399.32
+China	13	215	11287	267126	111255.42
+UK	11	191	15265	228619	99858.11
+Germany	10	171	14071	210639	88431.80
+Brazil	11	163	9864	196008	81293.35
+Japan	11	158	12468	189918	86148.29
 SET USE_SECONDARY_ENGINE=ON;
 SET secondary_engine_cost_threshold=0;
 SET rapid_use_dynamic_offload=off;
 SELECT 
 c.country,
-COUNT(DISTINCT c.customer_id) as customer_count,
+COUNT(DISTINCT c.customer_id),
 COUNT(o.order_id) as total_orders,
-SUM(o.quantity) as total_quantity
+sum(c.customer_id),
+sum(o.order_id),
+sum(o.total_amount)
 FROM customers c
-JOIN orders o ON c.customer_id = o.customer_id
+JOIN orders o ON c.customer_id = o.customer_id  
 GROUP BY c.country
 ORDER BY total_orders DESC;
-country	customer_count	total_orders	total_quantity
-Australia	23	402	2182
-USA	23	393	2233
-India	19	315	1736
-Canada	15	262	1469
-France	14	230	1176
-China	13	215	1122
-UK	11	191	1052
-Germany	10	171	917
-Brazil	11	163	845
-Japan	11	158	895
+country	COUNT(DISTINCT c.customer_id)	total_orders	sum(c.customer_id)	sum(o.order_id)	sum(o.total_amount)
+Australia	23	402	32199	496427	202118.14
+USA	23	393	26363	502045	193044.01
+India	19	315	24914	411106	163247.40
+Canada	15	262	20835	342680	135129.73
+France	14	230	20028	281682	114399.32
+China	13	215	11287	267126	111255.42
+UK	11	191	15265	228619	99858.11
+Germany	10	171	14071	210639	88431.80
+Brazil	11	163	9864	196008	81293.35
+Japan	11	158	12468	189918	86148.29
 DROP DATABASE sh_vector_iterators;

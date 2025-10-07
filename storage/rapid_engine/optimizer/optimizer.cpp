@@ -255,7 +255,7 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
     case AccessPath::AGGREGATE:
     case AccessPath::TEMPTABLE_AGGREGATE: {
       // Check both data sufficiency AND child path vectorization support
-      if (path->num_output_rows() == kUnknownRowCount) {
+      if (path->type == AccessPath::AGGREGATE && path->num_output_rows() == kUnknownRowCount) {
         EstimateAggregateCost(join->thd, path, join->query_block);
       }
       auto n_records = path->num_output_rows_before_filter;
