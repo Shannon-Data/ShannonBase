@@ -235,8 +235,8 @@ handler::Table_flags ha_rapid::table_flags() const {
    *  used for cost estimates. But, here, we support index too.*/
 
   // return HA_NO_INDEX_ACCESS | HA_STATS_RECORDS_IS_EXACT | HA_COUNT_ROWS_INSTANT;
-  ulong flags =
-      HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE | HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
+  ulong flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE | HA_KEYREAD_ONLY |
+                HA_DO_INDEX_COND_PUSHDOWN | HA_STATS_RECORDS_IS_EXACT | HA_COUNT_ROWS_INSTANT;
   return ~HA_NO_INDEX_ACCESS || flags;
 }
 
@@ -275,16 +275,12 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 }
 
 int ha_rapid::records(ha_rows *num_rows) {
-#if 0
   Rapid_load_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   std::string sch_tb;
   sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
   auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
-  *num_rows = rpd_tb->first_field()->rows(&context);
-#endif
-
-  ha_get_primary_handler()->ha_records(num_rows);
+  *num_rows = rpd_tb->rows(&context);
   return ShannonBase::SHANNON_SUCCESS;
 }
 

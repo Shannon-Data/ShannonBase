@@ -98,6 +98,13 @@ Japan	11	158	12468	189918	86148.29
 SET USE_SECONDARY_ENGINE=ON;
 SET secondary_engine_cost_threshold=0;
 SET rapid_use_dynamic_offload=off;
+EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM customers;
+EXPLAIN
+-> Count rows in customers
+
+SELECT COUNT(*) FROM customers;
+COUNT(*)
+1000
 SELECT 
 c.country,
 COUNT(DISTINCT c.customer_id),

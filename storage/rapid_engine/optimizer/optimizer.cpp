@@ -254,13 +254,27 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
     } break;
     case AccessPath::AGGREGATE:
     case AccessPath::TEMPTABLE_AGGREGATE: {
+      // due to OPTION_NO_CONST_TABLES is set, then in first round optimization, it don't do aggregation optimzation.
+      // therefore, all sub queries offload to secondary engine, then do optimization in secondary engine.
+      aggregate_evaluated outcome;
+      if (join->tables_list && join->implicit_grouping &&
+          optimize_aggregated_query(join->thd, join->query_block, *join->fields, join->where_cond, &outcome)) {
+        DBUG_PRINT("error", ("Error from optimize_aggregated_query"));
+        return nullptr;
+      }
+      if (outcome == AGGR_DELAYED) {
+        return NewUnqualifiedCountAccessPath(join->thd);
+      }
+
       // Check both data sufficiency AND child path vectorization support
       if (path->type == AccessPath::AGGREGATE && path->num_output_rows() == kUnknownRowCount) {
         EstimateAggregateCost(join->thd, path, join->query_block);
       }
       auto n_records = path->num_output_rows_before_filter;
       bool data_sufficient = ((size_t)n_records >= SHANNON_VECTOR_WIDTH);
-      bool child_support = CheckChildVectorization(path->aggregate().child);
+
+      bool child_support =
+          CheckChildVectorization((path->type == AccessPath::AGGREGATE) ? path->aggregate().child : nullptr);
       context->can_vectorized = data_sufficient && child_support;
       if (path->vectorized == context->can_vectorized) return nullptr;
 
