@@ -38,9 +38,9 @@
 
 namespace ShannonBase {
 namespace Imcs {
-SHANNON_THREAD_LOCAL Cu::LocalDataBuffer Cu::m_buff;
+// SHANNON_THREAD_LOCAL Cu::LocalDataBuffer Cu::m_buff;
 Cu::Cu(RapidTable *owner, const Field *field) {
-  static_assert(alignof(m_buff) >= CACHE_LINE_SIZE, "Alignment failed");
+  // static_assert(alignof(m_buff) >= CACHE_LINE_SIZE, "Alignment failed");
   ut_a(field && !field->is_flag_set(NOT_SECONDARY_FLAG));
 
   m_header = std::make_unique<Cu_header>();
@@ -263,11 +263,12 @@ uchar *Cu::write_row(const Rapid_load_context *context, row_id_t rowid, uchar *d
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
 
   auto dlen = (len == UNIV_SQL_NULL) ? sizeof(uint32) : ((len < sizeof(uint32)) ? sizeof(uint32) : len);
+  uchar local_buff[MAX_FIELD_WIDTH];
   std::unique_ptr<uchar[]> datum(dlen < MAX_FIELD_WIDTH ? nullptr : new uchar[dlen]);
   uchar *pdatum{nullptr};
   if (data) {  // not null.
     ut_a(len != UNIV_SQL_NULL);
-    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff.data : datum.get();
+    pdatum = (dlen < MAX_FIELD_WIDTH) ? local_buff : datum.get();
     std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
     std::memcpy(pdatum, data, len);
   }
@@ -369,10 +370,11 @@ uchar *Cu::update_row_from_log(const Rapid_load_context *context, row_id_t rowid
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
 
   auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
-  std::unique_ptr<uchar[]> datum((dlen < MAX_FIELD_WIDTH) ? nullptr : new uchar[dlen]);
+  uchar local_buff[MAX_FIELD_WIDTH];
+  std::unique_ptr<uchar[]> datum(dlen < MAX_FIELD_WIDTH ? nullptr : new uchar[dlen]);
   uchar *pdatum{nullptr};
   if (data) {
-    pdatum = (dlen < MAX_FIELD_WIDTH) ? m_buff.data : datum.get();
+    pdatum = (dlen < MAX_FIELD_WIDTH) ? local_buff : datum.get();
     std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
     std::memcpy(pdatum, data, len);
   }

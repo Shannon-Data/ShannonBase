@@ -81,9 +81,38 @@ class Rapid_execution_context : public Secondary_engine_execution_context {
   double m_best_cost;
 };
 
+class Rapid_pop_context : public Secondary_engine_execution_context {
+ public:
+  uint64_t m_start_lsn;
+  // current schema name and table name.
+  std::string m_schema_name, m_table_name;
+  // trx id.
+  Transaction::ID m_trxid{0};
+
+  // key length, DATA_ROW_ID_LEN OR KEY LEN;
+  uint8 m_key_len{0};
+
+  // key info. which is rowid or primary key/unique key.
+  std::unique_ptr<uchar[]> m_key_buff{nullptr};
+};
+
 class ha_rapid;
 // used in imcs.
-class Rapid_load_context : public Secondary_engine_execution_context {
+class Rapid_ha_data {
+ public:
+  Rapid_ha_data() : m_trx(nullptr) {}
+
+  ~Rapid_ha_data() {}
+
+  ShannonBase::Transaction *get_trx() const { return m_trx; }
+
+  void set_trx(ShannonBase::Transaction *t) { m_trx = t; }
+
+ private:
+  ShannonBase::Transaction *m_trx;
+};
+
+class Rapid_context : public Secondary_engine_execution_context {
  public:
   class extra_info_t {
    public:
@@ -113,14 +142,19 @@ class Rapid_load_context : public Secondary_engine_execution_context {
     std::unordered_map<std::string, uint> m_partition_infos;
 
     // active partitio info.
-    std::string m_active_part_key;
+    static SHANNON_THREAD_LOCAL std::string m_active_part_key;
   };
-
-  Rapid_load_context() : m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr), m_thd{nullptr} {}
-  virtual ~Rapid_load_context() = default;
 
   // current schema name and table name.
   std::string m_schema_name, m_table_name;
+
+  extra_info_t m_extra_info;
+};
+
+class Rapid_load_context : public Rapid_context {
+ public:
+  Rapid_load_context() : m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr), m_thd{nullptr} {}
+  virtual ~Rapid_load_context() = default;
 
   // current transaction.
   Transaction *m_trx{nullptr};
@@ -133,37 +167,18 @@ class Rapid_load_context : public Secondary_engine_execution_context {
 
   // current thd here.
   THD *m_thd{nullptr};
-
-  extra_info_t m_extra_info;
 };
 
-class Rapid_pop_context : public Secondary_engine_execution_context {
+class Rapid_scan_context : public Rapid_context {
  public:
-  uint64_t m_start_lsn;
-  // current schema name and table name.
-  std::string m_schema_name, m_table_name;
-  // trx id.
-  Transaction::ID m_trxid{0};
+  // current transaction.
+  Transaction *m_trx{nullptr};
 
-  // key length, DATA_ROW_ID_LEN OR KEY LEN;
-  uint8 m_key_len{0};
+  // the primary key of this table.
+  TABLE *m_table{nullptr};
 
-  // key info. which is rowid or primary key/unique key.
-  std::unique_ptr<uchar[]> m_key_buff{nullptr};
-};
-
-class Rapid_ha_data {
- public:
-  Rapid_ha_data() : m_trx(nullptr) {}
-
-  ~Rapid_ha_data() {}
-
-  ShannonBase::Transaction *get_trx() const { return m_trx; }
-
-  void set_trx(ShannonBase::Transaction *t) { m_trx = t; }
-
- private:
-  ShannonBase::Transaction *m_trx;
+  // current thd here.
+  THD *m_thd{nullptr};
 };
 
 }  // namespace ShannonBase

@@ -84,6 +84,8 @@
 #define SHANNON_VECTOR_WIDTH 128  // ARM NEON
 #endif
 
+constexpr uint64 SHANNON_PARTS_PARALLEL = 32;
+
 extern char *mysql_llm_home_ptr;
 namespace ShannonBase {
 using row_id_t = size_t;

@@ -193,7 +193,7 @@ class VectorizedTableScanIterator : public TableRowIterator {
       auto str_id = *(uint32 *)data_ptr;
 
       std::string fld_name(field->field_name);
-      auto rpd_field = m_data_table.get()->source()->get_field(fld_name);
+      auto rpd_field = m_data_table.get()->table()->get_field(fld_name);
       if (!rpd_field) return;
 
       auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);

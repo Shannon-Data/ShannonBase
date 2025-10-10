@@ -41,7 +41,9 @@
 #include "storage/rapid_engine/trx/transaction.h"  //Transaction
 
 namespace ShannonBase {
+class Rapid_context;
 class Rapid_load_context;
+class Rapid_scan_context;
 namespace Imcs {
 class Cu;
 /**
@@ -188,10 +190,10 @@ class Chunk : public MemoryObject {
   int GC();
 
   // gets null bit flag.
-  int is_null(const Rapid_load_context *context, row_id_t pos);
+  int is_null(const Rapid_scan_context *context, row_id_t pos);
 
   // gets the delete flag.
-  int is_deleted(const Rapid_load_context *context, row_id_t pos);
+  int is_deleted(const Rapid_scan_context *context, row_id_t pos);
 
   // get the normalized pack length
   inline size_t normalized_pack_length() { return m_header->m_normalized_pack_length; }

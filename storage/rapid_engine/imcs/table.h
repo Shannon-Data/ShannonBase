@@ -40,7 +40,9 @@
 class TABLE;
 class Field;
 namespace ShannonBase {
+class Rapid_context;
 class Rapid_load_context;
+class Rapid_scan_context;
 namespace Imcs {
 class Cu;
 class RapidTable : public MemoryObject {
@@ -108,8 +110,10 @@ class RapidTable : public MemoryObject {
   virtual int write(const Rapid_load_context *, uchar *) = 0;
   virtual int write(const Rapid_load_context *, uchar *, size_t, ulong *, size_t, ulong *, ulong *) = 0;
 
+  virtual int build_partitions(const Rapid_load_context *) = 0;
+
   // gets the # of physical rows.
-  virtual row_id_t rows(const Rapid_load_context *) = 0;
+  virtual row_id_t rows(const Rapid_context *) = 0;
 
   // to reserer a row place for this operation.
   virtual row_id_t reserve_id(const Rapid_load_context *) = 0;
@@ -167,6 +171,7 @@ class Table : public RapidTable {
  public:
   Table() = default;
   Table(std::string schema, std::string table) : RapidTable(schema, table) {}
+  Table(std::string schema, std::string table, std::string partkey) : RapidTable(schema, table), m_part_key(partkey) {}
   virtual ~Table() {
     m_fields.clear();
     m_source_keys.clear();
@@ -197,11 +202,13 @@ class Table : public RapidTable {
     return ShannonBase::SHANNON_SUCCESS;
   }
 
+  virtual int build_partitions(const Rapid_load_context *) final { return ShannonBase::SHANNON_SUCCESS; }
+
   // rollback a modified record.
   virtual int rollback_changes_by_trxid(Transaction::ID trxid) final;
 
   // gets the # of physical rows.
-  virtual row_id_t rows(const Rapid_load_context *) final { return m_stats.prows.load(); }
+  virtual row_id_t rows(const Rapid_context *) final { return m_stats.prows.load(); }
 
   // to reserer a row place for this operation.
   virtual row_id_t reserve_id(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
@@ -244,12 +251,16 @@ class Table : public RapidTable {
   int build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid);
   int build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
                        ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks);
+
+ private:
+  std::string m_part_key;
 };
 
 class PartTable : public RapidTable {
  public:
   PartTable() = default;
-  PartTable(std::string schema, std::string table) : RapidTable(schema, table) {}
+  PartTable(std::string schema, std::string table, std::string part_key)
+      : RapidTable(schema, table), m_part_key(part_key) {}
   virtual ~PartTable() {
     m_fields.clear();
     m_source_keys.clear();
@@ -257,49 +268,90 @@ class PartTable : public RapidTable {
   }
 
   virtual TYPE type() final { return RapidTable::TYPE::PARTTABLE; }
-  virtual int create_fields_memo(const Rapid_load_context *) final;
-  virtual int create_index_memo(const Rapid_load_context *context) final;
 
-  virtual int write(const Rapid_load_context *context, uchar *data) final;
-  virtual int write(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
-                    ulong *null_byte_offsets, ulong *null_bitmasks) final;
+  virtual int create_fields_memo(const Rapid_load_context *) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
 
-  virtual int delete_row(const Rapid_load_context *context, row_id_t rowid) final;
-  virtual int delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) final;
+  virtual int create_index_memo(const Rapid_load_context *) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
 
-  virtual int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid) final;
-  virtual int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
-                          ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) final;
+  virtual int write(const Rapid_load_context *, uchar *) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
 
-  virtual int write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                                 std::unordered_map<std::string, mysql_field_t> &fields) final;
-  virtual int update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
-                         const uchar *new_field_data, size_t nlen) final;
-  virtual int update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                                  std::unordered_map<std::string, mysql_field_t> &upd_recs) final;
+  virtual int write(const Rapid_load_context *, uchar *, size_t, ulong *, size_t, ulong *, ulong *) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  virtual int delete_row(const Rapid_load_context *, row_id_t) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  virtual int delete_rows(const Rapid_load_context *, const std::vector<row_id_t> &) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  virtual int build_index(const Rapid_load_context *, const KEY *, row_id_t) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  virtual int build_index(const Rapid_load_context *, const KEY *, row_id_t, uchar *, ulong *, ulong *, ulong *) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  virtual int write_row_from_log(const Rapid_load_context *, row_id_t,
+                                 std::unordered_map<std::string, mysql_field_t> &) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  virtual int update_row(const Rapid_load_context *, row_id_t, std::string &, const uchar *, size_t) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
+  virtual int update_row_from_log(const Rapid_load_context *, row_id_t,
+                                  std::unordered_map<std::string, mysql_field_t> &) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
   virtual int truncate() final {
     assert(false);
     return ShannonBase::SHANNON_SUCCESS;
   }
 
+  virtual int build_partitions(const Rapid_load_context *context) final;
+
   // rollback a modified record.
-  virtual int rollback_changes_by_trxid(Transaction::ID trxid) final;
+  virtual int rollback_changes_by_trxid(Transaction::ID) final { assert(false); }
 
   // gets the # of physical rows.
-  virtual row_id_t rows(const Rapid_load_context *) final { return m_stats.prows.load(); }
+  virtual row_id_t rows(const Rapid_context *) final { return m_stats.prows.load(); }
 
   // to reserer a row place for this operation.
   virtual row_id_t reserve_id(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
 
   virtual Cu *first_field() final { return m_fields.begin()->second.get(); }
 
-  virtual Cu *get_field(std::string field_name) final;
+  virtual Cu *get_field(std::string) final {
+    assert(false);
+    return nullptr;
+  }
 
-  virtual Index::Index<uchar, row_id_t> *get_index(std::string key_name) final {
-    if (m_indexes.find(key_name) == m_indexes.end())
-      return nullptr;
-    else
-      return m_indexes[key_name].get();
+  virtual Index::Index<uchar, row_id_t> *get_index(std::string) final {
+    assert(false);
+    return nullptr;
   }
 
   virtual std::unordered_map<std::string, std::unique_ptr<Cu>> &get_fields() final { return m_fields; }
@@ -309,6 +361,11 @@ class PartTable : public RapidTable {
   virtual std::string &schema_name() final { return m_schema_name; }
   virtual std::string &name() final { return m_table_name; }
   virtual row_id_t reserver_rowid() final { return m_stats.prows.fetch_add(1); }
+
+  inline RapidTable *get_partition(std::string part_key) {
+    if (m_partitions.find(part_key) == m_partitions.end()) return nullptr;
+    return m_partitions[part_key].get();
+  }
 
  private:
   bool is_field_null(int field_index, const uchar *rowdata, const ulong *null_byte_offsets,
@@ -329,6 +386,13 @@ class PartTable : public RapidTable {
   int build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid);
   int build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
                        ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks);
+
+ private:
+  // all the partition sub-tables.
+  std::unordered_map<std::string, std::unique_ptr<RapidTable>> m_partitions;
+
+  // part_name+"#"+ part_id
+  std::string m_part_key;
 };
 
 }  // namespace Imcs

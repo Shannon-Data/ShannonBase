@@ -49,6 +49,9 @@ set use_secondary_engine=forced;
 alter table LINEITEM secondary_engine RAPID;
 
 alter table LINEITEM secondary_load;
+
+select * from LINEITEM;
+
 alter table LINEITEM secondary_unload;
 
 alter table LINEITEM secondary_load PARTITION(p0, p1, p10);
@@ -59,7 +62,7 @@ alter table LINEITEM secondary_unload PARTITION(p0, p10, p1);
 
 alter table LINEITEM secondary_load PARTITION(p0, p1, p10);
 alter table LINEITEM secondary_unload PARTITION(p0, p10);
---error 3890
+--error 3889
 alter table LINEITEM secondary_unload;
 --enable_warnings
 
