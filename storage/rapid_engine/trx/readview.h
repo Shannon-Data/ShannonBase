@@ -35,6 +35,8 @@
 #include "storage/rapid_engine/trx/transaction.h"
 
 namespace ShannonBase {
+class Rapid_context;
+class Rapid_scan_context;
 class Rapid_load_context;
 namespace Imcs {
 class Chunk;
@@ -147,7 +149,7 @@ using SMU_items = struct smu_item_vec_t {
    * if in_place_len == UNIV_SQL_NULL, means in_place value is null. flag is to indicate flag bit
    * of the data, such as deleted, null, etc.
    **/
-  uchar *reconstruct_data(Rapid_load_context *context, uchar *in_place, size_t &in_place_len, uint8 &status);
+  uchar *reconstruct_data(Rapid_scan_context *context, uchar *in_place, size_t &in_place_len, uint8 &status);
 
   std::mutex vec_mutex;
   std::deque<SMU_item> items;
@@ -174,7 +176,7 @@ class Snapshot_meta_unit {
    */
   // in_place, means the current version. flag indicates the flag of reconstructed data.
   // such as is null or not, is deleted marked or not.
-  uchar *build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid, uchar *in_place,
+  uchar *build_prev_vers(Rapid_scan_context *context, ShannonBase::row_id_t rowid, uchar *in_place,
                          size_t &in_place_len, uint8 &status);
 
   // - row_start: starting global row id
@@ -186,7 +188,7 @@ class Snapshot_meta_unit {
   // - reconstruct_buf: caller-provided buffer of size >= row_count * normalized_len
   //
   // Returns BitmapResult where bit i indicates visibility of row (row_start + i).
-  BitmapResult build_prev_vers_batch(Rapid_load_context *context, ShannonBase::row_id_t row_start, size_t row_count,
+  BitmapResult build_prev_vers_batch(Rapid_scan_context *context, ShannonBase::row_id_t row_start, size_t row_count,
                                      const uchar *chunk_base_ptr, size_t normalized_len, uchar *reconstruct_buf);
 
   // gets the rowid's versions.

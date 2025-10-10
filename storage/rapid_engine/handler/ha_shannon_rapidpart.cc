@@ -42,31 +42,73 @@ Created jun 6, 2025 */
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
-
+extern int rpd_async_column_threshold;
 ha_rapidpart::ha_rapidpart(handlerton *hton, TABLE_SHARE *table)
     : ha_rapid(hton, table), Partition_helper(this), m_thd(ha_thd()), m_share(nullptr) {}
 
-int ha_rapidpart::records(ha_rows *num_rows) { return ShannonBase::SHANNON_SUCCESS; }
-
 int ha_rapidpart::rnd_pos(uchar *record, uchar *pos) { return ShannonBase::SHANNON_SUCCESS; }
+
+int ha_rapidpart::rnd_init(bool scan) {
+  m_current_part_empty = false;
+
+  if (m_data_table->init()) {
+    m_start_of_scan = false;
+    return HA_ERR_GENERIC;
+  }
+
+  inited = handler::RND;
+  m_start_of_scan = true;
+  return (Partition_helper::ph_rnd_init(scan));
+}
 
 int ha_rapidpart::rnd_init_in_part(uint part_id, bool scan) {
   // int err = change_active_index(part_id, table_share->primary_key);
   /* Don't use semi-consistent read in random row reads (by position).
   This means we must disable semi_consistent_read if scan is false. */
+  std::string part_key;
+  auto part_name = m_data_table->source()->part_info->partitions[part_id]->partition_name;
+  part_key.append(part_name).append("#").append(std::to_string(part_id));
 
-  m_last_part = part_id;
-  m_start_of_scan = true;
+  const auto &rpd_table = m_data_table->table_source();
+  auto partition_ptr = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table)->get_partition(part_key);
+  auto n_rows = partition_ptr->rows(nullptr);
+  m_current_part_empty = (n_rows) ? false : true;
+
+  if (!m_current_part_empty) m_data_table->active_table(partition_ptr);
+
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
-  assert(false);
-  return ShannonBase::SHANNON_SUCCESS;
+  int error{HA_ERR_END_OF_FILE};
+  if (m_current_part_empty) return error;
+
+  if (inited == handler::RND && m_start_of_scan) {
+    if (table_share->fields <= static_cast<uint>(ShannonBase::rpd_async_column_threshold)) {
+      error = m_data_table->next(buf);
+    } else {
+      auto reader_pool = ShannonBase::Imcs::Imcs::pool();
+      std::future<int> fut =
+          boost::asio::co_spawn(*reader_pool, m_data_table->next_async(buf), boost::asio::use_future);
+      error = fut.get();  // co_await m_data_table->next_async(buf);  // index_first(buf);
+      if (error == HA_ERR_KEY_NOT_FOUND) {
+        error = HA_ERR_END_OF_FILE;
+      }
+    }
+  }
+
+  // increase the row count.
+  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  return error;
 }
 
-int ha_rapidpart::rnd_end_in_part(uint, bool) {
-  assert(false);
+int ha_rapidpart::rnd_end_in_part(uint, bool) { return ShannonBase::SHANNON_SUCCESS; }
+
+int ha_rapidpart::rnd_end() {
+  if (m_data_table->end()) return HA_ERR_GENERIC;
+
+  m_start_of_scan = false;
+  inited = handler::NONE;
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -132,18 +174,18 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   if (shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) != nullptr) {
     std::string err;
     err.append(table.s->db.str).append(".").append(table.s->table_name.str).append(" already loaded");
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
-    return HA_ERR_KEY_NOT_FOUND;
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.c_str());
+    return HA_ERR_GENERIC;
   }
 
   for (auto idx = 0u; idx < table.s->fields; idx++) {
     auto fld = *(table.field + idx);
-    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+    if (!bitmap_is_set(table.read_set, idx) || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
     if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
       std::string err;
       err.append(table.s->table_name.str).append(fld->field_name).append(" type not allowed");
-      my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
+      my_error(ER_SECONDARY_ENGINE, MYF(0), err.c_str());
       return HA_ERR_GENERIC;
     }
   }
@@ -177,7 +219,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   }
 
   if (Imcs::Imcs::instance()->load_parttable(&context, const_cast<TABLE *>(&table))) {
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), table.s->db.str, table.s->table_name.str);
+    my_error(ER_SECONDARY_ENGINE, MYF(0), table.s->db.str, table.s->table_name.str);
     return HA_ERR_GENERIC;
   }
 
@@ -197,7 +239,7 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   if (error_if_not_loaded && !share) {
     std::string err(db_name);
     err.append(".").append(table_name).append(" table is not loaded into rapid yet");
-    my_error(ER_SECONDARY_ENGINE_DDL, MYF(0), err.c_str());
+    my_error(ER_SECONDARY_ENGINE, MYF(0), err.c_str());
     return HA_ERR_GENERIC;
   }
 

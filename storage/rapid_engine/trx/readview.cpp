@@ -134,7 +134,7 @@ smu_item_t::smu_item_t(size_t size) {
   tm_stamp = tm_committed = std::chrono::high_resolution_clock::now();
 }
 
-uchar *smu_item_vec_t::reconstruct_data(Rapid_load_context *context, uchar *in_place, size_t &in_place_len,
+uchar *smu_item_vec_t::reconstruct_data(Rapid_scan_context *context, uchar *in_place, size_t &in_place_len,
                                         uint8 &status) {
   std::lock_guard<std::mutex> lock(vec_mutex);
   auto ret = in_place;
@@ -191,7 +191,7 @@ uchar *smu_item_vec_t::reconstruct_data(Rapid_load_context *context, uchar *in_p
 
 void Snapshot_meta_unit::set_owner(ShannonBase::Imcs::Chunk *owner) { m_owner = owner; }
 
-uchar *Snapshot_meta_unit::build_prev_vers(Rapid_load_context *context, ShannonBase::row_id_t rowid, uchar *in_place,
+uchar *Snapshot_meta_unit::build_prev_vers(Rapid_scan_context *context, ShannonBase::row_id_t rowid, uchar *in_place,
                                            size_t &in_place_len, uint8 &status) {
   if (m_owner->is_deleted(context, rowid)) status |= static_cast<uint8>(RECONSTRUCTED_STATUS::STAT_DELETED);
   if (m_owner->is_null(context, rowid)) {
@@ -204,7 +204,7 @@ uchar *Snapshot_meta_unit::build_prev_vers(Rapid_load_context *context, ShannonB
              : m_version_info[rowid].reconstruct_data(context, in_place, in_place_len, status);
 }
 
-BitmapResult Snapshot_meta_unit::build_prev_vers_batch(Rapid_load_context *context, ShannonBase::row_id_t row_start,
+BitmapResult Snapshot_meta_unit::build_prev_vers_batch(Rapid_scan_context *context, ShannonBase::row_id_t row_start,
                                                        size_t row_count, const uchar *chunk_base_ptr,
                                                        size_t normalized_len, uchar *reconstruct_buf) {
   BitmapResult result;

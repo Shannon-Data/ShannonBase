@@ -54,8 +54,10 @@ namespace ShannonBase {
 namespace Imcs {
 ShannonBase::Utils::SimpleRatioAdjuster DataTable::m_adaptive_ratio(0.3);
 
-DataTable::DataTable(TABLE *source, RapidTable *rpd) : m_initialized{false}, m_data_source(source), m_rapid_table(rpd) {
-  ut_a(m_data_source && m_rapid_table);
+DataTable::DataTable(TABLE *source, RapidTable *rpd)
+    : m_initialized{false}, m_data_source(source), m_rapid_table(rpd), m_source_rpd_table(rpd) {
+  // if m_rapid_table is null, means we will get its real imp by part_id when it used.
+  ut_a(m_data_source);
   m_rowid.store(0);
 }
 
@@ -82,7 +84,7 @@ int DataTable::init() {
     m_initialized.store(true);
     m_rowid.store(0);
 
-    m_context = std::make_unique<Rapid_load_context>();
+    m_context = std::make_unique<Rapid_scan_context>();
     m_context->m_thd = current_thd;
     m_context->m_extra_info.m_keynr = m_active_index;
 
@@ -96,6 +98,15 @@ int DataTable::init() {
     m_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
     m_context->m_table_name = const_cast<char *>(m_data_source->s->table_name.str);
   }
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int DataTable::end() {
+  m_context->m_trx->release_snapshot();
+  m_context->m_trx->commit();
+
+  m_rowid.store(0);
+  m_initialized.store(false);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -392,15 +403,6 @@ int DataTable::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::
 
   // advance m_rowid to last selected + 1
   m_rowid.store(start_row + static_cast<ShannonBase::row_id_t>(n_to_scan));
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-int DataTable::end() {
-  m_context->m_trx->release_snapshot();
-  m_context->m_trx->commit();
-
-  m_rowid.store(0);
-  m_initialized.store(false);
   return ShannonBase::SHANNON_SUCCESS;
 }
 

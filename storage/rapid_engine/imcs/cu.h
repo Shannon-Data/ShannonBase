@@ -230,7 +230,8 @@ class Cu : public MemoryObject {
   typedef struct alignas(CACHE_LINE_SIZE) LocalDataBuffer_t {
     uchar data[MAX_FIELD_WIDTH];
   } LocalDataBuffer;
-  static SHANNON_THREAD_LOCAL LocalDataBuffer m_buff;
+  // TODO: it corrupt under multithread, will fixed in future.
+  // static SHANNON_THREAD_LOCAL LocalDataBuffer m_buff;
 
   // the meta stat mutex.
   std::mutex m_stats_mutex;

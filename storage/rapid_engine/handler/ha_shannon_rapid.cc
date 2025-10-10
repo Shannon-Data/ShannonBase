@@ -211,7 +211,7 @@ int ha_rapid::info(unsigned int flags) {
   std::string sch_tb;
   sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
 
-  Rapid_load_context context;
+  Rapid_scan_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   context.m_trx->begin();
 
@@ -275,12 +275,16 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 }
 
 int ha_rapid::records(ha_rows *num_rows) {
-  Rapid_load_context context;
+  Rapid_scan_context context;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
+  context.m_trx->begin();
+
   std::string sch_tb;
   sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
   auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
   *num_rows = rpd_tb->rows(&context);
+
+  context.m_trx->commit();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -461,7 +465,7 @@ int ha_rapid::rnd_next(uchar *buf) {
     }
   }
 
-  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return error;
 }
 
@@ -498,8 +502,7 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fun
 
   m_data_table->set_end_range(end_range);
   err = m_data_table->index_read(buf, key, key_len, find_flag);
-  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-
+  if (err == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return err;
 }
 
@@ -511,22 +514,22 @@ int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
 int ha_rapid::index_next(uchar *buf) {
   ut_ad(m_start_of_scan && inited == handler::INDEX);
 
-  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-  return m_data_table->index_next(buf);
+  auto error = m_data_table->index_next(buf);
+  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  return error;
 }
 
 int ha_rapid::index_next_same(uchar *buf, const uchar *, uint) {
   ut_ad(m_start_of_scan && inited == handler::INDEX);
 
-  ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
-
-  return m_data_table->index_next(buf);
+  auto error = m_data_table->index_next(buf);
+  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  return error;
 }
 
 int ha_rapid::index_first(uchar *buf) {
   DBUG_TRACE;
   ut_ad(m_start_of_scan && inited == handler::INDEX);
-  ha_statistic_increment(&System_status_var::ha_read_first_count);
 
   int error;
   if (end_range) {
@@ -534,6 +537,7 @@ int ha_rapid::index_first(uchar *buf) {
     error = m_data_table->index_read(buf, end_range->key, end_range->length, end_range->flag);
   } else
     error = m_data_table->index_next(buf);
+  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_first_count);
   return error;
 }
 
@@ -545,8 +549,6 @@ int ha_rapid::index_prev(uchar *buf) {
 int ha_rapid::index_last(uchar *buf) {
   DBUG_TRACE;
 
-  ha_statistic_increment(&System_status_var::ha_read_last_count);
-
   m_data_table->set_end_range(end_range);
   int error = m_data_table->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
 
@@ -555,7 +557,7 @@ int ha_rapid::index_last(uchar *buf) {
   if (error == HA_ERR_KEY_NOT_FOUND) {
     error = HA_ERR_END_OF_FILE;
   }
-
+  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_last_count);
   return error;
 }
 

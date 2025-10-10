@@ -86,6 +86,9 @@ class ha_rapid : public handler {
  public:
   ha_rapid(handlerton *hton, TABLE_SHARE *table_share);
 
+ protected:
+  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;
+
  private:
   int create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) override { return HA_ERR_WRONG_COMMAND; }
 
@@ -175,10 +178,7 @@ class ha_rapid : public handler {
   not yet fetched any row, else false */
   bool m_start_of_scan{false};
 
-  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;
   std::string m_failed_reason;
-
-  ha_rapidpart *m_part_handler{nullptr};
 };
 
 }  // namespace ShannonBase

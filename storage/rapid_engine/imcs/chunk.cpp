@@ -346,7 +346,7 @@ void Chunk::check_data_type(size_t type_size) {
   }
 }
 
-int Chunk::is_null(const Rapid_load_context *context, row_id_t pos) {
+int Chunk::is_null(const Rapid_scan_context *context, row_id_t pos) {
   std::shared_lock<std::shared_mutex> lk(m_header_mutex);
   if (!m_header->m_null_mask.get())
     return static_cast<int>(false);
@@ -354,7 +354,7 @@ int Chunk::is_null(const Rapid_load_context *context, row_id_t pos) {
     return Utils::Util::bit_array_get(m_header->m_null_mask.get(), pos);
 }
 
-int Chunk::is_deleted(const Rapid_load_context *context, row_id_t pos) {
+int Chunk::is_deleted(const Rapid_scan_context *context, row_id_t pos) {
   std::shared_lock<std::shared_mutex> lk(m_header_mutex);
   if (!m_header->m_del_mask.get())
     return SHANNON_SUCCESS;

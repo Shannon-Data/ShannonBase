@@ -41,7 +41,9 @@
 class TABLE;
 class key_range;
 namespace ShannonBase {
+class Rapid_context;
 class Rapid_load_context;
+class Rapid_scan_context;
 namespace Imcs {
 class Imcs;
 class Cu;
@@ -74,7 +76,19 @@ class DataTable : public MemoryObject {
   DataTable(TABLE *source_table, RapidTable *rpd);
   virtual ~DataTable();
 
-  RapidTable *source() { return m_rapid_table; }
+  // gets its active rapid table.
+  inline RapidTable *table() const { return m_rapid_table; }
+
+  // the parent table of partitions.
+  inline RapidTable *table_source() const { return m_source_rpd_table; }
+
+  // to reset to a new rpd table source.
+  inline void active_table(RapidTable *rpd_table) {
+    m_rowid.store(0);
+    m_rapid_table = rpd_table;
+  }
+
+  inline TABLE *source() const { return m_data_source; }
 
   // open a cursor on db_table to read/write.
   int open();
@@ -144,13 +158,13 @@ class DataTable : public MemoryObject {
   TABLE *m_data_source{nullptr};
 
   // rapid table.
-  RapidTable *m_rapid_table;
+  RapidTable *m_rapid_table{nullptr}, *m_source_rpd_table{nullptr};
 
   // start from where.
   std::atomic<row_id_t> m_rowid{0};
 
   // context
-  std::unique_ptr<Rapid_load_context> m_context{nullptr};
+  std::unique_ptr<Rapid_scan_context> m_context{nullptr};
 
   // index iterator.
   std::unique_ptr<Index::Iterator, IteratorDeleter> m_index_iter;
