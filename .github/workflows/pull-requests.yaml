@@ -93,6 +93,11 @@ jobs:
       - name: Clean up build
         run: |
           sudo find ${{ github.workspace }} -mindepth 1 -delete
+          sudo apt-get clean -y
+          sudo apt-get autoremove -y --purge
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo rm -rf /tmp/* /var/tmp/*
+          sudo rm -rf ~/.cache/* ~/.npm/* ~/.gem/*            
       - name: Run MTR tests (x86)
         run: |
           sudo mkdir -p /home/shannon-bin/log
@@ -151,6 +156,11 @@ jobs:
       - name: Clean up build
         run: |
           sudo find ${{ github.workspace }} -mindepth 1 -delete
+          sudo apt-get clean -y
+          sudo apt-get autoremove -y --purge
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo rm -rf /tmp/* /var/tmp/*
+          sudo rm -rf ~/.cache/* ~/.npm/* ~/.gem/*            
       - name: Run MTR tests (ARM)
         run: |
           sudo mkdir -p /home/shannon-bin/log
