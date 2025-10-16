@@ -53,7 +53,7 @@
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
-#include "storage/rapid_engine/populate/populate.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
 namespace ShannonBase {

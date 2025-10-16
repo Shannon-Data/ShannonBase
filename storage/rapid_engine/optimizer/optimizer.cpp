@@ -43,7 +43,7 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/optimizer/path/access_path.h"
-#include "storage/rapid_engine/populate/populate.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 
 namespace ShannonBase {
 namespace Optimizer {

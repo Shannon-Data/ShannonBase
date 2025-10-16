@@ -42,7 +42,7 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/ml/ml.h"
-#include "storage/rapid_engine/populate/populate.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 
 namespace ShannonBase {
 namespace Utils {

@@ -20,36 +20,36 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-# This is the CMakeLists for Shannon Rapid
-INCLUDE(${CMAKE_SOURCE_DIR}/storage/innobase/innodb.cmake)
+# Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
+
+# Shannon Rapid Engine CMakeLists.txt
 
 MSVC_CPPCHECK_DISABLE()
 
+include(${CMAKE_SOURCE_DIR}/storage/innobase/innodb.cmake)
+
 ADD_DEFINITIONS(-DLOG_SUBSYSTEM_TAG="Rapid")
 
-# TODO: Fix up all non-canonical include paths and remove this.
-INCLUDE_DIRECTORIES(
-  ${CMAKE_SOURCE_DIR}/sql
-  ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/storage/innobase
-  ${CMAKE_SOURCE_DIR}/storage/rapid_engine
+# --- Explicit InnoDB include dirs ---
+SET(INNOBASE_INCLUDE_DIRS
+  ${CMAKE_SOURCE_DIR}/storage/innobase         # For "ut/ut.h", "sync0/..." etc.
+  ${CMAKE_SOURCE_DIR}/storage/innobase/include # For other InnoDB headers
 )
 
-#FOR AUTO-ML MODELS
-INCLUDE_DIRECTORIES( ${CMAKE_SOURCE_DIR}/extra/lightgbm/include)
-#LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/rapid_engine/ml/LightGBM/lib/)
+# --- Shannon Rapid include dirs ---
+SET(SHANNON_RAPID_INCLUDE_DIRS
+  ${CMAKE_CURRENT_SOURCE_DIR}                    # Rapid source dir
+  ${CMAKE_SOURCE_DIR}/include                    # global include
+  ${CMAKE_SOURCE_DIR}/sql                        # SQL headers
+  ${CMAKE_SOURCE_DIR}/extra/lightgbm/include     # LightGBM
+)
 
-# Conflicting YYSTYPE, because we have multiple Bison grammars.
-# WL#11100 Migrate to Bison 3.x should fix this.
-#
-# STRING(REPLACE "-flto" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
-# STRING(REPLACE "-flto" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-
-
+# --- Source files ---
 SET(SHANNON_RAPID_COMPRESS_SOURCES
   compress/algorithms.cpp
   compress/dictionary/dictionary.cpp
 )
+
 SET(SHANNON_IMCS_SOURCES
    imcs/table.cpp
    imcs/data_table.cpp
@@ -64,11 +64,13 @@ SET(SHANNON_IMCS_SOURCES
    imcs/purge/purge.cpp
    autopilot/loader.cpp
 )
+
 SET(SHANNON_POPULATE_SOURCES
    populate/log_parser.cpp
-   populate/populate.cpp
+   populate/log_populate.cpp
 )
-SET (SHANNON_TRX_SOURCES
+
+SET(SHANNON_TRX_SOURCES
     trx/transaction.cpp
     trx/readview.cpp
 )
@@ -77,6 +79,7 @@ SET(SHANNON_READER_SOURCES
     reader/csv_reader.cpp
 )
 
+# --- Lakehouse / Arrow / Parquet optional support ---
 IF((LINUX OR WIN32) AND WITH_LAKEHOUSE STREQUAL "system")
     list(APPEND SHANNON_READER_SOURCES reader/parquet_reader.cpp)
 
@@ -130,43 +133,35 @@ IF((LINUX OR WIN32) AND WITH_LAKEHOUSE STREQUAL "system")
         ENDIF()
     ENDIF()
 
+    # Enable Lakehouse feature flag
     add_definitions(-DLAKEHOUSE_ENABLED)
-
-    IF(WIN32)
-        set_property(TARGET ha_rapid PROPERTY
-            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-
-        if(CMAKE_TOOLCHAIN_FILE)
-            find_package(PkgConfig QUIET)
-        endif()
-
-        if(MSVC)
-            target_link_libraries(ha_rapid PRIVATE ws2_32)
-        endif()
-    ENDIF()
 ENDIF()
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
-
-SET (SHANNON_ITERATOR_SOURCES
+# --- Iterators and optimizer ---
+SET(SHANNON_ITERATOR_SOURCES
     executor/iterators/iterator.cpp
     executor/iterators/aggregate_iterator.cpp
     executor/iterators/hash_join_iterator.cpp
     executor/iterators/table_scan_iterator.cpp
     ${SHANNON_READER_SOURCES}
 )
-set (SHANNON_OPTIMIZE
+
+SET(SHANNON_OPTIMIZE
     optimizer/optimizer.cpp
     optimizer/path/access_path.cpp
     optimizer/rules/const_fold_rule.cpp
     cost/cost.cpp
     statistics/statistics.cpp
 )
-set (SHANNON_ML
+
+SET(SHANNON_ML
     ml/ml.cpp
 )
-set (SHANNON_PERSISTENCE
+
+SET(SHANNON_PERSISTENCE
 )
+
+# --- All Rapid sources ---
 SET(SHANNON_RAPID_SOURCES
     handler/ha_shannon_rapid.cc
     handler/ha_shannon_rapidpart.cc
@@ -179,57 +174,110 @@ SET(SHANNON_RAPID_SOURCES
     ${SHANNON_PERSISTENCE}
 )
 
+# --- Compress library ---
 ADD_LIBRARY(rapid_compress STATIC ${SHANNON_RAPID_COMPRESS_SOURCES})
-TARGET_COMPILE_DEFINITIONS(
-  rapid_compress PRIVATE UNIV_LIBRARY UNIV_NO_ERR_MSGS)
 ADD_DEPENDENCIES(rapid_compress GenError)
 
+# Configure compress library includes
+# Note: UNIV_NO_ERR_MSGS is defined to reduce binary size
+TARGET_INCLUDE_DIRECTORIES(rapid_compress
+    PRIVATE
+        ${INNOBASE_INCLUDE_DIRS}
+        ${SHANNON_RAPID_INCLUDE_DIRS}
+)
+
+# --- NUMA library support ---
 UNSET(NUMA_LIBRARY)
 IF(HAVE_LIBNUMA)
   SET(NUMA_LIBRARY "numa")
 ENDIF()
 
-SET(SHANNON_RAPID_LIBRARIES sql_dd ${ZLIB_LIBRARY} ${LZ4_LIBRARY} ${NUMA_LIBRARY} _lightgbm gomp)
+# --- Libraries for plugin ---
+SET(SHANNON_RAPID_LIBRARIES
+    rapid_compress
+    sql_dd
+    ${ZLIB_LIBRARY}
+    ${LZ4_LIBRARY}
+    ${NUMA_LIBRARY}
+    _lightgbm
+    gomp
+)
 
+# --- Add Lakehouse libraries if enabled ---
 IF(WITH_LAKEHOUSE)
-    SET(SHANNON_RAPID_LIBRARIES ${SHANNON_RAPID_LIBRARIES} INTERFACE Arrow::arrow_shared Parquet::parquet_shared)
+    list(APPEND SHANNON_RAPID_LIBRARIES Arrow::arrow_shared Parquet::parquet_shared)
 ENDIF()
 
+# --- Add MySQL plugin ---
 MYSQL_ADD_PLUGIN(shannon_rapid
-  ${SHANNON_RAPID_SOURCES} ${SHANNON_RAPID_COMPRESS_SOURCES}
+  ${SHANNON_RAPID_SOURCES}
   STORAGE_ENGINE
   MANDATORY
   MODULE_OUTPUT_NAME ha_rapid
-  LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES})
+  LINK_LIBRARIES ${SHANNON_RAPID_LIBRARIES}
+)
 
+# --- Target compile definitions and options ---
+# Note: MUTEX_FUTEX/MUTEX_SYS is already defined by innodb.cmake
+# We only need to add Rapid-specific definitions here
+
+# PUBLIC: Suppress specific warnings for this target and dependents
+TARGET_COMPILE_OPTIONS(shannon_rapid PUBLIC -Wno-error=unused-parameter)
+
+# --- Include directories configuration ---
+# PUBLIC: InnoDB headers are part of the API and needed by dependents (e.g., MySQL core)
+# PRIVATE: Rapid internal headers are not exposed to dependents
+TARGET_INCLUDE_DIRECTORIES(shannon_rapid
+    PUBLIC
+        ${INNOBASE_INCLUDE_DIRS}    # InnoDB headers (ut/ut.h, etc.)
+    PRIVATE
+        ${SHANNON_RAPID_INCLUDE_DIRS}  # Rapid internal headers
+)
+
+# --- Link directories ---
 TARGET_LINK_DIRECTORIES(shannon_rapid PRIVATE ${ONNXRUNTIME_LIB_DIR})
+
+# --- Windows-specific configuration for Lakehouse ---
+IF(WITH_LAKEHOUSE AND WIN32)
+    set_property(TARGET shannon_rapid PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+
+    if(CMAKE_TOOLCHAIN_FILE)
+        find_package(PkgConfig QUIET)
+    endif()
+
+    if(MSVC)
+        target_link_libraries(shannon_rapid PRIVATE ws2_32)
+    endif()
+ENDIF()
+
+# --- Compiler flags / platform tweaks ---
+IF(MY_COMPILER_IS_GNU_OR_CLANG)
+    # Apply to the target specifically, not globally
+    TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE -Wno-cast-qual)
+ENDIF()
 
 # Avoid generating Hardware Capabilities due to crc32 instructions
 IF(SOLARIS_INTEL)
   MY_CHECK_CXX_COMPILER_FLAG("-Wa,-nH" HAVE_WA_NH)
   IF(HAVE_WA_NH)
-    ADD_COMPILE_FLAGS(
-      COMPILE_FLAGS "-Wa,-nH"
-    )
+    TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE "-Wa,-nH")
   ENDIF()
 ENDIF()
 
 # On linux: /usr/include/stdio.h:#define BUFSIZ 8192
-# On Solaris: /usr/include/iso/stdio_iso.h:#define    BUFSIZ  1024
+# On Solaris: /usr/include/iso/stdio_iso.h:#define BUFSIZ 1024
 IF(SOLARIS AND MY_COMPILER_IS_GNU)
-  ADD_COMPILE_FLAGS(
-    COMPILE_FLAGS "-Wno-format-truncation"
-    )
+  TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE "-Wno-format-truncation")
 ENDIF()
 
 # Generated code with logical-op warnings
 MY_CHECK_CXX_COMPILER_WARNING("-Wlogical-op" HAS_WARN_FLAG)
 IF(HAS_WARN_FLAG)
-  ADD_COMPILE_FLAGS(
-    COMPILE_FLAGS "${HAS_WARN_FLAG}")
+  TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE "${HAS_WARN_FLAG}")
 ENDIF()
+
 MY_CHECK_CXX_COMPILER_WARNING("-Wcast-function-type" HAS_WARN_FLAG)
 IF(HAS_WARN_FLAG)
-  ADD_COMPILE_FLAGS(
-    COMPILE_FLAGS "${HAS_WARN_FLAG}")
+  TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE "${HAS_WARN_FLAG}")
 ENDIF()

@@ -199,14 +199,6 @@
 #include "thr_lock.h"
 #include "typelib.h"
 
-#include "storage/rapid_engine/populate/populate.h"
-#include "storage/rapid_engine/imcs/purge/purge.h"
-#include "storage/rapid_engine/include/rapid_status.h" //rpd_columns_info
-#include "storage/rapid_engine/imcs/imcs.h"
-#include "storage/rapid_engine/imcs/cu.h"
-#include "storage/rapid_engine/utils/utils.h"
-#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
-
 namespace dd {
 class View;
 }  // namespace dd
@@ -2767,53 +2759,6 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table,
              "secondary storage engine load table failed");
     return true;
   }
-
-  // add the mete info into 'rpd_column_id' and 'rpd_columns tables', etc.
-  // to check whether it has been loaded or not. here, we dont use field_ptr != nullptr
-  // because the ghost column.
-  Field *field_ptr = nullptr;
-  for (auto index = 0u; index < table.s->fields; index++) {
-    field_ptr = *(table.field + index);
-    // Skip columns marked as NOT SECONDARY.
-    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-    ShannonBase::rpd_column_info_t row_rpd_columns;
-    strncpy(row_rpd_columns.schema_name, table.s->db.str, table.s->db.length);
-    row_rpd_columns.table_id = static_cast<uint>(table.s->table_map_id.id());
-    row_rpd_columns.column_id = field_ptr->field_index();
-    strncpy(row_rpd_columns.column_name, field_ptr->field_name,
-            sizeof (row_rpd_columns.column_name)-1);
-    strncpy(row_rpd_columns.table_name, table.s->table_name.str,
-            sizeof(row_rpd_columns.table_name)-1);
-    auto key_name = ShannonBase::Utils::Util::get_key_name(table.s->db.str,
-                                                           table.s->table_name.str,
-                                                           field_ptr->field_name);
-    #if 0 //TODO: refact
-    ShannonBase::Compress::Dictionary* dict =
-      ShannonBase::Imcs::Imcs::instance()->get_cu(key_name)->get_header()->m_local_dict.get();
-    if (dict)
-      row_rpd_columns.data_dict_bytes = dict->content_size();
-    row_rpd_columns.data_placement_index = 0;
-    #endif
-    std::string comment (field_ptr->comment.str);
-    memset (row_rpd_columns.encoding, 0x0, NAME_LEN);
-    if (comment.find("SORTED") != std::string::npos)
-      strncpy(row_rpd_columns.encoding, "SORTED", strlen("SORTED") + 1);
-    else if (comment.find ("VARLEN") != std::string::npos)
-      strncpy(row_rpd_columns.encoding, "VARLEN", strlen("VARLEN") + 1);
-    else
-      strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
-    row_rpd_columns.ndv = 0;
-    ShannonBase::rpd_columns_info.push_back(row_rpd_columns);
-  }
-
-
-  //start imcs purger thread to purge dead tuples.
-  ShannonBase::Purge::Purger::start();
-
-  //start population thread if table loaded successfully.
-  ShannonBase::Populate::Populator::start();
-
   return false;
 }
 
@@ -2842,12 +2787,6 @@ static bool secondary_engine_unload_table(THD *thd, const char *db_name,
                                           bool error_if_not_loaded) {
   assert(thd->mdl_context.owns_equal_or_stronger_lock(
       MDL_key::TABLE, db_name, table_name, MDL_EXCLUSIVE));
-
-  //then stop the purge thread.
-  ShannonBase::Purge::Purger::end();
-
-  //stop the main pop monitor thread.
-  ShannonBase::Populate::Populator::end();
 
   // Nothing to unload if table has no secondary engine defined.
   LEX_CSTRING secondary_engine;
@@ -2893,14 +2832,6 @@ static bool secondary_engine_unload_table(THD *thd, const char *db_name,
   // Unload table from secondary engine.
   if (handler->ha_unload_table(db_name, table_name, error_if_not_loaded))
     return true;
-  //ease the meta info.
-  for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::rpd_columns_info.begin();
-       it != ShannonBase::rpd_columns_info.end();) {
-        if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
-            it = ShannonBase::rpd_columns_info.erase(it);
-        else
-            ++it;
-  }
 
   return false;
 }

@@ -45,7 +45,7 @@
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/table.h"  //RapidTable
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/populate/populate.h"  //sys_pop_buff
+#include "storage/rapid_engine/populate/log_commons.h"  //sys_pop_buff
 #include "storage/rapid_engine/trx/readview.h"
 #include "storage/rapid_engine/trx/transaction.h"  //Transaction
 #include "storage/rapid_engine/utils/utils.h"      //Blob
