@@ -51,7 +51,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef UNIV_HOTBACKUP
 #include "page0types.h"
 #include "trx0purge.h"
-#include "storage/rapid_engine/populate/populate.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 #endif /* !UNIV_HOTBACKUP */
 
 static_assert(static_cast<int>(MTR_MEMO_PAGE_S_FIX) ==

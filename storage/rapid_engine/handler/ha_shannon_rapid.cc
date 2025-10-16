@@ -58,11 +58,13 @@
 
 #include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
 #include "storage/innobase/include/dict0dd.h"    //dd_is_partitioned
+
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
 #include "storage/rapid_engine/imcs/data_table.h"  //DataTable
 #include "storage/rapid_engine/imcs/imcs.h"        // IMCS
+#include "storage/rapid_engine/imcs/purge/purge.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_const.h"  //const
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -70,7 +72,7 @@
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/writable_access_path.h"
-#include "storage/rapid_engine/populate/populate.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/statistics/statistics.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
@@ -358,10 +360,57 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
   }
+
+  // add the mete info into 'rpd_column_id' and 'rpd_columns tables', etc.
+  // to check whether it has been loaded or not. here, we dont use field_ptr != nullptr
+  // because the ghost column.
+  for (auto index = 0u; index < table_arg.s->fields; index++) {
+    auto field_ptr = *(table_arg.field + index);
+    // Skip columns marked as NOT SECONDARY.
+    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    ShannonBase::rpd_column_info_t row_rpd_columns;
+    strncpy(row_rpd_columns.schema_name, table_arg.s->db.str, table_arg.s->db.length);
+    row_rpd_columns.table_id = static_cast<uint>(table_arg.s->table_map_id.id());
+    row_rpd_columns.column_id = field_ptr->field_index();
+    strncpy(row_rpd_columns.column_name, field_ptr->field_name, sizeof(row_rpd_columns.column_name) - 1);
+    strncpy(row_rpd_columns.table_name, table_arg.s->table_name.str, sizeof(row_rpd_columns.table_name) - 1);
+    auto key_name =
+        ShannonBase::Utils::Util::get_key_name(table_arg.s->db.str, table_arg.s->table_name.str, field_ptr->field_name);
+#if 0  // TODO: refact
+    ShannonBase::Compress::Dictionary* dict =
+      ShannonBase::Imcs::Imcs::instance()->get_cu(key_name)->get_header()->m_local_dict.get();
+    if (dict)
+      row_rpd_columns.data_dict_bytes = dict->content_size();
+    row_rpd_columns.data_placement_index = 0;
+#endif
+    std::string comment(field_ptr->comment.str);
+    memset(row_rpd_columns.encoding, 0x0, NAME_LEN);
+    if (comment.find("SORTED") != std::string::npos)
+      strncpy(row_rpd_columns.encoding, "SORTED", strlen("SORTED") + 1);
+    else if (comment.find("VARLEN") != std::string::npos)
+      strncpy(row_rpd_columns.encoding, "VARLEN", strlen("VARLEN") + 1);
+    else
+      strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
+    row_rpd_columns.ndv = 0;
+    ShannonBase::rpd_columns_info.push_back(row_rpd_columns);
+  }
+
+  // start imcs purger thread to purge dead tuples.
+  ShannonBase::Purge::Purger::start();
+
+  // start population thread if table loaded successfully.
+  ShannonBase::Populate::Populator::start();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
+  // then stop the purge thread.
+  ShannonBase::Purge::Purger::end();
+
+  // stop the main pop monitor thread.
+  ShannonBase::Populate::Populator::end();
+
   RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
   if (error_if_not_loaded && !share) {
     std::string err(db_name);
@@ -394,6 +443,14 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
 
   Imcs::Imcs::instance()->unload_table(&context, db_name, table_name, false);
 
+  // ease the meta info.
+  for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::rpd_columns_info.begin();
+       it != ShannonBase::rpd_columns_info.end();) {
+    if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
+      it = ShannonBase::rpd_columns_info.erase(it);
+    else
+      ++it;
+  }
   return ShannonBase::SHANNON_SUCCESS;
 }
 

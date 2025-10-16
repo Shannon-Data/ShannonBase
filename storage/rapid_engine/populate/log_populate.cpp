@@ -25,7 +25,7 @@
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
 
-#include "storage/rapid_engine/populate/populate.h"
+#include "storage/rapid_engine/populate/log_populate.h"
 
 #if !defined(_WIN32)
 #include <pthread.h>  // For pthread_setname_np
@@ -38,15 +38,15 @@
 #include <sstream>
 #include <thread>
 
+#include "current_thd.h"
+#include "include/os0event.h"
+#include "sql/sql_class.h"
+
 #include "storage/innobase/include/btr0pcur.h"  //for btr_pcur_t
 #include "storage/innobase/include/data0type.h"
 #include "storage/innobase/include/dict0dd.h"
 #include "storage/innobase/include/dict0dict.h"
 #include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
-
-#include "current_thd.h"
-#include "include/os0event.h"
-#include "sql/sql_class.h"
 #include "storage/innobase/include/os0thread-create.h"
 
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -183,21 +183,61 @@ static void parse_log_func_main(log_t *log_ptr) {
   sys_pop_started.store(false, std::memory_order_seq_cst);
 }
 
-bool Populator::active() { return thread_is_active(srv_threads.m_change_pop_cordinator); }
+std::unique_ptr<Populator::Impl> Populator::impl_ = nullptr;
 
-void Populator::send_notify() { os_event_set(log_sys->rapid_events[0]); }
+std::unique_ptr<Populator::Impl> &Populator::get_impl() {
+  if (!impl_) {
+    // Lazy initialization
+    impl_ = std::make_unique<PopulatorImpl>();
+  }
+  return impl_;
+}
 
-void Populator::start() {
-  if (!Populator::active() && shannon_loaded_tables->size()) {
+/**
+ * Whether the log pop main thread is active or not. true is alive, false dead.
+ */
+bool Populator::active() { return get_impl()->active_impl(); }
+
+/**
+ * To launch log pop main thread.
+ */
+void Populator::start() { get_impl()->start_impl(); }
+
+/**
+ * To stop log pop main thread.
+ */
+void Populator::end() { get_impl()->end_impl(); }
+
+/**
+ * To print thread infos.
+ */
+void Populator::print_info(FILE *file) { get_impl()->print_info_impl(file); }
+
+/**
+ * To send notify to populator main thread to start do propagation.
+ */
+void Populator::send_notify() { get_impl()->send_notify_impl(); }
+
+/**
+ * Preload mysql.indexes into caches.
+ */
+int Populator::load_indexes_caches() { return get_impl()->load_indexes_caches_impl(); }
+
+bool PopulatorImpl::active_impl() { return thread_is_active(srv_threads.m_change_pop_cordinator); }
+
+void PopulatorImpl::send_notify_impl() { os_event_set(log_sys->rapid_events[0]); }
+
+void PopulatorImpl::start_impl() {
+  if (!active_impl() && shannon_loaded_tables->size()) {
     srv_threads.m_change_pop_cordinator = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
     ShannonBase::Populate::sys_pop_started.store(true, std::memory_order_seq_cst);
     srv_threads.m_change_pop_cordinator.start();
-    ut_a(Populator::active());
+    ut_a(active_impl());
   }
 }
 
-void Populator::end() {
-  if (Populator::active() && shannon_loaded_tables->size()) {
+void PopulatorImpl::end_impl() {
+  if (active_impl() && shannon_loaded_tables->size()) {
     sys_pop_started.store(false, std::memory_order_seq_cst);
     os_event_set(log_sys->rapid_events[0]);
     srv_threads.m_change_pop_cordinator.join();
@@ -206,11 +246,11 @@ void Populator::end() {
     g_index_cache.clear();
     g_index_names.clear();
 
-    ut_a(Populator::active() == false);
+    ut_a(active_impl() == false);
   }
 }
 
-int Populator::load_indexes_caches() {
+int PopulatorImpl::load_indexes_caches_impl() {
   btr_pcur_t pcur;
   const rec_t *rec;
   mem_heap_t *heap;
@@ -282,7 +322,7 @@ int Populator::load_indexes_caches() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-void Populator::print_info(FILE *file) { /* in: output stream */
+void PopulatorImpl::print_info_impl(FILE *file) { /* in: output stream */
   fprintf(file,
           "rapid log pop thread : %s \n"
           "rapid log pop thread loops: " ULINTPF
@@ -292,6 +332,10 @@ void Populator::print_info(FILE *file) { /* in: output stream */
           "rapid log data remaining line: " ULINTPF "\n",
           ShannonBase::Populate::sys_pop_started ? "running" : "stopped", ShannonBase::Populate::sys_rapid_loop_count,
           ShannonBase::Populate::sys_pop_data_sz / 1024, ShannonBase::Populate::sys_pop_buff.size());
+}
+bool PopulatorImpl::check_status_impl(std::string &table_name) {
+  std::shared_lock<std::shared_mutex> lk(g_processing_table_mutex);
+  return (g_processing_tables.find(table_name) != g_processing_tables.end()) ? true : false;
 }
 }  // namespace Populate
 }  // namespace ShannonBase

@@ -38,18 +38,16 @@
 #include "current_thd.h"
 #include "sql/table.h"
 
-#include "storage/innobase/include/btr0pcur.h"  //for btr_pcur_t
-#include "storage/innobase/include/data0type.h"
-#include "storage/innobase/include/dict0dd.h"
+#include "storage/innobase/include/btr0pcur.h"   //for btr_pcur_t
+#include "storage/innobase/include/data0type.h"  //DATA_BLOB, etc.
 #include "storage/innobase/include/dict0dict.h"
 #include "storage/innobase/include/dict0mem.h"  //for dict_index_t, etc.
 #include "storage/innobase/include/lob0lob.h"   //ext
 #include "storage/innobase/include/log0log.h"
 #include "storage/innobase/include/log0test.h"
-#include "storage/innobase/include/log0write.h"
+#include "storage/innobase/include/row0mysql.h"
 #include "storage/innobase/include/row0sel.h"
 #include "storage/innobase/include/row0upd.h"
-#include "storage/innobase/rem/rec.h"
 
 #include "storage/rapid_engine/imcs/chunk.h"  //chunk
 #include "storage/rapid_engine/imcs/cu.h"     //cu

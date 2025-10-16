@@ -35,11 +35,10 @@
 #include <shared_mutex>
 #include <unordered_map>
 
-#include "storage/innobase/include/buf0buf.h"
+#include "storage/innobase/include/buf0buf.h"  // buf_block_t
 #include "storage/innobase/include/log0types.h"
-#include "storage/innobase/include/mtr0types.h"
+#include "storage/innobase/include/mtr0types.h"  //mlog_id_t
 #include "storage/innobase/include/trx0types.h"
-#include "storage/innobase/include/univ.i"
 
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
