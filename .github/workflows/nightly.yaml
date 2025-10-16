@@ -1,3 +1,20 @@
+# Workflow: Nightly ShannonBase Compile & MTR
+# Purpose: Builds and tests ShannonBase (MySQL-based project) on x86 and ARM architectures
+# Triggers:
+#   - Push to tags matching "*v*" (e.g., version tags like v1.0.0)
+#   - Daily at 1:30 AM Beijing time (UTC+8, equivalent to 5:30 PM UTC previous day)
+#   - Manual dispatch via workflow_dispatch
+# Jobs:
+#   - lint: Checks code formatting for storage/rapid_engine and ml directories
+#   - build_x86: Builds and runs selected MTR tests on x86 architecture
+#   - build_arm: Builds and runs selected MTR tests on ARM architecture with skip-test list
+# Notes:
+#   - Uses concurrency to cancel in-progress runs for the same workflow/ref
+#   - Includes disk space optimizations to prevent 'No space left on device' errors
+#   - Commented-out alternative test commands (collections/default.push, default.daily) for future use with faster runners
+#   - lint job may fail on non-PR events due to pull_request-specific variables; needs adjustment for tag push and schedule triggers
+#
+#    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
 name: nightly
 
 on:
@@ -18,24 +35,19 @@ defaults:
 jobs:
   lint:
     name: lint
-    # if: ${{ contains(github.event.pull_request.labels.*.name, 'ready-for-testing') && github.event.pull_request.merged != true }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
-      - uses: actions/checkout@v4
-        with:
-          clean: false
-      # - name: Check License Header
-      #   uses: apache/skywalking-eyes/header@main 
+          fetch-depth: 0
       - name: Ensure clang-format is available
         run: |
           command -v clang-format-14 > /dev/null || (sudo apt-get update && sudo apt-get install -y clang-format-14)
       - name: Format check
         run: |
           git diff -U0 --no-color ${{ github.event.pull_request.base.sha }} HEAD storage/rapid_engine ml | /usr/share/clang/clang-format-14/clang-format-diff.py -p1 | tee /tmp/.clang-format-diff
-          [ -s /tmp/.clang-format-diff ] && exit 1 || true 
+          [ -s /tmp/.clang-format-diff ] && exit 1 || true
+
   # x86
   build_x86:
     needs: lint
@@ -47,8 +59,7 @@ jobs:
         fetch-depth: 0    
     - name: Clean old build cache
       run: |
-        cd ${{ github.workspace }}
-        rm -rf cmake_build
+        rm -rf ${{ github.workspace }}/cmake_build
     - name: install_lib
       run: |
         sudo apt install -y libtirpc-dev && sudo apt install -y libboost-all-dev libexpect-perl
@@ -73,23 +84,26 @@ jobs:
         -DWITH_PROTOBUF=bundled \
         -DWITH_UNIT_TESTS=OFF \
         -DWITH_HYPERGRAPH_OPTIMIZER=ON \
-        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j$(nproc) && \
-        sudo make install
+        -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
+        make -j"$(nproc)" && sudo make install
+        sudo find /home/shannon-bin/bin -type f -executable -exec strip --strip-unneeded {} \; || true
     - name: clean_up_shannonbase_build
       run: |
-        sudo find ${{ github.workspace }} -mindepth 1 -delete
+        sudo rm -rf ${{ github.workspace }}/*
         sudo apt-get clean -y
         sudo apt-get autoremove -y --purge
         sudo rm -rf /var/lib/apt/lists/*
+        sudo rm -rf /var/log/* /var/cache/*
         sudo rm -rf /tmp/* /var/tmp/*
         sudo rm -rf ~/.cache/* ~/.npm/* ~/.gem/*
+        sudo rm -rf /home/runner/.cache/* /home/runner/.docker/*
     - name: run_mtr_test
       run: |
         sudo mkdir -p /home/shannon-bin/log
         sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
-        ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,funcs_2,information_schema,sys_vars,opt_trace,ml \
+        ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_ndb,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,information_schema,sys_vars,opt_trace,ml \
         --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         #sudo chmod +x ./collections/default.push && ./collections/default.daily
@@ -104,8 +118,7 @@ jobs:
           fetch-depth: 0
       - name: Clean old build cache
         run: |
-          cd ${{ github.workspace }}
-          rm -rf cmake_build
+          rm -rf ${{ github.workspace }}/cmake_build
       - name: Install ARM dependencies
         run: |
           sudo apt install -y libtirpc-dev libboost-all-dev libjson-perl libexpect-perl
@@ -132,16 +145,19 @@ jobs:
           -DWITH_HYPERGRAPH_OPTIMIZER=ON \
           -DCMAKE_C_FLAGS="-march=armv8-a -O2" \
           -DCMAKE_CXX_FLAGS="-march=armv8-a -O2" \
-          -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V." && make -j$(nproc) && \
-          sudo make install
+          -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
+          make -j"$(nproc)" && sudo make install
+          sudo find /home/shannon-bin/bin -type f -executable -exec strip --strip-unneeded {} \; || true
       - name: Clean up build
         run: |
-          sudo find ${{ github.workspace }} -mindepth 1 -delete
+          sudo rm -rf ${{ github.workspace }}/*
           sudo apt-get clean -y
           sudo apt-get autoremove -y --purge
           sudo rm -rf /var/lib/apt/lists/*
+          sudo rm -rf /var/log/* /var/cache/*
           sudo rm -rf /tmp/* /var/tmp/*
-          sudo rm -rf ~/.cache/* ~/.npm/* ~/.gem/*        
+          sudo rm -rf ~/.cache/* ~/.npm/* ~/.gem/*
+          sudo rm -rf /home/runner/.cache/* /home/runner/.docker/*
       - name: Run MTR tests (ARM)
         run: |
           sudo mkdir -p /home/shannon-bin/log
