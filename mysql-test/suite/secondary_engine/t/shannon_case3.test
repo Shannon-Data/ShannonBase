@@ -40,7 +40,7 @@ insert into tt1 values(10, 'n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1n1
                          (30, 'n3', 3, 'm');
 
 
---sleep 1
+--sleep 10
 select *, length(name), length(content) from tt1 order by id;
 
 drop table tt1;

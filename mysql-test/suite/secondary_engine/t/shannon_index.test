@@ -62,7 +62,7 @@ INSERT INTO employees (id, name, department, salary) VALUES
 (1004, 'David', 'Engineering', 9000.00),
 (1005, 'Eve', 'HR', 6500.00);
 
---SLEEP 1
+--SLEEP 10
 
 EXPLAIN SELECT * FROM employees order by id;
 SELECT * FROM employees order by id;
@@ -177,7 +177,7 @@ SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering'
 insert into employees values(1006, 'PPT', 'Sales', 4530.32);
 insert into employees values(1007, 'TPP', 'Sales', 5430.32);
 
---sleep 2
+--sleep 10
 
 --connection connection_1
 --echo [conn1]

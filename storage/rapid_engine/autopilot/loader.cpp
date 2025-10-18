@@ -55,7 +55,7 @@ mysql_pfs_key_t rapid_self_load_thread_key;
 namespace ShannonBase {
 namespace Populate {
 extern std::shared_mutex g_processing_table_mutex;
-extern std::set<std::string> g_processing_tables;
+extern std::multiset<std::string> g_processing_tables;
 }  // namespace Populate
 extern bool rpd_self_load_enabled;
 extern ulonglong rpd_self_load_interval_seconds;  // default 24hurs

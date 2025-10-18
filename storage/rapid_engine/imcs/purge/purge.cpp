@@ -62,7 +62,7 @@ extern ulonglong rpd_max_purger_timeout;
 
 namespace Populate {
 extern std::shared_mutex g_processing_table_mutex;
-extern std::set<std::string> g_processing_tables;
+extern std::multiset<std::string> g_processing_tables;
 }  // namespace Populate
 namespace Purge {
 std::atomic<purge_state_t> Purger::m_state{purge_state_t::PURGE_STATE_EXIT};

@@ -51,7 +51,8 @@
 
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
-#include "storage/rapid_engine/populate/log_parser.h"
+#include "storage/rapid_engine/populate/log_copyinfo.h"
+#include "storage/rapid_engine/populate/log_redolog.h"
 
 #ifdef UNIV_PFS_THREAD
 mysql_pfs_key_t rapid_populate_thread_key;
@@ -59,10 +60,13 @@ mysql_pfs_key_t rapid_populate_thread_key;
 
 namespace ShannonBase {
 namespace Populate {
+// to identify synchonization mode.
+std::atomic<SyncMode> g_sync_mode{SyncMode::REDO_LOG_PARSE};
+
 // should be pay more attention to syc relation between this thread
 // and log_buffer write. if we stop changes poping, should stop writing
 // firstly, then stop this thread.
-std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
+std::unordered_map<uint64_t, change_record_buff_t> sys_pop_buff;
 
 std::atomic<bool> sys_pop_started{false};
 // how many data was in sys_pop_buff?
@@ -70,7 +74,7 @@ std::atomic<uint64> sys_pop_data_sz{0};
 static uint64 sys_rapid_loop_count{0};
 
 /**
- * return lsn_t, key of processing mtr_log_rec_t.
+ * return lsn_t, key of processing mtr_log_rec_t. Parse the log comes from redo log records.
  */
 static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, const byte *end, size_t sz) {
   THD *log_pop_thread_thd{nullptr};
@@ -103,6 +107,39 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
   return (parsed_bytes == sz) ? start_lsn : 0;
 }
 
+/**
+ * return lsn_t, key of processing mtr_log_rec_t. Parse the log comes from COPY_INFO records.
+ */
+static uint64_t parse_copy_info_record_worker(uint64_t start_lsn, const byte *start, const byte *end, size_t sz) {
+  THD *log_pop_thread_thd{nullptr};
+  if (current_thd == nullptr) {
+    my_thread_init();
+    log_pop_thread_thd = create_internal_thd();
+    if (!log_pop_thread_thd) {
+      my_thread_end();
+      return start_lsn;
+    }
+  }
+
+#if !defined(_WIN32)  // here we
+  pthread_setname_np(pthread_self(), "rapid_copy_info_wkr");
+#else
+  SetThreadDescription(GetCurrentThread(), L"rapid_copy_info_wkr");
+#endif
+  SHANNON_THREAD_LOCAL CopyInfoParser copy_info_log;
+  SHANNON_THREAD_LOCAL Rapid_load_context context;
+
+  auto parsed_bytes = copy_info_log.parse_copy_info(&context, const_cast<byte *>(start), const_cast<byte *>(end));
+  ut_a(parsed_bytes == sz);
+
+  if (log_pop_thread_thd) {
+    my_thread_end();
+    destroy_internal_thd(log_pop_thread_thd);
+    log_pop_thread_thd = nullptr;
+  }
+
+  return (parsed_bytes == sz) ? start_lsn : 0;
+}
 /**
  * main entry of pop thread. it monitors sys_pop_buff, a new mtr_log_rect_t
  * is coming, then it starts a new worker to dealing with this mtr_log_rec_t.
@@ -148,12 +185,20 @@ static void parse_log_func_main(log_t *log_ptr) {
     thread_num = (thread_num >= sys_pop_buff.size()) ? sys_pop_buff.size() : thread_num;
     auto curr_iter = sys_pop_buff.begin();
     for (size_t counter = 0; counter < thread_num; counter++) {
-      byte *from_ptr = curr_iter->second.data.get();
-      auto size = curr_iter->second.size;
+      auto come_from = curr_iter->second.m_source;
+      byte *from_ptr = curr_iter->second.m_buff0.get();
+      auto size = curr_iter->second.m_size;
 
       // using std thread, not IB_thread, ib_thread has not interface to thread func ret.
-      results.emplace_back(
-          std::async(std::launch::async, parse_mtr_log_worker, curr_iter->first, from_ptr, from_ptr + size, size));
+      if (come_from == ShannonBase::Populate::Source::REDO_LOG)
+        results.emplace_back(
+            std::async(std::launch::async, parse_mtr_log_worker, curr_iter->first, from_ptr, from_ptr + size, size));
+      else if (come_from == ShannonBase::Populate::Source::COPY_INFO)
+        results.emplace_back(std::async(std::launch::async, parse_copy_info_record_worker, curr_iter->first, from_ptr,
+                                        from_ptr + size, size));
+      else
+        assert(false);
+
       curr_iter++;
       if (curr_iter == sys_pop_buff.end()) break;
     }
@@ -171,7 +216,7 @@ static void parse_log_func_main(log_t *log_ptr) {
       mutex_enter(&log_sys->rapid_populator_mutex);
       auto iter = sys_pop_buff.find(ret_lsn);
       if (iter != sys_pop_buff.end()) {
-        sys_pop_data_sz.fetch_sub(iter->second.size);
+        sys_pop_data_sz.fetch_sub(iter->second.m_size);
         sys_pop_buff.erase(ret_lsn);
       }
       mutex_exit(&log_sys->rapid_populator_mutex);
@@ -183,14 +228,14 @@ static void parse_log_func_main(log_t *log_ptr) {
   sys_pop_started.store(false, std::memory_order_seq_cst);
 }
 
-std::unique_ptr<Populator::Impl> Populator::impl_ = nullptr;
+std::unique_ptr<Populator::Impl> Populator::m_impl = nullptr;
 
 std::unique_ptr<Populator::Impl> &Populator::get_impl() {
-  if (!impl_) {
+  if (!m_impl) {
     // Lazy initialization
-    impl_ = std::make_unique<PopulatorImpl>();
+    m_impl = std::make_unique<PopulatorImpl>();
   }
-  return impl_;
+  return m_impl;
 }
 
 /**
@@ -207,6 +252,13 @@ void Populator::start() { get_impl()->start_impl(); }
  * To stop log pop main thread.
  */
 void Populator::end() { get_impl()->end_impl(); }
+
+/**
+ * write log buffer to remote.
+ */
+uint Populator::write(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec) {
+  return get_impl()->write_impl(file, start_lsn, changed_rec);
+}
 
 /**
  * To print thread infos.
@@ -245,9 +297,24 @@ void PopulatorImpl::end_impl() {
 
     g_index_cache.clear();
     g_index_names.clear();
+    g_processing_tables.clear();
 
+    sys_pop_buff.clear();
     ut_a(active_impl() == false);
   }
+}
+
+uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec) {
+  if (!active_impl() || !shannon_loaded_tables->size()) return ShannonBase::SHANNON_SUCCESS;
+
+  if (!file) {  // means to sys pop buffer, otherwise to remote addr.
+    auto rec_sz = changed_rec->m_size;
+    sys_pop_buff.emplace(start_lsn, std::move(*changed_rec));
+    sys_pop_data_sz.fetch_add(rec_sz);
+  } else {  // write to remote addr via network.
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
 }
 
 int PopulatorImpl::load_indexes_caches_impl() {
@@ -333,6 +400,12 @@ void PopulatorImpl::print_info_impl(FILE *file) { /* in: output stream */
           ShannonBase::Populate::sys_pop_started ? "running" : "stopped", ShannonBase::Populate::sys_rapid_loop_count,
           ShannonBase::Populate::sys_pop_data_sz / 1024, ShannonBase::Populate::sys_pop_buff.size());
 }
+
+bool PopulatorImpl::is_loaded_table_impl(std::string sch_name, std::string table_name) {
+  auto share = ShannonBase::shannon_loaded_tables->get(sch_name.c_str(), table_name.c_str());
+  return (share) ? true : false;
+}
+
 bool PopulatorImpl::check_status_impl(std::string &table_name) {
   std::shared_lock<std::shared_mutex> lk(g_processing_table_mutex);
   return (g_processing_tables.find(table_name) != g_processing_tables.end()) ? true : false;

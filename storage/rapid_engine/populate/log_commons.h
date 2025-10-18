@@ -27,6 +27,77 @@
    The fundmental code for imcs. Interface of Log of Rapid.
 */
 
+/*********************************************************************************************************************
+ *
+ * The current system employs two synchronization mechanisms to propagate data changes from InnoDB to the Rapid engine:
+ *
+ * (1) Real-time synchronization via Notification Hooks.
+ * After a user executes a DML operation (such as INSERT, UPDATE, or DELETE), the system triggers registered
+ * Notification Hooks to notify each storage engine to perform corresponding actions. For example:
+ *
+ *     shannon_rapid_hton->notify_create_table = NotifyCreateTable;
+ *     shannon_rapid_hton->notify_after_insert = NotifyAfterInsert;
+ *     shannon_rapid_hton->notify_after_update = NotifyAfterUpdate;
+ *     shannon_rapid_hton->notify_after_delete = NotifyAfterDelete;
+ *
+ *
+ * This approach does not require redo log parsing. Instead, it analyzes records directly through COPY_INFO, allowing it
+ * to capture DML behavior instantly and synchronize changes to the Rapid engine efficiently. It provides excellent
+ * real-time performance with relatively simple implementation.
+ *
+ * (2) Asynchronous synchronization via Redo Logs.(LogParser)
+ * After a user transaction is committed, the system writes Mini Transaction Records (MTRs) into the buffer and then
+ * parses the redo logs to apply corresponding row-store changes to the Rapid engine. Although more complex, this
+ * approach offers higher extensibility and serves as the foundation for implementing a storage-compute separation
+ * architecture, similar to the core design of AWS Aurora’s cloud-native engine.
+ *
+ * Considering both performance and future evolution, the system uses the Notification Hook mechanism as the default
+ * synchronization path, while retaining the redo log–based mechanism to support future ShannonBase advancements toward
+ * a cloud-native and distributed architecture.
+ *
+ *     ┌─────────────────────────────────────────────────────────┐
+ *     │                    MySQL/InnoDB                         │
+ *     │  ┌──────────┐      ┌──────────┐      ┌──────────┐       │
+ *     │  │  INSERT  │      │  UPDATE  │      │  DELETE  │       │
+ *     │  └────┬─────┘      └────┬─────┘      └────┬─────┘       │
+ *     │       │                 │                  │            │
+ *     │       ├─────────────────┼──────────────────┤            │
+ *     │       │ (Hook Point)    │                  │            │
+ *     │       ▼                 ▼                  ▼            │
+ *     │ ....................................................... |
+ *     | . ┌──────────────────────┐            ┌────────────┐  . │
+ *     │ . │ xxx_hton->notify_xxx │            |  redo log  |  . │
+ *     │ . └─────────────────┬────┘            └─────|──────┘  . │
+ *     | ....................................................... |
+ *     └──────────────┼───────────────────────|──────────────────┘
+ *                    │                       |
+ *          ┌─────────┴───────────────────────┴──────────┐
+ *     way1: directly │                       │ way2: Redo Log
+ *        (realtime)  │                       │  （decoupled ）
+ *       low lentency ▼                       ▼    architect
+ *          ┌─────────────┐               ┌─────────────┐
+ *          │DirectCapture│               │   RedoLog   │
+ *          │   Handler   │               │   Handler   │
+ *          └─────┬───────┘               └──────┬──────┘
+ *                │                              │
+ *                └───────────────┬──────────────┘
+ *                                ▼
+ *                      ┌────────────────┐
+ *                      │ UnifiedChange  │
+ *                      │    Buffer      │
+ *                      └────────┬───────┘
+ *                               ▼
+ *                      ┌────────────────┐
+ *                      │   Processing   │
+ *                      │     Thread     │
+ *                      └────────┬───────┘
+ *                               ▼
+ *                      ┌────────────────┐
+ *                      │  Rapid Engine  │
+ *                      │     (IMCS)     │
+ *                      └────────────────┘
+ *
+ *******************************************************************************************************************/
 #ifndef __SHANNONBASE_LOG_COMMONS_H__
 #define __SHANNONBASE_LOG_COMMONS_H__
 
@@ -36,53 +107,85 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <shared_mutex>
 
 #include "my_inttypes.h"
+#include "storage/rapid_engine/include/rapid_const.h"  // SHANNON_ALIGNAS
 
 namespace ShannonBase {
 namespace Populate {
-/**
- * key, (uint64_t)lsn_t, start lsn of this mtr record. a mtr_log_rec is consisted of
- * serveral mlog records. Taking ISNERT as an instance, an insert operation is
- * leading by a MLOG_REC_INSERT mlog record, then a serials mlog records. if it's a
- * multi-record. And ending with a end type MLOG. In fact, a mtr_log_rec is a transaction
- * opers.
- * for populate the changes to rapid. we copy all DML opers mlog record into mtr_log_rec_t
- * when transaction commits. `mtr_t::Command::execute`. After that cp all mtr_log_rec_t to
- * sys_pop_buff.
- */
-typedef struct mtr_log_rec_t {
-  std::unique_ptr<uchar[]> data;
-  size_t size;
+enum class SyncMode : uint8 {
+  DIRECT_NOTIFICATION = 0,  // notification-based
+  REDO_LOG_PARSE,           // redo-log based
+  HYBRID                    // hybrid mode.
+};
 
-  mtr_log_rec_t(size_t s) : data(std::make_unique<uchar[]>(s)), size(s) {}
+// to identify synchonization mode.
+extern std::atomic<SyncMode> g_sync_mode;
 
-  mtr_log_rec_t(mtr_log_rec_t &&other) noexcept : data(std::move(other.data)), size(other.size) { other.size = 0; }
+// running flag of pop thread.
+extern std::atomic<bool> sys_pop_started;
 
-  mtr_log_rec_t &operator=(mtr_log_rec_t &&other) noexcept {
+enum class Source : uint8 {
+  UN_KNOWN = 0,
+  REDO_LOG, /** come from redo log, mtr records */
+  COPY_INFO /** come from direct capture in sql COPY_INFO */
+};
+
+// it's an iterterface struct to store all the info of changed data. such as where it comes from
+// data and its length, etc.
+typedef struct SHANNON_ALIGNAS change_record_buff_t {
+  // the changed records come from where.
+  Source m_source;
+
+  // the changed record buffer. IF SOURCE FROM REDO, IT ONLY USE `m_buff0`, OTHERWISE, FROM
+  // COPY_INFO, THE `m_buff1`, `m_schema_name` AND `m_table_name` MAYBE USED, AND `m_oper` IS SET.
+  std::unique_ptr<uchar[]> m_buff0;
+
+  // size of the records;
+  size_t m_size;
+
+  // oper type is used for which log comes from COPY_INFO, in REDO_LOG we dont set the oper type.
+  // is set in redo log parsing stage.
+  enum class OperType : uint8 { UNSET = 0, INSERT, DELETE, UPDATE } m_oper{OperType::UNSET};
+  std::string m_schema_name, m_table_name;
+  std::unique_ptr<uchar[]> m_buff1;
+
+  change_record_buff_t(Source sc, size_t s)
+      : m_source(sc), m_buff0(std::make_unique<uchar[]>(s)), m_size(s), m_buff1(std::make_unique<uchar[]>(s)) {}
+
+  change_record_buff_t(change_record_buff_t &&other) noexcept
+      : m_source(other.m_source),
+        m_buff0(std::move(other.m_buff0)),
+        m_size(other.m_size),
+        m_schema_name(std::move(other.m_schema_name)),
+        m_table_name(std::move(other.m_table_name)),
+        m_buff1(std::move(other.m_buff1)) {
+    other.m_size = 0;
+  }
+
+  change_record_buff_t &operator=(change_record_buff_t &&other) noexcept {
     if (this != &other) {
-      data = std::move(other.data);
-      size = other.size;
-      other.size = 0;
+      m_source = other.m_source;
+      m_buff0 = std::move(other.m_buff0);
+      m_buff1 = std::move(other.m_buff1);
+      m_size = other.m_size;
+      m_schema_name = std::move(other.m_schema_name);
+      m_table_name = std::move(other.m_table_name);
+
+      other.m_source = Source::UN_KNOWN;
+      other.m_size = 0;
     }
     return *this;
   }
 
   // Deleted copy constructor and copy assignment operator to prevent copying
-  mtr_log_rec_t(const mtr_log_rec_t &) = delete;
-  mtr_log_rec_t &operator=(const mtr_log_rec_t &) = delete;
+  change_record_buff_t(const change_record_buff_t &) = delete;
+  change_record_buff_t &operator=(const change_record_buff_t &) = delete;
 
-  ~mtr_log_rec_t() {}
-} mtr_log_rec;
-
-extern std::unordered_map<uint64_t, mtr_log_rec> sys_pop_buff;
-extern std::shared_mutex g_processing_table_mutex;
-extern std::set<std::string> g_processing_tables;
-// pop change buffer size.
-extern std::atomic<uint64> sys_pop_data_sz;
-// flag of pop change thread. true is running, set to false to stop
-extern std::atomic<bool> sys_pop_started;
+  ~change_record_buff_t() {}
+} change_record_buff;
 
 class Populator {
  public:
@@ -102,9 +205,22 @@ class Populator {
   static void end();
 
   /**
+   * Send the log buffer to system pop buffer via any type of connection.
+   * Such as file handler or socket handler, ect.
+   */
+  static uint write(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec);
+
+  /**
    * To print thread infos.
    */
   static void print_info(FILE *file);
+
+  /**
+   * To test whether the table is loaded or not.
+   */
+  static inline bool is_loaded_table(std::string sch_name, std::string table_name) {
+    return get_impl()->is_loaded_table_impl(sch_name, table_name);
+  }
 
   /**
    * To check whether the specific table are still do populating.
@@ -144,10 +260,20 @@ class Populator {
     virtual void end_impl() = 0;
 
     /**
+     * Send the log buffer to system pop buffer via any type of connection.
+     * Such as file handler or socket handler, ect.
+     */
+    virtual uint write_impl(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec) = 0;
+
+    /**
      * To print thread infos.
      */
     virtual void print_info_impl(FILE *file) = 0;
 
+    /**
+     * To test table is loaded or not.
+     */
+    virtual bool is_loaded_table_impl(std::string sch_name, std::string table_name) = 0;
     /**
      * To send notify to populator main thread to start do propagation.
      */
@@ -173,8 +299,9 @@ class Populator {
   ~Populator() = delete;
 
  private:
-  static std::unique_ptr<Populator::Impl> impl_;
+  static std::unique_ptr<Populator::Impl> m_impl;
 };
+
 }  // namespace Populate
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_LOG_COMMONS_H__

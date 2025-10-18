@@ -81,6 +81,6 @@ table_map GetImmediateDeleteTables(const JOIN *join, table_map delete_tables);
 /// clause.
 bool CheckSqlSafeUpdate(THD *thd, const JOIN *join);
 
-void notify_plugins_after_delete(THD *thd, TABLE *table);
+void notify_plugins_after_delete(THD *thd, TABLE *table, const uchar *old_rec);
 
 #endif /* SQL_DELETE_INCLUDED */

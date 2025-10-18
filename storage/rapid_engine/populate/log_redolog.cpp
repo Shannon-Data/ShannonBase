@@ -31,7 +31,7 @@
    proc should be also changed correspondingly.
 */
 
-#include "storage/rapid_engine/populate/log_parser.h"
+#include "storage/rapid_engine/populate/log_redolog.h"
 #include <algorithm>
 #include <set>
 
@@ -55,7 +55,6 @@
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/table.h"             //RapidTable
 #include "storage/rapid_engine/include/rapid_context.h"  //Rapid_load_context
-#include "storage/rapid_engine/include/rapid_status.h"   //LoaedTables
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -68,7 +67,7 @@ std::unordered_map<uint64, const dict_index_t *> g_index_cache;
 // to find out the rapid table is updated or not. If tables in query statement are still in do populating, then query
 // should go to innnodb or go to rapid.
 std::shared_mutex g_processing_table_mutex;
-std::set<std::string> g_processing_tables;
+std::multiset<std::string> g_processing_tables;
 
 // if using dict_index_t->table->get_table_name, it seems to slow, using cache
 // to accelerate it.
@@ -83,6 +82,15 @@ std::unordered_map<std::string, SYS_FIELD_TYPE_ID> current_sys_field_map = {
 alignas(CACHE_LINE_SIZE) SHANNON_THREAD_LOCAL uchar LogParser::mysql_field_data_1[MAX_FIELD_WIDTH] = {0};
 
 ShannonBase::Utils::SimpleRatioAdjuster LogParser::m_adaptive_ratio(0.3);
+
+static inline bool is_system_tablespace(space_id_t space_id) {
+  auto is_sys_space = (space_id == 0) ? true : false;
+  auto is_dict = (space_id == dict_sys_t::s_dict_space_id) ? true : false;
+  auto is_sys_temp =
+      fsp_is_global_temporary(space_id) || fsp_is_session_temporary(space_id) || fsp_is_system_temporary(space_id);
+  auto is_undo = fsp_is_undo_tablespace(space_id);
+  return is_sys_space || is_dict || is_sys_temp || is_undo;
+}
 
 uint LogParser::get_trxid(const rec_t *rec, const dict_index_t *index, const ulint *offsets, uchar *trx_id) {
   uint pk_len{0};
@@ -112,29 +120,6 @@ uint LogParser::get_trxid(const rec_t *rec, const dict_index_t *index, const uli
   }
 
   return pk_len;
-}
-
-buf_block_t *LogParser::get_block(space_id_t space_id, page_no_t page_no) {
-  buf_block_t *block{nullptr};
-  const page_id_t page_id(space_id, page_no);
-  bool found;
-  const page_size_t page_size = fil_space_get_page_size(space_id, &found);
-  if (found && buf_page_peek(page_id)) {
-    mtr_t mtr_p;
-    mtr_start(&mtr_p);
-    block = buf_page_get_gen(page_id, page_size, RW_SX_LATCH, nullptr, Page_fetch::POSSIBLY_FREED, UT_LOCATION_HERE,
-                             &mtr_p);
-    mtr_commit(&mtr_p);
-  }
-  return block;
-}
-
-bool LogParser::is_data_rec(rec_t *rec) {
-  auto status = rec_get_status(rec);
-  if (status == REC_STATUS_ORDINARY || status == REC_STATUS_INFIMUM || status == REC_STATUS_SUPREMUM)
-    return true;
-  else
-    return false;
 }
 
 bool LogParser::check_key_field(std::unordered_map<std::string, ShannonBase::key_meta_t> &keys,
@@ -951,6 +936,8 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
 
   ut_a(offset <= UNIV_PAGE_SIZE);
 
+  if (index->table->is_system_schema()) return (ptr);
+
   if (page) {
     auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
     const dict_index_t *real_tb_index = find_index(index_id, context->m_schema_name, context->m_table_name);
@@ -968,17 +955,24 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
       rec_offs_init(offsets_);
       context->m_extra_info.m_trxid = trx_id;
 
-      // get field length from rapid
-      auto share = ShannonBase::shannon_loaded_tables->get(context->m_schema_name, context->m_table_name);
-      if (share) {
-        /**
-         * If all rows were deleted from a page, and those were not used by any other transaction.
-         * This page will be purged, otherwise, it's there.
-         */
-        auto all = (page[PAGE_HEADER + PAGE_N_HEAP + 1] == PAGE_HEAP_NO_USER_LOW) ? true : false;
-        auto offsets = rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
-        parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
-                                       nullptr, trx_id);
+      /**
+       * If all rows were deleted from a page, and those were not used by any other transaction.
+       * This page will be purged, otherwise, it's there.
+       */
+      auto all = (page[PAGE_HEADER + PAGE_N_HEAP + 1] == PAGE_HEAP_NO_USER_LOW) ? true : false;
+      auto offsets = rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
+      {
+        std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+        g_processing_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
+      }
+      parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
+                                     nullptr, trx_id);
+      {
+        std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+        auto it = g_processing_tables.find(context->m_schema_name + "/" + context->m_table_name);
+        if (it != g_processing_tables.end()) {
+          g_processing_tables.erase(it);
+        }
       }
       if (UNIV_LIKELY_NULL(heap)) {
         mem_heap_free(heap);
@@ -1008,6 +1002,8 @@ byte *LogParser::parse_cur_and_apply_delete_rec(Rapid_load_context *context, byt
 
   ut_a(offset <= UNIV_PAGE_SIZE);
 
+  if (index->table->is_system_schema()) return (ptr);
+
   if (block) {
     // may the page in this block not used by any one, it could be evicted.???
     page_t *page = ((buf_frame_t *)block->frame);
@@ -1017,24 +1013,32 @@ byte *LogParser::parse_cur_and_apply_delete_rec(Rapid_load_context *context, byt
     ulint offsets_[REC_OFFS_NORMAL_SIZE];
     rec_t *rec = page + offset;
     rec_offs_init(offsets_);
-    if (page) {
-      auto context = std::make_unique<ShannonBase::Rapid_load_context>();
 
+    if (page) {
       auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
       const dict_index_t *real_tb_index = find_index(index_id, context->m_schema_name, context->m_table_name);
-      assert(real_tb_index);
-      auto share = ShannonBase::shannon_loaded_tables->get(context->m_schema_name, context->m_table_name);
-      if (share) {  // was not loaded table and not leaf
+      if (real_tb_index) {  // was not loaded table and not leaf
         /**
          * If all rows were deleted from a page, and those were not used by any other transaction.
          * This page will be purged, otherwise, it's there.
          */
         auto all = (page[PAGE_HEADER + PAGE_N_HEAP + 1] == PAGE_HEAP_NO_USER_LOW) ? true : false;
         auto offsets = rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
-        parse_cur_rec_change_apply_low(context.get(), rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
+        {
+          std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+          g_processing_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
+        }
+        parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
                                        nullptr);
-      }  // share
-    }    // page
+        {
+          std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+          auto it = g_processing_tables.find(context->m_schema_name + "/" + context->m_table_name);
+          if (it != g_processing_tables.end()) {
+            g_processing_tables.erase(it);
+          }
+        }
+      }
+    }
 
     if (UNIV_LIKELY_NULL(heap)) {
       mem_heap_free(heap);
@@ -1133,7 +1137,8 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
   /**real_b_index 0 means it's system dict table, otherwise, users. or the record status is
    * NOT REC_STATUS_ORDINARY, means it can be leave nodes. dict_index_is_spatial(index) not support. */
   std::string db_name, tb_name;
-  real_tb_index = page ? find_index(mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID), db_name, tb_name) : nullptr;
+  auto index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
+  real_tb_index = page ? find_index(index_id, db_name, tb_name) : nullptr;
   if (!block || !real_tb_index || !is_data_rec(cursor_rec)) {
     return (const_cast<byte *>(ptr + (end_seg_len >> 1)));
   }
@@ -1184,16 +1189,24 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
   offsets = rec_get_offsets(buf + origin_offset, index, offsets, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
 
   {
+    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+    g_processing_tables.emplace(db_name + "/" + tb_name);
+  }
+
+  {
     auto context = std::make_unique<Rapid_load_context>();
     context->m_schema_name = db_name;
     context->m_table_name = tb_name;
-    // get field length from rapid
-    auto share = ShannonBase::shannon_loaded_tables->get(context->m_schema_name, context->m_table_name);
-    if (!share)  // was not loaded table, return
-      goto finish;
-
     parse_cur_rec_change_apply_low(context.get(), buf + origin_offset, index, real_tb_index, offsets, MLOG_REC_INSERT,
                                    false, page_zip);
+  }
+
+  {
+    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+    auto it = g_processing_tables.find(db_name + "/" + tb_name);
+    if (it != g_processing_tables.end()) {
+      g_processing_tables.erase(it);
+    }
   }
 finish:
   if (buf != buf1) {
@@ -1219,9 +1232,19 @@ byte *LogParser::parse_and_apply_upd_rec_in_place(
     trx_id_t trx_id) {
   ut_ad(rec_offs_validate(rec, index, offsets));
   ut_ad(!index->table->skip_alter_undo);
+  {
+    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+    g_processing_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
+  }
   auto ret = parse_cur_rec_change_apply_low(context, rec, index, real_index, offsets, MLOG_REC_UPDATE_IN_PLACE, false,
                                             page_zip, update, trx_id);
-
+  {
+    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
+    auto it = g_processing_tables.find(context->m_schema_name + "/" + context->m_table_name);
+    if (it != g_processing_tables.end()) {
+      g_processing_tables.erase(it);
+    }
+  }
   /*now, we dont want to support zipped page now. how to deal with pls ref to:
     page_zip_write_rec(page_zip, rec, index, offsets, 0); */
   if (ret) return nullptr;
@@ -1277,6 +1300,8 @@ byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context
     goto func_exit;
   }
 
+  if (index->table->is_system_schema()) goto func_exit;
+
   index_id = mach_read_from_8(page + PAGE_HEADER + PAGE_INDEX_ID);
   tb_index = find_index(index_id, db_name, tb_name);
   if (!tb_index) goto func_exit;
@@ -1290,19 +1315,13 @@ byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context
     */
   }
 
-  if (tb_index) {
-    auto context = std::make_unique<Rapid_load_context>();
-    context->m_extra_info.m_trxid = trx_id;
-    context->m_schema_name = db_name;
-    context->m_table_name = tb_name;
+  context->m_extra_info.m_trxid = trx_id;
+  context->m_schema_name = db_name;
+  context->m_table_name = tb_name;
 
-    // get field length from rapid
-    auto share = ShannonBase::shannon_loaded_tables->get(context->m_schema_name, context->m_table_name);
-    if (share) {  // was not loaded table, return
-      offsets = rec_get_offsets(rec, index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
-      parse_and_apply_upd_rec_in_place(context.get(), rec, index, tb_index, offsets, update, page_zip, trx_id);
-    }
-  }
+  // get field length from rapid
+  offsets = rec_get_offsets(rec, index, nullptr, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
+  parse_and_apply_upd_rec_in_place(context, rec, index, tb_index, offsets, update, page_zip, trx_id);
 func_exit:
   mem_heap_free(heap);
 
@@ -1456,6 +1475,42 @@ byte *LogParser::parse_page_header(mlog_id_t type, const byte *ptr, const byte *
   return (const_cast<byte *>(ptr));
 }
 
+byte *LogParser::advance_mlog_parse_nbytes(mlog_id_t type,      /*!< in: log record type: MLOG_1BYTE, ... */
+                                           const byte *ptr,     /*!< in: buffer */
+                                           const byte *end_ptr, /*!< in: buffer end */
+                                           byte *page,          /*!< in: page where to apply the log
+                                                                record, or NULL */
+                                           void *page_zip)      /*!< in/out: compressed page, or NULL */
+{
+  ulint offset;
+
+  ut_a(type <= MLOG_8BYTES);
+  ut_a(!page || !page_zip || !fil_page_index_page_check(page));
+
+  if (end_ptr < ptr + 2) {
+    return (nullptr);
+  }
+
+  offset = mach_read_from_2(ptr);
+  ptr += 2;
+
+  if (offset >= UNIV_PAGE_SIZE) {
+    return (nullptr);
+  }
+
+  if (type == MLOG_8BYTES) {
+    mach_u64_parse_compressed(&ptr, end_ptr);  // just advance the pointer.
+    return (ptr == nullptr) ? (nullptr) : const_cast<byte *>(ptr);
+  }
+
+  mach_parse_compressed(&ptr, end_ptr);
+
+  if (ptr == nullptr) {
+    return (nullptr);
+  }
+  return const_cast<byte *>(ptr);
+}
+
 byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_id_t type, byte *ptr, byte *end_ptr,
                                              space_id_t space_id, page_no_t page_no, buf_block_t *block, mtr_t *mtr,
                                              lsn_t start_lsn) {
@@ -1524,15 +1579,25 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
   page_t *page{nullptr};
   page_zip_des_t *page_zip{nullptr};
-  dict_index_t *index = nullptr;
-  [[maybe_unused]] page_type_t page_type{FIL_PAGE_TYPE_ALLOCATED};
+  dict_index_t *index{nullptr};
+  page_type_t page_type{FIL_PAGE_TYPE_ALLOCATED};
 
   /**
    * Here, the page perhaps reomved when delete all records opers delivered.
    * a blank page got. we also can get the page from mtr's memo because if we in async mode,
    * the trx may be committed or rollback, does not existed anymore.
    */
+  class BlockGuard {
+   public:
+    BlockGuard(buf_block_t *block) : m_block(block) {}
+    ~BlockGuard() {
+      if (m_block) buf_block_unfix(m_block);
+    }
+    buf_block_t *m_block;
+  };
+
   block = get_block(space_id, page_no);
+  BlockGuard block_gaurd(block);
   if (block) {  // page_no != 0;
     ut_ad(buf_page_in_file(&block->page));
 
@@ -1542,7 +1607,6 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
 
     page_zip = buf_block_get_page_zip(block);
     // TODO: make a copy of page and page_zip. after the page and page_zip parsed, free them.
-    buf_block_unfix(block);
   } else {
     DBUG_PRINT("ib_log the bloc is nullptr", ("type:%s", get_mlog_string(type)));
   }
@@ -1565,7 +1629,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
       (fil_space_t) */
 
       if (page != nullptr && page_no == 0 && mach_read_from_2(ptr) == FSP_HEADER_OFFSET + FSP_SPACE_FLAGS) {
-        ptr = const_cast<byte *>(mlog_parse_nbytes(MLOG_4BYTES, ptr, end_ptr, page, page_zip));
+        ptr = const_cast<byte *>(advance_mlog_parse_nbytes(MLOG_4BYTES, ptr, end_ptr, page, page_zip));
 
         /* When applying log, we have complete records.
         They can be incomplete (ptr=nullptr) only during
@@ -1589,7 +1653,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
         ulint offset = fsp_header_get_encryption_progress_offset(page_size_t(space->flags));
 
         if (offs == offset) {
-          ptr = const_cast<byte *>(mlog_parse_nbytes(MLOG_1BYTE, ptr, end_ptr, page, page_zip));
+          ptr = const_cast<byte *>(advance_mlog_parse_nbytes(MLOG_1BYTE, ptr, end_ptr, page, page_zip));
           // ignore the opers, just advance the pointer.
         }
         fil_space_release(space);
@@ -1600,7 +1664,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
     case MLOG_2BYTES:
     case MLOG_8BYTES:
 
-      ptr = const_cast<byte *>(mlog_parse_nbytes(type, ptr, end_ptr, nullptr, page_zip));
+      ptr = const_cast<byte *>(advance_mlog_parse_nbytes(type, ptr, end_ptr, nullptr, page_zip));
       break;
 
     case MLOG_REC_INSERT:
@@ -2059,7 +2123,7 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
   UNIV_MEM_INVALID(body, sizeof *body);
 
   if (ptr == end_ptr) {
-    return std::ptrdiff_t(end_ptr - ptr);
+    return 0;
   }
   switch (*ptr) {
 #ifdef UNIV_LOG_LSN_DEBUG
@@ -2087,7 +2151,7 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
     case MLOG_DUMMY_RECORD | MLOG_SINGLE_REC_FLAG:
       // found_corrupt_log; then, now, we skip this mlogs.
       ut_a(false);
-      return std::ptrdiff_t(end_ptr - ptr);
+      return 0;
 
     case MLOG_TABLE_DYNAMIC_META:
     case MLOG_TABLE_DYNAMIC_META | MLOG_SINGLE_REC_FLAG:
@@ -2102,21 +2166,14 @@ ulint LogParser::parse_log_rec(Rapid_load_context *context, mlog_id_t *type, byt
       if (new_ptr != nullptr) {
         new_ptr = advance_parseMetadataLog(id, version, new_ptr, end_ptr);
       }
-      return new_ptr == nullptr ? (std::ptrdiff_t(end_ptr - ptr)) /*skip it*/ : std::ptrdiff_t(new_ptr - ptr);
+
+      return new_ptr == nullptr ? 0 : new_ptr - ptr;
   }
 
   new_ptr = const_cast<byte *>(mlog_parse_initial_log_record(ptr, end_ptr, type, space_id, page_no));
-  *body = new_ptr;
-  {
-    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-    fil_space_t *space = fil_space_acquire(*space_id);
-    if (space && space->name) g_processing_tables.emplace(space->name);
-    fil_space_release(space);
-  }
 
-  if (new_ptr == nullptr) {  // skip it, go to next.
-    return (std::ptrdiff_t(end_ptr - ptr));
-  }
+  *body = new_ptr;
+  if (new_ptr == nullptr) return 0;
 
   /**
    * different with recovery, in recovery, delete[all]/drop opreation, can found the corresponding page
@@ -2137,18 +2194,12 @@ ulint LogParser::parse_single_rec(Rapid_load_context *context, byte *ptr, byte *
   /* Try to parse a log record, fetching its type, space id,
   page no, and a pointer to the body of the log record */
 
-  mlog_id_t type = MLOG_BIGGEST_TYPE;
-  byte *body;
-  page_no_t page_no = 0;
-  space_id_t space_id = 0;
+  mlog_id_t type{MLOG_BIGGEST_TYPE};
+  byte *body{nullptr};
+  page_no_t page_no{0};
+  space_id_t space_id{0};
 
   auto ret = parse_log_rec(context, &type, ptr, end_ptr, &space_id, &page_no, &body);
-  {  // the log processed done.
-    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-    fil_space_t *space = fil_space_acquire(space_id);
-    if (space && space->name) g_processing_tables.erase(space->name);
-    fil_space_release(space);
-  }
   return ret;
 }
 
@@ -2164,7 +2215,6 @@ ulint LogParser::parse_multi_rec(Rapid_load_context *context, byte *ptr, byte *e
 
     ulint len = parse_log_rec(context, &type, ptr, end_ptr, &space_id, &page_no, &body);
     if (len == 0) {
-      ut_a(false);
       return parsed_bytes;
     } else if ((*ptr & MLOG_SINGLE_REC_FLAG)) {
       ut_a(false);
@@ -2203,12 +2253,6 @@ ulint LogParser::parse_multi_rec(Rapid_load_context *context, byte *ptr, byte *e
         break;
     }
   }
-  {  // the log processed done. `fil_space_get` is not thread-safe, using `fil_space_acquire`/`fil_space_release`.
-    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-    fil_space_t *space = fil_space_acquire(space_id);
-    if (space && space->name) g_processing_tables.erase(space->name);
-    fil_space_release(space);
-  }
 
   return parsed_bytes;
 }
@@ -2221,7 +2265,7 @@ uint LogParser::parse_redo(Rapid_load_context *context, byte *ptr, byte *end_ptr
    * to data file.
    */
   if (ptr == end_ptr) {
-    return std::ptrdiff_t(end_ptr - ptr);
+    return 0;
   }
 
   bool single_rec;
@@ -2236,8 +2280,11 @@ uint LogParser::parse_redo(Rapid_load_context *context, byte *ptr, byte *end_ptr
       single_rec = !!(*ptr & MLOG_SINGLE_REC_FLAG);
   }
 
+  uint32 space_id = mach_read_from_4(ptr + 1);  // lay out[type + sapce_id + page_id.]
+  if (is_system_tablespace(space_id))           // skip it, go to next. dont parse the body.
+    return (std::ptrdiff_t(end_ptr - ptr));
+
   return (single_rec) ? parse_single_rec(context, ptr, end_ptr) : parse_multi_rec(context, ptr, end_ptr);
 }
-
 }  // namespace Populate
 }  // namespace ShannonBase
