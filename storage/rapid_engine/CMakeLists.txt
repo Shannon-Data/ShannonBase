@@ -66,8 +66,9 @@ SET(SHANNON_IMCS_SOURCES
 )
 
 SET(SHANNON_POPULATE_SOURCES
-   populate/log_parser.cpp
-   populate/log_populate.cpp
+    populate/log_populate.cpp
+    populate/log_redolog.cpp
+    populate/log_copyinfo.cpp
 )
 
 SET(SHANNON_TRX_SOURCES

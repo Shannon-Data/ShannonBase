@@ -2602,9 +2602,9 @@ using notify_create_table_t = void (*)(struct HA_CREATE_INFO *create_info,
 using notify_after_insert_t = void (*)(THD *thd, void* arg);
 
 //old_row = table->record[1], new_row = table->record[0]
-using notify_after_update_t = void (*)(THD *thd, TABLE *table /*, uchar *old_row, uchar *new_row*/);
+using notify_after_update_t = void (*)(THD *thd, void *arg);
 
-using notify_after_delete_t = void (*)(THD *thd, TABLE *table);
+using notify_after_delete_t = void (*)(THD *thd, void *arg);
 /**
   Secondary engine hook called after PRIMARY_TENTATIVELY optimization is
   complete, and decides if secondary engine optimization will be performed, and

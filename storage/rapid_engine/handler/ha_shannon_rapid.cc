@@ -56,6 +56,8 @@
 #include "sql/sql_optimizer.h"
 #include "sql/table.h"
 
+#include "log0log.h" /* log_get_lsn */
+
 #include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
 #include "storage/innobase/include/dict0dd.h"    //dd_is_partitioned
 
@@ -72,7 +74,7 @@
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/writable_access_path.h"
-#include "storage/rapid_engine/populate/log_commons.h"
+#include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/statistics/statistics.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
@@ -838,7 +840,8 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
 // table->record[0], table->record[1] and COPY_INFO, etc. After that you can insert these changes to rapid. The other
 // way is we use now, the redo log.
 void NotifyAfterInsert(THD *thd, void *args) {
-  if (!thd || !args) return;
+  if (!thd || !args || ShannonBase::Populate::g_sync_mode.load() == ShannonBase::Populate::SyncMode::REDO_LOG_PARSE)
+    return;
   struct comb_args {
     TABLE *arg1;
     COPY_INFO *arg2;
@@ -851,15 +854,74 @@ void NotifyAfterInsert(THD *thd, void *args) {
   auto update = params->arg3;
 
   if (!params || !table || !info || !update) return;
+
+  if (ShannonBase::Populate::Populator::active()) {
+    ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
+                                                              table->s->rec_buff_length);
+    copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::INSERT;
+    copy_info_rec.m_schema_name = table->s->db.str;
+    copy_info_rec.m_table_name = table->s->table_name.str;
+
+    lsn_t current_lsn = log_get_lsn(*log_sys);
+    std::memcpy(copy_info_rec.m_buff0.get(), table->record[0], table->s->rec_buff_length);
+    ShannonBase::Populate::Populator::write(nullptr, current_lsn, &copy_info_rec);
+  }
 }
 
 // old_row = table->record[1], new_row = table->record[0]
-void NotifyAfterUpdate(THD *thd, TABLE *table /*, uchar *old_row, uchar *new_row*/) {
-  if (!thd || !table) return;
+void NotifyAfterUpdate(THD *thd, void *args) {
+  if (!thd || !args || ShannonBase::Populate::g_sync_mode.load() == ShannonBase::Populate::SyncMode::REDO_LOG_PARSE)
+    return;
+  struct comb_args {
+    TABLE *arg1;
+    const uchar *arg2;
+    const uchar *arg3;
+  };
+
+  auto params = static_cast<comb_args *>(args);
+  auto table = params->arg1;
+  auto old_row = params->arg2;
+  auto new_row = params->arg3;
+
+  if (ShannonBase::Populate::Populator::active()) {
+    ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
+                                                              table->s->rec_buff_length);
+    copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::UPDATE;
+    copy_info_rec.m_schema_name = table->s->db.str;
+    copy_info_rec.m_table_name = table->s->table_name.str;
+
+    lsn_t current_lsn = log_get_lsn(*log_sys);
+    std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
+    std::memcpy(copy_info_rec.m_buff1.get(), new_row, table->s->rec_buff_length);
+    ShannonBase::Populate::Populator::write(nullptr, current_lsn, &copy_info_rec);
+  }
 }
 
-void NotifyAfterDelete(THD *thd, TABLE *table) {
-  if (!thd || !table) return;
+void NotifyAfterDelete(THD *thd, void *args) {
+  if (!thd || !args || ShannonBase::Populate::g_sync_mode.load() == ShannonBase::Populate::SyncMode::REDO_LOG_PARSE)
+    return;
+  struct comb_args {
+    TABLE *arg1;
+    const uchar *old_rec;
+  };
+
+  auto params = static_cast<comb_args *>(args);
+  auto table = params->arg1;
+  auto old_row = params->old_rec;
+
+  if (!params || !table || !old_row) return;
+
+  if (ShannonBase::Populate::Populator::active()) {
+    ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
+                                                              table->s->rec_buff_length);
+    copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::DELETE;
+    copy_info_rec.m_schema_name = table->s->db.str;
+    copy_info_rec.m_table_name = table->s->table_name.str;
+
+    lsn_t current_lsn = log_get_lsn(*log_sys);
+    std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
+    ShannonBase::Populate::Populator::write(nullptr, current_lsn, &copy_info_rec);
+  }
 }
 
 void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
@@ -893,7 +955,7 @@ void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
 // returns false, goes to next phase for secondary engine execution.
 static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF) {
-    SetSecondaryEngineOffloadFailedReason(thd, "use_secondary_engine set to off.");
+    SetSecondaryEngineOffloadFailedReason(thd, "use_secondary_engine set to off");
     return true;
   } else if (thd->variables.use_secondary_engine == SECONDARY_ENGINE_FORCED)
     return false;
@@ -915,13 +977,13 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   uint64 too_much_pop_threshold =
       static_cast<uint64_t>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
   if (ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
-    SetSecondaryEngineOffloadFailedReason(thd, "too much changes need to populate.");
+    SetSecondaryEngineOffloadFailedReason(thd, "too much changes need to populate");
     return true;
   }
 
   // 3: checks dict encoding projection, and varlen project size, etc.
   if (ShannonBase::Utils::Util::check_dict_encoding_projection(thd)) {
-    SetSecondaryEngineOffloadFailedReason(thd, "dict encoding is not supported.");
+    SetSecondaryEngineOffloadFailedReason(thd, "dict encoding is not supported");
     return true;
   }
   return false;
@@ -1039,7 +1101,7 @@ static void AssertSupportedPath(const AccessPath *path) {
 // to rapid returns true, goes to innodb engine. otherwise, false, goes to secondary engine.
 static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD *thd, LEX *lex) {
   if (likely(thd->variables.use_secondary_engine == SECONDARY_ENGINE_OFF)) {
-    SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, set use_secondary_engine to false.");
+    SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, set use_secondary_engine to false");
     return true;
   }
 
@@ -1049,7 +1111,7 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
       static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
   if (unlikely(ShannonBase::Populate::sys_pop_buff.size() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
                ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold)) {
-    SetSecondaryEngineOffloadFailedReason(thd, "in RapidOptimize, the CP lag is too much.");
+    SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, the CP lag is too much");
     return true;
   }
 
@@ -1736,7 +1798,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   auto instance_ = ShannonBase::Imcs::Imcs::instance();
   if (!instance_) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "get IMCS instance.");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "get IMCS instance");
     return 1;
   };
 

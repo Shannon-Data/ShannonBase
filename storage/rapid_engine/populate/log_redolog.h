@@ -28,8 +28,8 @@
    transfer from row-based format to column-based format.
 */
 
-#ifndef __SHANNONBASE_LOG_PARSER_H__
-#define __SHANNONBASE_LOG_PARSER_H__
+#ifndef __SHANNONBASE_LOG_REDOLOG_PARSER_H__
+#define __SHANNONBASE_LOG_REDOLOG_PARSER_H__
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -39,10 +39,12 @@
 #include "storage/innobase/include/log0types.h"
 #include "storage/innobase/include/mtr0types.h"  //mlog_id_t
 #include "storage/innobase/include/trx0types.h"
+#include "storage/innobase/rem/rec.h"  // rec_get_status
 
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/utils/concurrent.h"  //asio
+#include "storage/rapid_engine/include/rapid_status.h"  //LoaedTables
+#include "storage/rapid_engine/utils/concurrent.h"      //asio
 #include "storage/rapid_engine/utils/cpu.h"
 
 // clang-format off
@@ -67,7 +69,7 @@ class LogParser {
   LogParser() = default;
   ~LogParser() = default;
 
-  //store the field infor in mysql format.
+  //store the field infor in mysql format. return parsed bytes.
   uint parse_redo(Rapid_load_context* context, byte *ptr, byte *end_ptr);
  private:
   ulint parse_log_rec(Rapid_load_context* context, mlog_id_t *type, byte *ptr, byte *end_ptr,
@@ -165,6 +167,9 @@ class LogParser {
   byte *parse_page_header(mlog_id_t type, const byte *ptr, const byte *end_ptr,
                           page_t *page, mtr_t *mtr);
 
+  byte *advance_mlog_parse_nbytes(mlog_id_t type, const byte *ptr, const byte *end_ptr,
+                                  byte *page, void *page_zip);
+
   // get the field value from innodb format to mysql format. return 0 success.
   int store_field_in_mysql_format(const dict_index_t *index, const dict_col_t* col,
                                   const byte *dest, const byte *src, ulint mlen, ulint len);
@@ -173,13 +178,20 @@ class LogParser {
   inline const dict_index_t *find_index(uint64 idx_id, std::string& db_name, std::string& table_name) {
     std::shared_lock slock(ShannonBase::Populate::g_index_cache_mutex);
     if (g_index_cache.find(idx_id) == g_index_cache.end()) {
-      assert(false);
+      //assert(false);
+      return nullptr;
     } else {
       db_name = g_index_names[idx_id].first;
       table_name = g_index_names[idx_id].second;
       slock.unlock();
+
+      // check it be loaded or not.
+      auto share = ShannonBase::shannon_loaded_tables->get(db_name.c_str(), table_name.c_str());
+      if (!share) return nullptr;
+
       assert(g_index_cache[idx_id]);
-      return g_index_cache[idx_id];
+      return (g_index_cache[idx_id]->type == DICT_CLUSTERED || /*clusted index*/
+              g_index_cache[idx_id]->type == (DICT_CLUSTERED | DICT_UNIQUE)/*primary key*/) ? g_index_cache[idx_id]: nullptr;
     }
 
     assert(false);
@@ -197,10 +209,26 @@ class LogParser {
   ulint parse_multi_rec(Rapid_load_context* context, byte *ptr, byte *end_ptr);
 
   // gets blocks by page no and space id
-  inline buf_block_t *get_block(space_id_t, page_no_t);
+  inline buf_block_t *get_block(space_id_t space_id, page_no_t page_no) {
+    buf_block_t *block{nullptr};
+    const page_id_t page_id(space_id, page_no);
+    bool found;
+    const page_size_t page_size = fil_space_get_page_size(space_id, &found);
+    if (found && buf_page_peek(page_id)) {
+      mtr_t mtr_p;
+      mtr_start(&mtr_p);
+      block = buf_page_get_gen(page_id, page_size, RW_SX_LATCH, nullptr, Page_fetch::POSSIBLY_FREED, UT_LOCATION_HERE,
+                              &mtr_p);
+      mtr_commit(&mtr_p);
+    }
+    return block;
+  }
 
   //is a valid data record.
-  inline bool is_data_rec(rec_t* rec);
+  inline bool is_data_rec(rec_t* rec) {
+    auto status = rec_get_status(rec);
+    return (status == REC_STATUS_ORDINARY || status == REC_STATUS_INFIMUM || status == REC_STATUS_SUPREMUM) ? true : false;
+  }
 
   inline bool check_key_field(std::unordered_map<std::string, ShannonBase::key_meta_t>& keys,
                               const char* field_name);
@@ -270,5 +298,5 @@ class LogParser {
 
 }  // namespace Populate
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_LOG_PARSER_H__
+#endif  //__SHANNONBASE_LOG_REDOLOG_PARSER_H__
 // clang-format on

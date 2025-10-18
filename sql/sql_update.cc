@@ -1072,7 +1072,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         break;
       }
 
-      notify_plugins_after_update(thd, table);
+      notify_plugins_after_update(thd, table, table->record[0], table->record[1]);
     }
     end_semi_consistent_read.reset();
 
@@ -1472,19 +1472,24 @@ bool should_switch_to_multi_table_if_subqueries(const THD *thd,
   return false;
 }
 
-void notify_plugins_after_update(THD *thd, TABLE *table) {
-  if (!thd || !table) return;
+void notify_plugins_after_update(THD *thd, TABLE *table, const uchar* old_rec, const uchar* new_rec) {
+  if (!thd || !table || !!old_rec || !new_rec) return;
 
+  struct comb_args{
+    TABLE *table;
+    const uchar *old_rec;
+    const uchar *new_rec;    
+  } comb_args{table, old_rec, new_rec};
   plugin_foreach(
       thd,
       [](THD *t, plugin_ref plugin, void *arg) -> bool {
         handlerton *hton = plugin_data<handlerton *>(plugin);
         if (hton->notify_after_update != nullptr) {
-          hton->notify_after_update(t, static_cast<TABLE*>(arg));
+          hton->notify_after_update(t, arg);
         }
         return false;
       },
-      MYSQL_STORAGE_ENGINE_PLUGIN, table);
+      MYSQL_STORAGE_ENGINE_PLUGIN, &comb_args);
 }
 
 bool Sql_cmd_update::prepare_inner(THD *thd) {

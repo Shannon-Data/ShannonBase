@@ -47,46 +47,8 @@
 class IB_thread;
 class dict_index_t;
 namespace ShannonBase {
-enum class SyncMode {
-  REDO_LOG_PARSE,       // redo-log based
-  DIRECT_NOTIFICATION,  // notification-based
-  HYBRID                // hybrid mode.
-};
-// to identify synchonization mode.
-extern std::atomic<SyncMode> g_sync_mode;
-
 namespace LogSerivce {
 class buf_block_t;
-// unified change records.
-typedef struct change_record_t {
-  enum class Source { REDO_LOG, DIRECT_CAPTURE };
-  Source source;
-
-  mlog_id_t operation_type;  // INSERT/UPDATE/DELETE
-
-  trx_id_t trx_id;
-  uint64_t timestamp;
-  lsn_t lsn;  // for redo log, to keep LSN
-
-  std::string schema_name;
-  std::string table_name;
-  space_id_t space_id;
-  page_no_t page_no;
-
-  std::unordered_map<std::string, mysql_field_t> field_values;
-
-  // extra info for redo log.
-  typedef struct RedoLogInfo_t {
-    std::unique_ptr<uchar[]> raw_log_data;
-    size_t log_size;
-    const dict_index_t *index;
-    const rec_t *rec;
-    const ulint *offsets;
-  } RedoLogInfo;
-  std::unique_ptr<RedoLogInfo> redo_info;
-
-  change_record_t(Source src) : source(src), trx_id(0), timestamp(0), lsn(0), space_id(0), page_no(0) {}
-} change_record_t;
 
 // used for aurora-style compuate-storage disaggregated architecture.
 class RedoLogService {
@@ -126,6 +88,27 @@ item by a co-routine to promot the performance.
 constexpr uint64 MAX_LOG_POP_SPINS = 5000000;
 constexpr uint64 MAX_WAIT_TIMEOUT = 200;
 
+/**
+ * key, (uint64_t)lsn_t, start lsn of this mtr record. a change_record_buff_t is consisted of
+ * serveral mlog records. Taking ISNERT as an instance, an insert operation is
+ * leading by a MLOG_REC_INSERT mlog record, then a serials mlog records. if it's a
+ * multi-record. And ending with a end type MLOG. In fact, a mtr_log_rec is a transaction
+ * opers.
+ * for populate the changes to rapid. we copy all DML opers mlog record into change_record_buff_t
+ * when transaction commits. `mtr_t::Command::execute`. After that cp all change_record_buff_t to
+ * sys_pop_buff.
+ */
+
+extern std::shared_mutex g_processing_table_mutex;
+extern std::multiset<std::string> g_processing_tables;
+
+// sys pop buffer, the changed records copied into this buffer. then propagation thread
+// do the real work.
+extern std::unordered_map<uint64_t, change_record_buff_t> sys_pop_buff;
+
+// how many data was in sys_pop_buff?
+extern std::atomic<uint64> sys_pop_data_sz;
+
 class PopulatorImpl : public Populator::Impl {
  public:
   /**
@@ -149,6 +132,12 @@ class PopulatorImpl : public Populator::Impl {
   void end_impl() override;
 
   /**
+   * Send the log buffer to system pop buffer via any type of connection.
+   * Such as file handler or socket handler, ect.
+   */
+  uint write_impl(FILE *to, uint64_t start_lsn, change_record_buff *changed_rec) override;
+
+  /**
    * Preload mysql.indexes into caches.
    */
   int load_indexes_caches_impl() override;
@@ -157,6 +146,11 @@ class PopulatorImpl : public Populator::Impl {
    * To print thread infos.
    */
   void print_info_impl(FILE *file) override;
+
+  /**
+   * To test the table is loaded or not.
+   */
+  bool is_loaded_table_impl(std::string sch_name, std::string table_name) override;
 
   /**
    * To check whether the specific table are still do populating.

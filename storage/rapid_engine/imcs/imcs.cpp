@@ -588,6 +588,12 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
     int result{ShannonBase::SHANNON_SUCCESS};
     task.rows_loaded = 0;
 
+#if !defined(_WIN32)  // here we
+    pthread_setname_np(pthread_self(), "load_partition_wkr");
+#else
+    SetThreadDescription(GetCurrentThread(), L"load_partition_wkr");
+#endif
+
     if (task_handler == nullptr) {
       std::lock_guard<std::mutex> lock(error_mutex);
       task.error_msg = "Handler clone is null for partition " + std::to_string(task.part_id);
