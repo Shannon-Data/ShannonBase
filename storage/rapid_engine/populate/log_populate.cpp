@@ -76,7 +76,9 @@ static uint64 sys_rapid_loop_count{0};
 /**
  * return lsn_t, key of processing mtr_log_rec_t. Parse the log comes from redo log records.
  */
-static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, const byte *end, size_t sz) {
+static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const change_record_buff_t *change_rec) {
+  ut_a(change_rec->m_source == Source::REDO_LOG);
+
   THD *log_pop_thread_thd{nullptr};
   if (current_thd == nullptr) {
     my_thread_init();
@@ -85,6 +87,13 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
       my_thread_end();
       return start_lsn;
     }
+
+    log_pop_thread_thd->system_thread = SYSTEM_THREAD_BACKGROUND;
+    log_pop_thread_thd->security_context()->skip_grants();
+
+    log_pop_thread_thd->store_globals();
+  } else {
+    log_pop_thread_thd = current_thd;
   }
 
 #if !defined(_WIN32)  // here we
@@ -92,13 +101,20 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
 #else
   SetThreadDescription(GetCurrentThread(), L"rapid_log_wkr");
 #endif
+  const byte *start = change_rec->m_buff0.get();
+  const byte *end = change_rec->m_buff0.get() + change_rec->m_size;
+  size_t sz = change_rec->m_size;
+
   SHANNON_THREAD_LOCAL LogParser parse_log;
   SHANNON_THREAD_LOCAL Rapid_load_context context;
+  context.m_thd = log_pop_thread_thd;
 
   auto parsed_bytes = parse_log.parse_redo(&context, const_cast<byte *>(start), const_cast<byte *>(end));
   ut_a(parsed_bytes == sz);
 
   if (log_pop_thread_thd) {
+    close_thread_tables(log_pop_thread_thd);
+
     my_thread_end();
     destroy_internal_thd(log_pop_thread_thd);
     log_pop_thread_thd = nullptr;
@@ -110,7 +126,7 @@ static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const byte *start, cons
 /**
  * return lsn_t, key of processing mtr_log_rec_t. Parse the log comes from COPY_INFO records.
  */
-static uint64_t parse_copy_info_record_worker(uint64_t start_lsn, const byte *start, const byte *end, size_t sz) {
+static uint64_t parse_copy_info_record_worker(uint64_t start_lsn, const change_record_buff_t *change_rec) {
   THD *log_pop_thread_thd{nullptr};
   if (current_thd == nullptr) {
     my_thread_init();
@@ -119,6 +135,13 @@ static uint64_t parse_copy_info_record_worker(uint64_t start_lsn, const byte *st
       my_thread_end();
       return start_lsn;
     }
+
+    log_pop_thread_thd->system_thread = SYSTEM_THREAD_BACKGROUND;
+    log_pop_thread_thd->security_context()->skip_grants();
+
+    log_pop_thread_thd->store_globals();
+  } else {
+    log_pop_thread_thd = current_thd;
   }
 
 #if !defined(_WIN32)  // here we
@@ -129,10 +152,21 @@ static uint64_t parse_copy_info_record_worker(uint64_t start_lsn, const byte *st
   SHANNON_THREAD_LOCAL CopyInfoParser copy_info_log;
   SHANNON_THREAD_LOCAL Rapid_load_context context;
 
-  auto parsed_bytes = copy_info_log.parse_copy_info(&context, const_cast<byte *>(start), const_cast<byte *>(end));
+  context.m_schema_name = change_rec->m_schema_name;
+  context.m_table_name = change_rec->m_table_name;
+
+  auto oper_type = change_rec->m_oper;
+
+  const byte *start = change_rec->m_buff0.get();
+  const byte *end = change_rec->m_buff0.get() + change_rec->m_size;
+  size_t sz = change_rec->m_size;
+  auto parsed_bytes =
+      copy_info_log.parse_copy_info(&context, oper_type, const_cast<byte *>(start), const_cast<byte *>(end));
   ut_a(parsed_bytes == sz);
 
   if (log_pop_thread_thd) {
+    close_thread_tables(log_pop_thread_thd);
+
     my_thread_end();
     destroy_internal_thd(log_pop_thread_thd);
     log_pop_thread_thd = nullptr;
@@ -185,18 +219,14 @@ static void parse_log_func_main(log_t *log_ptr) {
     thread_num = (thread_num >= sys_pop_buff.size()) ? sys_pop_buff.size() : thread_num;
     auto curr_iter = sys_pop_buff.begin();
     for (size_t counter = 0; counter < thread_num; counter++) {
-      auto come_from = curr_iter->second.m_source;
-      byte *from_ptr = curr_iter->second.m_buff0.get();
-      auto size = curr_iter->second.m_size;
-
       // using std thread, not IB_thread, ib_thread has not interface to thread func ret.
-      if (come_from == ShannonBase::Populate::Source::REDO_LOG)
+      if (curr_iter->second.m_source == ShannonBase::Populate::Source::REDO_LOG)
         results.emplace_back(
-            std::async(std::launch::async, parse_mtr_log_worker, curr_iter->first, from_ptr, from_ptr + size, size));
-      else if (come_from == ShannonBase::Populate::Source::COPY_INFO)
-        results.emplace_back(std::async(std::launch::async, parse_copy_info_record_worker, curr_iter->first, from_ptr,
-                                        from_ptr + size, size));
-      else
+            std::async(std::launch::async, parse_mtr_log_worker, curr_iter->first, &curr_iter->second));
+      else if (curr_iter->second.m_source == ShannonBase::Populate::Source::COPY_INFO) {
+        results.emplace_back(
+            std::async(std::launch::async, parse_copy_info_record_worker, curr_iter->first, &curr_iter->second));
+      } else
         assert(false);
 
       curr_iter++;
@@ -311,7 +341,7 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
     auto rec_sz = changed_rec->m_size;
     sys_pop_buff.emplace(start_lsn, std::move(*changed_rec));
     sys_pop_data_sz.fetch_add(rec_sz);
-  } else {  // write to remote addr via network.
+  } else {  // TODO: write to remote addr via network.
   }
 
   return ShannonBase::SHANNON_SUCCESS;

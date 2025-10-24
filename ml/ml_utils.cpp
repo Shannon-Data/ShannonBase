@@ -218,6 +218,7 @@ int Utils::check_table_available(std::string &sch_tb_name) {
   }
   return 0;
 }
+
 // open table by name. return table ptr, otherwise return nullptr.
 TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
   THD *thd = current_thd;
@@ -226,16 +227,15 @@ TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name
    * but there's not even a opened table, so that, here we try to open a table, it failed before
    * exiting the lock table mode. such as executing `selecct ml_predict_row(xxx) int xx;`
    */
-  auto table_already_open{false};
-  for (auto table = thd->open_tables; table; table = table->next) {
-    if (!strcmp(schema_name.c_str(), table->s->db.str) && !strcmp(table_name.c_str(), table->s->table_name.str)) {
-      table_already_open = true;
-      break;
+  TABLE *table{nullptr};
+  for (table = thd->open_tables; table; table = table->next) {
+    if (table->s && table->file && schema_name == table->s->db.str && table_name == table->s->table_name.str) {
+      return table;
     }
   }
 
   auto old_mode = thd->locked_tables_mode;
-  if (!table_already_open && thd->locked_tables_mode == LTM_PRELOCKED) {
+  if (thd->locked_tables_mode == LTM_PRELOCKED) {
     thd->locked_tables_mode = LTM_NONE;
   }
 
@@ -258,7 +258,8 @@ TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name
 
 int Utils::close_table(TABLE *table [[maybe_unused]]) {
   assert(table);
-  // it will close in close_thread_tables(). so here do nothing.
+  // The table will be closed by `close_thread_tables()` in the caller.
+  // No manual cleanup is required here.
   return 0;
 }
 

@@ -145,9 +145,10 @@ class Rapid_context : public Secondary_engine_execution_context {
     static SHANNON_THREAD_LOCAL std::string m_active_part_key;
   };
 
-  // current schema name and table name.
+  // current openning schema name and table name.
   std::string m_schema_name, m_table_name;
 
+  // current openning table extra information.
   extra_info_t m_extra_info;
 };
 

@@ -1258,17 +1258,17 @@ byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context
                                                      page_t *page,                           /*!< in: page or NULL */
                                                      page_zip_des_t *page_zip, /*!< in/out: compressed page, or NULL */
                                                      dict_index_t *index) {    /*!< in: index corresponding to page */
-  ulint flags;
-  rec_t *rec;
-  upd_t *update;
-  ulint pos;
-  trx_id_t trx_id;
-  roll_ptr_t roll_ptr;
-  ulint rec_offset;
-  mem_heap_t *heap;
-  ulint *offsets;
-  uint64_t index_id;
-  const dict_index_t *tb_index;
+  ulint flags{0};
+  rec_t *rec{nullptr};
+  upd_t *update{nullptr};
+  ulint pos{0};
+  trx_id_t trx_id{0};
+  roll_ptr_t roll_ptr{0};
+  ulint rec_offset{0};
+  mem_heap_t *heap{nullptr};
+  ulint *offsets{nullptr};
+  uint64_t index_id{0};
+  const dict_index_t *tb_index{nullptr};
   std::string db_name, tb_name;
 
   if (end_ptr < ptr + 1) {

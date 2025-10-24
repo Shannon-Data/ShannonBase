@@ -37,8 +37,10 @@
 #include "sql/field.h"       //field
 #include "sql/table.h"       //TABLE
 #include "storage/innobase/include/mach0data.h"
-#include "storage/rapid_engine/imcs/chunk.h"  //CHUNK
-#include "storage/rapid_engine/imcs/cu.h"     //CU
+
+#include "storage/rapid_engine/imcs/chunk.h"           //CHUNK
+#include "storage/rapid_engine/imcs/cu.h"              //CU
+#include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -48,6 +50,26 @@
 namespace ShannonBase {
 namespace Imcs {
 
+/**
+ * @brief Encode a row buffer into a contiguous key buffer suitable for indexing.
+ *
+ * This function constructs a binary key representation from a MySQL row record
+ * according to the specified KEY metadata. It handles null flags, variable-length
+ * fields, BLOBs, and numeric types, ensuring proper encoding for index comparison.
+ *
+ * @param[out] to_key      Pointer to pre-allocated key buffer to write encoded key.
+ * @param[in]  from_record Pointer to row data buffer containing raw field values.
+ * @param[in]  key_info    Pointer to MySQL KEY structure describing key parts.
+ * @param[in]  key_len     Total length of the key buffer.
+ *
+ * @note
+ *   - Handles null indicators for columns that have a null bit.
+ *   - Numeric types (DOUBLE, FLOAT, DECIMAL, NEWDECIMAL, LONG) are encoded
+ *     in sortable binary format using Index::Encoder.
+ *   - Fixed-length, variable-length, and BLOB columns are encoded according
+ *     to MySQL key conventions (HA_KEY_BLOB_LENGTH for BLOBs).
+ *   - The function does not modify the input record.
+ */
 static void encode_row_key(uchar *to_key, const uchar *from_record, const KEY *key_info, uint key_len) {
   if (!to_key || !from_record || !key_info || key_len == 0) return;
 
@@ -103,6 +125,30 @@ static void encode_row_key(uchar *to_key, const uchar *from_record, const KEY *k
   }
 }
 
+/**
+ * @brief Encode a key directly from a row using column offsets and null bitmaps.
+ *
+ * This function converts a row buffer into a binary key representation, taking
+ * into account the column offsets, null-byte positions, and null-bit masks.
+ * The encoded key is written into a shared key buffer. A shared mutex is used
+ * to ensure thread-safe access to the key buffer.
+ *
+ * @param[in]  rowdata          Pointer to the raw row buffer.
+ * @param[in]  col_offsets      Array of column byte offsets within the row.
+ * @param[in]  null_byte_offsets Array of byte offsets where null bits reside.
+ * @param[in]  null_bitmasks    Array of bitmasks for testing null flags.
+ * @param[in]  key              Pointer to KEY metadata describing the key.
+ * @param[out] key_buff         Pointer to pre-allocated buffer to store encoded key.
+ * @param[in,out] key_buff_mutex Shared mutex to protect concurrent writes to key_buff.
+ *
+ * @note
+ *   - Encodes null flags into the first byte of each key part if applicable.
+ *   - Numeric types are encoded via Index::Encoder to preserve sort order.
+ *   - BLOB and variable-length parts are encoded using MySQL HA_KEY_BLOB_LENGTH.
+ *   - The key buffer is locked during the encoding process to ensure thread safety.
+ *   - This function may modify the field pointers of `Field` objects temporarily
+ *     to point into the row buffer for key extraction.
+ */
 static void encode_key_from_row(const uchar *rowdata, const ulong *col_offsets, const ulong *null_byte_offsets,
                                 const ulong *null_bitmasks, const KEY *key, uchar *key_buff,
                                 std::shared_mutex &key_buff_mutex) {
@@ -317,8 +363,71 @@ int Table::build_index(const Rapid_load_context *context, const KEY *key, row_id
   return build_index_impl(context, key, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
 }
 
-// IMPORTANT NOTIC: IF YOU CHANGE THE CODE HERE, YOU SHOULD CHANGE THE PARTITIAL TABLE `PartTable::write`
-// CORRESPONDINGLY.
+int Table::build_key_info(const Rapid_load_context *context, const KEY *key) {
+  // this is come from ha_innodb.cc postion(), when postion() changed, the part should be changed respondingly.
+  // why we dont not change the impl of postion() directly? because the postion() is impled in innodb engine.
+  // we want to decouple with innodb engine.
+  // ref: void key_copy(uchar *to_key, const uchar *from_record, const KEY *key_info,
+  //            uint key_length). Due to we should encoding the float/double/decimal types.
+  auto source = context->m_table;
+
+  if (key == nullptr) {
+    /* No primary key was defined for the table and we generated the clustered index
+     from row id: the row reference will be the row id, not any key value that MySQL
+     knows of */
+    ut_a(source->file->ref_length == ShannonBase::SHANNON_DATA_DB_ROW_ID_LEN);
+
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = source->file->ref_length;
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff =
+        std::make_unique<uchar[]>(source->file->ref_length);
+    memset(context->m_extra_info.m_key_buff.get(), 0x0, source->file->ref_length);
+    memcpy(context->m_extra_info.m_key_buff.get(), source->file->ref, source->file->ref_length);
+  } else {
+    /* Copy primary key as the row reference */
+    auto from_record = source->record[0];
+
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = key->key_length;
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
+    memset(context->m_extra_info.m_key_buff.get(), 0x0, key->key_length);
+    auto to_key = context->m_extra_info.m_key_buff.get();
+    encode_row_key(to_key, from_record, key, key->key_length);
+  }
+
+  return SHANNON_SUCCESS;
+}
+
+int Table::build_key_info(const Rapid_load_context *context, const KEY *key, uchar *rowdata, ulong *col_offsets,
+                          ulong *null_byte_offsets, ulong *null_bitmasks) {
+  // this is come from ha_innodb.cc postion(), when postion() changed, the part should be changed respondingly.
+  // why we dont not change the impl of postion() directly? because the postion() is impled in innodb engine.
+  // we want to decouple with innodb engine.
+  auto source = context->m_table;
+
+  if (key == nullptr) {
+    /* No primary key was defined for the table and we generated the clustered index
+     from row id: the row reference will be the row id, not any key value that MySQL
+     knows of */
+    ut_a(false);  // In parallel scan, the primary key must be have, otherwise sequential scan.
+    ut_a(source->file->ref_length == ShannonBase::SHANNON_DATA_DB_ROW_ID_LEN);
+
+    ut_a(const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len == source->file->ref_length);
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = source->file->ref_length;
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff =
+        std::make_unique<uchar[]>(source->file->ref_length);
+    memset(context->m_extra_info.m_key_buff.get(), 0x0, source->file->ref_length);
+    memcpy(context->m_extra_info.m_key_buff.get(), source->file->ref, source->file->ref_length);
+  } else {
+    /* Copy primary key as the row reference */
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = key->key_length;
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
+    memset(context->m_extra_info.m_key_buff.get(), 0x0, key->key_length);
+    auto to_key = context->m_extra_info.m_key_buff.get();
+    encode_key_from_row(rowdata, col_offsets, null_byte_offsets, null_bitmasks, key, to_key, m_key_buff_mutex);
+  }
+
+  return SHANNON_SUCCESS;
+}
+
 int Table::write(const Rapid_load_context *context, uchar *data) {
   /**
    * for VARCHAR type Data in field->ptr is stored as: 1 or 2 bytes length-prefix-header  (from
@@ -328,6 +437,7 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
 
   auto rowid = reserver_rowid();
 
+  Utils::ColumnMapGuard guard(context->m_table);
   for (auto index = 0u; index < context->m_table->s->fields; index++) {
     auto fld = *(context->m_table->field + index);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -412,6 +522,7 @@ int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, 
 
   auto rowid = reserver_rowid();
 
+  Utils::ColumnMapGuard guard(context->m_table);
   for (auto col_ind = 0u; col_ind < context->m_table->s->fields; col_ind++) {
     auto fld = *(context->m_table->field + col_ind);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -573,6 +684,33 @@ int Table::delete_row(const Rapid_load_context *context, row_id_t rowid) {
 
   m_stats.prows.fetch_sub(1);
   return SHANNON_SUCCESS;
+}
+
+int Table::delete_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
+                      ulong *null_byte_offsets, ulong *null_bitmasks) {
+  ut_a(context->m_table->s->fields == n_cols);
+
+  if (context->m_table->s->is_missing_primary_key()) {
+    context->m_table->file->position((const uchar *)rowdata);  // to set DB_ROW_ID.
+    if (build_key_info(context, nullptr, rowdata, col_offsets, null_byte_offsets, null_bitmasks)) return HA_ERR_GENERIC;
+  }
+
+  Utils::ColumnMapGuard guard(context->m_table);
+  for (auto index = 0u; index < context->m_table->s->keys; index++) {
+    auto key_info = context->m_table->key_info + index;
+    if (!strncmp(key_info->name, ShannonBase::SHANNON_PRIMARY_KEY_NAME,
+                 strlen(ShannonBase::SHANNON_PRIMARY_KEY_NAME))) {
+      if (build_key_info(context, key_info, rowdata, col_offsets, null_byte_offsets, null_bitmasks))
+        return HA_ERR_GENERIC;
+      break;
+    }
+  }
+  auto rowid = m_indexes[ShannonBase::SHANNON_PRIMARY_KEY_NAME].get()->lookup(context->m_extra_info.m_key_buff.get(),
+                                                                              context->m_extra_info.m_key_len);
+  auto found_rowid = rowid ? *rowid : INVALID_ROW_ID;
+  if (found_rowid == INVALID_ROW_ID) return HA_ERR_KEY_NOT_FOUND;
+
+  return delete_row(context, found_rowid);
 }
 
 int Table::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) {

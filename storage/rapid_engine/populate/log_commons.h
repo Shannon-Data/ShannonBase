@@ -159,15 +159,19 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
       : m_source(other.m_source),
         m_buff0(std::move(other.m_buff0)),
         m_size(other.m_size),
+        m_oper(other.m_oper),
         m_schema_name(std::move(other.m_schema_name)),
         m_table_name(std::move(other.m_table_name)),
         m_buff1(std::move(other.m_buff1)) {
+    other.m_source = Source::UN_KNOWN;
+    other.m_oper = OperType::UNSET;
     other.m_size = 0;
   }
 
   change_record_buff_t &operator=(change_record_buff_t &&other) noexcept {
     if (this != &other) {
       m_source = other.m_source;
+      m_oper = other.m_oper;
       m_buff0 = std::move(other.m_buff0);
       m_buff1 = std::move(other.m_buff1);
       m_size = other.m_size;
@@ -175,6 +179,7 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
       m_table_name = std::move(other.m_table_name);
 
       other.m_source = Source::UN_KNOWN;
+      other.m_oper = OperType::UNSET;
       other.m_size = 0;
     }
     return *this;
