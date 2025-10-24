@@ -37,6 +37,7 @@
 #include "sql/sql_lex.h"
 #include "sql/sql_optimizer.h"                //JOIN
 #include "sql/table.h"                        //TABLE
+#include "sql/transaction.h"                  // trans_commit_stmt
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcs.h"
@@ -53,16 +54,15 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
    * but there's not even a opened table, so that, here we try to open a table, it failed before
    * exiting the lock table mode. such as executing `selecct ml_predict_row(xxx) int xx;`
    */
-  auto table_already_open{false};
-  for (auto table = thd->open_tables; table; table = table->next) {
-    if (!strcmp(schema_name.c_str(), table->s->db.str) && !strcmp(table_name.c_str(), table->s->table_name.str)) {
-      table_already_open = true;
-      break;
+  TABLE *table{nullptr};
+  for (table = thd->open_tables; table; table = table->next) {
+    if (table->s && table->file && schema_name == table->s->db.str && table_name == table->s->table_name.str) {
+      return table;
     }
   }
 
   auto old_mode = thd->locked_tables_mode;
-  if (!table_already_open && thd->locked_tables_mode == LTM_PRELOCKED) {
+  if (thd->locked_tables_mode == LTM_PRELOCKED) {
     thd->locked_tables_mode = LTM_NONE;
   }
 
@@ -72,6 +72,7 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
   table_ref.open_strategy = Table_ref::OPEN_NORMAL;
 
   if (open_table(thd, &table_ref, &table_ref_context) || !table_ref.table->file) {
+    sql_print_warning("Failed to open table %s.%s", schema_name, table_name);
     return nullptr;
   }
 
@@ -89,9 +90,11 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
 }
 
 int Util::close_table(THD *thd, TABLE *table [[maybe_unused]]) {
-  assert(table);
   // it will close in close_thread_tables(). so here do nothing.
   if (table) table->file->ha_external_lock(thd, F_UNLCK);
+
+  // Transaction will be open in openning stage implicitly.
+  if (thd->get_transaction()->is_active(Transaction_ctx::STMT)) trans_commit_stmt(thd);
 
   return SHANNON_SUCCESS;
 }

@@ -340,11 +340,11 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   m_thd->set_sent_row_count(0);
   // start to read data from innodb and load to rapid.
   ShannonBase::Rapid_load_context context;
-  context.m_table = const_cast<TABLE *>(&table_arg);
   context.m_thd = m_thd;
-  context.m_extra_info.m_keynr = active_index;
+  context.m_table = const_cast<TABLE *>(&table_arg);
   context.m_schema_name = table_arg.s->db.str;
   context.m_table_name = table_arg.s->table_name.str;
+  context.m_extra_info.m_keynr = active_index;
   context.m_extra_info.m_key_len = table_arg.file->ref_length;
 
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {

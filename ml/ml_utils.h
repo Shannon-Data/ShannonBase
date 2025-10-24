@@ -56,7 +56,17 @@ class Utils {
   // get the secondary handler of a openned table.
   static handler *get_secondary_handler(TABLE *source_table_ptr);
 
-  // close a opened table.
+  /**
+   * @brief No-op close for TABLE objects.
+   *
+   * In the current design, the lifecycle of TABLE objects is managed by
+   * the SQL layer. Specifically, all opened tables will be automatically
+   * closed by the caller through `close_thread_tables()`. Therefore, this
+   * function does not need to manually close or free the TABLE instance.
+   *
+   * @param table The TABLE pointer to close (unused in this implementation).
+   * @return Always returns 0.
+   */
   static int close_table(TABLE *table);
 
   /** to training a mode by using specific data. success, returns hanlde of the trained model,

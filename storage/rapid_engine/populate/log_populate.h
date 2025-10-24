@@ -132,8 +132,44 @@ class PopulatorImpl : public Populator::Impl {
   void end_impl() override;
 
   /**
-   * Send the log buffer to system pop buffer via any type of connection.
-   * Such as file handler or socket handler, ect.
+   * @brief Write a parsed change record into the population buffer or a remote stream.
+   *
+   * This function serves as the main data ingestion entry point for the Rapid
+   * log population subsystem. Depending on the input target, it either:
+   *   - Appends the change record into the in-memory buffer (`sys_pop_buff`),
+   *     to be consumed later by the background populator thread (`parse_log_func_main()`), or
+   *   - Sends the change record to a remote sink (e.g., distributed node, log replicator)
+   *     — currently marked as TODO.
+   *
+   * @param[in] file
+   *   Target output stream. If `nullptr`, the record will be pushed into
+   *   `sys_pop_buff`. Otherwise, it represents a writable file handle or
+   *   network stream (future extension).
+   *
+   * @param[in] start_lsn
+   *   The starting LSN (Log Sequence Number) corresponding to this change
+   *   record. It serves as the unique key for indexing `sys_pop_buff`.
+   *
+   * @param[in,out] changed_rec
+   *   The change record buffer, which contains serialized redo or copy-info
+   *   data produced by the log parsing or change-capture layer.
+   *   Ownership of the buffer is moved into the population subsystem.
+   *
+   * @return
+   *   `ShannonBase::SHANNON_SUCCESS` (always success currently),
+   *   since this function is synchronous and only performs local memory operations.
+   *
+   * @note
+   * - When `file == nullptr`, this function transfers ownership of `changed_rec`
+   *   into the global `sys_pop_buff` and increases the global memory usage counter
+   *   `sys_pop_data_sz` atomically.
+   * - The background thread (`rapid_log_coordinator`) periodically monitors
+   *   the buffer size and launches worker threads to process and propagate
+   *   these buffered changes.
+   * - Thread safety is guaranteed by `rapid_populator_mutex` when the buffer
+   *   is concurrently consumed and modified.
+   * - When remote propagation is implemented, care must be taken to preserve
+   *   LSN ordering guarantees and ensure durability.
    */
   uint write_impl(FILE *to, uint64_t start_lsn, change_record_buff *changed_rec) override;
 
@@ -153,8 +189,29 @@ class PopulatorImpl : public Populator::Impl {
   bool is_loaded_table_impl(std::string sch_name, std::string table_name) override;
 
   /**
-   * To check whether the specific table are still do populating.
-   * true is in pop queue, otherwise return false; tabel_name format: `schema_name/table_name`
+   * @brief Check whether a given table is currently in the population process.
+   *
+   * This method is used to determine whether a specific table (identified by
+   * its fully qualified name `"schema_name/table_name"`) is still being populated
+   * by the background populator subsystem. The function acquires a shared (read)
+   * lock on the global `g_processing_tables` set to ensure thread-safe access.
+   *
+   * If the table exists in `g_processing_tables`, it indicates that the table
+   * population job is still ongoing. Otherwise, the population process for this
+   * table has completed or was never started.
+   *
+   * Typical use cases include:
+   * - Query planning: deciding whether to route a query to ShannonBase or InnoDB.
+   * - Status monitoring: reporting progress of background population tasks.
+   *
+   * @param table_name A fully qualified table identifier in the form
+   *        `"schema_name/table_name"`.
+   *
+   * @return `true` if the table is currently being populated, `false` otherwise.
+   *
+   * @threadsafe Uses `std::shared_lock<std::shared_mutex>` to allow concurrent reads.
+   * @note This function should not be called from within a write lock context
+   *       on `g_processing_table_mutex`, as it would cause potential deadlocks.
    */
   bool check_status_impl(std::string &table_name) override;
 };
