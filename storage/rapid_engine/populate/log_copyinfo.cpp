@@ -40,24 +40,44 @@ namespace Populate {
 int CopyInfoParser::parse_table_meta(Rapid_load_context *context, const TABLE *table) {
   assert(table);
 
+  std::string key{table->s->db.str};
+  key.append(":").append(table->s->table_name.str);
+  if (m_col_offsets.find(key) != m_col_offsets.end() && m_null_byte_offsets.find(key) != m_null_byte_offsets.end() &&
+      m_null_bitmasks.find(key) != m_null_bitmasks.end())
+    return ShannonBase::SHANNON_SUCCESS;
+
   m_n_fields = table->s->fields;
+  std::vector<ulong> col_offsets(m_n_fields);
+  std::vector<ulong> null_byte_offsets(m_n_fields);
+  std::vector<ulong> null_bitmasks(m_n_fields);
 
-  m_col_offsets.resize(m_n_fields);
-  m_null_byte_offsets.resize(m_n_fields);
-  m_null_bitmasks.resize(m_n_fields);
+  for (uint idx = 0; idx < m_n_fields; idx++) {
+    Field *fld = table->field[idx];
 
-  for (uint idx = 0; idx < table->s->fields; idx++) {
-    auto fld = *(table->field + idx);
-    m_col_offsets[idx] = fld->offset(table->record[0]);
-    m_null_byte_offsets[idx] = fld->null_offset();
-    m_null_bitmasks[idx] = fld->null_bit;
+    if (!fld) {
+      sql_print_error("Field[%u] is NULL in table %s.%s", idx, table->s->db.str, table->s->table_name.str);
+      return HA_ERR_GENERIC;
+    }
+
+    col_offsets[idx] = fld->offset(table->record[0]);
+    null_byte_offsets[idx] = fld->null_offset();
+    null_bitmasks[idx] = fld->null_bit;
   }
+
+  assert(m_col_offsets.find(key) == m_col_offsets.end());
+  m_col_offsets.emplace(key, std::move(col_offsets));
+
+  assert(m_null_byte_offsets.find(key) == m_null_byte_offsets.end());
+  m_null_byte_offsets.emplace(key, std::move(null_byte_offsets));
+
+  assert(m_null_bitmasks.find(key) == m_null_bitmasks.end());
+  m_null_bitmasks.emplace(key, std::move(null_bitmasks));
 
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, change_record_buff_t::OperType oper_type, byte *start,
-                                     byte *end_ptr) {
+                                     byte *end_ptr, byte *new_start, byte *new_end_ptr) {
   // Open target table
   TABLE *table =
       ShannonBase::Utils::Util::open_table_by_name(current_thd, context->m_schema_name, context->m_table_name, TL_READ);
@@ -65,7 +85,7 @@ uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, change_record_
     std::string err_msg = "Cannot open table ";
     err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" for parsing");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
-    return HA_ERR_GENERIC;
+    return 0;
   }
 
   TableGuard tb_gurad(current_thd, table);
@@ -75,14 +95,18 @@ uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, change_record_
     std::string err_msg = "Cannot get the openned table ";
     err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" meta information");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
-    return HA_ERR_GENERIC;
+    return 0;
   }
 
   // Dispatch by operation type
+  context->m_trx = Transaction::get_or_create_trx(current_thd);
+  context->m_trx->begin();
+  context->m_extra_info.m_trxid = context->m_trx->get_id();
+
   auto ret{ShannonBase::SHANNON_SUCCESS};
   switch (oper_type) {
     case change_record_buff_t::OperType::UPDATE:
-      ret = parse_and_apply_update(context, table, start, end_ptr);
+      ret = parse_and_apply_update(context, table, start, end_ptr, new_start, new_end_ptr);
       break;
     case change_record_buff_t::OperType::INSERT:
       ret = parse_and_apply_insert(context, table, start, end_ptr);
@@ -95,25 +119,39 @@ uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, change_record_
       assert(false);
       break;
   }
+  context->m_trx->commit();
   return ret;
 }
 
 int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, TABLE *table, const byte *start,
-                                           const byte *end_ptr) {
+                                           const byte *end_ptr, const byte *new_start, const byte *new_end_ptr) {
   std::string sch_tb_name = context->m_schema_name;
   sch_tb_name.append(":").append(context->m_table_name);
 
-  size_t row_size = end_ptr - start;
   auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_table(sch_tb_name);
   if (!rpd_table) {
     std::string err_msg = "Cannot get the table ";
     err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" from loaded tables");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
+    return 0;  // parsed bytes.
+  }
+
+  std::string key{table->s->db.str};
+  key.append(":").append(table->s->table_name.str);
+
+  size_t row_size = end_ptr - start;
+  if (rpd_table->update_row(context, row_size, m_col_offsets[key].data(), m_null_byte_offsets[key].data(),
+                            m_null_bitmasks[key].data(), (const uchar *)start, (const uchar *)new_start)) {
+    std::string errmsg;
+    errmsg.append("load data from ")
+        .append(context->m_schema_name.c_str())
+        .append(".")
+        .append(context->m_table_name.c_str())
+        .append(" to imcs failed.");
+    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
     return 0;
   }
-  // auto ret = rpd_table->write();
-
-  return row_size;  // parsed_bytes
+  return row_size;
 }
 
 int CopyInfoParser::parse_and_apply_insert(Rapid_load_context *context, TABLE *table, const byte *start,
@@ -129,9 +167,12 @@ int CopyInfoParser::parse_and_apply_insert(Rapid_load_context *context, TABLE *t
     return 0;  // parsed bytes.
   }
 
+  std::string key{table->s->db.str};
+  key.append(":").append(table->s->table_name.str);
+
   size_t row_size = end_ptr - start;
-  if (rpd_table->write(context, (uchar *)start, row_size, m_col_offsets.data(), m_n_fields, m_null_byte_offsets.data(),
-                       m_null_bitmasks.data())) {
+  if (rpd_table->write(context, (uchar *)start, row_size, m_col_offsets[key].data(), m_n_fields,
+                       m_null_byte_offsets[key].data(), m_null_bitmasks[key].data())) {
     std::string errmsg;
     errmsg.append("load data from ")
         .append(context->m_schema_name.c_str())
@@ -157,9 +198,12 @@ int CopyInfoParser::parse_and_apply_delete(Rapid_load_context *context, TABLE *t
     return 0;  // parsed bytes.
   }
 
+  std::string key{table->s->db.str};
+  key.append(":").append(table->s->table_name.str);
+
   size_t row_size = end_ptr - start;
-  if (rpd_table->delete_row(context, (uchar *)start, row_size, m_col_offsets.data(), m_n_fields,
-                            m_null_byte_offsets.data(), m_null_bitmasks.data())) {
+  if (rpd_table->delete_row(context, (uchar *)start, row_size, m_col_offsets[key].data(), m_n_fields,
+                            m_null_byte_offsets[key].data(), m_null_bitmasks[key].data())) {
     std::string errmsg;
     errmsg.append("load data from ")
         .append(context->m_schema_name.c_str())

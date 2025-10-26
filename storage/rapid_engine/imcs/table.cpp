@@ -328,10 +328,9 @@ int Table::build_index_impl(const Rapid_load_context *context, const KEY *key, r
     /* No primary key was defined for the table and we generated the clustered index
      from row id: the row reference will be the row id, not any key value that MySQL
      knows of */
-    ut_a(false);  // In parallel scan, the primary key must be have, otherwise sequential scan.
-    ut_a(source->file->ref_length == ShannonBase::SHANNON_DATA_DB_ROW_ID_LEN);
+    // In parallel scan, the primary key must be have, otherwise sequential scan.
 
-    ut_a(const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len == source->file->ref_length);
+    ut_a(source->file->ref_length == SHANNON_DATA_DB_ROW_ID_LEN);
     key_len = source->file->ref_length;
     key_buff.reset(new uchar[key_len]);
     memset(key_buff.get(), 0x0, key_len);
@@ -407,10 +406,8 @@ int Table::build_key_info(const Rapid_load_context *context, const KEY *key, uch
     /* No primary key was defined for the table and we generated the clustered index
      from row id: the row reference will be the row id, not any key value that MySQL
      knows of */
-    ut_a(false);  // In parallel scan, the primary key must be have, otherwise sequential scan.
     ut_a(source->file->ref_length == ShannonBase::SHANNON_DATA_DB_ROW_ID_LEN);
 
-    ut_a(const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len == source->file->ref_length);
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = source->file->ref_length;
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff =
         std::make_unique<uchar[]>(source->file->ref_length);
@@ -435,7 +432,7 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
    * directly, due to we dont care what real it is. ref to: field.cc:6703
    */
 
-  auto rowid = reserver_rowid();
+  auto rowid = forward_rowid(context);
 
   Utils::ColumnMapGuard guard(context->m_table);
   for (auto index = 0u; index < context->m_table->s->fields; index++) {
@@ -496,18 +493,25 @@ int Table::write(const Rapid_load_context *context, uchar *data) {
     }
 
     if (!(m_fields[fld->field_name]->write_row(context, rowid, data_ptr, data_len))) {
+      backward_rowid(context);
       return HA_ERR_GENERIC;
     }
   }
 
   if (context->m_table->s->is_missing_primary_key()) {
     context->m_table->file->position((const uchar *)context->m_table->record[0]);  // to set DB_ROW_ID.
-    if (build_index(context, nullptr, rowid)) return HA_ERR_GENERIC;
+    if (build_index(context, nullptr, rowid)) {
+      backward_rowid(context);
+      return HA_ERR_GENERIC;
+    }
   }
 
   for (auto index = 0u; index < context->m_table->s->keys; index++) {
     auto key_info = context->m_table->key_info + index;
-    if (build_index(context, key_info, rowid)) return HA_ERR_GENERIC;
+    if (build_index(context, key_info, rowid)) {
+      backward_rowid(context);
+      return HA_ERR_GENERIC;
+    }
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -520,7 +524,7 @@ int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, 
   uchar *data_ptr{nullptr};
   uint data_len{0};
 
-  auto rowid = reserver_rowid();
+  auto rowid = forward_rowid(context);
 
   Utils::ColumnMapGuard guard(context->m_table);
   for (auto col_ind = 0u; col_ind < context->m_table->s->fields; col_ind++) {
@@ -581,20 +585,25 @@ int Table::write(const Rapid_load_context *context, uchar *rowdata, size_t len, 
 
     if (!(m_fields[fld->field_name]->write_row(context, rowid, data_ptr, data_len))) {
       // TODO: mark this row to be junk.
+      backward_rowid(context);
       return HA_ERR_GENERIC;
     }
   }
 
   if (context->m_table->s->is_missing_primary_key()) {
     context->m_table->file->position((const uchar *)rowdata);  // to set DB_ROW_ID.
-    if (build_index(context, nullptr, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks))
+    if (build_index(context, nullptr, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks)) {
+      backward_rowid(context);
       return HA_ERR_GENERIC;
+    }
   }
 
   for (auto index = 0u; index < context->m_table->s->keys; index++) {
     auto key_info = context->m_table->key_info + index;
-    if (build_index(context, key_info, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks))
+    if (build_index(context, key_info, rowid, rowdata, col_offsets, null_byte_offsets, null_bitmasks)) {
+      backward_rowid(context);
       return HA_ERR_GENERIC;
+    }
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -674,6 +683,95 @@ int Table::update_row_from_log(const Rapid_load_context *context, row_id_t rowid
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+int Table::update_row(const Rapid_load_context *context, size_t nlen, ulong *col_offsets, ulong *null_byte_offsets,
+                      ulong *null_bitmasks, const uchar *start, const uchar *new_start) {
+  if (context->m_table->s->is_missing_primary_key()) {
+    context->m_table->file->position(start);  // to set DB_ROW_ID.
+    if (build_key_info(context, nullptr, (uchar *)start, col_offsets, null_byte_offsets, null_bitmasks))
+      return HA_ERR_GENERIC;
+  }
+
+  Utils::ColumnMapGuard guard(context->m_table);
+  for (auto index = 0u; index < context->m_table->s->keys; index++) {
+    auto key_info = context->m_table->key_info + index;
+    if (!strncmp(key_info->name, ShannonBase::SHANNON_PRIMARY_KEY_NAME,
+                 strlen(ShannonBase::SHANNON_PRIMARY_KEY_NAME))) {
+      if (build_key_info(context, key_info, (uchar *)start, col_offsets, null_byte_offsets, null_bitmasks))
+        return HA_ERR_GENERIC;
+      break;
+    }
+  }
+  auto rowid = m_indexes[ShannonBase::SHANNON_PRIMARY_KEY_NAME].get()->lookup(context->m_extra_info.m_key_buff.get(),
+                                                                              context->m_extra_info.m_key_len);
+  auto found_rowid = rowid ? *rowid : INVALID_ROW_ID;
+  if (found_rowid == INVALID_ROW_ID) return HA_ERR_KEY_NOT_FOUND;
+
+  uchar *data_ptr{nullptr};
+  uint data_len{0};
+  for (auto col_ind = 0u; col_ind < context->m_table->s->fields; col_ind++) {
+    auto fld = *(context->m_table->field + col_ind);
+    if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    data_ptr = (uchar *)new_start + col_offsets[col_ind];
+    auto is_null = (fld->is_nullable()) ? is_field_null(col_ind, new_start, null_byte_offsets, null_bitmasks) : false;
+
+    if (is_null) {
+      data_len = UNIV_SQL_NULL;
+      data_ptr = nullptr;
+    } else {
+      switch (fld->type()) {
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_TINY_BLOB:
+        case MYSQL_TYPE_MEDIUM_BLOB:
+        case MYSQL_TYPE_LONG_BLOB: {
+          // TODO: BLOB data maybe not in the page. stores off the page.
+          auto bfld = down_cast<Field_blob *>(fld);
+          uint pack_len = bfld->pack_length_no_ptr();
+          switch (pack_len) {
+            case 1:
+              data_len = *data_ptr;
+              break;
+            case 2:
+              data_len = uint2korr(data_ptr);
+              break;
+            case 3:
+              data_len = uint3korr(data_ptr);
+              break;
+            case 4:
+              data_len = uint4korr(data_ptr);
+              break;
+          }
+          // Advance past length prefix
+          data_ptr += pack_len;
+
+          // For BLOBs, the data_ptr now points to a pointer to the actual blob data
+          uchar *blob_ptr = nullptr;
+          memcpy(&blob_ptr, data_ptr, sizeof(uchar *));
+          data_ptr = blob_ptr;
+        } break;
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_VAR_STRING: {
+          auto extra_offset = (fld->field_length > 256 ? 2 : 1);
+          if (extra_offset == 1)
+            data_len = mach_read_from_1(data_ptr);
+          else if (extra_offset == 2)
+            data_len = mach_read_from_2_little_endian(data_ptr);
+          data_ptr = data_ptr + ptrdiff_t(extra_offset);
+        } break;
+        default: {
+          data_len = fld->pack_length();
+        } break;
+      }
+    }
+
+    if (!(m_fields[fld->field_name]->update_row(context, found_rowid, data_ptr, data_len))) {
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
 int Table::delete_row(const Rapid_load_context *context, row_id_t rowid) {
   for (auto it = m_fields.begin(); it != m_fields.end();) {
     if (!it->second->delete_row(context, rowid)) {
@@ -682,7 +780,6 @@ int Table::delete_row(const Rapid_load_context *context, row_id_t rowid) {
     ++it;
   }
 
-  m_stats.prows.fetch_sub(1);
   return SHANNON_SUCCESS;
 }
 

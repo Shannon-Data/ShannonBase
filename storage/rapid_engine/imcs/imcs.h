@@ -129,7 +129,7 @@ class Imcs : public MemoryObject {
 
   inline row_id_t reserve_row_id(std::string &sch_table) {
     if (m_tables.size() == 0 || m_tables.find(sch_table) == m_tables.end()) return INVALID_ROW_ID;
-    return m_tables[sch_table]->reserve_id(nullptr);
+    return m_tables[sch_table]->forward_rowid(nullptr);
   }
 
   inline RapidTable *get_table(std::string &sch_table) {

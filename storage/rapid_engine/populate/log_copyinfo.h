@@ -30,6 +30,7 @@
 #ifndef __SHANNONBASE_LOG_COPY_INFO_PARSER_H__
 #define __SHANNONBASE_LOG_COPY_INFO_PARSER_H__
 
+#include "sql/sql_base.h"
 #include "storage/rapid_engine/include/rapid_context.h"  //Rapid_load_context
 #include "storage/rapid_engine/populate/log_commons.h"   //change_record_buff_t::OperType
 #include "storage/rapid_engine/utils/utils.h"
@@ -57,12 +58,21 @@ class CopyInfoParser {
     ~TableGuard() noexcept {
       if (m_table && m_thd) {
         ShannonBase::Utils::Util::close_table(m_thd, m_table);
+        // Remove the table from table definition cache to force reopening on next access
+        // Reason: In multi-threaded environments, other threads may use cached table instances,
+        // but the field pointers (field->ptr) within these table instances might have been
+        // reset during previous operations, leading to incorrect field offset values.
+        // Forcing a reopen ensures that field information is properly reinitialized.
+        tdc_remove_table(m_thd, TDC_RT_MARK_FOR_REOPEN, m_table->s->db.str, m_table->s->table_name.str, false);
       }
     }
 
     // Disable copy
     TableGuard(const TableGuard &) = delete;
     TableGuard &operator=(const TableGuard &) = delete;
+
+    TableGuard(TableGuard &&other) = delete;
+    TableGuard &operator=(TableGuard &&other) = delete;
 
    private:
     THD *m_thd;
@@ -99,8 +109,10 @@ class CopyInfoParser {
    * @param[in]  oper_type   The type of operation (INSERT, UPDATE, DELETE) being parsed.
    * @param[in]  start         Pointer to the start of the binary buffer containing change records.
    * @param[in]  end_ptr     Pointer to the end of the binary buffer.
+   * @param[in]  new_start   Pointer to the start of the binary buffer containing change records[table->record[0]].
+   * @param[in]  new_end_ptr Pointer to the end of the binary buffer [table->record[1]].
    *
-   * @return Always returns 0 for success; future versions may return error codes.
+   * @return returns parsed bytes; or return 0 on error.
    *
    * @note The function assumes `parse_record_header()` advances `start` safely
    *       within bounds and that each parsed record includes valid schema/table
@@ -109,7 +121,7 @@ class CopyInfoParser {
    *              provided `Rapid_load_context` instance.
    */
   uint parse_copy_info(Rapid_load_context *context, change_record_buff_t::OperType oper_type, byte *start,
-                       byte *end_ptr);
+                       byte *end_ptr, byte *new_start, byte *new_end_ptr);
 
  private:
   /**
@@ -126,8 +138,10 @@ class CopyInfoParser {
    *
    * @param[in] context   Rapid population execution context.
    * @param[in] table     The MySQL TABLE object (from COPY_INFO).
-   * @param[in] start     Pointer to the row buffer (`table->record[1]`).
-   * @param[in] end_ptr   Pointer to the end of row buffer.
+   * @param[in] start     Pointer to the row buffer , old row buffer (`table->record[0]`).
+   * @param[in] end_ptr   Pointer to the end of row buffer, old row buffer.
+   * @param[in] new_start     Pointer to the row buffer , new row buffer(`table->record[1]`).
+   * @param[in] new_ end_ptr   Pointer to the end of row buffer, new row buffer.
    *
    * @return
    *   - `The parsed bytes` if update applied successfully.
@@ -138,7 +152,8 @@ class CopyInfoParser {
    *   - It does not perform any physical logging; the LSN was already assigned
    *     in `NotifyAfterUpdate()` before enqueuing the record.
    */
-  int parse_and_apply_update(Rapid_load_context *context, TABLE *table, const byte *start, const byte *end_ptr);
+  int parse_and_apply_update(Rapid_load_context *context, TABLE *table, const byte *start, const byte *end_ptr,
+                             const byte *new_start, const byte *new_end_ptr);
 
   /**
    * @brief Apply an INSERT operation to a RAPID table using COPY_INFO data.
@@ -218,9 +233,9 @@ class CopyInfoParser {
 
  private:
   size_t m_n_fields{0};
-  std::vector<ulong> m_col_offsets;
-  std::vector<ulong> m_null_byte_offsets;
-  std::vector<ulong> m_null_bitmasks;
+  std::map<std::string, std::vector<ulong>> m_col_offsets;
+  std::map<std::string, std::vector<ulong>> m_null_byte_offsets;
+  std::map<std::string, std::vector<ulong>> m_null_bitmasks;
 };
 }  // namespace Populate
 }  // namespace ShannonBase

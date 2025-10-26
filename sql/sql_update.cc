@@ -996,8 +996,10 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
           error =
               table->file->ha_update_row(table->record[1], table->record[0]);
         }
-        if (error == 0)
+        if (error == 0) {
           updated_rows++;
+          notify_plugins_after_update(thd, table, table->record[1], table->record[0]);
+        }
         else if (error == HA_ERR_RECORD_IS_THE_SAME)
           error = 0;
         else {
@@ -1071,8 +1073,6 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         error = 1;
         break;
       }
-
-      notify_plugins_after_update(thd, table, table->record[0], table->record[1]);
     }
     end_semi_consistent_read.reset();
 
@@ -1473,7 +1473,7 @@ bool should_switch_to_multi_table_if_subqueries(const THD *thd,
 }
 
 void notify_plugins_after_update(THD *thd, TABLE *table, const uchar* old_rec, const uchar* new_rec) {
-  if (!thd || !table || !!old_rec || !new_rec) return;
+  if (!thd || !table || !old_rec || !new_rec) return;
 
   struct comb_args{
     TABLE *table;

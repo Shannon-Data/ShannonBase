@@ -849,13 +849,18 @@ void NotifyAfterInsert(THD *thd, void *args) {
   };
 
   auto params = static_cast<comb_args *>(args);
+  if (!params) return;
+
   auto table = params->arg1;
   auto info = params->arg2;
   auto update = params->arg3;
 
-  if (!params || !table || !info || !update) return;
+  if (!table || !info || !update) return;
 
-  if (ShannonBase::Populate::Populator::active()) {
+  std::string sch_tb_name = table->s->db.str;
+  sch_tb_name.append(":").append(table->s->table_name.str);
+  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_table(sch_tb_name);
+  if (ShannonBase::Populate::Populator::active() && rpd_table) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::INSERT;
@@ -879,11 +884,18 @@ void NotifyAfterUpdate(THD *thd, void *args) {
   };
 
   auto params = static_cast<comb_args *>(args);
+  if (!params) return;
+
   auto table = params->arg1;
   auto old_row = params->arg2;
   auto new_row = params->arg3;
 
-  if (ShannonBase::Populate::Populator::active()) {
+  if (!table || !old_row || !new_row) return;
+
+  std::string sch_tb_name = table->s->db.str;
+  sch_tb_name.append(":").append(table->s->table_name.str);
+  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_table(sch_tb_name);
+  if (ShannonBase::Populate::Populator::active() && rpd_table) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::UPDATE;
@@ -906,12 +918,17 @@ void NotifyAfterDelete(THD *thd, void *args) {
   };
 
   auto params = static_cast<comb_args *>(args);
+  if (!params) return;
+
   auto table = params->arg1;
   auto old_row = params->old_rec;
 
-  if (!params || !table || !old_row) return;
+  if (!table || !old_row) return;
 
-  if (ShannonBase::Populate::Populator::active()) {
+  std::string sch_tb_name = table->s->db.str;
+  sch_tb_name.append(":").append(table->s->table_name.str);
+  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_table(sch_tb_name);
+  if (ShannonBase::Populate::Populator::active() && rpd_table) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::DELETE;

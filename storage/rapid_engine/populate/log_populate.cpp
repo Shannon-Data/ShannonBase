@@ -67,10 +67,11 @@ std::atomic<SyncMode> g_sync_mode{SyncMode::REDO_LOG_PARSE};
 // and log_buffer write. if we stop changes poping, should stop writing
 // firstly, then stop this thread.
 std::unordered_map<uint64_t, change_record_buff_t> sys_pop_buff;
-
+// does the pop thread started or not.
 std::atomic<bool> sys_pop_started{false};
 // how many data was in sys_pop_buff?
 std::atomic<uint64> sys_pop_data_sz{0};
+// how many times applied round.
 static uint64 sys_rapid_loop_count{0};
 
 /**
@@ -159,9 +160,13 @@ static uint64_t parse_copy_info_record_worker(uint64_t start_lsn, const change_r
 
   const byte *start = change_rec->m_buff0.get();
   const byte *end = change_rec->m_buff0.get() + change_rec->m_size;
+
+  const byte *new_start = change_rec->m_buff1.get();
+  const byte *new_end_ptr = change_rec->m_buff1.get() + change_rec->m_size;
   size_t sz = change_rec->m_size;
   auto parsed_bytes =
-      copy_info_log.parse_copy_info(&context, oper_type, const_cast<byte *>(start), const_cast<byte *>(end));
+      copy_info_log.parse_copy_info(&context, oper_type, const_cast<byte *>(start), const_cast<byte *>(end),
+                                    const_cast<byte *>(new_start), const_cast<byte *>(new_end_ptr));
   ut_a(parsed_bytes == sz);
 
   if (log_pop_thread_thd) {

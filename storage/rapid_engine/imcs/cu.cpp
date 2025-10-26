@@ -353,15 +353,27 @@ uchar *Cu::update_row(const Rapid_load_context *context, row_id_t rowid, uchar *
   ut_a(context);
   ut_a((data && len != UNIV_SQL_NULL) || (!data && len == UNIV_SQL_NULL));
 
+  auto dlen = (len < sizeof(uint32)) ? sizeof(uint32) : len;
+  uchar local_buff[MAX_FIELD_WIDTH];
+  std::unique_ptr<uchar[]> datum(dlen < MAX_FIELD_WIDTH ? nullptr : new uchar[dlen]);
+  uchar *pdatum{nullptr};
+  if (data) {
+    pdatum = (dlen < MAX_FIELD_WIDTH) ? local_buff : datum.get();
+    std::memset(pdatum, 0x0, (dlen < MAX_FIELD_WIDTH) ? MAX_FIELD_WIDTH : dlen);
+    std::memcpy(pdatum, data, len);
+  }
+  auto wdata = (len == UNIV_SQL_NULL) ? nullptr : get_vfield_value(pdatum, len, false);
+
   auto chunk_id = rowid / SHANNON_ROWS_IN_CHUNK;
   auto offset_in_chunk = rowid % SHANNON_ROWS_IN_CHUNK;
   ut_a(chunk_id < m_chunks.size());
 
-  auto old = m_chunks[chunk_id].get()->seek((row_id_t)offset_in_chunk);
+  auto ret = m_chunks[chunk_id]->update(context, offset_in_chunk, wdata, len);
+  if (!ret) {
+    auto old = m_chunks[chunk_id].get()->seek((row_id_t)offset_in_chunk);
+    update_meta_info(ShannonBase::OPER_TYPE::OPER_UPDATE, data, old);
+  }
 
-  update_meta_info(ShannonBase::OPER_TYPE::OPER_UPDATE, data, old);
-
-  auto ret = m_chunks[chunk_id]->update(context, offset_in_chunk, data, len);
   return ret;
 }
 

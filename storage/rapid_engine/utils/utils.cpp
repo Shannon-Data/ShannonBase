@@ -56,7 +56,8 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
    */
   TABLE *table{nullptr};
   for (table = thd->open_tables; table; table = table->next) {
-    if (table->s && table->file && schema_name == table->s->db.str && table_name == table->s->table_name.str) {
+    if (table->s && table->file && table->file->inited && schema_name == table->s->db.str &&
+        table_name == table->s->table_name.str) {
       return table;
     }
   }
