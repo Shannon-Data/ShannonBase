@@ -141,7 +141,7 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
 
   // the changed record buffer. IF SOURCE FROM REDO, IT ONLY USE `m_buff0`, OTHERWISE, FROM
   // COPY_INFO, THE `m_buff1`, `m_schema_name` AND `m_table_name` MAYBE USED, AND `m_oper` IS SET.
-  std::unique_ptr<uchar[]> m_buff0;
+  std::unique_ptr<uchar[]> m_buff0{nullptr};
 
   // size of the records;
   size_t m_size;
@@ -150,7 +150,7 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   // is set in redo log parsing stage.
   enum class OperType : uint8 { UNSET = 0, INSERT, DELETE, UPDATE } m_oper{OperType::UNSET};
   std::string m_schema_name, m_table_name;
-  std::unique_ptr<uchar[]> m_buff1;
+  std::unique_ptr<uchar[]> m_buff1{nullptr};
 
   change_record_buff_t(Source sc, size_t s)
       : m_source(sc), m_buff0(std::make_unique<uchar[]>(s)), m_size(s), m_buff1(std::make_unique<uchar[]>(s)) {}

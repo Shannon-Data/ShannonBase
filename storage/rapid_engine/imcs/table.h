@@ -49,6 +49,16 @@ class Cu;
  * @class RapidTable
  * @brief Abstract base class representing a Rapid in-memory table.
  *
+ * Table (RapidTable)
+ * └── CU (Column Unit) - One CU per field
+ *       ├── Cu_header: Column metadata (statistics, dictionary, encoding type)
+ *       └── Chunks[] - Column data chunks (each chunk contains SHANNON_ROWS_IN_CHUNK rows)
+ *             ├── Chunk_header
+ *             │     ├── m_null_mask: NULL bitmap
+ *             │     ├── m_del_mask: Deletion bitmap
+ *             │     ├── m_smu: Version management unit
+ *             │     └── m_prows: Physical row count
+ *             └── ChunkMemoryManager: Actual data storage
  * This class defines the fundamental interface for all Rapid table types, including
  * normal tables (`Table`) and partitioned tables (`PartTable`). It provides APIs for
  * data manipulation (insert, update, delete), index management, metadata access, and
@@ -193,6 +203,20 @@ class RapidTable : public MemoryObject {
                          const uchar *new_field_data, size_t nlen) = 0;
 
   /**
+   * @brief Update a single field within a row.
+   * @param[in] context Rapid context.
+   * @param[in] nlen Length of row data.
+   * @param[in] col_offsets Column offsets array.
+   * @param[in] null_byte_offsets Null byte offsets.
+   * @param[in] null_bitmasks Null bitmasks.
+   * @param[in] start old row data ptr.
+   * @param[in] new_start new row data ptr.
+   * @return SHANNON_SUCCESS on success.
+   */
+  virtual int update_row(const Rapid_load_context *context, size_t nlen, ulong *col_offsets, ulong *null_byte_offsets,
+                         ulong *null_bitmasks, const uchar *start, const uchar *new_start) = 0;
+
+  /**
    * @brief Apply an update reconstructed from redo or binlog data.
    * @param[in] context Rapid context.
    * @param[in] rowid   Target row.
@@ -258,7 +282,10 @@ class RapidTable : public MemoryObject {
   virtual row_id_t rows(const Rapid_context *) = 0;
 
   /** @brief Reserve a new row ID for insertion. */
-  virtual row_id_t reserve_id(const Rapid_load_context *) = 0;
+  virtual row_id_t forward_rowid(const Rapid_load_context *) = 0;
+
+  /** @brief rollback the new row ID for insertion. */
+  virtual row_id_t backward_rowid(const Rapid_load_context *) = 0;
 
   /** @brief Lookup Cu column by field name. */
   virtual Cu *first_field() = 0;
@@ -275,12 +302,19 @@ class RapidTable : public MemoryObject {
   /** @brief Access MySQL source key metadata. */
   virtual std::unordered_map<std::string, key_meta_t> &get_source_keys() = 0;
 
+  /** @brief Get schema name. */
   virtual std::string &schema_name() = 0;
+
+  /** @brief Get this table name. */
   virtual std::string &name() = 0;
-  virtual row_id_t reserver_rowid() = 0;
+
+  /** @brief Truncate this table. */
   virtual int truncate() = 0;
+
+  /** @brief Rollback this changes. */
   virtual int rollback_changes_by_trxid(Transaction::ID trxid) = 0;
 
+  /** @brief Get the load type. */
   void set_load_type(LoadType load_type) { m_load_type = load_type; }
 
  protected:
@@ -361,6 +395,8 @@ class Table : public RapidTable {
                          const uchar *new_field_data, size_t nlen) final;
   virtual int update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
                                   std::unordered_map<std::string, mysql_field_t> &upd_recs) final;
+  virtual int update_row(const Rapid_load_context *context, size_t nlen, ulong *col_offsets, ulong *null_byte_offsets,
+                         ulong *null_bitmasks, const uchar *start, const uchar *new_start) final;
   virtual int truncate() final {
     assert(false);
     return ShannonBase::SHANNON_SUCCESS;
@@ -375,7 +411,10 @@ class Table : public RapidTable {
   virtual row_id_t rows(const Rapid_context *) final { return m_stats.prows.load(); }
 
   // to reserer a row place for this operation.
-  virtual row_id_t reserve_id(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
+  virtual row_id_t forward_rowid(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
+
+  // to reserer back the row id for rollback operation.
+  virtual row_id_t backward_rowid(const Rapid_load_context *) final { return m_stats.prows.fetch_sub(1); }
 
   virtual Cu *first_field() final { return m_fields.begin()->second.get(); }
 
@@ -393,8 +432,8 @@ class Table : public RapidTable {
   virtual std::unordered_map<std::string, key_meta_t> &get_source_keys() final { return m_source_keys; }
 
   virtual std::string &schema_name() final { return m_schema_name; }
+
   virtual std::string &name() final { return m_table_name; }
-  virtual row_id_t reserver_rowid() final { return m_stats.prows.fetch_add(1); }
 
  private:
   bool is_field_null(int field_index, const uchar *rowdata, const ulong *null_byte_offsets,
@@ -461,7 +500,7 @@ class Table : public RapidTable {
   int build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid);
 
   /**
-    Insert a record reference into the in-memory index structure (parallel version).
+    Insert a record reference into the in-memory index structure
 
     This variant is designed for parallel or asynchronous loading,
     where row data resides in an external buffer rather than
@@ -629,6 +668,12 @@ class PartTable : public RapidTable {
     return ShannonBase::SHANNON_SUCCESS;
   }
 
+  virtual int update_row(const Rapid_load_context *context, size_t nlen, ulong *col_offsets, ulong *null_byte_offsets,
+                         ulong *null_bitmasks, const uchar *start, const uchar *new_start) final {
+    assert(false);
+    return ShannonBase::SHANNON_SUCCESS;
+  }
+
   virtual int truncate() final {
     assert(false);
     return ShannonBase::SHANNON_SUCCESS;
@@ -646,7 +691,10 @@ class PartTable : public RapidTable {
   virtual row_id_t rows(const Rapid_context *) final { return m_stats.prows.load(); }
 
   // to reserer a row place for this operation.
-  virtual row_id_t reserve_id(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
+  virtual row_id_t forward_rowid(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
+
+  // to reserer back the new row for rollback operation.
+  virtual row_id_t backward_rowid(const Rapid_load_context *) final { return m_stats.prows.fetch_sub(1); }
 
   virtual Cu *first_field() final { return m_fields.begin()->second.get(); }
 
