@@ -44,7 +44,8 @@ namespace ShannonBase {
 class Transaction;
 namespace Imcs {
 class DataTable;
-}
+class RpdTableView;
+}  // namespace Imcs
 
 class ha_rapidpart;
 
@@ -87,7 +88,8 @@ class ha_rapid : public handler {
   ha_rapid(handlerton *hton, TABLE_SHARE *table_share);
 
  protected:
-  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;
+  // std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;
+  std::unique_ptr<ShannonBase::Imcs::RpdTableView> m_rpd_table_viewer;
 
  private:
   int create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) override { return HA_ERR_WRONG_COMMAND; }

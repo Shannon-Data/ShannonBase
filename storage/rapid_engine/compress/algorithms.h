@@ -39,13 +39,14 @@ namespace Compress {
 
 enum class Encoding_type { NONE, SORTED, VARLEN };
 enum class compress_algos { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
+enum class Compression_level { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
 
 class Compress_algorithm {
  public:
   Compress_algorithm() = default;
   virtual ~Compress_algorithm() = default;
   virtual std::string &compressString(std::string &original) = 0;
-  virtual std::string &decompressString(std::string &compressed_str) = 0;
+  virtual std::string &decompressString(const std::string &compressed_str) = 0;
   static constexpr uint MAX_BUFF_LEN = 65535;
 };
 
@@ -54,7 +55,7 @@ class zstd_compress : public Compress_algorithm {
   zstd_compress();
   virtual ~zstd_compress() = default;
   virtual std::string &compressString(std::string &original) final;
-  virtual std::string &decompressString(std::string &compressed_str) final;
+  virtual std::string &decompressString(const std::string &compressed_str) final;
 
  private:
   char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
@@ -66,7 +67,7 @@ class zlib_compress : public Compress_algorithm {
   zlib_compress();
   virtual ~zlib_compress() = default;
   virtual std::string &compressString(std::string &original) final;
-  virtual std::string &decompressString(std::string &compressed_str) final;
+  virtual std::string &decompressString(const std::string &compressed_str) final;
 
  private:
   char m_buffer[Compress_algorithm::MAX_BUFF_LEN] = {0};
@@ -78,7 +79,7 @@ class lz4_compress : public Compress_algorithm {
   lz4_compress();
   virtual ~lz4_compress() = default;
   virtual std::string &compressString(std::string &original) final;
-  virtual std::string &decompressString(std::string &compressed_str) final;
+  virtual std::string &decompressString(const std::string &compressed_str) final;
 
  private:
   std::string m_result;

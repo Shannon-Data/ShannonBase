@@ -29,8 +29,8 @@
 #include "include/trx0types.h"  //trx_id_t
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"  //Secondary_engine_execution_context
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/trx/transaction.h"
 
 class trx_t;
@@ -41,6 +41,9 @@ class THD;
 
 namespace ShannonBase {
 class Transaction;
+namespace Compress {
+class Dictionary;
+}
 namespace Imcs {
 class Imcs;
 class Cu;
@@ -121,6 +124,8 @@ class Rapid_context : public Secondary_engine_execution_context {
     // trxid of this innodb rows.
     Transaction::ID m_trxid{0};
 
+    Transaction::ID m_scn{0};
+
     Compress::Encoding_type m_algo{Compress::Encoding_type::SORTED};
 
     // index scan info.
@@ -136,7 +141,7 @@ class Rapid_context : public Secondary_engine_execution_context {
     uint m_key_len{0};
 
     // the active key memo.
-    std::unique_ptr<uchar[]> m_key_buff{nullptr};
+    std::shared_ptr<uchar[]> m_key_buff{nullptr};
 
     // partition info.
     std::unordered_map<std::string, uint> m_partition_infos;
@@ -146,7 +151,7 @@ class Rapid_context : public Secondary_engine_execution_context {
   };
 
   // current openning schema name and table name.
-  std::string m_schema_name, m_table_name;
+  std::string m_schema_name, m_table_name, m_sch_tb_name;
 
   // current openning table extra information.
   extra_info_t m_extra_info;
@@ -166,12 +171,16 @@ class Rapid_load_context : public Rapid_context {
   // the dictionary for this Cu.
   Compress::Dictionary *m_local_dict{nullptr};
 
+  Populate::change_record_buff_t::off_page_data_t *m_offpage_data0{nullptr};
+  Populate::change_record_buff_t::off_page_data_t *m_offpage_data1{nullptr};
   // current thd here.
   THD *m_thd{nullptr};
 };
 
 class Rapid_scan_context : public Rapid_context {
  public:
+  size_t limit{SIZE_MAX}, rows_returned;
+
   // current transaction.
   Transaction *m_trx{nullptr};
 

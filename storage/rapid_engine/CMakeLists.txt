@@ -52,16 +52,20 @@ SET(SHANNON_RAPID_COMPRESS_SOURCES
 
 SET(SHANNON_IMCS_SOURCES
    imcs/table.cpp
-   imcs/data_table.cpp
+   imcs/table0view.cpp
    imcs/imcs.cpp
    imcs/imcu.cpp
    imcs/cu.cpp
-   imcs/chunk.cpp
+   imcs/col0stats.cpp
+   imcs/predicate.cpp
+   imcs/varlen0data.cpp
+   imcs/worker.cpp
    imcs/index/art/art.cpp
    imcs/index/encoder.cpp
+   imcs/row0row.cpp
    utils/utils.cpp
    utils/SIMD.cpp
-   imcs/purge/purge.cpp
+   utils/memory_pool.cpp
    autopilot/loader.cpp
 )
 

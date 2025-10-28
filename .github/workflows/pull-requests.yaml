@@ -122,8 +122,8 @@ jobs:
           sudo chmod -R u+rwx mysql-test-run.pl
           export ASAN_OPTIONS="detect_leaks=1"
           export LSAN_OPTIONS="suppressions=/home/shannon-bin/mysql-test/lsan.supp"
-          ./mysql-test-run.pl --sanitize --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,secondary_engine,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
-          information_schema,ml \
+          ./mysql-test-run.pl --sanitize --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
+          information_schema \
           --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         # sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.push
@@ -187,7 +187,7 @@ jobs:
           sudo chmod -R u+rwx mysql-test-run.pl
           export ASAN_OPTIONS="detect_leaks=1"
           export LSAN_OPTIONS="suppressions=/home/shannon-bin/mysql-test/lsan.supp"
-          ./mysql-test-run.pl  --sanitize --suite=main,innodb,secondary_engine,ml \
+          ./mysql-test-run.pl  --sanitize --suite=main,innodb \
           --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         # sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.push

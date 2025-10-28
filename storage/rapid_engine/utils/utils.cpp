@@ -277,9 +277,8 @@ bool Util::dynamic_feature_normalization(THD *thd) {
   if (thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED) {
     for (auto &table_ref : stmt_context->get_query_tables()) {
       std::string table_name(table_ref->db);
-      table_name += "/";
-      table_name += table_ref->table_name;
-      if (ShannonBase::Populate::Populator::check_status(table_name)) return false;
+      table_name = table_name + ":" + table_ref->table_name;
+      if (ShannonBase::Populate::Populator::mark_table_required(table_name)) return false;
     }
   }
 
@@ -289,6 +288,7 @@ bool Util::dynamic_feature_normalization(THD *thd) {
 // check whether the dictionary encoding projection is supported or not.
 // returns true if supported to innodb, otherwise, false to secondary engine.
 bool Util::check_dict_encoding_projection(THD *thd) {
+#if 0
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   if (!imcs_instance) return true;
 
@@ -309,7 +309,7 @@ bool Util::check_dict_encoding_projection(THD *thd) {
       // to test all cu infos.
     }
   }
-
+#endif
   return false;
 }
 
@@ -335,14 +335,38 @@ uint Util::normalized_length(const Field *field) {
              : field->pack_length();
 }
 
-ColumnMapGuard::ColumnMapGuard(TABLE *t) : table(t) {
-  old_wmap = tmp_use_all_columns(table, table->write_set);
-  old_rmap = tmp_use_all_columns(table, table->read_set);
+ColumnMapGuard::ColumnMapGuard(TABLE *t, TYPE type) : bit_type(type), table(t) {
+  switch (bit_type) {
+    case TYPE::READ:
+      old_rmap = tmp_use_all_columns(table, table->read_set);
+      break;
+    case TYPE::WRITE:
+      old_wmap = tmp_use_all_columns(table, table->write_set);
+      break;
+    case TYPE::ALL:
+      old_rmap = tmp_use_all_columns(table, table->read_set);
+      old_wmap = tmp_use_all_columns(table, table->write_set);
+      break;
+    default:
+      assert(false);
+  }
 }
 
 ColumnMapGuard::~ColumnMapGuard() {
-  if (old_wmap) tmp_restore_column_map(table->write_set, old_wmap);
-  if (old_rmap) tmp_restore_column_map(table->read_set, old_rmap);
+  switch (bit_type) {
+    case TYPE::READ:
+      if (old_rmap) tmp_restore_column_map(table->read_set, old_rmap);
+      break;
+    case TYPE::WRITE:
+      if (old_wmap) tmp_restore_column_map(table->write_set, old_wmap);
+      break;
+    case TYPE::ALL:
+      if (old_rmap) tmp_restore_column_map(table->read_set, old_rmap);
+      if (old_wmap) tmp_restore_column_map(table->write_set, old_wmap);
+      break;
+    default:
+      break;
+  }
 }
 
 }  // namespace Utils

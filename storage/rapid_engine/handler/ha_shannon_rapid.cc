@@ -64,9 +64,8 @@
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
-#include "storage/rapid_engine/imcs/data_table.h"  //DataTable
 #include "storage/rapid_engine/imcs/imcs.h"        // IMCS
-#include "storage/rapid_engine/imcs/purge/purge.h"
+#include "storage/rapid_engine/imcs/table0view.h"  //RpdTableView
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_const.h"  //const
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -78,6 +77,7 @@
 #include "storage/rapid_engine/statistics/statistics.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
+#include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "template_utils.h"
@@ -92,6 +92,7 @@ static void rapid_register_tx(handlerton *const hton, THD *const thd, ShannonBas
 namespace ShannonBase {
 
 MEM_ROOT rapid_mem_root(PSI_NOT_INSTRUMENTED, 1024);
+std::shared_ptr<Utils::MemoryPool> g_rpd_memory_pool{nullptr};
 handlerton *shannon_rapid_hton_ptr{nullptr};
 
 LoadedTables *shannon_loaded_tables = nullptr;
@@ -194,18 +195,20 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
   std::string key(table_share->db.str);
   key.append(":").append(table_share->table_name.str);
   if (dd_table_is_partitioned(*table_def)) {
-    m_data_table.reset(new ShannonBase::Imcs::DataTable(table, Imcs::Imcs::instance()->get_parttable(key)));
+    m_rpd_table_viewer.reset(
+        new ShannonBase::Imcs::RpdTableView(table, Imcs::Imcs::instance()->get_rpd_parttable(key)));
   } else {
-    m_data_table.reset(new ShannonBase::Imcs::DataTable(table, Imcs::Imcs::instance()->get_table(key)));
+    m_rpd_table_viewer.reset(new ShannonBase::Imcs::RpdTableView(table, Imcs::Imcs::instance()->get_rpd_table(key)));
   }
-  m_data_table->open();
-  if (end_range) m_data_table->set_end_range(end_range);
-
+  m_rpd_table_viewer->open();
+  if (end_range) m_rpd_table_viewer->set_end_range(end_range);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::close() {
-  m_data_table->close();
+  m_rpd_table_viewer->close();
+  m_rpd_table_viewer.reset(nullptr);
+
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -215,20 +218,13 @@ int ha_rapid::info(unsigned int flags) {
   std::string sch_tb;
   sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
 
-  Rapid_scan_context context;
-  context.m_trx = Transaction::get_or_create_trx(m_thd);
-  context.m_trx->begin();
-
   if (table->part_info) {
-    auto rpd_tb = Imcs::Imcs::instance()->get_parttable(sch_tb);
-    stats.records = rpd_tb->rows(&context);
+    auto rpd_tb = Imcs::Imcs::instance()->get_rpd_parttable(sch_tb);
+    stats.records = rpd_tb->meta().total_rows;
   } else {
-    auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
-    stats.records = rpd_tb->rows(&context);
+    auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(sch_tb);
+    stats.records = down_cast<ShannonBase::Imcs::Table *>(rpd_tb)->rows(nullptr);
   }
-
-  context.m_trx->commit();
-
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -279,16 +275,11 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 }
 
 int ha_rapid::records(ha_rows *num_rows) {
-  Rapid_scan_context context;
-  context.m_trx = Transaction::get_or_create_trx(m_thd);
-  context.m_trx->begin();
-
   std::string sch_tb;
   sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
-  auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
-  *num_rows = rpd_tb->rows(&context);
+  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(sch_tb);
+  *num_rows = rpd_tb->meta().total_rows;
 
-  context.m_trx->commit();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -325,6 +316,16 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     return HA_ERR_KEY_NOT_FOUND;
   }
 
+  if (table_arg.s->is_missing_primary_key()) {
+    std::string err;
+    err.append(table_arg.s->db.str)
+        .append(".")
+        .append(table_arg.s->table_name.str)
+        .append(" requires PK for loading into rapid");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
+    return HA_ERR_KEY_NOT_FOUND;
+  }
+
   for (auto idx = 0u; idx < table_arg.s->fields; idx++) {
     auto fld = *(table_arg.field + idx);
     if (fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -344,12 +345,14 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_table = const_cast<TABLE *>(&table_arg);
   context.m_schema_name = table_arg.s->db.str;
   context.m_table_name = table_arg.s->table_name.str;
+  context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
   context.m_extra_info.m_keynr = active_index;
   context.m_extra_info.m_key_len = table_arg.file->ref_length;
+  context.m_trx = Transaction::get_or_create_trx(current_thd);
 
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
     std::string err;
-    err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" load failed.");
+    err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" load failed");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
     return HA_ERR_GENERIC;
   }
@@ -398,18 +401,12 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     ShannonBase::rpd_columns_info.push_back(row_rpd_columns);
   }
 
-  // start imcs purger thread to purge dead tuples.
-  ShannonBase::Purge::Purger::start();
-
   // start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
-  // then stop the purge thread.
-  ShannonBase::Purge::Purger::end();
-
   // stop the main pop monitor thread.
   ShannonBase::Populate::Populator::end();
 
@@ -483,7 +480,7 @@ int ha_rapid::start_stmt(THD *const thd, thr_lock_type lock_type) {
                         without rnd_end() in between
 @return 0 or error number */
 int ha_rapid::rnd_init(bool scan) {
-  if (m_data_table->init()) {
+  if (m_rpd_table_viewer->init()) {
     m_start_of_scan = false;
     return HA_ERR_GENERIC;
   }
@@ -497,7 +494,7 @@ int ha_rapid::rnd_init(bool scan) {
  @return 0 or error number */
 
 int ha_rapid::rnd_end(void) {
-  if (m_data_table->end()) return HA_ERR_GENERIC;
+  if (m_rpd_table_viewer->end()) return HA_ERR_GENERIC;
 
   m_start_of_scan = false;
   inited = handler::NONE;
@@ -512,11 +509,11 @@ int ha_rapid::rnd_next(uchar *buf) {
 
   if (inited == handler::RND && m_start_of_scan) {
     if (table_share->fields <= static_cast<uint>(ShannonBase::rpd_async_column_threshold)) {
-      error = m_data_table->next(buf);
+      error = m_rpd_table_viewer->next(buf);
     } else {
       auto reader_pool = ShannonBase::Imcs::Imcs::pool();
       std::future<int> fut =
-          boost::asio::co_spawn(*reader_pool, m_data_table->next_async(buf), boost::asio::use_future);
+          boost::asio::co_spawn(*reader_pool, m_rpd_table_viewer->next_async(buf), boost::asio::use_future);
       error = fut.get();  // co_await m_data_table->next_async(buf);  // index_first(buf);
       if (error == HA_ERR_KEY_NOT_FOUND) {
         error = HA_ERR_END_OF_FILE;
@@ -531,7 +528,7 @@ int ha_rapid::rnd_next(uchar *buf) {
 int ha_rapid::index_init(uint keynr, bool sorted) {
   DBUG_TRACE;
 
-  if (m_data_table->index_init(keynr, sorted)) {
+  if (m_rpd_table_viewer->index_init(keynr, sorted)) {
     m_start_of_scan = false;
     return HA_ERR_GENERIC;
   }
@@ -545,7 +542,7 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
 int ha_rapid::index_end() {
   DBUG_TRACE;
 
-  if (m_data_table->index_end()) return HA_ERR_GENERIC;
+  if (m_rpd_table_viewer->index_end()) return HA_ERR_GENERIC;
 
   active_index = MAX_KEY;
   inited = handler::NONE;
@@ -559,21 +556,21 @@ int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_fun
   int err{HA_ERR_END_OF_FILE};
   ut_ad(m_start_of_scan && inited == handler::INDEX);
 
-  m_data_table->set_end_range(end_range);
-  err = m_data_table->index_read(buf, key, key_len, find_flag);
+  m_rpd_table_viewer->set_end_range(end_range);
+  err = m_rpd_table_viewer->index_read(buf, key, key_len, find_flag);
   if (err == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return err;
 }
 
 int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
-  m_data_table->set_end_range(end_range);
-  return (m_data_table->index_read(buf, key, key_len, HA_READ_PREFIX_LAST));
+  m_rpd_table_viewer->set_end_range(end_range);
+  return (m_rpd_table_viewer->index_read(buf, key, key_len, HA_READ_PREFIX_LAST));
 }
 
 int ha_rapid::index_next(uchar *buf) {
   ut_ad(m_start_of_scan && inited == handler::INDEX);
 
-  auto error = m_data_table->index_next(buf);
+  auto error = m_rpd_table_viewer->index_next(buf);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return error;
 }
@@ -581,7 +578,7 @@ int ha_rapid::index_next(uchar *buf) {
 int ha_rapid::index_next_same(uchar *buf, const uchar *, uint) {
   ut_ad(m_start_of_scan && inited == handler::INDEX);
 
-  auto error = m_data_table->index_next(buf);
+  auto error = m_rpd_table_viewer->index_next(buf);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return error;
 }
@@ -592,10 +589,10 @@ int ha_rapid::index_first(uchar *buf) {
 
   int error;
   if (end_range) {
-    m_data_table->set_end_range(end_range);
-    error = m_data_table->index_read(buf, end_range->key, end_range->length, end_range->flag);
+    m_rpd_table_viewer->set_end_range(end_range);
+    error = m_rpd_table_viewer->index_read(buf, end_range->key, end_range->length, end_range->flag);
   } else
-    error = m_data_table->index_next(buf);
+    error = m_rpd_table_viewer->index_next(buf);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_first_count);
   return error;
 }
@@ -608,8 +605,8 @@ int ha_rapid::index_prev(uchar *buf) {
 int ha_rapid::index_last(uchar *buf) {
   DBUG_TRACE;
 
-  m_data_table->set_end_range(end_range);
-  int error = m_data_table->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
+  m_rpd_table_viewer->set_end_range(end_range);
+  int error = m_rpd_table_viewer->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
 
   /* MySQL does not seem to allow this to return HA_ERR_KEY_NOT_FOUND */
 
@@ -718,6 +715,35 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
       // see any changes that occurred since the last statement.
       trx->release_snapshot();
     }
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+/**
+ * Prepares for two-phase commit
+ * @param hton Handlerton pointer
+ * @param thd THD pointer
+ * @param all true = prepare entire transaction, false = prepare statement-level transaction
+ */
+static int rapid_prepare(handlerton *hton, THD *thd, bool all) {
+  DBUG_TRACE;
+  DBUG_PRINT("rapid_prepare", ("all: %d", all));
+
+  ut_a(hton == ShannonBase::shannon_rapid_hton_ptr);
+
+  // For the Rapid engine, we rely on InnoDB's two-phase commit
+  // Can simply return success here
+  // If independent two-phase commit implementation is needed in the future,
+  // logic can be added here
+
+  auto *trx = ShannonBase::Transaction::get_trx_from_thd(thd);
+  if (trx == nullptr) return ShannonBase::SHANNON_SUCCESS;
+
+  if (all) {
+    DBUG_PRINT("rapid_prepare", ("preparing transaction %lu", trx->get_id()));
+    // If needed, can set transaction status to PREPARED here
+    // trx->set_status(Transaction::STATUS::PREPARED);
   }
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -836,6 +862,64 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
   }
 }
 
+/**
+ * @brief Read and copy BLOB-type off-page data from table
+ *
+ * The main purpose of this function is to address the storage characteristics of BLOB data types in MySQL:
+ * - BLOB fields only store pointers and length information in the row record, actual data is stored in off-page areas
+ * - When inserting multiple records consecutively, MySQL may reuse the same memory area for BLOB data
+ * - If we only copy pointers from record[0], subsequent operations will overwrite the actual data pointed to
+ *
+ * The function ensures data integrity through the following steps:
+ * 1. Use pre-cached BLOB field indices to avoid traversing all fields
+ * 2. Parse BLOB field length prefixes and pointer information
+ * 3. Create independent memory copies for each BLOB data
+ * 4. Store copied data in off_page_data structure for later use
+ *
+ * @param table MySQL table structure pointer
+ * @param off_page_data Output parameter, stores field indices and corresponding BLOB data copies
+ */
+static void read_off_page_data(TABLE *table,
+                               ShannonBase::Populate::change_record_buff_t::off_page_data_t &off_page_data) {
+  const uint field_count = table->s->fields;
+  Field **fields = table->field;
+  for (uint idx = 0; idx < field_count; idx++) {
+    Field *fld = fields[idx];
+    uchar *base_ptr = fld->field_ptr();
+    if (likely(((fld->type() != MYSQL_TYPE_BLOB) && (fld->type() != MYSQL_TYPE_TINY_BLOB) &&
+                (fld->type() != MYSQL_TYPE_MEDIUM_BLOB) && (fld->type() != MYSQL_TYPE_LONG_BLOB))))
+      continue;
+
+    auto bfld = down_cast<Field_blob *>(fld);
+    uint pack_len = bfld->pack_length_no_ptr();
+    size_t data_len = 0;
+    switch (pack_len) {
+      case 1:
+        data_len = *base_ptr;
+        break;
+      case 2:
+        data_len = uint2korr(base_ptr);
+        break;
+      case 3:
+        data_len = uint3korr(base_ptr);
+        break;
+      case 4:
+        data_len = uint4korr(base_ptr);
+        break;
+      default:
+        continue;
+    }
+    uchar *blob_data_ptr = base_ptr + pack_len;
+    uchar *actual_blob_data = nullptr;
+    memcpy(&actual_blob_data, blob_data_ptr, sizeof(uchar *));
+    if (actual_blob_data && data_len > 0) {
+      std::shared_ptr<uchar[]> blob_copy(new uchar[data_len]);
+      std::memcpy(blob_copy.get(), actual_blob_data, data_len);
+      off_page_data.emplace(idx, std::make_pair(data_len, std::move(blob_copy)));
+    }
+  }
+}
+
 // To after insrt into primary engine, this function will be invoked. Then, you can get all chages from
 // table->record[0], table->record[1] and COPY_INFO, etc. After that you can insert these changes to rapid. The other
 // way is we use now, the redo log.
@@ -857,18 +941,21 @@ void NotifyAfterInsert(THD *thd, void *args) {
 
   if (!table || !info || !update) return;
 
+  assert(!table->s->is_missing_primary_key());
+
   std::string sch_tb_name = table->s->db.str;
   sch_tb_name.append(":").append(table->s->table_name.str);
-  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_table(sch_tb_name);
+  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(sch_tb_name);
   if (ShannonBase::Populate::Populator::active() && rpd_table) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::INSERT;
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
-
     lsn_t current_lsn = log_get_lsn(*log_sys);
     std::memcpy(copy_info_rec.m_buff0.get(), table->record[0], table->s->rec_buff_length);
+    // read and store off-page data.
+    read_off_page_data(table, copy_info_rec.m_offpage_data0);
     ShannonBase::Populate::Populator::write(nullptr, current_lsn, &copy_info_rec);
   }
 }
@@ -894,7 +981,7 @@ void NotifyAfterUpdate(THD *thd, void *args) {
 
   std::string sch_tb_name = table->s->db.str;
   sch_tb_name.append(":").append(table->s->table_name.str);
-  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_table(sch_tb_name);
+  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(sch_tb_name);
   if (ShannonBase::Populate::Populator::active() && rpd_table) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
@@ -904,7 +991,10 @@ void NotifyAfterUpdate(THD *thd, void *args) {
 
     lsn_t current_lsn = log_get_lsn(*log_sys);
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
-    std::memcpy(copy_info_rec.m_buff1.get(), new_row, table->s->rec_buff_length);
+    if (new_row) {
+      std::memcpy(copy_info_rec.m_buff1.get(), new_row, table->s->rec_buff_length);
+      read_off_page_data(table, copy_info_rec.m_offpage_data0);
+    }
     ShannonBase::Populate::Populator::write(nullptr, current_lsn, &copy_info_rec);
   }
 }
@@ -927,7 +1017,7 @@ void NotifyAfterDelete(THD *thd, void *args) {
 
   std::string sch_tb_name = table->s->db.str;
   sch_tb_name.append(":").append(table->s->table_name.str);
-  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_table(sch_tb_name);
+  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(sch_tb_name);
   if (ShannonBase::Populate::Populator::active() && rpd_table) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
@@ -937,6 +1027,8 @@ void NotifyAfterDelete(THD *thd, void *args) {
 
     lsn_t current_lsn = log_get_lsn(*log_sys);
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
+
+    read_off_page_data(table, copy_info_rec.m_offpage_data0);
     ShannonBase::Populate::Populator::write(nullptr, current_lsn, &copy_info_rec);
   }
 }
@@ -986,8 +1078,8 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   ut_a(thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED);
   for (auto &table_ref : shannon_statement_context->get_query_tables()) {
     std::string table_name(table_ref->db);
-    table_name.append("/").append(table_ref->table_name);
-    if (ShannonBase::Populate::Populator::check_status(table_name)) return true;
+    table_name.append(":").append(table_ref->table_name);
+    if (ShannonBase::Populate::Populator::mark_table_required(table_name)) return true;
   }
 
   // 2: to check whether the sys_pop_data_sz has too many data to populate.
@@ -1128,7 +1220,7 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
       static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO * ShannonBase::rpd_pop_buff_sz_max);
   if (unlikely(ShannonBase::Populate::sys_pop_buff.size() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
                ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold)) {
-    SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, the CP lag is too much");
+    SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, the change propation lag is too much");
     return true;
   }
 
@@ -1781,6 +1873,9 @@ static SHOW_VAR rapid_status_variables_export[] = {
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
+  ShannonBase::Utils::MemoryPool::Config config;
+  ShannonBase::g_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
+
   handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);
   ShannonBase::shannon_rapid_hton_ptr = shannon_rapid_hton;
   shannon_rapid_hton->create = rapid_create_handler;
@@ -1805,6 +1900,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;
+  shannon_rapid_hton->prepare = rapid_prepare;
   shannon_rapid_hton->start_consistent_snapshot = rapid_start_trx_and_assign_read_view;
   shannon_rapid_hton->savepoint_set = rapid_savepoint;
   shannon_rapid_hton->savepoint_rollback = rapid_rollback_to_savepoint;
@@ -1823,6 +1919,12 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
+  while (ShannonBase::Populate::Populator::active()) {
+    ShannonBase::Populate::sys_pop_started.store(false);
+    os_event_set(log_sys->rapid_events[0]);
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+
   if (ShannonBase::shannon_loaded_tables) {
     delete ShannonBase::shannon_loaded_tables;
     ShannonBase::shannon_loaded_tables = nullptr;

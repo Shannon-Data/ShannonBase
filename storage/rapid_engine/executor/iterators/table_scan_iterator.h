@@ -35,8 +35,8 @@
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/imcs/cu.h"
-#include "storage/rapid_engine/imcs/data_table.h"
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/imcs/table0view.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
@@ -186,19 +186,23 @@ class VectorizedTableScanIterator : public TableRowIterator {
    * @param rowid Row index within the current batch
    */
   inline void ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
+#if 0  // to use Rowbuffer::ColumnValue.
     if (field->real_type() == MYSQL_TYPE_ENUM) {
       field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
     } else {
       const char *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
       auto str_id = *(uint32 *)data_ptr;
 
-      std::string fld_name(field->field_name);
-      auto rpd_field = m_data_table.get()->table()->get_field(fld_name);
+      std::string fld_idx(field->field_index());
+      m_rpd_table_viewer.get()->table()
+
+      auto rpd_field = m_rpd_table_viewer.get()->table()->get_field(fld_name);
       if (!rpd_field) return;
 
       auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
       field->store(str_ptr.c_str(), strlen(str_ptr.c_str()), field->charset());
     }
+#endif
   }
 
   /**
@@ -215,8 +219,8 @@ class VectorizedTableScanIterator : public TableRowIterator {
  private:
   TABLE *m_table;  ///< MySQL table structure pointer
 
-  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;    ///< Underlying columnar data table
-  std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing
+  std::unique_ptr<ShannonBase::Imcs::RpdTableView> m_rpd_table_viewer;  ///< Underlying columnar data table
+  std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;         ///< Column chunks for batch processing
 
   filter_func_t m_filter;  ///< Optional filter function for row-level filtering
 

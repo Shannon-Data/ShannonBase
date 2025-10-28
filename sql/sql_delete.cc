@@ -136,6 +136,8 @@ bool DeleteCurrentRowAndProcessTriggers(THD *thd, TABLE *table,
 
   ++*deleted_rows;
 
+  notify_plugins_after_delete(thd, table, table->record[0]);
+
   if (invoke_after_triggers) {
     if (table->triggers->process_triggers(thd, TRG_EVENT_DELETE,
                                           TRG_ACTION_AFTER,
@@ -619,8 +621,6 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
         error = -1;
         break;
       }
-
-      notify_plugins_after_delete(thd, table, table->record[0]);
     }
 
     killed_status = thd->killed;

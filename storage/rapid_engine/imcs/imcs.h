@@ -41,6 +41,7 @@
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/utils/concurrent.h"
@@ -127,30 +128,22 @@ class Imcs : public MemoryObject {
 
   void cleanup(std::string &sch_name, std::string &table_name);
 
-  inline row_id_t reserve_row_id(std::string &sch_table) {
-    if (m_tables.size() == 0 || m_tables.find(sch_table) == m_tables.end()) return INVALID_ROW_ID;
-    return m_tables[sch_table]->forward_rowid(nullptr);
-  }
+  inline row_id_t reserve_row_id(std::string &sch_table) { return 0; }
 
-  inline RapidTable *get_table(std::string &sch_table) {
+  inline RpdTable *get_rpd_table(const std::string &sch_table) {
     std::shared_lock lk(m_table_mutex);
-    if (m_tables.find(sch_table) == m_tables.end())
+    if (m_rpd_tables.find(sch_table) == m_rpd_tables.end())
       return nullptr;
     else
-      return m_tables[sch_table].get();
+      return m_rpd_tables[sch_table].get();
   }
 
-  inline std::unordered_map<std::string, std::unique_ptr<RapidTable>> &get_tables() {
+  inline RpdTable *get_rpd_parttable(std::string &sch_table) {
     std::shared_lock lk(m_table_mutex);
-    return m_tables;
-  }
-
-  inline RapidTable *get_parttable(std::string &sch_table) {
-    std::shared_lock lk(m_table_mutex);
-    if (m_parttables.find(sch_table) == m_parttables.end())
+    if (m_rpd_parttables.find(sch_table) == m_rpd_parttables.end())
       return nullptr;
     else
-      return m_parttables[sch_table].get();
+      return m_rpd_parttables[sch_table].get();
   }
 
  private:
@@ -213,10 +206,10 @@ class Imcs : public MemoryObject {
 
   std::shared_mutex m_table_mutex;
   // loaded tables. key format: schema_name + ":" + table_name.
-  std::unordered_map<std::string, std::unique_ptr<RapidTable>> m_tables;
+  std::unordered_map<std::string, std::unique_ptr<RpdTable>> m_rpd_tables;
 
   // loaded partitioned tables. key format: schema_name + ":" + table_name.
-  std::unordered_map<std::string, std::unique_ptr<RapidTable>> m_parttables;
+  std::unordered_map<std::string, std::unique_ptr<RpdTable>> m_rpd_parttables;
 
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};
