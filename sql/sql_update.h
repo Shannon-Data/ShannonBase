@@ -53,7 +53,8 @@ bool compare_records(const TABLE *table);
 bool should_switch_to_multi_table_if_subqueries(const THD *thd,
                                                 const Query_block *select,
                                                 const Table_ref *table_list);
-void notify_plugins_after_update(THD *thd, TABLE *table, const uchar* old_rec, const uchar* new_rec);
+void notify_plugins_after_update(THD *thd, TABLE *table, const uchar* old_rec,
+                                 const uchar* new_rec);
 
 class Query_result_update final : public Query_result_interceptor {
   /// Number of tables being updated

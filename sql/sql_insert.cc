@@ -321,7 +321,8 @@ bool validate_default_values_of_unset_fields(THD *thd, TABLE *table) {
   return false;
 }
 
-void notify_plugins_after_insert(THD *thd, TABLE *table, COPY_INFO *info, COPY_INFO *update) {
+void notify_plugins_after_insert(THD *thd, TABLE *table, COPY_INFO *info,
+                                 COPY_INFO *update) {
   if (!thd || !table || !info || !update) return;
 
   struct comb_args {
@@ -2409,11 +2410,10 @@ bool Query_result_insert::send_data(THD *thd,
   }
 
   error = write_record(thd, table, &info, &update);
+  if (!error)
+    notify_plugins_after_insert(thd, table, &info, &update);
 
   DEBUG_SYNC(thd, "create_select_after_write_rows_event");
-
-  notify_plugins_after_insert(thd, table, &info, &update);
-
   if (!error &&
       (table->triggers || info.get_duplicate_handling() == DUP_UPDATE)) {
     /*

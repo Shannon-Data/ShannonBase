@@ -30,6 +30,9 @@
 #define __SHANNONBASE_COMPRESS_DICTIONARY_H__
 
 #include <mutex>
+#include <shared_mutex>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "include/my_inttypes.h"
@@ -39,52 +42,46 @@
 
 namespace ShannonBase {
 namespace Compress {
-
 // Dictionary, which store all the dictionary data.
 class Dictionary {
  public:
   static constexpr auto DEFAULT_STRID = 0;
   static constexpr auto INVALID_STRID = -1;
+  static constexpr size_t kMinCompressThreshold = 64;  // Strings shorter than this length will not be compressed
 
-  Dictionary(Encoding_type type) : m_encoding_type(type) {
+  explicit Dictionary(Encoding_type type) : m_encoding_type(type) {
+    // Default "unknown" string
     m_content.emplace("unknown", 0);
     m_id2content.emplace(0, "unknown");
   }
+
   Dictionary() = delete;
   virtual ~Dictionary() = default;
 
-  // store the string into dictionary, and return the string id.
-  virtual uint32 store(const uchar *, size_t, Encoding_type type = Encoding_type::NONE);
+  // Store a string in the dictionary and return its ID
+  virtual uint32 store(const uchar *str, size_t len, Encoding_type type = Encoding_type::NONE);
 
-  // get the string by string id. surcess return 0 and string, otherwise not found return -1.;
+  // Get string by ID
   virtual int32 id(uint64 strid, String &ret_val);
 
-  // get the string id by string. if not found, return empty string.
+  // Get string content by ID
   virtual std::string get(uint64 strid);
 
-  // get the string id by string. if not found, return -1.
+  // Get ID by string
   virtual int64 id(const std::string &str);
 
-  // get the algorithm type.
-  virtual inline Encoding_type get_algo() const { return m_encoding_type; }
-
-  // get the content size.
-  virtual inline uint32 content_size() const { return m_content.size(); }
+  inline Encoding_type get_algo() const { return m_encoding_type; }
+  inline uint32 content_size() const { return m_content.size(); }
 
  private:
-  std::mutex m_content_mtx;
-
-  // the encoding type of this dictionary used.
+  mutable std::shared_mutex m_content_mtx;
   Encoding_type m_encoding_type{Encoding_type::NONE};
 
-  // compressed cotent string mapp, key: compressed string, value: compressed
-  // string id in this map.
+  // Compressed content mapping: compressed/encoded_str -> id
   std::unordered_map<std::string, uint64> m_content;
-
-  // string id<--> original string. for access accleration.
+  // id -> compressed (or original) string
   std::unordered_map<uint64, std::string> m_id2content;
 };
-
 }  // namespace Compress
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_COMPRESS_DICTIONARY_H__

@@ -1951,7 +1951,7 @@ rapid-max-purger-timeout 5000
 rapid-memory-size-max 8589934592
 rapid-min-versions-for-purge 10
 rapid-parallel-load-max 10000
-rapid-pop-buffer-size-max 134217728
+rapid-pop-buffer-size-max 268435456
 rapid-purge-batch-size 64
 rapid-purge-efficiency-threshold 0.1
 rapid-self-load-base-relation-fill-percentage 70

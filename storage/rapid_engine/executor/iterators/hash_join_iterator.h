@@ -37,7 +37,6 @@
 #include "sql/iterators/hash_join_iterator.h"
 #include "sql/join_type.h"  //JoinType
 #include "storage/rapid_engine/executor/iterators/iterator.h"
-#include "storage/rapid_engine/imcs/chunk.h"
 #include "storage/rapid_engine/imcs/cu.h"
 
 class Item_eq_base;

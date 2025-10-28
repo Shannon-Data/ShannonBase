@@ -138,8 +138,8 @@ class CopyInfoParser {
    *
    * @param[in] context   Rapid population execution context.
    * @param[in] table     The MySQL TABLE object (from COPY_INFO).
-   * @param[in] start     Pointer to the row buffer , old row buffer (`table->record[0]`).
-   * @param[in] end_ptr   Pointer to the end of row buffer, old row buffer.
+   * @param[in] old_start     Pointer to the row buffer , old row buffer (`table->record[0]`).
+   * @param[in] old_end_ptr   Pointer to the end of row buffer, old row buffer.
    * @param[in] new_start     Pointer to the row buffer , new row buffer(`table->record[1]`).
    * @param[in] new_ end_ptr   Pointer to the end of row buffer, new row buffer.
    *
@@ -152,7 +152,7 @@ class CopyInfoParser {
    *   - It does not perform any physical logging; the LSN was already assigned
    *     in `NotifyAfterUpdate()` before enqueuing the record.
    */
-  int parse_and_apply_update(Rapid_load_context *context, TABLE *table, const byte *start, const byte *end_ptr,
+  int parse_and_apply_update(Rapid_load_context *context, TABLE *table, const byte *old_start, const byte *old_end_ptr,
                              const byte *new_start, const byte *new_end_ptr);
 
   /**

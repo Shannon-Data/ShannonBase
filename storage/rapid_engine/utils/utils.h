@@ -52,26 +52,6 @@ class Dictionary;
 }
 namespace Utils {
 
-class MemoryPool {
- public:
-  void *allocate(size_t size) {
-    if (m_current_offset + size > m_block_size) {
-      m_memory_blocks.emplace_back(std::make_unique<char[]>(m_block_size));
-      m_current_offset = 0;
-    }
-    void *ptr = m_memory_blocks.back().get() + m_current_offset;
-    m_current_offset += size;
-    return ptr;
-  }
-
-  void reset() { m_current_offset = 0; }
-
- private:
-  std::vector<std::unique_ptr<char[]>> m_memory_blocks;
-  size_t m_block_size;
-  size_t m_current_offset;
-};
-
 class Util {
  public:
   // open a table via schema name and table name.
@@ -316,12 +296,19 @@ class Util {
 };
 
 class ColumnMapGuard {
-  TABLE *table;
-  my_bitmap_map *old_wmap, *old_rmap;
-
  public:
-  ColumnMapGuard(TABLE *t);
+  enum class TYPE : uint8_t { READ, WRITE, ALL };
+  ColumnMapGuard(TABLE *t, TYPE type = TYPE::READ);
   ~ColumnMapGuard();
+
+  ColumnMapGuard(const ColumnMapGuard &) = delete;
+  ColumnMapGuard &operator=(const ColumnMapGuard &) = delete;
+
+ private:
+  TYPE bit_type{TYPE::READ};
+  TABLE *table{nullptr};
+  my_bitmap_map *old_rmap{nullptr};
+  my_bitmap_map *old_wmap{nullptr};
 };
 
 }  // namespace Utils

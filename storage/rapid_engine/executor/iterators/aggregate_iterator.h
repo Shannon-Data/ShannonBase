@@ -37,8 +37,8 @@
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/imcs/cu.h"
-#include "storage/rapid_engine/imcs/data_table.h"
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/imcs/table0view.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"

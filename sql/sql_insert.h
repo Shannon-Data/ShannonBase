@@ -61,7 +61,8 @@ bool validate_default_values_of_unset_fields(THD *thd, TABLE *table);
   @param thd the current session
   @param cmd command to be notified about
 */
-void notify_plugins_after_insert(THD *thd, TABLE *table, COPY_INFO *info, COPY_INFO *update);
+void notify_plugins_after_insert(THD *thd, TABLE *table, COPY_INFO *info,
+                                 COPY_INFO *update);
 
 class Query_result_insert : public Query_result_interceptor {
  public:

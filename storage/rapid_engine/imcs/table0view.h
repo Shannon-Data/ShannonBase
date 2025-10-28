@@ -23,8 +23,8 @@
 
    The fundmental code for imcs.
 */
-#ifndef __SHANNONBASE_DATA_TABLE_H__
-#define __SHANNONBASE_DATA_TABLE_H__
+#ifndef __SHANNONBASE_TABLE_VIEW_H__
+#define __SHANNONBASE_TABLE_VIEW_H__
 
 #include <atomic>
 #include <functional>
@@ -48,44 +48,24 @@ namespace Imcs {
 class Imcs;
 class Cu;
 class RapidTable;
+class RpdTable;
+class RowBuffer;
 
-class DeferGuard {
+class RpdTableView : public MemoryObject {
  public:
-  explicit DeferGuard(std::function<void()> fn) : m_fn(std::move(fn)), m_active(true) {}
-
-  DeferGuard(const DeferGuard &) = delete;
-  DeferGuard &operator=(const DeferGuard &) = delete;
-
-  DeferGuard(DeferGuard &&other) noexcept : m_fn(std::move(other.m_fn)), m_active(other.m_active) {
-    other.m_active = false;
-  }
-
-  ~DeferGuard() {
-    if (m_active && m_fn) m_fn();
-  }
-
-  void dismiss() noexcept { m_active = false; }
-
- private:
-  std::function<void()> m_fn;
-  bool m_active;
-};
-
-class DataTable : public MemoryObject {
- public:
-  DataTable(TABLE *source_table, RapidTable *rpd);
-  virtual ~DataTable();
+  RpdTableView(TABLE *source_table, RpdTable *rpd);
+  virtual ~RpdTableView() = default;
 
   // gets its active rapid table.
-  inline RapidTable *table() const { return m_rapid_table; }
+  inline RpdTable *table() const { return m_rpd_table; }
 
   // the parent table of partitions.
-  inline RapidTable *table_source() const { return m_source_rpd_table; }
+  inline RpdTable *table_source() const { return m_source_rpd_table; }
 
   // to reset to a new rpd table source.
-  inline void active_table(RapidTable *rpd_table) {
-    m_rowid.store(0);
-    m_rapid_table = rpd_table;
+  inline void active_table(RpdTable *rpd_table) {
+    m_current_row_idx.store(0);
+    m_rpd_table = rpd_table;
   }
 
   inline TABLE *source() const { return m_data_source; }
@@ -128,14 +108,6 @@ class DataTable : public MemoryObject {
   // index read prev
   int index_prev(uchar *buf);
 
-  inline uchar *ensure_buffer_size(size_t needed_size) {
-    if (needed_size > m_buffer_size) {
-      m_row_buffer = std::make_unique<uchar[]>(needed_size);
-      m_buffer_size = needed_size;
-    }
-    return m_row_buffer.get();
-  }
-
   inline void set_end_range(key_range *end_range) { m_end_range = end_range; }
 
  private:
@@ -146,47 +118,62 @@ class DataTable : public MemoryObject {
   };
   enum class FETCH_STATUS : uint8 { FETCH_ERROR, FETCH_OK, FETCH_CONTINUE, FETCH_NEXT_ROW };
 
-  DataTable::FETCH_STATUS fetch_row_field(ulong current_chunk, ulong offset_in_chunk, Field *source_fld);
-
   // Helper method to encode key parts for ART storage
   void encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key_info);
 
+  // Helper to fetch next batch of rows
+  bool fetch_next_batch(size_t batch_size = SHANNON_BATCH_NUM);
+
+  int position(row_id_t start_row_id);
+
  private:
-  std::atomic<bool> m_initialized{false};
+  std::atomic<bool> m_scan_initialized{false};
 
   // the data source, an IMCS.
   TABLE *m_data_source{nullptr};
 
   // rapid table.
-  RapidTable *m_rapid_table{nullptr}, *m_source_rpd_table{nullptr};
+  RpdTable *m_rpd_table{nullptr}, *m_source_rpd_table{nullptr} /**if it partition rpd, pointer to parent rpd. */;
 
   // start from where.
-  std::atomic<row_id_t> m_rowid{0};
+  std::atomic<row_id_t> m_current_row_idx{0};
+
+  std::atomic<bool> m_using_batch{true};
+
+  size_t m_batch_start{0};  // Current batch boundaries
+  size_t m_batch_end{0};
+
+  size_t m_current_imcu_idx{0};               // Which IMCU we're currently scanning
+  size_t m_current_imcu_offset{0};            // Offset within current IMCU
+  std::atomic<bool> m_scan_exhausted{false};  // All IMCUs scanned
 
   // context
-  std::unique_ptr<Rapid_scan_context> m_context{nullptr};
+  std::unique_ptr<Rapid_scan_context> m_scan_context{nullptr};
 
   // index iterator.
   std::unique_ptr<Index::Iterator, IteratorDeleter> m_index_iter;
 
-  // active index no.
+  // active index id.
   int8_t m_active_index{MAX_KEY};
 
   // key buff to store the encoded key data.
   std::unique_ptr<uchar[]> m_key{nullptr};
 
   // end key buff to store the encoded key data if it end_range is available.
+  key_range *m_end_range{nullptr};
   std::unique_ptr<uchar[]> m_end_key{nullptr};
 
-  // Reusable buffer
-  std::unique_ptr<uchar[]> m_row_buffer;
-  size_t m_buffer_size = 0;
-
-  key_range *m_end_range{nullptr};
+  // Buffer to hold scanned rows
+  std::vector<std::unique_ptr<RowBuffer>> m_row_buffer_cache;
+  std::mutex m_buffer_mutex;
 
   static ShannonBase::Utils::SimpleRatioAdjuster m_adaptive_ratio;
+
+  // Performance metrics
+  std::atomic<uint64_t> m_total_rows_scanned{0};
+  std::atomic<uint64_t> m_batch_fetch_count{0};
 };
 
 }  // namespace Imcs
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_DATA_TABLE_H__
+#endif  //__SHANNONBASE_TABLE_VIEW_H__

@@ -1472,13 +1472,14 @@ bool should_switch_to_multi_table_if_subqueries(const THD *thd,
   return false;
 }
 
-void notify_plugins_after_update(THD *thd, TABLE *table, const uchar* old_rec, const uchar* new_rec) {
+void notify_plugins_after_update(THD *thd, TABLE *table,
+                                 const uchar* old_rec, const uchar* new_rec) {
   if (!thd || !table || !old_rec || !new_rec) return;
 
   struct comb_args{
     TABLE *table;
     const uchar *old_rec;
-    const uchar *new_rec;    
+    const uchar *new_rec;
   } comb_args{table, old_rec, new_rec};
   plugin_foreach(
       thd,

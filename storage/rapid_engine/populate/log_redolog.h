@@ -52,7 +52,7 @@ class Field;
 class TABLE;
 namespace ShannonBase {
 namespace Imcs{
-class RapidTable;
+class RpdTable;
 }
 class Rapid_load_context;
 namespace Populate {
@@ -284,7 +284,7 @@ class LogParser {
                                               std::mutex &field_mutex, size_t idx,
                                               std::unordered_map<std::string, mysql_field_t> &field_values);
 
-  bool rec_field_parse(Rapid_load_context *context, mem_heap_t *heap, Imcs::RapidTable *rpd_table, const rec_t *rec,
+  bool rec_field_parse(Rapid_load_context *context, mem_heap_t *heap, Imcs::RpdTable *rpd_table, const rec_t *rec,
                         const dict_index_t *index, const ulint *offsets,
                         const dict_index_t *real_index, const ulint *real_offsets,
                         size_t idx, std::mutex &field_mutex,

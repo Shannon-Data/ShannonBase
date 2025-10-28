@@ -49,9 +49,8 @@
 #include "storage/innobase/include/row0sel.h"
 #include "storage/innobase/include/row0upd.h"
 
-#include "storage/rapid_engine/imcs/chunk.h"  //chunk
-#include "storage/rapid_engine/imcs/cu.h"     //cu
-#include "storage/rapid_engine/imcs/imcs.h"   //imcs
+#include "storage/rapid_engine/imcs/cu.h"    //cu
+#include "storage/rapid_engine/imcs/imcs.h"  //imcs
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/table.h"             //RapidTable
 #include "storage/rapid_engine/include/rapid_context.h"  //Rapid_load_context
@@ -141,8 +140,9 @@ bool LogParser::check_key_field(std::unordered_map<std::string, ShannonBase::key
 int LogParser::build_key(const Rapid_load_context *context,
                          std::unordered_map<std::string, mysql_field_t> &field_values,
                          std::map<std::string, key_info_t> &keys) {
+#if 0
   std::string sch_tb = context->m_schema_name + ":" + context->m_table_name;
-  auto rpd_tb = Imcs::Imcs::instance()->get_table(sch_tb);
+  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(sch_tb);
   auto &matched_keys = rpd_tb->get_source_keys();
   ut_a(matched_keys.size() > 0);
 
@@ -231,7 +231,7 @@ int LogParser::build_key(const Rapid_load_context *context,
     key_info_t key_info = {key_meta.first, std::move(key_buff)};
     keys.emplace(key_name, std::move(key_info));
   }
-
+#endif
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -523,7 +523,7 @@ byte *LogParser::parse_tablespace_redo_extend(byte *ptr, const byte *end, const 
   return ptr;
 }
 
-bool LogParser::rec_field_parse(Rapid_load_context *context, mem_heap_t *heap, Imcs::RapidTable *rpd_table,
+bool LogParser::rec_field_parse(Rapid_load_context *context, mem_heap_t *heap, Imcs::RpdTable *rpd_table,
                                 const rec_t *rec, const dict_index_t *index, const ulint *offsets,
                                 const dict_index_t *real_index, const ulint *real_offsets, size_t idx,
                                 std::mutex &field_mutex, std::unordered_map<std::string, mysql_field_t> &field_values) {
@@ -545,8 +545,7 @@ bool LogParser::rec_field_parse(Rapid_load_context *context, mem_heap_t *heap, I
 
   // clang-format off
     // due to innodb col has not NOT_SECONDARY property, so check it with IMCS.
-    if (is_roll_ptr ||
-        (!is_trx_id && !is_row_id && !rpd_table->get_field(field_name))) {
+    if (is_roll_ptr || (!is_trx_id && !is_row_id)) {
       return true;
     }
   // clang-format on
@@ -566,9 +565,10 @@ bool LogParser::rec_field_parse(Rapid_load_context *context, mem_heap_t *heap, I
   field_value.has_nullbit = col->is_nullable();
   field_value.mtype = col->mtype;
 
-  auto mysql_fld_len =
-      (is_trx_id) ? SHANNON_DATA_DB_TRX_ID_LEN
-                  : ((is_row_id) ? SHANNON_DATA_DB_ROW_ID_LEN : rpd_table->get_field(field_name)->header()->m_width);
+  auto mysql_fld_len = (is_trx_id) ? SHANNON_DATA_DB_TRX_ID_LEN
+                                   : ((is_row_id) ? SHANNON_DATA_DB_ROW_ID_LEN
+                                                  : 0); /*rpd_table->get_field(field_name)->header()->m_width)*/
+  ;
   DBUG_PRINT("parse_rec_fields", ("Extracted field: %s, mtype=%u, len=%lu", field_name, col->mtype, mysql_fld_len));
 
   std::unique_ptr<uchar[]> mysql_field_data((mysql_fld_len <= MAX_FIELD_WIDTH) ? nullptr : new uchar[mysql_fld_len]);
@@ -671,7 +671,7 @@ boost::asio::awaitable<void> LogParser::co_parse_field(Rapid_load_context *conte
   // same with parse_rec_field.
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   std::string sch_tb = context->m_schema_name + ":" + context->m_table_name;
-  auto rpd_table = imcs_instance->get_table(sch_tb);
+  auto rpd_table = imcs_instance->get_rpd_table(sch_tb);
 
   std::unique_ptr<mem_heap_t, decltype(&mem_heap_free)> heap(mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE),
                                                              mem_heap_free);
@@ -680,7 +680,6 @@ boost::asio::awaitable<void> LogParser::co_parse_field(Rapid_load_context *conte
 
   rec_field_parse(context, heap.get(), rpd_table, rec, index, offsets, real_index, real_offsets, idx, field_mutex,
                   field_values);
-
   co_return;
 }
 
@@ -733,6 +732,7 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
   ut_ad(rec_offs_validate(rec, index, offsets));
   ut_ad(rec_offs_size(offsets));
 
+#if 0
   ut_a(offsets);
   ut_a(rec == nullptr || rec_get_n_fields(rec, index) >= rec_offs_n_fields(offsets));
 
@@ -743,7 +743,7 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
   ut_a(imcs_instance);
   std::string sch_tb;
   sch_tb.append(context->m_schema_name).append(":").append(context->m_table_name);
-  auto rpd_table = imcs_instance->get_table(sch_tb);
+  auto rpd_table = imcs_instance->get_rpd_table(sch_tb);
   auto field_mutex = std::make_shared<std::mutex>();
 
   std::unique_ptr<mem_heap_t, decltype(&mem_heap_free)> heap(mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE),
@@ -764,28 +764,14 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
     rec_field_parse(context, heap_ptr, rpd_table, rec, index, offsets, real_index, real_offsets, idx, *field_mutex,
                     field_values);
   }
+#endif
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 row_id_t LogParser::find_matched_row(Rapid_load_context *context, std::map<std::string, key_info_t> &keys) {
   // now that, it use sequentail scan all the chunks to find the match rows.
   // in next, ART will be introduced to accelerate the row finding via index scan.
-  auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
-  std::string sch_tb(context->m_schema_name);
-  sch_tb.append(":").append(context->m_table_name);
-  auto rpd_tb = imcs_instance->get_table(sch_tb);
-
-  ut_a(rpd_tb->first_field() && rpd_tb->first_field()->header()->m_key_len == context->m_extra_info.m_key_len);
-
-  if (keys.find(ShannonBase::SHANNON_PRIMARY_KEY_NAME) != keys.end()) {
-    ut_a(context->m_extra_info.m_key_len == keys[ShannonBase::SHANNON_PRIMARY_KEY_NAME].first);
-    std::memcpy(context->m_extra_info.m_key_buff.get(), keys[ShannonBase::SHANNON_PRIMARY_KEY_NAME].second.get(),
-                context->m_extra_info.m_key_len);
-    auto rowid = rpd_tb->get_index(ShannonBase::SHANNON_PRIMARY_KEY_NAME)
-                     ->lookup(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len);
-    return rowid ? *rowid : INVALID_ROW_ID;
-  } else
-    return INVALID_ROW_ID;
+  return INVALID_ROW_ID;
 }
 
 int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const rec_t *rec, const dict_index_t *index,
@@ -813,12 +799,12 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     UNIV_MEM_ASSERT_RW(rec_start, extra_size);
   }
 #endif /* UNIV_DEBUG_VALGRIND */
-
+#if 0
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
   std::string sch_tb(context->m_schema_name);
   sch_tb.append(":").append(context->m_table_name);
-  auto rpd_tb = imcs_instance->get_table(sch_tb);
+  auto rpd_tb = imcs_instance->get_rpd_table(sch_tb);
   auto log_parser_pool = ShannonBase::Imcs::Imcs::pool();
 
   // no user defined index.
@@ -832,6 +818,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
   }
 
   switch (type) {
+
     case MLOG_REC_DELETE: {
       if (all) return imcs_instance->delete_rows(context, {});
 
@@ -894,7 +881,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     default:
       break;
   }
-
+#endif
   return ShannonBase::SHANNON_SUCCESS;
 }
 

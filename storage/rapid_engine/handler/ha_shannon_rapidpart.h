@@ -39,7 +39,7 @@ The ShannonBase Partition handler: the interface between MySQL and Rapid. */
 #include "sql/partitioning/partition_handler.h"
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
-#include "storage/rapid_engine/imcs/data_table.h"
+#include "storage/rapid_engine/imcs/table0view.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
 /* Forward declarations */

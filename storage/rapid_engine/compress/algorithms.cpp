@@ -55,7 +55,7 @@ std::string &zstd_compress::compressString(std::string &orginal) {
 }
 
 // TODO: to reduce the copy operations on string.
-std::string &zstd_compress::decompressString(std::string &compressed_str) {
+std::string &zstd_compress::decompressString(const std::string &compressed_str) {
   size_t compressedSize = compressed_str.size();
   size_t decompressedBufferSize = ZSTD_getFrameContentSize(compressed_str.c_str(), compressedSize);
 
@@ -100,7 +100,7 @@ std::string &zlib_compress::compressString(std::string &orginal) {
   return m_result;
 }
 
-std::string &zlib_compress::decompressString(std::string &compressed_str) {
+std::string &zlib_compress::decompressString(const std::string &compressed_str) {
   z_stream zStream;
   zStream.zalloc = Z_NULL;
   zStream.zfree = Z_NULL;
@@ -139,7 +139,7 @@ std::string &lz4_compress::compressString(std::string &original) {
   return m_result;
 }
 
-std::string &lz4_compress::decompressString(std::string &compressed_str) {
+std::string &lz4_compress::decompressString(const std::string &compressed_str) {
   auto original_size = LZ4_compressBound(compressed_str.size());
 
   std::unique_ptr<char[]> comp_data = std::make_unique<char[]>(original_size);

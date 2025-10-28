@@ -69,10 +69,10 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table,
   if (table_def == nullptr) return;
 
   if (dd_table_is_partitioned(*table_def)) {
-    m_data_table.reset(
-        new ShannonBase::Imcs::DataTable(table, ShannonBase::Imcs::Imcs::instance()->get_parttable(key)));
+    m_rpd_table_viewer.reset(
+        new ShannonBase::Imcs::RpdTableView(table, ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(key)));
   } else {
-    m_data_table.reset(new ShannonBase::Imcs::DataTable(table, Imcs::Imcs::instance()->get_table(key)));
+    m_rpd_table_viewer.reset(new ShannonBase::Imcs::RpdTableView(table, Imcs::Imcs::instance()->get_rpd_table(key)));
   }
 }
 
@@ -187,7 +187,7 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
 
 bool VectorizedTableScanIterator::Init() {
   // Initialize similar to ha_rapid::rnd_init()
-  if (m_data_table->init()) {
+  if (m_rpd_table_viewer->init()) {
     return true;
   }
 
@@ -250,7 +250,7 @@ int VectorizedTableScanIterator::ReadNextBatch() {
   ClearBatchData();
 
   size_t read_cnt = 0;
-  int result = m_data_table->next_batch(m_batch_size, m_col_chunks, read_cnt);
+  int result = m_rpd_table_viewer->next_batch(m_batch_size, m_col_chunks, read_cnt);
 
   if (result != 0) {
     if (result == HA_ERR_END_OF_FILE) {

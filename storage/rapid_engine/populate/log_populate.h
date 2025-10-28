@@ -85,8 +85,8 @@ item by a co-routine to promot the performance.
  * 5000000 spin rounds. for the more detail infor ref to : comment of
  * `innodb_log_writer_spin_delay`.
  */
-constexpr uint64 MAX_LOG_POP_SPINS = 5000000;
-constexpr uint64 MAX_WAIT_TIMEOUT = 200;
+constexpr uint64 POP_MAX_LOG_POP_SPINS = 5000000;
+constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;
 
 /**
  * key, (uint64_t)lsn_t, start lsn of this mtr record. a change_record_buff_t is consisted of
@@ -104,7 +104,8 @@ extern std::multiset<std::string> g_processing_tables;
 
 // sys pop buffer, the changed records copied into this buffer. then propagation thread
 // do the real work.
-extern std::unordered_map<uint64_t, change_record_buff_t> sys_pop_buff;
+extern std::unordered_map<std::string, std::unique_ptr<table_pop_buffer_t>> sys_pop_buff;
+extern std::shared_mutex sys_pop_buff_mutex;
 
 // how many data was in sys_pop_buff?
 extern std::atomic<uint64> sys_pop_data_sz;
@@ -189,31 +190,27 @@ class PopulatorImpl : public Populator::Impl {
   bool is_loaded_table_impl(std::string sch_name, std::string table_name) override;
 
   /**
-   * @brief Check whether a given table is currently in the population process.
+   * @brief Check whether a given table is currently in the population process, if
+   * it was, then set to required by queries.
    *
    * This method is used to determine whether a specific table (identified by
-   * its fully qualified name `"schema_name/table_name"`) is still being populated
-   * by the background populator subsystem. The function acquires a shared (read)
-   * lock on the global `g_processing_tables` set to ensure thread-safe access.
-   *
-   * If the table exists in `g_processing_tables`, it indicates that the table
-   * population job is still ongoing. Otherwise, the population process for this
-   * table has completed or was never started.
-   *
+   * its fully qualified name `"schema_name:table_name"`) is still being populated
+   * by the background populator subsystem.
    * Typical use cases include:
    * - Query planning: deciding whether to route a query to ShannonBase or InnoDB.
    * - Status monitoring: reporting progress of background population tasks.
    *
-   * @param table_name A fully qualified table identifier in the form
-   *        `"schema_name/table_name"`.
+   * @param sch_table_name A fully qualified table identifier in the form
+   *        `"schema_name:table_name"`.
    *
-   * @return `true` if the table is currently being populated, `false` otherwise.
+   * @return `true` if the table is currently being populated, and then mark it required by qureies,
+   *          `false` otherwise.
    *
    * @threadsafe Uses `std::shared_lock<std::shared_mutex>` to allow concurrent reads.
    * @note This function should not be called from within a write lock context
    *       on `g_processing_table_mutex`, as it would cause potential deadlocks.
    */
-  bool check_status_impl(std::string &table_name) override;
+  bool mark_table_required_impl(std::string &sch_table_name) override;
 };
 }  // namespace Populate
 }  // namespace ShannonBase
