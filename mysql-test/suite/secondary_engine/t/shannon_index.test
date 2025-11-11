@@ -18,7 +18,7 @@ SET USE_SECONDARY_ENGINE=FORCED;
 # test for no use defined key
 CREATE TABLE employees (
     id INT,
-    name VARCHAR(100),
+    name VARCHAR(100) primary key,
     department VARCHAR(100),
     salary DECIMAL(10,2)
 ) SECONDARY_ENGINE=RAPID;
@@ -190,7 +190,7 @@ DROP TABLE employees;
 
 # (DOUBLE, DOUBLE) COMPSITE INDEX, SAME TYPE
 CREATE TABLE test_composite_index2 (
-  `id` int NOT NULL,
+  `id` int NOT NULL primary key,
   `part1` double DEFAULT NULL,
   `part2` double DEFAULT NULL,
   `data` varchar(100) COLLATE utf8mb4_general_ci DEFAULT NULL,

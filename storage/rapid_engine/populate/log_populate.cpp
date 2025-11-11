@@ -33,6 +33,7 @@
 #include <Windows.h>  // For SetThreadDescription
 #endif
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <mutex>
 #include <sstream>
@@ -80,133 +81,172 @@ std::atomic<uint64> sys_pop_data_sz{0};
 // how many times applied round.
 static uint64 sys_rapid_loop_count{0};
 
-/**
- * return lsn_t, key of processing mtr_log_rec_t. Parse the log comes from redo log records.
- */
-static uint64_t parse_mtr_log_worker(uint64_t start_lsn, const change_record_buff_t *change_rec) {
-  change_record_buff_t local_rec = *change_rec;  // in case the changed buffer be modified in concurrent env.
-  ut_a(local_rec.m_source == Source::REDO_LOG);
+struct table_worker_context {
+  std::string table_key;
+  IB_thread thread_handle;
+  std::atomic<bool> should_stop{false};
+  std::mutex mtx;
+  std::condition_variable cv;
+  std::chrono::steady_clock::time_point last_activity;
 
-  THD *log_pop_thread_thd{nullptr};
-  if (current_thd == nullptr) {
-    my_thread_init();
-    log_pop_thread_thd = create_internal_thd();
-    if (!log_pop_thread_thd) {
-      my_thread_end();
-      return start_lsn;
-    }
+  std::unordered_map<uint64_t, change_record_buff_t> pending_records;
+  std::atomic<size_t> pending_size{0};
 
-    log_pop_thread_thd->system_thread = SYSTEM_THREAD_BACKGROUND;
-    log_pop_thread_thd->security_context()->skip_grants();
+  table_worker_context(std::string key) : table_key(std::move(key)), last_activity(std::chrono::steady_clock::now()) {}
+  static table_worker_context *get_or_create_table_worker(const std::string &table_key);
+};
 
-    log_pop_thread_thd->store_globals();
-  } else {
-    log_pop_thread_thd = current_thd;
-  }
+std::unordered_map<std::string, std::unique_ptr<table_worker_context>> table_workers;
+std::shared_mutex table_workers_mutex;
 
-#if !defined(_WIN32)  // here we
-  pthread_setname_np(pthread_self(), "rapid_log_wkr");
+static void table_worker_func(table_worker_context *ctx) {
+#if !defined(_WIN32)
+  std::string thread_name = "rapid_change_table_worker_" + ctx->table_key.substr(0, 10);
+  pthread_setname_np(pthread_self(), thread_name.c_str());
 #else
-  SetThreadDescription(GetCurrentThread(), L"rapid_log_wkr");
+  std::wstring thread_name =
+      L"rapid_change_table_worker_" +
+      std::wstring(ctx->table_key.begin(), ctx->table_key.begin() + std::min(ctx->table_key.size(), size_t(10)));
+  SetThreadDescription(GetCurrentThread(), thread_name.c_str());
 #endif
-  const byte *start = local_rec.m_buff0.get();
-  const byte *end = local_rec.m_buff0.get() + local_rec.m_size;
-  size_t sz = local_rec.m_size;
+
+  THD *thd = create_internal_thd();
+  if (!thd) return;
+  thd->system_thread = SYSTEM_THREAD_BACKGROUND;
+  thd->security_context()->skip_grants();
+  thd->store_globals();
+  struct ThdGuard {
+    THD *m_thd;
+    explicit ThdGuard(THD *thd) : m_thd(thd) {}
+    ~ThdGuard() {
+      if (m_thd) {
+        close_thread_tables(m_thd);
+
+        my_thread_end();
+        destroy_internal_thd(m_thd);
+        m_thd = nullptr;
+      }
+    }
+  } thd_guard(thd);
 
   SHANNON_THREAD_LOCAL LogParser parse_log;
-  SHANNON_THREAD_LOCAL Rapid_load_context context;
-  context.m_thd = log_pop_thread_thd;
-
-  auto parsed_bytes = parse_log.parse_redo(&context, const_cast<byte *>(start), const_cast<byte *>(end));
-  ut_a(parsed_bytes == sz);
-
-  if (log_pop_thread_thd) {
-    close_thread_tables(log_pop_thread_thd);
-
-    my_thread_end();
-    destroy_internal_thd(log_pop_thread_thd);
-    log_pop_thread_thd = nullptr;
-  }
-
-  return (parsed_bytes == sz) ? start_lsn : 0;
-}
-
-/**
- * return lsn_t, key of processing mtr_log_rec_t. Parse the log comes from COPY_INFO records.
- */
-static uint64_t parse_copy_info_record_worker(uint64_t start_lsn, const change_record_buff_t *change_rec) {
-  change_record_buff_t local_rec = *change_rec;  // in case the changed buffer be modified in concurrent env.
-
-  THD *log_pop_thread_thd{nullptr};
-  if (current_thd == nullptr) {
-    my_thread_init();
-    log_pop_thread_thd = create_internal_thd();
-    if (!log_pop_thread_thd) {
-      my_thread_end();
-      return start_lsn;
-    }
-
-    log_pop_thread_thd->system_thread = SYSTEM_THREAD_BACKGROUND;
-    log_pop_thread_thd->security_context()->skip_grants();
-
-    log_pop_thread_thd->store_globals();
-  } else {
-    log_pop_thread_thd = current_thd;
-  }
-
-#if !defined(_WIN32)  // here we
-  pthread_setname_np(pthread_self(), "rapid_copy_info_wkr");
-#else
-  SetThreadDescription(GetCurrentThread(), L"rapid_copy_info_wkr");
-#endif
   SHANNON_THREAD_LOCAL CopyInfoParser copy_info_log;
   SHANNON_THREAD_LOCAL Rapid_load_context context;
-  auto oper_type = local_rec.m_oper;
+  context.m_thd = thd;
 
-  context.m_schema_name = local_rec.m_schema_name;
-  context.m_table_name = local_rec.m_table_name;
-  context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
+  while (!ctx->should_stop.load(std::memory_order_acquire)) {
+    std::unique_lock<std::mutex> lock(ctx->mtx);
+    ctx->cv.wait_for(lock, std::chrono::milliseconds(TABLE_WORKER_IDLE_TIMEOUT),
+                     [ctx] { return ctx->should_stop.load() || ctx->pending_size.load() > 0; });
+    if (ctx->should_stop.load()) break;
 
-  context.m_offpage_data0 = local_rec.m_offpage_data0.size() ? &local_rec.m_offpage_data0 : nullptr;
-  context.m_offpage_data1 = local_rec.m_offpage_data0.size() ? &local_rec.m_offpage_data1 : nullptr;
+    auto idle =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - ctx->last_activity)
+            .count();
+    if ((uint64_t)idle >= TABLE_WORKER_IDLE_TIMEOUT && ctx->pending_size.load() == 0) break;
 
-  context.m_trx = Transaction::get_or_create_trx(current_thd);
-  context.m_trx->begin();
-  context.m_extra_info.m_trxid = context.m_trx->get_id();
+    std::unordered_map<uint64_t, change_record_buff_t> applying;
+    std::unordered_map<uint64_t, change_record_buff_t> failed;
+    size_t applied_size = 0;
+    if (ctx->pending_size.load() > 0) {
+      applying = std::move(ctx->pending_records);
+      ctx->pending_records.clear();
+      ctx->pending_size.store(0, std::memory_order_release);
+    }
+    lock.unlock();
 
-  const byte *start = local_rec.m_buff0.get();
-  const byte *end = local_rec.m_buff0.get() + local_rec.m_size;
-  const byte *new_start = local_rec.m_buff1.get();
-  const byte *new_end_ptr = local_rec.m_buff1.get() + local_rec.m_size;
-  size_t sz = local_rec.m_size;
+    if (applying.empty()) continue;
 
-  auto parsed_bytes =
-      copy_info_log.parse_copy_info(&context, oper_type, const_cast<byte *>(start), const_cast<byte *>(end),
-                                    const_cast<byte *>(new_start), const_cast<byte *>(new_end_ptr));
+    for (auto &[lsn, change_rec] : applying) {
+      size_t parsed_bytes = 0;
+      if (change_rec.m_source == ShannonBase::Populate::Source::REDO_LOG) {
+        const byte *start = change_rec.m_buff0.get();
+        const byte *end = start + change_rec.m_size;
+        parsed_bytes = parse_log.parse_redo(&context, const_cast<byte *>(start), const_cast<byte *>(end));
+        assert(parsed_bytes == size_t(end - start));
+      } else {
+        auto oper_type = change_rec.m_oper;
+        context.m_schema_name = change_rec.m_schema_name;
+        context.m_table_name = change_rec.m_table_name;
+        context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
+        context.m_offpage_data0 = change_rec.m_offpage_data0.empty() ? nullptr : &change_rec.m_offpage_data0;
+        context.m_offpage_data1 = change_rec.m_offpage_data1.empty() ? nullptr : &change_rec.m_offpage_data1;
 
-  std::string key_part;
-  key_part.append(context.m_schema_name.c_str()).append(":").append(context.m_table_name.c_str());
-  ShannonBase::Imcs::RpdTable *rpd_tb{nullptr};
-  rpd_tb = Imcs::Imcs::instance()->get_rpd_parttable(key_part);
-  if (rpd_tb)
-    rpd_tb->register_transaction(context.m_trx);
-  else {
-    rpd_tb = Imcs::Imcs::instance()->get_rpd_table(key_part);
-    if (rpd_tb) rpd_tb->register_transaction(context.m_trx);
+        context.m_trx = Transaction::get_or_create_trx(thd);
+        context.m_trx->begin();
+        context.m_extra_info.m_trxid = context.m_trx->get_id();
+
+        const byte *old_start = change_rec.m_buff0.get();
+        const byte *old_end = old_start + change_rec.m_size;
+        const byte *new_start = change_rec.m_buff1.get();
+        const byte *new_end = new_start + change_rec.m_size;
+        parsed_bytes = copy_info_log.parse_copy_info(&context, oper_type, const_cast<byte *>(old_start),
+                                                     const_cast<byte *>(old_end), const_cast<byte *>(new_start),
+                                                     const_cast<byte *>(new_end));
+        std::string key_part;
+        key_part.append(context.m_schema_name.c_str()).append(":").append(context.m_table_name.c_str());
+        ShannonBase::Imcs::RpdTable *rpd_tb{nullptr};
+        rpd_tb = Imcs::Imcs::instance()->get_rpd_parttable(key_part);
+        if (rpd_tb)
+          rpd_tb->register_transaction(context.m_trx);
+        else {
+          rpd_tb = Imcs::Imcs::instance()->get_rpd_table(key_part);
+          if (rpd_tb) rpd_tb->register_transaction(context.m_trx);
+        }
+        context.m_trx->commit();
+      }
+
+      if (parsed_bytes == change_rec.m_size) {
+        applied_size += change_rec.m_size;
+      } else {
+        push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
+                            "Propagation failed for table %s at LSN %lu, retrying...", ctx->table_key.c_str(), lsn);
+        failed.emplace(lsn, std::move(change_rec));
+      }
+    }
+
+    sys_pop_data_sz.fetch_sub(applied_size, std::memory_order_release);
+
+    if (!failed.empty()) {
+      std::lock_guard<std::mutex> lock(ctx->mtx);
+      for (auto &p : failed) {
+        ctx->pending_records.emplace(p.first, std::move(p.second));
+        ctx->pending_size.fetch_add(p.second.m_size);
+      }
+      ctx->cv.notify_one();
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(ctx->mtx);
+      ctx->last_activity = std::chrono::steady_clock::now();
+    }
+  }  // end while.
+
+  {
+    std::unique_lock<std::shared_mutex> lock(table_workers_mutex);
+    auto it = table_workers.find(ctx->table_key);
+    if (it != table_workers.end() && it->second.get() == ctx) {
+      table_workers.erase(it);
+    }
   }
-  context.m_trx->commit();
+}
 
-  ut_a(parsed_bytes == sz);
+table_worker_context *table_worker_context::get_or_create_table_worker(const std::string &table_key) {
+  std::unique_lock<std::shared_mutex> lock(table_workers_mutex);
+  auto it = table_workers.find(table_key);
 
-  if (log_pop_thread_thd) {
-    close_thread_tables(log_pop_thread_thd);
-
-    my_thread_end();
-    destroy_internal_thd(log_pop_thread_thd);
-    log_pop_thread_thd = nullptr;
+  if (it != table_workers.end() && thread_is_active(it->second->thread_handle)) {
+    return it->second.get();
   }
 
-  return (parsed_bytes == sz) ? start_lsn : 0;
+  auto ctx = std::make_unique<table_worker_context>(table_key);
+  auto *ctx_ptr = ctx.get();
+
+  IB_thread handle = os_thread_create(rapid_populate_thread_key, 0, table_worker_func, ctx_ptr);
+  ctx_ptr->thread_handle = handle;
+  table_workers[table_key] = std::move(ctx);
+  table_workers[table_key]->thread_handle.start();
+  return ctx_ptr;
 }
 
 /**
@@ -296,45 +336,17 @@ static void parse_log_func_main(log_t *log_ptr) {
         tbuf->data_size.store(0, std::memory_order_release);
       }
 
-      std::vector<std::future<uint64_t>> results;
-      size_t thread_num = std::min(std::thread::hardware_concurrency() / 2, (uint)applying.size());
-      auto curr_iter = applying.begin();
-      for (size_t i = 0; i < thread_num && curr_iter != applying.end(); ++i, ++curr_iter) {
-        if (curr_iter->second.m_source == Source::REDO_LOG)
-          results.emplace_back(
-              std::async(std::launch::async, parse_mtr_log_worker, curr_iter->first, &curr_iter->second));
-        else
-          results.emplace_back(
-              std::async(std::launch::async, parse_copy_info_record_worker, curr_iter->first, &curr_iter->second));
-      }
+      if (applying.empty()) continue;
 
-      for (auto &res : results) {
-        auto ret_lsn = res.get();
-        if (!ret_lsn) {
-          push_warning_printf(current_thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
-                              "Propagation failed for table %s, data is stale. Please SECONDARY_UNLOAD/LOAD",
-                              table_key.c_str());
-        }
-
-        auto iter = applying.find(ret_lsn);
-        if (iter != applying.end()) {
-          sys_pop_data_sz.fetch_sub(iter->second.m_size);
-          applying.erase(iter);
-        } else
-          assert(false);
-      }
-
-      if (!applying.empty()) {  // remaings re-add into pop buffer.
-        std::lock_guard<std::mutex> lock(tbuf->mutex);
+      auto *worker = table_worker_context::get_or_create_table_worker(table_key);
+      {
+        std::lock_guard lock(worker->mtx);
         for (auto &p : applying) {
-          tbuf->writing.emplace(p.first, std::move(p.second));
-          tbuf->data_size.fetch_add(p.second.m_size);
-          sys_pop_data_sz.fetch_add(p.second.m_size);
+          worker->pending_records.emplace(p.first, std::move(p.second));
+          worker->pending_size.fetch_add(p.second.m_size);
         }
-        {
-          std::unique_lock<std::shared_mutex> ulk(sys_pop_buff_mutex);
-          sys_pop_buff[table_key] = std::move(tbuf);
-        }
+        worker->last_activity = std::chrono::steady_clock::now();
+        worker->cv.notify_one();
       }
     }  // end for each table
 
@@ -363,6 +375,8 @@ bool Populator::active() { return get_impl()->active_impl(); }
  * To launch log pop main thread.
  */
 void Populator::start() { get_impl()->start_impl(); }
+
+void Populator::unload(const std::string &sch, const std::string &table) { get_impl()->unload_impl(sch, table); }
 
 /**
  * To stop log pop main thread.
@@ -404,12 +418,46 @@ void PopulatorImpl::start_impl() {
   }
 }
 
+void PopulatorImpl::unload_impl(const std::string &sch, const std::string &table) {
+  if (!active_impl() || !shannon_loaded_tables->size()) return;
+
+  {
+    std::shared_lock lock(table_workers_mutex);
+    std::string key = sch + ":" + table;
+    if (table_workers.find(key) == table_workers.end()) return;
+    table_workers[key]->should_stop.store(true, std::memory_order_acquire);
+    table_workers[key]->cv.notify_one();
+
+    if (thread_is_active(table_workers[key]->thread_handle)) table_workers[key]->thread_handle.join();
+  }
+}
+
 void PopulatorImpl::end_impl() {
-  if (active_impl() && shannon_loaded_tables->size()) {
+  // all the table has been unloaded, then stop main worker.
+  if (active_impl()) {
+    assert(!shannon_loaded_tables->size());
+
     sys_pop_started.store(false, std::memory_order_seq_cst);
     os_event_set(log_sys->rapid_events[0]);
     srv_threads.m_change_pop_cordinator.join();
     sys_rapid_loop_count = 0;
+
+    {
+      std::shared_lock lock(table_workers_mutex);
+      for (auto &[k, ctx] : table_workers) {
+        ctx->should_stop.store(true);
+        ctx->cv.notify_one();
+      }
+
+      for (auto &[k, ctx] : table_workers) {
+        if (thread_is_active(ctx->thread_handle)) ctx->thread_handle.join();
+      }
+    }
+
+    {
+      std::unique_lock lock(table_workers_mutex);
+      table_workers.clear();
+    }
 
     g_index_cache.clear();
     g_index_names.clear();

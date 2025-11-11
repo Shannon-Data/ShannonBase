@@ -397,8 +397,6 @@ class Table : public RpdTable {
   virtual int register_transaction(Transaction *trx) override;
 
  private:
-  row_id_t insert_row_impl(const Rapid_load_context *context, const RowBuffer &row_data);
-
   bool is_field_null(int field_index, const uchar *rowdata, const ulong *null_byte_offsets,
                      const ulong *null_bitmasks) {
     ulong byte_offset = null_byte_offsets[field_index];
@@ -513,38 +511,31 @@ class Table : public RpdTable {
 
     @retval SHANNON_SUCCESS  Index entry successfully created
   */
-  int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, const RowBuffer *row_data);
+  int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata, size_t len,
+                  ulong *col_offsets, size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks);
 
   /**
-   * The impl of `build_index`.
+   * @brief Encode a row buffer into a contiguous key buffer suitable for indexing.
+   *
+   * This function constructs a binary key representation from a MySQL row record
+   * according to the specified KEY metadata. It handles null flags, variable-length
+   * fields, BLOBs, and numeric types, ensuring proper encoding for index comparison.
+   *
+   * @param[out] to_key      Pointer to pre-allocated key buffer to write encoded key.
+   * @param[in]  from_record Pointer to row data buffer containing raw field values.
+   * @param[in]  key_info    Pointer to MySQL KEY structure describing key parts.
+   * @param[in]  key_len     Total length of the key buffer.
+   *
+   * @note
+   *   - Handles null indicators for columns that have a null bit.
+   *   - Numeric types (DOUBLE, FLOAT, DECIMAL, NEWDECIMAL, LONG) are encoded
+   *     in sortable binary format using Index::Encoder.
+   *   - Fixed-length, variable-length, and BLOB columns are encoded according
+   *     to MySQL key conventions (HA_KEY_BLOB_LENGTH for BLOBs).
+   *   - The function does not modify the input record.
    */
-  int build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid, const RowBuffer *row_data);
-
-  /**
-    Build the encoded row reference key (primary key) from a given row buffer.
-
-    This is a parallel/async variant of build_key_info(), designed for
-    high-performance data loading or parallel scanning where the current
-    row buffer (rowdata) is not stored in TABLE::record[] but in an
-    external buffer.
-
-    The encoding logic is identical to InnoDB’s key_copy(), with extensions
-    for sortable encoding of FLOAT/DOUBLE/DECIMAL types.
-
-    This function assumes the table has an explicit primary key; otherwise,
-    a sequential scan should be used. For concurrency safety, access to
-    the shared key buffer is protected by m_key_buff_mutex.
-
-    @param[in]  context           The current rapid load context
-    @param[in]  key               The KEY descriptor for the primary key
-    @param[in]  rowdata           Pointer to the raw row data buffer
-    @param[in]  col_offsets       Per-column byte offsets within rowdata
-    @param[in]  null_byte_offsets Per-column NULL byte offsets
-    @param[in]  null_bitmasks     Per-column NULL bit masks
-
-    @retval SHANNON_SUCCESS  Key buffer successfully built
-  */
-  int build_key_info(const Rapid_load_context *context, const KEY *key, uchar *rowdata, const RowBuffer *row_data);
+  void encode_row_key(uchar *to_key, const KEY *key, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
+                      ulong *null_byte_offsets, ulong *null_bitmasks);
 };
 
 // partitioned rapid table.

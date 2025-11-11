@@ -13,7 +13,7 @@ ALTER DATABASE shannon_ml CHARACTER SET ascii COLLATE ascii_bin;
 USE shannon_ml;
 --enable_warnings
 
-CREATE TABLE census_train ( age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
+CREATE TABLE census_train (id INT PRIMARY KEY AUTO_INCREMENT NOT SECONDARY, age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
 CREATE TABLE census_test LIKE census_train;
 
 --disable_query_log

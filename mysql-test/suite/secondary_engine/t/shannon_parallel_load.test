@@ -55,7 +55,7 @@ EXPLAIN SELECT * FROM with_primary_key WHERE age = 10;
 ALTER TABLE with_primary_key SECONDARY_UNLOAD;
 
 CREATE TABLE without_primary_key (
-    student_id VARCHAR(20) COMMENT '学号/Student ID',
+    student_id VARCHAR(20) primary key COMMENT '学号/Student ID',
     student_name VARCHAR(50) COMMENT '学生姓名/Student Name',
     class_name VARCHAR(30) COMMENT '班级/Class',
     score DECIMAL(5,2) COMMENT '分数/Score',
@@ -95,7 +95,7 @@ EXPLAIN SELECT * FROM without_primary_key WHERE student_id = 'S2023009';
 ALTER TABLE without_primary_key SECONDARY_UNLOAD;
 
 CREATE TABLE with_unique_index (
-    product_code VARCHAR(20) COMMENT '产品代码/Product Code',
+    product_code VARCHAR(20) primary key COMMENT '产品代码/Product Code',
     product_name VARCHAR(100) COMMENT '产品名称/Product Name',
     category VARCHAR(50) COMMENT '类别/Category',
     price DECIMAL(10,2) COMMENT '价格/Price',

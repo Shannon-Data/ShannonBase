@@ -7,7 +7,7 @@
 
 create database test_query;
 use test_query;
-create table ti (id int, score double, name char(9), name2 char(12)) secondary_engine=rapid;
+create table ti (id int primary key, score double, name char(9), name2 char(12)) secondary_engine=rapid;
 
 --disable_warnings
 
@@ -41,8 +41,8 @@ explain select * from ti order by name;
 
 --connection connection_2
 --echo [conn2]
-insert into ti values(1, 1.12, '创建相应的情况下d', '创建相应的 lsn值d');
-insert into ti values(2, 1.102, '创建相应的情况下s', '创建相应的 lsn值s');
+insert into ti values(2, 2.12, '创建相应的情况下d', '创建相应的 lsn值d');
+insert into ti values(3, 3.102, '创建相应的情况下s', '创建相应的 lsn值s');
 
 select * from ti order by name;
 --sleep 1
@@ -53,11 +53,11 @@ select * from ti order by name;
 
 --connection connection_2
 --echo [conn2]
-insert into ti values(3, 3.123, '创建1', '创建相应的新值1');
-insert into ti values(4, 4, '创建2', '创建相应的新值2');
-insert into ti values(5, 5.104424, '创建3.1', '创建相应的新值3.1');
-insert into ti values(5, 3.124424, '创建3.2', '创建相应的新值3.2');
-insert into ti values(6, 5.124424, '创建4', '创建相应的新值4');
+insert into ti values(4, 3.123, '创建1', '创建相应的新值1');
+insert into ti values(5, 4, '创建2', '创建相应的新值2');
+insert into ti values(6, 5.104424, '创建3.1', '创建相应的新值3.1');
+insert into ti values(7, 3.124424, '创建3.2', '创建相应的新值3.2');
+insert into ti values(8, 5.124424, '创建4', '创建相应的新值4');
 
 select * from ti order by id,name2;
 select * from ti order by name;

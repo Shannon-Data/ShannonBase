@@ -199,6 +199,11 @@ class Populator {
   static void end();
 
   /**
+   * To stop propagation oper for sche table
+   */
+  static void unload(const std::string &sch, const std::string &table);
+
+  /**
    * Send the log buffer to system pop buffer via any type of connection.
    * Such as file handler or socket handler, ect.
    */
@@ -249,6 +254,11 @@ class Populator {
      * To launch log pop main thread.
      */
     virtual void start_impl() = 0;
+
+    /**
+     * To stop propagation oper for sche table
+     */
+    virtual void unload_impl(const std::string &sch, const std::string &table) = 0;
 
     /**
      * To stop log pop main thread.

@@ -133,42 +133,38 @@ int RpdTableView::end() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-void RpdTableView::encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key_info) {
-  if (!encoded_key || !original_key || !key_info) return;
+void RpdTableView::encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key) {
+  if (!encoded_key || !original_key || !key) return;
 
   auto offset{0u};
   std::memcpy(encoded_key, original_key, key_len);
 
-  for (auto part = 0u; part < actual_key_parts(key_info); part++) {
-    auto key_part_info = key_info->key_part + part;
-    if (key_part_info->null_bit) offset += 1;
+  for (auto part = 0u; part < key->user_defined_key_parts; part++) {
+    auto &key_part_info = key->key_part[part];
+    if (key_part_info.null_bit) offset += 1;
+    auto fld = key_part_info.field;
 
-    switch (key_part_info->field->type()) {
+    switch (fld->type()) {
       case MYSQL_TYPE_DOUBLE:
-      case MYSQL_TYPE_FLOAT: {
-        uchar encoding[8] = {0};
-        auto val = Utils::Util::get_field_numeric<double>(key_part_info->field, original_key + offset, nullptr);
-        Index::Encoder<double>::EncodeData(val, encoding);
-        std::memcpy(encoded_key + offset, encoding, key_part_info->length);
-      } break;
+      case MYSQL_TYPE_FLOAT:
       case MYSQL_TYPE_DECIMAL:
       case MYSQL_TYPE_NEWDECIMAL: {
         uchar encoding[8] = {0};
-        auto val = Utils::Util::get_field_numeric<double>(key_part_info->field, original_key + offset, nullptr);
+        auto val = Utils::Util::get_field_numeric<double>(fld, original_key + offset, nullptr);
         Index::Encoder<double>::EncodeData(val, encoding);
-        std::memcpy(encoded_key + offset, encoding, key_part_info->length);
+        std::memcpy(encoded_key + offset, encoding, key_part_info.length);
       } break;
       case MYSQL_TYPE_LONG: {
-        ut_a(key_part_info->length == sizeof(int32_t));
+        ut_a(key_part_info.length == sizeof(int32_t));
         uchar encoding[4] = {0};
-        auto val = Utils::Util::get_field_numeric<int32_t>(key_part_info->field, original_key + offset, nullptr);
+        auto val = Utils::Util::get_field_numeric<int32_t>(fld, original_key + offset, nullptr);
         Index::Encoder<int32_t>::EncodeData(val, encoding);
-        std::memcpy(encoded_key + offset, encoding, key_part_info->length);
+        std::memcpy(encoded_key + offset, encoding, key_part_info.length);
       } break;
       default:
         break;
     }
-    offset += key_part_info->field->pack_length();
+    offset += fld->pack_length();
     if (offset >= key_len) break;
   }
 }
@@ -398,15 +394,9 @@ int RpdTableView::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey
   ut_a(m_active_index != MAX_KEY);
   if (key_len == 0 && key != nullptr) return HA_ERR_WRONG_COMMAND;
 
-  if ((key && key_len > 0) && m_data_source->s->is_missing_primary_key()) {
-    m_data_source->file->position(m_data_source->record[0]);
-    m_key = std::make_unique<uchar[]>(m_data_source->file->ref_length);
-    std::memcpy(m_key.get(), m_data_source->file->ref, m_data_source->file->ref_length);
-  } else {
-    auto key_info = m_data_source->s->key_info + m_active_index;
-    m_key = std::make_unique<uchar[]>(key_len);
-    encode_key_parts(m_key.get(), key, key_len, key_info);
-  }
+  auto key_info = m_data_source->s->key_info + m_active_index;
+  m_key = std::make_unique<uchar[]>(key_len);
+  encode_key_parts(m_key.get(), key, key_len, key_info);
 
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
 

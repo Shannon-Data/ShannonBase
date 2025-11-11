@@ -380,9 +380,14 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *filee) {
+int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *file) {
   auto m_thd = context->m_thd;
-  handler *shannon_file = nullptr;
+  handler *shannon_file = file;
+
+  context->m_trx->begin_stmt();
+  TransactionGuard txn(context->m_trx);
+  const_cast<Rapid_load_context *>(context)->m_extra_info.m_trxid = context->m_trx->get_id();
+
   // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
   size_t num_threads;
   auto max_threads = thd_parallel_read_threads(m_thd);
@@ -460,17 +465,6 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     ut_a(scan_cookie);
     ut_a(scan_cookie->tid == std::this_thread::get_id());
 
-    if (shannon_file->rnd_pos_by_record(context->m_table->record[0])) {
-      error_flag.store(true);
-      std::string errmsg("position failed");
-      my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
-      return HA_ERR_GENERIC;
-    }
-    std::shared_ptr<uchar[]> ref_key = std::make_shared<uchar[]>(shannon_file->ref_length);
-    std::memcpy(ref_key.get(), shannon_file->ref, shannon_file->ref_length);
-    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::move(ref_key);
-    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = shannon_file->ref_length;
-
     auto data_ptr = static_cast<uchar *>(rowdata);
     auto end_data_ptr = static_cast<uchar *>(rowdata) + ptrdiff_t(nrows * scan_cookie->row_len);
     for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie->row_len), index++) {
@@ -518,6 +512,8 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     });
   }
 
+  Imcs::Imcs::instance()->get_rpd_table(context->m_sch_tb_name)->register_transaction(context->m_trx);
+  const_cast<Rapid_load_context *>(context)->m_trx->commit();
   context->m_thd->inc_sent_row_count(total_rows.load());
   // end of load the data from innodb to imcs.
   return ShannonBase::SHANNON_SUCCESS;

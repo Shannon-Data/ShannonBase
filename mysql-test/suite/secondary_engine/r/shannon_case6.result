@@ -28,7 +28,7 @@ PRIMARY KEY (id),
 INDEX idx_username (username)
 ) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
 CREATE TABLE t5 (
-id INT NOT NULL,
+id INT NOT NULL PRIMARY KEY,
 first_name VARCHAR(50) NOT NULL,
 last_name VARCHAR(50) NOT NULL,
 birth_date DATE NOT NULL,
@@ -235,7 +235,7 @@ id	first_name	last_name	birth_date
 5	Eve	Davis	1985-09-17
 explain select * from t5 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t5	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using filesort
+1	SIMPLE	t5	NULL	index	NULL	PRIMARY	4	NULL	5	100.00	NULL
 INSERT INTO t6 (id, user_id, order_total) VALUES
 (1, 1, 150.00),
 (2, 2, 299.99),
@@ -555,7 +555,7 @@ UPDATE t5 SET birth_date = '1997-12-31' WHERE id = 1;
 DELETE FROM t5 WHERE id = 3;
 explain select * from t5 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t5	NULL	ALL	NULL	NULL	NULL	NULL	4	100.00	Using filesort
+1	SIMPLE	t5	NULL	index	NULL	PRIMARY	4	NULL	4	100.00	NULL
 select * from t5 order by id;
 id	first_name	last_name	birth_date
 1	Alice	Johnson	1997-12-31
@@ -648,7 +648,7 @@ score	name	id	gender
 82	Jack	10	M
 explain select * from t2 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	11	100.00	Using filesort; Using secondary engine Rapid
+1	SIMPLE	t2	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
 select * from t2 order by id;
 id	email
 1	alice_new@example.com
@@ -705,6 +705,7 @@ select * from t6 order by id;
 id	user_id	order_total
 1	1	180.00
 2	2	299.99
+3	3	75.50
 explain select * from t7 order by order_id, product_id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	t7	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
@@ -722,7 +723,7 @@ order_id	product_id	quantity
 6	109	2
 explain select * from t8 order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t8	NULL	ALL	NULL	NULL	NULL	NULL	11	100.00	Using filesort; Using secondary engine Rapid
+1	SIMPLE	t8	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
 select * from t8 order by id;
 id	email	phone	created_at
 1	alice@example.com	1112223333	IGNORE
@@ -736,7 +737,7 @@ id	email	phone	created_at
 10	jack@example.com	999-000-1111	IGNORE
 explain select * from t9 order by user_id, group_id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t9	NULL	ALL	NULL	NULL	NULL	NULL	10	100.00	Using filesort; Using secondary engine Rapid
+1	SIMPLE	t9	NULL	ALL	NULL	NULL	NULL	NULL	9	100.00	Using filesort; Using secondary engine Rapid
 select * from t9 order by user_id, group_id;
 user_id	group_id	role	created_at
 1	101	Smember	IGNORE

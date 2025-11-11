@@ -80,13 +80,8 @@ that's performance issue. in future, we will use co-rountine to process every
 item by a co-routine to promot the performance.
 */
 
-/** Default value of spin delay (in spin rounds)
- * 1000 spin round takes 4us,  25000 takes 1ms for busy waiting. therefore, 200ms means
- * 5000000 spin rounds. for the more detail infor ref to : comment of
- * `innodb_log_writer_spin_delay`.
- */
-constexpr uint64 POP_MAX_LOG_POP_SPINS = 5000000;
-constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;
+constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;         // main worker, timeout time in ms.
+constexpr uint64 TABLE_WORKER_IDLE_TIMEOUT = 30000;  // if 30s no incoming new data,the exit the table-level workers.
 
 /**
  * key, (uint64_t)lsn_t, start lsn of this mtr record. a change_record_buff_t is consisted of
@@ -126,6 +121,11 @@ class PopulatorImpl : public Populator::Impl {
    * To launch log pop main thread.
    */
   void start_impl() override;
+
+  /**
+   * To stop log pop main thread.
+   */
+  void unload_impl(const std::string &sch, const std::string &table) override;
 
   /**
    * To stop log pop main thread.
