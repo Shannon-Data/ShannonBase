@@ -1,9 +1,9 @@
 create database sh_test6;
 use sh_test6;
 set use_secondary_engine=forced;
-create table tt6 (score int, name char(10), id int not secondary, gender char(1)) secondary_engine=rapid;
+create table tt6 (score int primary key, name char(10), id int not secondary, gender char(1)) secondary_engine=rapid;
 insert into tt6 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
-insert into tt6 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm'), (4,'n4',4,'f');
+insert into tt6 values(5, 'n5', 5, 'm'), (6, 'n6', 6, 'f'), (7, 'n7', 7, 'm'), (4,'n4',4,'f');
 alter table tt6 secondary_load;
 explain select * from tt6 order by id;
 ERROR HY000: Secondary engine operation failed. All plans were rejected by the secondary storage engine.
@@ -14,10 +14,10 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 1	SIMPLE	tt6	NULL	ALL	NULL	NULL	NULL	NULL	7	100.00	Using filesort; Using secondary engine Rapid
 select score, name, gender from tt6 order by score;
 score	name	gender
-1	n1	m
-2	n2	f
-3	n3	m
 4	n4	f
+5	n5	m
+6	n6	f
+7	n7	m
 10	n1	m
 20	n2	f
 30	n3	m
@@ -38,27 +38,30 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 1	SIMPLE	tt6	NULL	ALL	NULL	NULL	NULL	NULL	7	100.00	Using temporary; Using secondary engine Rapid
 select sum(score), name, gender from tt6 group by name, gender;
 sum(score)	name	gender
-11	n1	m
-22	n2	f
-33	n3	m
 4	n4	f
+5	n5	m
+6	n6	f
+7	n7	m
+10	n1	m
+20	n2	f
+30	n3	m
 explain select avg(score), gender from tt6 group by gender;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	tt6	NULL	ALL	NULL	NULL	NULL	NULL	7	100.00	Using temporary; Using secondary engine Rapid
 select avg(score), gender from tt6 group by gender;
 avg(score)	gender
-11.0000	m
-8.6667	f
-insert into tt6(score, name, gender) values('40','n4','f'),(50,'n5','m');
+10.0000	f
+13.0000	m
+insert into tt6(score, name, id, gender) values('40','n4', 40, 'f'),(50,'n5',50,'m');
 explain select score, name, gender from tt6 order by score;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	tt6	NULL	ALL	NULL	NULL	NULL	NULL	9	100.00	Using filesort; Using secondary engine Rapid
 select score, name, gender from tt6 order by score;
 score	name	gender
-1	n1	m
-2	n2	f
-3	n3	m
 4	n4	f
+5	n5	m
+6	n6	f
+7	n7	m
 10	n1	m
 20	n2	f
 30	n3	m
@@ -74,10 +77,10 @@ score	name	gender
 30	n3	m
 20	n2	f
 10	n1	m
+7	n7	m
+6	n6	f
+5	n5	m
 4	n4	f
-3	n3	m
-2	n2	f
-1	n1	m
 delete from tt6 where score=40;
 explain select score, name, gender from tt6 order by score desc;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
@@ -88,10 +91,10 @@ score	name	gender
 30	n3	m
 20	n2	f
 10	n1	m
+7	n7	m
+6	n6	f
+5	n5	m
 4	n4	f
-3	n3	m
-2	n2	f
-1	n1	m
 delete from tt6 where id=3;
 explain select score, name, gender from tt6 order by score desc;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
@@ -101,9 +104,10 @@ score	name	gender
 50	n5	m
 20	n2	f
 10	n1	m
+7	n7	m
+6	n6	f
+5	n5	m
 4	n4	f
-2	n2	f
-1	n1	m
 update tt6 set name ='n5_new2' where score=50;
 explain select score, name, gender from tt6 order by score desc;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
@@ -113,9 +117,10 @@ score	name	gender
 50	n5_new2	m
 20	n2	f
 10	n1	m
+7	n7	m
+6	n6	f
+5	n5	m
 4	n4	f
-2	n2	f
-1	n1	m
 update tt6 set name ='n5_new22' where id=5;
 explain select score, name, gender from tt6 order by score desc;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
@@ -125,9 +130,10 @@ score	name	gender
 50	n5_new2	m
 20	n2	f
 10	n1	m
+7	n7	m
+6	n6	f
+5	n5_new22	m
 4	n4	f
-2	n2	f
-1	n1	m
 delete from tt6 where id=2;
 explain select score, name, gender from tt6 order by score desc;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
@@ -136,7 +142,9 @@ select score, name, gender from tt6 order by score desc;
 score	name	gender
 50	n5_new2	m
 10	n1	m
+7	n7	m
+6	n6	f
+5	n5_new22	m
 4	n4	f
-1	n1	m
 alter table tt6 secondary_unload;
 drop database sh_test6;

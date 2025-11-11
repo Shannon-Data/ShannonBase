@@ -705,25 +705,6 @@ void MemoryPool::cleanup() noexcept {
 
 void MemoryPool::log(LogLevel level, const std::string &message) const {
   DBUG_PRINT("memory_pool", ("[%d] %s", static_cast<int>(level), message.c_str()));
-
-  switch (level) {
-    case LogLevel::ERROR:
-      sql_print_error("MemoryPool: %s", message.c_str());
-      break;
-    case LogLevel::WARNING:
-      sql_print_warning("MemoryPool: %s", message.c_str());
-      break;
-    case LogLevel::INFO:
-#ifdef NDEBUG
-      return;
-#else
-      sql_print_information("MemoryPool: %s", message.c_str());
-#endif
-      break;
-    case LogLevel::DEBUG:
-      sql_print_information("MemoryPool [DEBUG]: %s", message.c_str());
-      break;
-  }
 }
 
 size_t MemoryPool::align_up(size_t size, size_t alignment) noexcept {

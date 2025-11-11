@@ -1,6 +1,6 @@
 create database test_query;
 use test_query;
-create table tt (score int, name char(10), id int, gender char(1)) secondary_engine=rapid;
+create table tt (score int, name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
 #connection_1 and cconnection_2
 #[conn_1]
 set use_secondary_engine=forced;
@@ -31,7 +31,7 @@ score	name	id	gender
 4	第四	4	d
 explain select * from tt order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	4	100.00	Using filesort
+1	SIMPLE	tt	NULL	index	NULL	PRIMARY	4	NULL	4	100.00	NULL
 [conn1_after_insertion]
 select * from tt order by id;
 score	name	id	gender
@@ -43,37 +43,34 @@ explain select * from tt order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	4	100.00	Using filesort; Using secondary engine Rapid
 drop table tt;
-create table tt (score int, name char(10), id int, gender char(1)) secondary_engine=rapid;
-insert into tt values (2,'n2',2,'b'),(3,'n3',3,'c'),(4,'n4',4,'d'), (5,'n5', 5, 'e'), (51,'n52', 5, 'f');
+create table tt (score int, name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
+insert into tt values (22,'n22',22,'b'),(33,'n33',33,'c'),(44,'n44',44,'d'), (51,'n52', 5, 'f');
 alter table tt secondary_load;
 select * from tt order by id;
 score	name	id	gender
-2	n2	2	b
-3	n3	3	c
-4	n4	4	d
-5	n5	5	e
 51	n52	5	f
+22	n22	22	b
+33	n33	33	c
+44	n44	44	d
 [conn2]
 update tt set score = 2 * score, name ='n55测试' where id =5;
 select * from tt order by id;
 score	name	id	gender
-2	n2	2	b
-3	n3	3	c
-4	n4	4	d
-10	n55测试	5	e
 102	n55测试	5	f
+22	n22	22	b
+33	n33	33	c
+44	n44	44	d
 [conn1]
 select * from tt order by id;
 score	name	id	gender
-2	n2	2	b
-3	n3	3	c
-4	n4	4	d
-10	n55测试	5	e
 102	n55测试	5	f
+22	n22	22	b
+33	n33	33	c
+44	n44	44	d
 explain select * from tt order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using filesort; Using secondary engine Rapid
-create table tt2 (name char(10), gender char(1)) secondary_engine=rapid;
+1	SIMPLE	tt	NULL	ALL	NULL	NULL	NULL	NULL	4	100.00	Using filesort; Using secondary engine Rapid
+create table tt2 (name char(10) primary key, gender char(1)) secondary_engine=rapid;
 insert into tt2 values('n1', 'm'), ('n2', null), ('n3', 'm');
 alter table tt2 secondary_load;
 select * from tt2;
@@ -101,11 +98,10 @@ select * from tt2;
 name	gender
 select * from tt;
 score	name	id	gender
-2	n2	2	b
-3	n3	3	c
-4	n4	4	d
-10	n55测试	5	e
 102	n55测试	5	f
+22	n22	22	b
+33	n33	33	c
+44	n44	44	d
 drop table tt;
 drop table tt2;
 SELECT * FROM performance_schema.rpd_table_id;

@@ -407,8 +407,8 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 }
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
-  // stop the main pop monitor thread.
-  ShannonBase::Populate::Populator::end();
+  // stop the table worker thread.
+  ShannonBase::Populate::Populator::unload(db_name, table_name);
 
   RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
   if (error_if_not_loaded && !share) {
@@ -450,6 +450,12 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
     else
       ++it;
   }
+
+  shannon_loaded_tables->erase(db_name, table_name);
+
+  // to try stop main thread, if there're no tables loaded.
+  if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::end();
+
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -940,8 +946,6 @@ void NotifyAfterInsert(THD *thd, void *args) {
   auto update = params->arg3;
 
   if (!table || !info || !update) return;
-
-  assert(!table->s->is_missing_primary_key());
 
   std::string sch_tb_name = table->s->db.str;
   sch_tb_name.append(":").append(table->s->table_name.str);

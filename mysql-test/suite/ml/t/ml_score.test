@@ -18,6 +18,8 @@ CREATE TABLE census_test LIKE census_train;
 --disable_query_log
 --eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_train_load.csv' INTO TABLE census_train FIELDS TERMINATED BY ',' ;
 --eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_test_load.csv' INTO TABLE census_test FIELDS TERMINATED BY ',' ;
+ALTER TABLE census_train ADD COLUMN id INT PRIMARY KEY AUTO_INCREMENT FIRST NOT SECONDARY;
+ALTER TABLE census_test ADD COLUMN id INT PRIMARY KEY AUTO_INCREMENT FIRST NOT SECONDARY;
 --enable_query_log
 
 SET @census_model = 'census_test_score';

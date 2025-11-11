@@ -1,7 +1,7 @@
 create database datatype_db;
 use datatype_db;
 CREATE TABLE datatype_test (
-id int,
+id int primary key,
 big_int_col BIGINT,
 bool_col BOOL,
 decimal_col DECIMAL(10, 2),
