@@ -439,7 +439,6 @@ class ARTIterator {
   std::vector<unsigned char> m_end_key;
   bool m_end_incl{false};
 };
-
 }  // namespace Index
 }  // namespace Imcs
 }  // namespace ShannonBase

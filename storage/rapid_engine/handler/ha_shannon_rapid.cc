@@ -348,7 +348,11 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
   context.m_extra_info.m_keynr = active_index;
   context.m_extra_info.m_key_len = table_arg.file->ref_length;
-  context.m_trx = Transaction::get_or_create_trx(current_thd);
+  context.m_trx = Transaction::get_or_create_trx(m_thd);
+
+  context.m_extra_info.m_trxid = context.m_trx->get_id();
+  // at loading step, to set SCN to non-zero, it means it committed after inserted with explicit begin/commit.
+  context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
 
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
     std::string err;
@@ -632,7 +636,7 @@ int ha_rapid::read_range_next() { return (handler::read_range_next()); }
 }  // namespace ShannonBase
 
 static bool rpd_thd_trx_is_auto_commit(THD *thd) { /*!< in: thread handle, can be NULL */
-  return thd != nullptr && !thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN) && thd_is_query_block(thd);
+  return (thd != nullptr && !thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN));
 }
 
 static void rapid_register_tx(handlerton *const hton, THD *const thd, ShannonBase::Transaction *const trx) {
@@ -774,7 +778,6 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
     return HA_ERR_ERRORS;
   }
 
-  trx->set_read_only(true);
   // here, the trx should be regiestered in innodb.
   rapid_register_tx(hton, thd, trx);
 
@@ -1386,16 +1389,12 @@ static int rpd_mem_size_max_validate(THD *,                          /*!< in: th
 
   long long input_val;
 
-  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
-    return 1;
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Tables have been loaded, cannot change the rapid params");
-  }
   if (value->val_int(value, &input_val)) {
-    return 1;
+    return HA_ERR_GENERIC;
   }
 
   if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE) {
-    return 1;
+    return HA_ERR_GENERIC;
   }
 
   *static_cast<int *>(save) = static_cast<int>(input_val);
@@ -1410,8 +1409,23 @@ This function is registered as a callback with MySQL.
 static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
 
+  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+             "Tables have been loaded, cannot change the rapid params,"
+             "must unload all loaded tables");
+    return;
+  }
+
   *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
   ShannonBase::rpd_mem_sz_max = *static_cast<const int *>(save);
+
+  ShannonBase::g_rpd_memory_pool = nullptr;  // reset first, then reallocation the new size.
+  ShannonBase::Utils::MemoryPool::Config config(ShannonBase::rpd_mem_sz_max);
+  ShannonBase::g_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
+  if (!ShannonBase::g_rpd_memory_pool) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "resize the rapid memory size failed");
+    return;
+  }
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -1711,7 +1725,7 @@ static void rpd_purge_efficiency_threshold_update(THD *thd,         /*!< in: thr
 // clang-format off
 static MYSQL_SYSVAR_ULONG(memory_size_max,
                           ShannonBase::rpd_mem_sz_max,
-                          PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+                          PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
                           "Number of memory size that used for rapid engine, and it must "
                           "not be oversize half of physical mem size.",
                           rpd_mem_size_max_validate,
@@ -1740,8 +1754,8 @@ static MYSQL_SYSVAR_ULONGLONG(parallel_load_max,
                               "from innodb to rapid engine..",
                               rpd_para_load_threshold_validate,
                               rpd_para_load_threshold_update,
-                              10000, //default val
-                              1000,  //min
+                              ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD, //default val
+                              0,  //min
                               ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD, //max
                               0);
 
@@ -1877,7 +1891,7 @@ static SHOW_VAR rapid_status_variables_export[] = {
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
-  ShannonBase::Utils::MemoryPool::Config config;
+  ShannonBase::Utils::MemoryPool::Config config(ShannonBase::rpd_mem_sz_max);
   ShannonBase::g_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
 
   handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);

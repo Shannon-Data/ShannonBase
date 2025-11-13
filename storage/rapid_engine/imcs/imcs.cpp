@@ -250,57 +250,6 @@ int Imcs::build_indexes_from_keys(const Rapid_load_context *context, std::map<st
 
 int Imcs::build_indexes_from_log(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
                                  row_id_t rowid) {
-#if 0
-  auto sch_tb = std::string(context->m_schema_name);
-  sch_tb.append(":").append(context->m_table_name);
-  auto rpd_table = m_tables[sch_tb].get();
-
-  auto &matched_keys = m_tables[sch_tb].get()->get_source_keys();
-  ut_a(matched_keys.size() > 0);
-
-  std::unique_ptr<uchar[]> key_buff{nullptr};
-  for (auto &key : matched_keys) {
-    auto key_name = key.first;
-    auto key_info = key.second;
-    key_buff.reset(new uchar[key_info.first]);
-    memset(key_buff.get(), 0x0, key_info.first);
-    uint key_offset{0u};
-    for (auto &keykey : key_info.second) {
-      ut_a(field_values.find(keykey) != field_values.end());
-      if (field_values[keykey].has_nullbit) {
-        *key_buff.get() = (field_values[keykey].is_null) ? 1 : 0;
-        key_offset++;
-      }
-
-      auto cs = rpd_table->get_field(keykey) ? rpd_table->get_field(keykey)->header()->m_charset : nullptr;
-      if (field_values[keykey].mtype == DATA_BLOB || field_values[keykey].mtype == DATA_VARCHAR ||
-          field_values[keykey].mtype == DATA_VARMYSQL) {
-        int2store(key_buff.get() + key_offset, field_values[keykey].plength);
-        key_offset += HA_KEY_BLOB_LENGTH;
-        std::memcpy(key_buff.get() + key_offset, field_values[keykey].data.get(), field_values[keykey].mlength);
-        key_offset += field_values[keykey].mlength;
-      } else {
-        ut_a(field_values[keykey].mlength = field_values[keykey].plength);
-        if (field_values[keykey].mtype == DATA_DOUBLE || field_values[keykey].mtype == DATA_FLOAT ||
-            field_values[keykey].mtype == DATA_DECIMAL) {
-          ut_a(field_values[keykey].mlength == 8);
-          uchar encoding[8] = {0};
-          auto val = *(double *)field_values[keykey].data.get();
-          Index::Encoder<double>::EncodeData(val, encoding);
-          std::memcpy(key_buff.get() + key_offset, encoding, field_values[keykey].mlength);
-          key_offset += field_values[keykey].mlength;
-        } else {
-          std::memcpy(key_buff.get() + key_offset, field_values[keykey].data.get(), field_values[keykey].mlength);
-          key_offset += field_values[keykey].mlength;
-          if (key_offset < key_info.first && cs)
-            cs->cset->fill(cs, (char *)key_buff.get() + key_offset, key_info.first - key_offset, ' ');
-        }
-      }
-    }
-    auto index = rpd_table->get_index(key_name);
-    if (index) index->insert(key_buff.get(), key_info.first, &rowid, sizeof(row_id_t));
-  }
-#endif
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -350,10 +299,6 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
       return HA_ERR_GENERIC;
     });
 
-    context->m_trx->begin_stmt();
-    TransactionGuard txn(context->m_trx);
-    const_cast<Rapid_load_context *>(context)->m_extra_info.m_trxid = context->m_trx->get_id();
-
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     if ((m_rpd_tables[context->m_sch_tb_name].get()->insert_row(
             context, context->m_table->record[0], context->m_table->s->rec_buff_length, col_offsets.data(),
@@ -367,10 +312,6 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
       my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
       break;
     }
-
-    Imcs::Imcs::instance()->get_rpd_table(context->m_sch_tb_name)->register_transaction(context->m_trx);
-    const_cast<Rapid_load_context *>(context)->m_trx->commit();
-
     m_thd->inc_sent_row_count(1);
 
     if (tmp == HA_ERR_RECORD_DELETED && !m_thd->killed) continue;
@@ -383,10 +324,6 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
 int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *file) {
   auto m_thd = context->m_thd;
   handler *shannon_file = file;
-
-  context->m_trx->begin_stmt();
-  TransactionGuard txn(context->m_trx);
-  const_cast<Rapid_load_context *>(context)->m_extra_info.m_trxid = context->m_trx->get_id();
 
   // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
   size_t num_threads;
@@ -510,10 +447,17 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
       my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
       return tmp ? tmp : HA_ERR_GENERIC;
     });
+
+    std::string errmsg;
+    errmsg.append("Parallel load failed for ")
+        .append(context->m_schema_name.c_str())
+        .append(".")
+        .append(context->m_table_name.c_str())
+        .append(" to rapid failed.");
+    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    return tmp ? tmp : HA_ERR_GENERIC;
   }
 
-  Imcs::Imcs::instance()->get_rpd_table(context->m_sch_tb_name)->register_transaction(context->m_trx);
-  const_cast<Rapid_load_context *>(context)->m_trx->commit();
   context->m_thd->inc_sent_row_count(total_rows.load());
   // end of load the data from innodb to imcs.
   return ShannonBase::SHANNON_SUCCESS;

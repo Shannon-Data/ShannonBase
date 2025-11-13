@@ -55,8 +55,9 @@ extern std::shared_ptr<ShannonBase::Utils::MemoryPool> g_rpd_memory_pool;
 namespace Imcs {
 
 Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(mysql_table, config) {
-  m_memory_pool = ShannonBase::Utils::MemoryPool::create_from_parent(ShannonBase::g_rpd_memory_pool, config.tenant_name,
-                                                                     config.max_table_mem_size);
+  m_memory_pool = ShannonBase::Utils::MemoryPool::create_from_parent(
+      ShannonBase::g_rpd_memory_pool,
+      config.tenant_name + ":" + mysql_table->s->db.str + mysql_table->s->table_name.str, config.max_table_mem_size);
   m_metadata.db_name = mysql_table->s->db.str;
   m_metadata.table_name = mysql_table->s->table_name.str;
   m_metadata.table_id = generate_table_id();
@@ -97,6 +98,7 @@ Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(my
         .nullable = field->is_nullable(),
         .is_key = field->is_flag_set(PRI_KEY_FLAG),
         .is_secondary_field = !field->is_flag_set(NOT_SECONDARY_FLAG),
+        .compression_level = Compress::Compression_level::DEFAULT,
         .encoding = encoding,
         .charset = field->charset(),
         .dictionary = is_string_type(field->type()) ? std::make_shared<Compress::Dictionary>(encoding) : nullptr,
@@ -116,9 +118,13 @@ Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(my
 }
 
 Table::~Table() {
+  {
+    m_imcus.clear();
+    m_current_imcu.store(nullptr);
+    m_imcu_index.clear();
+  }
   if (m_memory_pool) {
-    m_memory_pool.get()->reset();
-    m_memory_pool = nullptr;
+    m_memory_pool.reset();
   }
 }
 
@@ -155,7 +161,6 @@ int Table::build_index(const Rapid_load_context *context, const KEY *key, row_id
   encode_row_key(to_key, key, rowdata, len, col_offsets, n_cols, null_byte_offsets, null_bitmasks);
 
   {
-    std::lock_guard<std::mutex> lock(*m_index_mutexes[key->name].get());
     m_indexes[key->name].get()->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
                                        sizeof(rowid));
   }
@@ -255,18 +260,19 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata, si
     local_row_id = current_imcu->insert_row(context, row_data);
   }
 
-  row_id_t global_row_id = current_imcu->get_start_row() + local_row_id;
+  // global current rowid.
+  m_current_rowid = current_imcu->get_start_row() + local_row_id;
 
   for (auto index = 0u; index < context->m_table->s->keys; index++) {  // user defined indexes.
     auto key_info = context->m_table->key_info + index;
-    if (build_index(context, key_info, global_row_id, rowdata, len, col_offsets, n_cols, null_byte_offsets,
+    if (build_index(context, key_info, m_current_rowid, rowdata, len, col_offsets, n_cols, null_byte_offsets,
                     null_bitmasks))
       return HA_ERR_GENERIC;
   }
 
   m_metadata.total_rows.fetch_add(1);
 
-  return global_row_id;
+  return m_current_rowid;
 }
 
 int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id) {
@@ -331,15 +337,8 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata, si
   std::string sch_tb_name = context->m_schema_name;
   sch_tb_name.append(":").append(context->m_table_name);
 
-  RowBuffer row_data(n_cols);
-  row_data.copy_from_mysql_fields(context, context->m_table->field, n_cols, rowdata, col_offsets, null_byte_offsets,
-                                  null_bitmasks);
-
   for (auto index = 0u; index < context->m_table->s->keys; index++) {
     auto key_info = context->m_table->key_info + index;
-    // if (build_key_info(context, key_info, rowdata, len, col_offsets, n_cols, null_byte_offsets, null_bitmasks))
-    //   return HA_ERR_GENERIC;
-
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = key_info->key_length;
     const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff =
         std::make_unique<uchar[]>(key_info->key_length);

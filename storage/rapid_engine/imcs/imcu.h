@@ -280,7 +280,7 @@ class Imcu : public MemoryObject {
   };
 
  public:
-  Imcu(RpdTable *owner, Table_Metadata &table_meta, row_id_t start_row, size_t capacity,
+  Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_t capacity,
        std::shared_ptr<Utils::MemoryPool> mem_pool);
   Imcu() = default;
   virtual ~Imcu();
@@ -500,12 +500,12 @@ class Imcu : public MemoryObject {
   /**
    * Initialize the header
    */
-  void init_header(const Table_Metadata &table_meta) {}
+  void init_header(const TableMetadata &table_meta) {}
 
   /**
    * Initialize all column units
    */
-  void init_column_units(const Table_Metadata &table_meta) {}
+  void init_column_units(const TableMetadata &table_meta) {}
 
   /**
    * Allocate a local row ID

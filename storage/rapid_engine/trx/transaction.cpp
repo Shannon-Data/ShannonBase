@@ -38,7 +38,6 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 
 namespace ShannonBase {
-
 // defined in ha_shannon_rapid.cc
 extern handlerton *shannon_rapid_hton_ptr;
 
@@ -62,14 +61,18 @@ static void destroy_ha_data(THD *const thd) {
   ha_data = nullptr;
 }
 
-Transaction::Transaction(THD *thd) : m_thd(thd) { m_trx_impl = trx_allocate_for_mysql(); }
+Transaction::Transaction(THD *thd) : m_thd(thd) {
+  m_trx_impl = trx_allocate_for_mysql();
+  m_trx_impl->mysql_thd = thd;
+  m_trx_impl->auto_commit = (m_thd != nullptr && !thd_test_options(m_thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN));
+}
 
 Transaction::~Transaction() {
   release_snapshot();
 
   if (is_active()) rollback();
 
-  if (m_registered_in_coordinator) TransactionCoordinator::instance().unregister_transaction(this);
+  if (m_registered_in_coordinator && is_active()) TransactionCoordinator::instance().unregister_transaction(this);
 
   trx_free_for_mysql(m_trx_impl);
 }
@@ -142,6 +145,14 @@ int Transaction::begin(ISOLATION_LEVEL iso_level) {
       is = trx_t::isolation_level_t::SERIALIZABLE;
       break;
   }
+  switch (thd_sql_command(m_thd)) {
+    case SQLCOM_INSERT:
+    case SQLCOM_UPDATE:
+    case SQLCOM_DELETE:
+    case SQLCOM_REPLACE:
+      m_read_only = false;
+      break;
+  }
 
   ut_a(m_trx_impl);
   // Check: If the transaction is registered but the underlying transaction has ended, it needs to be unregistered
@@ -155,11 +166,7 @@ int Transaction::begin(ISOLATION_LEVEL iso_level) {
     m_commit_scn = 0;
   }
 
-  ut_a(m_trx_impl->state.load() == TRX_STATE_NOT_STARTED);
   m_trx_impl->isolation_level = is;
-
-  m_trx_impl->auto_commit =
-      m_thd != nullptr && !thd_test_options(m_thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN) && thd_is_query_block(m_thd);
 
   trx_start_if_not_started(m_trx_impl, !m_read_only, UT_LOCATION_HERE);
 
@@ -205,6 +212,7 @@ int Transaction::commit() {
     error = trx_commit_for_mysql(m_trx_impl);
   }
 
+  m_stmt_active = false;
   return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
 }
 
@@ -222,6 +230,7 @@ int Transaction::rollback() {
     error = trx_rollback_for_mysql(m_trx_impl);
   }
 
+  m_stmt_active = false;
   return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
 }
 
@@ -336,7 +345,9 @@ bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
   info.status = TransactionInfo::ABORTED;
 
   // Notify all IMCUs
-  for (auto *imcu : info.modified_imcus) imcu->get_transaction_journal()->abort_transaction(txn_id);
+  for (auto *imcu : info.modified_imcus) {
+    if (imcu->get_transaction_journal()) imcu->get_transaction_journal()->abort_transaction(txn_id);
+  }
 
   //  removes from all active trxn.
   m_active_txns.erase(it);

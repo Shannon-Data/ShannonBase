@@ -59,7 +59,6 @@ class Field;
 namespace ShannonBase {
 class ShannonBaseContext;
 class Rapid_load_context;
-
 namespace Imcs {
 class Dictionary;
 class RpdTable;
@@ -109,7 +108,7 @@ class CU : public MemoryObject {
   CU(Imcu *owner, const FieldMetadata &field_meta, uint32_t col_idx, size_t capacity,
      std::shared_ptr<ShannonBase::Utils::MemoryPool> mem_pool);
 
-  virtual ~CU();
+  virtual ~CU() = default;
 
   /**
    * Write value (for INSERT)
@@ -268,22 +267,29 @@ class CU : public MemoryObject {
 
  private:
   const char *m_magic = "SHANNON_CU";
-
   CU_header m_header;
 
   // Data Storage
   // Main data area (continuous memory, normalized length)
   struct PoolDeleter {
-    ShannonBase::Utils::MemoryPool *pool;
+    std::weak_ptr<ShannonBase::Utils::MemoryPool> pool;
     size_t size;
 
-    PoolDeleter(ShannonBase::Utils::MemoryPool *p, size_t s) : pool(p), size(s) {}
-    PoolDeleter() : pool(nullptr), size(0) {}
+    PoolDeleter(std::shared_ptr<ShannonBase::Utils::MemoryPool> p, size_t s) : pool(p), size(s) {}
+    PoolDeleter() : pool(), size(0) {}
     PoolDeleter(const PoolDeleter &other) = default;
     PoolDeleter &operator=(const PoolDeleter &other) = default;
 
     void operator()(uchar *ptr) const {
-      if (pool && ptr) pool->deallocate(ptr, size);
+      auto sp = pool.lock();
+      if (sp && ptr) {
+        try {
+          sp->deallocate(ptr, size);
+        } catch (const std::exception &e) {
+          // Log error but don't throw in destructor
+          DBUG_PRINT("memory_pool", ("PoolDeleter failed: %s", e.what()));
+        }
+      }
     }
   };
 
@@ -356,7 +362,6 @@ class CU : public MemoryObject {
   // CU local Memory Management Pool.
   std::shared_ptr<ShannonBase::Utils::MemoryPool> m_memory_pool;
 };
-
 }  // namespace Imcs
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CU_H__

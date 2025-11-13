@@ -64,6 +64,7 @@ struct SHANNON_ALIGNAS FieldMetadata {
   bool is_key{false};
   bool is_secondary_field{false};
 
+  Compress::Compression_level compression_level{Compress::Compression_level::DEFAULT};
   Compress::Encoding_type encoding;
   const CHARSET_INFO *charset{nullptr};
   std::shared_ptr<Compress::Dictionary> dictionary;
@@ -73,7 +74,7 @@ struct SHANNON_ALIGNAS FieldMetadata {
   double null_ratio{0.0};
 };
 
-struct SHANNON_ALIGNAS Table_Metadata {
+struct SHANNON_ALIGNAS TableMetadata {
   // Basic information
   std::string db_name;
   std::string table_name;

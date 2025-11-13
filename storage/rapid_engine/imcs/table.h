@@ -256,7 +256,7 @@ class RpdTable : public MemoryObject {
   /** @brief Lookup index by key name. */
   virtual Index::Index<uchar, row_id_t> *get_index(std::string key_name) = 0;
 
-  Table_Metadata &meta() { return m_metadata; }
+  TableMetadata &meta() { return m_metadata; }
 
  protected:
   /**
@@ -271,14 +271,17 @@ class RpdTable : public MemoryObject {
 
   const TABLE *m_source_table{nullptr};
 
-  Table_Metadata m_metadata;
+  TableMetadata m_metadata;
 
   // IMCU list (supports dynamic expansion)
   std::mutex m_imcu_mtex;
   std::vector<std::shared_ptr<Imcu>> m_imcus;
 
+  // current position
+  row_id_t m_current_rowid{0};
+
   // IMCU index (fast positioning)
-  struct SHANNON_ALIGNAS Imcu_Index {
+  struct SHANNON_ALIGNAS ImcuIndex {
     row_id_t start_row{0};
     row_id_t end_row{0};
     std::shared_ptr<Imcu> imcu{nullptr};
@@ -289,18 +292,18 @@ class RpdTable : public MemoryObject {
     bool has_deletes{false};
     double delete_ratio{0.0};
 
-    Imcu_Index()
+    ImcuIndex()
         : min_values(SHANNON_MAX_COLUMNS, SHANNON_MAX_DOUBLE),
           max_values(SHANNON_MAX_COLUMNS, SHANNON_MIN_DOUBLE),
           has_deletes(false),
           delete_ratio(0.0) {}
-    Imcu_Index(size_t col_num)
+    ImcuIndex(size_t col_num)
         : min_values(col_num, SHANNON_MAX_DOUBLE),
           max_values(col_num, SHANNON_MIN_DOUBLE),
           has_deletes(false),
           delete_ratio(0.0) {}
   };
-  std::vector<Imcu_Index> m_imcu_index;
+  std::vector<ImcuIndex> m_imcu_index;
 
   // Current IMCU
   std::atomic<Imcu *> m_current_imcu{nullptr};
@@ -329,7 +332,7 @@ class Table : public RpdTable {
  public:
   Table(const TABLE *&mysql_table, const TableConfig &config);
 
-  virtual ~Table();
+  virtual ~Table() override;
 
   virtual TYPE type() const override { return TYPE::NORAMAL; }
 
@@ -421,7 +424,7 @@ class Table : public RpdTable {
     m_imcu_index.reserve(m_imcus.size());
 
     for (auto &imcu : m_imcus) {
-      Imcu_Index idx(imcu->owner()->meta().num_columns);
+      ImcuIndex idx(imcu->owner()->meta().num_columns);
       idx.start_row = imcu->get_start_row();
       idx.end_row = imcu->get_end_row();
       idx.imcu = imcu;
@@ -457,7 +460,7 @@ class Table : public RpdTable {
     m_imcu_index.reserve(m_imcus.size());
 
     for (auto &imcu : m_imcus) {
-      Imcu_Index idx(imcu->owner()->meta().num_columns);
+      ImcuIndex idx(imcu->owner()->meta().num_columns);
       idx.start_row = imcu->get_start_row();
       idx.end_row = imcu->get_end_row();
       idx.imcu = imcu;
@@ -472,7 +475,7 @@ class Table : public RpdTable {
   }
 
   void update_imcu_index(Imcu *imcu) {
-    Imcu_Index idx;
+    ImcuIndex idx;
     idx.start_row = imcu->get_start_row();
     idx.end_row = imcu->get_end_row();
     idx.imcu = m_imcus.back();

@@ -43,7 +43,8 @@
 namespace ShannonBase {
 namespace Imcs {
 CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32_t col_idx, size_t capacity,
-       std::shared_ptr<ShannonBase::Utils::MemoryPool> mem_pool) {
+       std::shared_ptr<ShannonBase::Utils::MemoryPool> mem_pool)
+    : m_memory_pool(mem_pool) {
   m_header.owner_imcu = owner;
   m_header.column_id = col_idx;
   m_header.field_metadata = field_meta.source_fld;
@@ -53,20 +54,20 @@ CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32_t col_idx, size_t ca
   m_header.charset = field_meta.charset;
   m_header.capacity = capacity;
   m_header.local_dict = field_meta.dictionary;
+  m_header.encoding = field_meta.encoding;
+  m_header.compression_level = field_meta.compression_level;
 
   m_data_capacity = capacity * m_header.normalized_length;
-  uchar *raw_ptr = static_cast<uchar *>(mem_pool.get()->allocate_auto(m_data_capacity, SHANNON_DATA_AREAR_NAME));
+  uchar *raw_ptr = static_cast<uchar *>(m_memory_pool.get()->allocate_auto(m_data_capacity, SHANNON_DATA_AREAR_NAME));
   if (!raw_ptr) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "CU memory allocation failed");
     return;
   }
 
-  m_data = std::unique_ptr<uchar[], PoolDeleter>(raw_ptr, PoolDeleter(mem_pool.get(), m_data_capacity));
-
+  // using PoolDeleter to de-allocated memory.
+  m_data = std::unique_ptr<uchar[], PoolDeleter>(raw_ptr, PoolDeleter(m_memory_pool, m_data_capacity));
   m_version_manager = std::make_unique<ColumnVersionManager>();
 }
-
-CU::~CU() {}
 
 void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction::ID txn_id, uint64_t scn,
                                               const uchar *old_value, size_t len) {

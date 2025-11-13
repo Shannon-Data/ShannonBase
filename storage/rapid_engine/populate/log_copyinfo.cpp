@@ -83,19 +83,8 @@ int CopyInfoParser::parse_table_meta(Rapid_load_context *context, const TABLE *t
 uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, change_record_buff_t::OperType oper_type, byte *start,
                                      byte *end_ptr, byte *new_start, byte *new_end_ptr) {
   // Open target table
-  TABLE *table =
-      ShannonBase::Utils::Util::open_table_by_name(current_thd, context->m_schema_name, context->m_table_name, TL_READ);
-  if (!table) {
-    std::string err_msg = "Cannot open table ";
-    err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" for parsing");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
-    return 0;
-  }
-
-  TableGuard tb_gurad(current_thd, table);
-  context->m_table = table;
-
-  if (parse_table_meta(context, table)) {
+  auto key = context->m_schema_name + ":" + context->m_table_name;
+  if ((m_col_offsets.find(key) == m_col_offsets.end()) && parse_table_meta(context, context->m_table)) {
     std::string err_msg = "Cannot get the openned table ";
     err_msg.append(context->m_schema_name).append(".").append(context->m_table_name).append(" meta information");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_str());
@@ -106,13 +95,13 @@ uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, change_record_
   auto ret{ShannonBase::SHANNON_SUCCESS};
   switch (oper_type) {
     case change_record_buff_t::OperType::UPDATE:
-      ret = parse_and_apply_update(context, table, start, end_ptr, new_start, new_end_ptr);
+      ret = parse_and_apply_update(context, context->m_table, start, end_ptr, new_start, new_end_ptr);
       break;
     case change_record_buff_t::OperType::INSERT:
-      ret = parse_and_apply_insert(context, table, start, end_ptr);
+      ret = parse_and_apply_insert(context, context->m_table, start, end_ptr);
       break;
     case change_record_buff_t::OperType::DELETE:
-      ret = parse_and_apply_delete(context, table, start, end_ptr);
+      ret = parse_and_apply_delete(context, context->m_table, start, end_ptr);
       break;
     default:
       sql_print_warning("Unknown operation type in change record");

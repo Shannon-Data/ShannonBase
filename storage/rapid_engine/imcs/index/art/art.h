@@ -48,7 +48,6 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-
 class ART {
  public:
   ART() : m_tree(nullptr), m_inited(false) {}
@@ -499,7 +498,6 @@ class ART {
 
   static ArtNodePtr null_ptr;
 };
-
 }  // namespace Index
 }  // namespace Imcs
 }  // namespace ShannonBase

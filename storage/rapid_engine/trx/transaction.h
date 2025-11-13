@@ -71,7 +71,6 @@ class Transaction : public MemoryObject {
   virtual void set_isolation_level(ISOLATION_LEVEL level) { m_iso_level = level; }
   virtual ISOLATION_LEVEL isolation_level() const { return m_iso_level; }
 
-  virtual void set_read_only(bool read_only) { m_read_only = read_only; }
   virtual Transaction::ID get_id();
 
   virtual int begin(ISOLATION_LEVEL iso_level = ISOLATION_LEVEL::READ_REPEATABLE);
@@ -100,13 +99,18 @@ class Transaction : public MemoryObject {
   friend class TransactionCoordinator;
 
   THD *m_thd{nullptr};
-  bool m_read_only{false};
+
+  // using innodb transaction impl for us.
   trx_t *m_trx_impl{nullptr};
+
   ISOLATION_LEVEL m_iso_level{ISOLATION_LEVEL::READ_REPEATABLE};
+
   bool m_stmt_active{false};
+  bool m_read_only{true};
 
   uint64_t m_start_scn{0};
   uint64_t m_commit_scn{0};
+
   bool m_registered_in_coordinator{false};
 };
 

@@ -63,7 +63,7 @@ class CopyInfoParser {
         // but the field pointers (field->ptr) within these table instances might have been
         // reset during previous operations, leading to incorrect field offset values.
         // Forcing a reopen ensures that field information is properly reinitialized.
-        tdc_remove_table(m_thd, TDC_RT_MARK_FOR_REOPEN, m_table->s->db.str, m_table->s->table_name.str, false);
+        // tdc_remove_table(m_thd, TDC_RT_MARK_FOR_REOPEN, m_table->s->db.str, m_table->s->table_name.str, false);
       }
     }
 

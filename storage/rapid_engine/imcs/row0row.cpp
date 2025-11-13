@@ -564,7 +564,7 @@ int RowBuffer::copy_from_mysql_fields(const Rapid_load_context *context, Field *
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int RowBuffer::copy_to_mysql_fields(const TABLE *to, const Table_Metadata *meta) const {
+int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) const {
   size_t read_set_col_idx{0};
   for (uint32_t col_idx = 0; col_idx < to->s->fields; col_idx++) {
     Field *source_fld = to->field[col_idx];
@@ -606,7 +606,7 @@ int RowBuffer::copy_to_mysql_fields(const TABLE *to, const Table_Metadata *meta)
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *to, const Table_Metadata *meta,
+boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *to, const TableMetadata *meta,
                                                                   boost::asio::any_io_executor &executor,
                                                                   size_t max_batch_size) const {
   // Build index mapping for read_set columns
