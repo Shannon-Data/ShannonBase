@@ -63,6 +63,7 @@ mysql_pfs_key_t rapid_populate_thread_key;
 
 namespace ShannonBase {
 namespace Populate {
+constexpr uint32_t MAX_RETRY_COUNT = 3;
 // to identify synchonization mode.
 std::atomic<SyncMode> g_sync_mode{SyncMode::DIRECT_NOTIFICATION};
 
@@ -134,6 +135,7 @@ static void table_worker_func(table_worker_context *ctx) {
   SHANNON_THREAD_LOCAL Rapid_load_context context;
   context.m_thd = thd;
 
+  std::unordered_map<uint64_t, uint32_t> retry_counts;
   while (!ctx->should_stop.load(std::memory_order_acquire)) {
     std::unique_lock<std::mutex> lock(ctx->mtx);
     ctx->cv.wait_for(lock, std::chrono::milliseconds(TABLE_WORKER_IDLE_TIMEOUT),
@@ -172,6 +174,28 @@ static void table_worker_func(table_worker_context *ctx) {
         context.m_offpage_data0 = change_rec.m_offpage_data0.empty() ? nullptr : &change_rec.m_offpage_data0;
         context.m_offpage_data1 = change_rec.m_offpage_data1.empty() ? nullptr : &change_rec.m_offpage_data1;
 
+        Table_ref table_list;
+        table_list.db = context.m_schema_name.c_str();
+        table_list.db_length = context.m_schema_name.length();
+        table_list.table_name = context.m_table_name.c_str();
+        table_list.table_name_length = context.m_table_name.length();
+        table_list.alias = context.m_table_name.c_str();
+        table_list.set_lock({TL_READ, THR_DEFAULT});
+        MDL_REQUEST_INIT(&table_list.mdl_request,
+                         MDL_key::TABLE,                 // namespace
+                         context.m_schema_name.c_str(),  // db
+                         context.m_table_name.c_str(),   // name
+                         MDL_SHARED_READ,                // type
+                         MDL_TRANSACTION);               // duration
+
+        Table_ref *table_list_ptr = &table_list;
+        uint counter{0};
+        if (open_tables(thd, &table_list_ptr, &counter, 0)) {
+          failed.emplace(lsn, std::move(change_rec));
+          continue;
+        }
+
+        context.m_table = table_list.table;
         context.m_trx = Transaction::get_or_create_trx(thd);
         context.m_trx->begin();
         context.m_extra_info.m_trxid = context.m_trx->get_id();
@@ -198,10 +222,22 @@ static void table_worker_func(table_worker_context *ctx) {
 
       if (parsed_bytes == change_rec.m_size) {
         applied_size += change_rec.m_size;
+        retry_counts.erase(lsn);
       } else {
-        push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
-                            "Propagation failed for table %s at LSN %lu, retrying...", ctx->table_key.c_str(), lsn);
-        failed.emplace(lsn, std::move(change_rec));
+        uint32_t current_retry = ++retry_counts[lsn];
+        if (current_retry <= MAX_RETRY_COUNT) {
+          push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
+                              "Propagation failed for table %s at LSN %lu (retry %u/%u), retrying...",
+                              ctx->table_key.c_str(), lsn, current_retry, MAX_RETRY_COUNT);
+          failed.emplace(lsn, std::move(change_rec));
+        } else {
+          // has over max-try-count, the discard re-trying.
+          push_warning_printf(thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE,
+                              "Propagation failed for table %s at LSN %lu after %u retries, dropping record",
+                              ctx->table_key.c_str(), lsn, MAX_RETRY_COUNT);
+          retry_counts.erase(lsn);
+          applied_size += change_rec.m_size;  // substract from pending_size.
+        }
       }
     }
 
@@ -229,6 +265,7 @@ static void table_worker_func(table_worker_context *ctx) {
       table_workers.erase(it);
     }
   }
+  close_thread_tables(thd);
 }
 
 table_worker_context *table_worker_context::get_or_create_table_worker(const std::string &table_key) {
@@ -425,6 +462,7 @@ void PopulatorImpl::unload_impl(const std::string &sch, const std::string &table
     std::shared_lock lock(table_workers_mutex);
     std::string key = sch + ":" + table;
     if (table_workers.find(key) == table_workers.end()) return;
+
     table_workers[key]->should_stop.store(true, std::memory_order_acquire);
     table_workers[key]->cv.notify_one();
 
@@ -434,38 +472,38 @@ void PopulatorImpl::unload_impl(const std::string &sch, const std::string &table
 
 void PopulatorImpl::end_impl() {
   // all the table has been unloaded, then stop main worker.
-  if (active_impl()) {
-    assert(!shannon_loaded_tables->size());
 
-    sys_pop_started.store(false, std::memory_order_seq_cst);
-    os_event_set(log_sys->rapid_events[0]);
-    srv_threads.m_change_pop_cordinator.join();
-    sys_rapid_loop_count = 0;
+  // main worker is not running, and all tables were unlaoded, do nothing.
+  if (!active_impl() && !shannon_loaded_tables->size()) return;
 
-    {
-      std::shared_lock lock(table_workers_mutex);
-      for (auto &[k, ctx] : table_workers) {
-        ctx->should_stop.store(true);
-        ctx->cv.notify_one();
-      }
-
-      for (auto &[k, ctx] : table_workers) {
-        if (thread_is_active(ctx->thread_handle)) ctx->thread_handle.join();
-      }
+  {
+    std::shared_lock lock(table_workers_mutex);
+    for (auto &[k, ctx] : table_workers) {
+      ctx->should_stop.store(true);
+      ctx->cv.notify_one();
     }
 
-    {
-      std::unique_lock lock(table_workers_mutex);
-      table_workers.clear();
+    for (auto &[k, ctx] : table_workers) {
+      if (thread_is_active(ctx->thread_handle)) ctx->thread_handle.join();
     }
-
-    g_index_cache.clear();
-    g_index_names.clear();
-    g_processing_tables.clear();
-
-    sys_pop_buff.clear();
-    ut_a(active_impl() == false);
   }
+
+  {
+    std::unique_lock lock(table_workers_mutex);
+    table_workers.clear();
+  }
+
+  sys_pop_started.store(false, std::memory_order_seq_cst);
+  os_event_set(log_sys->rapid_events[0]);
+  srv_threads.m_change_pop_cordinator.join();
+  sys_rapid_loop_count = 0;
+
+  g_index_cache.clear();
+  g_index_names.clear();
+  g_processing_tables.clear();
+
+  sys_pop_buff.clear();
+  ut_a(active_impl() == false);
 }
 
 uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buff *changed_rec) {

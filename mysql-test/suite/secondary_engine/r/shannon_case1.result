@@ -16,6 +16,7 @@ select * from tt where id >=1  and id < 3 order by id;
 score	name	id	gender
 1	n1	1	m
 2	n2	2	f
+alter table tt secondary_unload;
 create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
 insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
 alter table tt1 secondary_load;
@@ -32,6 +33,7 @@ score	name	id	gender
 select score from tt1 where id > 2  and score = 30 order by id;
 score
 30
+alter table tt1 secondary_unload;
 create table tt2 (score int, name char(10), id int primary key, gender char(1));
 insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt2 secondary_engine=rapid;
@@ -49,6 +51,8 @@ select * from tt3 where score >1 order by id;
 score	name	id	gender
 2	n2	2	f
 3	n3	3	m
+alter table tt2 secondary_unload;
+alter table tt3 secondary_unload;
 create table tt4 (score double primary key, name char(10), id int, gender char(1));
 insert into tt4 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
 alter table tt4 secondary_engine=rapid;
@@ -111,6 +115,8 @@ score	name	id	gender
 select score from tt1 where id > 2  and score = 30 order by id;
 score
 30
+alter table tt secondary_unload;
+alter table tt1 secondary_unload;
 create table tt2 (score int, name char(10), id int primary key, gender char(1));
 insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt2 secondary_engine=rapid;
@@ -120,6 +126,7 @@ score	name	id	gender
 1	n1	1	m
 2	n2	2	f
 3	n3	3	m
+alter table tt2 secondary_unload;
 create table tt3 (score int primary key, name char(10), id int, gender char(1), key(id, score));
 insert into tt3 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt3 secondary_engine=rapid;
@@ -174,6 +181,7 @@ select * from tt where id >=1  and id < 3 order by id;
 score	name	id	gender
 1	n1	1	m
 2	n2	2	f
+alter table tt secondary_unload;
 create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
 insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
 alter table tt1 secondary_load;
@@ -190,6 +198,7 @@ score	name	id	gender
 select score from tt1 where id > 2  and score = 30 order by id;
 score
 30
+alter table tt1 secondary_unload;
 create table tt2 (score int primary key, name char(10), id int, gender char(1));
 insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt2 secondary_engine=rapid;
@@ -199,6 +208,7 @@ score	name	id	gender
 1	n1	1	m
 2	n2	2	f
 3	n3	3	m
+alter table tt2 secondary_unload;
 create table tt3 (score int primary key , name char(10), id int, gender char(1), key(id, score));
 insert into tt3 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt3 secondary_engine=rapid;
@@ -234,6 +244,8 @@ select * from tt4 where score < 2.3 and id < 4 order by id;
 score	name	id	gender
 1.1	n1	1	m
 2.2	n2	2	f
+alter table tt3 secondary_unload;
+alter table tt4 secondary_unload;
 create table tt5 (name char(10) primary key, gender char(1)) secondary_engine=rapid;
 insert into tt5 values('n1', 'm'), ('n2', null), ('n3', 'm');
 alter table tt5 secondary_load;

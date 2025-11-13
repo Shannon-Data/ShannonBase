@@ -51,7 +51,6 @@
 
 namespace ShannonBase {
 namespace Imcs {
-
 ShannonBase::Utils::SimpleRatioAdjuster RpdTableView::m_adaptive_ratio(0.3);
 RpdTableView::RpdTableView(TABLE *source, RpdTable *rpd)
     : m_scan_initialized{false}, m_data_source(source), m_rpd_table(rpd), m_source_rpd_table(rpd) {
@@ -82,7 +81,6 @@ int RpdTableView::init() {
     m_scan_context->m_extra_info.m_trxid = m_scan_context->m_trx->get_id();
     m_scan_context->m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
 
-    m_scan_context->m_trx->set_read_only(true);
     if (!m_scan_context->m_trx->is_active())
       m_scan_context->m_trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(current_thd));
     m_rpd_table->register_transaction(m_scan_context->m_trx);
@@ -244,7 +242,7 @@ boost::asio::awaitable<int> RpdTableView::next_async(uchar *buf) {
   // Async convert to MySQL format (parallel column processing for wide tables)
   auto status =
       co_await row_buffer->copy_to_mysql_fields_async(m_data_source,         // TABLE*
-                                                      &m_rpd_table->meta(),  // Table_Metadata*
+                                                      &m_rpd_table->meta(),  // TableMetadata*
                                                       executor,
                                                       m_adaptive_ratio.getMaxBatchSize()  // optional batch size
       );
@@ -265,12 +263,12 @@ bool RpdTableView::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */)
   m_row_buffer_cache.clear();
 
   // Build projection list (columns to read and Not NOT_SECONDARY_FLAG)
-  std::vector<uint32_t> projection;
-  projection.reserve(m_data_source->s->fields);
-  for (uint32_t i = 0; i < m_data_source->s->fields; i++) {
-    Field *field = m_data_source->field[i];
-    if (bitmap_is_set(m_data_source->read_set, i) && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
-      projection.push_back(i);
+  std::vector<uint32_t> projection_cols;
+  projection_cols.reserve(m_data_source->s->fields);
+  for (uint32_t idx = 0; idx < m_data_source->s->fields; idx++) {
+    Field *field = m_data_source->field[idx];
+    if (bitmap_is_set(m_data_source->read_set, idx) && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
+      projection_cols.push_back(idx);
     }
   }
 
@@ -294,17 +292,17 @@ bool RpdTableView::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */)
     }
 
     // Copy column data (zero-copy mode)
-    for (size_t i = 0; i < row_data.size(); i++) {
-      if (row_data[i] == nullptr) {
-        row_buffer->set_column_null(i);
+    for (size_t idx = 0; idx < row_data.size(); idx++) {
+      if (row_data[idx] == nullptr) {
+        row_buffer->set_column_null(idx);
       } else {  // Prefetch next column's data
-        if (i + 1 < row_data.size() && row_data[i + 1] != nullptr) SHANNON_PREFETCH_R(row_data[i + 1]);
+        if (idx + 1 < row_data.size() && row_data[idx + 1] != nullptr) SHANNON_PREFETCH_R(row_data[idx + 1]);
 
         // Note: We need to determine the length properly
         // For now, use the field's pack_length as approximation
-        Field *field = m_data_source->field[i];
+        Field *field = m_data_source->field[idx];
         size_t length = field->pack_length();
-        row_buffer->set_column_zero_copy(i, row_data[i], length, field->type());
+        row_buffer->set_column_zero_copy(idx, row_data[idx], length, field->type());
       }
     }
     m_row_buffer_cache.push_back(std::move(row_buffer));
@@ -321,7 +319,7 @@ bool RpdTableView::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */)
     size_t scanned = imcu->scan_range(m_scan_context.get(),
                                       m_current_imcu_offset,  // Start from where we left off
                                       remaining,              // How many rows we still need
-                                      predicates, projection, callback);
+                                      predicates, projection_cols, callback);
     remaining -= scanned;
 
     // Check if IMCU is exhausted
@@ -359,9 +357,78 @@ bool RpdTableView::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */)
   return !m_row_buffer_cache.empty();
 }
 
-int RpdTableView::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data,
+int RpdTableView::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
                              size_t &read_cnt) {
-  return ShannonBase::SHANNON_SUCCESS;
+  read_cnt = 0;
+  if (m_scan_exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
+
+  // 1.build projection columns.
+  std::vector<uint32_t> projection_cols;
+  for (uint32_t idx = 0; idx < m_data_source->s->fields; ++idx) {
+    Field *fld = m_data_source->field[idx];
+    if (bitmap_is_set(m_data_source->read_set, idx) && !fld->is_flag_set(NOT_SECONDARY_FLAG))
+      projection_cols.push_back(idx);
+  }
+  if (projection_cols.empty()) return ShannonBase::SHANNON_SUCCESS;
+
+  // 2. preallocate col_chunks
+  if (col_chunks.size() != projection_cols.size()) {
+    col_chunks.clear();
+    col_chunks.reserve(projection_cols.size());
+
+    for (uint32_t col_id : projection_cols) {
+      Field *fld = m_data_source->field[col_id];
+      col_chunks.emplace_back(fld, batch_size);
+    }
+  }
+
+  // 3. the predicates.
+  std::vector<std::unique_ptr<Predicate>> predicates;
+
+  // 4. fill up the ColumChunk.
+  auto callback = [&](row_id_t global_row_id, const std::vector<const uchar *> &row_data) {
+    for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
+      auto col_idx = projection_cols[idx];
+      auto &col_chunk = col_chunks[col_idx];
+
+      auto data_ptr = row_data[col_idx];
+      auto is_null = (data_ptr == nullptr) ? true : false;
+
+      auto normal_len = m_rpd_table->meta().fields[col_idx].normalized_length;
+      col_chunk.add(data_ptr, normal_len, is_null);
+    }
+    read_cnt++;
+  };
+
+  // 5. start batch scanning.
+  size_t remaining = batch_size;
+  while (m_current_imcu_idx < m_rpd_table->meta().total_imcus && remaining > 0) {
+    Imcu *imcu = m_rpd_table->locate_imcu(m_current_imcu_idx);
+    if (!imcu) {
+      m_current_imcu_idx++;
+      continue;
+    }
+
+    size_t scanned = imcu->scan_range(m_scan_context.get(), m_current_imcu_offset, remaining,
+                                      predicates /* predicates */,  // in future, index push down.
+                                      projection_cols, callback);
+
+    remaining -= scanned;
+    size_t imcu_rows = imcu->get_row_count();
+    if (m_current_imcu_offset + scanned >= imcu_rows) {
+      m_current_imcu_idx++;
+      m_current_imcu_offset = 0;
+    } else {
+      m_current_imcu_offset += scanned;
+      if (remaining == 0) break;
+    }
+  }
+
+  if (m_current_imcu_idx >= m_rpd_table->meta().total_imcus) {
+    m_scan_exhausted.store(true, std::memory_order_release);
+  }
+
+  return read_cnt > 0 ? ShannonBase::SHANNON_SUCCESS : HA_ERR_END_OF_FILE;
 }
 
 int RpdTableView::index_init(uint keynr, bool sorted) {

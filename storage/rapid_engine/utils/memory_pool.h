@@ -167,7 +167,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
      * @struct Snapshot
      * @brief Point-in-time statistics snapshot
      */
-    struct Snapshot {
+    struct SHANNON_ALIGNAS Snapshot {
       size_t total_capacity;
       size_t allocated_bytes;
       size_t used_bytes;
@@ -192,7 +192,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    * @struct TenantConfig
    * @brief Configuration for tenant-specific quota management
    */
-  struct TenantConfig {
+  struct SHANNON_ALIGNAS TenantConfig {
     std::string name;                         ///< Tenant identifier
     size_t quota;                             ///< Memory quota in bytes (0 = disabled)
     std::atomic<size_t> current_usage{0};     ///< Current memory usage
@@ -202,8 +202,9 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
     TenantConfig(const std::string &n, size_t q);
   };
 
-  struct Config {
+  struct SHANNON_ALIGNAS Config {
     // basic configuration.
+    std::string tenant_name;
     size_t initial_size;
     double small_pool_ratio;
     size_t alignment;
@@ -215,20 +216,20 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
     LogLevel log_level;
 
     // Sub-pool specific configuration
-    std::shared_ptr<MemoryPool> parent_pool;  ///< Parent pool (for sub-pools)
-    bool is_sub_pool;                         ///< Is this a sub-pool?
+    std::weak_ptr<MemoryPool> parent_pool;  ///< Parent pool (for sub-pools)
+    bool is_sub_pool;                       ///< Is this a sub-pool?
 
-    Config()
-        : initial_size(SHANNON_DEFAULT_MEMRORY_SIZE),
+    explicit Config(size_t intial_size = SHANNON_DEFAULT_MEMRORY_SIZE)
+        : initial_size(intial_size),
           small_pool_ratio(0.2),
           alignment(CACHE_LINE_SIZE),
-          allow_expansion(true),
+          allow_expansion(false),
           min_expansion_size(128 * SHANNON_MB),
           expansion_trigger_threshold(0.9),  // 90%
           auto_defragmentation(true),
           defrag_trigger_threshold(0.3),  // 30%
           log_level(LogLevel::INFO),
-          parent_pool{nullptr},
+          parent_pool(),
           is_sub_pool(false) {}
   };
 
@@ -343,7 +344,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    *     global_pool, "my_module", 1024*1024*1024);
    * @endcode
    */
-  static std::shared_ptr<MemoryPool> create_from_parent(std::shared_ptr<MemoryPool> parent_pool,
+  static std::shared_ptr<MemoryPool> create_from_parent(const std::shared_ptr<MemoryPool> &parent_pool,
                                                         const std::string &tenant_name, size_t sub_pool_size);
 
   /**
@@ -356,7 +357,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    * @brief Get parent pool (if this is a sub-pool)
    * @return Shared pointer to parent pool, or nullptr if root pool
    */
-  std::shared_ptr<MemoryPool> get_parent_pool() const { return m_config.parent_pool; }
+  std::shared_ptr<MemoryPool> get_parent_pool() const { return m_config.parent_pool.lock(); }
 
   // Statistics and Monitoring Interface
   /**
@@ -377,6 +378,13 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    */
   void set_log_level(LogLevel level);
 
+  std::string get_tenant_name() const {
+    if (m_config.is_sub_pool && !m_config.tenant_name.empty()) {
+      return m_config.tenant_name;
+    }
+    return "root";
+  }
+
  private:
   /**
    * @struct FreeBlock
@@ -391,22 +399,22 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    * @struct SubPool
    * @brief Internal representation of a memory sub-pool region
    */
-  struct SubPool {
+  struct SHANNON_ALIGNAS SubPool {
     void *memory_base;                   ///< Base address of pool memory
     size_t total_size;                   ///< Total size of pool
     size_t current_offset;               ///< Current allocation offset
     std::vector<FreeBlock> free_blocks;  ///< List of free blocks
     mutable std::mutex mutex;            ///< Mutex for thread safety
 
-    bool is_from_parent;                     ///< True if memory from parent pool
-    std::shared_ptr<MemoryPool> parent_ref;  ///< Reference to parent pool
+    bool is_from_parent;                   ///< True if memory from parent pool
+    std::weak_ptr<MemoryPool> parent_ref;  ///< Reference to parent pool
 
     SubPool(size_t size, size_t alignment);  ///< Constructor for root pool
     SubPool(void *base, size_t size);        ///< Constructor for sub-pool
     ~SubPool();
   };
 
-  struct AllocationInfo {
+  struct SHANNON_ALIGNAS AllocationInfo {
     size_t offset;          ///< Offset from pool base
     size_t aligned_size;    ///< Aligned allocation size
     int pool_index;         ///< Index of sub-pool (0=small, 1=large)
@@ -419,8 +427,16 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   std::unordered_map<void *, AllocationInfo> m_allocations;                  ///< Allocation tracking
   std::unordered_map<std::string, std::unique_ptr<TenantConfig>> m_tenants;  ///< Tenant configs
 
-  std::vector<std::shared_ptr<MemoryPool>> m_child_pools;  ///< Child sub-pools
-  mutable std::mutex m_child_pools_mutex;                  ///< Child pool mutex
+  /**
+   * @brief Base address of this sub-pool's memory block.
+   *
+   * For root pools: nullptr
+   * For sub-pools: points to the memory allocated via parent->allocate()
+   * Used in destructor to return memory to parent pool.
+   */
+  void *m_subpool_base{nullptr};                         ///< Memory block allocated from parent pool for this sub-pool
+  std::vector<std::weak_ptr<MemoryPool>> m_child_pools;  ///< Child sub-pools
+  mutable std::mutex m_child_pools_mutex;                ///< Child pool mutex
 
   mutable std::mutex m_alloc_mutex;   ///< Allocation mutex
   mutable std::mutex m_tenant_mutex;  ///< Tenant mutex
@@ -445,15 +461,17 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   void update_peak_usage() noexcept;
   void monitor_loop();
   void cleanup() noexcept;
+  void cleanup_expired_children() noexcept;
   void log(LogLevel level, const std::string &message) const;
 
   // Static Utility Methods
-  static size_t align_up(size_t size, size_t alignment) noexcept;
+  static size_t align_up(size_t size, size_t alignment) noexcept { return (size + alignment - 1) & ~(alignment - 1); }
+  static size_t align_down(size_t size, size_t alignment) noexcept { return (size / alignment) * alignment; }
+
   static void *aligned_alloc_portable(size_t alignment, size_t size) noexcept;
   static void free_aligned_portable(void *ptr) noexcept;
   static std::string format_size(size_t bytes);
 };
-
 }  // namespace Utils
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_UTILS_MEMORY_POOL_H__

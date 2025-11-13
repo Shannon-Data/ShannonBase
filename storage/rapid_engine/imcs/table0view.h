@@ -173,7 +173,6 @@ class RpdTableView : public MemoryObject {
   std::atomic<uint64_t> m_total_rows_scanned{0};
   std::atomic<uint64_t> m_batch_fetch_count{0};
 };
-
 }  // namespace Imcs
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_TABLE_VIEW_H__

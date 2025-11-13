@@ -56,8 +56,9 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
    */
   TABLE *table{nullptr};
   for (table = thd->open_tables; table; table = table->next) {
-    if (table->s && table->file && table->file->inited && schema_name == table->s->db.str &&
-        table_name == table->s->table_name.str) {
+    auto db_flag = !strncmp(schema_name.c_str(), table->s->db.str, table->s->db.length);
+    auto tb_flag = !strncmp(table_name.c_str(), table->s->table_name.str, table->s->table_name.length);
+    if (table->s && table->file && (table->file->inited != handler::NONE) && db_flag && tb_flag) {
       return table;
     }
   }

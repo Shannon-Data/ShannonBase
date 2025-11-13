@@ -41,7 +41,7 @@
 
 namespace ShannonBase {
 namespace Imcs {
-Imcu::Imcu(RpdTable *owner, Table_Metadata &table_meta, row_id_t start_row, size_t capacity,
+Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_t capacity,
            std::shared_ptr<Utils::MemoryPool> mem_pool)
     : m_owner_table(owner), m_memory_pool(mem_pool) {
   m_header.imcu_id = owner->meta().total_imcus.fetch_add(1);
@@ -324,10 +324,8 @@ size_t Imcu::scan_range(Rapid_scan_context *context, size_t start_offset, size_t
     matching_rows.reserve(batch_size);
 
     for (size_t i = 0; i < batch_size; i++) {
-      if (!Utils::Util::bit_array_get(&visibility_mask, i)) {
-        scanned++;
-        continue;  // invisible，skip.
-      }
+      scanned++;
+      if (!Utils::Util::bit_array_get(&visibility_mask, i)) continue;  // invisible，skip.
 
       row_id_t local_row_id = start + i;
 
@@ -345,10 +343,9 @@ size_t Imcu::scan_range(Rapid_scan_context *context, size_t start_offset, size_t
           break;
         }
       }
+      if (match) matching_rows.push_back(local_row_id);
 
-      if (match) {
-        matching_rows.push_back(local_row_id);
-      }
+      if (scanned >= limit) break;
     }
 
     // 3. Read projection columns of matched rows
@@ -356,9 +353,9 @@ size_t Imcu::scan_range(Rapid_scan_context *context, size_t start_offset, size_t
       // read the loaded CUs.
       for (size_t i = 0; i < projection.size(); i++) {
         uint32_t col_idx = projection[i];
-        if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id))
+        if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
           row_buffer[i] = nullptr;
-        else {
+        } else {
           CU *cu = get_cu(col_idx);
           row_buffer[i] = cu->get_data_address(local_row_id);  // return data addr directly, no data cpy.
         }
@@ -368,13 +365,10 @@ size_t Imcu::scan_range(Rapid_scan_context *context, size_t start_offset, size_t
       row_id_t global_row_id = m_header.start_row + local_row_id;
       callback(global_row_id, row_buffer);
 
-      scanned++;
       context->rows_returned++;
 
       // check the LIMIT options.
-      if (context->limit > 0 && context->rows_returned >= context->limit) {
-        return scanned;
-      }
+      if (context->limit > 0 && context->rows_returned >= context->limit) return scanned;
     }
   }
 
@@ -449,9 +443,7 @@ void Imcu::update_storage_index() {
     // Traverse all valid (non-deleted) rows
     for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
       // Skip deleted rows
-      if (Utils::Util::bit_array_get(m_header.del_mask.get(), row_idx)) {
-        continue;
-      }
+      if (Utils::Util::bit_array_get(m_header.del_mask.get(), row_idx)) continue;
 
       // Check if NULL
       if (m_header.null_masks[col_idx] && Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), row_idx)) {

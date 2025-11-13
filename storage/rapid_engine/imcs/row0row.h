@@ -331,7 +331,7 @@ class StorageIndex {
   bool deserialize(std::istream &in);
 };
 
-struct Table_Metadata;
+struct TableMetadata;
 class DeferGuard {
  public:
   explicit DeferGuard(std::function<void()> fn) : m_fn(std::move(fn)), m_active(true) {}
@@ -588,7 +588,7 @@ class RowBuffer {
    * @param to: MySQL TABLE
    * @param meta: MySQL TABLE metadata
    */
-  int copy_to_mysql_fields(const TABLE *to, const Table_Metadata *meta) const;
+  int copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) const;
 
   // MySQL Compatibility Interface, async version with parallel column processing
   /**
@@ -598,7 +598,7 @@ class RowBuffer {
    * @param executor: executor.
    * @param max_batch_size: batch size.
    */
-  boost::asio::awaitable<int> copy_to_mysql_fields_async(const TABLE *to, const Table_Metadata *meta,
+  boost::asio::awaitable<int> copy_to_mysql_fields_async(const TABLE *to, const TableMetadata *meta,
                                                          boost::asio::any_io_executor &executor,
                                                          size_t max_batch_size = 32) const;
 

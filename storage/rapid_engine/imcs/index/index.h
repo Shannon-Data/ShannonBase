@@ -121,7 +121,7 @@ class Index {
     ART::Art_leaf *l = m_impl->ART_maximum();
     if (l->values.empty()) return 1;
 
-    if (ind >= l->vcount) return 1;
+    if (ind >= l->vcount.load(std::memory_order_acquire)) return 1;
     *value = *reinterpret_cast<value_t *>(l->values[ind]);
     return 0;
   }
@@ -134,7 +134,7 @@ class Index {
     ART::Art_leaf *l = m_impl->ART_minimum();
     if (l->values.empty()) return 1;
 
-    if (ind >= l->vcount) return 1;
+    if (ind >= l->vcount.load(std::memory_order_acquire)) return 1;
     *value = *reinterpret_cast<value_t *>(l->values[ind]);
     return 0;
   }

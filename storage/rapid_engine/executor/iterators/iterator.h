@@ -69,7 +69,7 @@ class ColumnChunk {
   // Move assignment operator
   ColumnChunk &operator=(ColumnChunk &&other) noexcept;
 
-  // set the indexth is null.
+  // set the row-indexth is null.
   inline void set_null(size_t index) {
     assert(m_null_mask.get());
     assert(index < m_chunk_size);
@@ -83,7 +83,7 @@ class ColumnChunk {
     return ShannonBase::Utils::Util::bit_array_get(m_null_mask.get(), index);
   }
 
-  bool add(uchar *data, size_t length, bool null);
+  bool add(const uchar *data, size_t length, bool null);
   bool add_batch(const std::vector<std::pair<const uchar *, size_t>> &data_batch, const std::vector<bool> &null_flags);
 
   // remove the last row data.

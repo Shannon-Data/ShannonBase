@@ -36,7 +36,6 @@
 
 namespace ShannonBase {
 namespace Utils {
-
 MemoryPool::PoolStats::Snapshot MemoryPool::PoolStats::snapshot() const noexcept {
   size_t cap = total_capacity.load(std::memory_order_relaxed);
   size_t used = used_bytes.load(std::memory_order_relaxed);
@@ -64,7 +63,7 @@ MemoryPool::PoolStats::Snapshot MemoryPool::PoolStats::snapshot() const noexcept
 MemoryPool::TenantConfig::TenantConfig(const std::string &n, size_t q) : name(n), quota(q) {}
 
 MemoryPool::SubPool::SubPool(size_t size, size_t alignment)
-    : memory_base(nullptr), total_size(size), current_offset(0), is_from_parent(false), parent_ref(nullptr) {
+    : memory_base(nullptr), total_size(size), current_offset(0), is_from_parent(false), parent_ref() {
   // Allocate new memory for root pool
   memory_base = aligned_alloc_portable(alignment, size);
   if (!memory_base) {
@@ -73,7 +72,7 @@ MemoryPool::SubPool::SubPool(size_t size, size_t alignment)
 }
 
 MemoryPool::SubPool::SubPool(void *base, size_t size)
-    : memory_base(base), total_size(size), current_offset(0), is_from_parent(true), parent_ref(nullptr) {
+    : memory_base(base), total_size(size), current_offset(0), is_from_parent(true), parent_ref() {
   // Use memory provided by parent pool (no allocation)
 }
 
@@ -107,13 +106,53 @@ MemoryPool::MemoryPool(const Config &config) : m_config(config), m_shutdown(fals
 
 MemoryPool::~MemoryPool() noexcept {
   m_shutdown.store(true, std::memory_order_release);
-
   if (m_monitor_thread.joinable()) {
     m_monitor_thread.join();
   }
 
+  if (m_config.is_sub_pool && m_subpool_base) {
+    if (auto parent = m_config.parent_pool.lock()) {
+      const size_t subpool_size = m_stats.total_capacity.load();
+      size_t remaining_allocs = 0;
+      {
+        std::scoped_lock lock(parent->m_alloc_mutex);
+        const char *subpool_start = static_cast<const char *>(m_subpool_base);
+        const char *subpool_end = subpool_start + subpool_size;
+
+        for (const auto &[ptr, info] : parent->m_allocations) {
+          if (ptr >= subpool_start && ptr < subpool_end) {
+            remaining_allocs++;
+          }
+        }
+      }
+
+      if (remaining_allocs > 0) {
+        log(LogLevel::WARNING, "Sub-pool still has " + std::to_string(remaining_allocs) +
+                                   " unreleased allocations. Memory leak possible!");
+      }
+
+      parent->deallocate(m_subpool_base, subpool_size);
+
+      log(LogLevel::INFO, "Returned sub-pool base block: " + format_size(subpool_size));
+
+      // 3. Remove self from parent's child list
+      {
+        std::scoped_lock lock(parent->m_child_pools_mutex);
+        auto &children = parent->m_child_pools;
+        children.erase(std::remove_if(children.begin(), children.end(),
+                                      [this](const std::weak_ptr<MemoryPool> &wp) {
+                                        auto sp = wp.lock();
+                                        return sp && sp.get() == this;
+                                      }),
+                       children.end());
+      }
+    } else {
+      log(LogLevel::WARNING, "Parent pool expired, cannot return sub-pool memory");
+    }
+  }
+
   cleanup();
-  log(LogLevel::INFO, "MemoryPool shutdown");
+  log(LogLevel::INFO, "MemoryPool destroyed");
 }
 
 void *MemoryPool::allocate(size_t size, SubPoolType pool_type, const std::string &tenant_id) {
@@ -159,7 +198,8 @@ void MemoryPool::deallocate(void *ptr, size_t size) noexcept {
     std::scoped_lock lock(m_alloc_mutex);
     auto it = m_allocations.find(ptr);
     if (it == m_allocations.end()) {
-      log(LogLevel::WARNING, "Attempted to deallocate invalid pointer");
+      log(LogLevel::WARNING, "deallocate: pointer " + std::to_string((uintptr_t)ptr) +
+                                 " not found in m_allocations, size=" + format_size(size));
       return;
     }
 
@@ -179,11 +219,13 @@ void MemoryPool::deallocate(void *ptr, size_t size) noexcept {
 
     m_stats.used_bytes.fetch_sub(size, std::memory_order_relaxed);
     m_stats.deallocation_count.fetch_add(1, std::memory_order_relaxed);
-
     m_allocations.erase(it);
 
+    log(LogLevel::DEBUG,
+        "deallocate: freed " + format_size(info.aligned_size) + " at offset " + std::to_string(info.offset));
+
   } catch (const std::exception &e) {
-    log(LogLevel::ERROR, "Deallocation error: " + std::string(e.what()));
+    log(LogLevel::ERROR, "deallocate error: " + std::string(e.what()));
   }
 }
 
@@ -256,37 +298,51 @@ bool MemoryPool::defragment() {
 }
 
 void MemoryPool::reset() noexcept {
+  // clean expired sub pool children.
+  cleanup_expired_children();
+
+  {
+    std::scoped_lock lock(m_child_pools_mutex);
+    if (!m_child_pools.empty()) {
+      log(LogLevel::ERROR, "Cannot reset pool with active sub-pools");
+      return;
+    }
+  }
+
   try {
     log(LogLevel::INFO, "Resetting memory pool...");
 
-    // Clear all sub-pools
+    // reset all subpool.
     for (auto &subpool : m_subpools) {
       std::scoped_lock lock(subpool->mutex);
       subpool->current_offset = 0;
       subpool->free_blocks.clear();
     }
 
-    // Clear allocation tracking
+    // cleanup allocated track
     {
       std::scoped_lock lock(m_alloc_mutex);
       m_allocations.clear();
     }
 
-    // Reset tenant statistics
+    // reset the statistics
     {
       std::scoped_lock lock(m_tenant_mutex);
       for (auto &[_, tenant] : m_tenants) {
         tenant->current_usage.store(0, std::memory_order_relaxed);
         tenant->peak_usage.store(0, std::memory_order_relaxed);
+        tenant->allocation_count.store(0, std::memory_order_relaxed);
       }
     }
 
-    // Reset pool statistics
+    // reset pool statistics.
     m_stats.allocated_bytes.store(0, std::memory_order_relaxed);
     m_stats.used_bytes.store(0, std::memory_order_relaxed);
+    m_stats.peak_usage.store(0, std::memory_order_relaxed);
+    m_stats.allocation_count.store(0, std::memory_order_relaxed);
+    m_stats.deallocation_count.store(0, std::memory_order_relaxed);
 
     log(LogLevel::INFO, "Reset completed");
-
   } catch (const std::exception &e) {
     log(LogLevel::ERROR, "Reset failed: " + std::string(e.what()));
   }
@@ -319,39 +375,35 @@ std::shared_ptr<MemoryPool> MemoryPool::create_sub_pool(size_t sub_pool_size, co
     throw std::runtime_error("Cannot create sub-pool from another sub-pool");
   }
 
-  // Allocate memory for sub-pool from this pool
+  Config sub_config = m_config;
+  sub_config.tenant_name = tenant_name;
+  sub_config.initial_size = sub_pool_size;
+  sub_config.is_sub_pool = true;
+  sub_config.allow_expansion = false;
+  // ===== set parent_pool =====
+  sub_config.parent_pool = shared_from_this();
+
+  auto sub_pool = std::make_shared<MemoryPool>(sub_config);
+
+  // allocate memory
   void *sub_memory = allocate(sub_pool_size, SubPoolType::LARGE_BLOCK, tenant_name);
   if (!sub_memory) {
     throw std::bad_alloc();
   }
 
-  // Create sub-pool configuration
-  Config sub_config;
-  sub_config.initial_size = sub_pool_size;
-  sub_config.parent_pool = shared_from_this();
-  sub_config.is_sub_pool = true;
-  sub_config.allow_expansion = false;  // Sub-pools cannot expand
-  sub_config.auto_defragmentation = m_config.auto_defragmentation;
-  sub_config.log_level = m_config.log_level;
-  sub_config.small_pool_ratio = m_config.small_pool_ratio;
-  sub_config.alignment = m_config.alignment;
-
-  // Create sub-pool instance
-  auto sub_pool = std::make_shared<MemoryPool>(sub_config);
+  sub_pool->m_subpool_base = sub_memory;
   sub_pool->initialize_as_sub_pool(sub_memory, sub_pool_size);
 
-  // Register child pool for tracking
   {
     std::scoped_lock lock(m_child_pools_mutex);
     m_child_pools.push_back(sub_pool);
   }
 
-  log(LogLevel::INFO, "Created sub-pool '" + tenant_name + "' with size " + format_size(sub_pool_size));
-
+  log(LogLevel::INFO, "Created sub-pool '" + tenant_name + "' size: " + format_size(sub_pool_size));
   return sub_pool;
 }
 
-std::shared_ptr<MemoryPool> MemoryPool::create_from_parent(std::shared_ptr<MemoryPool> parent_pool,
+std::shared_ptr<MemoryPool> MemoryPool::create_from_parent(const std::shared_ptr<MemoryPool> &parent_pool,
                                                            const std::string &tenant_name, size_t sub_pool_size) {
   if (!parent_pool) {
     throw std::invalid_argument("Parent pool cannot be null");
@@ -474,19 +526,24 @@ void MemoryPool::initialize_pools(size_t total_size) {
 }
 
 void MemoryPool::initialize_as_sub_pool(void *parent_memory, size_t size) {
-  // Clear any default-initialized pools
+  m_subpool_base = parent_memory;
   m_subpools.clear();
 
-  // Create sub-pools using parent's memory
+  size_t required_alignment = std::max(m_config.alignment, sizeof(void *));
+
   size_t small_pool_size = static_cast<size_t>(size * m_config.small_pool_ratio);
+  small_pool_size = align_up(small_pool_size, required_alignment);
+
+  if (small_pool_size > size) {
+    small_pool_size = align_down(size / 2, required_alignment);
+  }
+
   size_t large_pool_size = size - small_pool_size;
 
-  // Small pool at start of parent memory
   auto small_subpool = std::make_unique<SubPool>(parent_memory, small_pool_size);
   small_subpool->parent_ref = m_config.parent_pool;
   m_subpools.push_back(std::move(small_subpool));
 
-  // Large pool follows small pool
   void *large_base = static_cast<char *>(parent_memory) + small_pool_size;
   auto large_subpool = std::make_unique<SubPool>(large_base, large_pool_size);
   large_subpool->parent_ref = m_config.parent_pool;
@@ -502,15 +559,34 @@ void *MemoryPool::allocate_from_pool(int pool_idx, size_t aligned_size, size_t a
   auto &subpool = m_subpools[pool_idx];
   std::scoped_lock lock(subpool->mutex);
 
+  size_t required_alignment = std::max(m_config.alignment, sizeof(void *));
+  aligned_size = align_up(aligned_size, required_alignment);
+
   void *ptr = try_allocate_from_free_blocks(subpool.get(), aligned_size);
   if (ptr) {
+    if (reinterpret_cast<uintptr_t>(ptr) % required_alignment != 0) {
+      log(LogLevel::ERROR, "Unaligned pointer returned from free blocks");
+      return nullptr;
+    }
     record_allocation(ptr, aligned_size, actual_size, pool_idx, tenant_id);
     return ptr;
   }
 
-  if (subpool->current_offset + aligned_size <= subpool->total_size) {
+  size_t base_offset = subpool->current_offset;
+  uintptr_t base_addr = reinterpret_cast<uintptr_t>(subpool->memory_base) + base_offset;
+  uintptr_t aligned_addr = align_up(base_addr, required_alignment);
+  size_t padding = aligned_addr - base_addr;
+
+  if (subpool->current_offset + aligned_size + padding <= subpool->total_size) {
+    subpool->current_offset += padding;
     ptr = static_cast<char *>(subpool->memory_base) + subpool->current_offset;
     subpool->current_offset += aligned_size;
+
+    if (reinterpret_cast<uintptr_t>(ptr) % required_alignment != 0) {
+      log(LogLevel::ERROR, "Unaligned pointer from continuous allocation");
+      return nullptr;
+    }
+
     record_allocation(ptr, aligned_size, actual_size, pool_idx, tenant_id);
     return ptr;
   }
@@ -519,17 +595,33 @@ void *MemoryPool::allocate_from_pool(int pool_idx, size_t aligned_size, size_t a
 }
 
 void *MemoryPool::try_allocate_from_free_blocks(SubPool *subpool, size_t aligned_size) {
-  // First-fit strategy: find first free block that fits
-  for (auto it = subpool->free_blocks.begin(); it != subpool->free_blocks.end(); ++it) {
-    if (it->size >= aligned_size) {
-      void *ptr = static_cast<char *>(subpool->memory_base) + it->offset;
+  size_t required_alignment = std::max(m_config.alignment, sizeof(void *));
 
-      if (it->size > aligned_size + m_config.alignment) {
-        // Split block: keep remainder in free list
-        it->offset += aligned_size;
-        it->size -= aligned_size;
+  for (auto it = subpool->free_blocks.begin(); it != subpool->free_blocks.end(); ++it) {
+    void *ptr = static_cast<char *>(subpool->memory_base) + it->offset;
+    uintptr_t ptr_addr = reinterpret_cast<uintptr_t>(ptr);
+
+    uintptr_t aligned_addr = align_up(ptr_addr, required_alignment);
+    size_t alignment_padding = aligned_addr - ptr_addr;
+
+    if (it->size >= aligned_size + alignment_padding) {
+      it->offset += alignment_padding;
+      it->size -= alignment_padding;
+
+      ptr = reinterpret_cast<void *>(aligned_addr);
+
+      if (it->size > aligned_size + required_alignment) {
+        size_t new_offset = it->offset + aligned_size;
+        new_offset = align_up(new_offset, required_alignment);
+        size_t actual_used = new_offset - it->offset;
+
+        if (it->size > actual_used) {
+          it->offset = new_offset;
+          it->size -= actual_used;
+        } else {
+          subpool->free_blocks.erase(it);
+        }
       } else {
-        // Use entire block
         subpool->free_blocks.erase(it);
       }
 
@@ -605,8 +697,9 @@ void MemoryPool::merge_adjacent_free_blocks(SubPool *subpool) {
     return;  // Need at least 2 blocks to merge
   }
 
-  std::sort(subpool->free_blocks.begin(), subpool->free_blocks.end(),
-            [](const FreeBlock &a, const FreeBlock &b) { return a.offset < b.offset; });
+  std::sort(
+      subpool->free_blocks.begin(), subpool->free_blocks.end(),
+      [](const FreeBlock &a, const FreeBlock &b) constexpr { return a.offset < b.offset; });
 
   std::vector<FreeBlock> merged;
   merged.reserve(subpool->free_blocks.size());
@@ -669,29 +762,19 @@ void MemoryPool::update_peak_usage() noexcept {
 
 void MemoryPool::monitor_loop() {
   while (!m_shutdown.load(std::memory_order_acquire)) {
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-
     try {
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+
+      cleanup_expired_children();
+
       auto s = m_stats.snapshot();
-
-      if (m_config.allow_expansion && s.usage_percentage >= m_config.expansion_trigger_threshold * 100.0) {
-        size_t expand_size = m_config.initial_size / 2;
-        if (expand_size < m_config.min_expansion_size) {
-          expand_size = m_config.min_expansion_size;
-        }
-
-        log(LogLevel::INFO, "Auto-expansion triggered at " + std::to_string((int)s.usage_percentage) + "% usage");
-        expand(expand_size);
+      if (m_config.allow_expansion && s.usage_percentage >= 85.0) {
+        expand(std::max(m_config.initial_size / 4, m_config.min_expansion_size));
       }
-
-      if (m_config.auto_defragmentation && s.fragmentation_ratio >= m_config.defrag_trigger_threshold) {
-        log(LogLevel::INFO, "Auto-defragmentation triggered at " + std::to_string((int)(s.fragmentation_ratio * 100)) +
-                                "% fragmentation");
+      if (m_config.auto_defragmentation && s.fragmentation_ratio >= 0.3) {
         defragment();
       }
-
-    } catch (const std::exception &e) {
-      log(LogLevel::ERROR, "Monitor loop error: " + std::string(e.what()));
+    } catch (...) {
     }
   }
 }
@@ -703,25 +786,33 @@ void MemoryPool::cleanup() noexcept {
   m_child_pools.clear();
 }
 
+void MemoryPool::cleanup_expired_children() noexcept {
+  std::scoped_lock lock(m_child_pools_mutex);
+  size_t old_size = m_child_pools.size();
+  m_child_pools.erase(std::remove_if(m_child_pools.begin(), m_child_pools.end(),
+                                     [](const std::weak_ptr<MemoryPool> &wp) { return wp.expired(); }),
+                      m_child_pools.end());
+
+  if (m_child_pools.size() < old_size) {
+    log(LogLevel::DEBUG, "Cleaned " + std::to_string(old_size - m_child_pools.size()) + " expired sub-pools");
+  }
+}
+
 void MemoryPool::log(LogLevel level, const std::string &message) const {
   DBUG_PRINT("memory_pool", ("[%d] %s", static_cast<int>(level), message.c_str()));
 }
 
-size_t MemoryPool::align_up(size_t size, size_t alignment) noexcept {
-  return (size + alignment - 1) & ~(alignment - 1);
-}
-
 void *MemoryPool::aligned_alloc_portable(size_t alignment, size_t size) noexcept {
+  size_t min_alignment = std::max(alignment, sizeof(void *));
+  size_t adjusted_size = ((size + min_alignment - 1) / min_alignment) * min_alignment;
+
 #if defined(_MSC_VER)
-  return _aligned_malloc(size, alignment);
+  return _aligned_malloc(adjusted_size, min_alignment);
 #elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && !defined(__APPLE__)
-  // C11 aligned_alloc requires size to be multiple of alignment
-  size_t adjusted = ((size + alignment - 1) / alignment) * alignment;
-  return std::aligned_alloc(alignment, adjusted);
+  return std::aligned_alloc(min_alignment, adjusted_size);
 #else
-  // POSIX posix_memalign
   void *ptr = nullptr;
-  if (posix_memalign(&ptr, alignment, size) != 0) return nullptr;
+  if (posix_memalign(&ptr, min_alignment, adjusted_size) != 0) return nullptr;
   return ptr;
 #endif
 }
