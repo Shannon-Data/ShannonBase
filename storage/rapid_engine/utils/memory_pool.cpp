@@ -104,12 +104,13 @@ MemoryPool::MemoryPool(const Config &config) : m_config(config), m_shutdown(fals
   // Sub-pool initialization is deferred to initialize_as_sub_pool()
 }
 
-MemoryPool::~MemoryPool() noexcept {
+MemoryPool::~MemoryPool() {
   m_shutdown.store(true, std::memory_order_release);
   if (m_monitor_thread.joinable()) {
     m_monitor_thread.join();
   }
 
+  // 2. reclaim sub pool.
   if (m_config.is_sub_pool && m_subpool_base) {
     if (auto parent = m_config.parent_pool.lock()) {
       const size_t subpool_size = m_stats.total_capacity.load();
@@ -131,8 +132,12 @@ MemoryPool::~MemoryPool() noexcept {
                                    " unreleased allocations. Memory leak possible!");
       }
 
-      parent->deallocate(m_subpool_base, subpool_size);
-
+      if (auto parent = m_config.parent_pool.lock()) {
+        try {
+          parent->deallocate(m_subpool_base, subpool_size);
+        } catch (...) {
+        }
+      }
       log(LogLevel::INFO, "Returned sub-pool base block: " + format_size(subpool_size));
 
       // 3. Remove self from parent's child list
@@ -556,42 +561,57 @@ void MemoryPool::initialize_as_sub_pool(void *parent_memory, size_t size) {
 
 void *MemoryPool::allocate_from_pool(int pool_idx, size_t aligned_size, size_t actual_size,
                                      const std::string &tenant_id) {
+  if (unlikely(aligned_size == 0)) aligned_size = m_config.alignment;
+
   auto &subpool = m_subpools[pool_idx];
   std::scoped_lock lock(subpool->mutex);
 
-  size_t required_alignment = std::max(m_config.alignment, sizeof(void *));
-  aligned_size = align_up(aligned_size, required_alignment);
-
   void *ptr = try_allocate_from_free_blocks(subpool.get(), aligned_size);
   if (ptr) {
-    if (reinterpret_cast<uintptr_t>(ptr) % required_alignment != 0) {
-      log(LogLevel::ERROR, "Unaligned pointer returned from free blocks");
+#ifndef NDEBUG
+    const size_t req_align = std::max(m_config.alignment, sizeof(void *));
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+    if (addr % req_align != 0) {
+      log(LogLevel::ERROR, "BUG: Unaligned pointer from free_blocks: " + std::to_string(addr));
+      assert(false && "Alignment violation");
       return nullptr;
     }
+#endif
     record_allocation(ptr, aligned_size, actual_size, pool_idx, tenant_id);
     return ptr;
   }
 
-  size_t base_offset = subpool->current_offset;
-  uintptr_t base_addr = reinterpret_cast<uintptr_t>(subpool->memory_base) + base_offset;
-  uintptr_t aligned_addr = align_up(base_addr, required_alignment);
-  size_t padding = aligned_addr - base_addr;
+  // allocate from consective memory space.
+  const size_t required_alignment = std::max(m_config.alignment, sizeof(void *));
+  const uintptr_t tail_addr = reinterpret_cast<uintptr_t>(subpool->memory_base) + subpool->current_offset;
+  const uintptr_t aligned_tail = align_up(tail_addr, required_alignment);
+  const size_t padding = aligned_tail - tail_addr;
+  const size_t total_needed = padding + aligned_size;
 
-  if (subpool->current_offset + aligned_size + padding <= subpool->total_size) {
-    subpool->current_offset += padding;
-    ptr = static_cast<char *>(subpool->memory_base) + subpool->current_offset;
-    subpool->current_offset += aligned_size;
-
-    if (reinterpret_cast<uintptr_t>(ptr) % required_alignment != 0) {
-      log(LogLevel::ERROR, "Unaligned pointer from continuous allocation");
-      return nullptr;
-    }
-
-    record_allocation(ptr, aligned_size, actual_size, pool_idx, tenant_id);
-    return ptr;
+  //  space check.
+  if (subpool->current_offset + total_needed > subpool->total_size) {
+    return nullptr;
   }
 
-  return nullptr;
+#ifndef NDEBUG
+  assert(padding < required_alignment && "Padding overflow");
+  assert(aligned_tail >= tail_addr && "Alignment regression");
+  assert(total_needed >= aligned_size && "Size underflow");
+#endif
+
+  // update offset
+  subpool->current_offset += total_needed;
+  ptr = reinterpret_cast<void *>(aligned_tail);
+
+#ifndef NDEBUG
+  assert(reinterpret_cast<uintptr_t>(ptr) % required_alignment == 0 && "Final alignment failed");
+  assert(ptr >= subpool->memory_base && ptr < static_cast<char *>(subpool->memory_base) + subpool->total_size);
+  assert(static_cast<char *>(ptr) + aligned_size <=
+         static_cast<char *>(subpool->memory_base) + subpool->current_offset);
+#endif
+
+  record_allocation(ptr, aligned_size, actual_size, pool_idx, tenant_id);
+  return ptr;
 }
 
 void *MemoryPool::try_allocate_from_free_blocks(SubPool *subpool, size_t aligned_size) {
