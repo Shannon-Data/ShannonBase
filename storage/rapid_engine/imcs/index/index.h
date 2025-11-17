@@ -34,9 +34,7 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-
 class ART;
-
 template <typename key_t, typename value_t>
 class Index {
  public:
@@ -148,7 +146,6 @@ class Index {
   std::unique_ptr<ART> m_impl{nullptr};
   bool m_start_scan{false};
 };
-
 }  // namespace Index
 }  // namespace Imcs
 }  // namespace ShannonBase

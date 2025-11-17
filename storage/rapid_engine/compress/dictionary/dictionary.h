@@ -42,45 +42,41 @@
 
 namespace ShannonBase {
 namespace Compress {
-// Dictionary, which store all the dictionary data.
 class Dictionary {
  public:
-  static constexpr auto DEFAULT_STRID = 0;
-  static constexpr auto INVALID_STRID = -1;
-  static constexpr size_t kMinCompressThreshold = 64;  // Strings shorter than this length will not be compressed
+  static constexpr uint64 DEFAULT_STRID = 0;
+  static constexpr uint64 INVALID_STRID = static_cast<uint64>(-1);
+  static constexpr size_t kMinCompressThreshold = 64;
 
-  explicit Dictionary(Encoding_type type) : m_encoding_type(type) {
-    // Default "unknown" string
-    m_content.emplace("unknown", 0);
-    m_id2content.emplace(0, "unknown");
-  }
+  explicit Dictionary(Encoding_type type = Encoding_type::NONE);
+  ~Dictionary() = default;
 
-  Dictionary() = delete;
-  virtual ~Dictionary() = default;
+  Dictionary(const Dictionary &) = delete;
+  Dictionary &operator=(const Dictionary &) = delete;
 
-  // Store a string in the dictionary and return its ID
-  virtual uint32 store(const uchar *str, size_t len, Encoding_type type = Encoding_type::NONE);
+  uint32 store(const uchar *str, size_t len, Encoding_type type = Encoding_type::NONE);
+  int32 id(uint64 strid, String &ret_val);
+  std::string get(uint64 strid);
+  int64 id(const std::string &str);
 
-  // Get string by ID
-  virtual int32 id(uint64 strid, String &ret_val);
-
-  // Get string content by ID
-  virtual std::string get(uint64 strid);
-
-  // Get ID by string
-  virtual int64 id(const std::string &str);
-
+  inline uint32 store(const uchar *str, size_t len, int) { return store(str, len, m_encoding_type); }
   inline Encoding_type get_algo() const { return m_encoding_type; }
-  inline uint32 content_size() const { return m_content.size(); }
+  inline uint32 content_size() const { return static_cast<uint32>(m_next_id.load()); }
+
+  size_t size() const { return m_next_id.load(); }
 
  private:
-  mutable std::shared_mutex m_content_mtx;
-  Encoding_type m_encoding_type{Encoding_type::NONE};
+  const Encoding_type m_encoding_type;
 
-  // Compressed content mapping: compressed/encoded_str -> id
-  std::unordered_map<std::string, uint64> m_content;
-  // id -> compressed (or original) string
-  std::unordered_map<uint64, std::string> m_id2content;
+  // index is ID. id ↔ flag + payload
+  std::vector<std::string> m_storage;
+
+  std::atomic<uint64> m_next_id;
+
+  std::unordered_map<std::string_view, uint64> m_reverse_index;
+  mutable std::shared_mutex m_reverse_mutex;
+
+  static constexpr size_t kInitialCapacity = 1ULL << 20;  // 1M
 };
 }  // namespace Compress
 }  // namespace ShannonBase
