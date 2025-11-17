@@ -157,7 +157,7 @@ bool CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar 
     m_header.null_count.fetch_add(1);
     m_header.data_size.fetch_add(m_header.normalized_length);
   } else {
-    if (m_header.local_dict) {
+    if (m_header.local_dict && (m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM)) {
       uint32_t dict_id = m_header.local_dict->store(data, len, m_header.encoding);
       std::memcpy(dest, &dict_id, sizeof(uint32_t));
       m_header.data_size.fetch_add(sizeof(uint32_t));
@@ -194,7 +194,7 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
       std::memset(dest, 0x0, m_header.normalized_length);
     } else {
       // dealing with encoding.
-      if (m_header.local_dict) {
+      if (m_header.local_dict && (m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM)) {
         uint32_t dict_id = m_header.local_dict.get()->store(new_data, len, m_header.encoding);
         std::memcpy(dest, &dict_id, sizeof(uint32_t));
       } else {
@@ -225,7 +225,7 @@ size_t CU::read(const Rapid_context *context, row_id_t local_row_id, uchar *buff
   const uchar *src = m_data.get() + local_row_id * m_header.normalized_length;
 
   // dealing with dictionary encode.
-  if (m_header.local_dict) {
+  if (m_header.local_dict && (m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM)) {
     uint32_t dict_id = *reinterpret_cast<const uint32_t *>(src);
     auto decode_str = m_header.local_dict->get(dict_id);
     std::memcpy(buffer, decode_str.c_str(), decode_str.length());

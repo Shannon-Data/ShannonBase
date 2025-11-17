@@ -43,81 +43,78 @@
  */
 namespace ShannonBase {
 namespace Compress {
-uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
-  DBUG_TRACE;
-  if (!str || !len) return Dictionary::DEFAULT_STRID;
+Dictionary::Dictionary(Encoding_type type) : m_encoding_type(type), m_next_id(1) {  // 0 reserved for unknown
+  m_storage.reserve(kInitialCapacity);
 
-  std::string orig(reinterpret_cast<const char *>(str), len);
+  // "unknown" takes ID 0
+  std::string unknown = "\x00unknown";
+  if (m_storage.empty()) m_storage.emplace_back();
+  m_storage.resize(1);
+  m_storage[0] = std::move(unknown);
+}
 
-  std::string compressed;
-  bool use_compression = false;
+uint32 Dictionary::store(const uchar *data, size_t len, Encoding_type type) {
+  if (!data || len == 0) return DEFAULT_STRID;
 
-  if (len >= kMinCompressThreshold) {
-    auto algr = CompressFactory::get_instance(type);
-    compressed = algr->compressString(orig);
+  std::string payload(reinterpret_cast<const char *>(data), len);
+  char flag = '\x00';
 
-    // do compression or not.
-    if (compressed.size() + 1 < orig.size()) {
-      use_compression = true;
+  if (len >= kMinCompressThreshold && type != Encoding_type::NONE) {
+    auto compressed = get_compressor(type)->compress(payload);
+    if (!compressed.empty() && compressed.size() + 16 < len) {
+      payload = std::move(compressed);
+      flag = '\x01';
     }
   }
 
-  std::string final_str;
-  if (use_compression) {
-    final_str.push_back('\x01');  // Compression flag
-    final_str += compressed;
-  } else {
-    final_str.push_back('\x00');  // No compression flag
-    final_str += orig;
+  std::string entry;
+  entry.reserve(payload.size() + 1);
+  entry.push_back(flag);
+  entry.append(payload);
+
+  uint64 id = m_next_id.fetch_add(1, std::memory_order_relaxed);
+
+  if (unlikely(id >= m_storage.size())) {
+    size_t new_size = std::max(m_storage.size() * 2, id + 1);
+    m_storage.resize(new_size);
   }
+  m_storage[id] = std::move(entry);
 
-  {
-    std::unique_lock lk(m_content_mtx);
-    auto pos = m_content.find(final_str);
-    if (pos != m_content.end()) return pos->second;
-
-    uint64 id = m_content.size();
-    m_content.emplace(final_str, id);
-    m_id2content.emplace(id, final_str);
-
-    ut_a(m_content.size() == m_id2content.size());
-    return id;
-  }
-}
-
-int32 Dictionary::id(uint64 strid, String &ret_val) {
-  std::string decoded = get(strid);
-  if (decoded.empty()) return -1;
-
-  std::shared_lock lk(m_content_mtx);
-  String strs(decoded.c_str(), decoded.length(), ret_val.charset());
-  copy_if_not_alloced(&ret_val, &strs, strs.length());
-  return 0;
+  m_reverse_index.emplace(std::string_view(m_storage[id].data() + 1, m_storage[id].size() - 1), id);
+  return static_cast<uint32>(id);
 }
 
 std::string Dictionary::get(uint64 strid) {
-  std::shared_lock lk(m_content_mtx);
-  auto pos = m_id2content.find(strid);
-  if (pos == m_id2content.end()) return {};
+  if (strid >= m_storage.size()) return {};
 
-  const std::string &stored = pos->second;
-  if (stored.empty()) return {};
+  const std::string &stored = m_storage[strid];
+  if (stored.size() <= 1) return {};
 
   char flag = stored[0];
   std::string_view payload(stored.data() + 1, stored.size() - 1);
 
-  if (flag == '\x01') {
-    auto algr = CompressFactory::get_instance(m_encoding_type);
-    return algr->decompressString(std::string(payload));
-  } else {
-    return std::string(payload);
+  if (flag == '\x01') return get_compressor(m_encoding_type)->decompress(payload);
+  return std::string(payload);
+}
+
+int32 Dictionary::id(uint64 strid, String &ret_val) {
+  std::string s = get(strid);
+  if (s.empty()) {
+    ret_val.length(0);
+    return -1;
   }
+  if (!ret_val.alloc(s.length() + 1)) return -1;
+
+  memcpy(ret_val.ptr(), s.data(), s.length());
+  ret_val.length(s.length());
+  ret_val[s.length()] = '\0';
+  return 0;
 }
 
 int64 Dictionary::id(const std::string &str) {
-  std::shared_lock lk(m_content_mtx);
-  auto pos = m_content.find(str);
-  return (pos != m_content.end()) ? pos->second : Dictionary::INVALID_STRID;
+  std::shared_lock lock(m_reverse_mutex);
+  auto it = m_reverse_index.find(str);
+  return it != m_reverse_index.end() ? static_cast<int64>(it->second) : INVALID_STRID;
 }
 }  // namespace Compress
 }  // namespace ShannonBase

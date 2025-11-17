@@ -153,17 +153,15 @@ int Table::build_index(const Rapid_load_context *context, const KEY *key, row_id
   // we want to decouple with innodb engine.
   // ref: void key_copy(uchar *to_key, const uchar *from_record, const KEY *key_info,
   //            uint key_length). Due to we should encoding the float/double/decimal types.
-  const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = key->key_length;
-  const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key->key_length);
-  memset(context->m_extra_info.m_key_buff.get(), 0x0, key->key_length);
-  auto to_key = context->m_extra_info.m_key_buff.get();
-
-  encode_row_key(to_key, key, rowdata, len, col_offsets, n_cols, null_byte_offsets, null_bitmasks);
-
-  {
-    m_indexes[key->name].get()->insert(context->m_extra_info.m_key_buff.get(), context->m_extra_info.m_key_len, &rowid,
-                                       sizeof(rowid));
+  if (key->key_length > MAX_KEY_LENGTH) {
+    return HA_ERR_INDEX_COL_TOO_LONG;
   }
+
+  uchar key_buffer[MAX_KEY_LENGTH] = {0};
+  std::memset(key_buffer, 0x0, key->key_length);
+  encode_row_key(key_buffer, key, rowdata, len, col_offsets, n_cols, null_byte_offsets, null_bitmasks);
+
+  { m_indexes[key->name].get()->insert(key_buffer, key->key_length, &rowid, sizeof(rowid)); }
   return SHANNON_SUCCESS;
 }
 
@@ -194,7 +192,6 @@ void Table::encode_row_key(uchar *to_key, const KEY *key, uchar *rowdata, size_t
       field->get_key_image(to_key, length, Field::itRAW);
       to_key += HA_KEY_BLOB_LENGTH;
     } else {
-      Utils::ColumnMapGuard guard(key->table);
       switch (field->type()) {
         case MYSQL_TYPE_DOUBLE:
         case MYSQL_TYPE_FLOAT:
