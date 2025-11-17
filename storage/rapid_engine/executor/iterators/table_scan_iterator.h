@@ -35,8 +35,8 @@
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/imcs/cu.h"
-#include "storage/rapid_engine/imcs/data_table.h"
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/imcs/table0view.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
@@ -68,7 +68,6 @@
 class TABLE;
 namespace ShannonBase {
 namespace Executor {
-
 /**
  * VectorizedTableScanIterator - A vectorized table scan iterator that processes data in batches
  *
@@ -78,16 +77,10 @@ namespace Executor {
  */
 class VectorizedTableScanIterator : public TableRowIterator {
  public:
-  /**
-   * Constructor for VectorizedTableScanIterator
-   * @param thd Thread handler
-   * @param table MySQL table structure
-   * @param expected_rows Estimated number of rows for batch size optimization
-   * @param examined_rows Counter for examined rows (output parameter)
-   */
   VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
 
   bool Init() override;
+
   int Read() override;
 
   /**
@@ -96,17 +89,9 @@ class VectorizedTableScanIterator : public TableRowIterator {
    */
   void set_filter(filter_func_t filter) { m_filter = filter; }
 
-  /**
-   * Get the current batch size being processed
-   * @return Current batch size in number of rows
-   */
   size_t GetCurrentBatchSize() const { return m_batch_size; }
 
  private:
-  /**
-   * Estimate the average row size for memory allocation optimization
-   * @return Estimated row size in bytes
-   */
   size_t EstimateRowSize() const;
 
   /**
@@ -117,10 +102,6 @@ class VectorizedTableScanIterator : public TableRowIterator {
    */
   size_t CalculateOptimalBatchSize(double expected_rows);
 
-  /**
-   * Cache active field pointers to avoid repeated lookups
-   * Improves performance by storing frequently accessed field information
-   */
   void CacheActiveFields();
 
   /**
@@ -129,26 +110,12 @@ class VectorizedTableScanIterator : public TableRowIterator {
    */
   void PreallocateColumnChunks();
 
-  /**
-   * Read the next batch of rows from the underlying storage
-   * @return 0 on success, error code on failure
-   */
   int ReadNextBatch();
 
-  /**
-   * Clear all batch data to prepare for next batch
-   * Resets column chunks while maintaining allocated capacity
-   */
-  void ClearBatchData() {
-    for (auto &chunk : m_col_chunks) {
-      chunk.clear();
-    }
+  inline void ClearBatchData() {
+    for (auto &chunk : m_col_chunks) chunk.clear();
   }
 
-  /**
-   * Update performance metrics after processing a batch
-   * @param start_time Timestamp when batch processing started
-   */
   void UpdatePerformanceMetrics(std::chrono::high_resolution_clock::time_point start_time);
 
   /**
@@ -189,14 +156,14 @@ class VectorizedTableScanIterator : public TableRowIterator {
     if (field->real_type() == MYSQL_TYPE_ENUM) {
       field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
     } else {
+      Utils::ColumnMapGuard guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
       const char *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
       auto str_id = *(uint32 *)data_ptr;
 
-      std::string fld_name(field->field_name);
-      auto rpd_field = m_data_table.get()->table()->get_field(fld_name);
-      if (!rpd_field) return;
-
-      auto str_ptr = rpd_field->header()->m_local_dict->get(str_id);
+      auto fld_idx = field->field_index();
+      auto dict = m_rpd_table_viewer->table_source()->meta().fields[fld_idx].dictionary;
+      if (!dict) return;
+      auto str_ptr = dict->get(str_id);
       field->store(str_ptr.c_str(), strlen(str_ptr.c_str()), field->charset());
     }
   }
@@ -215,8 +182,8 @@ class VectorizedTableScanIterator : public TableRowIterator {
  private:
   TABLE *m_table;  ///< MySQL table structure pointer
 
-  std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;    ///< Underlying columnar data table
-  std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing
+  std::unique_ptr<ShannonBase::Imcs::RpdTableView> m_rpd_table_viewer;  ///< Underlying columnar data table
+  std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;         ///< Column chunks for batch processing
 
   filter_func_t m_filter;  ///< Optional filter function for row-level filtering
 

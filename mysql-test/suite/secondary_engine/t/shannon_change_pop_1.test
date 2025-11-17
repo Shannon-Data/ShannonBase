@@ -9,7 +9,7 @@ create database test_query;
 use test_query;
 --disable_warnings
 
-create table tt2 (name char(10), gender char(1)) secondary_engine=rapid;
+create table tt2 (name char(10) primary key, gender char(1)) secondary_engine=rapid;
 insert into tt2 values('n1', 'm'), ('n2', null), ('n3', 'm');
 select * from tt2;
 
@@ -70,7 +70,7 @@ commit;
 --connection connection_1
 --echo [conn1]
 #name is large than a page.
-create table tt (score int , name text, id int, gender char(1)) secondary_engine=rapid;
+create table tt (score int primary key , name text, id int, gender char(1)) secondary_engine=rapid;
 insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 insert into tt values (4,'If the speed of processing data propagation from the MySQL DB System to HeatWave is too slow and the change propagation buffer exceeds its size, this would result in a few potential behaviors or challenges:
 

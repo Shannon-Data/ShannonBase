@@ -127,7 +127,6 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0new.h"
 
 #include "storage/rapid_engine/populate/log_commons.h"
-#include "storage/rapid_engine/imcs/purge/purge.h"
 
 /** fil_space_t::flags for hard-coded tablespaces */
 extern uint32_t predefined_flags;
@@ -2597,28 +2596,10 @@ bool srv_shutdown_waits_for_rollback_of_recovered_transactions() {
   return (srv_force_recovery < SRV_FORCE_NO_TRX_UNDO && srv_fast_shutdown == 0);
 }
 
-static void srv_shutdown_pop_stop() {
-  while (ShannonBase::Populate::Populator::active()) {
-    ShannonBase::Populate::sys_pop_started.store(false);
-    os_event_set(log_sys->rapid_events[0]);
-    std::this_thread::sleep_for(
-        std::chrono::microseconds(SHUTDOWN_SLEEP_TIME_US));
-  }
-
-  while (ShannonBase::Purge::Purger::active()) {
-    ShannonBase::Purge::Purger::set_status(ShannonBase::Purge::purge_state_t::PURGE_STATE_STOP);
-    std::this_thread::sleep_for(
-        std::chrono::microseconds(SHUTDOWN_SLEEP_TIME_US));
-  }
-}
-
 /** Shut down all InnoDB background tasks that may look up objects in
 the data dictionary. */
 void srv_pre_dd_shutdown() {
   ut_a(srv_shutdown_state.load() == SRV_SHUTDOWN_NONE);
-
-  /*stop the pop thread.*/
-  srv_shutdown_pop_stop();
 
   /* Warn and wait if there are still some query threads alive.
   If all is correct, then all user threads should already be gone,

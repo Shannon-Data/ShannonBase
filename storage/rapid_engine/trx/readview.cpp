@@ -34,7 +34,6 @@
 #include "storage/innobase/include/dict0mem.h"
 #include "storage/innobase/include/read0types.h"
 
-#include "storage/rapid_engine/imcs/chunk.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/utils/SIMD.h"
 
@@ -189,10 +188,9 @@ uchar *smu_item_vec_t::reconstruct_data(Rapid_scan_context *context, uchar *in_p
   return ret;
 }
 
-void Snapshot_meta_unit::set_owner(ShannonBase::Imcs::Chunk *owner) { m_owner = owner; }
-
 uchar *Snapshot_meta_unit::build_prev_vers(Rapid_scan_context *context, ShannonBase::row_id_t rowid, uchar *in_place,
                                            size_t &in_place_len, uint8 &status) {
+#if 0
   if (m_owner->is_deleted(context, rowid)) status |= static_cast<uint8>(RECONSTRUCTED_STATUS::STAT_DELETED);
   if (m_owner->is_null(context, rowid)) {
     status |= static_cast<uint8>(RECONSTRUCTED_STATUS::STAT_NULL);
@@ -202,12 +200,16 @@ uchar *Snapshot_meta_unit::build_prev_vers(Rapid_scan_context *context, ShannonB
   return (m_version_info.find(rowid) == m_version_info.end())
              ? in_place
              : m_version_info[rowid].reconstruct_data(context, in_place, in_place_len, status);
+#endif
+  return nullptr;
 }
 
 BitmapResult Snapshot_meta_unit::build_prev_vers_batch(Rapid_scan_context *context, ShannonBase::row_id_t row_start,
                                                        size_t row_count, const uchar *chunk_base_ptr,
                                                        size_t normalized_len, uchar *reconstruct_buf) {
   BitmapResult result;
+
+#if 0
   if (row_count == 0) {
     result.visible_count = 0;
     return result;
@@ -273,6 +275,7 @@ BitmapResult Snapshot_meta_unit::build_prev_vers_batch(Rapid_scan_context *conte
 
   // 3) compute popcount (visible_count)
   result.visible_count = ShannonBase::Utils::SIMD::popcount_bitmap(result.bitmask);
+#endif
   return result;
 }
 

@@ -106,16 +106,28 @@ constexpr uint64 SHANNON_MB = SHANNON_KB * 1024;
 constexpr uint64 SHANNON_GB = SHANNON_MB * 1024;
 
 // some sizes used by imcs.
-constexpr size_t SHANNON_ROWS_IN_CHUNK = 819200;
-constexpr uint64 SHANNON_DEFAULT_MEMRORY_SIZE = 8 * SHANNON_GB;
+static constexpr char SHANNON_DATA_AREAR_NAME[] = "DATA_AREAR";
+static constexpr char SHANNON_META_AREAN_NAME[] = "META_DATA_AREAR";
+
+constexpr size_t SHANNON_ROWS_IN_CHUNK = 81920;
+
+constexpr uint64 SHANNON_DEFAULT_MEMRORY_SIZE = 0.5 * SHANNON_GB;
 constexpr uint64 SHANNON_MAX_MEMRORY_SIZE = SHANNON_DEFAULT_MEMRORY_SIZE;
+
+constexpr uint64 SHANNON_TABLE_MEMRORY_SIZE = 32 * SHANNON_MB;
+constexpr uint64 SHANNON_SMALL_TABLE_MEMRORY_SIZE = 16 * SHANNON_MB;
+constexpr uint64 SHANNON_MAX_IMCU_MEMRORY_SIZE = 8 * SHANNON_MB;
+
 constexpr uint64 SHANNON_POPULATION_HRESHOLD_SIZE = 64 * SHANNON_MB;
-constexpr uint64 SHANNON_MAX_POPULATION_BUFFER_SIZE = 128 * SHANNON_MB;
+constexpr uint64 SHANNON_MAX_POPULATION_BUFFER_SIZE = 256 * SHANNON_MB;
 constexpr double SHANNON_TO_MUCH_POP_THRESHOLD_RATIO = 0.85;
 constexpr uint64 SHANNON_POP_BUFF_THRESHOLD_COUNT = 10000;
+
 constexpr uint64 SHANNON_PARALLEL_LOAD_THRESHOLD = 1000000;
+
 constexpr uint64 SHANNON_DEFAULT_SELF_LOAD_INTERVAL = 86400;
 constexpr uint64 SHANNON_DEFAULT_SELF_LOAD_FILL_PERCENTAGE = 70;
+
 constexpr uint64 SHANNON_DEFAULT_MAX_PURGER_TIMEOUT = 5000;
 constexpr uint SHANNON_MIN_PURGER_TIMEOUT = 256;
 // rapid_purge_batch_size related
@@ -127,11 +139,17 @@ constexpr uint SHANNON_DEFAULT_MIN_VERSIONS_FOR_PURGE = 10;
 // rapid_purge_efficiency_threshold
 constexpr double SHANNON_DEFAULT_PURGE_EFFICIENCY_THRESHOLD = 0.1;
 
+constexpr double SHANNON_HIGH_DELETE_RATIO = 0.3;
+constexpr double SHANNON_MEDIUM_DELETE_RATIO = 0.2;
+constexpr size_t SHANNON_LARGE_DELETE_COUNT = 10000;
+
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
+
+const uint SHANNON_MAX_COLUMNS = 256;
 
 constexpr uint MAX_N_FIELD_PARALLEL = 128;
 constexpr uint DEFAULT_N_FIELD_PARALLEL = 16;
-constexpr uint SHANNON_BATCH_NUM = 8;
+constexpr uint SHANNON_BATCH_NUM = 1024;
 
 constexpr char SHANNON_DB_ROW_ID[] = "DB_ROW_ID";
 constexpr size_t SHANNON_DB_ROW_ID_LEN = 9;
@@ -190,7 +208,7 @@ enum class RPD_NODE_ROLE {
   NODE_SECONDARY_NODE
 };
 
-enum class OPER_TYPE : uint8 { OPER_INSERT, OPER_UPDATE, OPER_DELETE };
+enum class OPER_TYPE : uint8 { OPER_NONE, OPER_INSERT, OPER_UPDATE, OPER_DELETE };
 constexpr int PREFETCH_AHEAD = 2;
 
 #if !defined(__cplusplus) && (!defined(__STDC__) || (__STDC_VERSION__ < 201112L))

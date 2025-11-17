@@ -1,6 +1,6 @@
 create database test_query;
 use test_query;
-create table ti (id int, score double, name char(9), name2 char(12)) secondary_engine=rapid;
+create table ti (id int primary key, score double, name char(9), name2 char(12)) secondary_engine=rapid;
 #connection_1 and cconnection_2
 #[conn_1]
 set use_secondary_engine=forced;
@@ -29,156 +29,156 @@ explain select * from ti order by name;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	ti	NULL	ALL	NULL	NULL	NULL	NULL	0	0.00	Using filesort; Using secondary engine Rapid
 [conn2]
-insert into ti values(1, 1.12, '创建相应的情况下d', '创建相应的 lsn值d');
-insert into ti values(2, 1.102, '创建相应的情况下s', '创建相应的 lsn值s');
+insert into ti values(2, 2.12, '创建相应的情况下d', '创建相应的 lsn值d');
+insert into ti values(3, 3.102, '创建相应的情况下s', '创建相应的 lsn值s');
 select * from ti order by name;
 id	score	name	name2
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
 [conn1_after_insertion]
 explain select * from ti order by name;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	ti	NULL	ALL	NULL	NULL	NULL	NULL	2	100.00	Using filesort; Using secondary engine Rapid
 select * from ti order by name;
 id	score	name	name2
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
 [conn2]
-insert into ti values(3, 3.123, '创建1', '创建相应的新值1');
-insert into ti values(4, 4, '创建2', '创建相应的新值2');
-insert into ti values(5, 5.104424, '创建3.1', '创建相应的新值3.1');
-insert into ti values(5, 3.124424, '创建3.2', '创建相应的新值3.2');
-insert into ti values(6, 5.124424, '创建4', '创建相应的新值4');
+insert into ti values(4, 3.123, '创建1', '创建相应的新值1');
+insert into ti values(5, 4, '创建2', '创建相应的新值2');
+insert into ti values(6, 5.104424, '创建3.1', '创建相应的新值3.1');
+insert into ti values(7, 3.124424, '创建3.2', '创建相应的新值3.2');
+insert into ti values(8, 5.124424, '创建4', '创建相应的新值4');
 select * from ti order by id,name2;
 id	score	name	name2
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-3	3.123	创建1	创建相应的新值1
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-5	3.124424	创建3.2	创建相应的新值3.2
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+7	3.124424	创建3.2	创建相应的新值3.2
+8	5.124424	创建4	创建相应的新值4
 select * from ti order by name;
 id	score	name	name2
-3	3.123	创建1	创建相应的新值1
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-5	3.124424	创建3.2	创建相应的新值3.2
-6	5.124424	创建4	创建相应的新值4
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+7	3.124424	创建3.2	创建相应的新值3.2
+8	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
 select * from ti order by score;
 id	score	name	name2
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-3	3.123	创建1	创建相应的新值1
-5	3.124424	创建3.2	创建相应的新值3.2
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+7	3.124424	创建3.2	创建相应的新值3.2
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+8	5.124424	创建4	创建相应的新值4
 select * from ti order by id, score;
 id	score	name	name2
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-3	3.123	创建1	创建相应的新值1
-4	4	创建2	创建相应的新值2
-5	3.124424	创建3.2	创建相应的新值3.2
-5	5.104424	创建3.1	创建相应的新值3.1
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+7	3.124424	创建3.2	创建相应的新值3.2
+8	5.124424	创建4	创建相应的新值4
 select * from ti order by id, name;
 id	score	name	name2
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-3	3.123	创建1	创建相应的新值1
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-5	3.124424	创建3.2	创建相应的新值3.2
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+7	3.124424	创建3.2	创建相应的新值3.2
+8	5.124424	创建4	创建相应的新值4
 select * from ti order by score, name;
 id	score	name	name2
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-3	3.123	创建1	创建相应的新值1
-5	3.124424	创建3.2	创建相应的新值3.2
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+7	3.124424	创建3.2	创建相应的新值3.2
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+8	5.124424	创建4	创建相应的新值4
 select id, name, sum(score) from ti group by id, name order by id;
 id	name	sum(score)
-1	创建相应的情况下d	1.12
-2	创建相应的情况下s	1.102
-3	创建1	3.123
-4	创建2	4
-5	创建3.1	5.104424
-5	创建3.2	3.124424
-6	创建4	5.124424
+2	创建相应的情况下d	2.12
+3	创建相应的情况下s	3.102
+4	创建1	3.123
+5	创建2	4
+6	创建3.1	5.104424
+7	创建3.2	3.124424
+8	创建4	5.124424
 [conn1]
 explain select * from ti order by name;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	ti	NULL	ALL	NULL	NULL	NULL	NULL	7	100.00	Using filesort; Using secondary engine Rapid
 select * from ti order by id, name2;
 id	score	name	name2
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-3	3.123	创建1	创建相应的新值1
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-5	3.124424	创建3.2	创建相应的新值3.2
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+7	3.124424	创建3.2	创建相应的新值3.2
+8	5.124424	创建4	创建相应的新值4
 select * from ti order by name;
 id	score	name	name2
-3	3.123	创建1	创建相应的新值1
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-5	3.124424	创建3.2	创建相应的新值3.2
-6	5.124424	创建4	创建相应的新值4
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+7	3.124424	创建3.2	创建相应的新值3.2
+8	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
 select * from ti order by score;
 id	score	name	name2
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-3	3.123	创建1	创建相应的新值1
-5	3.124424	创建3.2	创建相应的新值3.2
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+7	3.124424	创建3.2	创建相应的新值3.2
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+8	5.124424	创建4	创建相应的新值4
 select * from ti order by id, score;
 id	score	name	name2
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-3	3.123	创建1	创建相应的新值1
-4	4	创建2	创建相应的新值2
-5	3.124424	创建3.2	创建相应的新值3.2
-5	5.104424	创建3.1	创建相应的新值3.1
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+7	3.124424	创建3.2	创建相应的新值3.2
+8	5.124424	创建4	创建相应的新值4
 select * from ti order by id, name;
 id	score	name	name2
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-3	3.123	创建1	创建相应的新值1
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-5	3.124424	创建3.2	创建相应的新值3.2
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+7	3.124424	创建3.2	创建相应的新值3.2
+8	5.124424	创建4	创建相应的新值4
 select * from ti order by score, name;
 id	score	name	name2
-2	1.102	创建相应的情况下s	创建相应的 lsn值s
-1	1.12	创建相应的情况下d	创建相应的 lsn值d
-3	3.123	创建1	创建相应的新值1
-5	3.124424	创建3.2	创建相应的新值3.2
-4	4	创建2	创建相应的新值2
-5	5.104424	创建3.1	创建相应的新值3.1
-6	5.124424	创建4	创建相应的新值4
+2	2.12	创建相应的情况下d	创建相应的 lsn值d
+3	3.102	创建相应的情况下s	创建相应的 lsn值s
+4	3.123	创建1	创建相应的新值1
+7	3.124424	创建3.2	创建相应的新值3.2
+5	4	创建2	创建相应的新值2
+6	5.104424	创建3.1	创建相应的新值3.1
+8	5.124424	创建4	创建相应的新值4
 select id, name, sum(score) from ti group by id, name order by id;
 id	name	sum(score)
-1	创建相应的情况下d	1.12
-2	创建相应的情况下s	1.102
-3	创建1	3.123
-4	创建2	4
-5	创建3.1	5.104424
-5	创建3.2	3.124424
-6	创建4	5.124424
+2	创建相应的情况下d	2.12
+3	创建相应的情况下s	3.102
+4	创建1	3.123
+5	创建2	4
+6	创建3.1	5.104424
+7	创建3.2	3.124424
+8	创建4	5.124424
 SELECT * FROM performance_schema.rpd_table_id;
 ID	NAME	SCHEMA_NAME	TABLE_NAME
 IGNORE	test_query\ti	test_query	ti

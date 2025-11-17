@@ -4,10 +4,10 @@ SHOW  VARIABLES like "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
 rapid_max_purger_timeout	5000
-rapid_memory_size_max	8589934592
+rapid_memory_size_max	536870912
 rapid_min_versions_for_purge	10
-rapid_parallel_load_max	10000
-rapid_pop_buffer_size_max	134217728
+rapid_parallel_load_max	1000000
+rapid_pop_buffer_size_max	268435456
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	70
@@ -20,10 +20,10 @@ SHOW VARIABLES like "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
 rapid_max_purger_timeout	5000
-rapid_memory_size_max	8589934592
+rapid_memory_size_max	536870912
 rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10
-rapid_pop_buffer_size_max	134217728
+rapid_pop_buffer_size_max	268435456
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	70
@@ -107,7 +107,7 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 1	SIMPLE	with_primary_key	NULL	ALL	NULL	NULL	NULL	NULL	20	10.00	Using where; Using secondary engine Rapid
 ALTER TABLE with_primary_key SECONDARY_UNLOAD;
 CREATE TABLE without_primary_key (
-student_id VARCHAR(20) COMMENT '学号/Student ID',
+student_id VARCHAR(20) primary key COMMENT '学号/Student ID',
 student_name VARCHAR(50) COMMENT '学生姓名/Student Name',
 class_name VARCHAR(30) COMMENT '班级/Class',
 score DECIMAL(5,2) COMMENT '分数/Score',
@@ -143,10 +143,10 @@ student_id	student_name	class_name	score
 S2023009	Sarah Davis	三班/Class 3	84.50
 EXPLAIN SELECT * FROM without_primary_key WHERE student_id = 'S2023009';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	without_primary_key	NULL	ALL	NULL	NULL	NULL	NULL	20	10.00	Using where; Using secondary engine Rapid
+1	SIMPLE	without_primary_key	NULL	const	PRIMARY	PRIMARY	82	const	1	100.00	Using secondary engine Rapid
 ALTER TABLE without_primary_key SECONDARY_UNLOAD;
 CREATE TABLE with_unique_index (
-product_code VARCHAR(20) COMMENT '产品代码/Product Code',
+product_code VARCHAR(20) primary key COMMENT '产品代码/Product Code',
 product_name VARCHAR(100) COMMENT '产品名称/Product Name',
 category VARCHAR(50) COMMENT '类别/Category',
 price DECIMAL(10,2) COMMENT '价格/Price',
@@ -182,7 +182,7 @@ product_code	product_name	category	price
 P1013	运动鞋 Sneakers	服装服饰/Apparel	499.00
 EXPLAIN SELECT * FROM with_unique_index WHERE product_code = 'P1013';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	with_unique_index	NULL	const	uidx_code	uidx_code	83	const	1	100.00	Using secondary engine Rapid
+1	SIMPLE	with_unique_index	NULL	const	PRIMARY,uidx_code	PRIMARY	82	const	1	100.00	Using secondary engine Rapid
 SELECT * FROM with_unique_index WHERE category = '电子产品/Electronics';
 product_code	product_name	category	price
 P1001	智能手机 Smartphone	电子产品/Electronics	2999.00
@@ -251,15 +251,15 @@ EXPLAIN SELECT * FROM with_secondary_index WHERE order_id = 'ORD20230011';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	with_secondary_index	NULL	const	PRIMARY	PRIMARY	82	const	1	100.00	Using secondary engine Rapid
 ALTER TABLE with_secondary_index SECONDARY_UNLOAD;
-SET GLOBAL rapid_parallel_load_max = 10000;
+SET GLOBAL rapid_parallel_load_max = 1000000;
 SHOW  VARIABLES like "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
 rapid_max_purger_timeout	5000
-rapid_memory_size_max	8589934592
+rapid_memory_size_max	536870912
 rapid_min_versions_for_purge	10
-rapid_parallel_load_max	10000
-rapid_pop_buffer_size_max	134217728
+rapid_parallel_load_max	1000000
+rapid_pop_buffer_size_max	268435456
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	70

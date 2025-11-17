@@ -136,61 +136,50 @@ enum class Source : uint8 {
 // it's an iterterface struct to store all the info of changed data. such as where it comes from
 // data and its length, etc.
 typedef struct SHANNON_ALIGNAS change_record_buff_t {
-  // the changed records come from where.
-  Source m_source;
-
-  // the changed record buffer. IF SOURCE FROM REDO, IT ONLY USE `m_buff0`, OTHERWISE, FROM
-  // COPY_INFO, THE `m_buff1`, `m_schema_name` AND `m_table_name` MAYBE USED, AND `m_oper` IS SET.
-  std::unique_ptr<uchar[]> m_buff0{nullptr};
-
-  // size of the records;
+  using off_page_data_t =
+      std::map<size_t, std::pair<size_t, std::shared_ptr<uchar[]>>>;  //<field_id, <length, off_page_data>>
+  Source m_source;                                                    // data source
   size_t m_size;
-
-  // oper type is used for which log comes from COPY_INFO, in REDO_LOG we dont set the oper type.
-  // is set in redo log parsing stage.
-  enum class OperType : uint8 { UNSET = 0, INSERT, DELETE, UPDATE } m_oper{OperType::UNSET};
+  enum class OperType : uint8 { UNSET = 0, INSERT, DELETE, UPDATE } m_oper{OperType::UNSET};  // oper type
   std::string m_schema_name, m_table_name;
-  std::unique_ptr<uchar[]> m_buff1{nullptr};
+
+  std::shared_ptr<uchar[]> m_buff0{nullptr};  // rep: record[0]
+  off_page_data_t m_offpage_data0;
+  std::shared_ptr<uchar[]> m_buff1{nullptr};  // rep: record[1]
+  off_page_data_t m_offpage_data1;            // using to store offpage data.
 
   change_record_buff_t(Source sc, size_t s)
-      : m_source(sc), m_buff0(std::make_unique<uchar[]>(s)), m_size(s), m_buff1(std::make_unique<uchar[]>(s)) {}
+      : m_source(sc),
+        m_size(s),
+        m_buff0(s > 0 ? std::shared_ptr<uchar[]>(new uchar[s]) : nullptr),
+        m_buff1(s > 0 ? std::shared_ptr<uchar[]>(new uchar[s]) : nullptr) {}
 
-  change_record_buff_t(change_record_buff_t &&other) noexcept
-      : m_source(other.m_source),
-        m_buff0(std::move(other.m_buff0)),
-        m_size(other.m_size),
-        m_oper(other.m_oper),
-        m_schema_name(std::move(other.m_schema_name)),
-        m_table_name(std::move(other.m_table_name)),
-        m_buff1(std::move(other.m_buff1)) {
-    other.m_source = Source::UN_KNOWN;
-    other.m_oper = OperType::UNSET;
-    other.m_size = 0;
-  }
+  change_record_buff_t() : m_source(Source::UN_KNOWN), m_size(0), m_oper(OperType::UNSET) {}
 
-  change_record_buff_t &operator=(change_record_buff_t &&other) noexcept {
-    if (this != &other) {
-      m_source = other.m_source;
-      m_oper = other.m_oper;
-      m_buff0 = std::move(other.m_buff0);
-      m_buff1 = std::move(other.m_buff1);
-      m_size = other.m_size;
-      m_schema_name = std::move(other.m_schema_name);
-      m_table_name = std::move(other.m_table_name);
+  change_record_buff_t(const change_record_buff_t &other) = default;
+  change_record_buff_t &operator=(const change_record_buff_t &other) = default;
+  change_record_buff_t(change_record_buff_t &&other) noexcept = default;
+  change_record_buff_t &operator=(change_record_buff_t &&other) noexcept = default;
+  ~change_record_buff_t() = default;
 
-      other.m_source = Source::UN_KNOWN;
-      other.m_oper = OperType::UNSET;
-      other.m_size = 0;
-    }
-    return *this;
-  }
+  inline uchar *get_buff0() const { return m_buff0.get(); }
+  inline uchar *get_buff1() const { return m_buff1.get(); }
 
-  // Deleted copy constructor and copy assignment operator to prevent copying
-  change_record_buff_t(const change_record_buff_t &) = delete;
-  change_record_buff_t &operator=(const change_record_buff_t &) = delete;
-
-  ~change_record_buff_t() {}
+  inline bool has_buff0() const { return m_buff0 != nullptr; }
+  inline bool has_buff1() const { return m_buff1 != nullptr; }
+  inline long use_count_buff0() const { return m_buff0.use_count(); }
+  inline long use_count_buff1() const { return m_buff1.use_count(); }
 } change_record_buff;
+
+typedef struct SHANNON_ALIGNAS table_pop_buffer_t {
+  std::mutex mutex;
+  std::unordered_map<uint64_t, change_record_buff_t> writing;   // crrurent writing
+  std::unordered_map<uint64_t, change_record_buff_t> applying;  // waiting for apply
+  std::atomic<bool> queried{false};                             // this table is required by some queries.
+  std::atomic<bool> pending_flush{false};
+  std::atomic<size_t> data_size{0};
+  std::atomic<bool> swapping{false};
+} table_pop_buffer;
 
 class Populator {
  public:
@@ -208,6 +197,11 @@ class Populator {
    * To stop log pop main thread.
    */
   static void end();
+
+  /**
+   * To stop propagation oper for sche table
+   */
+  static void unload(const std::string &sch, const std::string &table);
 
   /**
    * Send the log buffer to system pop buffer via any type of connection.
@@ -228,10 +222,12 @@ class Populator {
   }
 
   /**
-   * To check whether the specific table are still do populating.
-   * true is in pop queue, otherwise return false; tabel_name format: `schema_name/table_name`
+   * To mark the specific table are still do populating required by quires. which is mark table queried.
+   * tabel_name format: `schema_name:table_name`
    */
-  static inline bool check_status(std::string &table_name) { return get_impl()->check_status_impl(table_name); }
+  static inline bool mark_table_required(std::string &sch_table_name) {
+    return get_impl()->mark_table_required_impl(sch_table_name);
+  }
 
   /**
    * To send notify to populator main thread to start do propagation.
@@ -258,6 +254,11 @@ class Populator {
      * To launch log pop main thread.
      */
     virtual void start_impl() = 0;
+
+    /**
+     * To stop propagation oper for sche table
+     */
+    virtual void unload_impl(const std::string &sch, const std::string &table) = 0;
 
     /**
      * To stop log pop main thread.
@@ -293,7 +294,7 @@ class Populator {
      * To check whether the specific table are still do populating.
      * true is in pop queue, otherwise return false; tabel_name format: `schema_name/table_name`
      */
-    virtual bool check_status_impl(std::string &table_name) = 0;
+    virtual bool mark_table_required_impl(std::string &table_name) = 0;
   };
 
   // Get implementation instance

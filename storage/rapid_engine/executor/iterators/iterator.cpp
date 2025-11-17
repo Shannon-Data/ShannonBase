@@ -130,7 +130,7 @@ void ColumnChunk::copy_from(const ColumnChunk &other) {
   }
 }
 
-bool ColumnChunk::add(uchar *data, size_t length, bool null) {
+bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
   if (!data && !null) {
     return false;
   }

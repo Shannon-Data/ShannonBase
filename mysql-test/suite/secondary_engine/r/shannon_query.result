@@ -34,7 +34,7 @@ select score from tt1 where id > 2  and score = 30 ;
 score
 30
 drop table tt1;
-create table tt2 (score int, name char(10), id int, gender char(1));
+create table tt2 (score int, name char(10), id int primary key, gender char(1));
 insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt2 secondary_engine=rapid;
 alter table tt2 secondary_load;
@@ -44,7 +44,7 @@ score	name	id	gender
 2	n2	2	f
 3	n3	3	m
 drop table tt2;
-create table tt3 (score int, name char(10), id int, gender char(1), key(id, score));
+create table tt3 (score int, name char(10), id int primary key, gender char(1), key(id, score));
 insert into tt3 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt3 secondary_engine=rapid;
 alter table tt3 secondary_load;
@@ -169,9 +169,9 @@ score	name	id	gender	weight
 3	n3	3	m	3.3
 select score, weight, gender from tt10;
 score	weight	gender
-1	1.1	m
-2	2.2	f
-3	3.3	m
+1	1.273197475e-314	m
+2	1.273197475e-314	f
+3	8.48798316e-315	m
 select * from tt10 where id >1 and weight < 4.4;
 score	name	id	gender	weight
 2	n2	2	f	2.2

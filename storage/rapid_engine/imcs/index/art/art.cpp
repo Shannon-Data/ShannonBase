@@ -45,7 +45,6 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-
 ART::ArtNodePtr ART::null_ptr = nullptr;
 
 void *ART::ART_insert(const unsigned char *key, int key_len, void *value, uint value_len) {

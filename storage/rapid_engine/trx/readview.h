@@ -38,9 +38,6 @@ namespace ShannonBase {
 class Rapid_context;
 class Rapid_scan_context;
 class Rapid_load_context;
-namespace Imcs {
-class Chunk;
-}
 
 namespace ReadView {
 
@@ -164,7 +161,6 @@ class Snapshot_meta_unit {
     m_version_info.rehash(0);
   }
 
-  void set_owner(ShannonBase::Imcs::Chunk *owner);
   /** an item of SMU. consist of <trxid, new_data>. pair of row_id_t and sum_item indicates
    * that each row data has a version link. If this row data not been modified, it does not
    * have any old version. [newest<---->oldest]
@@ -222,7 +218,6 @@ class Snapshot_meta_unit {
  private:
   std::shared_mutex m_version_mutex;
   std::unordered_map<row_id_t, ReadView::SMU_items> m_version_info;
-  ShannonBase::Imcs::Chunk *m_owner;
 };
 
 }  // namespace ReadView

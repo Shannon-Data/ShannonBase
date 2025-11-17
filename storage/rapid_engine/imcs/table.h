@@ -32,7 +32,10 @@
 #include <string>
 #include <vector>
 
+#include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/index/index.h"
+#include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/trx/transaction.h"
@@ -44,12 +47,12 @@ class Rapid_context;
 class Rapid_load_context;
 class Rapid_scan_context;
 namespace Imcs {
-class Cu;
 /**
  * @class RapidTable
  * @brief Abstract base class representing a Rapid in-memory table.
  *
  * Table (RapidTable)
+ * └─IMCU(stored in row format logically)
  * └── CU (Column Unit) - One CU per field
  *       ├── Cu_header: Column metadata (statistics, dictionary, encoding type)
  *       └── Chunks[] - Column data chunks (each chunk contains SHANNON_ROWS_IN_CHUNK rows)
@@ -73,75 +76,43 @@ class Cu;
  *   - Column and index containers are guarded by shared_mutex.
  *   - Access counters use atomic operations.
  */
-class RapidTable : public MemoryObject {
+struct Row_Result {};
+class Predicate;
+class RpdTable : public MemoryObject {
  public:
-  /**
-   * @brief Table load type (self-load or user-initiated).
-   */
-  enum class LoadType {
-    NOT_LOADED = 0,  ///< Table not yet loaded into memory.
-    SELF_LOADED,     ///< Automatically loaded by system background process.
-    USER_LOADED      ///< Explicitly loaded by user request.
-  };
-
-  /**
-   * @struct TableStats
-   * @brief Statistics structure tracking table activity and access frequency.
-   *
-   * This structure maintains access counters, row count, and timing information
-   * to guide adaptive caching and garbage collection decisions.
-   */
-  struct TableStats {
-    std::shared_mutex m_stats_lock;                         // to protect the stats modification.
-    std::atomic<uint64_t> mysql_access_count{0};            // MySQL access counts.
-    std::atomic<uint64_t> heatwave_access_count{0};         // Rapid access counts.
-    double importance{0.0};                                 // importance score.
-    std::atomic<time_t> last_accessed{std::time(nullptr)};  // the laste access time.
-    LoadType load_type{LoadType::NOT_LOADED};               // load type.
-    // the phyiscal # of rows in this table.
-    // physical row count. If you want to get logical rows, you should consider
-    // MVCC to decide that whether this phyical row is visiable or not to this
-    // transaction.
-    std::atomic<row_id_t> prows{0};
-
-    /** @brief Update last accessed timestamp to now. */
-    void update_access_time() { last_accessed.store(std::time(nullptr), std::memory_order_relaxed); }
-
-    /**
-     * @brief Compute elapsed seconds since last access.
-     * @return Time delta in seconds.
-     */
-    time_t seconds_since_last_access() const {
-      time_t now = std::time(nullptr);
-      return now - last_accessed.load(std::memory_order_relaxed);
-    }
-    TableStats() = default;
-  };
-
   /**
    * @brief Rapid table type (normal or partitioned).
    */
   enum class TYPE : uint8 { UNKONWN = 0, NORAMAL, PARTTABLE };
 
-  RapidTable() = default;
-  RapidTable(std::string schema, std::string table) : m_schema_name(schema), m_table_name(table) {}
-  virtual ~RapidTable() = default;
+  /** @brief cotor. */
+  RpdTable(const TABLE *&mysql_table, const TableConfig &config)
+      : m_mem_root(std::move(std::make_unique<MEM_ROOT>())), m_source_table(mysql_table) {}
 
-  RapidTable(RapidTable &&) = default;
-  RapidTable &operator=(RapidTable &&) = default;
+  /** @brief decotor. */
+  virtual ~RpdTable() {}
 
-  RapidTable(const RapidTable &) = delete;
-  RapidTable &operator=(const RapidTable &) = delete;
+  virtual TYPE type() const = 0;
 
-  /** @brief Returns the table type (normal or partitioned). */
-  virtual RapidTable::TYPE type() = 0;
+  /** @brief set the load type. */
+  void set_load_type(LoadType load_type) { m_metadata.load_type = load_type; }
 
   /**
-   * @brief Initialize Cu field metadata and allocate per-column memory.
-   * @param[in] context  Rapid load execution context.
-   * @return SHANNON_SUCCESS on success.
+   * Registers a transaction with all IMCUs in this table
+   *
+   * This function iterates through all IMCUs (In-Memory Compression Units)
+   * belonging to this table and registers the transaction with each one.
+   * This ensures that all IMCUs are aware of the transaction and can track
+   * any modifications made during its lifetime.
+   *
+   * @param trx Pointer to the transaction to be registered
+   * @return true if registration was successful for all IMCUs, false otherwise
+   *
+   * @note The transaction must not be null (assertion will trigger if null)
+   * @note This is typically called when a transaction starts working with this table
+   * @note Each IMCU will track the transaction for conflict detection and MVCC purposes
    */
-  virtual int create_fields_memo(const Rapid_load_context *context) = 0;
+  virtual int register_transaction(Transaction *trx) = 0;
 
   /**
    * @brief Initialize Rapid index structures based on MySQL key metadata.
@@ -151,15 +122,7 @@ class RapidTable : public MemoryObject {
   virtual int create_index_memo(const Rapid_load_context *context) = 0;
 
   /**
-   * @brief Delete a single row by its row ID.
-   * @param[in] context Rapid load context.
-   * @param[in] rowid   Row identifier.
-   * @return SHANNON_SUCCESS on success.
-   */
-  virtual int delete_row(const Rapid_load_context *context, row_id_t rowid) = 0;
-
-  /**
-   * @brief delete supporting precomputed offsets and bitmaps.
+   * @brief write supporting precomputed offsets and bitmaps.
    * @param[in] context Rapid context.
    * @param[in] rowdata Row data buffer.
    * @param[in] len     Buffer length.
@@ -167,98 +130,39 @@ class RapidTable : public MemoryObject {
    * @param[in] n_cols  Number of columns.
    * @param[in] null_byte_offsets Null byte offsets.
    * @param[in] null_bitmasks Null bitmasks.
-   * @return SHANNON_SUCCESS on success.
+   * @return: Inserted global row_id, returns INVALID_ROW_ID on failure.
    */
-  virtual int delete_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                         size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) = 0;
+  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
+                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) = 0;
 
   /**
-   * @brief Delete multiple rows in batch.
-   * @param[in] context Rapid load context.
-   * @param[in] rowids  List of row IDs to delete.
-   * @return SHANNON_SUCCESS on success.
+   * Delete row (Core: row-level marking)
+   * @param global_row_id: Global row number
+   * @param context: Context
+   * @return: Returns SHANNON_SUCCESS on success.
    */
-  virtual int delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) = 0;
+  virtual int delete_row(const Rapid_load_context *context, row_id_t global_row_id) = 0;
 
   /**
-   * @brief Insert a new row reconstructed from redo or binlog information.
-   * @param[in] context  Rapid load context.
-   * @param[in] rowid    Logical row ID.
-   * @param[in] fields   Parsed field data from InnoDB log.
-   * @return SHANNON_SUCCESS on success.
+   * Batch delete (optimized version)
+   * @param row_ids: List of row IDs to delete
+   * @param context: Context
+   * @return: Number of successfully deleted rows
    */
-  virtual int write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                                 std::unordered_map<std::string, mysql_field_t> &fields) = 0;
+  virtual size_t delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &row_ids) = 0;
 
   /**
-   * @brief Update a single field within a row.
-   * @param[in] context Rapid context.
-   * @param[in] rowid   Row ID.
-   * @param[in] field_key Field name.
-   * @param[in] new_field_data Pointer to new field bytes.
-   * @param[in] nlen Length of new field data.
-   * @return SHANNON_SUCCESS on success.
+   * Update row (Core: only operate on modified columns)
+   * @param global_row_id: Global row number
+   * @param updates: Column index -> new value mapping
+   * @param context: Context
+   * @return: Returns SHANNON_SUCCESS on success
    */
-  virtual int update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
-                         const uchar *new_field_data, size_t nlen) = 0;
+  virtual int update_row(const Rapid_load_context *context, row_id_t global_row_id,
+                         const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates) = 0;
 
   /**
-   * @brief Update a single field within a row.
-   * @param[in] context Rapid context.
-   * @param[in] nlen Length of row data.
-   * @param[in] col_offsets Column offsets array.
-   * @param[in] null_byte_offsets Null byte offsets.
-   * @param[in] null_bitmasks Null bitmasks.
-   * @param[in] start old row data ptr.
-   * @param[in] new_start new row data ptr.
-   * @return SHANNON_SUCCESS on success.
-   */
-  virtual int update_row(const Rapid_load_context *context, size_t nlen, ulong *col_offsets, ulong *null_byte_offsets,
-                         ulong *null_bitmasks, const uchar *start, const uchar *new_start) = 0;
-
-  /**
-   * @brief Apply an update reconstructed from redo or binlog data.
-   * @param[in] context Rapid context.
-   * @param[in] rowid   Target row.
-   * @param[in] upd_recs Updated fields.
-   * @return SHANNON_SUCCESS on success.
-   */
-  virtual int update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                                  std::unordered_map<std::string, mysql_field_t> &upd_recs) = 0;
-
-  /**
-   * @brief Build index entry for a specific row.
-   * @param[in] context Rapid context.
-   * @param[in] key     Key definition.
-   * @param[in] rowid   value of key, rowid.
-   * @return SHANNON_SUCCESS on success. The built key buffer stored in `context->m_extra_info.m_key_buff`.
-   */
-  virtual int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid) = 0;
-
-  /**
-   * @brief Build index entry with explicit row data and offsets.
-   * @param[in] context Rapid context.
-   * @param[in] key     Key definition.
-   * @param[in] rowid   value of key, rowid.
-   * @param[in] rowdata Pointer to record buffer.
-   * @param[in] col_offsets Column offsets array.
-   * @param[in] null_byte_offsets Null byte offsets.
-   * @param[in] null_bitmasks Null bitmasks.
-   * @return SHANNON_SUCCESS on success. The built key buffer stored in `context->m_extra_info.m_key_buff`.
-   */
-  virtual int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
-                          ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) = 0;
-
-  /**
-   * @brief Write a record to the table.
-   * @param[in] context Rapid load context.
-   * @param[in] data    Row data buffer.
-   * @return SHANNON_SUCCESS on success.
-   */
-  virtual int write(const Rapid_load_context *context, uchar *data) = 0;
-
-  /**
-   * @brief Parallelized write supporting precomputed offsets and bitmaps.
+   * @brief returen the global record row id in the table.
    * @param[in] context Rapid context.
    * @param[in] rowdata Row data buffer.
    * @param[in] len     Buffer length.
@@ -266,159 +170,210 @@ class RapidTable : public MemoryObject {
    * @param[in] n_cols  Number of columns.
    * @param[in] null_byte_offsets Null byte offsets.
    * @param[in] null_bitmasks Null bitmasks.
-   * @return SHANNON_SUCCESS on success.
+   * @return: Inserted global row_id, returns INVALID_ROW_ID on failure.
    */
-  virtual int write(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
-                    ulong *null_byte_offsets, ulong *null_bitmasks) = 0;
+  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
+                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) = 0;
 
   /**
-   * @brief Initialize partitioned sub-tables (for PartTable).
-   * @param[in] context Rapid load context.
-   * @return SHANNON_SUCCESS on success.
+   * Full table scan (vectorized)
+   * @param context: Scan context
+   * @param predicates: List of predicates
+   * @param projection: List of projection columns
+   * @param callback: Callback function
+   * @return: Returns SHANNON_SUCCESS on success
    */
-  virtual int build_partitions(const Rapid_load_context *context) = 0;
+  virtual int scan_table(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
+                         const std::vector<uint32_t> &projection, RowCallback callback) = 0;
 
-  /** @brief Get physical row count. */
-  virtual row_id_t rows(const Rapid_context *) = 0;
+  /**
+   * Scan table with offset and limit support (for incremental scanning)
+   * @param context: Scan context
+   * @param start_offset: Global row offset to start from
+   * @param limit: Maximum number of rows to return
+   * @param predicates: Filter conditions
+   * @param projection: Columns to read
+   * @param callback: Callback for each matching row
+   * @return: Number of rows actually returned
+   */
+  virtual size_t scan_table(Rapid_scan_context *context, row_id_t start_offset, size_t limit,
+                            const std::vector<std::unique_ptr<Predicate>> &predicates,
+                            const std::vector<uint32_t> &projection, RowCallback callback) = 0;
 
-  /** @brief Reserve a new row ID for insertion. */
-  virtual row_id_t forward_rowid(const Rapid_load_context *) = 0;
+  /**
+   * Point query (based on primary key)
+   * @param key_value: Primary key value
+   * @param context: Context
+   * @param result: Output result
+   */
+  virtual bool read(Rapid_scan_context *context, const uchar *key_value, Row_Result &result) = 0;
 
-  /** @brief rollback the new row ID for insertion. */
-  virtual row_id_t backward_rowid(const Rapid_load_context *) = 0;
+  /**
+   * Range scan
+   * @param start_key: Start key
+   * @param end_key: End key
+   * @param context: Context
+   * @param callback: Callback
+   */
+  virtual bool range_scan(Rapid_scan_context *context, const uchar *start_key, const uchar *end_key,
+                          RowCallback callback) = 0;
 
-  /** @brief Lookup Cu column by field name. */
-  virtual Cu *first_field() = 0;
+  /**
+   * Get row count (considering visibility)
+   */
+  virtual uint64_t get_row_count(const Rapid_scan_context *context) const = 0;
 
-  /** @brief Lookup Cu column by field name. */
-  virtual Cu *get_field(std::string field_name) = 0;
+  /**
+   * Get column statistics
+   */
+  virtual ColumnStatistics get_column_stats(uint32_t col_idx) const = 0;
+
+  /**
+   * Update statistics
+   */
+  virtual void update_statistics(bool force = false) = 0;
+
+  /**
+   * Garbage collection
+   */
+  virtual size_t garbage_collect(uint64_t min_active_scn) = 0;
+
+  /**
+   * Compress IMCUs
+   */
+  virtual size_t compact(double delete_ratio_threshold = 0.5) = 0;
+
+  /**
+   * Reorganize table
+   */
+  virtual bool reorganize() = 0;
+
+  /**
+   * Return imcu_idth imcu pointer.
+   */
+  virtual Imcu *locate_imcu(size_t imcu_id) = 0;
 
   /** @brief Lookup index by key name. */
   virtual Index::Index<uchar, row_id_t> *get_index(std::string key_name) = 0;
 
-  /** @brief Access all Cu field objects. */
-  virtual std::unordered_map<std::string, std::unique_ptr<Cu>> &get_fields() = 0;
-
-  /** @brief Access MySQL source key metadata. */
-  virtual std::unordered_map<std::string, key_meta_t> &get_source_keys() = 0;
-
-  /** @brief Get schema name. */
-  virtual std::string &schema_name() = 0;
-
-  /** @brief Get this table name. */
-  virtual std::string &name() = 0;
-
-  /** @brief Truncate this table. */
-  virtual int truncate() = 0;
-
-  /** @brief Rollback this changes. */
-  virtual int rollback_changes_by_trxid(Transaction::ID trxid) = 0;
-
-  /** @brief Get the load type. */
-  void set_load_type(LoadType load_type) { m_load_type = load_type; }
+  TableMetadata &meta() { return m_metadata; }
 
  protected:
-  TYPE m_type{TYPE::UNKONWN};
+  /**
+   * Locate IMCU based on global row_id
+   */
+  uint32_t generate_table_id() {
+    static std::atomic<uint32_t> counter{1};
+    return counter.fetch_add(1);
+  }
 
-  // self load or user load.
-  LoadType m_load_type{LoadType::NOT_LOADED};
+  std::unique_ptr<MEM_ROOT> m_mem_root;
 
-  // name of schema.
-  std::string m_schema_name;
+  const TABLE *m_source_table{nullptr};
 
-  // name of this table.
-  std::string m_table_name;
+  TableMetadata m_metadata;
 
-  // the statistic of this table.
-  TableStats m_stats;
+  // IMCU list (supports dynamic expansion)
+  std::mutex m_imcu_mtex;
+  std::vector<std::shared_ptr<Imcu>> m_imcus;
 
-  // the loaded cus. key format: field/column name.
-  std::shared_mutex m_fields_mutex;
-  std::unordered_map<std::string, std::unique_ptr<Cu>> m_fields;
+  // current position
+  row_id_t m_current_rowid{0};
 
-  // key format: key_name
-  // value format: vector<park part1 name , key part2 name>.
-  std::unordered_map<std::string, key_meta_t> m_source_keys;
+  // IMCU index (fast positioning)
+  struct SHANNON_ALIGNAS ImcuIndex {
+    row_id_t start_row{0};
+    row_id_t end_row{0};
+    std::shared_ptr<Imcu> imcu{nullptr};
 
-  // key format: key_name.
-  std::shared_mutex m_key_buff_mutex;
+    // IMCU-level statistics (for query optimization)
+    std::vector<double> min_values;  // each column
+    std::vector<double> max_values;  // each column
+    bool has_deletes{false};
+    double delete_ratio{0.0};
+
+    ImcuIndex()
+        : min_values(SHANNON_MAX_COLUMNS, SHANNON_MAX_DOUBLE),
+          max_values(SHANNON_MAX_COLUMNS, SHANNON_MIN_DOUBLE),
+          has_deletes(false),
+          delete_ratio(0.0) {}
+    ImcuIndex(size_t col_num)
+        : min_values(col_num, SHANNON_MAX_DOUBLE),
+          max_values(col_num, SHANNON_MIN_DOUBLE),
+          has_deletes(false),
+          delete_ratio(0.0) {}
+  };
+  std::vector<ImcuIndex> m_imcu_index;
+
+  // Current IMCU
+  std::atomic<Imcu *> m_current_imcu{nullptr};
+
+  // Table-level lock (coarse-grained, protects IMCU list)
+  std::shared_mutex m_table_mutex;
+
+  // Transaction manager [TODO:]
+  // std::unique_ptr<Transaction_Coordinator> m_txn_coordinator;
+
+  // Version manager (global view) [TODO:]
+  // std::unique_ptr<Global_Version_Manager> m_version_manager;
+
+  // Memory pool
+  std::shared_ptr<Utils::MemoryPool> m_memory_pool;
+
+  // Background worker threads [TODO:]
+  // std::unique_ptr<Background_Worker_Pool> m_bg_workers;
 
   // indexes mutex for index writing.
   std::unordered_map<std::string, std::unique_ptr<std::mutex>> m_index_mutexes;
   std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
 };
 
-/**
- * @class Table
- * @brief Concrete implementation of RapidTable for non-partitioned tables.
- *
- * The `Table` class manages an in-memory Cu-columnar table, handling field
- * storage, index building, and transactional rollback integration. It provides
- * full CRUD APIs for Redo/Undo recovery and online synchronization with
- * the MySQL engine.
- *
- * Features:
- *   - Field-level Cu memory allocation and columnar access.
- *   - Rapid index management integrated with MySQL KEY metadata.
- *   - Thread-safe concurrent reads via shared_mutex.
- *   - Row ID management and basic statistics tracking.
- */
-class Table : public RapidTable {
+class Table : public RpdTable {
  public:
-  Table() = default;
-  Table(std::string schema, std::string table) : RapidTable(schema, table) {}
-  Table(std::string schema, std::string table, std::string partkey) : RapidTable(schema, table), m_part_key(partkey) {}
-  virtual ~Table() {
-    m_fields.clear();
-    m_source_keys.clear();
-    m_indexes.clear();
-  }
+  Table(const TABLE *&mysql_table, const TableConfig &config);
 
-  virtual TYPE type() final { return RapidTable::TYPE::NORAMAL; }
-  virtual int create_fields_memo(const Rapid_load_context *context) final;
-  virtual int create_index_memo(const Rapid_load_context *context) final;
+  virtual ~Table() override;
 
-  virtual int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid) final;
-  virtual int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
-                          ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) final;
-  virtual int write(const Rapid_load_context *context, uchar *data) final;
-  virtual int write(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
-                    ulong *null_byte_offsets, ulong *null_bitmasks) final;
-  virtual int delete_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                         size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) final;
-  virtual int delete_row(const Rapid_load_context *context, row_id_t rowid) final;
-  virtual int delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) final;
+  virtual TYPE type() const override { return TYPE::NORAMAL; }
 
-  virtual int write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                                 std::unordered_map<std::string, mysql_field_t> &fields) final;
-  virtual int update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
-                         const uchar *new_field_data, size_t nlen) final;
-  virtual int update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                                  std::unordered_map<std::string, mysql_field_t> &upd_recs) final;
-  virtual int update_row(const Rapid_load_context *context, size_t nlen, ulong *col_offsets, ulong *null_byte_offsets,
-                         ulong *null_bitmasks, const uchar *start, const uchar *new_start) final;
-  virtual int truncate() final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  virtual int create_index_memo(const Rapid_load_context *context) override;
 
-  virtual int build_partitions(const Rapid_load_context *) final { return ShannonBase::SHANNON_SUCCESS; }
+  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
+                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) override;
 
-  // rollback a modified record.
-  virtual int rollback_changes_by_trxid(Transaction::ID trxid) final;
+  virtual int delete_row(const Rapid_load_context *context, row_id_t global_row_id) override;
 
-  // gets the # of physical rows.
-  virtual row_id_t rows(const Rapid_context *) final { return m_stats.prows.load(); }
+  virtual size_t delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &row_ids) override;
 
-  // to reserer a row place for this operation.
-  virtual row_id_t forward_rowid(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
+  virtual int update_row(const Rapid_load_context *context, row_id_t global_row_id,
+                         const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates) override;
 
-  // to reserer back the row id for rollback operation.
-  virtual row_id_t backward_rowid(const Rapid_load_context *) final { return m_stats.prows.fetch_sub(1); }
+  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
+                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) override;
 
-  virtual Cu *first_field() final { return m_fields.begin()->second.get(); }
+  virtual int scan_table(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
+                         const std::vector<uint32_t> &projection, RowCallback callback) override;
 
-  virtual Cu *get_field(std::string field_name) final;
+  virtual size_t scan_table(Rapid_scan_context *context, row_id_t start_offset, size_t limit,
+                            const std::vector<std::unique_ptr<Predicate>> &predicates,
+                            const std::vector<uint32_t> &projection, RowCallback callback) override;
+
+  virtual bool read(Rapid_scan_context *context, const uchar *key_value, Row_Result &result) override;
+
+  virtual bool range_scan(Rapid_scan_context *context, const uchar *start_key, const uchar *end_key,
+                          RowCallback callback) override;
+
+  virtual uint64_t get_row_count(const Rapid_scan_context *context) const override;
+
+  virtual ColumnStatistics get_column_stats(uint32_t col_idx) const override;
+
+  virtual void update_statistics(bool force = false) override;
+
+  virtual size_t garbage_collect(uint64_t min_active_scn) override;
+
+  virtual size_t compact(double delete_ratio_threshold = 0.5) override;
+
+  virtual bool reorganize() override;
 
   virtual Index::Index<uchar, row_id_t> *get_index(std::string key_name) final {
     if (m_indexes.find(key_name) == m_indexes.end())
@@ -427,13 +382,22 @@ class Table : public RapidTable {
       return m_indexes[key_name].get();
   }
 
-  virtual std::unordered_map<std::string, std::unique_ptr<Cu>> &get_fields() final { return m_fields; }
+  virtual Imcu *locate_imcu(size_t imcu_id) override {
+    // size_t imcu_idx = global_row_id / m_metadata.rows_per_imcu;
+    if (imcu_id >= m_imcus.size()) return nullptr;
+    return m_imcus[imcu_id].get();
+  }
 
-  virtual std::unordered_map<std::string, key_meta_t> &get_source_keys() final { return m_source_keys; }
+  virtual row_id_t rows(const Rapid_context *) final { return m_metadata.total_rows; }
 
-  virtual std::string &schema_name() final { return m_schema_name; }
+  virtual Imcu *locate_imcu_by_rowid(row_id_t global_row_id) {
+    auto imcu_id = global_row_id / m_metadata.rows_per_imcu;
+    // size_t imcu_idx = global_row_id / m_metadata.rows_per_imcu;
+    if (imcu_id >= m_imcus.size()) return nullptr;
+    return m_imcus[imcu_id].get();
+  }
 
-  virtual std::string &name() final { return m_table_name; }
+  virtual int register_transaction(Transaction *trx) override;
 
  private:
   bool is_field_null(int field_index, const uchar *rowdata, const ulong *null_byte_offsets,
@@ -448,22 +412,76 @@ class Table : public RapidTable {
     return (null_byte & bitmask) != 0;
   }
 
-  /**
-    Build the metadata for a hidden clustered index.
+  inline void create_initial_imcu() {
+    auto imcu = std::make_shared<Imcu>(this, m_metadata,
+                                       0,  // global start_row
+                                       m_metadata.rows_per_imcu, m_memory_pool);
 
-    When a table has no user-defined primary key, MySQL automatically
-    generates a hidden clustered index using a 6-byte row_id as the
-    unique row reference.
+    m_imcus.push_back(imcu);
+    m_current_imcu.store(imcu.get());
 
-    This function creates an in-memory index object (Index<uchar, row_id_t>)
-    corresponding to that hidden key and registers its name, key length,
-    and lock.
+    m_imcu_index.clear();
+    m_imcu_index.reserve(m_imcus.size());
 
-    @param[in]  context   Rapid load context (unused but kept for interface consistency)
+    for (auto &imcu : m_imcus) {
+      ImcuIndex idx(imcu->owner()->meta().num_columns);
+      idx.start_row = imcu->get_start_row();
+      idx.end_row = imcu->get_end_row();
+      idx.imcu = imcu;
+      m_imcu_index.push_back(idx);
+    }
+  }
 
-    @retval SHANNON_SUCCESS  Hidden index successfully registered
-  */
-  int build_hidden_index_memo(const Rapid_load_context *context);
+  Imcu *get_or_create_write_imcu() {
+    Imcu *current = m_current_imcu.load();
+
+    if (current && !current->is_full()) {
+      return current;
+    }
+
+    /**
+     * EACH MCU CONTAINS `SHANNON_ROWS_IN_CHUNK` (DEFAULT) ROWS.
+     */
+    std::unique_lock lock(m_table_mutex);
+    row_id_t start_row = m_imcus.empty() ? 0 : m_imcus.size() * m_metadata.rows_per_imcu;
+
+    auto new_imcu = std::make_shared<Imcu>(this, m_metadata, start_row /*start_row_#*/,
+                                           m_metadata.rows_per_imcu /*capacity*/, m_memory_pool);
+    m_imcus.push_back(new_imcu);
+    m_current_imcu.store(new_imcu.get());
+
+    update_imcu_index(new_imcu.get());
+
+    return new_imcu.get();
+  }
+
+  void build_imcu_index() {  // to update the all imcu indexe statistics
+    m_imcu_index.clear();
+    m_imcu_index.reserve(m_imcus.size());
+
+    for (auto &imcu : m_imcus) {
+      ImcuIndex idx(imcu->owner()->meta().num_columns);
+      idx.start_row = imcu->get_start_row();
+      idx.end_row = imcu->get_end_row();
+      idx.imcu = imcu;
+
+      // TODO: collect statistics infor.
+      // min_values[x] =xxx;
+      // max_values[x] =yyy;
+      // bool has_deletes = true;
+      // double delete_ratio = 0.5;
+      m_imcu_index.push_back(idx);
+    }
+  }
+
+  void update_imcu_index(Imcu *imcu) {
+    ImcuIndex idx;
+    idx.start_row = imcu->get_start_row();
+    idx.end_row = imcu->get_end_row();
+    idx.imcu = m_imcus.back();
+
+    m_imcu_index.push_back(idx);
+  }
 
   /**
     Build metadata for all user-defined secondary indexes.
@@ -492,251 +510,117 @@ class Table : public RapidTable {
     encoding rules to preserve lexical order.
 
     @param[in]  context   Rapid load context
-    @param[in]  key       The KEY descriptor for the index (nullptr if hidden PK)
     @param[in]  rowid     The row identifier to be associated with the key
 
     @retval SHANNON_SUCCESS  Index entry successfully created
   */
-  int build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid);
+  int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata, size_t len,
+                  ulong *col_offsets, size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks);
 
   /**
-    Insert a record reference into the in-memory index structure
-
-    This variant is designed for parallel or asynchronous loading,
-    where row data resides in an external buffer rather than
-    TABLE::record[0].
-
-    It encodes the primary key directly from rowdata using the
-    per-column offsets and null maps, then inserts the resulting
-    key→rowid mapping into the index. Access to each index is
-    serialized via its dedicated mutex to ensure thread safety.
-
-    @param[in]  context           Rapid load context
-    @param[in]  key               The KEY descriptor for the index
-    @param[in]  rowid             The row identifier to associate
-    @param[in]  rowdata           External row data buffer
-    @param[in]  col_offsets       Per-column byte offsets
-    @param[in]  null_byte_offsets Per-column NULL byte offsets
-    @param[in]  null_bitmasks     Per-column NULL bit masks
-
-    @retval SHANNON_SUCCESS  Index entry successfully inserted
-  */
-  int build_index_impl(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata,
-                       ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks);
-
-  /**
-    Build the row reference key (rowid or primary key) for the current record.
-
-    This function reproduces the logic of ha_innodb::position(), which
-    generates the row reference used by MySQL to uniquely identify a record.
-    However, we re-implement it here to decouple from the InnoDB engine layer.
-
-    The resulting key buffer (m_extra_info.m_key_buff) is stored inside the
-    Rapid_load_context for later use (e.g., for synchronization or external
-    index update).
-
-    If the table has no explicit primary key, we use the hidden InnoDB row ID
-    (6-byte ref) as the record identifier. Otherwise, we build the encoded
-    primary key image from the current record (record[0]) using the
-    same field-by-field encoding rules as InnoDB’s key_copy(), but with
-    additional handling for sortable encoding of floating-point and decimal
-    types.
-
-    @param[in]  context    The current rapid load context
-    @param[in]  key        The KEY descriptor for the primary key (nullptr if none)
-
-    @retval SHANNON_SUCCESS  Key buffer successfully built
-  */
-  int build_key_info(const Rapid_load_context *context, const KEY *key);
-
-  /**
-    Build the encoded row reference key (primary key) from a given row buffer.
-
-    This is a parallel/async variant of build_key_info(), designed for
-    high-performance data loading or parallel scanning where the current
-    row buffer (rowdata) is not stored in TABLE::record[] but in an
-    external buffer.
-
-    The encoding logic is identical to InnoDB’s key_copy(), with extensions
-    for sortable encoding of FLOAT/DOUBLE/DECIMAL types.
-
-    This function assumes the table has an explicit primary key; otherwise,
-    a sequential scan should be used. For concurrency safety, access to
-    the shared key buffer is protected by m_key_buff_mutex.
-
-    @param[in]  context           The current rapid load context
-    @param[in]  key               The KEY descriptor for the primary key
-    @param[in]  rowdata           Pointer to the raw row data buffer
-    @param[in]  col_offsets       Per-column byte offsets within rowdata
-    @param[in]  null_byte_offsets Per-column NULL byte offsets
-    @param[in]  null_bitmasks     Per-column NULL bit masks
-
-    @retval SHANNON_SUCCESS  Key buffer successfully built
-  */
-  int build_key_info(const Rapid_load_context *context, const KEY *key, uchar *rowdata, ulong *col_offsets,
-                     ulong *null_byte_offsets, ulong *null_bitmasks);
-
- private:
-  std::string m_part_key;
+   * @brief Encode a row buffer into a contiguous key buffer suitable for indexing.
+   *
+   * This function constructs a binary key representation from a MySQL row record
+   * according to the specified KEY metadata. It handles null flags, variable-length
+   * fields, BLOBs, and numeric types, ensuring proper encoding for index comparison.
+   *
+   * @param[out] to_key      Pointer to pre-allocated key buffer to write encoded key.
+   * @param[in]  from_record Pointer to row data buffer containing raw field values.
+   * @param[in]  key_info    Pointer to MySQL KEY structure describing key parts.
+   * @param[in]  key_len     Total length of the key buffer.
+   *
+   * @note
+   *   - Handles null indicators for columns that have a null bit.
+   *   - Numeric types (DOUBLE, FLOAT, DECIMAL, NEWDECIMAL, LONG) are encoded
+   *     in sortable binary format using Index::Encoder.
+   *   - Fixed-length, variable-length, and BLOB columns are encoded according
+   *     to MySQL key conventions (HA_KEY_BLOB_LENGTH for BLOBs).
+   *   - The function does not modify the input record.
+   */
+  void encode_row_key(uchar *to_key, const KEY *key, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
+                      ulong *null_byte_offsets, ulong *null_bitmasks);
 };
 
-/**
- * @class PartTable
- * @brief Implementation of RapidTable supporting table partitioning.
- *
- * The `PartTable` extends RapidTable by managing multiple child partitions,
- * each represented by an internal `Table` instance. It coordinates partition
- * metadata, routing, and global statistics aggregation.
- *
- * Features:
- *   - Multi-partition management via `std::vector<Table>`.
- *   - Partition metadata (key mapping, name, schema).
- *   - Unified transactional rollback propagation.
- */
-class PartTable : public RapidTable {
+// partitioned rapid table.
+class PartTable : public RpdTable {
  public:
-  PartTable() = default;
-  PartTable(std::string schema, std::string table, std::string part_key)
-      : RapidTable(schema, table), m_part_key(part_key) {}
-  virtual ~PartTable() {
-    m_fields.clear();
-    m_source_keys.clear();
-    m_indexes.clear();
+  PartTable(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(mysql_table, config) {}
+  virtual ~PartTable() {}
+
+  virtual TYPE type() const override { return TYPE::PARTTABLE; }
+
+  virtual int register_transaction(Transaction *trx) override;
+
+  virtual int create_index_memo(const Rapid_load_context *context) override { return 0; }
+
+  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
+                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) override {
+    return INVALID_ROW_ID;
   }
 
-  virtual TYPE type() final { return RapidTable::TYPE::PARTTABLE; }
+  virtual int delete_row(const Rapid_load_context *context, row_id_t global_row_id) override { return 0; }
 
-  virtual int create_fields_memo(const Rapid_load_context *) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
+  virtual size_t delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &row_ids) override {
+    return 0;
   }
 
-  virtual int create_index_memo(const Rapid_load_context *) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
+  virtual int update_row(const Rapid_load_context *context, row_id_t global_row_id,
+                         const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates) override {
+    return 0;
   }
 
-  virtual int write(const Rapid_load_context *, uchar *) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
+  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
+                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) override {
+    return INVALID_ROW_ID;
   }
 
-  virtual int write(const Rapid_load_context *, uchar *, size_t, ulong *, size_t, ulong *, ulong *) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
+  virtual int scan_table(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
+                         const std::vector<uint32_t> &projection, RowCallback callback) override {
+    return 0;
   }
 
-  virtual int delete_row(const Rapid_load_context *, row_id_t) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
+  virtual size_t scan_table(Rapid_scan_context *context, row_id_t start_offset, size_t limit,
+                            const std::vector<std::unique_ptr<Predicate>> &predicates,
+                            const std::vector<uint32_t> &projection, RowCallback callback) override {
+    return 0;
   }
 
-  virtual int delete_row(const Rapid_load_context *, uchar *, size_t, ulong *, size_t, ulong *, ulong *) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
+  virtual bool read(Rapid_scan_context *context, const uchar *key_value, Row_Result &result) override { return 0; }
+
+  virtual bool range_scan(Rapid_scan_context *context, const uchar *start_key, const uchar *end_key,
+                          RowCallback callback) override {
+    return 0;
   }
 
-  virtual int delete_rows(const Rapid_load_context *, const std::vector<row_id_t> &) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
+  virtual uint64_t get_row_count(const Rapid_scan_context *context) const override { return 0; }
+
+  virtual ColumnStatistics get_column_stats(uint32_t col_idx) const override {
+    ColumnStatistics col_stat(col_idx, "col_name", MYSQL_TYPE_NULL);
+    return col_stat;
   }
 
-  virtual int build_index(const Rapid_load_context *, const KEY *, row_id_t) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  virtual void update_statistics(bool force = false) override {}
 
-  virtual int build_index(const Rapid_load_context *, const KEY *, row_id_t, uchar *, ulong *, ulong *, ulong *) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  virtual size_t garbage_collect(uint64_t min_active_scn) override { return 0; }
 
-  virtual int write_row_from_log(const Rapid_load_context *, row_id_t,
-                                 std::unordered_map<std::string, mysql_field_t> &) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  virtual size_t compact(double delete_ratio_threshold = 0.5) override { return 0; }
 
-  virtual int update_row(const Rapid_load_context *, row_id_t, std::string &, const uchar *, size_t) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  virtual bool reorganize() override { return false; }
 
-  virtual int update_row_from_log(const Rapid_load_context *, row_id_t,
-                                  std::unordered_map<std::string, mysql_field_t> &) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  virtual Imcu *locate_imcu(size_t imcu_id) override { return nullptr; }
 
-  virtual int update_row(const Rapid_load_context *context, size_t nlen, ulong *col_offsets, ulong *null_byte_offsets,
-                         ulong *null_bitmasks, const uchar *start, const uchar *new_start) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  virtual Index::Index<uchar, row_id_t> *get_index(std::string) final { return nullptr; }
 
-  virtual int truncate() final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
+  virtual int build_partitions(const Rapid_load_context *context);
 
-  virtual int build_partitions(const Rapid_load_context *context) final;
-
-  // rollback a modified record.
-  virtual int rollback_changes_by_trxid(Transaction::ID) final {
-    assert(false);
-    return ShannonBase::SHANNON_SUCCESS;
-  }
-
-  // gets the # of physical rows.
-  virtual row_id_t rows(const Rapid_context *) final { return m_stats.prows.load(); }
-
-  // to reserer a row place for this operation.
-  virtual row_id_t forward_rowid(const Rapid_load_context *) final { return m_stats.prows.fetch_add(1); }
-
-  // to reserer back the new row for rollback operation.
-  virtual row_id_t backward_rowid(const Rapid_load_context *) final { return m_stats.prows.fetch_sub(1); }
-
-  virtual Cu *first_field() final { return m_fields.begin()->second.get(); }
-
-  virtual Cu *get_field(std::string) final {
-    assert(false);
-    return nullptr;
-  }
-
-  virtual Index::Index<uchar, row_id_t> *get_index(std::string) final {
-    assert(false);
-    return nullptr;
-  }
-
-  virtual std::unordered_map<std::string, std::unique_ptr<Cu>> &get_fields() final { return m_fields; }
-
-  virtual std::unordered_map<std::string, key_meta_t> &get_source_keys() final { return m_source_keys; }
-
-  virtual std::string &schema_name() final { return m_schema_name; }
-  virtual std::string &name() final { return m_table_name; }
-  virtual row_id_t reserver_rowid() final { return m_stats.prows.fetch_add(1); }
-
-  inline RapidTable *get_partition(std::string part_key) {
+  inline RpdTable *get_partition(std::string part_key) {
     if (m_partitions.find(part_key) == m_partitions.end()) return nullptr;
     return m_partitions[part_key].get();
   }
 
  private:
-  bool is_field_null(int field_index, const uchar *rowdata, const ulong *null_byte_offsets,
-                     const ulong *null_bitmasks) {
-    ulong byte_offset = null_byte_offsets[field_index];
-    ulong bitmask = null_bitmasks[field_index];
-
-    // gets null byte.
-    uchar null_byte = rowdata[byte_offset];
-
-    // check null bit.
-    return (null_byte & bitmask) != 0;
-  }
-
- private:
   // all the partition sub-tables.
-  std::unordered_map<std::string, std::unique_ptr<RapidTable>> m_partitions;
+  std::unordered_map<std::string, std::unique_ptr<RpdTable>> m_partitions;
 
   // part_name+"#"+ part_id
   std::string m_part_key;

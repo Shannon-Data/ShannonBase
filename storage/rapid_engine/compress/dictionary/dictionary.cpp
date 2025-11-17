@@ -43,66 +43,81 @@
  */
 namespace ShannonBase {
 namespace Compress {
-
 uint32 Dictionary::store(const uchar *str, size_t len, Encoding_type type) {
   DBUG_TRACE;
-  // returns dictionary id. //encoding alg pls ref to: heatwave document.
   if (!str || !len) return Dictionary::DEFAULT_STRID;
 
-  std::string strstr(reinterpret_cast<const char *>(str), len);
-  auto algr = CompressFactory::get_instance(type);
-  std::string compressed_str(algr->compressString(strstr));
+  std::string orig(reinterpret_cast<const char *>(str), len);
 
-  {
-    std::scoped_lock lk(m_content_mtx);
-    auto content_pos = m_content.find(compressed_str);
-    if (content_pos != m_content.end()) return content_pos->second;
+  std::string compressed;
+  bool use_compression = false;
 
-    // not found, then insert a new one.
-    uint64 id = m_content.size();
-    // compressed string <---> str id. get a copy of string and store it in map.
-    m_content.emplace(compressed_str, id);
+  if (len >= kMinCompressThreshold) {
+    auto algr = CompressFactory::get_instance(type);
+    compressed = algr->compressString(orig);
 
-    // id<---> original string
-    ut_a(m_id2content.find(id) == m_id2content.end());
-    m_id2content.emplace(id, compressed_str);
-
-    ut_a((m_content.size() == m_id2content.size()));
-    return id;
-  }
-
-  return Dictionary::DEFAULT_STRID;
-}
-
-int32 Dictionary::id(uint64 strid, String &ret_val) {
-  std::scoped_lock lk(m_content_mtx);
-  auto compressed_str = get(strid);
-  if (compressed_str.empty()) return -1;
-
-  String strs(compressed_str.c_str(), compressed_str.length(), ret_val.charset());
-  copy_if_not_alloced(&ret_val, &strs, strs.length());
-
-  return Dictionary::DEFAULT_STRID;
-}
-
-std::string Dictionary::get(uint64 strid) {
-  {
-    std::scoped_lock lk(m_content_mtx);
-    auto id_pos = m_id2content.find(strid);
-    if (id_pos != m_id2content.end()) {
-      auto compressed_str = id_pos->second;
-      return CompressFactory::get_instance(m_encoding_type)->decompressString(compressed_str);
+    // do compression or not.
+    if (compressed.size() + 1 < orig.size()) {
+      use_compression = true;
     }
   }
 
-  return std::string();
+  std::string final_str;
+  if (use_compression) {
+    final_str.push_back('\x01');  // Compression flag
+    final_str += compressed;
+  } else {
+    final_str.push_back('\x00');  // No compression flag
+    final_str += orig;
+  }
+
+  {
+    std::unique_lock lk(m_content_mtx);
+    auto pos = m_content.find(final_str);
+    if (pos != m_content.end()) return pos->second;
+
+    uint64 id = m_content.size();
+    m_content.emplace(final_str, id);
+    m_id2content.emplace(id, final_str);
+
+    ut_a(m_content.size() == m_id2content.size());
+    return id;
+  }
+}
+
+int32 Dictionary::id(uint64 strid, String &ret_val) {
+  std::string decoded = get(strid);
+  if (decoded.empty()) return -1;
+
+  std::shared_lock lk(m_content_mtx);
+  String strs(decoded.c_str(), decoded.length(), ret_val.charset());
+  copy_if_not_alloced(&ret_val, &strs, strs.length());
+  return 0;
+}
+
+std::string Dictionary::get(uint64 strid) {
+  std::shared_lock lk(m_content_mtx);
+  auto pos = m_id2content.find(strid);
+  if (pos == m_id2content.end()) return {};
+
+  const std::string &stored = pos->second;
+  if (stored.empty()) return {};
+
+  char flag = stored[0];
+  std::string_view payload(stored.data() + 1, stored.size() - 1);
+
+  if (flag == '\x01') {
+    auto algr = CompressFactory::get_instance(m_encoding_type);
+    return algr->decompressString(std::string(payload));
+  } else {
+    return std::string(payload);
+  }
 }
 
 int64 Dictionary::id(const std::string &str) {
-  std::scoped_lock lk(m_content_mtx);
-  auto content_pos = m_content.find(str);
-  return (content_pos != m_content.end()) ? content_pos->second : Dictionary::INVALID_STRID;
+  std::shared_lock lk(m_content_mtx);
+  auto pos = m_content.find(str);
+  return (pos != m_content.end()) ? pos->second : Dictionary::INVALID_STRID;
 }
-
 }  // namespace Compress
 }  // namespace ShannonBase

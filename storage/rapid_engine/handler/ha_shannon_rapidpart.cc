@@ -51,7 +51,7 @@ int ha_rapidpart::rnd_pos(uchar *record, uchar *pos) { return ShannonBase::SHANN
 int ha_rapidpart::rnd_init(bool scan) {
   m_current_part_empty = false;
 
-  if (m_data_table->init()) {
+  if (m_rpd_table_viewer->init()) {
     m_start_of_scan = false;
     return HA_ERR_GENERIC;
   }
@@ -66,15 +66,15 @@ int ha_rapidpart::rnd_init_in_part(uint part_id, bool scan) {
   /* Don't use semi-consistent read in random row reads (by position).
   This means we must disable semi_consistent_read if scan is false. */
   std::string part_key;
-  auto part_name = m_data_table->source()->part_info->partitions[part_id]->partition_name;
+  auto part_name = m_rpd_table_viewer->source()->part_info->partitions[part_id]->partition_name;
   part_key.append(part_name).append("#").append(std::to_string(part_id));
 
-  const auto &rpd_table = m_data_table->table_source();
+  const auto &rpd_table = m_rpd_table_viewer->table_source();
   auto partition_ptr = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table)->get_partition(part_key);
-  auto n_rows = partition_ptr->rows(nullptr);
+  auto n_rows = partition_ptr->meta().total_rows.load(std::memory_order_relaxed);
   m_current_part_empty = (n_rows) ? false : true;
 
-  if (!m_current_part_empty) m_data_table->active_table(partition_ptr);
+  if (!m_current_part_empty) m_rpd_table_viewer->active_table(partition_ptr);
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -85,11 +85,11 @@ int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
 
   if (inited == handler::RND && m_start_of_scan) {
     if (table_share->fields <= static_cast<uint>(ShannonBase::rpd_async_column_threshold)) {
-      error = m_data_table->next(buf);
+      error = m_rpd_table_viewer->next(buf);
     } else {
       auto reader_pool = ShannonBase::Imcs::Imcs::pool();
       std::future<int> fut =
-          boost::asio::co_spawn(*reader_pool, m_data_table->next_async(buf), boost::asio::use_future);
+          boost::asio::co_spawn(*reader_pool, m_rpd_table_viewer->next_async(buf), boost::asio::use_future);
       error = fut.get();  // co_await m_data_table->next_async(buf);  // index_first(buf);
       if (error == HA_ERR_KEY_NOT_FOUND) {
         error = HA_ERR_END_OF_FILE;
@@ -105,7 +105,7 @@ int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
 int ha_rapidpart::rnd_end_in_part(uint, bool) { return ShannonBase::SHANNON_SUCCESS; }
 
 int ha_rapidpart::rnd_end() {
-  if (m_data_table->end()) return HA_ERR_GENERIC;
+  if (m_rpd_table_viewer->end()) return HA_ERR_GENERIC;
 
   m_start_of_scan = false;
   inited = handler::NONE;
@@ -199,6 +199,11 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   context.m_schema_name = table.s->db.str;
   context.m_table_name = table.s->table_name.str;
 
+  context.m_trx = Transaction::get_or_create_trx(m_thd);
+  context.m_trx->begin_stmt();
+  context.m_extra_info.m_trxid = context.m_trx->get_id();
+  context.m_extra_info.m_scn = context.m_extra_info.m_trxid;
+
   // use specific partion. such as partition(p1, p2, p10, ..., pn).
   Table_ref *table_list = m_thd->lex->query_block->get_table_list();
   if (table_list->partition_names && table.file->get_partition_handler()) {
@@ -220,8 +225,10 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 
   if (Imcs::Imcs::instance()->load_parttable(&context, const_cast<TABLE *>(&table))) {
     my_error(ER_SECONDARY_ENGINE, MYF(0), table.s->db.str, table.s->table_name.str);
+    context.m_trx->rollback_stmt();
     return HA_ERR_GENERIC;
   }
+  context.m_trx->commit();
 
   m_share = new RapidPartShare(table);
   m_share->file = this;
