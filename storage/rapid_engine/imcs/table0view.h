@@ -64,10 +64,22 @@ class RapidCursor : public MemoryObject {
   // the parent table of partitions.
   inline RpdTable *table_source() const { return m_source_rpd_table; }
 
-  // to reset to a new rpd table source.
+  // to reset to a new rpd table source. Used in Partition Table case.
   inline void active_table(RpdTable *rpd_table) {
-    m_current_row_idx.store(0);
     m_rpd_table = rpd_table;
+
+    // Reserve buffer cache with extra space to reduce reallocation
+    m_row_buffer_cache.clear();
+    m_row_buffer_cache.reserve(SHANNON_BATCH_NUM + 16);
+
+    // Initialize scan position
+    m_current_row_idx.store(0, std::memory_order_release);
+
+    m_batch_start = 0;
+    m_batch_end = 0;
+    m_current_imcu_idx = 0;
+    m_current_imcu_offset = 0;
+    m_scan_exhausted.store(false, std::memory_order_release);
   }
 
   inline TABLE *source() const { return m_data_source; }

@@ -26,7 +26,7 @@ CREATE TABLE LINEITEM ( L_ORDERKEY    BIGINT NOT NULL,
                         L_COMMENT      VARCHAR(44) NOT NULL,
                         PRIMARY KEY (L_ORDERKEY, L_LINENUMBER))
                         PARTITION BY KEY()
-                        PARTITIONS 64;
+                        PARTITIONS 4;
 
 alter table LINEITEM secondary_engine NULL;
 
@@ -50,7 +50,7 @@ alter table LINEITEM secondary_engine RAPID;
 
 alter table LINEITEM secondary_load;
 
-select * from LINEITEM;
+select * from LINEITEM order by L_ORDERKEY, L_PARTKEY;
 
 alter table LINEITEM secondary_unload;
 
@@ -86,7 +86,7 @@ CREATE TABLE LINEITEM1 ( L_ORDERKEY    BIGINT NOT NULL,
                         L_COMMENT      VARCHAR(44) NOT NULL,
                         PRIMARY KEY (L_ORDERKEY, L_LINENUMBER))
                         PARTITION BY KEY()
-                        PARTITIONS 18;
+                        PARTITIONS 3;
 
 alter table LINEITEM1 secondary_engine NULL;
 
@@ -107,7 +107,7 @@ alter table LINEITEM1 change L_ORDERKEY L_ORDERKEY BIGINT NOT NULL COMMENT 'RAPI
 alter table LINEITEM1 secondary_engine RAPID;
 
 alter table LINEITEM1 secondary_load;
-explain select * from LINEITEM1;
+explain select * from LINEITEM1 order by L_ORDERKEY, L_PARTKEY;
 alter table LINEITEM1 secondary_unload;
 
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
@@ -118,5 +118,5 @@ set rapid_use_dynamic_offload=1;
 SET optimizer_trace = 'enabled=on';
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 
-
+--enable_warnings
 drop database test_partition;
