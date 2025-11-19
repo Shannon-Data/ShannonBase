@@ -36,10 +36,12 @@ Created jun 6, 2025 */
 #include "my_dbug.h"
 #include "storage/innobase/include/dict0dd.h"  //dd_is_partitioned
 
-#include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/utils/utils.h"
+
+#include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/imcs/table0view.h"
 
 namespace ShannonBase {
 extern int rpd_async_column_threshold;
@@ -51,7 +53,7 @@ int ha_rapidpart::rnd_pos(uchar *record, uchar *pos) { return ShannonBase::SHANN
 int ha_rapidpart::rnd_init(bool scan) {
   m_current_part_empty = false;
 
-  if (m_rpd_table_viewer->init()) {
+  if (m_cursor->init()) {
     m_start_of_scan = false;
     return HA_ERR_GENERIC;
   }
@@ -66,15 +68,15 @@ int ha_rapidpart::rnd_init_in_part(uint part_id, bool scan) {
   /* Don't use semi-consistent read in random row reads (by position).
   This means we must disable semi_consistent_read if scan is false. */
   std::string part_key;
-  auto part_name = m_rpd_table_viewer->source()->part_info->partitions[part_id]->partition_name;
+  auto part_name = m_cursor->source()->part_info->partitions[part_id]->partition_name;
   part_key.append(part_name).append("#").append(std::to_string(part_id));
 
-  const auto &rpd_table = m_rpd_table_viewer->table_source();
+  const auto &rpd_table = m_cursor->table_source();
   auto partition_ptr = down_cast<ShannonBase::Imcs::PartTable *>(rpd_table)->get_partition(part_key);
   auto n_rows = partition_ptr->meta().total_rows.load(std::memory_order_relaxed);
   m_current_part_empty = (n_rows) ? false : true;
 
-  if (!m_current_part_empty) m_rpd_table_viewer->active_table(partition_ptr);
+  if (!m_current_part_empty) m_cursor->active_table(partition_ptr);
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -85,11 +87,10 @@ int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
 
   if (inited == handler::RND && m_start_of_scan) {
     if (table_share->fields <= static_cast<uint>(ShannonBase::rpd_async_column_threshold)) {
-      error = m_rpd_table_viewer->next(buf);
+      error = m_cursor->next(buf);
     } else {
       auto reader_pool = ShannonBase::Imcs::Imcs::pool();
-      std::future<int> fut =
-          boost::asio::co_spawn(*reader_pool, m_rpd_table_viewer->next_async(buf), boost::asio::use_future);
+      std::future<int> fut = boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future);
       error = fut.get();  // co_await m_data_table->next_async(buf);  // index_first(buf);
       if (error == HA_ERR_KEY_NOT_FOUND) {
         error = HA_ERR_END_OF_FILE;
@@ -105,7 +106,7 @@ int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
 int ha_rapidpart::rnd_end_in_part(uint, bool) { return ShannonBase::SHANNON_SUCCESS; }
 
 int ha_rapidpart::rnd_end() {
-  if (m_rpd_table_viewer->end()) return HA_ERR_GENERIC;
+  if (m_cursor->end()) return HA_ERR_GENERIC;
 
   m_start_of_scan = false;
   inited = handler::NONE;

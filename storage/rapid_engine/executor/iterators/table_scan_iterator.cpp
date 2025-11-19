@@ -68,10 +68,10 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table,
   if (table_def == nullptr) return;
 
   if (dd_table_is_partitioned(*table_def)) {
-    m_rpd_table_viewer.reset(
-        new ShannonBase::Imcs::RpdTableView(table, ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(key)));
+    m_cursor.reset(
+        new ShannonBase::Imcs::RapidCursor(table, ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(key)));
   } else {
-    m_rpd_table_viewer.reset(new ShannonBase::Imcs::RpdTableView(table, Imcs::Imcs::instance()->get_rpd_table(key)));
+    m_cursor.reset(new ShannonBase::Imcs::RapidCursor(table, Imcs::Imcs::instance()->get_rpd_table(key)));
   }
 }
 
@@ -182,7 +182,7 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
 
 bool VectorizedTableScanIterator::Init() {
   // Initialize similar to ha_rapid::rnd_init()
-  if (m_rpd_table_viewer->init()) return true;
+  if (m_cursor->init()) return true;
 
   // Allocate row buffer for batch processing. to store data in mysql format in column format.
   CacheActiveFields();
@@ -239,7 +239,7 @@ int VectorizedTableScanIterator::ReadNextBatch() {
   ClearBatchData();
 
   size_t read_cnt = 0;
-  int result = m_rpd_table_viewer->next_batch(m_batch_size, m_col_chunks, read_cnt);
+  int result = m_cursor->next_batch(m_batch_size, m_col_chunks, read_cnt);
 
   if (result != 0) {
     if (result == HA_ERR_END_OF_FILE) {

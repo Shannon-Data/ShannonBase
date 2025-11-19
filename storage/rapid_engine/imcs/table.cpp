@@ -40,11 +40,9 @@
 #include "sql/table.h"       //TABLE
 #include "storage/innobase/include/mach0data.h"
 
-#include "storage/rapid_engine/imcs/cu.h"              //CU
-#include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
-
+#include "storage/rapid_engine/imcs/cu.h"  //CU
 #include "storage/rapid_engine/imcs/index/encoder.h"
-#include "storage/rapid_engine/imcs/predicate.h"  //predicate
+#include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/utils/memory_pool.h"  //Blob
@@ -120,12 +118,10 @@ Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(my
 Table::~Table() {
   {
     m_imcus.clear();
-    m_current_imcu.store(nullptr);
     m_imcu_index.clear();
   }
-  if (m_memory_pool) {
-    m_memory_pool.reset();
-  }
+
+  if (m_memory_pool) m_memory_pool.reset();
 }
 
 int Table::build_user_defined_index_memo(const Rapid_load_context *context) {
@@ -258,18 +254,17 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata, si
   }
 
   // global current rowid.
-  m_current_rowid = current_imcu->get_start_row() + local_row_id;
+  auto rowid = current_imcu->get_start_row() + local_row_id;
 
   for (auto index = 0u; index < context->m_table->s->keys; index++) {  // user defined indexes.
     auto key_info = context->m_table->key_info + index;
-    if (build_index(context, key_info, m_current_rowid, rowdata, len, col_offsets, n_cols, null_byte_offsets,
-                    null_bitmasks))
+    if (build_index(context, key_info, rowid, rowdata, len, col_offsets, n_cols, null_byte_offsets, null_bitmasks))
       return HA_ERR_GENERIC;
   }
 
   m_metadata.total_rows.fetch_add(1);
 
-  return m_current_rowid;
+  return rowid;
 }
 
 int Table::delete_row(const Rapid_load_context *context, row_id_t global_row_id) {
@@ -350,73 +345,6 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata, si
                                                                               context->m_extra_info.m_key_len);
   auto global_row_id = rowid ? *rowid : INVALID_ROW_ID;
   return global_row_id;
-}
-
-int Table::scan_table(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
-                      const std::vector<uint32_t> &projection, RowCallback callback) {
-  // 1. travel all IMCUs.
-  for (auto &imcu : m_imcus) {
-    // 1.1 Storage Index to filter（skip IMCU ）
-    if (imcu->can_skip_imcu(predicates)) continue;  // skip IMCU
-
-    // 1.2 scan IMCU
-    imcu->scan(context, predicates, projection, callback);
-
-    // 1.3 check LIMIT oper.
-    if (context->limit > 0 && context->rows_returned >= context->limit) break;
-  }
-
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-size_t Table::scan_table(Rapid_scan_context *context, row_id_t start_offset, size_t limit,
-                         const std::vector<std::unique_ptr<Predicate>> &predicates,
-                         const std::vector<uint32_t> &projection, RowCallback callback) {
-  std::shared_lock lock(m_table_mutex);
-
-  if (limit == 0 || m_imcus.empty()) return 0;
-
-  size_t total_scanned = 0;
-  size_t remaining = limit;
-
-  // Calculate which IMCU contains start_offset
-  size_t rows_per_imcu = m_metadata.rows_per_imcu;
-  size_t start_imcu_idx = start_offset / rows_per_imcu;
-  size_t offset_in_imcu = start_offset % rows_per_imcu;
-
-  // Scan from start_imcu_idx to end
-  for (size_t imcu_idx = start_imcu_idx; imcu_idx < m_imcus.size() && remaining > 0; imcu_idx++) {
-    auto &imcu = m_imcus[imcu_idx];
-
-    // Storage Index filtering
-    if (imcu->can_skip_imcu(predicates)) {
-      offset_in_imcu = 0;  // Reset for next IMCU
-      continue;
-    }
-
-    // Scan range within this IMCU
-    size_t scanned = imcu->scan_range(context,
-                                      offset_in_imcu,  // Start from offset only for first IMCU
-                                      remaining,       // How many more rows we need
-                                      predicates, projection, callback);
-
-    total_scanned += scanned;
-    remaining -= scanned;
-    offset_in_imcu = 0;  // Subsequent IMCUs start from 0
-
-    // Check context limit
-    if (context->limit > 0 && context->rows_returned >= context->limit) break;
-  }
-
-  return total_scanned;
-}
-
-bool Table::read(Rapid_scan_context *context, const uchar *key_value, Row_Result &result) { return false; }
-
-bool Table::range_scan(Rapid_scan_context *context, const uchar *start_key, const uchar *end_key,
-                       RowCallback callback) {
-  assert(context && start_key && end_key);
-  return false;
 }
 
 uint64_t Table::get_row_count(const Rapid_scan_context *context) const {

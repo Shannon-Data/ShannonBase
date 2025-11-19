@@ -32,12 +32,12 @@
 #include "sql/sql_class.h"
 #include "sql/table.h"  //TABLE
 
+#include "storage/rapid_engine/utils/utils.h"
+
 #include "storage/innobase/include/mach0data.h"
 #include "storage/rapid_engine/imcs/imcs.h"  // imcs:pool
 #include "storage/rapid_engine/imcs/table.h"
-#include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/trx/transaction.h"  // TransactionJournal
-#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 namespace Imcs {

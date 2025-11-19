@@ -38,38 +38,41 @@
 #include "include/ut0dbg.h"   //ut_a
 #include "sql/field.h"        //field
 #include "sql/table.h"        //TABLE
-#include "storage/innobase/include/mach0data.h"
-#include "storage/rapid_engine/imcs/cu.h"    //CU
-#include "storage/rapid_engine/imcs/imcs.h"  //IMCS
-#include "storage/rapid_engine/imcs/index/encoder.h"
-#include "storage/rapid_engine/imcs/table.h"  //RapidTable
+
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/log_commons.h"  //sys_pop_buff
-#include "storage/rapid_engine/trx/readview.h"
+
+#include "storage/innobase/include/mach0data.h"
 #include "storage/rapid_engine/trx/transaction.h"  //Transaction
 #include "storage/rapid_engine/utils/utils.h"      //Blob
 
+#include "storage/rapid_engine/imcs/cu.h"    //CU
+#include "storage/rapid_engine/imcs/imcs.h"  //IMCS
+#include "storage/rapid_engine/imcs/index/encoder.h"
+#include "storage/rapid_engine/imcs/predicate.h"  //predicate
+#include "storage/rapid_engine/imcs/table.h"      //RapidTable
+
 namespace ShannonBase {
 namespace Imcs {
-ShannonBase::Utils::SimpleRatioAdjuster RpdTableView::m_adaptive_ratio(0.3);
-RpdTableView::RpdTableView(TABLE *source, RpdTable *rpd)
+ShannonBase::Utils::SimpleRatioAdjuster RapidCursor::m_adaptive_ratio(0.3);
+RapidCursor::RapidCursor(TABLE *source, RpdTable *rpd)
     : m_scan_initialized{false}, m_data_source(source), m_rpd_table(rpd), m_source_rpd_table(rpd) {
   // if m_rapid_table is null, means we will get its real imp by part_id when it used.
   ut_a(m_data_source);
   m_current_row_idx.store(0);
 }
 
-int RpdTableView::open() {
+int RapidCursor::open() {
   m_current_row_idx.store(0);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int RpdTableView::close() {
+int RapidCursor::close() {
   m_current_row_idx.store(0);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int RpdTableView::init() {
+int RapidCursor::init() {
   assert(!m_scan_initialized.load(std::memory_order_acquire));
   if (!m_scan_initialized.load(std::memory_order_acquire)) {
     m_scan_context = std::make_unique<Rapid_scan_context>();
@@ -112,7 +115,7 @@ int RpdTableView::init() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int RpdTableView::end() {
+int RapidCursor::end() {
   m_scan_context->m_trx->release_snapshot();
   m_scan_context->m_trx->commit();
 
@@ -131,7 +134,7 @@ int RpdTableView::end() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-void RpdTableView::encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key) {
+void RapidCursor::encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key) {
   if (!encoded_key || !original_key || !key) return;
 
   auto offset{0u};
@@ -167,7 +170,7 @@ void RpdTableView::encode_key_parts(uchar *encoded_key, const uchar *original_ke
   }
 }
 
-int RpdTableView::position(row_id_t start_row_id) {
+int RapidCursor::position(row_id_t start_row_id) {
   // Reserve buffer cache with extra space to reduce reallocation
   m_using_batch.store(false, std::memory_order_release);
   m_row_buffer_cache.resize(1);
@@ -185,7 +188,22 @@ int RpdTableView::position(row_id_t start_row_id) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int RpdTableView::next(uchar *buf) {
+int RapidCursor::scan_table(const std::vector<std::unique_ptr<Predicate>> &predicates,
+                            const std::vector<uint32_t> &projection, RowCallback &callback) {
+  return false;
+}
+
+size_t RapidCursor::scan_table(row_id_t start_offset, size_t limit,
+                               const std::vector<std::unique_ptr<Predicate>> &predicates,
+                               const std::vector<uint32_t> &projection, RowCallback &callback) {
+  return false;
+}
+
+bool RapidCursor::read(const uchar *key_value, Row_Result &result) { return false; }
+
+bool RapidCursor::range_scan(const uchar *start_key, const uchar *end_key, RowCallback &cb) { return false; }
+
+int RapidCursor::next(uchar *buf) {
   assert(m_scan_initialized.load(std::memory_order_acquire));
   if (!m_scan_initialized.load(std::memory_order_acquire)) init();
 
@@ -220,7 +238,7 @@ int RpdTableView::next(uchar *buf) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-boost::asio::awaitable<int> RpdTableView::next_async(uchar *buf) {
+boost::asio::awaitable<int> RapidCursor::next_async(uchar *buf) {
   assert(m_scan_initialized.load(std::memory_order_acquire));
 
   if (!m_scan_initialized.load(std::memory_order_acquire)) init();
@@ -255,7 +273,7 @@ boost::asio::awaitable<int> RpdTableView::next_async(uchar *buf) {
   co_return ShannonBase::SHANNON_SUCCESS;
 }
 
-bool RpdTableView::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */) {
+bool RapidCursor::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */) {
   std::lock_guard<std::mutex> lock(m_buffer_mutex);
   if (m_scan_exhausted.load(std::memory_order_acquire)) return false;
 
@@ -357,8 +375,8 @@ bool RpdTableView::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */)
   return !m_row_buffer_cache.empty();
 }
 
-int RpdTableView::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
-                             size_t &read_cnt) {
+int RapidCursor::next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
+                            size_t &read_cnt) {
   read_cnt = 0;
   if (m_scan_exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
 
@@ -427,7 +445,7 @@ int RpdTableView::next_batch(size_t batch_size, std::vector<ShannonBase::Executo
   return read_cnt > 0 ? ShannonBase::SHANNON_SUCCESS : HA_ERR_END_OF_FILE;
 }
 
-int RpdTableView::index_init(uint keynr, bool sorted) {
+int RapidCursor::index_init(uint keynr, bool sorted) {
   init();
   m_active_index = keynr;
   auto index = m_rpd_table->get_index(m_data_source->s->key_info[keynr].name);
@@ -447,13 +465,13 @@ int RpdTableView::index_init(uint keynr, bool sorted) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int RpdTableView::index_end() {
+int RapidCursor::index_end() {
   m_active_index = MAX_KEY;
   return end();
 }
 
 // index read.
-int RpdTableView::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) {
+int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) {
   ut_a(m_active_index != MAX_KEY);
   if (key_len == 0 && key != nullptr) return HA_ERR_WRONG_COMMAND;
 
@@ -514,7 +532,7 @@ int RpdTableView::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey
   return HA_ERR_KEY_NOT_FOUND;
 }
 
-int RpdTableView::index_next(uchar *buf) {
+int RapidCursor::index_next(uchar *buf) {
   const uchar *result_key{nullptr};
   uint32_t result_key_len{0};
   row_id_t value{std::numeric_limits<row_id_t>::max()};
@@ -534,9 +552,9 @@ int RpdTableView::index_next(uchar *buf) {
   return err;
 }
 
-int RpdTableView::index_prev(uchar *buf) { return HA_ERR_WRONG_COMMAND; }
+int RapidCursor::index_prev(uchar *buf) { return HA_ERR_WRONG_COMMAND; }
 
-row_id_t RpdTableView::find(uchar *buf) {
+row_id_t RapidCursor::find(uchar *buf) {
   row_id_t rowid{0u};
   return rowid;
 }
