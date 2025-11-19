@@ -84,8 +84,7 @@ class RpdTable : public MemoryObject {
   enum class TYPE : uint8 { UNKONWN = 0, NORAMAL, PARTTABLE };
 
   /** @brief cotor. */
-  RpdTable(const TABLE *&mysql_table, const TableConfig &config)
-      : m_mem_root(std::move(std::make_unique<MEM_ROOT>())), m_source_table(mysql_table) {}
+  RpdTable(const TABLE *&mysql_table, const TableConfig &config);
 
   /** @brief decotor. */
   virtual ~RpdTable() {}
@@ -471,7 +470,7 @@ class Table : public RpdTable {
 class PartTable : public RpdTable {
  public:
   PartTable(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(mysql_table, config) {}
-  virtual ~PartTable() {}
+  virtual ~PartTable() { m_partitions.clear(); }
 
   virtual TYPE type() const override { return TYPE::PARTTABLE; }
 

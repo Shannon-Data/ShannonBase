@@ -93,7 +93,7 @@ class Imcs : public MemoryObject {
 
   // unload the table rows data from imcs.
   int unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
-                   bool error_if_not_loaded);
+                   bool error_if_not_loaded, bool is_partition = false);
 
   // insert a row into IMCS, where located at 'rowid'.
   int insert_row(const Rapid_load_context *context, row_id_t rowid, uchar *buf);

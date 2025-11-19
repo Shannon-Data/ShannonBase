@@ -213,10 +213,9 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
 
 int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
-  std::string parttb_key;
-  parttb_key.append(source->s->db.str).append(":").append(source->s->table_name.str);
-
+  std::string parttb_key = context->m_sch_tb_name;
   TableConfig table_cfg;
+  table_cfg.max_table_mem_size = SHANNON_TABLE_MEMRORY_SIZE;
   auto rpd_part_table = std::make_unique<PartTable>(source, table_cfg);
 
   if (rpd_part_table->build_partitions(context)) {
@@ -464,8 +463,8 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
 }
 
 int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) {
-  std::string sch_name(context->m_schema_name.c_str()), table_name(context->m_table_name.c_str()), key;
-  key.append(sch_name).append(":").append(table_name);
+  std::string sch_name(context->m_schema_name.c_str()), table_name(context->m_table_name.c_str());
+  std::string key = context->m_sch_tb_name;
   if (m_rpd_parttables.find(key) == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
   auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[key].get());
   assert(part_tb_ptr);
@@ -536,8 +535,8 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
 }
 
 int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopart *file) {
-  std::string sch_name(context->m_schema_name.c_str()), table_name(context->m_table_name.c_str()), key;
-  key.append(sch_name).append(":").append(table_name);
+  std::string sch_name(context->m_schema_name.c_str()), table_name(context->m_table_name.c_str());
+  std::string key = context->m_sch_tb_name;
   if (m_rpd_parttables.find(key) == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
   auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[key].get());
   assert(part_tb_ptr);
@@ -744,11 +743,9 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
     return HA_ERR_GENERIC;
   }
 
-  std::string sch_name(context->m_schema_name.c_str()), table_name(context->m_table_name.c_str()), key;
-  key.append(sch_name).append(":").append(table_name);
+  std::string sch_name(context->m_schema_name.c_str()), table_name(context->m_table_name.c_str());
+  std::string key = context->m_sch_tb_name;
   ut_a(m_rpd_parttables.find(key) != m_rpd_parttables.end());
-  auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[key].get());
-  part_tb_ptr->register_transaction(context->m_trx);
 
   auto ret{ShannonBase::SHANNON_SUCCESS};
   auto parall_scan = (context->m_extra_info.m_partition_infos.size() > SHANNON_PARTS_PARALLEL) ? true : false;
@@ -781,7 +778,6 @@ int Imcs::unload_innodb(const Rapid_load_context *context, const char *db_name, 
   std::unique_lock lock(m_table_mutex);
   m_rpd_tables.erase(key);
 
-  shannon_loaded_tables->erase(db_name, table_name);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -794,23 +790,21 @@ int Imcs::unload_innodbpart(const Rapid_load_context *context, const char *db_na
     return HA_ERR_GENERIC;
   }
 
-  shannon_loaded_tables->erase(db_name, table_name);
+  std::unique_lock lock(m_table_mutex);
+  m_rpd_parttables.erase(key);
+
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
-                       bool error_if_not_loaded) {
+                       bool error_if_not_loaded, bool is_partition) {
   /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
    *  removed*/
   int ret{ShannonBase::SHANNON_SUCCESS};
-  auto partition_hanlder = context->m_table ? context->m_table->file->get_partition_handler() : nullptr;
-  auto partition_names = context->m_thd->lex->query_block->get_table_list()
-                             ? context->m_thd->lex->query_block->get_table_list()->partition_names
-                             : nullptr;
-  if (partition_names && partition_hanlder) {
-    ret = unload_innodbpart(context, db_name, table_name, error_if_not_loaded);
-  } else
-    ret = unload_innodb(context, db_name, table_name, error_if_not_loaded);
+  if (is_partition)
+    unload_innodbpart(context, db_name, table_name, error_if_not_loaded);
+  else
+    unload_innodb(context, db_name, table_name, error_if_not_loaded);
   return ret;
 }
 

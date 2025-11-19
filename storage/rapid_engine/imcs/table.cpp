@@ -52,7 +52,8 @@ namespace ShannonBase {
 extern std::shared_ptr<ShannonBase::Utils::MemoryPool> g_rpd_memory_pool;
 namespace Imcs {
 
-Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(mysql_table, config) {
+RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
+    : m_mem_root(std::move(std::make_unique<MEM_ROOT>())), m_source_table(mysql_table) {
   m_memory_pool = ShannonBase::Utils::MemoryPool::create_from_parent(
       ShannonBase::g_rpd_memory_pool,
       config.tenant_name + ":" + mysql_table->s->db.str + mysql_table->s->table_name.str, config.max_table_mem_size);
@@ -105,7 +106,9 @@ Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(my
         .distinct_count = 0,
         .null_ratio = 0.0});
   }
+}
 
+Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(mysql_table, config) {
   // [TODO] intial global compoent.
   // m_txn_coordinator = std::make_unique<Transaction_Coordinator>();
   // m_version_manager = std::make_unique<Global_Version_Manager>();
@@ -433,6 +436,7 @@ int PartTable::register_transaction(Transaction *trx) {
 int PartTable::build_partitions(const Rapid_load_context *context) {
   auto ret{ShannonBase::SHANNON_SUCCESS};
   assert(context->m_table);
+  m_part_key = context->m_sch_tb_name;
 
   // start to add partitions.
   for (auto &[part_name, part_id] : context->m_extra_info.m_partition_infos) {

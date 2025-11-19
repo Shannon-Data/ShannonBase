@@ -199,11 +199,12 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = table.s->db.str;
   context.m_table_name = table.s->table_name.str;
+  context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
 
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   context.m_trx->begin_stmt();
   context.m_extra_info.m_trxid = context.m_trx->get_id();
-  context.m_extra_info.m_scn = context.m_extra_info.m_trxid;
+  context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();  // see the commont on RpdTable load.
 
   // use specific partion. such as partition(p1, p2, p10, ..., pn).
   Table_ref *table_list = m_thd->lex->query_block->get_table_list();
@@ -229,7 +230,6 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
     context.m_trx->rollback_stmt();
     return HA_ERR_GENERIC;
   }
-  context.m_trx->commit();
 
   m_share = new RapidPartShare(table);
   m_share->file = this;
@@ -239,6 +239,40 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table.s->db.str, table.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
   }
+
+  for (auto index = 0u; index < table.s->fields; index++) {
+    auto field_ptr = *(table.field + index);
+    // Skip columns marked as NOT SECONDARY.
+    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
+    ShannonBase::rpd_column_info_t row_rpd_columns;
+    strncpy(row_rpd_columns.schema_name, table.s->db.str, table.s->db.length);
+    row_rpd_columns.table_id = static_cast<uint>(table.s->table_map_id.id());
+    row_rpd_columns.column_id = field_ptr->field_index();
+    strncpy(row_rpd_columns.column_name, field_ptr->field_name, sizeof(row_rpd_columns.column_name) - 1);
+    strncpy(row_rpd_columns.table_name, table.s->table_name.str, sizeof(row_rpd_columns.table_name) - 1);
+    auto key_name =
+        ShannonBase::Utils::Util::get_key_name(table.s->db.str, table.s->table_name.str, field_ptr->field_name);
+#if 0  // TODO: refact
+    ShannonBase::Compress::Dictionary* dict =
+      ShannonBase::Imcs::Imcs::instance()->get_cu(key_name)->get_header()->m_local_dict.get();
+    if (dict)
+      row_rpd_columns.data_dict_bytes = dict->content_size();
+    row_rpd_columns.data_placement_index = 0;
+#endif
+    std::string comment(field_ptr->comment.str);
+    memset(row_rpd_columns.encoding, 0x0, NAME_LEN);
+    if (comment.find("SORTED") != std::string::npos)
+      strncpy(row_rpd_columns.encoding, "SORTED", strlen("SORTED") + 1);
+    else if (comment.find("VARLEN") != std::string::npos)
+      strncpy(row_rpd_columns.encoding, "VARLEN", strlen("VARLEN") + 1);
+    else
+      strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
+    row_rpd_columns.ndv = 0;
+    ShannonBase::rpd_columns_info.push_back(row_rpd_columns);
+  }
+  // start population thread if table loaded successfully.
+  ShannonBase::Populate::Populator::start();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -252,35 +286,29 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   }
 
   ShannonBase::Rapid_load_context context;
-  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
-  context.m_table = table_list ? table_list->table : nullptr;
+  context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
 
-  auto part_handler = context.m_table ? context.m_table->file->get_partition_handler() : nullptr;
-  auto partition_names = table_list ? table_list->partition_names : nullptr;
-  if (partition_names && part_handler) {
-    partition_info *part_info = table_list->table->part_info;
-    List_iterator_fast<String> it(*table_list->partition_names);
-    String *str{nullptr};
-    while ((str = it++)) {
-      uint part_id;
-      if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
-        context.m_extra_info.m_partition_infos.emplace(std::make_pair(str->c_ptr(), part_id));
-      }
-    }
+  Imcs::Imcs::instance()->unload_table(&context, db_name, table_name, false, true);
+
+  // ease the meta info.
+  for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::rpd_columns_info.begin();
+       it != ShannonBase::rpd_columns_info.end();) {
+    if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
+      it = ShannonBase::rpd_columns_info.erase(it);
+    else
+      ++it;
   }
-
-  Imcs::Imcs::instance()->unload_table(&context, db_name, table_name, false);
-
   // if all cus has been unloaded, then we can remove the meta info. Considering the following
   // scenario: alter table xxx secondary_load partion(p0, p1, xxx, pN), then unload a part of
   // partitions, not all alter table xxx secondary_unload partition(p0, p10). Under this stage,
   // we think that the table is still in loading status.
-
   shannon_loaded_tables->erase(db_name, table_name);
+
+  if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::end();
 
   return ShannonBase::SHANNON_SUCCESS;
 }

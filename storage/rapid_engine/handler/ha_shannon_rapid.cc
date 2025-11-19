@@ -421,26 +421,11 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   }
 
   ShannonBase::Rapid_load_context context;
-  Table_ref *table_list = m_thd->lex->query_block->get_table_list();
-  context.m_table = table_list ? table_list->table : nullptr;
+  context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
-
-  auto part_handler = context.m_table ? context.m_table->file->get_partition_handler() : nullptr;
-  auto partition_names = table_list ? table_list->partition_names : nullptr;
-  if (partition_names && part_handler) {
-    partition_info *part_info = table_list->table->part_info;
-    List_iterator_fast<String> it(*table_list->partition_names);
-    String *str{nullptr};
-    while ((str = it++)) {
-      uint part_id;
-      if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
-        context.m_extra_info.m_partition_infos.emplace(std::make_pair(str->c_ptr(), part_id));
-      }
-    }
-  }
 
   Imcs::Imcs::instance()->unload_table(&context, db_name, table_name, false);
 
