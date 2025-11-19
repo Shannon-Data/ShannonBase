@@ -65,7 +65,7 @@
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
 #include "storage/rapid_engine/imcs/imcs.h"        // IMCS
-#include "storage/rapid_engine/imcs/table0view.h"  //RpdTableView
+#include "storage/rapid_engine/imcs/table0view.h"  //RapidCursor
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_const.h"  //const
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -194,20 +194,18 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
 
   std::string key(table_share->db.str);
   key.append(":").append(table_share->table_name.str);
-  if (dd_table_is_partitioned(*table_def)) {
-    m_rpd_table_viewer.reset(
-        new ShannonBase::Imcs::RpdTableView(table, Imcs::Imcs::instance()->get_rpd_parttable(key)));
-  } else {
-    m_rpd_table_viewer.reset(new ShannonBase::Imcs::RpdTableView(table, Imcs::Imcs::instance()->get_rpd_table(key)));
-  }
-  m_rpd_table_viewer->open();
-  if (end_range) m_rpd_table_viewer->set_end_range(end_range);
+  m_rpd_table = dd_table_is_partitioned(*table_def) ? Imcs::Imcs::instance()->get_rpd_parttable(key)
+                                                    : Imcs::Imcs::instance()->get_rpd_table(key);
+  m_cursor.reset(new Imcs::RapidCursor(table, m_rpd_table));
+
+  m_cursor->open();
+  if (end_range) m_cursor->set_end_range(end_range);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::close() {
-  m_rpd_table_viewer->close();
-  m_rpd_table_viewer.reset(nullptr);
+  m_cursor->close();
+  m_cursor.reset(nullptr);
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -490,12 +488,10 @@ int ha_rapid::start_stmt(THD *const thd, thr_lock_type lock_type) {
                         without rnd_end() in between
 @return 0 or error number */
 int ha_rapid::rnd_init(bool scan) {
-  if (m_rpd_table_viewer->init()) {
-    m_start_of_scan = false;
+  if (m_cursor->init()) {
     return HA_ERR_GENERIC;
   }
 
-  m_start_of_scan = true;
   inited = handler::RND;
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -504,9 +500,8 @@ int ha_rapid::rnd_init(bool scan) {
  @return 0 or error number */
 
 int ha_rapid::rnd_end(void) {
-  if (m_rpd_table_viewer->end()) return HA_ERR_GENERIC;
+  if (m_cursor->end()) return HA_ERR_GENERIC;
 
-  m_start_of_scan = false;
   inited = handler::NONE;
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -517,13 +512,12 @@ int ha_rapid::rnd_end(void) {
 int ha_rapid::rnd_next(uchar *buf) {
   int error{HA_ERR_END_OF_FILE};
 
-  if (inited == handler::RND && m_start_of_scan) {
+  if (inited == handler::RND) {
     if (table_share->fields <= static_cast<uint>(ShannonBase::rpd_async_column_threshold)) {
-      error = m_rpd_table_viewer->next(buf);
+      error = m_cursor->next(buf);
     } else {
       auto reader_pool = ShannonBase::Imcs::Imcs::pool();
-      std::future<int> fut =
-          boost::asio::co_spawn(*reader_pool, m_rpd_table_viewer->next_async(buf), boost::asio::use_future);
+      std::future<int> fut = boost::asio::co_spawn(*reader_pool, m_cursor->next_async(buf), boost::asio::use_future);
       error = fut.get();  // co_await m_data_table->next_async(buf);  // index_first(buf);
       if (error == HA_ERR_KEY_NOT_FOUND) {
         error = HA_ERR_END_OF_FILE;
@@ -538,12 +532,10 @@ int ha_rapid::rnd_next(uchar *buf) {
 int ha_rapid::index_init(uint keynr, bool sorted) {
   DBUG_TRACE;
 
-  if (m_rpd_table_viewer->index_init(keynr, sorted)) {
-    m_start_of_scan = false;
+  if (m_cursor->index_init(keynr, sorted)) {
     return HA_ERR_GENERIC;
   }
 
-  m_start_of_scan = true;
   active_index = keynr;
   inited = handler::INDEX;
   return ShannonBase::SHANNON_SUCCESS;
@@ -552,57 +544,55 @@ int ha_rapid::index_init(uint keynr, bool sorted) {
 int ha_rapid::index_end() {
   DBUG_TRACE;
 
-  if (m_rpd_table_viewer->index_end()) return HA_ERR_GENERIC;
+  if (m_cursor->index_end()) return HA_ERR_GENERIC;
 
   active_index = MAX_KEY;
   inited = handler::NONE;
-  m_start_of_scan = false;
-
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag) {
   DBUG_TRACE;
   int err{HA_ERR_END_OF_FILE};
-  ut_ad(m_start_of_scan && inited == handler::INDEX);
+  ut_ad(inited == handler::INDEX);
 
-  m_rpd_table_viewer->set_end_range(end_range);
-  err = m_rpd_table_viewer->index_read(buf, key, key_len, find_flag);
+  m_cursor->set_end_range(end_range);
+  err = m_cursor->index_read(buf, key, key_len, find_flag);
   if (err == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return err;
 }
 
 int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
-  m_rpd_table_viewer->set_end_range(end_range);
-  return (m_rpd_table_viewer->index_read(buf, key, key_len, HA_READ_PREFIX_LAST));
+  m_cursor->set_end_range(end_range);
+  return (m_cursor->index_read(buf, key, key_len, HA_READ_PREFIX_LAST));
 }
 
 int ha_rapid::index_next(uchar *buf) {
-  ut_ad(m_start_of_scan && inited == handler::INDEX);
+  ut_ad(inited == handler::INDEX);
 
-  auto error = m_rpd_table_viewer->index_next(buf);
+  auto error = m_cursor->index_next(buf);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return error;
 }
 
 int ha_rapid::index_next_same(uchar *buf, const uchar *, uint) {
-  ut_ad(m_start_of_scan && inited == handler::INDEX);
+  ut_ad(inited == handler::INDEX);
 
-  auto error = m_rpd_table_viewer->index_next(buf);
+  auto error = m_cursor->index_next(buf);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return error;
 }
 
 int ha_rapid::index_first(uchar *buf) {
   DBUG_TRACE;
-  ut_ad(m_start_of_scan && inited == handler::INDEX);
+  ut_ad(inited == handler::INDEX);
 
   int error;
   if (end_range) {
-    m_rpd_table_viewer->set_end_range(end_range);
-    error = m_rpd_table_viewer->index_read(buf, end_range->key, end_range->length, end_range->flag);
+    m_cursor->set_end_range(end_range);
+    error = m_cursor->index_read(buf, end_range->key, end_range->length, end_range->flag);
   } else
-    error = m_rpd_table_viewer->index_next(buf);
+    error = m_cursor->index_next(buf);
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_first_count);
   return error;
 }
@@ -615,8 +605,8 @@ int ha_rapid::index_prev(uchar *buf) {
 int ha_rapid::index_last(uchar *buf) {
   DBUG_TRACE;
 
-  m_rpd_table_viewer->set_end_range(end_range);
-  int error = m_rpd_table_viewer->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
+  m_cursor->set_end_range(end_range);
+  int error = m_cursor->index_read(buf, nullptr, 0, HA_READ_BEFORE_KEY);
 
   /* MySQL does not seem to allow this to return HA_ERR_KEY_NOT_FOUND */
 

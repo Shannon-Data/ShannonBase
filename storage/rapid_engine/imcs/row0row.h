@@ -62,7 +62,7 @@
 #include "my_list.h"    //for LIST
 #include "sql/table.h"  //for TABLE
 
-#include "storage/innobase/include/univ.i"  //UNIV_SQL_NULL
+//#include "storage/innobase/include/univ.i"  //UNIV_SQL_NULL
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/predicate.h"

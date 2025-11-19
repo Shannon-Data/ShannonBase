@@ -43,8 +43,8 @@ class Table;
 namespace ShannonBase {
 class Transaction;
 namespace Imcs {
-class DataTable;
-class RpdTableView;
+class RpdTable;
+class RapidCursor;
 }  // namespace Imcs
 
 class ha_rapidpart;
@@ -88,8 +88,8 @@ class ha_rapid : public handler {
   ha_rapid(handlerton *hton, TABLE_SHARE *table_share);
 
  protected:
-  // std::unique_ptr<ShannonBase::Imcs::DataTable> m_data_table;
-  std::unique_ptr<ShannonBase::Imcs::RpdTableView> m_rpd_table_viewer;
+  ShannonBase::Imcs::RpdTable *m_rpd_table{nullptr};
+  std::unique_ptr<ShannonBase::Imcs::RapidCursor> m_cursor;
 
  private:
   int create(const char *, TABLE *, HA_CREATE_INFO *, dd::Table *) override { return HA_ERR_WRONG_COMMAND; }
@@ -175,10 +175,6 @@ class ha_rapid : public handler {
   RapidShare *m_share{nullptr};
 
   THD *m_thd{nullptr};
-
-  /** this is set to 1 when we are starting a table scan but have
-  not yet fetched any row, else false */
-  bool m_start_of_scan{false};
 
   std::string m_failed_reason;
 };

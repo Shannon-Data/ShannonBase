@@ -32,12 +32,12 @@
 #include <string>
 #include <vector>
 
+#include "storage/rapid_engine/include/rapid_object.h"
+
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
-#include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
 #include "storage/rapid_engine/trx/transaction.h"
 
 class TABLE;
@@ -76,8 +76,6 @@ namespace Imcs {
  *   - Column and index containers are guarded by shared_mutex.
  *   - Access counters use atomic operations.
  */
-struct Row_Result {};
-class Predicate;
 class RpdTable : public MemoryObject {
  public:
   /**
@@ -176,49 +174,6 @@ class RpdTable : public MemoryObject {
                               size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) = 0;
 
   /**
-   * Full table scan (vectorized)
-   * @param context: Scan context
-   * @param predicates: List of predicates
-   * @param projection: List of projection columns
-   * @param callback: Callback function
-   * @return: Returns SHANNON_SUCCESS on success
-   */
-  virtual int scan_table(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
-                         const std::vector<uint32_t> &projection, RowCallback callback) = 0;
-
-  /**
-   * Scan table with offset and limit support (for incremental scanning)
-   * @param context: Scan context
-   * @param start_offset: Global row offset to start from
-   * @param limit: Maximum number of rows to return
-   * @param predicates: Filter conditions
-   * @param projection: Columns to read
-   * @param callback: Callback for each matching row
-   * @return: Number of rows actually returned
-   */
-  virtual size_t scan_table(Rapid_scan_context *context, row_id_t start_offset, size_t limit,
-                            const std::vector<std::unique_ptr<Predicate>> &predicates,
-                            const std::vector<uint32_t> &projection, RowCallback callback) = 0;
-
-  /**
-   * Point query (based on primary key)
-   * @param key_value: Primary key value
-   * @param context: Context
-   * @param result: Output result
-   */
-  virtual bool read(Rapid_scan_context *context, const uchar *key_value, Row_Result &result) = 0;
-
-  /**
-   * Range scan
-   * @param start_key: Start key
-   * @param end_key: End key
-   * @param context: Context
-   * @param callback: Callback
-   */
-  virtual bool range_scan(Rapid_scan_context *context, const uchar *start_key, const uchar *end_key,
-                          RowCallback callback) = 0;
-
-  /**
    * Get row count (considering visibility)
    */
   virtual uint64_t get_row_count(const Rapid_scan_context *context) const = 0;
@@ -259,26 +214,20 @@ class RpdTable : public MemoryObject {
   TableMetadata &meta() { return m_metadata; }
 
  protected:
-  /**
-   * Locate IMCU based on global row_id
-   */
   uint32_t generate_table_id() {
     static std::atomic<uint32_t> counter{1};
     return counter.fetch_add(1);
   }
 
-  std::unique_ptr<MEM_ROOT> m_mem_root;
+  std::unique_ptr<MEM_ROOT> m_mem_root;              // table memory root. usd for MysQL SQL Objects. such as `Field`.
+  std::shared_ptr<Utils::MemoryPool> m_memory_pool;  // table data memory pool.
 
-  const TABLE *m_source_table{nullptr};
-
+  const TABLE *m_source_table{nullptr};  // which mysql table belongs to.
   TableMetadata m_metadata;
 
   // IMCU list (supports dynamic expansion)
   std::mutex m_imcu_mtex;
   std::vector<std::shared_ptr<Imcu>> m_imcus;
-
-  // current position
-  row_id_t m_current_rowid{0};
 
   // IMCU index (fast positioning)
   struct SHANNON_ALIGNAS ImcuIndex {
@@ -305,9 +254,6 @@ class RpdTable : public MemoryObject {
   };
   std::vector<ImcuIndex> m_imcu_index;
 
-  // Current IMCU
-  std::atomic<Imcu *> m_current_imcu{nullptr};
-
   // Table-level lock (coarse-grained, protects IMCU list)
   std::shared_mutex m_table_mutex;
 
@@ -316,9 +262,6 @@ class RpdTable : public MemoryObject {
 
   // Version manager (global view) [TODO:]
   // std::unique_ptr<Global_Version_Manager> m_version_manager;
-
-  // Memory pool
-  std::shared_ptr<Utils::MemoryPool> m_memory_pool;
 
   // Background worker threads [TODO:]
   // std::unique_ptr<Background_Worker_Pool> m_bg_workers;
@@ -350,18 +293,6 @@ class Table : public RpdTable {
 
   virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
                               size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) override;
-
-  virtual int scan_table(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
-                         const std::vector<uint32_t> &projection, RowCallback callback) override;
-
-  virtual size_t scan_table(Rapid_scan_context *context, row_id_t start_offset, size_t limit,
-                            const std::vector<std::unique_ptr<Predicate>> &predicates,
-                            const std::vector<uint32_t> &projection, RowCallback callback) override;
-
-  virtual bool read(Rapid_scan_context *context, const uchar *key_value, Row_Result &result) override;
-
-  virtual bool range_scan(Rapid_scan_context *context, const uchar *start_key, const uchar *end_key,
-                          RowCallback callback) override;
 
   virtual uint64_t get_row_count(const Rapid_scan_context *context) const override;
 
@@ -418,7 +349,6 @@ class Table : public RpdTable {
                                        m_metadata.rows_per_imcu, m_memory_pool);
 
     m_imcus.push_back(imcu);
-    m_current_imcu.store(imcu.get());
 
     m_imcu_index.clear();
     m_imcu_index.reserve(m_imcus.size());
@@ -433,11 +363,8 @@ class Table : public RpdTable {
   }
 
   Imcu *get_or_create_write_imcu() {
-    Imcu *current = m_current_imcu.load();
-
-    if (current && !current->is_full()) {
-      return current;
-    }
+    auto current = m_imcus.back();
+    if (current && !current->is_full()) return current.get();
 
     /**
      * EACH MCU CONTAINS `SHANNON_ROWS_IN_CHUNK` (DEFAULT) ROWS.
@@ -448,7 +375,6 @@ class Table : public RpdTable {
     auto new_imcu = std::make_shared<Imcu>(this, m_metadata, start_row /*start_row_#*/,
                                            m_metadata.rows_per_imcu /*capacity*/, m_memory_pool);
     m_imcus.push_back(new_imcu);
-    m_current_imcu.store(new_imcu.get());
 
     update_imcu_index(new_imcu.get());
 
@@ -574,24 +500,6 @@ class PartTable : public RpdTable {
     return INVALID_ROW_ID;
   }
 
-  virtual int scan_table(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
-                         const std::vector<uint32_t> &projection, RowCallback callback) override {
-    return 0;
-  }
-
-  virtual size_t scan_table(Rapid_scan_context *context, row_id_t start_offset, size_t limit,
-                            const std::vector<std::unique_ptr<Predicate>> &predicates,
-                            const std::vector<uint32_t> &projection, RowCallback callback) override {
-    return 0;
-  }
-
-  virtual bool read(Rapid_scan_context *context, const uchar *key_value, Row_Result &result) override { return 0; }
-
-  virtual bool range_scan(Rapid_scan_context *context, const uchar *start_key, const uchar *end_key,
-                          RowCallback callback) override {
-    return 0;
-  }
-
   virtual uint64_t get_row_count(const Rapid_scan_context *context) const override { return 0; }
 
   virtual ColumnStatistics get_column_stats(uint32_t col_idx) const override {
@@ -625,7 +533,6 @@ class PartTable : public RpdTable {
   // part_name+"#"+ part_id
   std::string m_part_key;
 };
-
 }  // namespace Imcs
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RAPID_TABLE_H__

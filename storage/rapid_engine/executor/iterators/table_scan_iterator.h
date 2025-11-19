@@ -161,7 +161,7 @@ class VectorizedTableScanIterator : public TableRowIterator {
       auto str_id = *(uint32 *)data_ptr;
 
       auto fld_idx = field->field_index();
-      auto dict = m_rpd_table_viewer->table_source()->meta().fields[fld_idx].dictionary;
+      auto dict = m_cursor->table_source()->meta().fields[fld_idx].dictionary;
       if (!dict) return;
       auto str_ptr = dict->get(str_id);
       field->store(str_ptr.c_str(), strlen(str_ptr.c_str()), field->charset());
@@ -182,8 +182,8 @@ class VectorizedTableScanIterator : public TableRowIterator {
  private:
   TABLE *m_table;  ///< MySQL table structure pointer
 
-  std::unique_ptr<ShannonBase::Imcs::RpdTableView> m_rpd_table_viewer;  ///< Underlying columnar data table
-  std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;         ///< Column chunks for batch processing
+  std::unique_ptr<ShannonBase::Imcs::RapidCursor> m_cursor;      ///< Underlying columnar data table
+  std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing
 
   filter_func_t m_filter;  ///< Optional filter function for row-level filtering
 

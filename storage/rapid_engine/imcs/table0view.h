@@ -31,13 +31,14 @@
 #include <utility>
 #include <vector>
 
+#include "storage/rapid_engine/include/rapid_object.h"
+
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/imcs/index/iterator.h"
-#include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/trx/readview.h"
+
+#include "storage/rapid_engine/imcs/row0row.h"
 #include "storage/rapid_engine/utils/concurrent.h"  //asio
 #include "storage/rapid_engine/utils/cpu.h"         //SimpleRatioAdjuster
-
 class TABLE;
 class key_range;
 namespace ShannonBase {
@@ -50,11 +51,12 @@ class Cu;
 class RapidTable;
 class RpdTable;
 class RowBuffer;
-
-class RpdTableView : public MemoryObject {
+struct Row_Result {};
+class Predicate;
+class RapidCursor : public MemoryObject {
  public:
-  RpdTableView(TABLE *source_table, RpdTable *rpd);
-  virtual ~RpdTableView() = default;
+  RapidCursor(TABLE *source_table, RpdTable *rpd);
+  virtual ~RapidCursor() = default;
 
   // gets its active rapid table.
   inline RpdTable *table() const { return m_rpd_table; }
@@ -78,6 +80,16 @@ class RpdTableView : public MemoryObject {
 
   // intitialize this data table object.
   int init();
+
+  int scan_table(const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32_t> &projection,
+                 RowCallback &callback);
+
+  size_t scan_table(row_id_t start_offset, size_t limit, const std::vector<std::unique_ptr<Predicate>> &predicates,
+                    const std::vector<uint32_t> &projection, RowCallback &callback);
+
+  bool read(const uchar *key_value, Row_Result &result);
+
+  bool range_scan(const uchar *start_key, const uchar *end_key, RowCallback &cb);
 
   // to the next rows.
   int next(uchar *buf);
