@@ -371,16 +371,14 @@ int RpdTableView::next_batch(size_t batch_size, std::vector<ShannonBase::Executo
   }
   if (projection_cols.empty()) return ShannonBase::SHANNON_SUCCESS;
 
+#ifndef NDEBUG
   // 2. preallocate col_chunks
   if (col_chunks.size() != projection_cols.size()) {
-    col_chunks.clear();
-    col_chunks.reserve(projection_cols.size());
-
     for (uint32_t col_id : projection_cols) {
-      Field *fld = m_data_source->field[col_id];
-      col_chunks.emplace_back(fld, batch_size);
+      assert(col_chunks[col_id].valid());
     }
   }
+#endif
 
   // 3. the predicates.
   std::vector<std::unique_ptr<Predicate>> predicates;
@@ -390,10 +388,8 @@ int RpdTableView::next_batch(size_t batch_size, std::vector<ShannonBase::Executo
     for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
       auto col_idx = projection_cols[idx];
       auto &col_chunk = col_chunks[col_idx];
-
-      auto data_ptr = row_data[col_idx];
+      auto data_ptr = row_data[idx];
       auto is_null = (data_ptr == nullptr) ? true : false;
-
       auto normal_len = m_rpd_table->meta().fields[col_idx].normalized_length;
       col_chunk.add(data_ptr, normal_len, is_null);
     }
