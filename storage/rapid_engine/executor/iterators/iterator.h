@@ -69,6 +69,7 @@ class ColumnChunk {
   // Move assignment operator
   ColumnChunk &operator=(ColumnChunk &&other) noexcept;
 
+  inline bool valid() const { return m_source_fld && (m_cols_buffer.get() != nullptr); }
   // set the row-indexth is null.
   inline void set_null(size_t index) {
     assert(m_null_mask.get());

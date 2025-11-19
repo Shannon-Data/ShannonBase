@@ -128,8 +128,8 @@ void VectorizedTableScanIterator::PreallocateColumnChunks() {
   for (uint ind = 0; ind < m_table->s->fields; ind++) {
     Field *field = *(m_table->field + ind);
     if (!bitmap_is_set(m_table->read_set, ind) || field->is_flag_set(NOT_SECONDARY_FLAG)) {
-      m_col_chunks.emplace_back(field, 0);
-    } else {  // using larger memory to reduce `allocate/new`
+      m_col_chunks.emplace_back(nullptr, 0);  // place-holder.
+    } else {                                  // using larger memory to reduce `allocate/new`
       auto initial_capacity =
           std::max(m_batch_size, static_cast<size_t>(((ShannonBase::SHANNON_ROWS_IN_CHUNK + 7) / 8) + 1));
       m_col_chunks.emplace_back(field, initial_capacity);
