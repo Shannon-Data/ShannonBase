@@ -66,6 +66,7 @@
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/predicate.h"
+#include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_object.h"
@@ -576,11 +577,9 @@ class RowBuffer {
    * @param[in] null_byte_offsets Null byte offsets.
    * @param[in] null_bitmasks Null bitmasks.
    */
-  int copy_from_mysql_fields(const Rapid_load_context *context, Field **fields, size_t num_fields,
-                             uchar *rowdata = nullptr,            // Optional: raw row buffer
-                             ulong *col_offsets = nullptr,        // Optional: column offsets
-                             ulong *null_byte_offsets = nullptr,  // Optional: null bitmap offsets
-                             ulong *null_bitmasks = nullptr);     // Optional: null bitmasks
+  int copy_from_mysql_fields(const Rapid_load_context *context, uchar *rowdata,
+                             const std::vector<FieldMetadata> &fields, ulong *col_offsets, ulong *null_byte_offsets,
+                             ulong *null_bitmasks);
 
   // MySQL Compatibility Interface
   /**

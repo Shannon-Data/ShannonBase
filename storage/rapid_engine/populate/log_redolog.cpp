@@ -668,10 +668,10 @@ boost::asio::awaitable<void> LogParser::co_parse_field(Rapid_load_context *conte
   // switch async context.
   co_await boost::asio::post(boost::asio::use_awaitable);
 
-  // same with parse_rec_field.
+  // same with parse_rec_field. [TODO: to check it part table or not]
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
-  std::string sch_tb = context->m_schema_name + ":" + context->m_table_name;
-  auto rpd_table = imcs_instance->get_rpd_table(sch_tb);
+  table_id_t table_id = real_index->table->id;
+  auto rpd_table = imcs_instance->get_rpd_table(table_id);
 
   std::unique_ptr<mem_heap_t, decltype(&mem_heap_free)> heap(mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE),
                                                              mem_heap_free);

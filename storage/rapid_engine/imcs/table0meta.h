@@ -74,15 +74,34 @@ struct SHANNON_ALIGNAS FieldMetadata {
   double null_ratio{0.0};
 };
 
+struct SHANNON_ALIGNAS KeyPart {
+  uint8_t null_bit{0};
+  uint key_field_ind;
+  uint16 key_part_flag{0}; /* 0 or HA_REVERSE_SORT */
+  uint16 length{0};
+};
+
+struct SHANNON_ALIGNAS Key {
+  std::string key_name;
+  uint key_length{0};
+
+  std::vector<KeyPart> key_parts;
+};
+
 struct SHANNON_ALIGNAS TableMetadata {
   // Basic information
   std::string db_name;
   std::string table_name;
-  uint32_t table_id{0};
+  table_id_t table_id{0};
 
+  bool db_low_byte_first{false}; /* Portable row format */
   // Column information
   uint32_t num_columns{0};
   std::vector<FieldMetadata> fields;
+  std::vector<Key> keys;  // key name <-->key part info.
+  std::vector<ulong> col_offsets;
+  std::vector<ulong> null_byte_offsets;
+  std::vector<ulong> null_bitmasks;
 
   // IMCU configuration
   size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};             // Default 8192000

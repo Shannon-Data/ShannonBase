@@ -33,7 +33,6 @@
 
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/sql_class.h"
-
 #include "storage/innobase/include/dict0dd.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -67,11 +66,12 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table,
   }
   if (table_def == nullptr) return;
 
+  table_id_t table_id = table_def->se_private_id();  // it's table id of dict_table_t
   if (dd_table_is_partitioned(*table_def)) {
     m_cursor.reset(
-        new ShannonBase::Imcs::RapidCursor(table, ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(key)));
+        new ShannonBase::Imcs::RapidCursor(table, ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(table_id)));
   } else {
-    m_cursor.reset(new ShannonBase::Imcs::RapidCursor(table, Imcs::Imcs::instance()->get_rpd_table(key)));
+    m_cursor.reset(new ShannonBase::Imcs::RapidCursor(table, Imcs::Imcs::instance()->get_rpd_table(table_id)));
   }
 }
 

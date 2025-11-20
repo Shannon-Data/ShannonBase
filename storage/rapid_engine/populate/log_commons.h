@@ -142,8 +142,10 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   Source m_source;                                                    // data source
   size_t m_size;
   enum class OperType : uint8 { UNSET = 0, INSERT, DELETE, UPDATE } m_oper{OperType::UNSET};  // oper type
+  table_id_t m_table_id{0};
+#ifndef NDEBUG
   std::string m_schema_name, m_table_name;
-
+#endif
   std::shared_ptr<uchar[]> m_buff0{nullptr};  // rep: record[0]
   off_page_data_t m_offpage_data0;
   std::shared_ptr<uchar[]> m_buff1{nullptr};  // rep: record[1]
@@ -202,7 +204,7 @@ class Populator {
   /**
    * To stop propagation oper for sche table
    */
-  static void unload(const std::string &sch, const std::string &table);
+  static void unload(const table_id_t &table_id);
 
   /**
    * Send the log buffer to system pop buffer via any type of connection.
@@ -226,8 +228,8 @@ class Populator {
    * To mark the specific table are still do populating required by quires. which is mark table queried.
    * tabel_name format: `schema_name:table_name`
    */
-  static inline bool mark_table_required(std::string &sch_table_name) {
-    return get_impl()->mark_table_required_impl(sch_table_name);
+  static inline bool mark_table_required(const table_id_t &table_id) {
+    return get_impl()->mark_table_required_impl(table_id);
   }
 
   /**
@@ -259,7 +261,7 @@ class Populator {
     /**
      * To stop propagation oper for sche table
      */
-    virtual void unload_impl(const std::string &sch, const std::string &table) = 0;
+    virtual void unload_impl(const table_id_t &table_id) = 0;
 
     /**
      * To stop log pop main thread.
@@ -295,7 +297,7 @@ class Populator {
      * To check whether the specific table are still do populating.
      * true is in pop queue, otherwise return false; tabel_name format: `schema_name/table_name`
      */
-    virtual bool mark_table_required_impl(std::string &table_name) = 0;
+    virtual bool mark_table_required_impl(const table_id_t &table_id) = 0;
   };
 
   // Get implementation instance

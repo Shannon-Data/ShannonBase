@@ -151,14 +151,16 @@ void RapidCursor::encode_key_parts(uchar *encoded_key, const uchar *original_key
       case MYSQL_TYPE_DECIMAL:
       case MYSQL_TYPE_NEWDECIMAL: {
         uchar encoding[8] = {0};
-        auto val = Utils::Util::get_field_numeric<double>(fld, original_key + offset, nullptr);
+        auto val = Utils::Util::get_field_numeric<double>(fld, original_key + offset, nullptr,
+                                                          m_data_source->s->db_low_byte_first);
         Index::Encoder<double>::EncodeData(val, encoding);
         std::memcpy(encoded_key + offset, encoding, key_part_info.length);
       } break;
       case MYSQL_TYPE_LONG: {
         ut_a(key_part_info.length == sizeof(int32_t));
         uchar encoding[4] = {0};
-        auto val = Utils::Util::get_field_numeric<int32_t>(fld, original_key + offset, nullptr);
+        auto val = Utils::Util::get_field_numeric<int32_t>(fld, original_key + offset, nullptr,
+                                                           m_data_source->s->db_low_byte_first);
         Index::Encoder<int32_t>::EncodeData(val, encoding);
         std::memcpy(encoded_key + offset, encoding, key_part_info.length);
       } break;

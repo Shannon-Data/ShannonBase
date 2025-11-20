@@ -742,6 +742,7 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   context.m_schema_name = schema;
   context.m_table_name = table;
 
+  // TODO: check table is partition table or not.
   int result = Imcs::Imcs::instance()->unload_table(&context, schema.c_str(), table.c_str(), false);
   if (result == SHANNON_SUCCESS) {
     // update state to unloaded.

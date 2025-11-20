@@ -89,6 +89,7 @@ constexpr uint64 SHANNON_PARTS_PARALLEL = 32;
 extern char *mysql_llm_home_ptr;
 namespace ShannonBase {
 using row_id_t = size_t;
+using table_id_t = uint64_t;
 /** Handler name for rapid */
 constexpr auto SHANNON_SUCCESS = 0;
 
