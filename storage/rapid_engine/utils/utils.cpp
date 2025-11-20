@@ -39,9 +39,12 @@
 #include "sql/table.h"                        //TABLE
 #include "sql/transaction.h"                  // trans_commit_stmt
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
+
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/ml/ml.h"
 #include "storage/rapid_engine/populate/log_populate.h"
 
@@ -53,6 +56,32 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
    * due to in function, `select xxxx`, when the statment executed, it enter lock table mode
    * but there's not even a opened table, so that, here we try to open a table, it failed before
    * exiting the lock table mode. such as executing `selecct ml_predict_row(xxx) int xx;`
+   * if you only get a TABLE object, you can
+   *    Table_ref table_list;
+   *     table_list.db = context.m_schema_name.c_str();
+   *     table_list.db_length = context.m_schema_name.length();
+   *     table_list.table_name = context.m_table_name.c_str();
+   *     table_list.table_name_length = context.m_table_name.length();
+   *     table_list.alias = context.m_table_name.c_str();
+   *     table_list.set_lock({TL_READ, THR_DEFAULT});
+   *     MDL_REQUEST_INIT(&table_list.mdl_request,
+   *                      MDL_key::TABLE,                 // namespace
+   *                      context.m_schema_name.c_str(),  // db
+   *                      context.m_table_name.c_str(),   // name
+   *                      MDL_SHARED_READ,                // type
+   *                      MDL_TRANSACTION);               // duration
+   *
+   *     Table_ref *table_list_ptr = &table_list;
+   *     uint counter{0};
+   *     if (open_tables(thd, &table_list_ptr, &counter, 0)) {
+   *       failed.emplace(lsn, std::move(change_rec));
+   *       continue;
+   *    }
+   *
+   *    context.m_table = table_list.table;
+   *    ..
+   *  to close the opened tables.
+   *    close_thread_tables(thd);
    */
   TABLE *table{nullptr};
   for (table = thd->open_tables; table; table = table->next) {
@@ -277,9 +306,9 @@ bool Util::dynamic_feature_normalization(THD *thd) {
   // to checkts whether query involves tables are still in pop queue. if yes, go innodb.
   if (thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED) {
     for (auto &table_ref : stmt_context->get_query_tables()) {
-      std::string table_name(table_ref->db);
-      table_name = table_name + ":" + table_ref->table_name;
-      if (ShannonBase::Populate::Populator::mark_table_required(table_name)) return false;
+      auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
+      auto table_id = share ? share->m_tableid : 0;
+      if (ShannonBase::Populate::Populator::mark_table_required(table_id)) return false;
     }
   }
 

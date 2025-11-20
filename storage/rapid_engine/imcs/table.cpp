@@ -40,6 +40,8 @@
 #include "sql/table.h"       //TABLE
 #include "storage/innobase/include/mach0data.h"
 
+#include "storage/innobase/handler/ha_innodb.h"
+
 #include "storage/rapid_engine/imcs/cu.h"  //CU
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
@@ -59,16 +61,26 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
       config.tenant_name + ":" + mysql_table->s->db.str + mysql_table->s->table_name.str, config.max_table_mem_size);
   m_metadata.db_name = mysql_table->s->db.str;
   m_metadata.table_name = mysql_table->s->table_name.str;
-  m_metadata.table_id = generate_table_id();
+  m_metadata.table_id = static_cast<ha_innobase *>(mysql_table->file)->get_table_id();
   m_metadata.rows_per_imcu = config.rows_per_imcu;
   m_metadata.max_imcu_size_mb = config.max_imcu_size_mb;
 
   // from MySQL TABLE get fields infor.
+  m_metadata.db_low_byte_first = mysql_table->s->db_low_byte_first;
   m_metadata.num_columns = mysql_table->s->fields;
-  m_metadata.fields.reserve(m_metadata.num_columns);
+  m_metadata.col_offsets.resize(m_metadata.num_columns);
+  m_metadata.null_byte_offsets.resize(m_metadata.num_columns);
+  m_metadata.null_bitmasks.resize(m_metadata.num_columns);
 
+  m_metadata.fields.reserve(m_metadata.num_columns);
   for (uint32_t ind = 0; ind < m_metadata.num_columns; ind++) {
     Field *field = mysql_table->field[ind];
+
+    m_metadata.col_offsets[ind] = field->offset(mysql_table->record[0]);
+    if (field->is_nullable()) {
+      m_metadata.null_byte_offsets[ind] = field->null_offset();
+      m_metadata.null_bitmasks[ind] = field->null_bit;
+    }
 
     std::string comment;
     if (field->comment.str && field->comment.length > 0) {
@@ -131,13 +143,21 @@ int Table::build_user_defined_index_memo(const Rapid_load_context *context) {
   auto source = context->m_table;
 
   for (auto ind = 0u; ind < source->s->keys; ind++) {
+    Key key;
     auto key_info = source->key_info + ind;
-    std::vector<std::string> key_parts_names;
+    key.key_name = key_info->name;
+    key.key_length = key_info->key_length;
+
     for (uint i = 0u; i < key_info->user_defined_key_parts /**actual_key_parts*/; i++) {
-      key_parts_names.push_back(key_info->key_part[i].field->field_name);
+      KeyPart key_part;
+      key_part.key_field_ind = key_info->key_part[i].field->field_index();
+      key_part.null_bit = key_info->key_part[i].null_bit;
+      key_part.key_part_flag = key_info->key_part[i].key_part_flag;
+      key_part.length = key_info->key_part[i].length;
+      key.key_parts.emplace_back(std::move(key_part));
     }
 
-    // m_source_keys.emplace(key_info->name, std::make_pair(key_info->key_length, key_parts_names));
+    m_metadata.keys.push_back(std::move(key));
     m_indexes.emplace(key_info->name, std::make_unique<Index::Index<uchar, row_id_t>>(key_info->name));
     m_index_mutexes.emplace(key_info->name, std::make_unique<std::mutex>());
   }
@@ -145,49 +165,47 @@ int Table::build_user_defined_index_memo(const Rapid_load_context *context) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Table::build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata, size_t len,
-                       ulong *col_offsets, size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) {
+int Table::build_index(const Rapid_load_context *context, const Key &key, row_id_t rowid, uchar *rowdata,
+                       ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
   // this is come from ha_innodb.cc postion(), when postion() changed, the part should be changed respondingly.
   // why we dont not change the impl of postion() directly? because the postion() is impled in innodb engine.
   // we want to decouple with innodb engine.
   // ref: void key_copy(uchar *to_key, const uchar *from_record, const KEY *key_info,
   //            uint key_length). Due to we should encoding the float/double/decimal types.
-  if (key->key_length > MAX_KEY_LENGTH) {
+  if (key.key_length > MAX_KEY_LENGTH) {
     return HA_ERR_INDEX_COL_TOO_LONG;
   }
 
   uchar key_buffer[MAX_KEY_LENGTH] = {0};
-  std::memset(key_buffer, 0x0, key->key_length);
-  encode_row_key(key_buffer, key, rowdata, len, col_offsets, n_cols, null_byte_offsets, null_bitmasks);
+  std::memset(key_buffer, 0x0, key.key_length);
+  encode_row_key(key_buffer, key.key_length, key.key_parts, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
 
-  { m_indexes[key->name].get()->insert(key_buffer, key->key_length, &rowid, sizeof(rowid)); }
+  { m_indexes[key.key_name].get()->insert(key_buffer, key.key_length, &rowid, sizeof(rowid)); }
   return SHANNON_SUCCESS;
 }
 
-void Table::encode_row_key(uchar *to_key, const KEY *key, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
-                           ulong *null_byte_offsets, ulong *null_bitmasks) {
-  if (!to_key || !key || key->key_length == 0) return;
-
-  std::memset(to_key, 0x0, key->key_length);
-
+void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<KeyPart> &key_parts, uchar *rowdata,
+                           ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks) {
   uint length{0u};
-  auto remain_len = key->key_length;
+  auto remain_len = key_length;
 
-  for (KEY_PART_INFO *key_part = key->key_part; remain_len > 0; key_part++) {
-    Field *field = key_part->field;
+  for (auto key_part_id = 0; remain_len > 0; key_part_id++) {
+    auto key_part = key_parts[key_part_id];
+    auto key_field_ind = key_part.key_field_ind;
+    Field *field = m_metadata.fields[key_field_ind].source_fld;
     const CHARSET_INFO *cs = field->charset();
     auto fld_ptr = rowdata + col_offsets[field->field_index()];
     field->set_field_ptr(fld_ptr);
 
-    if (key_part->null_bit) {
+    if (key_part.null_bit) {
       *to_key++ = (field->is_null() ? 1 : 0);
       remain_len--;
     }
 
-    length = std::min<uint>(remain_len, key_part->length);
-    if (key_part->key_part_flag & HA_BLOB_PART || key_part->key_part_flag & HA_VAR_LENGTH_PART) {
+    length = std::min<uint>(remain_len, key_part.length);
+    if (key_part.key_part_flag & HA_BLOB_PART || key_part.key_part_flag & HA_VAR_LENGTH_PART) {
       remain_len -= HA_KEY_BLOB_LENGTH;
-      length = std::min<uint>(remain_len, key_part->length);
+      length = std::min<uint>(remain_len, key_part.length);
       field->get_key_image(to_key, length, Field::itRAW);
       to_key += HA_KEY_BLOB_LENGTH;
     } else {
@@ -197,13 +215,15 @@ void Table::encode_row_key(uchar *to_key, const KEY *key, uchar *rowdata, size_t
         case MYSQL_TYPE_DECIMAL:
         case MYSQL_TYPE_NEWDECIMAL: {
           uchar encoding[8] = {0};
-          Index::Encoder<double>::EncodeData(field->val_real(), encoding);
+          auto val = Utils::Util::get_field_numeric<double>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+          Index::Encoder<double>::EncodeData(val, encoding);
           std::memcpy(to_key, encoding, length);  // decimal stored length: 5 not 8.
         } break;
         case MYSQL_TYPE_LONG: {
           ut_a(length == sizeof(int32_t));
           uchar encoding[4] = {0};
-          Index::Encoder<int32_t>::EncodeData((int32_t)field->val_int(), encoding);
+          auto val = Utils::Util::get_field_numeric<int32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
+          Index::Encoder<int32_t>::EncodeData(val, encoding);
           std::memcpy(to_key, encoding, length);
         } break;
         default: {
@@ -236,13 +256,10 @@ int Table::register_transaction(Transaction *trx) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                           size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) {
-  ut_a(context->m_table->s->fields == n_cols);
-
-  RowBuffer row_data(n_cols);
-  row_data.copy_from_mysql_fields(context, context->m_table->field, n_cols, rowdata, col_offsets, null_byte_offsets,
-                                  null_bitmasks);
+row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
+  RowBuffer row_data(m_metadata.num_columns);
+  row_data.copy_from_mysql_fields(context, rowdata, m_metadata.fields, m_metadata.col_offsets.data(),
+                                  m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
 
   Imcu *current_imcu = get_or_create_write_imcu();
   if (!current_imcu) {
@@ -259,9 +276,9 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata, si
   // global current rowid.
   auto rowid = current_imcu->get_start_row() + local_row_id;
 
-  for (auto index = 0u; index < context->m_table->s->keys; index++) {  // user defined indexes.
-    auto key_info = context->m_table->key_info + index;
-    if (build_index(context, key_info, rowid, rowdata, len, col_offsets, n_cols, null_byte_offsets, null_bitmasks))
+  for (auto &key : m_metadata.keys) {  // user defined indexes.
+    if (build_index(context, key, rowid, rowdata, m_metadata.col_offsets.data(), m_metadata.null_byte_offsets.data(),
+                    m_metadata.null_bitmasks.data()))
       return HA_ERR_GENERIC;
   }
 
@@ -327,20 +344,15 @@ int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
   return imcu->update_row(context, local_row_id, updates);
 }
 
-row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                           size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) {
-  std::string sch_tb_name = context->m_schema_name;
-  sch_tb_name.append(":").append(context->m_table_name);
-
-  for (auto index = 0u; index < context->m_table->s->keys; index++) {
-    auto key_info = context->m_table->key_info + index;
-    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = key_info->key_length;
-    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff =
-        std::make_unique<uchar[]>(key_info->key_length);
-    std::memset(context->m_extra_info.m_key_buff.get(), 0x0, key_info->key_length);
+row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
+  for (auto &key : m_metadata.keys) {
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_len = key.key_length;
+    const_cast<Rapid_load_context *>(context)->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key.key_length);
+    std::memset(context->m_extra_info.m_key_buff.get(), 0x0, key.key_length);
     auto to_key = context->m_extra_info.m_key_buff.get();
     std::shared_mutex key_buff_mutex;
-    encode_row_key(to_key, key_info, rowdata, len, col_offsets, n_cols, null_byte_offsets, null_bitmasks);
+    encode_row_key(to_key, key.key_length, key.key_parts, rowdata, m_metadata.col_offsets.data(),
+                   m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
     break;  // The first key is PK.
   }
 
