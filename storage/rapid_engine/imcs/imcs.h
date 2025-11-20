@@ -95,22 +95,26 @@ class Imcs : public MemoryObject {
   int unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
                    bool error_if_not_loaded, bool is_partition = false);
 
-  void cleanup(std::string &sch_name, std::string &table_name);
+  // unload the table rows data from imcs.
+  int unload_table(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded,
+                   bool is_partition = false);
 
-  inline RpdTable *get_rpd_table(const std::string &sch_table) {
+  void cleanup(const table_id_t &table_id);
+
+  inline RpdTable *get_rpd_table(const table_id_t &table_id) {
     std::shared_lock lk(m_table_mutex);
-    if (m_rpd_tables.find(sch_table) == m_rpd_tables.end())
+    if (m_rpd_tables.find(table_id) == m_rpd_tables.end())
       return nullptr;
     else
-      return m_rpd_tables[sch_table].get();
+      return m_rpd_tables[table_id].get();
   }
 
-  inline RpdTable *get_rpd_parttable(std::string &sch_table) {
+  inline RpdTable *get_rpd_parttable(const table_id_t &table_id) {
     std::shared_lock lk(m_table_mutex);
-    if (m_rpd_parttables.find(sch_table) == m_rpd_parttables.end())
+    if (m_rpd_parttables.find(table_id) == m_rpd_parttables.end())
       return nullptr;
     else
-      return m_rpd_parttables[sch_table].get();
+      return m_rpd_parttables[table_id].get();
   }
 
  private:
@@ -124,11 +128,9 @@ class Imcs : public MemoryObject {
   int load_innodbpart(const Rapid_load_context *context, ha_innopart *file);
   int load_innodbpart_parallel(const Rapid_load_context *context, ha_innopart *file);
 
-  int unload_innodb(const Rapid_load_context *context, const char *db_name, const char *table_name,
-                    bool error_if_not_loaded);
+  int unload_innodb(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded);
 
-  int unload_innodbpart(const Rapid_load_context *context, const char *db_name, const char *table_name,
-                        bool error_if_not_loaded);
+  int unload_innodbpart(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded);
 
  private:
   // Thread context for parallel scanning operations
@@ -173,10 +175,10 @@ class Imcs : public MemoryObject {
 
   std::shared_mutex m_table_mutex;
   // loaded tables. key format: schema_name + ":" + table_name.
-  std::unordered_map<std::string, std::unique_ptr<RpdTable>> m_rpd_tables;
+  std::unordered_map<table_id_t, std::unique_ptr<RpdTable>> m_rpd_tables;
 
   // loaded partitioned tables. key format: schema_name + ":" + table_name.
-  std::unordered_map<std::string, std::unique_ptr<RpdTable>> m_rpd_parttables;
+  std::unordered_map<table_id_t, std::unique_ptr<RpdTable>> m_rpd_parttables;
 
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};

@@ -99,7 +99,7 @@ extern std::multiset<std::string> g_processing_tables;
 
 // sys pop buffer, the changed records copied into this buffer. then propagation thread
 // do the real work.
-extern std::unordered_map<std::string, std::unique_ptr<table_pop_buffer_t>> sys_pop_buff;
+extern std::unordered_map<table_id_t, std::unique_ptr<table_pop_buffer_t>> sys_pop_buff;
 extern std::shared_mutex sys_pop_buff_mutex;
 
 // how many data was in sys_pop_buff?
@@ -125,7 +125,7 @@ class PopulatorImpl : public Populator::Impl {
   /**
    * To stop log pop main thread.
    */
-  void unload_impl(const std::string &sch, const std::string &table) override;
+  void unload_impl(const table_id_t &table_id) override;
 
   /**
    * To stop log pop main thread.
@@ -200,8 +200,7 @@ class PopulatorImpl : public Populator::Impl {
    * - Query planning: deciding whether to route a query to ShannonBase or InnoDB.
    * - Status monitoring: reporting progress of background population tasks.
    *
-   * @param sch_table_name A fully qualified table identifier in the form
-   *        `"schema_name:table_name"`.
+   * @param sch_table_name A fully qualified table identifier
    *
    * @return `true` if the table is currently being populated, and then mark it required by qureies,
    *          `false` otherwise.
@@ -210,7 +209,7 @@ class PopulatorImpl : public Populator::Impl {
    * @note This function should not be called from within a write lock context
    *       on `g_processing_table_mutex`, as it would cause potential deadlocks.
    */
-  bool mark_table_required_impl(std::string &sch_table_name) override;
+  bool mark_table_required_impl(const table_id_t &table_id) override;
 };
 }  // namespace Populate
 }  // namespace ShannonBase

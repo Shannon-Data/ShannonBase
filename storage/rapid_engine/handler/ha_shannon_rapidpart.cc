@@ -34,6 +34,7 @@ Created jun 6, 2025 */
 #include "ha_shannon_rapidpart.h"
 #include "include/mysqld_error.h"
 #include "my_dbug.h"
+#include "storage/innobase/handler/ha_innodb.h"
 #include "storage/innobase/include/dict0dd.h"  //dd_is_partitioned
 
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -233,7 +234,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 
   m_share = new RapidPartShare(table);
   m_share->file = this;
-  m_share->m_tableid = table.s->table_map_id.id();
+  m_share->m_tableid = static_cast<ha_innobase *>(table.file)->get_table_id();
   shannon_loaded_tables->add(table.s->db.str, table.s->table_name.str, m_share);
   if (shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) == nullptr) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table.s->db.str, table.s->table_name.str);
@@ -285,6 +286,9 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
     return HA_ERR_GENERIC;
   }
 
+  auto table_id = share ? share->m_tableid : 0;
+  ShannonBase::Populate::Populator::unload(table_id);
+
   ShannonBase::Rapid_load_context context;
   context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
   context.m_thd = m_thd;
@@ -292,7 +296,7 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
 
-  Imcs::Imcs::instance()->unload_table(&context, db_name, table_name, false, true);
+  Imcs::Imcs::instance()->unload_table(&context, table_id, false, true);
 
   // ease the meta info.
   for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::rpd_columns_info.begin();

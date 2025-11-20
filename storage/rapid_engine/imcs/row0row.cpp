@@ -485,13 +485,9 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
   FieldDataInfo info{nullptr, 0, false};
   // Determine data source pointer
   uchar *base_ptr = nullptr;
-  if (rowdata && col_offsets) {  // Mode 2: Use provided rowdata buffer + offsets
-    base_ptr = rowdata + col_offsets[col_idx];
-    info.is_null = (fld->is_nullable()) ? is_field_null(col_idx, rowdata, null_byte_offsets, null_bitmasks) : false;
-  } else {  // Mode 1: Use Field object directly
-    base_ptr = fld->field_ptr();
-    info.is_null = fld->is_nullable() ? fld->is_null() : false;
-  }
+  base_ptr = rowdata + col_offsets[col_idx];
+  info.is_null = (fld->is_nullable()) ? is_field_null(col_idx, rowdata, null_byte_offsets, null_bitmasks) : false;
+
   if (info.is_null) return info;
 
   // Extract data based on field type (unified logic)
@@ -547,13 +543,13 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
   return info;
 }
 
-int RowBuffer::copy_from_mysql_fields(const Rapid_load_context *context, Field **fields, size_t num_fields,
-                                      uchar *rowdata, ulong *col_offsets, ulong *null_byte_offsets,
-                                      ulong *null_bitmasks) {
-  if (num_fields != m_num_columns) return HA_ERR_GENERIC;
+int RowBuffer::copy_from_mysql_fields(const Rapid_load_context *context, uchar *rowdata,
+                                      const std::vector<FieldMetadata> &fields, ulong *col_offsets,
+                                      ulong *null_byte_offsets, ulong *null_bitmasks) {
+  if (fields.size() != m_num_columns) return HA_ERR_GENERIC;
 
-  for (size_t idx = 0; idx < num_fields; idx++) {
-    Field *fld = fields[idx];
+  for (size_t idx = 0; idx < fields.size(); idx++) {
+    Field *fld = fields[idx].source_fld;
     auto info = extract_field_data(context, fld, idx, rowdata, col_offsets, null_byte_offsets, null_bitmasks);
     if (info.is_null)
       set_column_null(idx);

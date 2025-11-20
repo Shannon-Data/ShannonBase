@@ -136,6 +136,7 @@ LoadedTables::~LoadedTables() {
     delete entry.second;
   }
 }
+
 void LoadedTables::add(const std::string &db, const std::string &table, RapidShare *rs) {
   std::lock_guard<std::mutex> guard(m_mutex);
   std::string keystr = db + ":" + table;
@@ -194,10 +195,8 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
 
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
 
-  std::string key(table_share->db.str);
-  key.append(":").append(table_share->table_name.str);
-  m_rpd_table = dd_table_is_partitioned(*table_def) ? Imcs::Imcs::instance()->get_rpd_parttable(key)
-                                                    : Imcs::Imcs::instance()->get_rpd_table(key);
+  m_rpd_table = dd_table_is_partitioned(*table_def) ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                                    : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   m_cursor.reset(new Imcs::RapidCursor(table, m_rpd_table));
 
   m_cursor->open();
@@ -215,14 +214,17 @@ int ha_rapid::close() {
 int ha_rapid::info(unsigned int flags) {
   ut_a(flags == (HA_STATUS_VARIABLE | HA_STATUS_NO_LOCK));
 
-  std::string sch_tb;
-  sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
+  RapidShare *share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
+  if (share == nullptr) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Table has not been loaded");
+    return HA_ERR_GENERIC;
+  }
 
   if (table->part_info) {
-    auto rpd_tb = Imcs::Imcs::instance()->get_rpd_parttable(sch_tb);
+    auto rpd_tb = Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid);
     stats.records = rpd_tb->meta().total_rows;
   } else {
-    auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(sch_tb);
+    auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
     stats.records = down_cast<ShannonBase::Imcs::Table *>(rpd_tb)->rows(nullptr);
   }
   return ShannonBase::SHANNON_SUCCESS;
@@ -275,9 +277,9 @@ unsigned long ha_rapid::index_flags(unsigned int idx, unsigned int part, bool al
 }
 
 int ha_rapid::records(ha_rows *num_rows) {
-  std::string sch_tb;
-  sch_tb.append(table_share->db.str).append(":").append(table_share->table_name.str);
-  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(sch_tb);
+  auto share = shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  auto table_id = share ? share->m_tableid : 0;
+  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(table_id);
   *num_rows = rpd_tb->meta().total_rows;
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -363,7 +365,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
   m_share = new RapidShare(table_arg);
   m_share->file = this;
-  m_share->m_tableid = table_arg.s->table_map_id.id();
+  m_share->m_tableid = static_cast<ha_innobase *>(table_arg.file)->get_table_id();
   shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) == nullptr) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
@@ -412,8 +414,6 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
   // stop the table worker thread.
-  ShannonBase::Populate::Populator::unload(db_name, table_name);
-
   RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
   if (error_if_not_loaded && !share) {
     std::string err(db_name);
@@ -422,6 +422,9 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
     return HA_ERR_GENERIC;
   }
 
+  auto table_id = share ? share->m_tableid : 0;
+  ShannonBase::Populate::Populator::unload(table_id);
+
   ShannonBase::Rapid_load_context context;
   context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
   context.m_thd = m_thd;
@@ -429,7 +432,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
 
-  Imcs::Imcs::instance()->unload_table(&context, db_name, table_name, false);
+  Imcs::Imcs::instance()->unload_table(&context, table_id, false);
 
   // ease the meta info.
   for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::rpd_columns_info.begin();
@@ -927,15 +930,16 @@ void NotifyAfterInsert(THD *thd, void *args) {
 
   if (!table || !info || !update) return;
 
-  std::string sch_tb_name = table->s->db.str;
-  sch_tb_name.append(":").append(table->s->table_name.str);
-  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(sch_tb_name);
-  if (ShannonBase::Populate::Populator::active() && rpd_table) {
+  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  if (ShannonBase::Populate::Populator::active() && share) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::INSERT;
+    copy_info_rec.m_table_id = share->m_tableid;
+#ifndef NDEBUG
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
+#endif
     lsn_t current_lsn = log_get_lsn(*log_sys);
     std::memcpy(copy_info_rec.m_buff0.get(), table->record[0], table->s->rec_buff_length);
     // read and store off-page data.
@@ -963,16 +967,16 @@ void NotifyAfterUpdate(THD *thd, void *args) {
 
   if (!table || !old_row || !new_row) return;
 
-  std::string sch_tb_name = table->s->db.str;
-  sch_tb_name.append(":").append(table->s->table_name.str);
-  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(sch_tb_name);
-  if (ShannonBase::Populate::Populator::active() && rpd_table) {
+  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  if (ShannonBase::Populate::Populator::active() && share) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::UPDATE;
+    copy_info_rec.m_table_id = share->m_tableid;
+#ifndef NDEBUG
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
-
+#endif
     lsn_t current_lsn = log_get_lsn(*log_sys);
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
     if (new_row) {
@@ -999,16 +1003,16 @@ void NotifyAfterDelete(THD *thd, void *args) {
 
   if (!table || !old_row) return;
 
-  std::string sch_tb_name = table->s->db.str;
-  sch_tb_name.append(":").append(table->s->table_name.str);
-  auto rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(sch_tb_name);
-  if (ShannonBase::Populate::Populator::active() && rpd_table) {
+  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  if (ShannonBase::Populate::Populator::active() && share) {
     ShannonBase::Populate::change_record_buff_t copy_info_rec(ShannonBase::Populate::Source::COPY_INFO,
                                                               table->s->rec_buff_length);
     copy_info_rec.m_oper = ShannonBase::Populate::change_record_buff_t::OperType::DELETE;
+    copy_info_rec.m_table_id = share->m_tableid;
+#ifndef NDEBUG
     copy_info_rec.m_schema_name = table->s->db.str;
     copy_info_rec.m_table_name = table->s->table_name.str;
-
+#endif
     lsn_t current_lsn = log_get_lsn(*log_sys);
     std::memcpy(copy_info_rec.m_buff0.get(), old_row, table->s->rec_buff_length);
 
@@ -1061,9 +1065,9 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   // if there're still do populating, then goes to innodb. and gets cardinality of tables.
   ut_a(thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED);
   for (auto &table_ref : shannon_statement_context->get_query_tables()) {
-    std::string table_name(table_ref->db);
-    table_name.append(":").append(table_ref->table_name);
-    if (ShannonBase::Populate::Populator::mark_table_required(table_name)) return true;
+    auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
+    auto table_id = share ? share->m_tableid : 0;
+    if (ShannonBase::Populate::Populator::mark_table_required(table_id)) return true;
   }
 
   // 2: to check whether the sys_pop_data_sz has too many data to populate.
