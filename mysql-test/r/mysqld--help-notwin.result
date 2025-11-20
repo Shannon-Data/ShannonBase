@@ -1118,6 +1118,9 @@ The following options may be given as the first argument:
  an incoming user load, some self-loaded tables will have
  to be unloaded to make room for the newly user-loaded
  table. 
+ --rapid-sync-mode[=name] 
+ The synchronization mode of changes propagation:
+ DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID
  --read-buffer-size=# 
  Each thread that does a sequential scan allocates a
  buffer of this size for each table it scans. If you do
@@ -1958,6 +1961,7 @@ rapid-self-load-base-relation-fill-percentage 70
 rapid-self-load-enabled FALSE
 rapid-self-load-interval-seconds 86400
 rapid-self-load-skip-quiet-check FALSE
+rapid-sync-mode DIRECT_NOTIFICATION
 read-buffer-size 131072
 read-only FALSE
 read-rnd-buffer-size 262144

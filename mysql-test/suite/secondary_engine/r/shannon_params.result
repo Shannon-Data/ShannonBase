@@ -25,6 +25,7 @@ rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
+rapid_sync_mode	DIRECT_NOTIFICATION
 rapid_use_dynamic_offload	ON
 SET rapid_async_column_threshold=11;
 ERROR HY000: Variable 'rapid_async_column_threshold' is a GLOBAL variable and should be set with SET GLOBAL
@@ -43,6 +44,7 @@ rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
+rapid_sync_mode	DIRECT_NOTIFICATION
 rapid_use_dynamic_offload	ON
 ALTER TABLE  t1 secondary_load;
 SET GLOBAL rapid_async_column_threshold=10;
@@ -63,6 +65,7 @@ rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
+rapid_sync_mode	DIRECT_NOTIFICATION
 rapid_use_dynamic_offload	ON
 SET GLOBAL rapid_self_load_enabled=on;
 SET GLOBAL rapid_self_load_base_relation_fill_percentage = 80;
@@ -81,5 +84,6 @@ rapid_self_load_base_relation_fill_percentage	80
 rapid_self_load_enabled	ON
 rapid_self_load_interval_seconds	864
 rapid_self_load_skip_quiet_check	OFF
+rapid_sync_mode	DIRECT_NOTIFICATION
 rapid_use_dynamic_offload	ON
 DROP DATABASE sh_params;

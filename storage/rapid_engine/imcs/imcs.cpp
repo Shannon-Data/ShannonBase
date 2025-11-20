@@ -233,25 +233,6 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Imcs::build_indexes_from_keys(const Rapid_load_context *context, std::map<std::string, key_info_t> &keys,
-                                  row_id_t rowid) {
-  std::string sch_tb(context->m_schema_name);
-  sch_tb.append(":").append(context->m_table_name);
-
-  for (auto &key : keys) {
-    auto key_name = key.first;
-    auto key_len = key.second.first;
-    auto key_buff = key.second.second.get();
-    m_rpd_tables[sch_tb].get()->get_index(key_name)->insert(key_buff, key_len, &rowid, sizeof(row_id_t));
-  }
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-int Imcs::build_indexes_from_log(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
-                                 row_id_t rowid) {
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
 void Imcs::cleanup(std::string &sch_name, std::string &table_name) {
   std::string key(sch_name);
   key.append(":").append(table_name);
@@ -807,72 +788,5 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
     unload_innodb(context, db_name, table_name, error_if_not_loaded);
   return ret;
 }
-
-int Imcs::insert_row(const Rapid_load_context *context, row_id_t rowid, uchar *buf) {
-  ut_a(context && buf);
-
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-int Imcs::write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                             std::unordered_map<std::string, mysql_field_t> &fields) {
-#if 0
-  std::string sch_tb;
-  sch_tb.append(context->m_schema_name).append(":").append(context->m_table_name);
-  return m_rpd_tables[sch_tb].get()->write_row_from_log(context, rowid, fields);
-#endif
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-int Imcs::delete_row(const Rapid_load_context *context, row_id_t rowid) {
-  ut_a(context);
-  auto sch_tb(context->m_schema_name);
-  sch_tb.append(":").append(context->m_table_name);
-  if (m_rpd_tables.find(sch_tb) == m_rpd_tables.end()) return HA_ERR_GENERIC;
-
-  return m_rpd_tables[sch_tb].get()->delete_row(context, rowid);
-}
-
-int Imcs::delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids) {
-  ut_a(context);
-  auto sch_tb(context->m_schema_name);
-  sch_tb.append(":").append(context->m_table_name);
-
-  if (m_rpd_tables.find(sch_tb) == m_rpd_tables.end()) return HA_ERR_GENERIC;
-  return m_rpd_tables[sch_tb].get()->delete_rows(context, rowids);
-}
-
-int Imcs::update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key,
-                     const uchar *new_field_data, size_t nlen) {
-  ut_a(context);
-#if 0
-  auto sch_tb(context->m_schema_name);
-  sch_tb.append(":").append(context->m_table_name);
-  auto ret = m_rpd_tables[sch_tb].get()->update_row(context, rowid, field_key, new_field_data, nlen);
-  if (!ret) return HA_ERR_GENERIC;
-#endif
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-int Imcs::update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                              std::unordered_map<std::string, mysql_field_t> &upd_recs) {
-  ut_a(context);
-#if 0
-  auto sch_tb(context->m_schema_name);
-  sch_tb.append(":").append(context->m_table_name);
-  return m_rpd_tables[sch_tb].get()->update_row_from_log(context, rowid, upd_recs);
-#endif
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-int Imcs::rollback_changes_by_trxid(Transaction::ID trxid) {
-#if 0
-  for (auto &tb : m_rpd_tables) {
-    tb.second.get()->rollback_changes_by_trxid(trxid);
-  }
-#endif
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
 }  // namespace Imcs
 }  // namespace ShannonBase

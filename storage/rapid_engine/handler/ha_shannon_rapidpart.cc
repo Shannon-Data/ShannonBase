@@ -286,7 +286,7 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   }
 
   ShannonBase::Rapid_load_context context;
-  context.m_table = share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr;
+  context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = db_name;

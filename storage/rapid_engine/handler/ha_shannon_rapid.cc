@@ -73,6 +73,7 @@
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/writable_access_path.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/statistics/statistics.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
@@ -100,6 +101,7 @@ uint64 rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
 ulonglong rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
 ulonglong rpd_para_load_threshold = ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD;
 int rpd_async_column_threshold = ShannonBase::DEFAULT_N_FIELD_PARALLEL;
+long unsigned int rpd_sync_mode_int = static_cast<int>(ShannonBase::Populate::SyncMode::DIRECT_NOTIFICATION);
 bool rpd_self_load_enabled = false;
 ulonglong rpd_self_load_interval_seconds = SHANNON_DEFAULT_SELF_LOAD_INTERVAL;  // 24hurs
 bool rpd_self_load_skip_quiet_check = false;
@@ -421,7 +423,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   }
 
   ShannonBase::Rapid_load_context context;
-  context.m_table = share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr;
+  context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = db_name;
@@ -1320,6 +1322,8 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_pop_buffer_size_max", (char *)&ShannonBase::rpd_pop_buff_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
     /*the max row number of used to enable parallel load for secondary_load*/
     {"rapid_parallel_load_max", (char *)&ShannonBase::rpd_para_load_threshold, SHOW_LONG, SHOW_SCOPE_GLOBAL},
+    /*the mode to aysnc the changes to rapid*/
+    {"rapid_async_mode", (char *)&ShannonBase::Populate::g_sync_mode, SHOW_INT, SHOW_SCOPE_GLOBAL},
     /*the max column number of used to aysnc reading or parsing log*/
     {"rapid_async_column_threshold", (char *)&ShannonBase::rpd_async_column_threshold, SHOW_INT, SHOW_SCOPE_GLOBAL},
     /*to enable self load or disable*/
@@ -1519,6 +1523,81 @@ static int rpd_async_threshold_validate(THD *,                          /*!< in:
   *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
 }
+
+// to update sync mode of propagation of changes.
+static void rpd_sync_mode_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *var [[maybe_unused]], void *var_ptr,
+                                 const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+
+  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
+  auto new_val = *static_cast<const int *>(save);
+  switch (new_val) {
+    case 0:
+      ShannonBase::Populate::g_sync_mode.store(ShannonBase::Populate::SyncMode::DIRECT_NOTIFICATION);
+      break;
+    case 1:
+      ShannonBase::Populate::g_sync_mode.store(ShannonBase::Populate::SyncMode::REDO_LOG_PARSE);
+      break;
+    case 2:
+      ShannonBase::Populate::g_sync_mode.store(ShannonBase::Populate::SyncMode::HYBRID);
+      break;
+    default:
+      sql_print_error("Invalid sync mode: %d, using default", new_val);
+      ShannonBase::Populate::g_sync_mode.store(ShannonBase::Populate::SyncMode::DIRECT_NOTIFICATION);
+  }
+}
+
+/** Validate passed-in "value" is a valid monitor counter name.
+ This function is registered as a callback with MySQL.
+ @return 0 for valid name */
+static int rpd_sync_mode_validate(THD *,                          /*!< in: thread handle */
+                                  SYS_VAR *,                      /*!< in: pointer to system
+                                                                                  variable */
+                                  void *save,                     /*!< out: immediate result
+                                                                  for update function */
+                                  struct st_mysql_value *value) { /*!< in: incoming string */
+
+  if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
+             "Tables have been loaded, cannot change the rapid sync mode to unload all loaded tables");
+    return 1;
+  }
+
+  int type = value->value_type(value);
+  if (type == MYSQL_VALUE_TYPE_INT) {
+    long long input_val;
+    if (value->val_int(value, &input_val)) return 1;
+
+    if (input_val < 0 || input_val > 2) {
+      sql_print_error("Sync mode value %lld is out of range [0, 2]", input_val);
+      return 1;
+    }
+    *static_cast<int *>(save) = static_cast<int>(input_val);
+  } else {
+    const char *str_val;
+    char buff[STRING_BUFFER_USUAL_SIZE];
+    int length = sizeof(buff);
+
+    if ((str_val = value->val_str(value, buff, &length)) == NULL) return 1;
+
+    if (strcasecmp(str_val, "DIRECT_NOTIFICATION") == 0) {
+      *static_cast<int *>(save) = 0;
+    } else if (strcasecmp(str_val, "REDO_LOG_PARSE") == 0) {
+      *static_cast<int *>(save) = 1;
+    } else if (strcasecmp(str_val, "HYBRID") == 0) {
+      *static_cast<int *>(save) = 2;
+    } else {
+      sql_print_error("Invalid sync mode name: %s", str_val);
+      return 1;
+    }
+  }
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+static TYPELIB rapid_sync_mode_typelib = {array_elements(ShannonBase::Populate::sync_mode_names) - 1,
+                                          "rapid_sync_mode_typelib", ShannonBase::Populate::sync_mode_names, nullptr};
 
 static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void *save) {
   bool new_value = *static_cast<const bool *>(save);
@@ -1734,6 +1813,16 @@ static MYSQL_SYSVAR_ULONGLONG(parallel_load_max,
                               ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD, //max
                               0);
 
+static MYSQL_SYSVAR_ENUM(sync_mode,
+                        ShannonBase::rpd_sync_mode_int,
+                        PLUGIN_VAR_OPCMDARG,
+                        "The synchronization mode of changes propagation: DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID",
+                        rpd_sync_mode_validate,
+                        rpd_sync_mode_update,
+                        static_cast<uint>(ShannonBase::Populate::SyncMode::DIRECT_NOTIFICATION), // default
+                        &rapid_sync_mode_typelib
+);
+
 static MYSQL_SYSVAR_INT(async_column_threshold,
                         ShannonBase::rpd_async_column_threshold,
                         PLUGIN_VAR_OPCMDARG,
@@ -1847,6 +1936,7 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
     MYSQL_SYSVAR(pop_buffer_size_max),
     MYSQL_SYSVAR(parallel_load_max),
+    MYSQL_SYSVAR(sync_mode),
     MYSQL_SYSVAR(async_column_threshold),
     MYSQL_SYSVAR(self_load_enabled),
     MYSQL_SYSVAR(self_load_interval_seconds),
