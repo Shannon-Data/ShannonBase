@@ -286,8 +286,12 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
     return HA_ERR_GENERIC;
   }
 
+<<<<<<< HEAD
   auto table_id = share ? share->m_tableid : 0;
   ShannonBase::Populate::Populator::unload(table_id);
+=======
+  ShannonBase::Populate::Populator::unload(share->m_tableid);
+>>>>>>> e8ffcdeac (feat(refactor):refactor change propagation)
 
   ShannonBase::Rapid_load_context context;
   context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
@@ -296,6 +300,10 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
 
+<<<<<<< HEAD
+=======
+  table_id_t table_id = share ? share->m_tableid : 0;
+>>>>>>> e8ffcdeac (feat(refactor):refactor change propagation)
   Imcs::Imcs::instance()->unload_table(&context, table_id, false, true);
 
   // ease the meta info.
