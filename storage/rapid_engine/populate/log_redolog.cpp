@@ -849,7 +849,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
             *log_parser_pool, parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
 
       // step 2: insert all field data into CUs.
-      auto rowid = imcs_instance->reserve_row_id(sch_tb);
+      auto rowid = 0;//imcs_instance->reserve_row_id(sch_tb);
       if (imcs_instance->write_row_from_log(context, rowid, row_field_value)) return HA_ERR_WRONG_IN_RECORD;
 
       // step3: insert the index info.

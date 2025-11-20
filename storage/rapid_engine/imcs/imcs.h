@@ -95,40 +95,7 @@ class Imcs : public MemoryObject {
   int unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
                    bool error_if_not_loaded, bool is_partition = false);
 
-  // insert a row into IMCS, where located at 'rowid'.
-  int insert_row(const Rapid_load_context *context, row_id_t rowid, uchar *buf);
-
-  // insert a row into IMCS to specific address from log_parser thread.
-  int write_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                         std::unordered_map<std::string, mysql_field_t> &fields);
-
-  // delete a row in IMCS by using its rowid.
-  int delete_row(const Rapid_load_context *context, row_id_t rowid);
-
-  // delete a row in IMCS by using its rowid. if vector is empty that means delete all rows.
-  int delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &rowids);
-
-  // update a cu in IMCS by using its rowid.
-  int update_row(const Rapid_load_context *context, row_id_t rowid, std::string &field_key, const uchar *new_field_data,
-                 size_t nlen);
-
-  /** row_id[in], which row will be updated.
-   *  upd_recs[in], new values of updating row at row_id.
-   */
-  int update_row_from_log(const Rapid_load_context *context, row_id_t rowid,
-                          std::unordered_map<std::string, mysql_field_t> &upd_recs);
-
-  int build_indexes_from_keys(const Rapid_load_context *context, std::map<std::string, key_info_t> &keys,
-                              row_id_t rowid);
-
-  int build_indexes_from_log(const Rapid_load_context *context, std::map<std::string, mysql_field_t> &field_values,
-                             row_id_t rowid);
-
-  int rollback_changes_by_trxid(Transaction::ID trxid);
-
   void cleanup(std::string &sch_name, std::string &table_name);
-
-  inline row_id_t reserve_row_id(std::string &sch_table) { return 0; }
 
   inline RpdTable *get_rpd_table(const std::string &sch_table) {
     std::shared_lock lk(m_table_mutex);
