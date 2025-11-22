@@ -122,15 +122,9 @@ class RpdTable : public MemoryObject {
    * @brief write supporting precomputed offsets and bitmaps.
    * @param[in] context Rapid context.
    * @param[in] rowdata Row data buffer.
-   * @param[in] len     Buffer length.
-   * @param[in] col_offsets Column offsets.
-   * @param[in] n_cols  Number of columns.
-   * @param[in] null_byte_offsets Null byte offsets.
-   * @param[in] null_bitmasks Null bitmasks.
    * @return: Inserted global row_id, returns INVALID_ROW_ID on failure.
    */
-  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) = 0;
+  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata) = 0;
 
   /**
    * Delete row (Core: row-level marking)
@@ -169,8 +163,7 @@ class RpdTable : public MemoryObject {
    * @param[in] null_bitmasks Null bitmasks.
    * @return: Inserted global row_id, returns INVALID_ROW_ID on failure.
    */
-  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) = 0;
+  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata) = 0;
 
   /**
    * Get row count (considering visibility)
@@ -280,8 +273,7 @@ class Table : public RpdTable {
 
   virtual int create_index_memo(const Rapid_load_context *context) override;
 
-  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) override;
+  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata) override;
 
   virtual int delete_row(const Rapid_load_context *context, row_id_t global_row_id) override;
 
@@ -290,8 +282,7 @@ class Table : public RpdTable {
   virtual int update_row(const Rapid_load_context *context, row_id_t global_row_id,
                          const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates) override;
 
-  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) override;
+  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata) override;
 
   virtual uint64_t get_row_count(const Rapid_scan_context *context) const override;
 
@@ -439,8 +430,8 @@ class Table : public RpdTable {
 
     @retval SHANNON_SUCCESS  Index entry successfully created
   */
-  int build_index(const Rapid_load_context *context, const KEY *key, row_id_t rowid, uchar *rowdata, size_t len,
-                  ulong *col_offsets, size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks);
+  int build_index(const Rapid_load_context *context, const Key &key, row_id_t rowid, uchar *rowdata, ulong *col_offsets,
+                  ulong *null_byte_offsets, ulong *null_bitmasks);
 
   /**
    * @brief Encode a row buffer into a contiguous key buffer suitable for indexing.
@@ -462,8 +453,8 @@ class Table : public RpdTable {
    *     to MySQL key conventions (HA_KEY_BLOB_LENGTH for BLOBs).
    *   - The function does not modify the input record.
    */
-  void encode_row_key(uchar *to_key, const KEY *key, uchar *rowdata, size_t len, ulong *col_offsets, size_t n_cols,
-                      ulong *null_byte_offsets, ulong *null_bitmasks);
+  void encode_row_key(uchar *to_key, uint key_length, const std::vector<KeyPart> &key_parts, uchar *rowdata,
+                      ulong *col_offsets, ulong *null_byte_offsets, ulong *null_bitmasks);
 };
 
 // partitioned rapid table.
@@ -478,10 +469,7 @@ class PartTable : public RpdTable {
 
   virtual int create_index_memo(const Rapid_load_context *context) override { return 0; }
 
-  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) override {
-    return INVALID_ROW_ID;
-  }
+  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata) override { return INVALID_ROW_ID; }
 
   virtual int delete_row(const Rapid_load_context *context, row_id_t global_row_id) override { return 0; }
 
@@ -494,10 +482,7 @@ class PartTable : public RpdTable {
     return 0;
   }
 
-  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata, size_t len, ulong *col_offsets,
-                              size_t n_cols, ulong *null_byte_offsets, ulong *null_bitmasks) override {
-    return INVALID_ROW_ID;
-  }
+  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata) override { return INVALID_ROW_ID; }
 
   virtual uint64_t get_row_count(const Rapid_scan_context *context) const override { return 0; }
 

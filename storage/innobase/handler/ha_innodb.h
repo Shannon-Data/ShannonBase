@@ -511,6 +511,10 @@ class ha_innobase : public handler {
   bool check_if_incompatible_data(HA_CREATE_INFO *info,
                                   uint table_changes) override;
 
+  inline table_id_t get_table_id() const { 
+    ut_ad(m_prebuilt != nullptr && m_prebuilt->table != nullptr);
+    return m_prebuilt->table->id; 
+  }
  private:
   /** @name Multi Range Read interface
   @{ */

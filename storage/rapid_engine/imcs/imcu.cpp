@@ -129,7 +129,8 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
     // update Storage Index
     if (row_col_data->data && is_numeric_type(row_col_data->type)) {
       auto src_fld = m_owner_table->meta().fields[col_idx].source_fld;
-      double numeric_val = Utils::Util::get_field_numeric<double>(src_fld, row_col_data->data, nullptr);
+      double numeric_val = Utils::Util::get_field_numeric<double>(src_fld, row_col_data->data, nullptr,
+                                                                  m_owner_table->meta().db_low_byte_first);
       m_header.storage_index->update(col_idx, numeric_val);
     }
   }
@@ -281,7 +282,8 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
 
     assert(cu->get_source_field()->type() == cu->get_type());
     if (is_numeric_type(cu->get_type())) {
-      double numeric_val = Utils::Util::get_field_numeric<double>(cu->get_source_field(), new_value.data, nullptr);
+      double numeric_val = Utils::Util::get_field_numeric<double>(cu->get_source_field(), new_value.data, nullptr,
+                                                                  m_owner_table->meta().db_low_byte_first);
       m_header.storage_index->update(col_idx, numeric_val);
     }
   }
@@ -458,7 +460,8 @@ void Imcu::update_storage_index() {
       // Update statistics based on data type
       if (is_numeric) {
         // Extract numeric value
-        double numeric_val = Utils::Util::get_field_numeric<double>(source_field, data, nullptr);
+        double numeric_val = Utils::Util::get_field_numeric<double>(source_field, data, nullptr,
+                                                                    m_owner_table->meta().db_low_byte_first);
         m_header.storage_index->update(col_idx, numeric_val);
       } else {
         // Handle string types

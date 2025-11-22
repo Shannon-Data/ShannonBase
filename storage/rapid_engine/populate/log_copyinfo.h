@@ -31,6 +31,7 @@
 #define __SHANNONBASE_LOG_COPY_INFO_PARSER_H__
 
 #include "sql/sql_base.h"
+#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"  //Rapid_load_context
 #include "storage/rapid_engine/populate/log_commons.h"   //change_record_buff_t::OperType
 #include "storage/rapid_engine/utils/utils.h"
@@ -120,8 +121,8 @@ class CopyInfoParser {
    * @threadsafe Not thread-safe; caller must ensure single-threaded access to the
    *              provided `Rapid_load_context` instance.
    */
-  uint parse_copy_info(Rapid_load_context *context, change_record_buff_t::OperType oper_type, byte *start,
-                       byte *end_ptr, byte *new_start, byte *new_end_ptr);
+  uint parse_copy_info(Rapid_load_context *context, table_id_t &table_id, change_record_buff_t::OperType oper_type,
+                       byte *start, byte *end_ptr, byte *new_start, byte *new_end_ptr);
 
  private:
   /**
@@ -152,8 +153,8 @@ class CopyInfoParser {
    *   - It does not perform any physical logging; the LSN was already assigned
    *     in `NotifyAfterUpdate()` before enqueuing the record.
    */
-  int parse_and_apply_update(Rapid_load_context *context, TABLE *table, const byte *old_start, const byte *old_end_ptr,
-                             const byte *new_start, const byte *new_end_ptr);
+  int parse_and_apply_update(Rapid_load_context *context, table_id_t &table_id, const byte *old_start,
+                             const byte *old_end_ptr, const byte *new_start, const byte *new_end_ptr);
 
   /**
    * @brief Apply an INSERT operation to a RAPID table using COPY_INFO data.
@@ -176,7 +177,7 @@ class CopyInfoParser {
    *   - The record buffer is already laid out in MySQL’s internal row format.
    *   - No binary decoding is required, only field extraction and mapping.
    */
-  int parse_and_apply_insert(Rapid_load_context *context, TABLE *table, const byte *start, const byte *end_ptr);
+  int parse_and_apply_insert(Rapid_load_context *context, table_id_t &table_id, const byte *start, const byte *end_ptr);
 
   /**
    * @brief Apply a DELETE operation to a RAPID table using COPY_INFO data.
@@ -199,43 +200,7 @@ class CopyInfoParser {
    *   - This function does not read or modify redo logs.
    *   - It directly interprets MySQL’s in-memory row layout.
    */
-  int parse_and_apply_delete(Rapid_load_context *context, TABLE *table, const byte *start, const byte *end_ptr);
-
-  /**
-   * @brief Initialize column metadata information from a given TABLE object.
-   *
-   * This function extracts essential per-column metadata (offsets, null byte locations,
-   * and null bitmasks) from the provided `TABLE` structure, and caches them internally
-   * in the `CopyInfoParser` instance for later use during record parsing and population.
-   *
-   * Specifically, it computes and stores:
-   *   - `m_col_offsets[i]`      → byte offset of column `i` within a record buffer.
-   *   - `m_null_byte_offsets[i]` → byte offset of the null-byte that contains the null bit for column `i`.
-   *   - `m_null_bitmasks[i]`     → bitmask used to test or set the null flag of column `i`.
-   *
-   * These values are derived from the MySQL `Field` metadata and are used to efficiently
-   * locate and interpret each field's data during row decoding or replay from COPY_INFO logs.
-   *
-   * @param[in] context   The rapid load execution context (may contain shared buffers or state).
-   * @param[in] table     The MySQL TABLE object whose field metadata will be parsed.
-   *
-   * @return
-   *   - `ShannonBase::SHANNON_SUCCESS` on success.
-   *   - (In future) error code if metadata extraction fails or table is invalid.
-   *
-   * @note
-   *   - The function assumes that `table` is already opened and valid.
-   *   - This function does not read or modify record contents — it only prepares metadata.
-   *   - The extracted offsets are based on `table->record[0]` layout and are reused
-   *     for parsing binary row data efficiently.
-   */
-  int parse_table_meta(Rapid_load_context *context, const TABLE *table);
-
- private:
-  size_t m_n_fields{0};
-  std::map<std::string, std::vector<ulong>> m_col_offsets;
-  std::map<std::string, std::vector<ulong>> m_null_byte_offsets;
-  std::map<std::string, std::vector<ulong>> m_null_bitmasks;
+  int parse_and_apply_delete(Rapid_load_context *context, table_id_t &table_id, const byte *start, const byte *end_ptr);
 };
 }  // namespace Populate
 }  // namespace ShannonBase
