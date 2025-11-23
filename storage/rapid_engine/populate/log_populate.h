@@ -82,7 +82,7 @@ item by a co-routine to promot the performance.
 
 constexpr uint64 POP_MAX_WAIT_TIMEOUT = 200;         // main worker, timeout time in ms.
 constexpr uint64 TABLE_WORKER_IDLE_TIMEOUT = 30000;  // if 30s no incoming new data,the exit the table-level workers.
-
+constexpr uint16_t BATCH_PROCESS_NUM = 256;
 /**
  * key, (uint64_t)lsn_t, start lsn of this mtr record. a change_record_buff_t is consisted of
  * serveral mlog records. Taking ISNERT as an instance, an insert operation is
@@ -93,10 +93,6 @@ constexpr uint64 TABLE_WORKER_IDLE_TIMEOUT = 30000;  // if 30s no incoming new d
  * when transaction commits. `mtr_t::Command::execute`. After that cp all change_record_buff_t to
  * sys_pop_buff.
  */
-
-extern std::shared_mutex g_processing_table_mutex;
-extern std::multiset<std::string> g_processing_tables;
-
 // sys pop buffer, the changed records copied into this buffer. then propagation thread
 // do the real work.
 extern std::unordered_map<table_id_t, std::unique_ptr<table_pop_buffer_t>> sys_pop_buff;
@@ -104,6 +100,9 @@ extern std::shared_mutex sys_pop_buff_mutex;
 
 // how many data was in sys_pop_buff?
 extern std::atomic<uint64> sys_pop_data_sz;
+
+extern std::shared_mutex g_propagating_table_mutex;
+extern std::multiset<std::string> g_propagating_tables;
 
 class PopulatorImpl : public Populator::Impl {
  public:

@@ -54,8 +54,8 @@ mysql_pfs_key_t rapid_self_load_thread_key;
 
 namespace ShannonBase {
 namespace Populate {
-extern std::shared_mutex g_processing_table_mutex;
-extern std::multiset<std::string> g_processing_tables;
+extern std::shared_mutex g_propagating_table_mutex;
+extern std::multiset<std::string> g_propagating_tables;
 }  // namespace Populate
 extern bool rpd_self_load_enabled;
 extern ulonglong rpd_self_load_interval_seconds;  // default 24hurs
@@ -519,8 +519,9 @@ bool SelfLoadManager::is_system_quiet() {
     }
 
     // to check Change Propagation's delay.
-    std::shared_lock lk(ShannonBase::Populate::g_processing_table_mutex);
-    if (ShannonBase::Populate::g_processing_tables.find(full_name) != ShannonBase::Populate::g_processing_tables.end())
+    std::shared_lock lk(ShannonBase::Populate::g_propagating_table_mutex);
+    if (ShannonBase::Populate::g_propagating_tables.find(full_name) !=
+        ShannonBase::Populate::g_propagating_tables.end())
       return false;  // is still in change propagating.
   }
 
