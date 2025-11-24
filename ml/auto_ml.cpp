@@ -150,29 +150,29 @@ void Auto_ML::build_task(std::string_view task_str) {
   return;
 }
 
-int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::string &model_content,
+int Auto_ML::precheck_and_process_meta_info(std::string &model_handle_name, std::string &model_content,
                                             bool should_loaded) {
-  if (model_hanle_name.length() == 0) return HA_ERR_GENERIC;
+  if (model_handle_name.length() == 0) return HA_ERR_GENERIC;
 
   {
     std::lock_guard<std::mutex> lock(models_mutex);
-    if (should_loaded && (Loaded_models.find(model_hanle_name) == Loaded_models.end())) {
+    if (should_loaded && (Loaded_models.find(model_handle_name) == Loaded_models.end())) {
       // should been loaded, but not loaded.
       std::ostringstream err;
-      err << model_hanle_name << " has not been loaded";
+      err << model_handle_name << " has not been loaded";
       my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
       models_mutex.unlock();
       return HA_ERR_GENERIC;
-    } else if (!should_loaded && (Loaded_models.find(model_hanle_name) != Loaded_models.end())) {
+    } else if (!should_loaded && (Loaded_models.find(model_handle_name) != Loaded_models.end())) {
       // should not been loaded, but loaded.
       std::ostringstream err;
-      err << model_hanle_name << " has been loaded";
+      err << model_handle_name << " has been loaded";
       my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
       return HA_ERR_GENERIC;
     }
   }
 
-  if (Utils::read_model_content(model_hanle_name, m_options)) return HA_ERR_GENERIC;
+  if (Utils::read_model_content(model_handle_name, m_options)) return HA_ERR_GENERIC;
   auto dom_ptr = m_options.clone_dom();
   if (!dom_ptr) return HA_ERR_GENERIC;
 
@@ -184,7 +184,7 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
     std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
   }
 
-  if (Utils::read_model_object_content(model_hanle_name, model_content)) return HA_ERR_GENERIC;
+  if (Utils::read_model_object_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
 
   if (m_task_type_str.length()) {
     init_task_map();
@@ -194,17 +194,17 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_hanle_name, std::
   return 0;
 }
 
-int Auto_ML::train() {
+int Auto_ML::train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata) {
   std::string sch_tb_name{m_schema_name};
   sch_tb_name.append(".");
   sch_tb_name.append(m_table_name);
   if (Utils::check_table_available(sch_tb_name)) return HA_ERR_GENERIC;
 
-  auto ret = m_ml_task ? m_ml_task->train() : HA_ERR_GENERIC;
+  auto ret = m_ml_task ? m_ml_task->train(thd, model_object, model_metadata) : HA_ERR_GENERIC;
   return ret;
 }
 
-int Auto_ML::load(String *model_handler_name) {
+int Auto_ML::load(THD *thd, String *model_handler_name) {
   // in load, the schem_name means user name.
   assert(model_handler_name);
   m_handler = model_handler_name->c_ptr_safe();
@@ -212,10 +212,10 @@ int Auto_ML::load(String *model_handler_name) {
   std::string model_content_str;
   if (precheck_and_process_meta_info(m_handler, model_content_str, false)) return HA_ERR_GENERIC;
 
-  return m_ml_task ? m_ml_task->load(model_content_str) : HA_ERR_GENERIC;
+  return m_ml_task ? m_ml_task->load(thd, model_content_str) : HA_ERR_GENERIC;
 }
 
-int Auto_ML::unload(String *model_handler_name) {
+int Auto_ML::unload(THD *thd, String *model_handler_name) {
   // in unload, the schem_name means user name.
   assert(model_handler_name);
   m_handler = model_handler_name->c_ptr_safe();
@@ -223,11 +223,11 @@ int Auto_ML::unload(String *model_handler_name) {
   std::string model_content_str;
   if (precheck_and_process_meta_info(m_handler, model_content_str, true)) return HA_ERR_GENERIC;
 
-  return m_ml_task ? m_ml_task->unload(m_handler) : HA_ERR_GENERIC;
+  return m_ml_task ? m_ml_task->unload(thd, m_handler) : HA_ERR_GENERIC;
 }
 
-double Auto_ML::score(String *sch_table_name, String *target_column_name, String *model_handle_name, String *metric,
-                      Json_wrapper options) {
+double Auto_ML::score(THD *thd, String *sch_table_name, String *target_column_name, String *model_handle_name,
+                      String *metric, Json_wrapper options) {
   assert(sch_table_name && target_column_name && model_handle_name);
 
   std::string sch_tb_name_str(sch_table_name->c_ptr_safe());
@@ -239,12 +239,13 @@ double Auto_ML::score(String *sch_table_name, String *target_column_name, String
 
   std::string target_column_name_str(target_column_name->c_ptr_safe());
   std::string metric_str(metric->c_ptr_safe());
-  return m_ml_task
-             ? m_ml_task->score(sch_tb_name_str, target_column_name_str, model_handler_name_str, metric_str, options)
-             : 0;
+  return m_ml_task ? m_ml_task->score(thd, sch_tb_name_str, target_column_name_str, model_handler_name_str, metric_str,
+                                      options)
+                   : 0;
 }
 
-int Auto_ML::predict_row(Json_wrapper &input, String *model_handler_name, Json_wrapper options, Json_wrapper &result) {
+int Auto_ML::predict_row(THD *thd, Json_wrapper &input, String *model_handler_name, Json_wrapper options,
+                         Json_wrapper &result) {
   assert(model_handler_name);
   std::string model_handler_name_str(model_handler_name->c_ptr_safe());
   std::string model_content_str;
@@ -281,7 +282,7 @@ int Auto_ML::predict_row(Json_wrapper &input, String *model_handler_name, Json_w
       goto error;
     }
   }
-  ret = m_ml_task ? m_ml_task->predict_row(input, model_handler_name_str, options, result) : HA_ERR_GENERIC;
+  ret = m_ml_task ? m_ml_task->predict_row(thd, input, model_handler_name_str, options, result) : HA_ERR_GENERIC;
 error:
   if (ret) {
     my_error(ER_SECONDARY_ENGINE, MYF(0), err.str().c_str());
@@ -290,7 +291,7 @@ error:
 }
 
 // predict a table.
-int Auto_ML::predict_table(String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name,
+int Auto_ML::predict_table(THD *thd, String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name,
                            Json_wrapper &options) {
   std::string in_sch_tb_name_str(in_sch_tb_name->c_ptr_safe());
   std::ostringstream err;
@@ -302,22 +303,22 @@ int Auto_ML::predict_table(String *in_sch_tb_name, String *model_handler_name, S
   std::string model_content_str;
   if (precheck_and_process_meta_info(model_handler_name_str, model_content_str, true)) return 0;
 
-  auto ret = m_ml_task
-                 ? m_ml_task->predict_table(in_sch_tb_name_str, model_handler_name_str, out_sch_tb_name_str, options)
-                 : HA_ERR_GENERIC;
+  auto ret = m_ml_task ? m_ml_task->predict_table(thd, in_sch_tb_name_str, model_handler_name_str, out_sch_tb_name_str,
+                                                  options)
+                       : HA_ERR_GENERIC;
 
   return ret;
 }
 
-int Auto_ML::import(Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_handler_name) {
+int Auto_ML::import(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_handler_name) {
   std::string handler_name_str(model_handler_name->ptr());
 
-  if (m_ml_task) return m_ml_task->import(model_object, model_metadata, handler_name_str);
+  if (m_ml_task) return m_ml_task->import(thd, model_object, model_metadata, handler_name_str);
 
   return 0;
 }
 
-int Auto_ML::explain(String *sch_tb_name, String *target_column_name, String *model_handler_name,
+int Auto_ML::explain(THD *thd, String *sch_tb_name, String *target_column_name, String *model_handler_name,
                      Json_wrapper exp_options) {
   assert(sch_tb_name && target_column_name && model_handler_name);
   m_options = exp_options;
@@ -329,15 +330,14 @@ int Auto_ML::explain(String *sch_tb_name, String *target_column_name, String *mo
   std::string sch_tb_name_str(sch_tb_name->c_ptr_safe());
   std::string target_column_name_str(target_column_name->c_ptr_safe());
   std::string modle_handle_name_str(model_handler_name->c_ptr_safe());
-  return m_ml_task ? m_ml_task->explain(sch_tb_name_str, target_column_name_str, modle_handle_name_str, exp_options)
-                   : HA_ERR_GENERIC;
+  return m_ml_task
+             ? m_ml_task->explain(thd, sch_tb_name_str, target_column_name_str, modle_handle_name_str, exp_options)
+             : HA_ERR_GENERIC;
 }
 
-int Auto_ML::model_active(String *in_sch_tb_name, Json_wrapper & /*out_model_info*/) {
-  assert(in_sch_tb_name);
-
+int Auto_ML::model_active(THD *thd, String *in_sch_tb_name, Json_wrapper & /*out_model_info*/) {
+  assert(thd && in_sch_tb_name);
   return 0;
 }
-
 }  // namespace ML
 }  // namespace ShannonBase

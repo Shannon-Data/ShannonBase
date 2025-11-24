@@ -220,46 +220,39 @@ int Utils::check_table_available(std::string &sch_tb_name) {
 }
 
 // open table by name. return table ptr, otherwise return nullptr.
-TABLE *Utils::open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type lk_mode) {
+TABLE *Utils::open_table_by_name(const std::string &schema_name, const std::string &table_name, thr_lock_type) {
   THD *thd = current_thd;
   /**
    * due to in function, `select xxxx`, when the statment executed, it enter lock table mode
    * but there's not even a opened table, so that, here we try to open a table, it failed before
    * exiting the lock table mode. such as executing `selecct ml_predict_row(xxx) int xx;`
    */
-  TABLE *table{nullptr};
-  for (table = thd->open_tables; table; table = table->next) {
-    if (table->s && table->file && schema_name == table->s->db.str && table_name == table->s->table_name.str) {
-      return table;
-    }
-  }
+  Table_ref table_list;
+  table_list.db = schema_name.c_str();
+  table_list.db_length = schema_name.length();
+  table_list.table_name = table_name.c_str();
+  table_list.table_name_length = table_name.length();
+  table_list.alias = table_name.c_str();
+  table_list.set_lock({TL_READ, THR_DEFAULT});
+  MDL_REQUEST_INIT(&table_list.mdl_request,
+                   MDL_key::TABLE,       // namespace
+                   schema_name.c_str(),  // db
+                   table_name.c_str(),   // name
+                   MDL_SHARED_READ,      // type
+                   MDL_TRANSACTION);     // duration
 
-  auto old_mode = thd->locked_tables_mode;
-  if (thd->locked_tables_mode == LTM_PRELOCKED) {
-    thd->locked_tables_mode = LTM_NONE;
-  }
-
-  Open_table_context table_ref_context(thd, MYSQL_OPEN_IGNORE_GLOBAL_READ_LOCK);
-
-  Table_ref table_ref(schema_name.c_str(), table_name.c_str(), lk_mode);
-  table_ref.open_strategy = Table_ref::OPEN_NORMAL;
-
-  if (open_table(thd, &table_ref, &table_ref_context) || !table_ref.table->file) {
-    return nullptr;
-  }
-
-  auto table_ptr = table_ref.table;
-  if (!table_ptr->next_number_field)  // in case.
-    table_ptr->next_number_field = table_ptr->found_next_number_field;
-
-  thd->locked_tables_mode = old_mode;
-  return table_ptr;
+  Table_ref *table_list_ptr = &table_list;
+  uint counter{0};
+  uint flags = MYSQL_OPEN_GET_NEW_TABLE | MYSQL_OPEN_IGNORE_FLUSH;
+  if (open_tables(thd, &table_list_ptr, &counter, flags)) return nullptr;
+  return table_list.table;
 }
 
-int Utils::close_table(TABLE *table [[maybe_unused]]) {
+int Utils::close_table(TABLE *table) {
   assert(table);
   // The table will be closed by `close_thread_tables()` in the caller.
   // No manual cleanup is required here.
+  // close_thread_table(current_thd, &table);
   return 0;
 }
 
@@ -361,7 +354,7 @@ int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<
   }
 
   std::map<float, int> n_classes;
-  while (sec_tb_handler->ha_rnd_next(table->record[0]) == 0) {
+  while (sec_tb_handler->ha_rnd_next(table->record[0]) != HA_ERR_END_OF_FILE) {
     for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
       Field *field_ptr = *(table->field + field_id);
       if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -507,154 +500,27 @@ BoosterHandle Utils::load_trained_model_from_string(std::string &model_content) 
   return (ret == 0) ? handle : nullptr;
 }
 
-int Utils::store_model_catalog(size_t model_obj_size, const Json_wrapper *model_meta, std::string &handler_name) {
-  THD *thd = current_thd;
-  std::string user_name(thd->security_context()->user().str);
-  std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
-  std::string cat_table_name = "MODEL_CATALOG";
-
-  auto cat_table_ptr = Utils::open_table_by_name(catalog_schema_name, cat_table_name, TL_WRITE);
-  if (!cat_table_ptr) {
-    std::ostringstream err;
-    err << catalog_schema_name.c_str() << "." << cat_table_name.c_str() << " open failed for ML";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
-  }
-
-  // Here, why we set MODEL_CATALOG IS NOT REPLCIATED, this called by SELECT sys.ML_TRAIN()
-  // it's a select statement. And in ML_TRAIN function, if the train process is proceeded successfull,
-  // then stores the meta info of trainned model. If we dont rpl the meta to replica to set.
-  // if binlog statement format is stmt, call statement will record, and replay on replica.
-  // therefore, we do not need to record the meta info of trainned model to replica. it will be
-  // replayed thee call statement on replica.
-  auto org_no_replicate = cat_table_ptr->no_replicate;
-  if (thd->variables.binlog_format == BINLOG_FORMAT_STMT) {
-    cat_table_ptr->no_replicate = true;
-  } else {
-    // To write the binlog statement.
-    thd->binlog_write_table_map(cat_table_ptr, true, true);
-  }
-
-  cat_table_ptr->file->ha_external_lock(thd, F_WRLCK | F_RDLCK);
-  cat_table_ptr->use_all_columns();
-
-  Field *field_ptr{nullptr};
-  cat_table_ptr->file->ha_index_init(cat_table_ptr->s->next_number_index, true);
-  cat_table_ptr->file->ha_index_last(cat_table_ptr->record[0]);
-  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_ID)];
-  int64_t next_id = field_ptr->val_int() + 1;
-  field_ptr->set_notnull();
-  field_ptr->store(next_id);
-
-  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
-  field_ptr->set_notnull();
-  field_ptr->store(handler_name.c_str(), handler_name.length(), &my_charset_utf8mb4_general_ci);
-
-  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
-  field_ptr->set_null();  // in ver 9.0, it's set to null.
-
-  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OWNER)];
-  field_ptr->set_notnull();
-  field_ptr->store(user_name.c_str(), user_name.length(), &my_charset_utf8mb4_general_ci);
-
-  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_OBJECT_SIZE)];
-  field_ptr->set_notnull();
-  field_ptr->store(model_obj_size);
-
-  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_METADATA)];
-  field_ptr->set_notnull();
-  assert(model_meta);
-  down_cast<Field_json *>(field_ptr)->store_json(model_meta);
-
-  auto ret = cat_table_ptr->file->ha_write_row(cat_table_ptr->record[0]);
-  cat_table_ptr->file->ha_index_end();
-  cat_table_ptr->file->ha_external_lock(thd, F_UNLCK);
-
-  // restore the no_replicate.
-  if (thd->variables.binlog_format == BINLOG_FORMAT_STMT) {
-    cat_table_ptr->no_replicate = org_no_replicate;
-  }
-
-  Utils::close_table(cat_table_ptr);
-  return ret;
-}
-
-int Utils::store_model_object_catalog(std::string &model_handle_name, Json_wrapper *model_content) {
-  assert(model_handle_name.length() && model_content);
-
-  THD *thd = current_thd;
-  std::string user_name(thd->security_context()->user().str);
-  std::string catalog_schema_name = "ML_SCHEMA_" + user_name;
-  std::string cat_table_name = "MODEL_OBJECT_CATALOG";
-
-  auto cat_table_ptr = Utils::open_table_by_name(catalog_schema_name, cat_table_name, TL_WRITE);
-  if (!cat_table_ptr) {
-    std::ostringstream err;
-    err << catalog_schema_name.c_str() << "." << cat_table_name.c_str() << " open failed for ML";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
-  }
-
-  auto org_no_replicate = cat_table_ptr->no_replicate;
-  if (thd->variables.binlog_format == BINLOG_FORMAT_STMT) {
-    cat_table_ptr->no_replicate = true;
-  } else {
-    // To write the binlog statement.
-    thd->binlog_write_table_map(cat_table_ptr, true, true);
-  }
-
-  cat_table_ptr->file->ha_external_lock(thd, F_WRLCK | F_RDLCK);
-  cat_table_ptr->use_all_columns();
-
-  Field *field_ptr{nullptr};
-  cat_table_ptr->file->ha_index_init(cat_table_ptr->s->next_number_index, true);
-  cat_table_ptr->file->ha_index_last(cat_table_ptr->record[0]);
-  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::CHUNK_ID)];
-  int64_t next_id = field_ptr->val_int() + 1;
-  field_ptr->set_notnull();
-  field_ptr->store(next_id);
-
-  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
-  field_ptr->set_notnull();
-  field_ptr->store(model_handle_name.c_str(), model_handle_name.length(), &my_charset_utf8mb4_general_ci);
-
-  field_ptr = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
-  field_ptr->set_notnull();
-  assert(model_content);
-  down_cast<Field_json *>(field_ptr)->store_json(model_content);
-
-  auto ret = cat_table_ptr->file->ha_write_row(cat_table_ptr->record[0]);
-  cat_table_ptr->file->ha_index_end();
-  cat_table_ptr->file->ha_external_lock(thd, F_UNLCK);
-
-  // restore the no_replicate.
-  if (thd->variables.binlog_format == BINLOG_FORMAT_STMT) {
-    cat_table_ptr->no_replicate = org_no_replicate;
-  }
-
-  Utils::close_table(cat_table_ptr);
-  return ret;
-}
-
 int Utils::read_model_content(std::string &model_handle_name, Json_wrapper &options) {
   std::string model_user_name(current_thd->security_context()->user().str);
   std::string model_schema_name = "ML_SCHEMA_" + model_user_name;
   auto cat_table_ptr = Utils::open_table_by_name(model_schema_name, "MODEL_CATALOG", TL_READ);
   if (!cat_table_ptr) return HA_ERR_GENERIC;
+  cat_table_ptr->file->init_table_handle_for_HANDLER();
 
   // get the model content from model catalog table by model handle name. table
   my_bitmap_map *old_map = tmp_use_all_columns(cat_table_ptr, cat_table_ptr->read_set);
   if (cat_table_ptr->file->ha_external_lock(current_thd, F_RDLCK)) {
+    Utils::close_table(cat_table_ptr);
     return HA_ERR_GENERIC;
   }
 
-  if (cat_table_ptr->file->ha_rnd_init(true)) {
-    cat_table_ptr->file->ha_rnd_end();
+  if (cat_table_ptr->file->inited == handler::NONE && cat_table_ptr->file->ha_rnd_init(true)) {
     cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);
+    Utils::close_table(cat_table_ptr);
     return HA_ERR_GENERIC;
   }
 
-  while (cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]) == 0) {
+  while (cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]) != HA_ERR_END_OF_FILE) {
     // handle_name.
     String handle_name, model_content;
     auto field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE));
@@ -680,56 +546,59 @@ int Utils::read_model_content(std::string &model_handle_name, Json_wrapper &opti
 }
 
 int Utils::read_model_object_content(std::string &model_handle_name, std::string &model_content) {
+  model_content.clear();
+
   std::string model_user_name(current_thd->security_context()->user().str);
   std::string model_schema_name = "ML_SCHEMA_" + model_user_name;
   auto cat_table_ptr = Utils::open_table_by_name(model_schema_name, "MODEL_OBJECT_CATALOG", TL_READ);
   if (!cat_table_ptr) return HA_ERR_GENERIC;
+  cat_table_ptr->file->init_table_handle_for_HANDLER();
 
-  // get the model content from model object catalog table by model handle name. table
+  // get the model content from model catalog table by model handle name. table
   my_bitmap_map *old_map = tmp_use_all_columns(cat_table_ptr, cat_table_ptr->read_set);
-  if (cat_table_ptr->file->ha_external_lock(current_thd, F_WRLCK | F_RDLCK)) {
+  if (cat_table_ptr->file->ha_external_lock(current_thd, F_RDLCK)) {
+    tmp_restore_column_map(cat_table_ptr->read_set, old_map);
+    Utils::close_table(cat_table_ptr);
     return HA_ERR_GENERIC;
   }
 
-  if (cat_table_ptr->file->ha_rnd_init(true)) {
-    cat_table_ptr->file->ha_rnd_end();
+  if (cat_table_ptr->file->inited == handler::NONE && cat_table_ptr->file->ha_rnd_init(true)) {
     cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);
+    Utils::close_table(cat_table_ptr);
     return HA_ERR_GENERIC;
   }
 
-  while (cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]) == 0) {
-    String handle_name;
-    auto field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_CATALOG_FIELD_INDEX::MODEL_HANDLE));
-    handle_name.set_charset(field_ptr->charset());
-    field_ptr->val_str(&handle_name);
+  struct Chunk {
+    uint32_t chunk_id;
+    String data;
+  };
+  std::vector<Chunk> chunks;
 
-    if (likely(strcmp(handle_name.c_ptr_safe(), model_handle_name.c_str())))  // not this one.
-      continue;
-    else {
-      // model object.[trainned model content]
-      Json_wrapper json_content;
-      field_ptr = *(cat_table_ptr->field + static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_OBJECT));
-      assert(field_ptr->type() == MYSQL_TYPE_JSON);
-      down_cast<Field_json *>(field_ptr)->val_json(&json_content);
-#ifdef LIGHTGBM_UNIFY_FORMAT
-      String model_str;
-      json_content.to_string(&model_str, true, "read_model_object_content", [] { assert(false); });
-      model_content = model_str.c_ptr_safe();
-#else
-      std::string keystr;
-      OPTION_VALUE_T option_value;
-      Utils::parse_json(json_content, option_value, keystr, 0);
-      assert(option_value[ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT].size() == 1);
-      model_content = option_value[ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT][0];
-#endif
-      break;
+  while (cat_table_ptr->file->ha_rnd_next(cat_table_ptr->record[0]) != HA_ERR_END_OF_FILE) {
+    String handle;
+    Field *handle_field = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_HANDLE)];
+    handle_field->val_str(&handle);
+
+    if (handle.c_ptr() && strcmp(handle.c_ptr(), model_handle_name.c_str()) == 0) {
+      Field *chunk_id_field = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::CHUNK_ID)];
+      uint32_t chunk_id = static_cast<uint32_t>(chunk_id_field->val_int());
+
+      Field *model_obj_field = cat_table_ptr->field[static_cast<int>(MODEL_OBJECT_CATALOG_FIELD_INDEX::MODEL_OBJECT)];
+      String model_obj;
+      model_obj_field->val_str(&model_obj);
+
+      chunks.push_back({chunk_id, std::move(model_obj)});
     }
   }
-
   if (old_map) tmp_restore_column_map(cat_table_ptr->read_set, old_map);
+
+  std::sort(chunks.begin(), chunks.end(), [](const Chunk &a, const Chunk &b) { return a.chunk_id < b.chunk_id; });
+
+  model_content.reserve(chunks.size() * 1048576);
+  for (const auto &c : chunks) model_content.append(c.data.ptr(), c.data.length());
+
   cat_table_ptr->file->ha_rnd_end();
   cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);
-
   Utils::close_table(cat_table_ptr);
   return 0;
 }
@@ -793,29 +662,24 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
   if (out_len > bufflen) {
     model_content_buff.reset(new char[out_len + 1]);
     memset(model_content_buff.get(), 0x0, bufflen);
-    // clang-format off
-  #ifdef LIGHTGBM_UNIFY_FORMAT
+    // clang-format off, If using LIGHTGBM_UNIFY_FORMAT, it means the model can be dumped with `ONNX-runtime` format.
+#ifdef LIGHTGBM_UNIFY_FORMAT
     LGBM_BoosterDumpModel(booster,
                           0,                              // start iter idx
-                          1,                             // end inter idx
+                          1,                              // end inter idx
                           C_API_FEATURE_IMPORTANCE_GAIN,  // feature_importance_type
                           out_len,                        // buff len
                           &out_len,                       // out len
                           model_content_buff.get());
-  #else
-    LGBM_BoosterSaveModelToString(booster,
-                                  0,
-                                  -1,
-                                  C_API_FEATURE_IMPORTANCE_GAIN,
-                                  out_len,
-                                  &out_len,
+#else
+    LGBM_BoosterSaveModelToString(booster, 0, -1, C_API_FEATURE_IMPORTANCE_GAIN, out_len, &out_len,
                                   model_content_buff.get());
-  #endif
+#endif
   }
   model_content.assign(model_content_buff.get(), out_len);
 
-  #ifndef LIGHTGBM_UNIFY_FORMAT
-  { //start to assemble the model object json file.
+  {  // start to assemble the model object json file. If the model content is not JSON format, therefore, we assemble it
+     // to JSON format with `SHANNON_LIGHTGBM_CONTENT`.
     Json_object *model_obj = new (std::nothrow) Json_object();
     if (model_obj == nullptr) return -1;
     model_obj->add_clone(ML_KEYWORDS::SHANNON_LIGHTGBM_CONTENT, new (std::nothrow) Json_string(model_content));
@@ -824,7 +688,6 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
     model_content_json.to_string(&json_format_content, false, "ML_train", [] { assert(false); });
     model_content.assign(json_format_content.c_ptr_safe(), json_format_content.length());
   }
-  #endif
   // clang-format on
 
 cleanup_booster:

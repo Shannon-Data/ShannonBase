@@ -77,20 +77,26 @@ class ML_embedding_row : public ML_embedding {
   virtual ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::EMBEDDING; }
 
  private:
-  virtual int train() override { return false; }
-  virtual int load(std::string &) override { return false; }
-  virtual int load_from_file(std::string &, std::string &) override { return false; }
-  virtual int unload(std::string &) override { return false; }
-  virtual int import(Json_wrapper &, Json_wrapper &, std::string &) override { return false; }
-  virtual double score(std::string &, std::string &, std::string &, std::string &, Json_wrapper &) override {
+  virtual int train(THD *, Json_wrapper & /*model_object*/, Json_wrapper & /*model_metadata*/) override {
+    return false;
+  }
+  virtual int load(THD *, std::string &) override { return false; }
+  virtual int load_from_file(THD *, std::string &, std::string &) override { return false; }
+  virtual int unload(THD *, std::string &) override { return false; }
+  virtual int import(THD *, Json_wrapper &, Json_wrapper &, std::string &) override { return false; }
+  virtual double score(THD *, std::string &, std::string &, std::string &, std::string &, Json_wrapper &) override {
     return 0.0f;
   }
 
-  virtual int explain(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
-  virtual int explain_row() override { return false; }
-  virtual int explain_table() override { return false; }
-  virtual int predict_row(Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override { return false; }
-  virtual int predict_table(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
+  virtual int explain(THD *, std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
+  virtual int explain_row(THD *) override { return false; }
+  virtual int explain_table(THD *) override { return false; }
+  virtual int predict_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override {
+    return false;
+  }
+  virtual int predict_table(THD *, std::string &, std::string &, std::string &, Json_wrapper &) override {
+    return false;
+  }
 };
 
 class ML_embedding_table : public ML_embedding {
@@ -103,20 +109,26 @@ class ML_embedding_table : public ML_embedding {
   virtual ML_TASK_TYPE_T type() override { return ML_TASK_TYPE_T::EMBEDDING; }
 
  private:
-  virtual int train() override { return false; }
-  virtual int load(std::string &) override { return false; }
-  virtual int load_from_file(std::string &, std::string &) override { return false; }
-  virtual int unload(std::string &) override { return false; }
-  virtual int import(Json_wrapper &, Json_wrapper &, std::string &) override { return false; }
-  virtual double score(std::string &, std::string &, std::string &, std::string &, Json_wrapper &) override {
+  virtual int train(THD *, Json_wrapper & /*model_object*/, Json_wrapper & /*model_metadata*/) override {
+    return false;
+  }
+  virtual int load(THD *, std::string &) override { return false; }
+  virtual int load_from_file(THD *, std::string &, std::string &) override { return false; }
+  virtual int unload(THD *, std::string &) override { return false; }
+  virtual int import(THD *, Json_wrapper &, Json_wrapper &, std::string &) override { return false; }
+  virtual double score(THD *, std::string &, std::string &, std::string &, std::string &, Json_wrapper &) override {
     return 0.0f;
   }
 
-  virtual int explain(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
-  virtual int explain_row() override { return false; }
-  virtual int explain_table() override { return false; }
-  virtual int predict_row(Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override { return false; }
-  virtual int predict_table(std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
+  virtual int explain(THD *, std::string &, std::string &, std::string &, Json_wrapper &) override { return false; }
+  virtual int explain_row(THD *) override { return false; }
+  virtual int explain_table(THD *) override { return false; }
+  virtual int predict_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) override {
+    return false;
+  }
+  virtual int predict_table(THD *, std::string &, std::string &, std::string &, Json_wrapper &) override {
+    return false;
+  }
 };
 }  // namespace ML
 }  // namespace ShannonBase

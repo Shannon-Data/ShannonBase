@@ -33,13 +33,24 @@ namespace ShannonBase {
 namespace ML {
 
 enum class MODEL_CATALOG_FIELD_INDEX : int {
-  MODEL_ID = 0,
-  MODEL_HANDLE,
-  MODEL_OBJECT,
-  MODEL_OWNER,
-  MODEL_OBJECT_SIZE,
-  MODEL_METADATA,
-  END_OF_COLUMN_ID
+  MODEL_ID = 0,        // Auto-increment primary key
+  MODEL_HANDLE,        // Unique model handle (string)
+  MODEL_OBJECT,        // Currently NULL in main table (large model stored in sharding table)
+  MODEL_OWNER,         // Model owner
+  BUILD_TIMESTAMP,     // New: Model build timestamp
+  TARGET_COLUMN_NAME,  // New: Target column name
+  TRAIN_TABLE_NAME,    // New: Training table name
+  MODEL_OBJECT_SIZE,   // Total bytes of model object
+  MODEL_TYPE,          // Reserved (currently can be NULL)
+  TASK,                // Task type: CLASSIFICATION / REGRESSION / ...
+  COLUMN_NAMES,        // Feature column names JSON array
+  MODEL_EXPLANATION,   // Model explainability (SHAP, etc., for future extension)
+  LAST_ACCESSED,       // Last accessed time (for LRU cleanup)
+  MODEL_METADATA,      // Complete metadata large JSON (includes txt2num_dict, training_params, etc.)
+  NOTES,               // Notes
+
+  // Always placed at the end, used to calculate total field count
+  END_OF_COLUMN_COUNT
 };
 
 enum class MODEL_OBJECT_CATALOG_FIELD_INDEX : int { CHUNK_ID = 0, MODEL_HANDLE, MODEL_OBJECT, END_OF_COLUMN_ID };
@@ -50,22 +61,23 @@ class ML_algorithm {
   ML_algorithm() {}
   virtual ~ML_algorithm() = default;
 
-  virtual int train() = 0;
-  virtual int load(std::string &model_content) = 0;
-  virtual int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) = 0;
-  virtual int unload(std::string &model_handle_name) = 0;
-  virtual int import(Json_wrapper &model_object, Json_wrapper &model_metadata, std::string &model_handle_name) = 0;
-  virtual double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+  virtual int train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata) = 0;
+  virtual int load(THD *thd, std::string &model_content) = 0;
+  virtual int load_from_file(THD *thd, std::string &model_file_full_path, std::string &model_handle_name) = 0;
+  virtual int unload(THD *thd, std::string &model_handle_name) = 0;
+  virtual int import(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata,
+                     std::string &model_handle_name) = 0;
+  virtual double score(THD *thd, std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
                        std::string &metric_str, Json_wrapper &option) = 0;
 
-  virtual int explain(std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
-                      Json_wrapper &exp_option) = 0;
-  virtual int explain_row() = 0;
-  virtual int explain_table() = 0;
-  virtual int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+  virtual int explain(THD *thd, std::string &sch_tb_name, std::string &target_column_name,
+                      std::string &model_handle_name, Json_wrapper &exp_option) = 0;
+  virtual int explain_row(THD *thd) = 0;
+  virtual int explain_table(THD *thd) = 0;
+  virtual int predict_row(THD *thd, Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                           Json_wrapper &result) = 0;
-  virtual int predict_table(std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
-                            Json_wrapper &options) = 0;
+  virtual int predict_table(THD *thd, std::string &sch_tb_name, std::string &model_handle_name,
+                            std::string &out_sch_tb_name, Json_wrapper &options) = 0;
   virtual ML_TASK_TYPE_T type() = 0;
 };
 

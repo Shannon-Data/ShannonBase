@@ -48,7 +48,7 @@ class Utils {
   static int check_table_available(std::string &sch_tb_name);
 
   // open a table via schema name and table name.
-  static TABLE *open_table_by_name(std::string schema_name, std::string table_name, thr_lock_type mode);
+  static TABLE *open_table_by_name(const std::string &schema_name, const std::string &table_name, thr_lock_type mode);
 
   // get the primary a openned table handler on success, otherwise nullptr.
   static handler *get_primary_handler(TABLE *source_table_ptr);
@@ -125,24 +125,6 @@ class Utils {
       Json_wrapper *train_options, std::string &training_params, Json_object *onnx_inputs_info,
       Json_object *onnx_outputs_info, Json_object *training_drift_metric, size_t chunks,
       txt2numeric_map_t &txt2num_dict);
-
-  /** to store the trained model into ML_SCHEMA_xxx.MODEL_CATALOG.
-   *  @param[in] model_content, the trainned model in string formation.
-   *  @param[in] option, the model option, in JSON formation.
-   *  @param[in] user_name, the who create/build this model.
-   *  @param[in] handler_name, the handler name, unique key.
-   *  @retval 0 success.
-   *  @retval errcode failed.
-   *  */
-  static int store_model_catalog(size_t model_obj_size, const Json_wrapper *model_meta, std::string &handler_name);
-
-  /**
-   * store the model meta info into model_object_catalog table.
-   * @param[in] model_handle_name, the name of this model handler.
-   * @param[in] model_meta, the json wrapper handler of this json-formattted model.
-   * @return 0 success, otherwise failed.
-   */
-  static int store_model_object_catalog(std::string &model_handle_name, Json_wrapper *model_meta);
 
   /* get the model content via handle name, sucess return 0, otherise failed.
    * @param[in] model_handle_name,model user name.

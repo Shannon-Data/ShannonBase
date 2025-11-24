@@ -3001,7 +3001,7 @@ bool Item_func_ml_predicte_row::val_json(Json_wrapper* wr) {
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   auto ret = auto_ml->
-    predict_row(input_data, handle_name_cptr, predict_options, *wr);
+    predict_row(current_thd, input_data, handle_name_cptr, predict_options, *wr);
   return (ret == 0) ? false : true;
 }
 

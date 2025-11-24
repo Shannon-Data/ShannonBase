@@ -31,6 +31,8 @@
 
 //#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"  //LightGBM
 
+#include "sql/item_func.h"
+
 #include "include/my_inttypes.h"
 #include "include/thr_lock.h"  //TL_READ
 #include "sql/current_thd.h"
@@ -106,7 +108,7 @@ MODEL_PREDICTION_EXP_T ML_classification::parse_option(Json_wrapper &options) {
   return explainer_type;
 }
 
-int ML_classification::train() {
+int ML_classification::train(THD* /*thd*/, Json_wrapper& model_object, Json_wrapper& model_metadata) {
   auto source_table_ptr = Utils::open_table_by_name(m_sch_name, m_table_name, TL_READ);
   if (!source_table_ptr) {
     std::ostringstream err;
@@ -172,7 +174,7 @@ int ML_classification::train() {
                              [](const char *, size_t) { assert(false); },
                              [] { assert(false); });
   if (!content_dom.get()) return HA_ERR_GENERIC;
-  Json_wrapper content_json(content_dom.get(), true);
+  model_object = Json_wrapper(std::move(content_dom));
 
   auto meta_json = Utils::build_up_model_metadata(TASK_NAMES_MAP[type()],  /* task */
                                                 m_target_name,  /*labelled col name */
@@ -202,22 +204,13 @@ int ML_classification::train() {
                                                 txt2num_dict   /* txt2numeric dict */
                                               );
 
-  if (!meta_json)
-    return HA_ERR_GENERIC;
-  Json_wrapper model_meta(meta_json);
-  if (Utils::store_model_catalog(model_content.length(),
-                                 &model_meta,
-                                 m_handler_name))
-    return HA_ERR_GENERIC;
-
-  if (Utils::store_model_object_catalog(m_handler_name, &content_json))
-    return HA_ERR_GENERIC;
   // clang-format on
+  model_metadata = Json_wrapper(meta_json);
   return 0;
 }
 
 // load the model from model_content.
-int ML_classification::load(std::string &model_content) {
+int ML_classification::load(THD *thd [[maybe_unused]], std::string &model_content) {
   std::lock_guard<std::mutex> lock(models_mutex);
   assert(model_content.length() && m_handler_name.length());
 
@@ -226,7 +219,8 @@ int ML_classification::load(std::string &model_content) {
   return 0;
 }
 
-int ML_classification::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+int ML_classification::load_from_file(THD *thd [[maybe_unused]], std::string &model_file_full_path,
+                                      std::string &model_handle_name) {
   std::lock_guard<std::mutex> lock(models_mutex);
   if (!model_file_full_path.length() || !model_handle_name.length()) {
     return HA_ERR_GENERIC;
@@ -236,7 +230,7 @@ int ML_classification::load_from_file(std::string &model_file_full_path, std::st
   return 0;
 }
 
-int ML_classification::unload(std::string &model_handle_name) {
+int ML_classification::unload(THD *thd [[maybe_unused]], std::string &model_handle_name) {
   std::lock_guard<std::mutex> lock(models_mutex);
   assert(!Loaded_models.empty());
 
@@ -245,14 +239,14 @@ int ML_classification::unload(std::string &model_handle_name) {
   return (cnt == 1) ? 0 : HA_ERR_GENERIC;
 }
 
-int ML_classification::import(Json_wrapper &, Json_wrapper &, std::string &) {
+int ML_classification::import(THD *, Json_wrapper &, Json_wrapper &, std::string &) {
   // all logical done in ml_model_import stored procedure.
   assert(false);
   return 0;
 }
 
-double ML_classification::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
-                                std::string &metric_str, Json_wrapper &option) {
+double ML_classification::score(THD * /*thd*/, std::string &sch_tb_name, std::string &target_name,
+                                std::string &model_handle, std::string &metric_str, Json_wrapper &option) {
   assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
 
   if (!option.empty()) {
@@ -348,8 +342,8 @@ double ML_classification::score(std::string &sch_tb_name, std::string &target_na
   return score;
 }
 
-int ML_classification::explain(std::string &sch_tb_name, std::string &target_name, std::string &model_handle_name,
-                               Json_wrapper &exp_options) {
+int ML_classification::explain(THD *thd [[maybe_unused]], std::string &sch_tb_name, std::string &target_name,
+                               std::string &model_handle_name, Json_wrapper &exp_options) {
   assert(sch_tb_name.length() && target_name.length());
   std::ostringstream err;
   auto pos = std::strstr(sch_tb_name.c_str(), ".") - sch_tb_name.c_str();
@@ -418,12 +412,12 @@ int ML_classification::explain(std::string &sch_tb_name, std::string &target_nam
   return 0;
 }
 
-int ML_classification::explain_row() { return 0; }
+int ML_classification::explain_row(THD *) { return 0; }
 
-int ML_classification::explain_table() { return 0; }
+int ML_classification::explain_table(THD *) { return 0; }
 
-int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
-                                   Json_wrapper &result) {
+int ML_classification::predict_row(THD *thd [[maybe_unused]], Json_wrapper &input_data, std::string &model_handle_name,
+                                   Json_wrapper &option, Json_wrapper &result) {
   assert(result.empty());
   std::ostringstream err;
   if (!option.empty()) {
@@ -515,8 +509,9 @@ int ML_classification::predict_row(Json_wrapper &input_data, std::string &model_
   return ret;
 }
 
-int ML_classification::predict_table(std::string &sch_tb_name, std::string &model_handle_name,
-                                     std::string &out_sch_tb_name, Json_wrapper &options) {
+int ML_classification::predict_table(THD *thd [[maybe_unused]], std::string &sch_tb_name,
+                                     std::string &model_handle_name, std::string &out_sch_tb_name,
+                                     Json_wrapper &options) {
   std::ostringstream err;
   std::string model_content;
   {
@@ -579,6 +574,5 @@ int ML_classification::predict_table(std::string &sch_tb_name, std::string &mode
 
   return 0;
 }
-
 }  // namespace ML
 }  // namespace ShannonBase

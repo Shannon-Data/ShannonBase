@@ -153,7 +153,7 @@
 #include "template_utils.h"
 #include "template_utils.h"  // pointer_cast
 #include "thr_mutex.h"
-
+#include "sql/sp_rcontext.h"
 #include "ml/auto_ml.h" //auto_ml
 
 using std::max;
@@ -10343,9 +10343,20 @@ longlong Item_func_ml_active::val_int() {
      std::make_unique<ShannonBase::ML::Auto_ML>();
   /**To invoke ML libs to load the trainned ML models into memory*/
   Json_wrapper out_model;
-  auto result = auto_ml->model_active(handle_name_ptr, out_model);
+  auto result = auto_ml->model_active(current_thd, handle_name_ptr, out_model);
 
   return result;
+}
+
+bool Item_func_ml_train::fix_fields(THD *thd, Item **ref) {
+  bool res = Item_func::fix_fields(thd, ref);
+  if (res) return res;
+
+  if (arg_count == 6) {
+    args[4]->set_data_type(MYSQL_TYPE_JSON);
+    args[5]->set_data_type(MYSQL_TYPE_JSON);
+  }
+  return 0;
 }
 
 longlong Item_func_ml_train::val_int() {
@@ -10375,7 +10386,7 @@ longlong Item_func_ml_train::val_int() {
   }
 
   Json_wrapper options; //is optional
-  if (arg_count == 4) {
+  if (arg_count == 6) {
     auto ret = args[2]->val_json(&options);
     if (ret) //cannot get the options.
       return 1;
@@ -10393,7 +10404,28 @@ longlong Item_func_ml_train::val_int() {
                                                 options,
                                                 handler_name);
   /**To invoke ML libs to train ML models*/
-  auto result = auto_ml->train();
+  Json_wrapper model_object, model_metadata;
+  auto result = auto_ml->train(current_thd, model_object, model_metadata);
+  if (arg_count == 6 && result == 0) {
+    THD *thd = current_thd;
+    sp_rcontext *spcont = thd->sp_runtime_ctx;
+    if (!spcont) return 0;
+    auto set_json_out_param = [&](Json_wrapper &wrapper, Item_splocal *splocal) {
+      String buf;
+      if (!wrapper.to_string(&buf, true, "ML_TRAIN", [] { assert(false); })) {
+        Item *item = new (thd->mem_root) Item_string(buf.ptr(), buf.length(), &my_charset_utf8mb4_bin);
+        if (item) {
+          item->set_data_type(MYSQL_TYPE_JSON);
+          spcont->set_variable(thd, false, splocal->get_var_idx(), &item);
+        }
+      }
+    };
+    if (auto *var = down_cast<Item_splocal*>(args[4]))
+      set_json_out_param(model_object, var);
+    if (auto *var = down_cast<Item_splocal*>(args[5]))
+      set_json_out_param(model_metadata, var);
+  }
+
   return result;
 }
 
@@ -10408,7 +10440,7 @@ longlong Item_func_ml_model_load::val_int() {
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   /**To invoke ML libs to load the trainned ML models into memory*/
-  auto result = auto_ml->load(handle_name_ptr);
+  auto result = auto_ml->load(current_thd, handle_name_ptr);
   return result;
 }
 
@@ -10422,7 +10454,7 @@ longlong Item_func_ml_model_unload::val_int() {
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   /**To invoke ML libs to unload the trainned ML models into memory*/
-  auto result = auto_ml->unload(handle_name_ptr);
+  auto result = auto_ml->unload(current_thd, handle_name_ptr);
   return result;
 }
 
@@ -10443,7 +10475,7 @@ longlong Item_func_ml_model_import::val_int() {
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   /**To invoke ML libs to load the trainned ML models into memory*/
-  auto result = auto_ml->import(model_obj, model_meta, &model_handle_name);
+  auto result = auto_ml->import(current_thd, model_obj, model_meta, &model_handle_name);
   return result;
 }
 
@@ -10471,7 +10503,7 @@ double Item_func_ml_score::val_real() {
 
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
-  auto score = auto_ml->score(sch_tb_name_cptr, target_name_cptr, handle_name_cptr,
+  auto score = auto_ml->score(current_thd, sch_tb_name_cptr, target_name_cptr, handle_name_cptr,
                                metric_name_cptr, score_options);
 
   return score;
@@ -10494,7 +10526,7 @@ longlong Item_func_ml_predicte_table::val_int() {
 
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
-  auto ret = auto_ml->predict_table(sch_tb_name_cptr, handle_name_cptr, out_sch_tb_name_cptr,
+  auto ret = auto_ml->predict_table(current_thd, sch_tb_name_cptr, handle_name_cptr, out_sch_tb_name_cptr,
                                     predict_table_options);
   return ret;
 }
@@ -10520,7 +10552,7 @@ longlong Item_func_ml_explain::val_int() {
   std::unique_ptr<ShannonBase::ML::Auto_ML> auto_ml =
      std::make_unique<ShannonBase::ML::Auto_ML>();
   /**To invoke ML libs to unload the trainned ML models into memory*/
-  auto result = auto_ml->explain(sch_tb_name_ptr, target_name_ptr, handle_name_ptr, exp_options);
+  auto result = auto_ml->explain(current_thd, sch_tb_name_ptr, target_name_ptr, handle_name_ptr, exp_options);
   return result;
 }
 
