@@ -328,6 +328,7 @@ int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<
   // read the training data from target table.
   for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
     Field *field_ptr = *(table->field + field_id);
+    if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
     txt2numeric[field_ptr->field_name];
 
     if (likely(!strcmp(field_ptr->field_name, label_name.c_str()))) continue;
@@ -363,6 +364,7 @@ int Utils::read_data(TABLE *table, std::vector<double> &train_data, std::vector<
   while (sec_tb_handler->ha_rnd_next(table->record[0]) == 0) {
     for (auto field_id = 0u; field_id < table->s->fields; field_id++) {
       Field *field_ptr = *(table->field + field_id);
+      if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
       auto data_val{0.0};
       switch (field_ptr->type()) {
@@ -934,7 +936,8 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name,
   int64 num_results;
 
   // First time, get the result dims.
-  std::vector<double> temp_predictions(10);
+  const int MAX_TEMP_SIZE = 1024 * 1024;
+  std::vector<double> temp_predictions(MAX_TEMP_SIZE);
 
   std::vector<double> sample_data;
   for (auto &field : input_data) {
@@ -973,7 +976,7 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name,
                                        &num_results,
                                        temp_predictions.data());
 
-  if (ret) {
+  if (ret || num_results <= 0 || num_results > MAX_TEMP_SIZE) {
     LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
@@ -1001,6 +1004,5 @@ int Utils::ML_predict_row(int type, std::string &model_handle_name,
   LGBM_BoosterFree(booster);
   return ret ? HA_ERR_GENERIC : 0;
 }
-
 }  // namespace ML
 }  // namespace ShannonBase
