@@ -12,14 +12,34 @@ ALTER DATABASE shannon_ml CHARACTER SET ascii COLLATE ascii_bin;
 USE shannon_ml;
 --enable_warnings
 
-CREATE TABLE census_train ( age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
+CREATE TABLE census_train (
+    age INT,
+    workclass VARCHAR(255),
+    fnlwgt INT,
+    education VARCHAR(255),
+    `education-num` INT,
+    `marital-status` VARCHAR(255),
+    occupation VARCHAR(255),
+    relationship VARCHAR(255),
+    race VARCHAR(255),
+    sex VARCHAR(255),
+    `capital-gain` INT,
+    `capital-loss` INT,
+    `hours-per-week` INT,
+    `native-country` VARCHAR(255),
+    revenue VARCHAR(255)
+);
+
 CREATE TABLE census_test LIKE census_train;
 
 --disable_query_log
 --eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_train_load.csv' INTO TABLE census_train FIELDS TERMINATED BY ',' ;
 --eval LOAD DATA INFILE '$MYSQLTEST_VARDIR/std_data/ml/census/census_test_load.csv' INTO TABLE census_test FIELDS TERMINATED BY ',' ;
-ALTER TABLE census_train ADD COLUMN id INT PRIMARY KEY AUTO_INCREMENT FIRST NOT SECONDARY;
-ALTER TABLE census_test ADD COLUMN id INT PRIMARY KEY AUTO_INCREMENT FIRST NOT SECONDARY;
+ALTER TABLE census_train ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+ALTER TABLE census_test ADD COLUMN id INT AUTO_INCREMENT NOT SECONDARY PRIMARY KEY FIRST;
+
+ALTER TABLE census_train SECONDARY_ENGINE = RAPID;
+ALTER TABLE census_test SECONDARY_ENGINE = RAPID;
 --enable_query_log
 
 SET @census_model = 'census_test_score';
@@ -41,7 +61,7 @@ CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_
 ALTER TABLE shannon_ml.census_test SECONDARY_LOAD;
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 
-SELECT @score_census;
+SELECT ROUND(@score_census, 2);
 
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
        JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names

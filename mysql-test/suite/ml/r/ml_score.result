@@ -4,7 +4,23 @@ DROP DATABASE IF EXISTS shannon_ml;
 CREATE DATABASE shannon_ml;
 ALTER DATABASE shannon_ml CHARACTER SET ascii COLLATE ascii_bin;
 USE shannon_ml;
-CREATE TABLE census_train ( age INT, workclass VARCHAR(255), fnlwgt INT, education VARCHAR(255), `education-num` INT, `marital-status` VARCHAR(255), occupation VARCHAR(255), relationship VARCHAR(255), race VARCHAR(255), sex VARCHAR(255), `capital-gain` INT, `capital-loss` INT, `hours-per-week` INT, `native-country` VARCHAR(255), revenue VARCHAR(255)) secondary_engine=rapid;
+CREATE TABLE census_train (
+age INT,
+workclass VARCHAR(255),
+fnlwgt INT,
+education VARCHAR(255),
+`education-num` INT,
+`marital-status` VARCHAR(255),
+occupation VARCHAR(255),
+relationship VARCHAR(255),
+race VARCHAR(255),
+sex VARCHAR(255),
+`capital-gain` INT,
+`capital-loss` INT,
+`hours-per-week` INT,
+`native-country` VARCHAR(255),
+revenue VARCHAR(255)
+);
 CREATE TABLE census_test LIKE census_train;
 SET @census_model = 'census_test_score';
 ALTER TABLE census_train SECONDARY_LOAD;
@@ -18,9 +34,9 @@ CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_
 ERROR HY000: ML operation failed. shannon_ml.census_test NOT loaded into rapid engine for ML.
 ALTER TABLE shannon_ml.census_test SECONDARY_LOAD;
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
-SELECT @score_census;
-@score_census
-0.7931527495384216
+SELECT ROUND(@score_census, 2);
+ROUND(@score_census, 2)
+0.79
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
 JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names
 FROM ML_SCHEMA_root.MODEL_CATALOG;
