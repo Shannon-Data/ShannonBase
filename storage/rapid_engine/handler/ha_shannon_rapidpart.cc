@@ -316,5 +316,4 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
 
   return ShannonBase::SHANNON_SUCCESS;
 }
-
 }  // namespace ShannonBase

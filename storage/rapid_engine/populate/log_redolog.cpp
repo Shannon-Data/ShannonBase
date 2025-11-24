@@ -62,11 +62,11 @@ namespace Populate {
 // to cache the found index_t usd by log parser, and used for next time.
 std::unordered_map<uint64, const dict_index_t *> g_index_cache;
 
-// to cache the which tables are processing. in populating queue. In query stage, we will check `g_processing_tables`
+// to cache the which tables are processing. in populating queue. In query stage, we will check `g_propagating_tables`
 // to find out the rapid table is updated or not. If tables in query statement are still in do populating, then query
 // should go to innnodb or go to rapid.
-std::shared_mutex g_processing_table_mutex;
-std::multiset<std::string> g_processing_tables;
+std::shared_mutex g_propagating_table_mutex;
+std::multiset<std::string> g_propagating_tables;
 
 // if using dict_index_t->table->get_table_name, it seems to slow, using cache
 // to accelerate it.
@@ -949,16 +949,16 @@ byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context
       auto all = (page[PAGE_HEADER + PAGE_N_HEAP + 1] == PAGE_HEAP_NO_USER_LOW) ? true : false;
       auto offsets = rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
       {
-        std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-        g_processing_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
+        std::unique_lock<std::shared_mutex> lk(g_propagating_table_mutex);
+        g_propagating_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
       }
       parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
                                      nullptr, trx_id);
       {
-        std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-        auto it = g_processing_tables.find(context->m_schema_name + "/" + context->m_table_name);
-        if (it != g_processing_tables.end()) {
-          g_processing_tables.erase(it);
+        std::unique_lock<std::shared_mutex> lk(g_propagating_table_mutex);
+        auto it = g_propagating_tables.find(context->m_schema_name + "/" + context->m_table_name);
+        if (it != g_propagating_tables.end()) {
+          g_propagating_tables.erase(it);
         }
       }
       if (UNIV_LIKELY_NULL(heap)) {
@@ -1012,16 +1012,16 @@ byte *LogParser::parse_cur_and_apply_delete_rec(Rapid_load_context *context, byt
         auto all = (page[PAGE_HEADER + PAGE_N_HEAP + 1] == PAGE_HEAP_NO_USER_LOW) ? true : false;
         auto offsets = rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
         {
-          std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-          g_processing_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
+          std::unique_lock<std::shared_mutex> lk(g_propagating_table_mutex);
+          g_propagating_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
         }
         parse_cur_rec_change_apply_low(context, rec, index, real_tb_index, offsets, MLOG_REC_DELETE, all, nullptr,
                                        nullptr);
         {
-          std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-          auto it = g_processing_tables.find(context->m_schema_name + "/" + context->m_table_name);
-          if (it != g_processing_tables.end()) {
-            g_processing_tables.erase(it);
+          std::unique_lock<std::shared_mutex> lk(g_propagating_table_mutex);
+          auto it = g_propagating_tables.find(context->m_schema_name + "/" + context->m_table_name);
+          if (it != g_propagating_tables.end()) {
+            g_propagating_tables.erase(it);
           }
         }
       }
@@ -1176,8 +1176,8 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
   offsets = rec_get_offsets(buf + origin_offset, index, offsets, ULINT_UNDEFINED, UT_LOCATION_HERE, &heap);
 
   {
-    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-    g_processing_tables.emplace(db_name + "/" + tb_name);
+    std::unique_lock<std::shared_mutex> lk(g_propagating_table_mutex);
+    g_propagating_tables.emplace(db_name + "/" + tb_name);
   }
 
   {
@@ -1189,10 +1189,10 @@ byte *LogParser::parse_cur_and_apply_insert_rec(Rapid_load_context *context,
   }
 
   {
-    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-    auto it = g_processing_tables.find(db_name + "/" + tb_name);
-    if (it != g_processing_tables.end()) {
-      g_processing_tables.erase(it);
+    std::unique_lock<std::shared_mutex> lk(g_propagating_table_mutex);
+    auto it = g_propagating_tables.find(db_name + "/" + tb_name);
+    if (it != g_propagating_tables.end()) {
+      g_propagating_tables.erase(it);
     }
   }
 finish:
@@ -1220,16 +1220,16 @@ byte *LogParser::parse_and_apply_upd_rec_in_place(
   ut_ad(rec_offs_validate(rec, index, offsets));
   ut_ad(!index->table->skip_alter_undo);
   {
-    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-    g_processing_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
+    std::unique_lock<std::shared_mutex> lk(g_propagating_table_mutex);
+    g_propagating_tables.emplace(context->m_schema_name + "/" + context->m_table_name);
   }
   auto ret = parse_cur_rec_change_apply_low(context, rec, index, real_index, offsets, MLOG_REC_UPDATE_IN_PLACE, false,
                                             page_zip, update, trx_id);
   {
-    std::unique_lock<std::shared_mutex> lk(g_processing_table_mutex);
-    auto it = g_processing_tables.find(context->m_schema_name + "/" + context->m_table_name);
-    if (it != g_processing_tables.end()) {
-      g_processing_tables.erase(it);
+    std::unique_lock<std::shared_mutex> lk(g_propagating_table_mutex);
+    auto it = g_propagating_tables.find(context->m_schema_name + "/" + context->m_table_name);
+    if (it != g_propagating_tables.end()) {
+      g_propagating_tables.erase(it);
     }
   }
   /*now, we dont want to support zipped page now. how to deal with pls ref to:

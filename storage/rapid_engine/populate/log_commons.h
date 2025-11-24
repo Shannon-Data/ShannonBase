@@ -112,6 +112,7 @@
 
 #include "my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // SHANNON_ALIGNAS
+#include "storage/rapid_engine/populate/log_buffer.h"
 
 namespace ShannonBase {
 namespace Populate {
@@ -174,14 +175,24 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   inline long use_count_buff1() const { return m_buff1.use_count(); }
 } change_record_buff;
 
+struct SHANNON_ALIGNAS change_candidate_t {
+  uint64_t lsn{0};
+  change_record_buff_t record;
+
+  change_candidate_t() = default;
+  change_candidate_t(uint64_t l, change_record_buff_t &&change_rec) : lsn(l), record(std::move(change_rec)) {}
+
+  change_candidate_t(const change_candidate_t &) = default;
+  change_candidate_t &operator=(const change_candidate_t &) = default;
+  change_candidate_t(change_candidate_t &&) = default;
+  change_candidate_t &operator=(change_candidate_t &&) = default;
+};
+
 typedef struct SHANNON_ALIGNAS table_pop_buffer_t {
-  std::mutex mutex;
-  std::unordered_map<uint64_t, change_record_buff_t> writing;   // crrurent writing
-  std::unordered_map<uint64_t, change_record_buff_t> applying;  // waiting for apply
-  std::atomic<bool> queried{false};                             // this table is required by some queries.
-  std::atomic<bool> pending_flush{false};
+  Ringbuffer<change_candidate_t> change_candiates;  // the change candidates.
+  std::atomic<bool> queried{false};                 // this table is required by some queries.
+  std::atomic<bool> pending_flush{false};           // mark it needs to be flushed
   std::atomic<size_t> data_size{0};
-  std::atomic<bool> swapping{false};
 } table_pop_buffer;
 
 class Populator {
