@@ -56,7 +56,7 @@ ML_forecasting::~ML_forecasting() {}
 
 ML_TASK_TYPE_T ML_forecasting::type() { return ML_TASK_TYPE_T::FORECASTING; }
 
-int ML_forecasting::train() {
+int ML_forecasting::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrapper &model_metadata) {
   // target_name can be set to null in forecasting. For time series forecasting tasks,
   // a regression objective function is typically used because the goal of time series
   // forecasting is to predict continuous values (such as stock prices, temperatures,
@@ -137,7 +137,7 @@ int ML_forecasting::train() {
                              [](const char *, size_t) { assert(false); },
                              [] { assert(false); });
   if (!content_dom.get()) return HA_ERR_GENERIC;
-  Json_wrapper content_json(content_dom.get(), true);
+  model_object = Json_wrapper(std::move(content_dom));
 
   auto meta_json = Utils::build_up_model_metadata(TASK_NAMES_MAP[type()],  /* task */
                                                 m_target_name,  /*labelled col name */
@@ -167,21 +167,12 @@ int ML_forecasting::train() {
                                                 txt2num_dict   /* txt2numeric dict */
                                               );
 
-  if (!meta_json)
-    return HA_ERR_GENERIC;
-  Json_wrapper model_meta(meta_json);
-  if (Utils::store_model_catalog(model_content.length(),
-                                 &model_meta,
-                                 m_handler_name))
-    return HA_ERR_GENERIC;
-
-  if (Utils::store_model_object_catalog(m_handler_name, &content_json))
-    return HA_ERR_GENERIC;
   // clang-format on
+  model_metadata = Json_wrapper(meta_json);
   return 0;
 }
 
-int ML_forecasting::load(std::string &model_content) {
+int ML_forecasting::load(THD *thd [[maybe_unused]], std::string &model_content) {
   assert(model_content.length() && m_handler_name.length());
 
   std::lock_guard<std::mutex> lock(models_mutex);
@@ -190,7 +181,8 @@ int ML_forecasting::load(std::string &model_content) {
   return 0;
 }
 
-int ML_forecasting::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+int ML_forecasting::load_from_file(THD *thd [[maybe_unused]], std::string &model_file_full_path,
+                                   std::string &model_handle_name) {
   if (!model_file_full_path.length() || !model_handle_name.length()) {
     return HA_ERR_GENERIC;
   }
@@ -200,7 +192,7 @@ int ML_forecasting::load_from_file(std::string &model_file_full_path, std::strin
   return 0;
 }
 
-int ML_forecasting::unload(std::string &model_handle_name) {
+int ML_forecasting::unload(THD *thd [[maybe_unused]], std::string &model_handle_name) {
   std::lock_guard<std::mutex> lock(models_mutex);
   assert(!Loaded_models.empty());
 
@@ -209,14 +201,14 @@ int ML_forecasting::unload(std::string &model_handle_name) {
   return (cnt == 1) ? 0 : HA_ERR_GENERIC;
 }
 
-int ML_forecasting::import(Json_wrapper &, Json_wrapper &, std::string &) {
+int ML_forecasting::import(THD *thd [[maybe_unused]], Json_wrapper &, Json_wrapper &, std::string &) {
   // all logical done in ml_model_import stored procedure.
   assert(false);
   return 0;
 }
 
-double ML_forecasting::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
-                             std::string &metric_str, Json_wrapper &option) {
+double ML_forecasting::score(THD *thd [[maybe_unused]], std::string &sch_tb_name, std::string &target_name,
+                             std::string &model_handle, std::string &metric_str, Json_wrapper &option) {
   assert(!sch_tb_name.empty() && !target_name.empty() && !model_handle.empty() && !metric_str.empty());
 
   std::transform(metric_str.begin(), metric_str.end(), metric_str.begin(), ::toupper);
@@ -282,28 +274,29 @@ double ML_forecasting::score(std::string &sch_tb_name, std::string &target_name,
   return score;
 }
 
-int ML_forecasting::explain(std::string &sch_tb_name [[maybe_unused]], std::string &target_column_name [[maybe_unused]],
+int ML_forecasting::explain(THD *thd [[maybe_unused]], std::string &sch_tb_name [[maybe_unused]],
+                            std::string &target_column_name [[maybe_unused]],
                             std::string &model_handle_name [[maybe_unused]],
                             Json_wrapper &exp_options [[maybe_unused]]) {
   return 0;
 }
-int ML_forecasting::explain_row() { return 0; }
+int ML_forecasting::explain_row(THD *) { return 0; }
 
-int ML_forecasting::explain_table() { return 0; }
+int ML_forecasting::explain_table(THD *) { return 0; }
 
-int ML_forecasting::predict_row(Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) {
+int ML_forecasting::predict_row(THD *thd [[maybe_unused]], Json_wrapper &, std::string &, Json_wrapper &,
+                                Json_wrapper &) {
   std::ostringstream err;
   err << "forecasting does not support predict_row.";
   my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
   return HA_ERR_GENERIC;
 }
 
-int ML_forecasting::predict_table(std::string &sch_tb_name [[maybe_unused]],
+int ML_forecasting::predict_table(THD *thd [[maybe_unused]], std::string &sch_tb_name [[maybe_unused]],
                                   std::string &model_handle_name [[maybe_unused]],
                                   std::string &out_sch_tb_name [[maybe_unused]],
                                   Json_wrapper &options [[maybe_unused]]) {
   return 0;
 }
-
 }  // namespace ML
 }  // namespace ShannonBase

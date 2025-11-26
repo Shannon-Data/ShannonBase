@@ -49,32 +49,35 @@ class Auto_ML {
   inline ML_TASK_TYPE_T type() { return (m_ml_task) ? m_ml_task->type() : ML_TASK_TYPE_T::UNKNOWN; }
 
   // do ML training.
-  int train();
+  int train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata);
   // load the trainned model into Rapid.
-  int load(String *model_handler_name);
+  int load(THD *thd, String *model_handler_name);
   // unload the loaded mode from Rapid.
-  int unload(String *model_handler_name);
+  int unload(THD *thd, String *model_handler_name);
   // import the model from another.
-  int import(Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_content);
+  int import(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_content);
   // evaluate and test the model.
-  double score(String *sch_table_name, String *target_column_name, String *model_handle_name, String *metric,
+  double score(THD *thd, String *sch_table_name, String *target_column_name, String *model_handle_name, String *metric,
                Json_wrapper options);
-  int explain(String *sch_tb_name, String *target_column_name, String *model_handler_name, Json_wrapper exp_options);
+  int explain(THD *thd, String *sch_tb_name, String *target_column_name, String *model_handler_name,
+              Json_wrapper exp_options);
   // predict the result with a row.
-  int predict_row(Json_wrapper &input, String *model_handler_name, Json_wrapper options, Json_wrapper &result);
+  int predict_row(THD *thd, Json_wrapper &input, String *model_handler_name, Json_wrapper options,
+                  Json_wrapper &result);
   // predict a table.
-  int predict_table(String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name, Json_wrapper &options);
+  int predict_table(THD *thd, String *in_sch_tb_name, String *model_handler_name, String *out_sch_tb_name,
+                    Json_wrapper &options);
   // gets model active
-  int model_active(String *in_sch_tb_name, Json_wrapper &out_model_info);
+  int model_active(THD *thd, String *in_sch_tb_name, Json_wrapper &out_model_info);
 
  private:
   /**check loaded or not, if yes, then get model meta info and model content.
-   * @param[in] model_hanle_name, the hanlde name of model to check.
+   * @param[in] model_handle_name, the hanlde name of model to check.
    * @param[in/out] model_content, the content of this trained model.
    * @param[in] should_loaded, true is to check whether is loaded into, false to check it should not be loaded.
    * @return true has been loaded, otherwise not.
    *  */
-  int precheck_and_process_meta_info(std::string &model_hanle_name, std::string &model_content,
+  int precheck_and_process_meta_info(std::string &model_handle_name, std::string &model_content,
                                      bool should_loaded = true);
   // get the json array value.
   std::string get_array_string(Json_array *array);

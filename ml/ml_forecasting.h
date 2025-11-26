@@ -42,20 +42,21 @@ class ML_forecasting : public ML_algorithm {
  public:
   ML_forecasting();
   virtual ~ML_forecasting() override;
-  int train() override;
-  int load(std::string &model_content) override;
-  int load_from_file(std::string &model_file_full_path, std::string &model_handle_name) override;
-  int unload(std::string &model_handle_name) override;
-  int import(Json_wrapper &model_object, Json_wrapper &model_metadata, std::string &model_handle_name) override;
-  double score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle, std::string &metric_str,
-               Json_wrapper &option) override;
-  int explain(std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
+  int train(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata) override;
+  int load(THD *thd, std::string &model_content) override;
+  int load_from_file(THD *thd, std::string &model_file_full_path, std::string &model_handle_name) override;
+  int unload(THD *thd, std::string &model_handle_name) override;
+  int import(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata,
+             std::string &model_handle_name) override;
+  double score(THD *thd, std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+               std::string &metric_str, Json_wrapper &option) override;
+  int explain(THD *thd, std::string &sch_tb_name, std::string &target_column_name, std::string &model_handle_name,
               Json_wrapper &exp_options) override;
-  int explain_row() override;
-  int explain_table() override;
-  int predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
+  int explain_row(THD *thd) override;
+  int explain_table(THD *thd) override;
+  int predict_row(THD *thd, Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
                   Json_wrapper &result) override;
-  int predict_table(std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
+  int predict_table(THD *thd, std::string &sch_tb_name, std::string &model_handle_name, std::string &out_sch_tb_name,
                     Json_wrapper &options) override;
   ML_TASK_TYPE_T type() override;
 

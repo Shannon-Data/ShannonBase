@@ -59,7 +59,7 @@ ML_recommendation::~ML_recommendation() {}
 
 ML_TASK_TYPE_T ML_recommendation::type() { return ML_TASK_TYPE_T::RECOMMENDATION; }
 
-int ML_recommendation::train() {
+int ML_recommendation::train(THD *, Json_wrapper &model_object, Json_wrapper &model_metadata) {
   std::vector<std::string> target_names;
   Utils::splitString(m_target_name, ',', target_names);
   assert(target_names.size() == 0 || target_names.size() == 1);
@@ -156,7 +156,7 @@ int ML_recommendation::train() {
                              [](const char *, size_t) { assert(false); },
                              [] { assert(false); });
   if (!content_dom.get()) return HA_ERR_GENERIC;
-  Json_wrapper content_json(content_dom.get(), true);
+  model_object = Json_wrapper(std::move(content_dom));
 
   auto meta_json = Utils::build_up_model_metadata(TASK_NAMES_MAP[type()],  /* task */
                                                 m_target_name,  /*labelled col name */
@@ -186,30 +186,21 @@ int ML_recommendation::train() {
                                                 txt2num_dict   /* txt2numeric dict */
                                               );
 
-  if (!meta_json)
-    return HA_ERR_GENERIC;
-  Json_wrapper model_meta(meta_json);
-  if (Utils::store_model_catalog(model_content.length(),
-                                 &model_meta,
-                                 m_handler_name))
-    return HA_ERR_GENERIC;
-
-  if (Utils::store_model_object_catalog(m_handler_name, &content_json))
-    return HA_ERR_GENERIC;
   // clang-format on
+  model_metadata = Json_wrapper(meta_json);
   return 0;
 }
 
-int ML_recommendation::load(std::string &model_content) {
+int ML_recommendation::load(THD *thd, std::string &model_content) {
   std::lock_guard<std::mutex> lock(models_mutex);
-  assert(model_content.length() && m_handler_name.length());
+  assert(thd && model_content.length() && m_handler_name.length());
 
   // insert the model content into the loaded map.
   Loaded_models[m_handler_name] = model_content;
   return 0;
 }
 
-int ML_recommendation::load_from_file(std::string &model_file_full_path, std::string &model_handle_name) {
+int ML_recommendation::load_from_file(THD *, std::string &model_file_full_path, std::string &model_handle_name) {
   std::lock_guard<std::mutex> lock(models_mutex);
   if (!model_file_full_path.length() || !model_handle_name.length()) {
     return HA_ERR_GENERIC;
@@ -219,7 +210,7 @@ int ML_recommendation::load_from_file(std::string &model_file_full_path, std::st
   return 0;
 }
 
-int ML_recommendation::unload(std::string &model_handle_name) {
+int ML_recommendation::unload(THD *, std::string &model_handle_name) {
   std::lock_guard<std::mutex> lock(models_mutex);
   assert(!Loaded_models.empty());
 
@@ -228,13 +219,13 @@ int ML_recommendation::unload(std::string &model_handle_name) {
   return (cnt == 1) ? 0 : HA_ERR_GENERIC;
 }
 
-int ML_recommendation::import(Json_wrapper &, Json_wrapper &, std::string &) {
+int ML_recommendation::import(THD *, Json_wrapper &, Json_wrapper &, std::string &) {
   // all logical done in ml_model_import stored procedure.
   assert(false);
   return 0;
 }
 
-double ML_recommendation::score(std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
+double ML_recommendation::score(THD *, std::string &sch_tb_name, std::string &target_name, std::string &model_handle,
                                 std::string &metric_str, Json_wrapper &option) {
   std::transform(metric_str.begin(), metric_str.end(), metric_str.begin(), ::toupper);
   std::vector<std::string> metrics;
@@ -301,29 +292,29 @@ double ML_recommendation::score(std::string &sch_tb_name, std::string &target_na
   return score;
 }
 
-int ML_recommendation::explain(std::string &, std::string &, std::string &, Json_wrapper &) {
+int ML_recommendation::explain(THD *, std::string &, std::string &, std::string &, Json_wrapper &) {
   std::ostringstream err;
   err << "recommendation does not soupport explain operation";
   my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
   return HA_ERR_GENERIC;
 }
 
-int ML_recommendation::explain_row() {
+int ML_recommendation::explain_row(THD *) {
   std::ostringstream err;
   err << "recommendation does not soupport explain operation";
   my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
   return HA_ERR_GENERIC;
 }
 
-int ML_recommendation::explain_table() {
+int ML_recommendation::explain_table(THD *) {
   std::ostringstream err;
   err << "recommendation does not soupport explain operation";
   my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
   return HA_ERR_GENERIC;
 }
 
-int ML_recommendation::predict_row(Json_wrapper &input_data, std::string &model_handle_name, Json_wrapper &option,
-                                   Json_wrapper &result) {
+int ML_recommendation::predict_row(THD *, Json_wrapper &input_data, std::string &model_handle_name,
+                                   Json_wrapper &option, Json_wrapper &result) {
   assert(result.empty());
   std::ostringstream err;
 
@@ -400,7 +391,7 @@ int ML_recommendation::predict_row(Json_wrapper &input_data, std::string &model_
   return ret;
 }
 
-int ML_recommendation::predict_table(std::string &sch_tb_name [[maybe_unused]],
+int ML_recommendation::predict_table(THD *thd [[maybe_unused]], std::string &sch_tb_name [[maybe_unused]],
                                      std::string &model_handle_name [[maybe_unused]],
                                      std::string &out_sch_tb_name [[maybe_unused]],
                                      Json_wrapper &options [[maybe_unused]]) {

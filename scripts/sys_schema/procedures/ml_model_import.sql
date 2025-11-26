@@ -62,153 +62,225 @@ BEGIN
     DECLARE v_model_cnt INT;
     DECLARE v_model_meta JSON;
     DECLARE v_model_object LONGTEXT;
-    DECLARE v_model_handle_name VARCHAR(64);
+    DECLARE v_target_column VARCHAR(64);
+    DECLARE v_train_table_name VARCHAR(128);
+    DECLARE v_model_type VARCHAR(64);
+    DECLARE v_task VARCHAR(64);
+    DECLARE v_column_names JSON;
+    DECLARE v_current_timestamp BIGINT;
+    DECLARE v_format VARCHAR(64);
+    DECLARE v_chunks INT;
+    DECLARE v_total_size BIGINT;
+    DECLARE v_chunk_id INT;
+    DECLARE v_final_metadata JSON;
 
     SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
     SET v_sys_meta_catalog_name = CONCAT('ML_SCHEMA_', v_user_name, '.MODEL_CATALOG');
     SET v_sys_meta_catalog_obj_name = CONCAT('ML_SCHEMA_', v_user_name, '.MODEL_OBJECT_CATALOG');
+    SET v_current_timestamp = UNIX_TIMESTAMP();
 
     IF in_metadata IS NULL THEN
-    SIGNAL SQLSTATE 'HY000'
-       SET MESSAGE_TEXT = "The options missed.";
+        SIGNAL SQLSTATE 'HY000'
+            SET MESSAGE_TEXT = "The options missed.";
     END IF;
 
-   IF in_model_handle_name IS NULL THEN
-      SET in_model_handle_name = CONCAT('ML_SCHEMA_', v_user_name, '_', SUBSTRING(MD5(RAND()), 1, 10));
-   END IF;
+    IF in_model_handle_name IS NULL THEN
+        SET in_model_handle_name = CONCAT('ML_SCHEMA_', v_user_name, '_', SUBSTRING(MD5(RAND()), 1, 10));
+    END IF;
 
-   SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_ID) INTO @MODEL_CNT FROM ',  v_sys_meta_catalog_name,
+    -- Check if model handle already exists
+    SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_ID) INTO @MODEL_CNT FROM ',  v_sys_meta_catalog_name,
                                   ' WHERE MODEL_HANDLE = \"', in_model_handle_name, '\";');
-   PREPARE select_model_stmt FROM @select_model_stm;
-   EXECUTE select_model_stmt;
-   SELECT @MODEL_CNT into v_model_cnt;
-   DEALLOCATE PREPARE select_model_stmt;
+    PREPARE select_model_stmt FROM @select_model_stm;
+    EXECUTE select_model_stmt;
+    SELECT @MODEL_CNT into v_model_cnt;
+    DEALLOCATE PREPARE select_model_stmt;
 
-   IF (v_model_cnt != 0) THEN
-     SIGNAL SQLSTATE 'HY000'
-        SET MESSAGE_TEXT = "The handle name you specify is already exists.";
-   END IF;
+    IF (v_model_cnt != 0) THEN
+        SIGNAL SQLSTATE 'HY000'
+           SET MESSAGE_TEXT = "The handle name you specify is already exists.";
+    END IF;
 
-   -- import from a tabble. in_model_content set to null.
-   IF JSON_CONTAINS_PATH(in_metadata, 'one', '$.schema') AND JSON_CONTAINS_PATH(in_metadata, 'one', '$.table')
-   THEN
-      SELECT in_metadata->'$.schema', in_metadata->'$.table' INTO v_schema, v_table;
+    -- Extract metadata values with defaults
+    SET v_target_column = IF(JSON_CONTAINS_PATH(in_metadata, 'one', '$.target_column_name'), 
+                            JSON_UNQUOTE(JSON_EXTRACT(in_metadata, '$.target_column_name')), 'target');
+    SET v_train_table_name = IF(JSON_CONTAINS_PATH(in_metadata, 'one', '$.train_table_name'), 
+                               JSON_UNQUOTE(JSON_EXTRACT(in_metadata, '$.train_table_name')), 'imported_model');
+    SET v_model_type = IF(JSON_CONTAINS_PATH(in_metadata, 'one', '$.model_type'), 
+                         JSON_UNQUOTE(JSON_EXTRACT(in_metadata, '$.model_type')), 'imported');
+    SET v_task = IF(JSON_CONTAINS_PATH(in_metadata, 'one', '$.task'), 
+                   JSON_UNQUOTE(JSON_EXTRACT(in_metadata, '$.task')), 'classification');
+    SET v_column_names = IF(JSON_CONTAINS_PATH(in_metadata, 'one', '$.column_names'), 
+                           JSON_EXTRACT(in_metadata, '$.column_names'), JSON_ARRAY());
+    SET v_format = IF(JSON_CONTAINS_PATH(in_metadata, 'one', '$.format'), 
+                     JSON_UNQUOTE(JSON_EXTRACT(in_metadata, '$.format')), 'ONNX');
 
-      SELECT COUNT(*) INTO v_import_obj_check
-      FROM INFORMATION_SCHEMA.TABLES
-      WHERE TABLE_SCHEMA = v_schema AND TABLE_NAME = v_table;
-      IF v_import_obj_check = 0 THEN
-          SET v_db_err_msg = CONCAT(in_table_name, ' used to import from does not exists.');
+    -- v_final_metadata
+    SET v_final_metadata = in_metadata;
+
+    -- Import from a table (in_model_content is NULL as per documentation)
+    IF in_model_content IS NULL AND JSON_CONTAINS_PATH(in_metadata, 'one', '$.schema') AND JSON_CONTAINS_PATH(in_metadata, 'one', '$.table') THEN
+        SELECT JSON_UNQUOTE(JSON_EXTRACT(in_metadata, '$.schema')), JSON_UNQUOTE(JSON_EXTRACT(in_metadata, '$.table')) INTO v_schema, v_table;
+
+        -- Check if table exists
+        SELECT COUNT(*) INTO v_import_obj_check
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = v_schema AND TABLE_NAME = v_table;
+        IF v_import_obj_check = 0 THEN
+            SET v_db_err_msg = CONCAT('Table ', v_schema, '.', v_table, ' used to import from does not exist.');
             SIGNAL SQLSTATE 'HY000'
             SET MESSAGE_TEXT = v_db_err_msg;
-      END IF;
+        END IF;
 
-      -- The table should have the following columns, and their recommended parameters:
-      SET @v_model_meta_check_stmt = CONCAT('SELECT COUNT(1) INTO @MODEL_CNT FROM INFORMATION_SCHEMA.COLUMNS ',
-                                            ' WHERE TABLE_SCHEMA = \"', v_schema, '\" AND TABLE_NAME = \"', v_table, '\"',
-                                            ' AND COLUMN_NAME IN (\"chunk_id\", \"model_object\", \"model_metadata\");');
-      PREPARE check_stmt FROM @v_model_meta_check_stmt;
-      EXECUTE check_stmt;
-      SELECT @MODEL_CNT into v_model_cnt;
-      DEALLOCATE PREPARE check_stmt;
-      IF v_model_cnt = 0 THEN
-        SIGNAL SQLSTATE 'HY000'
-           SET MESSAGE_TEXT = "The table definition imported is wrong.";
-      END IF;
+        -- Verify table has required columns according to official documentation
+        SET @v_model_meta_check_stmt = CONCAT('SELECT COUNT(1) INTO @MODEL_CNT FROM INFORMATION_SCHEMA.COLUMNS ',
+                                              ' WHERE TABLE_SCHEMA = \"', v_schema, '\" AND TABLE_NAME = \"', v_table, '\"',
+                                              ' AND COLUMN_NAME IN (\"chunk_id\", \"model_object\", \"model_metadata\");');
+        PREPARE check_stmt FROM @v_model_meta_check_stmt;
+        EXECUTE check_stmt;
+        SELECT @MODEL_CNT into v_model_cnt;
+        DEALLOCATE PREPARE check_stmt;
+        IF v_model_cnt < 3 THEN
+            SIGNAL SQLSTATE 'HY000'
+               SET MESSAGE_TEXT = "The table must have chunk_id, model_object, and model_metadata columns.";
+        END IF;
 
-      SET @v_model_meta_check_stmt = CONCAT('SELECT COUNT(1) INTO @MODEL_CNT FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE ',
-                                          ' WHERE TABLE_SCHEMA = \"', v_schema, '\" AND TABLE_NAME = \"', v_table, '\"',
-                                          ' AND CONSTRAINT_NAME = \"PRIMARY\" AND COLUMN_NAME = \"CHUNK_ID\";');
-      PREPARE check_stmt FROM @v_model_meta_check_stmt;
-      EXECUTE check_stmt;
-      SELECT @MODEL_CNT into v_model_cnt;
-      DEALLOCATE PREPARE check_stmt;
-      IF v_model_cnt = 0 THEN
-        SIGNAL SQLSTATE 'HY000'
-           SET MESSAGE_TEXT = "The column definition of CHUNK_ID imported is wrong.";
-      END IF;
+        -- Check primary key constraint on chunk_id
+        SET @v_model_meta_check_stmt = CONCAT('SELECT COUNT(1) INTO @MODEL_CNT FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE ',
+                                              ' WHERE TABLE_SCHEMA = \"', v_schema, '\" AND TABLE_NAME = \"', v_table, '\"',
+                                              ' AND CONSTRAINT_NAME = \"PRIMARY\" AND COLUMN_NAME = \"chunk_id\";');
+        PREPARE check_stmt FROM @v_model_meta_check_stmt;
+        EXECUTE check_stmt;
+        SELECT @MODEL_CNT into v_model_cnt;
+        DEALLOCATE PREPARE check_stmt;
+        IF v_model_cnt = 0 THEN
+            SIGNAL SQLSTATE 'HY000'
+               SET MESSAGE_TEXT = "The chunk_id column must be the PRIMARY KEY.";
+        END IF;
 
-      SET @v_model_meta_check_stmt = CONCAT('SELECT COUNT(1) INTO @MODEL_CNT FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE ',
-                                          ' WHERE TABLE_SCHEMA = \"', v_schema, '\" AND TABLE_NAME = \"', v_table, '\"',
-                                          ' AND COLUMN_NAME = \"MODEL_OBJECT\" AND IS_NULLABLE = \"NO\" AND DATA_TYPE = \"LONGTEXT\";');
+        -- There must be one row with chunk_id = 1
+        SET @select_model_stm = CONCAT('SELECT COUNT(*) INTO @MODEL_CNT FROM ',
+                                        v_schema, '.', v_table,
+                                        ' WHERE chunk_id = 1;');
+        PREPARE select_model_stmt FROM @select_model_stm;
+        EXECUTE select_model_stmt;
+        SELECT @MODEL_CNT into v_model_cnt;
+        DEALLOCATE PREPARE select_model_stmt;
+        IF v_model_cnt != 1 THEN
+            SIGNAL SQLSTATE 'HY000'
+                SET MESSAGE_TEXT = "There must be exactly one row with chunk_id = 1.";
+        END IF;
 
-      PREPARE check_stmt FROM @v_model_meta_check_stmt;
-      EXECUTE check_stmt;
-      SELECT @MODEL_CNT into v_model_cnt;
-      DEALLOCATE PREPARE check_stmt;
-      IF v_model_cnt = 0 THEN
-        SIGNAL SQLSTATE 'HY000'
-           SET MESSAGE_TEXT = "The column definition of model_object imported is wrong.";
-      END IF;
+        -- Get model metadata from chunk_id = 1
+        SET @model_obj_stm = CONCAT('SELECT model_metadata INTO @MODEL_META FROM ',
+                                    v_schema, '.', v_table, ' WHERE chunk_id = 1;');
+        PREPARE select_model_stmt FROM @model_obj_stm;
+        EXECUTE select_model_stmt;
+        SELECT @MODEL_META into v_model_meta;
+        DEALLOCATE PREPARE select_model_stmt;
 
-      SET @v_model_meta_check_stmt = CONCAT('SELECT COUNT(1) INTO @MODEL_CNT FROM INFORMATION_SCHEMA.COLUMNS ',
-                                          ' WHERE TABLE_SCHEMA = \"', v_schema, '\" AND TABLE_NAME = \"', v_table, '\"',
-                                          ' AND COLUMN_NAME = \"MODEL_METADATA\" AND COLUMN_DEFAULT IS NULL AND COLUMN_TYPE = \"JSON\";');
+        -- Update metadata with values from the imported model if available
+        IF v_model_meta IS NOT NULL THEN
+            -- Extract metadata from the model_metadata column
+            SET v_target_column = IF(JSON_CONTAINS_PATH(v_model_meta, 'one', '$.target_column_name'), 
+                                    JSON_UNQUOTE(JSON_EXTRACT(v_model_meta, '$.target_column_name')), v_target_column);
+            SET v_train_table_name = IF(JSON_CONTAINS_PATH(v_model_meta, 'one', '$.train_table_name'), 
+                                       JSON_UNQUOTE(JSON_EXTRACT(v_model_meta, '$.train_table_name')), v_train_table_name);
+            SET v_model_type = IF(JSON_CONTAINS_PATH(v_model_meta, 'one', '$.model_type'), 
+                                 JSON_UNQUOTE(JSON_EXTRACT(v_model_meta, '$.model_type')), v_model_type);
+            SET v_task = IF(JSON_CONTAINS_PATH(v_model_meta, 'one', '$.task'), 
+                           JSON_UNQUOTE(JSON_EXTRACT(v_model_meta, '$.task')), v_task);
+            SET v_column_names = IF(JSON_CONTAINS_PATH(v_model_meta, 'one', '$.column_names'), 
+                                   JSON_EXTRACT(v_model_meta, '$.column_names'), v_column_names);
+            SET v_format = IF(JSON_CONTAINS_PATH(v_model_meta, 'one', '$.format'), 
+                             JSON_UNQUOTE(JSON_EXTRACT(v_model_meta, '$.format')), v_format);
+            
+            SET v_final_metadata = v_model_meta;
+        END IF;
 
-      PREPARE check_stmt FROM @v_model_meta_check_stmt;
-      EXECUTE check_stmt;
-      SELECT @MODEL_CNT into v_model_cnt;
-      DEALLOCATE PREPARE check_stmt;
-      IF v_model_cnt = 0 THEN
-        SIGNAL SQLSTATE 'HY000'
-           SET MESSAGE_TEXT = "The column definition of MODEL_METADATA imported is wrong.";
-      END IF;
+        -- Get total number of chunks and calculate total size
+        SET v_total_size = 0;
+        
+        -- We'll use prepared statements to handle dynamic table names
+        SET @get_chunk_count = CONCAT('SELECT COUNT(*) INTO @TOTAL_CHUNKS FROM ', v_schema, '.', v_table);
+        PREPARE stmt FROM @get_chunk_count;
+        EXECUTE stmt;
+        SELECT @TOTAL_CHUNKS into v_chunks;
+        DEALLOCATE PREPARE stmt;
 
-      -- There must be one row, and only one row, in the table with chunk_id = 1.
-      SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_METADATA) INTO @MODEL_CNT FROM ',
-                                      v_schema, '.', v_table,
-                                      ' WHERE chunk_id = 1;');
-      PREPARE select_model_stmt FROM @select_model_stm;
-      EXECUTE select_model_stmt;
-      SELECT @MODEL_CNT into v_model_cnt;
-      DEALLOCATE PREPARE select_model_stmt;
-      IF v_model_cnt != 1 THEN
-        SIGNAL SQLSTATE 'HY000'
-            SET MESSAGE_TEXT = "the table your imported more than one row with CHUNK_ID = 1.";
-      END IF;
+        -- Import all chunks to model_object_catalog
+        SET v_chunk_id = 1;
+        WHILE v_chunk_id <= v_chunks DO
+            -- Get chunk content and size
+            SET @chunk_query = CONCAT('SELECT model_object, LENGTH(model_object) INTO @CHUNK_CONTENT, @CHUNK_SIZE FROM ', 
+                                     v_schema, '.', v_table, ' WHERE chunk_id = ', v_chunk_id);
+            PREPARE chunk_select FROM @chunk_query;
+            EXECUTE chunk_select;
+            DEALLOCATE PREPARE chunk_select;
+            
+            -- Add to total size
+            SET v_total_size = v_total_size + @CHUNK_SIZE;
+            
+            -- Insert chunk into model_object_catalog
+            SET @insert_chunk = CONCAT('INSERT INTO ', v_sys_meta_catalog_obj_name, 
+                                      ' (MODEL_HANDLE, CHUNK_ID, MODEL_OBJECT) VALUES(\"', 
+                                      in_model_handle_name, '\", ', v_chunk_id, ', \"', 
+                                      REPLACE(@CHUNK_CONTENT, '\"', '\"\"'), '\")');
+            PREPARE chunk_insert FROM @insert_chunk;
+            EXECUTE chunk_insert;
+            DEALLOCATE PREPARE chunk_insert;
+            
+            SET v_chunk_id = v_chunk_id + 1;
+        END WHILE;
 
+        -- If chunks is not set in metadata and we have multiple chunks, update metadata
+        IF v_final_metadata IS NOT NULL AND NOT JSON_CONTAINS_PATH(v_final_metadata, 'one', '$.chunks') AND v_chunks > 1 THEN
+            SET v_final_metadata = JSON_SET(v_final_metadata, '$.chunks', v_chunks);
+        END IF;
 
-      SET @model_obj_stm = CONCAT('SELECT MODEL_OBJECT, MODEL_METADATA INTO @MODEL_OBJ, @MODEL_META FROM',
-                                  v_schema, '.', v_table, ' WHERE CHUNK_ID = 1;');
-      PREPARE select_model_stmt FROM @model_obj_stm;
-      EXECUTE select_model_stmt;
-      SELECT @MODEL_OBJ, @model_metadata into v_model_object, v_model_meta;
-      DEALLOCATE PREPARE select_model_stmt;
+    ELSE
+        -- Direct model content import (non-table import)
+        SET v_total_size = OCTET_LENGTH(in_model_content);
+        
+        -- Insert into model_object_catalog (single chunk)
+        SET @model_obj_stm = CONCAT('INSERT INTO ', v_sys_meta_catalog_obj_name, 
+                                  ' (MODEL_HANDLE, CHUNK_ID, MODEL_OBJECT)',
+                                  ' VALUES(\"', in_model_handle_name, '\", 1, \"',
+                                  REPLACE(in_model_content, '\"', '\"\"'), '\");');
+        PREPARE select_model_stmt FROM @model_obj_stm;
+        EXECUTE select_model_stmt;
+        DEALLOCATE PREPARE select_model_stmt;
+    END IF;
 
-      SET @model_obj_size = OCTET_LENGTH(v_model_object);
-      SET @model_obj_stm = CONCAT('INSERT INTO ', v_sys_meta_catalog_name,
-                                  '(MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, MODEL_OBJECT_SIZE, MODEL_METADATA)',
-                                  ' VALUES(', '\"', in_model_handle_name, '\", NULL,',
-                                  '\"', v_user_name, '\",', @model_obj_size, ',',
-                                  '''',JSON_UNQUOTE(JSON_EXTRACT(v_model_meta, '$')), ''');');
-      PREPARE select_model_stmt FROM @model_obj_stm;
-      EXECUTE select_model_stmt;
-      DEALLOCATE PREPARE select_model_stmt;
+    SET @param_model_handle = in_model_handle_name;
+    SET @param_user_name = v_user_name;
+    SET @param_timestamp = v_current_timestamp;
+    SET @param_target_column = IFNULL(v_target_column, '');
+    SET @param_train_table = IFNULL(v_train_table_name, 'imported_model');
+    SET @param_total_size = v_total_size;
+    SET @param_model_type = IFNULL(v_model_type, 'imported');
+    SET @param_task = IFNULL(v_task, 'classification');
+    SET @param_column_names = IF(JSON_LENGTH(v_column_names) > 0, JSON_UNQUOTE(v_column_names), '[]');
+    SET @param_metadata = JSON_UNQUOTE(JSON_EXTRACT(v_final_metadata, '$'));
 
-      SET @model_obj_stm = CONCAT('INSERT INTO ', v_sys_meta_catalog_obj_name, '(MODEL_HANDLE, MODEL_OBJECT)',
-                                    ' VALUES(', '\"', in_model_handle_name, '\",',
-                                    JSON_QUOTE(CAST(v_model_object AS CHAR)), ');');
-      PREPARE select_model_stmt FROM @model_obj_stm;
-      EXECUTE select_model_stmt;
-      DEALLOCATE PREPARE select_model_stmt;
-   ELSE
-    -- The preprocessed model object.
-      SET @model_obj_size = OCTET_LENGTH(in_model_content);
-      SET @model_obj_stm = CONCAT('INSERT INTO ', v_sys_meta_catalog_name,
-                                  '(MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, MODEL_OBJECT_SIZE, MODEL_METADATA)',
-                                  ' VALUES(', '\"', in_model_handle_name, '\", NULL,',
-                                  '\"', v_user_name, '\",', @model_obj_size, ',',
-                                  '''',JSON_UNQUOTE(JSON_EXTRACT(in_metadata, '$')), ''');');
-      PREPARE select_model_stmt FROM @model_obj_stm;
-      EXECUTE select_model_stmt;
-      DEALLOCATE PREPARE select_model_stmt;
-
-      SET @model_obj_stm = CONCAT('INSERT INTO ', v_sys_meta_catalog_obj_name, '(MODEL_HANDLE, MODEL_OBJECT)',
-                                    ' VALUES(', '\"', in_model_handle_name, '\",',
-                                    JSON_QUOTE(CAST(in_model_content AS CHAR)), ');');
-      PREPARE select_model_stmt FROM @model_obj_stm;
-      EXECUTE select_model_stmt;
-      DEALLOCATE PREPARE select_model_stmt;
-   END IF;
+    SET @model_obj_stm = CONCAT('INSERT INTO ', v_sys_meta_catalog_name,
+                             ' (MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, BUILD_TIMESTAMP, ',
+                             'TARGET_COLUMN_NAME, TRAIN_TABLE_NAME, MODEL_OBJECT_SIZE, ',
+                             'MODEL_TYPE, TASK, COLUMN_NAMES, MODEL_METADATA, LAST_ACCESSED)',
+                             ' VALUES(?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    PREPARE select_model_stmt FROM @model_obj_stm;
+    EXECUTE select_model_stmt USING 
+        @param_model_handle, 
+        @param_user_name, 
+        @param_timestamp, 
+        @param_target_column, 
+        @param_train_table, 
+        @param_total_size, 
+        @param_model_type, 
+        @param_task, 
+        @param_column_names, 
+        @param_metadata, 
+        @param_timestamp;
+    DEALLOCATE PREPARE select_model_stmt;
 END$$
 DELIMITER ;

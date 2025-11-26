@@ -4093,6 +4093,7 @@ class Item_func_ml_train : public Item_int_func {
   Item_func_ml_train(const POS &pos, PT_item_list *list)
       : Item_int_func(pos, list) {}
   enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  bool fix_fields(THD *thd, Item **ref) override;
   longlong val_int() override;
   const char *func_name() const override {
     return "ML_TRAIN";

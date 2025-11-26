@@ -52,12 +52,19 @@ CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'cla
 
 SET @shml_model = "census_test_im";
 
-SET @shml_object = ( SELECT model_object FROM ML_SCHEMA_root.MODEL_OBJECT_CATALOG  WHERE model_handle COLLATE utf8mb4_0900_ai_ci = @shml_model);
+CREATE TABLE imported_from_tb (
+  chunk_id INT AUTO_INCREMENT PRIMARY KEY,
+  model_object LONGTEXT NOT NULL,
+  model_metadata JSON DEFAULT NULL
+);
 
-SET @shml_metadata = (SELECT model_metadata FROM ML_SCHEMA_root.MODEL_CATALOG WHERE model_handle COLLATE utf8mb4_0900_ai_ci = @shml_model );
+INSERT INTO imported_from_tb (model_object, model_metadata)
+SELECT moc.model_object, mc.model_metadata FROM ML_SCHEMA_root.MODEL_OBJECT_CATALOG moc
+JOIN ML_SCHEMA_root.MODEL_CATALOG mc ON moc.model_handle = mc.model_handle WHERE moc.model_handle = @shml_model
+ORDER BY moc.chunk_id;
 
 SET @imported_model = 'census_test_imported';
-CALL sys.ML_MODEL_IMPORT(@shml_object, @shml_metadata, @imported_model);
+CALL sys.ML_MODEL_IMPORT(NULL, JSON_OBJECT('schema', 'shannon_ml', 'table', 'imported_from_tb'), @imported_model);
 
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
        JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names

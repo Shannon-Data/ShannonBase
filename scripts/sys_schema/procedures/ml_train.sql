@@ -53,259 +53,228 @@ mysql> CALL sys.ML_TRAIN(\'ml_data.iris_train\', \'class\',
     NOT DETERMINISTIC
     MODIFIES SQL DATA
 BEGIN
-    -- Variable declarations for validation and processing
-    DECLARE v_user_name VARCHAR(64);
-    DECLARE v_db_name_check VARCHAR(64);
-    DECLARE v_sys_schema_name VARCHAR(64);
-    DECLARE v_db_err_msg TEXT;
+    DECLARE v_user_name          VARCHAR(64);
+    DECLARE v_sys_schema_name    VARCHAR(64);
+    DECLARE v_db_name_check      VARCHAR(64);
+    DECLARE v_train_schema_name  VARCHAR(64);
+    DECLARE v_train_table_name   VARCHAR(64);
+    DECLARE v_task               VARCHAR(64) DEFAULT 'classification';
+    DECLARE v_model_handle       VARCHAR(255);
+    DECLARE v_err_msg            TEXT DEFAULT '';
 
-    -- Table and model validation variables
-    DECLARE v_train_obj_check INT;
-    DECLARE v_train_schema_name VARCHAR(64);
-    DECLARE v_train_table_name VARCHAR(64);
-    DECLARE v_model_name VARCHAR(255);
+    DECLARE v_train_obj_check    INT DEFAULT 0;
+    DECLARE table_size_gb        DECIMAL(10,2);
+    DECLARE table_rows           BIGINT;
+    DECLARE column_count         INT;
+    DECLARE v_temp_count         INT DEFAULT 0;
 
-    -- Table constraint variables
-    DECLARE table_size_gb DECIMAL(10, 2);
-    DECLARE table_rows BIGINT;
-    DECLARE column_count INT;
+    DECLARE o_model_object       JSON;
+    DECLARE o_model_metadata     JSON;
 
-    -- Task and option processing variables
-    DECLARE v_task VARCHAR(64) DEFAULT 'classification';
-    DECLARE v_datetime_index VARCHAR(64);
-    DECLARE v_endogenous_vars JSON;
-    DECLARE v_exogenous_vars JSON;
-    DECLARE v_model_list JSON;
-    DECLARE v_exclude_models JSON;
-    DECLARE v_optimization_metric VARCHAR(64);
-    DECLARE v_contamination DECIMAL(5,4);
-    DECLARE v_users_column VARCHAR(64);
-    DECLARE v_items_column VARCHAR(64);
-    DECLARE v_feedback VARCHAR(64);
-    DECLARE v_document_column VARCHAR(64);
+    DECLARE v_model_object_size  BIGINT UNSIGNED DEFAULT 0;
+    DECLARE v_model_object_text  LONGTEXT;
+    DECLARE v_chunk_size         INT DEFAULT 16777216; -- 16MB
+    DECLARE v_chunk_id           INT DEFAULT 1;
+    DECLARE v_offset             BIGINT DEFAULT 0;
+    DECLARE v_remain             BIGINT;
 
-    -- Step 1: Validate table name format
+    -- Step 1-3 : Basic Validation (table name, size, rows, columns)
     IF in_table_name NOT REGEXP '^[^.]+\.[^.]+$' THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Invalid schema.table format, please using fully qualified name of the table.';
+            SET MESSAGE_TEXT = 'Invalid schema.table format';
     END IF;
 
-    -- Step 2: Extract schema and table names
-    SELECT SUBSTRING_INDEX(in_table_name, '.', 1) INTO v_train_schema_name;
-    SELECT SUBSTRING_INDEX(in_table_name, '.', -1) INTO v_train_table_name;
+    SELECT SUBSTRING_INDEX(in_table_name,'.',1)  INTO v_train_schema_name;
+    SELECT SUBSTRING_INDEX(in_table_name,'.',-1) INTO v_train_table_name;
 
-    -- Step 3: Validate table size constraints
-    SELECT ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024 / 1024, 2) INTO table_size_gb
+    SELECT ROUND((DATA_LENGTH + INDEX_LENGTH)/1024/1024/1024,2)
+           INTO table_size_gb
     FROM information_schema.TABLES
     WHERE TABLE_SCHEMA = v_train_schema_name
-    AND TABLE_NAME = v_train_table_name;
+      AND TABLE_NAME   = v_train_table_name;
 
     SELECT TABLE_ROWS INTO table_rows
     FROM information_schema.TABLES
     WHERE TABLE_SCHEMA = v_train_schema_name
-    AND TABLE_NAME = v_train_table_name;
+      AND TABLE_NAME   = v_train_table_name;
 
     SELECT COUNT(*) INTO column_count
     FROM information_schema.COLUMNS
     WHERE TABLE_SCHEMA = v_train_schema_name
-    AND TABLE_NAME = v_train_table_name;
+      AND TABLE_NAME   = v_train_table_name;
 
-    -- Enforce size constraints
     IF table_size_gb > 10 THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'The table cannot exceed 10 GB';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Table cannot exceed 10 GB';
     END IF;
-
     IF table_rows > 100000000 THEN
-        SIGNAL SQLSTATE '45001'
-        SET MESSAGE_TEXT = 'The table cannot exceed 100 million rows';
+        SIGNAL SQLSTATE '45001' SET MESSAGE_TEXT = 'Table cannot exceed 100 million rows';
     END IF;
-
     IF column_count > 1017 THEN
-        SIGNAL SQLSTATE '45002'
-        SET MESSAGE_TEXT = 'The table cannot exceed 1017 columns';
+        SIGNAL SQLSTATE '45002' SET MESSAGE_TEXT = 'Table cannot exceed 1017 columns';
     END IF;
 
-    -- Step 4: Setup ML schema for user
-    SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;  
+    -- Step 4 : Create User-specific ML_SCHEMA_xxx
+    SELECT SUBSTRING_INDEX(CURRENT_USER(),'@',1) INTO v_user_name;
     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
 
     SELECT SCHEMA_NAME INTO v_db_name_check
     FROM INFORMATION_SCHEMA.SCHEMATA
     WHERE SCHEMA_NAME = v_sys_schema_name;
 
-    -- Create ML schema and catalog tables if they don't exist
     IF v_db_name_check IS NULL THEN
         START TRANSACTION;
 
-        -- Create ML schema
-        SET @create_db_stmt = CONCAT('CREATE DATABASE ', v_sys_schema_name, ';');
-        PREPARE create_db_stmt FROM @create_db_stmt;
-        EXECUTE create_db_stmt;
-        DEALLOCATE PREPARE create_db_stmt;
+        SET @sql = CONCAT('CREATE DATABASE ', v_sys_schema_name);
+        PREPARE s FROM @sql; EXECUTE s; DEALLOCATE PREPARE s;
 
-        -- Create MODEL_CATALOG table
-        SET @create_tb_stmt = CONCAT(' CREATE TABLE ', v_sys_schema_name, '.MODEL_CATALOG(
-                                        MODEL_ID INT NOT NULL AUTO_INCREMENT,
-                                        MODEL_HANDLE VARCHAR(255) UNIQUE,
-                                        MODEL_OBJECT JSON DEFAULT NULL,
-                                        MODEL_OWNER VARCHAR(255) DEFAULT NULL,
-                                        MODEL_OBJECT_SIZE INT DEFAULT 0,
-                                        MODEL_METADATA JSON DEFAULT NULL,
-                                        PRIMARY KEY (MODEL_ID));');
-        PREPARE create_tb_stmt FROM @create_tb_stmt;
-        EXECUTE create_tb_stmt;
-        DEALLOCATE PREPARE create_tb_stmt;
+        -- -------- MODEL_CATALOG (latest official structure) ----------
+        SET @sql = CONCAT('
+            CREATE TABLE ', v_sys_schema_name, '.MODEL_CATALOG (
+                MODEL_ID            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                MODEL_HANDLE        VARCHAR(255) NOT NULL,
+                MODEL_OBJECT        JSON DEFAULT NULL COMMENT "Always NULL - stored in MODEL_OBJECT_CATALOG",
+                MODEL_OWNER         VARCHAR(255) DEFAULT NULL,
+                BUILD_TIMESTAMP     BIGINT UNSIGNED NOT NULL DEFAULT (unix_timestamp()),
+                TARGET_COLUMN_NAME  VARCHAR(64)  DEFAULT NULL,
+                TRAIN_TABLE_NAME    VARCHAR(255) NOT NULL,
+                MODEL_OBJECT_SIZE   BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                MODEL_TYPE          VARCHAR(128) DEFAULT NULL,
+                TASK                VARCHAR(64)  DEFAULT NULL,
+                COLUMN_NAMES        JSON         DEFAULT NULL,
+                MODEL_EXPLANATION   JSON         DEFAULT NULL,
+                LAST_ACCESSED       BIGINT UNSIGNED DEFAULT NULL,
+                MODEL_METADATA      JSON         DEFAULT NULL,
+                NOTES               TEXT         DEFAULT NULL,
+                PRIMARY KEY (MODEL_ID),
+                UNIQUE KEY uk_model_handle (MODEL_HANDLE),
+                KEY idx_owner (MODEL_OWNER),
+                KEY idx_train_table (TRAIN_TABLE_NAME),
+                KEY idx_task (TASK),
+                KEY idx_last_accessed (LAST_ACCESSED),
+                KEY idx_build_time (BUILD_TIMESTAMP)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+            COMMENT="ShannonBase ML Model Catalog"');
+        PREPARE s FROM @sql; EXECUTE s; DEALLOCATE PREPARE s;
 
-        -- Create MODEL_OBJECT_CATALOG table
-        SET @create_tb_stmt = CONCAT(' CREATE TABLE ', v_sys_schema_name, '.MODEL_OBJECT_CATALOG (
-                                        CHUNK_ID INT NOT NULL AUTO_INCREMENT,
-                                        MODEL_HANDLE VARCHAR(255),
-                                        MODEL_OBJECT JSON DEFAULT NULL,
-                                        PRIMARY KEY (CHUNK_ID, MODEL_HANDLE));');
-        PREPARE create_tb_stmt FROM @create_tb_stmt;
-        EXECUTE create_tb_stmt;
-        DEALLOCATE PREPARE create_tb_stmt;
-
-        -- Add foreign key constraint
-        SET @add_fk_tb_stmt = CONCAT(' ALTER TABLE ', v_sys_schema_name, '.MODEL_OBJECT_CATALOG
-                                     ADD CONSTRAINT fk_cat_handle_objcat_handl FOREIGN KEY (MODEL_HANDLE) ',
-                                     'REFERENCES ', v_sys_schema_name, '.MODEL_CATALOG(MODEL_HANDLE);');
-        PREPARE add_fk_tb_stmt FROM @add_fk_tb_stmt;
-        EXECUTE add_fk_tb_stmt;
-        DEALLOCATE PREPARE add_fk_tb_stmt;
-
+        -- -------- MODEL_OBJECT_CATALOG (store large models in chunks) ----------
+        SET @sql = CONCAT('
+            CREATE TABLE ', v_sys_schema_name, '.MODEL_OBJECT_CATALOG (
+                CHUNK_ID      INT UNSIGNED NOT NULL,
+                MODEL_HANDLE  VARCHAR(255) NOT NULL,
+                MODEL_OBJECT  LONGTEXT NOT NULL,
+                PRIMARY KEY uk_handle_chunk (MODEL_HANDLE, CHUNK_ID),
+                KEY idx_handle (MODEL_HANDLE)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+            COMMENT="Large model binaries stored in chunks"
+        ');
+        PREPARE s FROM @sql; EXECUTE s; DEALLOCATE PREPARE s;
         COMMIT;
     END IF;
 
-    -- Step 5: Validate training table exists
-    SELECT COUNT(*) INTO v_train_obj_check
-    FROM INFORMATION_SCHEMA.TABLES
-    WHERE TABLE_SCHEMA = v_train_schema_name
-    AND TABLE_NAME = v_train_table_name;
-
-    IF v_train_obj_check = 0 THEN
-        SET v_db_err_msg = CONCAT(in_table_name, ' used to do training does not exists.');
-        SIGNAL SQLSTATE 'HY000'
-            SET MESSAGE_TEXT = v_db_err_msg;
+    -- Step 5-7 : Table existence, handle, target column validation.
+    IF (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA=v_train_schema_name AND TABLE_NAME=v_train_table_name) = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Training table does not exist';
     END IF;
 
-    -- Step 6: Handle model handle - check if exists or generate new one
     IF in_model_handle IS NOT NULL THEN
-        SET @select_model_stm = CONCAT('SELECT COUNT(MODEL_HANDLE) INTO @MODEL_HANDLE_COUNT FROM ',  
-                                       v_sys_schema_name,
-                                       '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', 
-                                       in_model_handle, '\";');
-        PREPARE select_model_stmt FROM @select_model_stm;
-        EXECUTE select_model_stmt;
-        SELECT @MODEL_HANDLE_COUNT INTO v_train_obj_check;
-        DEALLOCATE PREPARE select_model_stmt;
+        SET v_model_handle = in_model_handle;
+        SET @v_temp_count = 0;
+        SET @sql_check = CONCAT('SELECT COUNT(*) INTO @v_temp_count FROM `',
+                                v_sys_schema_name, '`.MODEL_CATALOG WHERE MODEL_HANDLE = ',
+                                QUOTE(v_model_handle));
+        PREPARE stmt FROM @sql_check;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
 
-        IF v_train_obj_check > 0 THEN
-            SIGNAL SQLSTATE 'HY000'
-                SET MESSAGE_TEXT = "The model has already existed.";
+        SET v_temp_count = @v_temp_count;
+
+        IF v_temp_count > 0 THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Model handle already exists';
         END IF;
     ELSE
-        -- Generate unique model handle
-        SET in_model_handle = CONCAT(in_table_name, '_', v_user_name, '_', 
-                                   SUBSTRING(MD5(RAND()), 1, 10));
+        SET v_model_handle = CONCAT(in_table_name,'_',v_user_name,'_',SUBSTRING(MD5(RAND()),1,10));
     END IF;
 
-    -- Step 7: Validate target column exists (if specified)
-    IF in_target_name IS NOT NULL THEN
-        SELECT COUNT(COLUMN_NAME) INTO v_train_obj_check
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = v_train_schema_name
-        AND TABLE_NAME = v_train_table_name 
-        AND COLUMN_NAME = in_target_name;
-
-        IF v_train_obj_check = 0 THEN
-            SET v_db_err_msg = CONCAT('column ', in_target_name, 
-                                    ' labelled does not exists in ', v_train_table_name);
-            SIGNAL SQLSTATE 'HY000'
-                SET MESSAGE_TEXT = v_db_err_msg;
-        END IF;
+    IF in_target_name IS NOT NULL AND
+       (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=v_train_schema_name
+          AND TABLE_NAME=v_train_table_name
+          AND COLUMN_NAME=in_target_name) = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Target column does not exist';
     END IF;
 
-    -- Step 8: Process training options and extract task-specific parameters
+    -- Step 8 : Options processing
     IF in_option IS NULL THEN
-        SET in_option = JSON_OBJECT('task', 'classification');
+        SET in_option = JSON_OBJECT('task','classification');
     END IF;
+    SET v_task = COALESCE(JSON_UNQUOTE(JSON_EXTRACT(in_option,'$.task')),'classification');
 
-    -- Extract task type
-    SET v_task = COALESCE(JSON_UNQUOTE(JSON_EXTRACT(in_option, '$.task')), 'classification');
-
-    -- Extract common parameters
-    SET v_model_list = JSON_EXTRACT(in_option, '$.model_list');
-    SET v_exclude_models = JSON_EXTRACT(in_option, '$.exclude_model_list');
-    SET v_optimization_metric = JSON_UNQUOTE(JSON_EXTRACT(in_option, '$.optimization_metric'));
-
-    -- Extract task-specific parameters
-    CASE v_task
-        WHEN 'forecasting' THEN
-            SET v_datetime_index = JSON_UNQUOTE(JSON_EXTRACT(in_option, '$.datetime_index'));
-            SET v_endogenous_vars = JSON_EXTRACT(in_option, '$.endogenous_variables');
-            SET v_exogenous_vars = JSON_EXTRACT(in_option, '$.exogenous_variables');
-
-            -- Validate required forecasting parameters
-            IF v_datetime_index IS NULL OR v_endogenous_vars IS NULL THEN
-                SIGNAL SQLSTATE 'HY000'
-                    SET MESSAGE_TEXT = 'Forecasting requires datetime_index and endogenous_variables';
-            END IF;
-
-        WHEN 'anomaly_detection' THEN
-            SET v_contamination = JSON_UNQUOTE(JSON_EXTRACT(in_option, '$.contamination'));
-            IF v_contamination IS NULL THEN
-                SET v_contamination = 0.01;
-            END IF;
-
-            -- Validate contamination range
-            IF v_contamination <= 0 OR v_contamination >= 0.5 THEN
-                SIGNAL SQLSTATE 'HY000'
-                    SET MESSAGE_TEXT = 'Contamination must be between 0 and 0.5';
-            END IF;
-
-        WHEN 'recommendation' THEN
-            SET v_users_column = JSON_UNQUOTE(JSON_EXTRACT(in_option, '$.users'));
-            SET v_items_column = JSON_UNQUOTE(JSON_EXTRACT(in_option, '$.items'));
-            SET v_feedback = COALESCE(JSON_UNQUOTE(JSON_EXTRACT(in_option, '$.feedback')), 'explicit');
-
-            -- Validate required recommendation parameters
-            IF v_users_column IS NULL OR v_items_column IS NULL THEN
-                SIGNAL SQLSTATE 'HY000'
-                    SET MESSAGE_TEXT = 'Recommendation requires users and items columns';
-            END IF;
-
-        WHEN 'topic_modeling' THEN
-            SET v_document_column = JSON_UNQUOTE(JSON_EXTRACT(in_option, '$.document_column'));
-
-            IF v_document_column IS NULL THEN
-                SIGNAL SQLSTATE 'HY000'
-                    SET MESSAGE_TEXT = 'Topic modeling requires document_column';
-            END IF;
-        ELSE
-            -- Classification and regression use defaults
-            SET v_task = v_task;
-    END CASE;
-
-    -- Step 9: Execute the actual ML training
-    -- Note: This calls the native ML_TRAIN function which handles the actual model training
+    -- Step 9 : Call underlying native ML_TRAIN
     START TRANSACTION;
-
-    -- Call the native ML_TRAIN function with validated parameters
-    SELECT ML_TRAIN(in_table_name, in_target_name, in_option, in_model_handle) INTO v_train_obj_check;
-
+    SELECT ML_TRAIN(in_table_name,
+                    in_target_name,
+                    in_option,
+                    v_model_handle,
+                    o_model_object,
+                    o_model_metadata) INTO v_train_obj_check;
     COMMIT;
 
-    -- Step 10: Check training result and handle errors
     IF v_train_obj_check != 0 THEN
-        SET v_db_err_msg = CONCAT('ML_TRAIN failed with error code: ', v_train_obj_check);
-        SIGNAL SQLSTATE 'HY000'
-            SET MESSAGE_TEXT = v_db_err_msg;
+        SET v_err_msg = CONCAT('ML_TRAIN native function failed with code ', v_train_obj_check);
+        ROLLBACK;
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_err_msg;
     END IF;
 
-    -- Step 11: Log successful training completion
-    -- The model metadata and objects are automatically stored by the native ML_TRAIN function
+    START TRANSACTION;
+    SET @model_json_extracted = NULL;
+    -- see the ref: `Utils::ML_train`
+    SET @model_json_extracted = JSON_EXTRACT(o_model_object, '$.SHANNON_LIGHTGBM_CONTENT');
+    IF @model_json_extracted IS NOT NULL AND @model_json_extracted != 'null' THEN
+        SET v_model_object_text = JSON_UNQUOTE(@model_json_extracted);
+    ELSE
+        SET v_model_object_text = JSON_UNQUOTE(o_model_object);
+    END IF;
+    SET v_model_object_size = LENGTH(v_model_object_text);
 
+    -- insert into catalog
+    SET @cat_sql = CONCAT(
+        'INSERT INTO `', v_sys_schema_name, '`.MODEL_CATALOG ',
+        '(MODEL_HANDLE, MODEL_OWNER, TARGET_COLUMN_NAME, TRAIN_TABLE_NAME, ',
+        'MODEL_OBJECT_SIZE, TASK, MODEL_METADATA, NOTES) VALUES (',
+        QUOTE(v_model_handle), ',',
+        QUOTE(v_user_name), ',',
+        IF(in_target_name IS NULL, 'NULL', QUOTE(in_target_name)), ',',
+        QUOTE(in_table_name), ',',
+        v_model_object_size, ',',
+        QUOTE(v_task), ',',
+        QUOTE(o_model_metadata), ',',
+        QUOTE('Model created by ml_train - compressed'),
+        ')'
+    );
+
+    PREPARE s FROM @cat_sql; EXECUTE s; DEALLOCATE PREPARE s;
+
+    -- write in chunks
+    SET v_remain = v_model_object_size;
+    SET v_offset = 0;
+    SET v_chunk_id = 1;
+
+    chunk_loop: WHILE v_remain > 0 DO
+        SET @chunk = SUBSTRING(v_model_object_text, v_offset + 1, LEAST(v_chunk_size, v_remain));
+        
+        SET @v_model_handle = v_model_handle;
+        SET @v_chunk_id = v_chunk_id;
+        SET @chunk_sql = CONCAT('INSERT INTO `', v_sys_schema_name, '`.MODEL_OBJECT_CATALOG ',
+                        '(MODEL_HANDLE, CHUNK_ID, MODEL_OBJECT) VALUES (?, ?, ?)');
+        PREPARE s FROM @chunk_sql;
+        EXECUTE s USING @v_model_handle, @v_chunk_id, @chunk;
+        DEALLOCATE PREPARE s;
+
+        SET v_offset = v_offset + v_chunk_size;
+        SET v_remain = v_remain - v_chunk_size;
+        SET v_chunk_id = v_chunk_id + 1;
+    END WHILE chunk_loop;
+COMMIT;
 END$$
 DELIMITER ;
