@@ -155,6 +155,12 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
     gen_options.presence_penalty = std::atof(oper_type.c_str());
   }
 
+  keystr = "frequency_penalty";
+  if (opt_values.find(keystr) != opt_values.end()) {
+    oper_type = opt_values[keystr][0];
+    gen_options.frequency_penalty = std::atof(oper_type.c_str());
+  }
+
   keystr = "stop_sequences";
   if (opt_values.find(keystr) != opt_values.end()) {
     gen_options.stop_sequences = opt_values[keystr];
@@ -164,7 +170,7 @@ std::string ML_generate_row::Generate(std::string &text, Json_wrapper &option) {
   if (opt_values.find(keystr) != opt_values.end()) {
     oper_type = opt_values[keystr][0];
     std::transform(oper_type.begin(), oper_type.end(), oper_type.begin(), ::tolower);
-    gen_options.presence_penalty = (oper_type == "true") ? true : false;
+    gen_options.speculative_decoding = (oper_type == "true") ? true : false;
   }
 
   auto tg = std::make_unique<LLM_Generate::TextGenerator>(model_path, token_path, gen_options);

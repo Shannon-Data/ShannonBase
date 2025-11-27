@@ -41,6 +41,7 @@
 #include <regex>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include <onnxruntime_cxx_api.h>
@@ -303,6 +304,20 @@ struct ModelConfig {
   std::string attention_type;  // "standard" or "gqa"
 };
 
+// Key/Value a layer structure：[SeqLen, Heads * HeadDim]
+template <typename T>
+using layer_cache_t = std::vector<T>;
+
+// KV entire structure：[NumLayers, [SeqLen, Heads * HeadDim]]
+template <typename T>
+using full_cache_t = std::vector<layer_cache_t<T>>;
+
+// 2. using std::variant to support different types data.
+using cache_data_t = std::variant<full_cache_t<float>,          /*FP32*/
+                                  full_cache_t<Ort::Float16_t>, /*FP16*/
+                                  full_cache_t<int8_t>,         /*INT8/QINT8*/
+                                  full_cache_t<int64_t>         /*INT64/QINT64*/
+                                  >;
 class TextGenerator {
  public:
   struct Result {
@@ -530,6 +545,30 @@ class TextGenerator {
   // A helper function.
   void PrintTopKLogits(const std::vector<float> &logits, int top_k) const;
 
+  template <typename CacheT, typename SourceT>
+  void updateLayerCache(full_cache_t<CacheT> &fullCache, size_t layerIdx, const SourceT *data, size_t elementCount);
+
+  /**
+   * @brief create a zero-elem(empty) ORT tensor.
+   * @param type ONNX data type (m_cacheDataType).
+   * @param shape shape of tensor（[1, num_heads, 0, head_dim]).
+   * @param memInfo
+   * @return Ort::Value zero-elem tesnor.
+   */
+  Ort::Value CreateZeroCacheTensor(ONNXTensorElementDataType type, const std::vector<int64_t> &shape,
+                                   const Ort::MemoryInfo &memInfo);
+
+  /**
+   * @brief from cache_data_t get the Nth-layer data，and create ORT tensor as input.
+   * @param cache (cache_data_t).
+   * @param layerIdx layer index.
+   * @param shape tensor shape（[1, num_heads, seq_len, head_dim]).
+   * @param memInfo
+   * @return Ort::Value ORT input tensor.
+   */
+  Ort::Value CreateInputCacheTensor(cache_data_t &cache, size_t layerIdx, const std::vector<int64_t> &shape,
+                                    const Ort::MemoryInfo &memInfo);
+
  private:
   // system prompt string.
   std::string m_system_prompt{"You are an AI assistant that provides clear and concise explanations in "};
@@ -581,6 +620,7 @@ class TextGenerator {
 
   // Vocabulary Size
   size_t m_vocabularySize = 0;
+  static constexpr size_t default_vocab_size = 5000;
 
   // initialized or not.
   bool m_initialized = false;
@@ -593,8 +633,10 @@ class TextGenerator {
   std::shared_ptr<tokenizers::Tokenizer> m_tokenizer;
 
   // kv-cache
-  std::vector<std::vector<float>> m_keyCache;
-  std::vector<std::vector<float>> m_valueCache;
+  ONNXTensorElementDataType m_cacheDataType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+  cache_data_t m_keyCache;
+  cache_data_t m_valueCache;
+
   bool m_kvCacheInitialized = false;
   bool m_shouldClearKVCache = true;
 

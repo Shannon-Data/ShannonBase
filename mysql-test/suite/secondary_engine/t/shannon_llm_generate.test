@@ -1,0 +1,25 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+# USED FOR RAG.
+create database sh_rag;
+use sh_rag;
+--disable_warnings
+--replace_column 1 IGNORE
+# remove comment for local run.
+#SELECT sys.ML_GENERATE(
+#    "What is AI?", 
+#    JSON_OBJECT(
+#        "task", "generation", 
+#        "model_id", "Qwen2.5-0.5B-Instruct", 
+#        "language", "en",
+#        "temperature", 0.8,
+#        "frequency_penalty", 1.2,
+#        "presence_penalty", 0.8,
+#        "max_tokens", 256
+#    )
+#);
+--enable_warnings
+DROP DATABASE sh_rag;

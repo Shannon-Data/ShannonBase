@@ -148,7 +148,9 @@ int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::
 
       my_decimal m;
       std::string decimal_str;
-      if (options.get_decimal_data(&m) || decimal2string(&m, ptr, &length)) return true; /* purecov: inspected */
+      if (options.get_decimal_data(&m)) return true; /* purecov: inspected */
+      decimal2string(&m, ptr, &length);
+      decimal_str = ptr;
       option_value[key].push_back(decimal_str);
       break;
     }
