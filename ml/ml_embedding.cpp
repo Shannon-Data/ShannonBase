@@ -67,30 +67,36 @@ ML_embedding::EmbeddingVector ML_embedding_row::GenerateEmbedding(std::string &t
     return result;
   }
 
-  std::string model_name("all-MiniLM-L12-v2");
+  std::string model_name("all-MiniLM-L12-v2");  // default model, if user specify, then user input.
   keystr = "model_id";
   if (opt_values.find(keystr) != opt_values.end()) model_name = opt_values[keystr].size() ? opt_values[keystr][0] : "";
 
   std::string path_path(mysql_llm_home);
-  if (!path_path.length()) {
-    path_path.append(mysql_home);
-  }
-  path_path.append("llm-models/").append(model_name).append("/onnx/");
-  if (!std::filesystem::exists(path_path)) {
+  if (!path_path.length()) path_path.append(mysql_home);
+  std::string model_path = path_path.append("llm-models/").append(model_name);
+
+  std::string onnx_path = model_path;
+  onnx_path.append("/onnx/");
+  if (!std::filesystem::exists(onnx_path)) {
     std::string err("can not find the model:");
     err.append(model_name);
     my_error(ER_ML_FAIL, MYF(0), err.c_str());
     return result;
   }
-  SentenceTransform::DocumentEmbeddingManager doc_manger(path_path);
-  if (doc_manger.ProcessText(text, 1024)) {
+
+  std::string tokenizer = model_path;
+  tokenizer.append("/tokenizer.json");
+  if (!std::filesystem::exists(tokenizer)) {
+    std::string err("can not find the tokenizer");
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
     return result;
   }
 
+  SentenceTransform::DocumentEmbeddingManager doc_manger(onnx_path, tokenizer);
+  if (doc_manger.ProcessText(text, 1024)) return result;
+
   auto embeded_res = doc_manger.Results();
-  if (!embeded_res.size()) {
-    return result;
-  }
+  if (!embeded_res.size()) return result;
 
   result = std::move(embeded_res[0].embedding);
   return result;

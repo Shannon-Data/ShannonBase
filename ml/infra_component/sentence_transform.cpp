@@ -112,12 +112,27 @@ ModelSelection select_model_variant(const std::string &model_dir, const std::str
 
 MiniLMEmbedding::MiniLMEmbedding(const std::string &modelPath, const std::string &tokenizerPath)
     : m_modelPath(modelPath), m_tokenizerPath(tokenizerPath) {
+  // 1. load Tokenizer(Huggingface Tokenizer FFI version)
+  if (!m_tokenizerPath.empty()) {
+    m_tokenizer = tokenizers::TokenizerUtils::load_from_file(m_tokenizerPath);
+    if (!m_tokenizer || !m_tokenizer->is_valid()) {
+      std::string error("Failed to load Tokenizer from: " + m_tokenizerPath);
+      my_error(ER_ML_FAIL, MYF(0), error.c_str());
+      return;
+    }
+  } else {
+    my_error(ER_ML_FAIL, MYF(0), "Tokenizer path must be provided for MiniLMEmbedding");
+    return;
+  }
+
+  // 2. select the matched model variant.
   auto ms = select_model_variant(m_modelPath);
   if (ms.filename.length())
     m_modelPath.append(ms.filename);
   else
     m_modelPath.append("model_O4.onnx");
 
+  // 3. initialize ONNX Runtime.
   InitializeONNX();
 }
 
@@ -151,15 +166,54 @@ void MiniLMEmbedding::InitializeONNX() {
   }
 }
 
-// single file embedding
 MiniLMEmbedding::EmbeddingResult MiniLMEmbedding::EmbedText(const std::string &text) {
-  auto tokens = Tokenize(text);
-  auto embedding = RunInference(tokens);
+  EmbeddingResult result;
+  result.text = text;
+  result.confidence = 0.0;  // default set 0, set 1 on succeeded.
 
-  return EmbeddingResult{
-      text, std::move(embedding),
-      1.0  // confidence ratio
-  };
+  tokenizers::Tokenizer::Encoding encoding(nullptr);
+  EmbeddingVector embedding;
+
+  // 1. Tokenization
+  auto token_status = Tokenize(text, encoding);
+  if (token_status != STATUS_T::OK) {
+    std::string err = "Tokenization failed with error code: " + std::to_string(static_cast<int>(token_status));
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+    return result;
+  }
+
+  // 2. Convert encoding results to int64_t vectors
+  const auto &source_input_ids = encoding.input_ids();
+  const auto &source_attention_mask = encoding.attention_mask();
+  const auto &source_token_type_ids = encoding.token_type_ids();
+
+  std::vector<int64_t> input_ids(source_input_ids.size());
+  std::vector<int64_t> attention_mask(source_attention_mask.size());
+  std::vector<int64_t> token_type_ids(source_token_type_ids.size());
+
+  for (uint32_t id : source_input_ids) input_ids.push_back(static_cast<int64_t>(id));
+  for (uint32_t mask : source_attention_mask) attention_mask.push_back(static_cast<int64_t>(mask));
+  for (uint32_t type_id : source_token_type_ids) token_type_ids.push_back(static_cast<int64_t>(type_id));
+
+  // 3. Run Inference
+  auto inference_status = RunInference(input_ids, attention_mask, token_type_ids, embedding);
+  if (inference_status != STATUS_T::OK) {
+    std::string err = "Inference failed with error code: " + std::to_string(static_cast<int>(inference_status));
+    my_error(ER_ML_FAIL, MYF(0), err.c_str());
+    return result;
+  }
+
+  // 4. L2 Normalization
+  if (!embedding.empty()) {
+    NormalizeL2(embedding);
+    result.embedding = std::move(embedding);
+    result.confidence = 1.0;
+  } else {
+    my_error(ER_ML_FAIL, MYF(0), "Inference succeeded but returned empty vector");
+    return result;
+  }
+
+  return result;
 }
 
 std::vector<MiniLMEmbedding::EmbeddingResult> MiniLMEmbedding::EmbedFile(const std::string &filePath,
@@ -172,9 +226,7 @@ std::vector<MiniLMEmbedding::EmbeddingResult> MiniLMEmbedding::EmbedFile(const s
   for (size_t i = 0; i < chunks.size(); ++i) {
     if (!chunks[i].empty()) {
       auto result = EmbedText(chunks[i]);
-      if (result.confidence > 0) {
-        results.push_back(std::move(result));
-      }
+      if (result.confidence > 0) results.push_back(std::move(result));
     }
   }
 
@@ -182,58 +234,26 @@ std::vector<MiniLMEmbedding::EmbeddingResult> MiniLMEmbedding::EmbedFile(const s
 }
 
 // simple tokenize（in fact using HuggingFace tokenizer）
-std::vector<int64_t> MiniLMEmbedding::Tokenize(const std::string &text) {
-  std::vector<int64_t> tokens;
+STATUS_T MiniLMEmbedding::Tokenize(const std::string &text, tokenizers::Tokenizer::Encoding &encoding_res) const {
+  if (!m_tokenizer || !m_tokenizer->is_valid()) return STATUS_T::ERROR_MODEL_NOT_INIT;
 
-  std::string cleanText = PreprocessText(text);
-  std::istringstream iss(cleanText);
-  std::string word;
+  if (text.empty()) return STATUS_T::OK;
 
-  // CLS token (101 for BERT-like models)
-  tokens.push_back(101);
-
-  while (iss >> word && tokens.size() < 512) {
-    int64_t tokenId = SimpleHash(word) % 30522;  // BERT vocab size
-    tokens.push_back(tokenId);
+  // add_special_tokens=true make sure [CLS] and [SEP]
+  auto encoding = m_tokenizer->encode(text, true);
+  if (!encoding.is_valid()) {
+    my_error(ER_ML_FAIL, MYF(0), "Tokenizer failed to encode text");
+    return STATUS_T::ERROR_TOKENIZER_FAIL;
   }
 
-  // SEP token (102)
-  tokens.push_back(102);
-
-  // Padding to fixed length
-  while (tokens.size() < 128) {
-    tokens.push_back(0);  // PAD token
-  }
-
-  if (tokens.size() > 128) {
-    tokens.resize(128);
-    tokens[127] = 102;  // Ensure SEP at end
-  }
-
-  return tokens;
-}
-
-std::string MiniLMEmbedding::PreprocessText(const std::string &text) {
-  std::string result = text;
-
-  std::transform(result.begin(), result.end(), result.begin(), ::tolower);
-
-  std::regex whitespace(R"(\s+)");
-  result = std::regex_replace(result, whitespace, " ");
-
-  std::regex punctuation(R"([^\w\s])");
-  result = std::regex_replace(result, punctuation, " ");
-
-  return result;
+  encoding_res = std::move(encoding);
+  return STATUS_T::OK;
 }
 
 std::vector<MiniLMEmbedding::EmbeddingResult> MiniLMEmbedding::EmbedBatch(const std::vector<std::string> &texts) {
   std::vector<MiniLMEmbedding::EmbeddingResult> results;
   results.reserve(texts.size());
-
-  for (const auto &text : texts) {
-    results.push_back(EmbedText(text));
-  }
+  for (const auto &text : texts) results.push_back(EmbedText(text));
 
   return results;
 }
@@ -242,7 +262,6 @@ double MiniLMEmbedding::CosineSimilarity(const EmbeddingVector &a, const Embeddi
   if (a.size() != b.size()) return 0.0;
 
   double dotProduct = 0.0, normA = 0.0, normB = 0.0;
-
   for (size_t i = 0; i < a.size(); ++i) {
     dotProduct += a[i] * b[i];
     normA += a[i] * a[i];
@@ -272,63 +291,77 @@ std::vector<std::pair<size_t, double>> MiniLMEmbedding::SemanticSearch(const Emb
   return similarities;
 }
 
-MiniLMEmbedding::EmbeddingVector MiniLMEmbedding::RunInference(const std::vector<int64_t> &tokens) {
-  std::vector<int64_t> inputShape = {1, static_cast<int64_t>(tokens.size())};
+STATUS_T MiniLMEmbedding::RunInference(const std::vector<int64_t> &input_ids,
+                                       const std::vector<int64_t> &attention_mask,
+                                       const std::vector<int64_t> &token_type_ids, EmbeddingVector &embeded_res) {
+  embeded_res.clear();
+  if (!m_ortSession || m_inputNames.empty()) return STATUS_T::ERROR_MODEL_NOT_INIT;
 
+  const size_t sequenceLength = input_ids.size();
+  if (sequenceLength == 0) return STATUS_T::ERROR_INVALID_INPUT;
+
+  // ONNX tensor dim：[Batch Size, Sequence Length]
+  std::array<int64_t, 2> inputShape = {1, static_cast<int64_t>(sequenceLength)};
   Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
   std::vector<Ort::Value> inputTensors;
 
-  // Create input_ids tensor
-  inputTensors.emplace_back(Ort::Value::CreateTensor<int64_t>(memoryInfo, const_cast<int64_t *>(tokens.data()),
-                                                              tokens.size(), inputShape.data(), inputShape.size()));
+  // 1. create input_ids Tensor
+  inputTensors.emplace_back(Ort::Value::CreateTensor<int64_t>(memoryInfo, const_cast<int64_t *>(input_ids.data()),
+                                                              input_ids.size(), inputShape.data(), inputShape.size()));
 
-  // Create attention mask
-  std::vector<int64_t> attentionMask(tokens.size(), 1);
-  for (size_t i = 0; i < tokens.size(); ++i) {
-    if (tokens[i] == 0) attentionMask[i] = 0;  // PAD tokens
-  }
-
-  // Create token_type_ids (all zeros for single segment)
-  std::vector<int64_t> tokenTypeIds(tokens.size(), 0);
-
-  // Check what inputs the model expects and provide them
-  std::vector<const char *> inputNamesPtr;
-  for (const auto &name : m_inputNames) {
-    inputNamesPtr.push_back(name.c_str());
-  }
-
-  // Create all required input tensors based on model requirements
+  // 2. create attention mask Tensor
   if (m_inputNames.size() >= 2) {
-    // Add attention_mask if model expects it
-    inputTensors.emplace_back(Ort::Value::CreateTensor<int64_t>(memoryInfo, attentionMask.data(), attentionMask.size(),
-                                                                inputShape.data(), inputShape.size()));
+    if (attention_mask.size() != sequenceLength) return STATUS_T::ERROR_INVALID_INPUT;
+    inputTensors.emplace_back(
+        Ort::Value::CreateTensor<int64_t>(memoryInfo, const_cast<int64_t *>(attention_mask.data()),
+                                          attention_mask.size(), inputShape.data(), inputShape.size()));
   }
 
+  // 3. create token_type_ids Tensor
   if (m_inputNames.size() >= 3) {
-    // Add token_type_ids if model expects it
-    inputTensors.emplace_back(Ort::Value::CreateTensor<int64_t>(memoryInfo, tokenTypeIds.data(), tokenTypeIds.size(),
-                                                                inputShape.data(), inputShape.size()));
+    if (token_type_ids.size() != sequenceLength) return STATUS_T::ERROR_INVALID_INPUT;
+    inputTensors.emplace_back(
+        Ort::Value::CreateTensor<int64_t>(memoryInfo, const_cast<int64_t *>(token_type_ids.data()),
+                                          token_type_ids.size(), inputShape.data(), inputShape.size()));
   }
 
-  std::vector<const char *> outputNamesPtr;
-  for (const auto &name : m_outputNames) {
-    outputNamesPtr.push_back(name.c_str());
+  // 4. ONNX Session inference
+  std::vector<const char *> c_input_names;
+  c_input_names.reserve(m_inputNames.size());
+  for (const auto &name : m_inputNames) c_input_names.push_back(name.c_str());
+
+  std::vector<const char *> c_output_names;
+  c_output_names.reserve(m_outputNames.size());
+  for (const auto &name : m_outputNames) c_output_names.push_back(name.c_str());
+
+  std::vector<Ort::Value> outputTensors;
+  outputTensors = m_ortSession->Run(Ort::RunOptions{nullptr}, c_input_names.data(), inputTensors.data(),
+                                    inputTensors.size(), c_output_names.data(), c_output_names.size());
+  if (outputTensors.empty()) return STATUS_T::ERROR_OUTPUT_TENSOR_EMPTY;
+
+  Ort::Value &lastHiddenState = outputTensors[0];
+  const float *outputData = lastHiddenState.GetTensorMutableData<float>();
+  std::vector<int64_t> outputShape = lastHiddenState.GetTensorTypeAndShapeInfo().GetShape();
+
+  // check shape [1, SeqLen, Dim]
+  if (outputShape.size() != 3 || outputShape[0] != 1) return STATUS_T::ERROR_OUTPUT_SHAPE_INVALID;
+
+  // 5. Mean Pooling
+  const size_t embeddingDimension = outputShape.back();
+  embeded_res.resize(embeddingDimension, 0.0f);
+  size_t actualTokens = 0;
+  for (size_t i = 0; i < sequenceLength; ++i) {
+    if (attention_mask[i] == 1) {
+      const float *tokenVector = outputData + i * embeddingDimension;
+      for (size_t j = 0; j < embeddingDimension; ++j) embeded_res[j] += tokenVector[j];
+      actualTokens++;
+    }
   }
 
-  // Run inference
-  auto outputTensors = m_ortSession->Run(Ort::RunOptions{nullptr}, inputNamesPtr.data(), inputTensors.data(),
-                                         inputTensors.size(), outputNamesPtr.data(), outputNamesPtr.size());
-
-  // Process output
-  const float *outputData = outputTensors[0].GetTensorData<float>();
-  auto outputShape = outputTensors[0].GetTensorTypeAndShapeInfo().GetShape();
-
-  size_t embeddingSize = outputShape.back();
-  EmbeddingVector embedding(outputData, outputData + embeddingSize);
-
-  NormalizeL2(embedding);
-  return embedding;
+  if (actualTokens > 0) {
+    for (float &val : embeded_res) val /= static_cast<float>(actualTokens);
+  }
+  return STATUS_T::OK;
 }
 
 std::vector<std::string> MiniLMEmbedding::ReadAndChunkFile(const std::string &filePath, size_t maxChunkSize) {
@@ -347,31 +380,23 @@ std::vector<std::string> MiniLMEmbedding::ReadAndChunkFile(const std::string &fi
 
   while (std::getline(file, line)) {
     if (line.empty()) continue;
-
     if (!currentChunk.empty() && currentChunk.length() + line.length() > maxChunkSize) {
       chunks.push_back(currentChunk);
       currentChunk.clear();
     }
 
-    if (!currentChunk.empty()) {
-      currentChunk += " ";
-    }
+    if (!currentChunk.empty()) currentChunk += " ";
     currentChunk += line;
   }
 
-  if (!currentChunk.empty()) {
-    chunks.push_back(currentChunk);
-  }
-
+  if (!currentChunk.empty()) chunks.push_back(currentChunk);
   return chunks;
 }
 
 std::vector<std::string> DocumentEmbeddingManager::SplitTextIntoChunks(const std::string &text, size_t maxChunkSize) {
   std::vector<std::string> chunks;
 
-  if (text.empty()) {
-    return chunks;
-  }
+  if (text.empty()) return chunks;
 
   if (text.length() <= maxChunkSize) {
     chunks.push_back(text);
@@ -380,15 +405,11 @@ std::vector<std::string> DocumentEmbeddingManager::SplitTextIntoChunks(const std
 
   size_t start = 0;
   size_t end = 0;
-
   while (start < text.length()) {
     end = std::min(start + maxChunkSize, text.length());
-
     if (end < text.length()) {
       size_t sentence_end = text.find_last_of(".!?。！？", end);
-      if (sentence_end != std::string::npos && sentence_end > start) {
-        end = sentence_end + 1;
-      }
+      if (sentence_end != std::string::npos && sentence_end > start) end = sentence_end + 1;
     }
 
     std::string chunk = text.substr(start, end - start);
@@ -396,36 +417,24 @@ std::vector<std::string> DocumentEmbeddingManager::SplitTextIntoChunks(const std
     // get rid of the blank at head and tail
     size_t chunk_start = chunk.find_first_not_of(" \t\n\r");
     size_t chunk_end = chunk.find_last_not_of(" \t\n\r");
-
-    if (chunk_start != std::string::npos && chunk_end != std::string::npos) {
+    if (chunk_start != std::string::npos && chunk_end != std::string::npos)
       chunk = chunk.substr(chunk_start, chunk_end - chunk_start + 1);
-    }
 
-    if (!chunk.empty()) {
-      chunks.push_back(chunk);
-    }
+    if (!chunk.empty()) chunks.push_back(chunk);
 
     start = end;
-
-    while (start < text.length() && std::isspace(text[start])) {
-      start++;
-    }
+    while (start < text.length() && std::isspace(text[start])) start++;
   }
-
   return chunks;
 }
 
 void DocumentEmbeddingManager::ProcessDocument(const std::string &filePath) {
   auto embeddings = m_embedder.EmbedFile(filePath);
-
   m_documentEmbeddings.insert(m_documentEmbeddings.end(), embeddings.begin(), embeddings.end());
 }
 
 bool DocumentEmbeddingManager::ProcessText(const std::string &text, size_t maxChunkSize) {
-  if (text.empty()) {
-    return false;
-  }
-
+  if (text.empty()) return false;
   if (text.length() <= maxChunkSize) {
     auto result = m_embedder.EmbedText(text);
     if (result.confidence > 0) {
@@ -439,11 +448,8 @@ bool DocumentEmbeddingManager::ProcessText(const std::string &text, size_t maxCh
 
   for (size_t i = 0; i < chunks.size(); ++i) {
     if (chunks[i].empty()) continue;
-
     auto result = m_embedder.EmbedText(chunks[i]);
-    if (result.confidence > 0) {
-      m_documentEmbeddings.push_back(std::move(result));
-    }
+    if (result.confidence > 0) m_documentEmbeddings.push_back(std::move(result));
   }
 
   return false;
@@ -467,10 +473,7 @@ std::vector<std::pair<std::string, double>> DocumentEmbeddingManager::SemanticSe
 
 void DocumentEmbeddingManager::SaveEmbeddings(const std::string &outputPath) {
   std::ofstream file(outputPath);
-  if (!file.is_open()) {
-    return;
-  }
-
+  if (!file.is_open()) return;
   for (const auto &result : m_documentEmbeddings) {
     file << result.text << "\t";
     for (size_t i = 0; i < result.embedding.size(); ++i) {
@@ -480,7 +483,6 @@ void DocumentEmbeddingManager::SaveEmbeddings(const std::string &outputPath) {
     file << std::endl;
   }
 }
-
 }  // namespace SentenceTransform
 }  // namespace ML
 }  // namespace ShannonBase

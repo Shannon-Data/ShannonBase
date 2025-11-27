@@ -65,9 +65,7 @@ class Tokenizer {
   static Tokenizer from_bytes(const std::vector<uint8_t> &data) { return Tokenizer(data); }
 
   ~Tokenizer() {
-    if (m_handle) {
-      tokenizer_free(m_handle);
-    }
+    if (m_handle) tokenizer_free(m_handle);
   }
 
   // Non-copyable
@@ -79,9 +77,7 @@ class Tokenizer {
 
   Tokenizer &operator=(Tokenizer &&other) noexcept {
     if (this != &other) {
-      if (m_handle) {
-        tokenizer_free(m_handle);
-      }
+      if (m_handle) tokenizer_free(m_handle);
       m_handle = other.m_handle;
       other.m_handle = nullptr;
     }
@@ -105,12 +101,9 @@ class Tokenizer {
     size_t length = 0;
 
     std::map<std::string, uint32_t> vocab;
-
     if (tokenizer_get_vocab(m_handle, with_added_tokens, &keys, &values, &length)) {
       for (size_t i = 0; i < length; ++i) {
-        if (keys[i]) {
-          vocab[std::string(keys[i])] = values[i];
-        }
+        if (keys[i]) vocab[std::string(keys[i])] = values[i];
       }
       vocab_free(keys, values, length);
     }
@@ -124,9 +117,7 @@ class Tokenizer {
     explicit Encoding(EncodingResult *result) : m_result(result) {}
 
     ~Encoding() {
-      if (m_result) {
-        encoding_result_free(m_result);
-      }
+      if (m_result) encoding_result_free(m_result);
     }
 
     // Non-copyable
@@ -138,9 +129,7 @@ class Tokenizer {
 
     Encoding &operator=(Encoding &&other) noexcept {
       if (this != &other) {
-        if (m_result) {
-          encoding_result_free(m_result);
-        }
+        if (m_result) encoding_result_free(m_result);
         m_result = other.m_result;
         other.m_result = nullptr;
       }
@@ -179,9 +168,7 @@ class Tokenizer {
       std::vector<std::string> result;
       result.reserve(m_result->length);
       for (size_t i = 0; i < m_result->length; ++i) {
-        if (m_result->tokens[i]) {
-          result.emplace_back(m_result->tokens[i]);
-        }
+        if (m_result->tokens[i]) result.emplace_back(m_result->tokens[i]);
       }
       return result;
     }
@@ -221,9 +208,7 @@ class Tokenizer {
     BatchEncoding(BatchEncodingResult *batch_result) : m_batch_result(batch_result) {}
 
     ~BatchEncoding() {
-      if (m_batch_result) {
-        batch_encoding_result_free(m_batch_result);
-      }
+      if (m_batch_result) batch_encoding_result_free(m_batch_result);
     }
 
     // Non-copyable
@@ -237,9 +222,7 @@ class Tokenizer {
 
     BatchEncoding &operator=(BatchEncoding &&other) noexcept {
       if (this != &other) {
-        if (m_batch_result) {
-          batch_encoding_result_free(m_batch_result);
-        }
+        if (m_batch_result) batch_encoding_result_free(m_batch_result);
         m_batch_result = other.m_batch_result;
         other.m_batch_result = nullptr;
       }
@@ -251,15 +234,12 @@ class Tokenizer {
 
     // Access individual encodings - Return by value to avoid ownership issues
     std::unique_ptr<Encoding> get_encoding(size_t index) const {
-      if (!m_batch_result || index >= m_batch_result->length || !m_batch_result->encodings) {
+      if (!m_batch_result || index >= m_batch_result->length || !m_batch_result->encodings)
         return std::make_unique<Encoding>(nullptr);
-      }
 
       // Create a copy of the EncodingResult to avoid double-free
       EncodingResult *original = m_batch_result->encodings[index];
-      if (!original) {
-        return std::make_unique<Encoding>(nullptr);
-      }
+      if (!original) return std::make_unique<Encoding>(nullptr);
 
       // Note: This is a simplified approach. In a production environment,
       // you might want to implement proper deep copying of EncodingResult
@@ -326,38 +306,26 @@ class Tokenizer {
 
   // HuggingFace-compatible encoding methods
   Encoding encode(const std::string &text, bool add_special_tokens = true) const {
-    if (!m_handle) {
-      return Encoding(nullptr);
-    }
-    auto *result = tokenizer_encode(m_handle, text.c_str(), add_special_tokens);
+    if (!m_handle) return Encoding(nullptr);
+    auto result = tokenizer_encode(m_handle, text.c_str(), add_special_tokens);
     return Encoding(result);
   }
 
   BatchEncoding encode_batch(const std::vector<std::string> &texts, bool add_special_tokens = true) const {
-    if (!m_handle || texts.empty()) {
-      return BatchEncoding(nullptr);
-    }
+    if (!m_handle || texts.empty()) return BatchEncoding(nullptr);
 
     std::vector<const char *> c_texts;
     c_texts.reserve(texts.size());
-    for (const auto &text : texts) {
-      c_texts.push_back(text.c_str());
-    }
+    for (const auto &text : texts) c_texts.push_back(text.c_str());
 
-    auto *result = tokenizer_encode_batch(m_handle, c_texts.data(), c_texts.size(), add_special_tokens);
+    auto result = tokenizer_encode_batch(m_handle, c_texts.data(), c_texts.size(), add_special_tokens);
     return BatchEncoding(result);
   }
 
   std::string decode(const std::vector<uint32_t> &ids, bool skip_special_tokens = true) const {
-    if (!m_handle || ids.empty()) {
-      return "";
-    }
-
-    auto *s = tokenizer_decode(m_handle, ids.data(), ids.size(), skip_special_tokens);
-    if (!s) {
-      return "";
-    }
-
+    if (!m_handle || ids.empty()) return "";
+    auto s = tokenizer_decode(m_handle, ids.data(), ids.size(), skip_special_tokens);
+    if (!s) return "";
     std::string result(s);
     string_free(s);
     return result;
@@ -372,9 +340,7 @@ class Tokenizer {
    */
   std::string apply_chat_template(const std::vector<ChatMessage> &messages, bool add_generation_prompt = true,
                                   const std::string &custom_template = "") const {
-    if (!m_handle || messages.empty()) {
-      return "";
-    }
+    if (!m_handle || messages.empty()) return "";
 
     // Validate message roles before proceeding
     for (const auto &msg : messages) {
@@ -423,15 +389,11 @@ class Tokenizer {
   Encoding apply_chat_template_and_encode(const std::vector<ChatMessage> &messages, bool add_generation_prompt = true,
                                           const std::string &custom_template = "",
                                           bool add_special_tokens = true) const {
-    if (!m_handle || messages.empty()) {
-      return Encoding(nullptr);
-    }
+    if (!m_handle || messages.empty()) return Encoding(nullptr);
 
     // Validate message roles before proceeding
     for (const auto &msg : messages) {
-      if (msg.role != "system" && msg.role != "user" && msg.role != "assistant") {
-        return Encoding(nullptr);
-      }
+      if (msg.role != "system" && msg.role != "user" && msg.role != "assistant") return Encoding(nullptr);
     }
 
     // Convert C++ ChatMessage to C ChatMessage
@@ -480,9 +442,7 @@ class Tokenizer {
     if (!m_handle) return "";
 
     char *template_str = tokenizer_get_chat_template(m_handle);
-    if (!template_str) {
-      return "";
-    }
+    if (!template_str) return "";
 
     std::string result(template_str);
     string_free(template_str);

@@ -43,6 +43,8 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#include "ml/infra_component/tokenizer.h"
+
 #if defined(_WIN32)
 #include <intrin.h>
 #elif (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
@@ -151,6 +153,16 @@ class CPUDetector {
 ModelSelection select_model_variant(const std::string &model_dir, const std::string &user_precision = "",
                                     const std::string &user_opt = "");
 
+enum class STATUS_T {
+  OK = 0,
+  ERROR_INVALID_INPUT = 1,         // invalid input（such as blank text or tokens）
+  ERROR_MODEL_NOT_INIT = 2,        // model /session not initialized
+  ERROR_ONNX_INFERENCE_FAIL = 3,   // ONNX Runtime inference failed.
+  ERROR_OUTPUT_TENSOR_EMPTY = 4,   // ONNX result empty.
+  ERROR_OUTPUT_SHAPE_INVALID = 5,  // ONNX tensor shape invalid
+  ERROR_TOKENIZER_FAIL = 6         // tokenizer init failed or emcoding failed.
+};
+
 class MiniLMEmbedding {
  public:
   // 384 dimensions，all-MiniLM-L6-v2 # of output demensions.
@@ -183,20 +195,10 @@ class MiniLMEmbedding {
  private:
   void InitializeONNX();
 
-  // simple tokenize（in fact using HuggingFace tokenizer）
-  std::vector<int64_t> Tokenize(const std::string &text);
+  STATUS_T Tokenize(const std::string &text, tokenizers::Tokenizer::Encoding &encoding_res) const;
 
-  std::string PreprocessText(const std::string &text);
-
-  size_t SimpleHash(const std::string &str) {
-    size_t hash = 5381;
-    for (char c : str) {
-      hash = ((hash << 5) + hash) + c;
-    }
-    return hash;
-  }
-
-  EmbeddingVector RunInference(const std::vector<int64_t> &tokens);
+  STATUS_T RunInference(const std::vector<int64_t> &input_ids, const std::vector<int64_t> &attention_mask,
+                        const std::vector<int64_t> &token_type_ids, EmbeddingVector &embeded_res);
 
   void NormalizeL2(EmbeddingVector &vec) {
     double norm = std::sqrt(std::inner_product(vec.begin(), vec.end(), vec.begin(), 0.0));
@@ -212,6 +214,8 @@ class MiniLMEmbedding {
  private:
   std::string m_modelPath;
   std::string m_tokenizerPath;
+  std::unique_ptr<tokenizers::Tokenizer> m_tokenizer;
+
   std::unique_ptr<Ort::Env> m_ortEnv;
   std::unique_ptr<Ort::Session> m_ortSession;
   std::unique_ptr<Ort::SessionOptions> m_sessionOptions;
@@ -221,7 +225,8 @@ class MiniLMEmbedding {
 
 class DocumentEmbeddingManager {
  public:
-  DocumentEmbeddingManager(const std::string &modelPath) : m_embedder(modelPath) {}
+  DocumentEmbeddingManager(const std::string &modelPath, const std::string &tokenizer)
+      : m_embedder(modelPath, tokenizer) {}
 
   // process a whole document
   void ProcessDocument(const std::string &filePath);
