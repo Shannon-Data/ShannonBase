@@ -1,0 +1,3 @@
+create database sh_rag;
+use sh_rag;
+DROP DATABASE sh_rag;
