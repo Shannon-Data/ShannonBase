@@ -1,6 +1,9 @@
 create database sh_self_load;
 use sh_self_load;
 #connection_1, cconnection_2
+SET GLOBAL rapid_self_load_enabled=on;
+SET GLOBAL rapid_self_load_interval_seconds=60;
+SET GLOBAL rapid_self_load_skip_quiet_check=true;
 CREATE TABLE simple_enum_table (
 id INT PRIMARY KEY AUTO_INCREMENT,
 user_name VARCHAR(50) NOT NULL,
@@ -74,7 +77,6 @@ def	sh_self_load	simple_enum_table_2	BASE TABLE	InnoDB	10	Dynamic	0	0	16384	0	0	
 def	sh_self_load	simple_enum_table_3	BASE TABLE	InnoDB	10	Dynamic	0	0	16384	0	0	0	1	IGNORE	IGNORE	NULL	utf8mb4_0900_ai_ci	NULL		
 def	sh_self_load	simple_enum_table_4	BASE TABLE	InnoDB	10	Dynamic	0	0	16384	0	0	0	1	IGNORE	IGNORE	NULL	utf8mb4_0900_ai_ci	NULL		
 def	sh_self_load	simple_enum_table_5	BASE TABLE	InnoDB	10	Dynamic	0	0	16384	0	0	0	1	IGNORE	IGNORE	NULL	utf8mb4_0900_ai_ci	NULL	SECONDARY_ENGINE="asdfd" SECONDARY_LOAD="0"	
-SET GLOBAL rapid_self_load_enabled=on;
 SHOW VARIABLES LIKE "%rapid_self_load_enabled%";
 Variable_name	Value
 rapid_self_load_enabled	ON

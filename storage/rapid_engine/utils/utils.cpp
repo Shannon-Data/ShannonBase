@@ -83,6 +83,8 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
    *  to close the opened tables.
    *    close_thread_tables(thd);
    */
+
+  /*
   TABLE *table{nullptr};
   for (table = thd->open_tables; table; table = table->next) {
     auto db_flag = !strncmp(schema_name.c_str(), table->s->db.str, table->s->db.length);
@@ -116,11 +118,31 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
   if (table_ptr->file->ha_external_lock(thd, F_WRLCK)) {
     return nullptr;
   }
+*/
+  Table_ref table_list;
+  table_list.db = schema_name.c_str();
+  table_list.db_length = schema_name.length();
+  table_list.table_name = table_name.c_str();
+  table_list.table_name_length = table_name.length();
+  table_list.alias = table_name.c_str();
+  table_list.set_lock({TL_READ, THR_DEFAULT});
+  MDL_REQUEST_INIT(&table_list.mdl_request,
+                   MDL_key::TABLE,       // namespace
+                   schema_name.c_str(),  // db
+                   table_name.c_str(),   // name
+                   MDL_SHARED_READ,      // type
+                   MDL_TRANSACTION);     // duration
 
-  return table_ptr;
+  Table_ref *table_list_ptr = &table_list;
+  uint counter{0};
+  uint flags = MYSQL_OPEN_GET_NEW_TABLE | MYSQL_OPEN_IGNORE_FLUSH;
+  if (open_tables(thd, &table_list_ptr, &counter, flags)) return nullptr;
+  if (table_list.table->file->ha_external_lock(thd, F_WRLCK)) return nullptr;
+
+  return table_list.table;
 }
 
-int Util::close_table(THD *thd, TABLE *table [[maybe_unused]]) {
+int Util::close_table(THD *thd, TABLE *table) {
   // it will close in close_thread_tables(). so here do nothing.
   if (table) table->file->ha_external_lock(thd, F_UNLCK);
 
@@ -152,23 +174,23 @@ int Util::get_range_value(enum_field_types type, const Compress::Dictionary *dic
     case MYSQL_TYPE_INT24:
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT: {
-      minkey = min_key ? *(int *)min_key->key : SHANNON_MIN_DOUBLE;
-      maxkey = max_key ? *(int *)max_key->key : SHANNON_MIN_DOUBLE;
+      minkey = min_key ? *reinterpret_cast<const int *>(min_key->key) : SHANNON_MIN_DOUBLE;
+      maxkey = max_key ? *reinterpret_cast<const int *>(max_key->key) : SHANNON_MIN_DOUBLE;
     } break;
     case MYSQL_TYPE_LONG:
     case MYSQL_TYPE_LONGLONG: {
-      minkey = min_key ? *(int *)min_key->key : SHANNON_MIN_DOUBLE;
-      maxkey = max_key ? *(int *)max_key->key : SHANNON_MAX_DOUBLE;
+      minkey = min_key ? *reinterpret_cast<const int *>(min_key->key) : SHANNON_MIN_DOUBLE;
+      maxkey = max_key ? *reinterpret_cast<const int *>(max_key->key) : SHANNON_MAX_DOUBLE;
     } break;
     case MYSQL_TYPE_DOUBLE:
     case MYSQL_TYPE_FLOAT: {
-      minkey = min_key ? *(double *)min_key->key : SHANNON_MIN_DOUBLE;
-      maxkey = max_key ? *(double *)max_key->key : SHANNON_MAX_DOUBLE;
+      minkey = min_key ? *reinterpret_cast<const double *>(min_key->key) : SHANNON_MIN_DOUBLE;
+      maxkey = max_key ? *reinterpret_cast<const double *>(max_key->key) : SHANNON_MAX_DOUBLE;
     } break;
     case MYSQL_TYPE_DECIMAL:
     case MYSQL_TYPE_NEWDECIMAL: {
-      minkey = min_key ? *(double *)min_key->key : SHANNON_MIN_DOUBLE;
-      maxkey = max_key ? *(double *)max_key->key : SHANNON_MAX_DOUBLE;
+      minkey = min_key ? *reinterpret_cast<const double *>(min_key->key) : SHANNON_MIN_DOUBLE;
+      maxkey = max_key ? *reinterpret_cast<const double *>(max_key->key) : SHANNON_MAX_DOUBLE;
     } break;
     case MYSQL_TYPE_DATE:
     case MYSQL_TYPE_TIME:
@@ -204,9 +226,7 @@ int Util::mem2string(uchar *buff, uint length, std::string &result) {
   std::ostringstream oss;
   oss << std::hex << std::setfill('0');
 
-  for (size_t i = 0; i < length; ++i) {
-    oss << std::setw(2) << static_cast<unsigned>(static_cast<unsigned char>(data[i]));
-  }
+  for (size_t i = 0; i < length; ++i) oss << std::setw(2) << static_cast<unsigned>(static_cast<unsigned char>(data[i]));
   result = oss.str();
   return SHANNON_SUCCESS;
 }
@@ -220,11 +240,9 @@ uchar *Util::pack_str(uchar *from, size_t length, const CHARSET_INFO *from_cs, u
 
   copy_length = well_formed_copy_nchars(to_cs, (char *)to, to_length, &my_charset_bin, (char *)from, length, to_length,
                                         &well_formed_error_pos, &cannot_convert_error_pos, &from_end_pos);
-
   /* Append spaces if the string was shorter than the field. */
   if (copy_length < to_length)
     to_cs->cset->fill(to_cs, (char *)to + copy_length, to_length - copy_length, to_cs->pad_char);
-
   return to;
 }
 

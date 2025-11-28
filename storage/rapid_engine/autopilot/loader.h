@@ -133,6 +133,7 @@ struct TableInfo {
   std::string table_name;
   std::string secondary_engine;
   uint64_t estimated_size{0};
+  bool partitioned{false};
   TableAccessStats stats;
   bool excluded_from_self_load{true};
 
@@ -152,7 +153,7 @@ class SelfLoadManager {
 
   // RPD Mirror management.
   int add_table(const std::string &schema, const std::string &table,
-                const std::string &secondary_engine = ShannonBase::rapid_hton_name);
+                const std::string &secondary_engine = ShannonBase::rapid_hton_name, bool is_partition = false);
 
   inline int remove_table(const std::string &schema, const std::string &table) {
     std::unique_lock lock(m_tables_mutex);
@@ -181,8 +182,8 @@ class SelfLoadManager {
   static constexpr int QUIET_WAIT_SECONDS = 300;
   static constexpr int MAX_QUIET_WAIT_ATTEMPTS = 10;
   static constexpr int QUERY_QUIET_MINUTES = 5;
-  static constexpr double IMPORTANCE_DECAY_FACTOR = 0.9;  // decline 10% a dya.
-  static constexpr double IMPORTANCE_THRESHOLD = 0.001;   // 99.9% threshold of decline.
+  static constexpr double IMPORTANCE_DECAY_FACTOR = 0.464;  // 0.464^3 ≈ 0.1 (3 days decline 90%)
+  static constexpr double IMPORTANCE_THRESHOLD = 0.001;     // 99.9% threshold of decline.
   static constexpr int COLD_TABLE_DAYS = 3;
   static constexpr double UPDATE_WEIGHT = 0.2;  // A smaller weight makes importance changes smoother
 
@@ -293,7 +294,6 @@ class SelfLoadManager {
   static constexpr uint FIELD_DATA_LEN_OFFSET_STATS = 4;
   static constexpr uint FIELD_INDEX_LEN_OFFSET_STATS = 6;
 };
-
 }  // namespace Autopilot
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_AUTOPILOT_LOADER_H__
