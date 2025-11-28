@@ -334,7 +334,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
     if (!ShannonBase::Utils::Util::is_support_type(fld->type())) {
       std::string err;
-      err.append(table_arg.s->table_name.str).append(fld->field_name).append(" type not allowed");
+      err.append(table_arg.s->table_name.str).append(".").append(fld->field_name).append(" type not allowed");
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
       return HA_ERR_GENERIC;
     }
@@ -846,8 +846,14 @@ SecondaryEngineGraphSimplificationRequestParameters SecondaryEngineCheckOptimize
 void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const char *table_name) {
   if (!dd::get_dictionary()->is_dd_schema_name(db) && !dd::get_dictionary()->is_system_table_name(db, table_name) &&
       create_info->secondary_engine.str) {
+    auto is_partitioned{false};
+    dd::cache::Dictionary_client *dc = current_thd->dd_client();
+    const dd::Table *table_obj = nullptr;
+    if (!dc->acquire(db, table_name, &table_obj) && table_obj)
+      is_partitioned = (table_obj->partition_type() != dd::Table::PT_NONE);
+
     auto &self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
-    self_load_inst->add_table(db, table_name, create_info->secondary_engine.str);
+    self_load_inst->add_table(db, table_name, create_info->secondary_engine.str, is_partitioned);
   }
 }
 
@@ -1619,10 +1625,27 @@ static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void
   }
 }
 
-static void update_self_load_interval(THD *, SYS_VAR *, void *var_ptr, const void *save) {
-  auto new_value = *static_cast<const int *>(save);
-  *static_cast<int *>(var_ptr) = new_value;
+static int check_self_load_interval(THD *thd, SYS_VAR *var, void *save, st_mysql_value *value) {
+  longlong new_value;
+  value->val_int(value, &new_value);
 
+  if (new_value < 60) {
+    my_printf_error(ER_WRONG_VALUE_FOR_VAR, "rapid_self_load_interval_seconds must be at least 60 seconds", MYF(0));
+    return 1;
+  }
+
+  if (new_value > 604800) {
+    my_printf_error(ER_WRONG_VALUE_FOR_VAR, "rapid_self_load_interval_seconds cannot exceed 604800 seconds (1 week)",
+                    MYF(0));
+    return 1;
+  }
+  *static_cast<ulonglong *>(save) = new_value;
+  return 0;
+}
+
+static void update_self_load_interval(THD *, SYS_VAR *, void *var_ptr, const void *save) {
+  ulonglong new_value = *static_cast<const ulonglong *>(save);
+  *static_cast<ulonglong *>(var_ptr) = new_value;
   ShannonBase::rpd_self_load_interval_seconds = new_value;
 }
 
@@ -1858,10 +1881,10 @@ static MYSQL_SYSVAR_ULONGLONG(self_load_interval_seconds,
                          "until the next wakeup of the Self-Load Worker. Therefore, the recommended order of "
                          "setting the variables is: 1. rapid_self_load_interval_seconds=<new value>; "
                          "2. rapid_self_load_enabled=TRUE;",
-                         nullptr,
+                         check_self_load_interval,
                          update_self_load_interval,
                          86400/**24hrs */,
-                         60 /*a hr*/,
+                         60 /*a mins*/,
                          86400 * 7/*a week */,
                          0);
 
