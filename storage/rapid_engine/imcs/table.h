@@ -205,6 +205,13 @@ class RpdTable : public MemoryObject {
 
   TableMetadata &meta() { return m_metadata; }
 
+  template <typename Func>
+  void foreach_imcu(Func &&func) {
+    for (auto &imcu : m_imcus) {
+      std::forward<Func>(func)(imcu.get());
+    }
+  }
+
  protected:
   uint32_t generate_table_id() {
     static std::atomic<uint32_t> counter{1};

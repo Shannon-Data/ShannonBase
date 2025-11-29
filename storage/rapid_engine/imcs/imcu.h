@@ -133,9 +133,11 @@ class Imcu : public MemoryObject {
     uint64_t max_scn{0};
 
     // GC Information
-    std::chrono::system_clock::time_point last_gc_time;
+    std::chrono::system_clock::time_point last_gc_time{std::chrono::system_clock::now()};
     size_t version_count{0};
     double delete_ratio{0.0};
+
+    std::chrono::system_clock::time_point last_compact_time{std::chrono::system_clock::now()};
 
     // Status Flags
     enum Status {
@@ -291,6 +293,7 @@ class Imcu : public MemoryObject {
 
   inline void set_status(Imcu_header::Status status) { m_header.status.store(status, std::memory_order_release); }
 
+  inline double deleted_ratio() const { return m_header.delete_ratio; }
   /**
    * Insert a row (IMCU-level entry point)
    * @param row_data: array of column data
@@ -411,9 +414,13 @@ class Imcu : public MemoryObject {
    * Check if compaction is required
    */
   bool needs_compaction() const {
-    return m_header.delete_ratio >= SHANNON_HIGH_DELETE_RATIO ||  // Deletion ratio exceeds 30%
-           (m_header.delete_count.load() > SHANNON_LARGE_DELETE_COUNT &&
-            m_header.delete_ratio >= SHANNON_MEDIUM_DELETE_RATIO);  // Or over 10,000 rows deleted with ratio > 20%
+    auto last_compact = m_header.last_compact_time;
+    auto now = std::chrono::system_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::minutes>(now - last_compact).count();
+    return ((elapsed > 30) &&
+            ((m_header.delete_ratio >= SHANNON_HIGH_DELETE_RATIO) ||  // Deletion ratio exceeds 30%
+             (m_header.delete_count.load() > SHANNON_LARGE_DELETE_COUNT &&
+              m_header.delete_ratio >= SHANNON_MEDIUM_DELETE_RATIO)));  // Or over 10,000 rows deleted with ratio > 20%
   }
 
   // Status Queries

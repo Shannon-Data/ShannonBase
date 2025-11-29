@@ -52,6 +52,7 @@
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/index/encoder.h"
+#include "storage/rapid_engine/imcs/worker.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/populate/log_commons.h"
@@ -166,18 +167,20 @@ int Imcs::initialize() {
     m_inited.store(1);
     Imcs::m_imcs_pool = std::make_unique<boost::asio::thread_pool>(std::thread::hardware_concurrency());
   }
+
+  BkgWorkerPool::instance();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::deinitialize() {
-  if (m_inited.load()) {
-    Imcs::m_imcs_pool->stop();
-    Imcs::m_imcs_pool->join();
-    Imcs::m_imcs_pool.reset();
+  if (m_inited.load(std::memory_order_acquire)) {
+    BkgWorkerPool::shutdown_all(true);
+
+    if (Imcs::m_imcs_pool) Imcs::m_imcs_pool.reset();
 
     m_rpd_tables.clear();
     m_rpd_parttables.clear();
-    m_inited.store(0);
+    m_inited.store(0, std::memory_order_release);
   }
   return ShannonBase::SHANNON_SUCCESS;
 }

@@ -588,6 +588,8 @@ Imcu *Imcu::compact() {
 
     // cp the columns data.
     for (auto &[col_idx, old_cu] : m_column_units) {
+      if (!old_cu) continue;  // NOT_SECONDARY_LOAD
+
       CU *new_cu = new_imcu->get_cu(col_idx);
 
       // read old data.
@@ -615,6 +617,7 @@ Imcu *Imcu::compact() {
   new_imcu->m_header.delete_count.store(0);
   new_imcu->m_header.delete_ratio = 0.0;
 
+  new_imcu->m_header.last_compact_time = std::chrono::system_clock::now();
   return new_imcu.get();
 }
 
