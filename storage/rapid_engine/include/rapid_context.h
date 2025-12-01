@@ -148,6 +148,9 @@ class Rapid_context : public Secondary_engine_execution_context {
 
     // active partitio info.
     static SHANNON_THREAD_LOCAL std::string m_active_part_key;
+
+    enum class OperType : uint8_t { PROPAGATION = 0, LOAD };
+    OperType m_oper{OperType::PROPAGATION};
   };
 
   // current openning schema name and table name.

@@ -92,21 +92,22 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
   uint64_t scn = context->m_extra_info.m_scn;
 
-  // 2. record Transaction_Journal.
-  {
-    std::unique_lock lock(m_header_mutex);
+  // 2. record Transaction_Journal, if it's not `load` oper.
+  if (context->m_extra_info.m_oper != Rapid_context::extra_info_t::OperType::LOAD) {
+    {
+      std::unique_lock lock(m_header_mutex);
+      TransactionJournal::Entry entry;
+      entry.row_id = local_row_id;
+      entry.txn_id = txn_id;
+      entry.operation = static_cast<uint8_t>(OPER_TYPE::OPER_INSERT);
+      entry.status = (scn > 0) ? TransactionJournal::COMMITTED : TransactionJournal::ACTIVE;
+      entry.scn = scn;
+      entry.timestamp = std::chrono::system_clock::now();
 
-    TransactionJournal::Entry entry;
-    entry.row_id = local_row_id;
-    entry.txn_id = txn_id;
-    entry.operation = static_cast<uint8_t>(OPER_TYPE::OPER_INSERT);
-    entry.status = (scn > 0) ? TransactionJournal::COMMITTED : TransactionJournal::ACTIVE;
-    entry.scn = scn;
-    entry.timestamp = std::chrono::system_clock::now();
+      m_header.txn_journal->add_entry(std::move(entry));
 
-    m_header.txn_journal->add_entry(std::move(entry));
-
-    m_header.insert_count.fetch_add(1);
+      m_header.insert_count.fetch_add(1);
+    }
   }
 
   // 3. write to each column.
@@ -398,8 +399,8 @@ void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_ro
       // check delete mask bit.
       if (Utils::Util::bit_array_get(m_header.del_mask.get(), local_row_id)) {
         // delete，Need to further check if it is visible in the snapshot.
-        if (!m_header.txn_journal->is_row_visible(local_row_id, context->m_extra_info.m_trxid,
-                                                  context->m_extra_info.m_scn)) {
+        if (!m_header.txn_journal->is_visible(local_row_id, context->m_extra_info.m_trxid,
+                                              context->m_extra_info.m_scn)) {
           Utils::Util::bit_array_reset(&visibility_mask, i);
         }
       }
