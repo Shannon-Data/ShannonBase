@@ -256,15 +256,6 @@ class RpdTable : public MemoryObject {
   // Table-level lock (coarse-grained, protects IMCU list)
   std::shared_mutex m_table_mutex;
 
-  // Transaction manager [TODO:]
-  // std::unique_ptr<Transaction_Coordinator> m_txn_coordinator;
-
-  // Version manager (global view) [TODO:]
-  // std::unique_ptr<Global_Version_Manager> m_version_manager;
-
-  // Background worker threads [TODO:]
-  // std::unique_ptr<Background_Worker_Pool> m_bg_workers;
-
   // indexes mutex for index writing.
   std::unordered_map<std::string, std::unique_ptr<std::mutex>> m_index_mutexes;
   std::unordered_map<std::string, std::unique_ptr<Index::Index<uchar, row_id_t>>> m_indexes;
