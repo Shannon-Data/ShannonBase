@@ -56,7 +56,7 @@ class Transaction : public MemoryObject {
     struct Snapshot {
       uint64_t scn;                              // Snapshot SCN
       std::vector<Transaction::ID> active_txns;  // Active transactions at snapshot time
-      std::chrono::system_clock::time_point created_at;
+      std::chrono::steady_clock::time_point created_at;
 
       Snapshot() : scn(0) {}
 
@@ -117,7 +117,7 @@ class Transaction : public MemoryObject {
       Snapshot snapshot;
       snapshot.scn = get_current_scn();
       snapshot.active_txns = active_txns;
-      snapshot.created_at = std::chrono::system_clock::now();
+      snapshot.created_at = std::chrono::steady_clock::now();
 
       // Update statistics
       m_snapshot_count.fetch_add(1, std::memory_order_relaxed);
@@ -318,13 +318,12 @@ class TransactionCoordinator {
 
   struct CachedVisibility {
     std::unique_ptr<bit_array_t> bitmap;
-    std::chrono::system_clock::time_point created_at;
+    std::chrono::steady_clock::time_point created_at;
     std::atomic<size_t> access_count{0};
 
     CachedVisibility() = default;
-    CachedVisibility(std::unique_ptr<bit_array_t> bm,
-                     std::chrono::system_clock::time_point ct = std::chrono::system_clock::now())
-        : bitmap(std::move(bm)), created_at(ct), access_count(0) {}
+    explicit CachedVisibility(std::unique_ptr<bit_array_t> bm)
+        : bitmap(std::move(bm)), created_at(std::chrono::steady_clock::now()), access_count(0) {}
 
     CachedVisibility(CachedVisibility &&other) noexcept
         : bitmap(std::move(other.bitmap)),

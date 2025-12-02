@@ -326,6 +326,12 @@ bool Util::dynamic_feature_normalization(THD *thd) {
     for (auto &table_ref : stmt_context->get_query_tables()) {
       auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
       auto table_id = share ? share->m_tableid : 0;
+      {
+        std::shared_lock lk(ShannonBase::Populate::sys_pop_buff_mutex);
+        if (ShannonBase::Populate::sys_pop_buff.find(table_id) != ShannonBase::Populate::sys_pop_buff.end()) {
+          return false;  // still in propation processing.
+        }
+      }
       if (ShannonBase::Populate::Populator::mark_table_required(table_id)) return false;
     }
   }
@@ -335,30 +341,34 @@ bool Util::dynamic_feature_normalization(THD *thd) {
 
 // check whether the dictionary encoding projection is supported or not.
 // returns true if supported to innodb, otherwise, false to secondary engine.
+// RAPID info such as rapid base table cardinality,
+//   |     dict encoding projection, varlen projection size, rapid queue
+//   |     size in to decide if query should be offloaded to RAPID.
 bool Util::check_dict_encoding_projection(THD *thd) {
-#if 0
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
-  if (!imcs_instance) return true;
+  if (!imcs_instance) return true;  // To InnoDB.
 
   std::string key_part;
   auto table_ref = thd->lex->unit->first_query_block()->leaf_tables;
   for (; table_ref; table_ref = table_ref->next_leaf) {
     if (table_ref->is_view_or_derived()) continue;
 
-    key_part = table_ref->db;
-    key_part.append(":").append(table_ref->table_name);
-    auto rpd_tb = imcs_instance->get_table(key_part);
+    auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
+    if (!share) return true;  // not loaded.
+
+    auto table_id = share ? share->m_tableid : 0;
+    auto is_part = table_ref->partition_names ? true : false;
+    auto rpd_table = is_part ? ShannonBase::Imcs::Imcs::instance()->get_rpd_table(table_id)
+                             : ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(table_id);
     for (auto j = 0u; j < table_ref->table->s->fields; j++) {
       auto field_ptr = *(table_ref->table->field + j);
       if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-      auto cu_header [[maybe_unused]] = rpd_tb->get_field(field_ptr->field_name)->header();
-      assert(cu_header);
-      // to test all cu infos.
+      auto dict_algo = rpd_table->meta().fields[j].dictionary.get()->get_algo();
+      if (dict_algo == ShannonBase::Compress::Encoding_type::NONE) return true;
     }
   }
-#endif
-  return false;
+
+  return false;  // to offload RAPID.
 }
 
 std::vector<std::string> Util::split(const std::string &str, char delimiter) {

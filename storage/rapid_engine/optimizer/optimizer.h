@@ -78,6 +78,9 @@ class Optimizer : public MemoryObject {
    */
   static AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join);
 
+  // Rapid cost calculator, HGO AccessPath estimation.
+  static bool RapidEstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost);
+
  private:
   /**
    * Determines if a given access path can be vectorized based on its type and properties.

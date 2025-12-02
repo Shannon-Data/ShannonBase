@@ -1073,7 +1073,16 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   ut_a(thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED);
   for (auto &table_ref : shannon_statement_context->get_query_tables()) {
     auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
+    if (!share) return true;
+
     auto table_id = share ? share->m_tableid : 0;
+    {
+      std::shared_lock lk(ShannonBase::Populate::sys_pop_buff_mutex);
+      if (ShannonBase::Populate::sys_pop_buff.find(table_id) != ShannonBase::Populate::sys_pop_buff.end()) {
+        SetSecondaryEngineOffloadFailedReason(thd, "still in propagation stage");
+        return true;  // still in propation processing.
+      }
+    }
     if (ShannonBase::Populate::Populator::mark_table_required(table_id)) return true;
   }
 
@@ -1087,7 +1096,7 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
 
   // 3: checks dict encoding projection, and varlen project size, etc.
   if (ShannonBase::Utils::Util::check_dict_encoding_projection(thd)) {
-    SetSecondaryEngineOffloadFailedReason(thd, "dict encoding is not supported");
+    SetSecondaryEngineOffloadFailedReason(thd, "dict encoding, varlen pj size, etc. not supported");
     return true;
   }
   return false;
@@ -1189,7 +1198,7 @@ static void AssertSupportedPath(const AccessPath *path) {
     case AccessPath::ROWID_INTERSECTION:
     case AccessPath::ROWID_UNION:
     case AccessPath::DYNAMIC_INDEX_RANGE_SCAN:
-      ut_a(false); /* purecov: deadcode */
+      // ut_a(false); /* purecov: deadcode */
       break;
     default:
       break;
@@ -1280,6 +1289,9 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
     *secondary_engine_cost = optimizer_cost;
   });
 
+  ShannonBase::Rapid_execution_context *rapid_ctx =
+      down_cast<ShannonBase::Rapid_execution_context *>(thd->lex->secondary_engine_execution_context());
+
   // Just use the cost calculated by the optimizer by default.
   *secondary_engine_cost = optimizer_cost;
 
@@ -1296,10 +1308,22 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
     *secondary_engine_cost = cost;
   });
 
-  // Check if the calculated cost is cheaper than the best cost seen so far.
-  *cheaper = down_cast<ShannonBase::Rapid_execution_context *>(thd->lex->secondary_engine_execution_context())
-                 ->BestPlanSoFar(join, *secondary_engine_cost);
+  bool estimation_error = ShannonBase::Optimizer::Optimizer::RapidEstimateJoinCostHGO(thd, join, secondary_engine_cost);
+  if (estimation_error) {
+    SetSecondaryEngineOffloadFailedReason(thd, "Calc Rapid Estimated Join Cost failed");
+    return true;
+  }
 
+  double primary_engine_best_cost = join.best_read;
+  if (primary_engine_best_cost <= 0.0) {
+    primary_engine_best_cost = optimizer_cost;
+  }
+
+  // Check if the calculated cost is cheaper than the best cost seen so far.
+  *cheaper = rapid_ctx->BestPlanSoFar(join, *secondary_engine_cost);
+  if (*secondary_engine_cost < primary_engine_best_cost) {
+    *use_best_so_far = true;
+  }
   return false;
 }
 
