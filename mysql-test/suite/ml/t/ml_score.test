@@ -61,7 +61,7 @@ CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_
 ALTER TABLE shannon_ml.census_test SECONDARY_LOAD;
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 
-SELECT ROUND(@score_census, 2);
+SELECT FORMAT(@score_census, 2);
 
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 
        JSON_UNQUOTE(MODEL_METADATA->'$.task') AS task, JSON_UNQUOTE(MODEL_METADATA->'$.column_names') as feature_names

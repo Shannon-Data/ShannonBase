@@ -23,36 +23,23 @@
 
    The fundmental code for imcs optimizer.
 */
-#include "storage/rapid_engine/cost/cost.h"
+#include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
 
+#include "sql/sql_lex.h"  //query_expression
 namespace ShannonBase {
 namespace Optimizer {
-std::unordered_map<CostEstimator::Type, CostEstimator *> CostModelServer::instances_;
-std::mutex CostModelServer::instance_mutex_;
 
-double RpdCostEstimator::cost(const PlanPtr &query_plan) {
-  double cost = 0.0;
-  return cost;
-}
+PredicatePushDown::PredicatePushDown(std::shared_ptr<Query_expression> &expression) : m_query_expr(expression) {}
+PredicatePushDown::~PredicatePushDown() {}
+void PredicatePushDown::apply(PlanPtr &root) {}
 
-CostEstimator *CostModelServer::Instance(CostEstimator::Type type) {
-  std::lock_guard<std::mutex> lock(instance_mutex_);
+AggregationPushDown::AggregationPushDown(std::shared_ptr<Query_expression> &expression) : m_query_expr(expression) {}
+AggregationPushDown::~AggregationPushDown() {}
+void AggregationPushDown::apply(PlanPtr &root) {}
 
-  auto it = instances_.find(type);
-  if (it != instances_.end()) {
-    return it->second;
-  }
+TopNPushDown::TopNPushDown(std::shared_ptr<Query_expression> &expression) : m_query_expr(expression) {}
+TopNPushDown::~TopNPushDown() {}
+void TopNPushDown::apply(PlanPtr &root) {}
 
-  CostEstimator *instance = nullptr;
-  switch (type) {
-    case CostEstimator::Type::RPD_ENG:
-      instance = new RpdCostEstimator();
-      break;
-    default:
-      return nullptr;
-  }
-  instances_[type] = instance;
-  return instance;
-}
 }  // namespace Optimizer
 }  // namespace ShannonBase

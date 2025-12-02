@@ -288,7 +288,6 @@ bool Util::standard_cost_threshold_classifier(THD *thd) {
 //  decision tree classifier for determining which engine should to go.
 // returns true goes to secondary engine, otherwise, false go to innodb.
 bool Util::decision_tree_classifier(THD *thd) {
-#ifdef DECISION_TREE_ENABLE  // if we have a trained classifier, we SHOULD enable this check.
   std::string text, reason;
   // here to use trained decision tree to classify the query.
 
@@ -306,9 +305,6 @@ bool Util::decision_tree_classifier(THD *thd) {
   write_trace_reason(thd, text.c_str(), reason.c_str());
 
   return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) ? true : false;
-#else
-  return true;
-#endif
 }
 
 // dynamic feature normalization for determining which engine should to go.

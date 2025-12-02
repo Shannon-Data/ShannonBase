@@ -39,7 +39,10 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/include/rapid_status.h"
+#include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
 #include "storage/rapid_engine/optimizer/rules/const_fold_rule.h"
+#include "storage/rapid_engine/optimizer/rules/join_reorder.h"
+#include "storage/rapid_engine/optimizer/rules/prune.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/optimizer/path/access_path.h"
@@ -62,7 +65,32 @@ std::string Timer::lap_formatted() {
 // ctor
 Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr, const std::shared_ptr<CostEstimator> &cost_estimator) {}
 
-bool Optimizer::RapidEstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost) {
+void Optimizer::AddDefaultRules() {
+  m_optimize_rules.emplace_back(std::make_unique<StorageIndexPrune>());
+  m_optimize_rules.emplace_back(std::make_unique<PredicatePushDown>());
+  m_optimize_rules.emplace_back(std::make_unique<JoinReOrder>());
+  m_optimize_rules.emplace_back(std::make_unique<AggregationPushDown>());
+  m_optimize_rules.emplace_back(std::make_unique<TopNPushDown>());
+  m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
+  m_registered.store(true, std::memory_order_relaxed);
+}
+
+void Optimizer::Optimize(OptimizeContext *context, THD *thd, JOIN *join) {
+  if (!m_registered.load()) AddDefaultRules();
+
+  QueryPlan plan;
+  plan.root = get_query_plan(context, thd, join);
+  for (auto &rule : m_optimize_rules) {
+    // PlanNode *new_root = pass->Apply(plan.root.get(), thd);
+    rule->apply(plan.root);
+    // plan.root.reset(new_root);
+    plan.total_cost = CostModelServer::Instance(CostEstimator::Type::RPD_ENG)->cost(plan.root);
+  }
+}
+
+PlanPtr Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join) { return nullptr; }
+
+bool Optimizer::EstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost) {
   *secondary_engine_cost = join.best_read * 0.8;
   // using Rapid Engine cost estimatino algorithm.
   return false;

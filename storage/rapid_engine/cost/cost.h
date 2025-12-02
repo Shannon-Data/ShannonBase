@@ -27,73 +27,64 @@
 #define __SHANNONBASE_COST_H__
 #include "storage/rapid_engine/include/rapid_object.h"
 
+#include "include/my_base.h"
 #include "sql/handler.h"  //Cost_estimator
+
 #include "sql/opt_costconstants.h"
 #include "sql/opt_costmodel.h"
+#include "storage/rapid_engine/optimizer/query_plan.h"
 
 namespace ShannonBase {
 namespace Optimizer {
-
-class Rapid_SE_cost_constants : public SE_cost_constants {
+class CostEstimator : public MemoryObject {
  public:
-  Rapid_SE_cost_constants() : SE_cost_constants(::Optimizer::kHypergraph) {}
-  virtual ~Rapid_SE_cost_constants() = default;
+  enum class Type : uint8_t { NONE = 0, RPD_ENG };
 
-  cost_constant_error rapid_update_func(const LEX_CSTRING &name, const double value) { return update(name, value); }
+  // to calc the cost of `query_plan`.
+  virtual double cost(const PlanPtr &query_plan) = 0;
+  virtual inline double cpu_factor() const { return m_cpu_factor; }
+  virtual inline double memory_factor() const { return m_memory_factor; }
+  virtual inline double io_factor() const { return m_io_factor; }
 
-  cost_constant_error rapid_update_default_func(const LEX_CSTRING &name, const double value) {
-    return update_default(name, value);
-  }
+  Type m_cost_estimator_type{Type::NONE};
+  double m_cpu_factor{0.0};
+  double m_memory_factor{0.0};
+  double m_io_factor{0.0};
 
-  /// Default cost for reading a random block from an in-memory buffer
-  static const double MEMORY_BLOCK_READ_COST;
-
-  /// Default cost for reading a random disk block
-  static const double IO_BLOCK_READ_COST;
+  virtual ~CostEstimator() = default;
 };
 
-class Rapid_Cost_estimate : public Cost_estimate {};
-
-class Rapid_Cost_model_server : public Cost_model_server {
+class RpdCostEstimator : public CostEstimator {
  public:
-  Rapid_Cost_model_server() {
-    // Create default values for server cost constants
-    m_server_cost_constants = new Server_cost_constants(::Optimizer::kHypergraph);
-#if !defined(NDEBUG)
-    m_initialized = true;
-#endif
+  RpdCostEstimator() {
+    m_cost_estimator_type = CostEstimator::Type::RPD_ENG;
+    m_cpu_factor = 0.01;
+    m_memory_factor = 0.25;
+    m_io_factor = 1.0;
   }
 
-  ~Rapid_Cost_model_server() override {
-    delete m_server_cost_constants;
-    m_server_cost_constants = nullptr;
-  }
+  double cost(const PlanPtr &query_plan) override;
 };
 
-class Rapid_Cost_model_table : public Cost_model_table {
+class CostModelServer : public Cost_model_server {
  public:
-  Rapid_Cost_model_table() {
-    // Create a rapid cost model server object that will provide
-    // cost constants for server operations
-    m_cost_model_server = new Rapid_Cost_model_server();
+  CostModelServer() = default;
 
-    // Allocate cost constants for operations on tables
-    m_se_cost_constants = new Rapid_SE_cost_constants();
+  // get a costEstimator instance.
+  static CostEstimator *Instance(CostEstimator::Type type);
 
-#if !defined(NDEBUG)
-    m_initialized = true;
-#endif
+  static void Cleanup() {
+    std::lock_guard<std::mutex> lock(instance_mutex_);
+    for (auto &pair : instances_) {
+      delete pair.second;
+    }
+    instances_.clear();
   }
 
-  ~Rapid_Cost_model_table() {
-    delete m_cost_model_server;
-    m_cost_model_server = nullptr;
-    delete m_se_cost_constants;
-    m_se_cost_constants = nullptr;
-  }
+ private:
+  static std::unordered_map<CostEstimator::Type, CostEstimator *> instances_;
+  static std::mutex instance_mutex_;
 };
-
 }  // namespace Optimizer
 }  // namespace ShannonBase
-
 #endif  //__SHANNONBASE_COST_H__

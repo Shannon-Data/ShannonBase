@@ -33,6 +33,9 @@
 #include <vector>
 
 #include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/optimizer/query_plan.h"
+#include "storage/rapid_engine/optimizer/rules/rule.h"
+
 class THD;
 class Query_expression;
 class JOIN;
@@ -64,7 +67,22 @@ class CardinalityEstimator;
  */
 class Optimizer : public MemoryObject {
  public:
+  Optimizer() = default;
   explicit Optimizer(std::shared_ptr<Query_expression> &, const std::shared_ptr<CostEstimator> &);
+
+  template <typename T, typename... Args>
+  T *add_rule(Args &&...args) {
+    static_assert(std::is_base_of<Rule, T>::value, "T must derive from Rule");
+    auto rule = std::make_unique<T>(std::forward<Args>(args)...);
+    T *ptr = rule.get();
+    m_optimize_rules.emplace_back(std::move(rule));
+    return ptr;
+  }
+
+  void AddDefaultRules();
+
+  void Optimize(OptimizeContext *context, THD *thd, JOIN *join);
+
   /**
    * @brief Optimizes and rewrites access paths for secondary engine with custom optimizer
    *
@@ -79,9 +97,10 @@ class Optimizer : public MemoryObject {
   static AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join);
 
   // Rapid cost calculator, HGO AccessPath estimation.
-  static bool RapidEstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost);
+  static bool EstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost);
 
  private:
+  PlanPtr get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join);
   /**
    * Determines if a given access path can be vectorized based on its type and properties.
    *
@@ -117,6 +136,9 @@ class Optimizer : public MemoryObject {
    * @see CanPathBeVectorized()
    */
   static bool CheckChildVectorization(AccessPath *child_path);
+
+  std::atomic<bool> m_registered{false};
+  std::vector<std::unique_ptr<Rule>> m_optimize_rules;
 };
 
 /**

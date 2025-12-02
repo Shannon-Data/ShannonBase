@@ -23,36 +23,43 @@
 
    The fundmental code for imcs optimizer.
 */
-#include "storage/rapid_engine/cost/cost.h"
+#ifndef __SHANNONBASE_OBJECT_PRUNE_RULE_H__
+#define __SHANNONBASE_OBJECT_PRUNE_RULE_H__
+
+#include <memory>
+#include <string>
+
+#include "storage/rapid_engine/optimizer/rules/rule.h"
+class Query_expression;
+class Query_block;
 
 namespace ShannonBase {
 namespace Optimizer {
-std::unordered_map<CostEstimator::Type, CostEstimator *> CostModelServer::instances_;
-std::mutex CostModelServer::instance_mutex_;
 
-double RpdCostEstimator::cost(const PlanPtr &query_plan) {
-  double cost = 0.0;
-  return cost;
-}
+class StorageIndexPrune : public Rule {
+ public:
+  StorageIndexPrune() = default;
+  StorageIndexPrune(std::shared_ptr<Query_expression> &expression);
+  virtual ~StorageIndexPrune();
+  void apply(PlanPtr &root) override;
+  std::string name() override { return std::string("StorageIndexPrune"); }
 
-CostEstimator *CostModelServer::Instance(CostEstimator::Type type) {
-  std::lock_guard<std::mutex> lock(instance_mutex_);
+ private:
+  std::shared_ptr<Query_expression> m_query_expr;
+};
 
-  auto it = instances_.find(type);
-  if (it != instances_.end()) {
-    return it->second;
-  }
+class ProjectionPruning : public Rule {
+ public:
+  ProjectionPruning() = default;
+  ProjectionPruning(std::shared_ptr<Query_expression> &expression);
+  virtual ~ProjectionPruning();
+  void apply(PlanPtr &root) override;
+  std::string name() override { return std::string("ProjectionPruning"); }
 
-  CostEstimator *instance = nullptr;
-  switch (type) {
-    case CostEstimator::Type::RPD_ENG:
-      instance = new RpdCostEstimator();
-      break;
-    default:
-      return nullptr;
-  }
-  instances_[type] = instance;
-  return instance;
-}
+ private:
+  std::shared_ptr<Query_expression> m_query_expr;
+};
+
 }  // namespace Optimizer
 }  // namespace ShannonBase
+#endif  //__SHANNONBASE_OBJECT_PRUNE_RULE_H__

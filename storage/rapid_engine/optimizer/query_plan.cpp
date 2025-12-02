@@ -23,36 +23,47 @@
 
    The fundmental code for imcs optimizer.
 */
-#include "storage/rapid_engine/cost/cost.h"
+#include "storage/rapid_engine/optimizer/query_plan.h"
+
+#include "sql/sql_lex.h"                      //query_expression
+#include "storage/rapid_engine/imcs/table.h"  // RpdTable
 
 namespace ShannonBase {
 namespace Optimizer {
-std::unordered_map<CostEstimator::Type, CostEstimator *> CostModelServer::instances_;
-std::mutex CostModelServer::instance_mutex_;
-
-double RpdCostEstimator::cost(const PlanPtr &query_plan) {
-  double cost = 0.0;
-  return cost;
+std::string ScanTable::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ Vectorized Scan " + (rpd_table ? rpd_table->meta().table_name : "UNKNOWN") +
+         (use_storage_index ? " [Pruned]" : "");
 }
 
-CostEstimator *CostModelServer::Instance(CostEstimator::Type type) {
-  std::lock_guard<std::mutex> lock(instance_mutex_);
+std::string HashJoin::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ Hash Join (vectorized)";
+}
 
-  auto it = instances_.find(type);
-  if (it != instances_.end()) {
-    return it->second;
-  }
+std::string LocalAgg::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ Local Aggregate";
+}
 
-  CostEstimator *instance = nullptr;
-  switch (type) {
-    case CostEstimator::Type::RPD_ENG:
-      instance = new RpdCostEstimator();
-      break;
-    default:
-      return nullptr;
+std::string GlobalAgg::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ Global Aggregate";
+}
+
+std::string RapidTopN::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ Top-N (limit=" + std::to_string(limit) + ")";
+}
+
+std::string ZeroRows::ToString(int indent) const { return "→ Zero Rows"; }
+
+void WalkPlan(PlanNode *node, std::function<void(PlanNode *)> cb) {
+  if (!node) return;
+  cb(node);
+  for (auto &child : node->children) {
+    WalkPlan(child.get(), cb);
   }
-  instances_[type] = instance;
-  return instance;
 }
 }  // namespace Optimizer
 }  // namespace ShannonBase

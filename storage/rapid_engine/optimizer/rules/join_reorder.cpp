@@ -23,36 +23,13 @@
 
    The fundmental code for imcs optimizer.
 */
-#include "storage/rapid_engine/cost/cost.h"
+#include "storage/rapid_engine/optimizer/rules/join_reorder.h"
 
+#include "sql/sql_lex.h"  //query_expression
 namespace ShannonBase {
 namespace Optimizer {
-std::unordered_map<CostEstimator::Type, CostEstimator *> CostModelServer::instances_;
-std::mutex CostModelServer::instance_mutex_;
-
-double RpdCostEstimator::cost(const PlanPtr &query_plan) {
-  double cost = 0.0;
-  return cost;
-}
-
-CostEstimator *CostModelServer::Instance(CostEstimator::Type type) {
-  std::lock_guard<std::mutex> lock(instance_mutex_);
-
-  auto it = instances_.find(type);
-  if (it != instances_.end()) {
-    return it->second;
-  }
-
-  CostEstimator *instance = nullptr;
-  switch (type) {
-    case CostEstimator::Type::RPD_ENG:
-      instance = new RpdCostEstimator();
-      break;
-    default:
-      return nullptr;
-  }
-  instances_[type] = instance;
-  return instance;
-}
+JoinReOrder::JoinReOrder(std::shared_ptr<Query_expression> &expression) : m_query_expr(expression) {}
+JoinReOrder::~JoinReOrder() {}
+void JoinReOrder::apply(PlanPtr &root) {}
 }  // namespace Optimizer
 }  // namespace ShannonBase
