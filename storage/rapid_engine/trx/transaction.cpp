@@ -443,7 +443,7 @@ void TransactionCoordinator::cache_visibility(void *imcu, uint64_t scn, std::uni
   VisibilityCacheKey key{imcu, scn};
   CachedVisibility entry;
   entry.bitmap = std::move(bitmap);
-  entry.created_at = std::chrono::system_clock::now();
+  entry.created_at = std::chrono::steady_clock::now();
   entry.access_count = 0;
 
   m_visibility_cache[key] = std::move(entry);

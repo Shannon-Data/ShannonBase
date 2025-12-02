@@ -103,9 +103,9 @@ jobs:
         sudo chown -R $USER:$USER /home/shannon-bin/
         cd /home/shannon-bin/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
-        ./mysql-test-run.pl --suite=main,innodb,binlog,binlog_gtid,binlog_nogtid,federated,funcs_1,funcs_2,information_schema,sys_vars,opt_trace,secondary_engine,ml \
+        ./mysql-test-run.pl --suite=main,innodb,federated,rpl,rpl_ndb,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,information_schema,sys_vars,opt_trace,secondary_engine,ml \
         --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --retry=3 --parallel=$(nproc)
-        # rpl,rpl_ndb,rpl_gtid,rpl_nogtid due to disk space limition on github runner, when we have a fast git action runner, we can use the following command to run the test.
+        # binlog,binlog_gtid,binlog_nogtid, due to disk space limition on github runner, when we have a fast git action runner, we can use the following command to run the test.
         #sudo chmod +x ./collections/default.push && ./collections/default.daily
   # ARM
   build_arm:

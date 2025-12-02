@@ -62,6 +62,12 @@ std::string Timer::lap_formatted() {
 // ctor
 Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr, const std::shared_ptr<CostEstimator> &cost_estimator) {}
 
+bool Optimizer::RapidEstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost) {
+  *secondary_engine_cost = join.best_read * 0.8;
+  // using Rapid Engine cost estimatino algorithm.
+  return false;
+}
+
 bool Optimizer::CanPathBeVectorized(AccessPath *path) {
   if (path == nullptr) return true;
 

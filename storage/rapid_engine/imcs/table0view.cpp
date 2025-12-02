@@ -298,7 +298,7 @@ bool RapidCursor::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */) 
   size_t remaining = batch_size;
 
   // Callback to collect rows with prefetch optimization
-  auto callback = [this](row_id_t global_row_id, const std::vector<const uchar *> &row_data) {
+  auto callback = [&](row_id_t global_row_id, const std::vector<const uchar *> &row_data) {
     auto row_buffer = std::make_unique<RowBuffer>(row_data.size());
     row_buffer->set_row_id(global_row_id);
 
@@ -313,14 +313,15 @@ bool RapidCursor::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */) 
 
     // Copy column data (zero-copy mode)
     for (size_t idx = 0; idx < row_data.size(); idx++) {
+      auto col_idx = projection_cols[idx];
       if (row_data[idx] == nullptr) {
-        row_buffer->set_column_null(idx);
+        row_buffer->set_column_null(col_idx);
       } else {  // Prefetch next column's data
         if (idx + 1 < row_data.size() && row_data[idx + 1] != nullptr) SHANNON_PREFETCH_R(row_data[idx + 1]);
 
         // Note: We need to determine the length properly
         // For now, use the field's pack_length as approximation
-        Field *field = m_data_source->field[idx];
+        Field *field = m_data_source->field[col_idx];
         size_t length = field->pack_length();
         row_buffer->set_column_zero_copy(idx, row_data[idx], length, field->type());
       }
