@@ -293,7 +293,8 @@ ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key, key_r
 double ha_rapid::scan_time() {
   DBUG_TRACE;
 
-  const double t = (stats.records + stats.deleted) * Optimizer::Rapid_SE_cost_constants::MEMORY_BLOCK_READ_COST;
+  const double t = (stats.records + stats.deleted) *
+                   Optimizer::CostModelServer::Instance(Optimizer::CostEstimator::Type::RPD_ENG)->io_factor();
   return t;
 }
 
@@ -1233,6 +1234,12 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   }
 
   JOIN *join = lex->unit->first_query_block()->join;
+  if (!join || join->tables == 0) return false;
+
+  // now, 6 core optimization rules applying（prune，push down, reorder, etc.）
+  ShannonBase::Optimizer::Optimizer rpd_optimizer;
+  rpd_optimizer.Optimize(context, thd, join);
+
   lex->unit->root_access_path() = ShannonBase::Optimizer::WalkAndRewriteAccessPaths(
       lex->unit->root_access_path(), join, WalkAccessPathPolicy::ENTIRE_TREE,
       [&](AccessPath *path, const JOIN *join) -> AccessPath * {
@@ -1308,7 +1315,7 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
     *secondary_engine_cost = cost;
   });
 
-  bool estimation_error = ShannonBase::Optimizer::Optimizer::RapidEstimateJoinCostHGO(thd, join, secondary_engine_cost);
+  bool estimation_error = ShannonBase::Optimizer::Optimizer::EstimateJoinCostHGO(thd, join, secondary_engine_cost);
   if (estimation_error) {
     SetSecondaryEngineOffloadFailedReason(thd, "Calc Rapid Estimated Join Cost failed");
     return true;

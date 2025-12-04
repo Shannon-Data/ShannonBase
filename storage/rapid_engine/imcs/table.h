@@ -351,22 +351,34 @@ class Table : public RpdTable {
   }
 
   Imcu *get_or_create_write_imcu() {
-    auto current = m_imcus.back();
-    if (current && !current->is_full()) return current.get();
+    // fast path: check last without lock
+    {
+      std::shared_lock read_lock(m_table_mutex);
+      if (!m_imcus.empty()) {
+        auto cur = m_imcus.back();
+        if (cur && !cur->is_full()) return cur.get();
+      }
+    }
 
-    /**
-     * EACH MCU CONTAINS `SHANNON_ROWS_IN_CHUNK` (DEFAULT) ROWS.
-     */
-    std::unique_lock lock(m_table_mutex);
-    row_id_t start_row = m_imcus.empty() ? 0 : m_imcus.size() * m_metadata.rows_per_imcu;
+    // Prepare new IMCU outside lock
+    std::shared_ptr<Imcu> candidate = std::make_shared<Imcu>(this, m_metadata, 0 /* will set start_row under lock */,
+                                                             m_metadata.rows_per_imcu, m_memory_pool);
 
-    auto new_imcu = std::make_shared<Imcu>(this, m_metadata, start_row /*start_row_#*/,
-                                           m_metadata.rows_per_imcu /*capacity*/, m_memory_pool);
-    m_imcus.push_back(new_imcu);
+    // Slow path: take exclusive lock to publish
+    {
+      std::unique_lock lock(m_table_mutex);
+      // recheck
+      if (!m_imcus.empty()) {
+        auto cur = m_imcus.back();
+        if (cur && !cur->is_full()) return cur.get();
+      }
+      row_id_t start_row = m_imcus.empty() ? 0 : (row_id_t)m_imcus.size() * m_metadata.rows_per_imcu;
+      candidate->new_start_row(start_row);
+      m_imcus.push_back(candidate);
+    }
 
-    update_imcu_index(new_imcu.get());
-
-    return new_imcu.get();
+    update_imcu_index(candidate.get());
+    return candidate.get();
   }
 
   void build_imcu_index() {  // to update the all imcu indexe statistics

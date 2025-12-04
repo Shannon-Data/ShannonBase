@@ -23,8 +23,8 @@
 
    The fundmental code for imcs optimizer.
 */
-#ifndef __SHANNONBASE_CONST_FOLD_RULE_H__
-#define __SHANNONBASE_CONST_FOLD_RULE_H__
+#ifndef __SHANNONBASE_CONDITION_PUSHDOWN_RULE_H__
+#define __SHANNONBASE_CONDITION_PUSHDOWN_RULE_H__
 
 #include <memory>
 #include <string>
@@ -36,13 +36,37 @@ class Query_block;
 namespace ShannonBase {
 namespace Optimizer {
 
-class Const_fold : public Rule {
+class PredicatePushDown : public Rule {
  public:
-  Const_fold() = default;
-  Const_fold(std::shared_ptr<Query_expression> &expression);
-  virtual ~Const_fold();
+  PredicatePushDown() = default;
+  PredicatePushDown(std::shared_ptr<Query_expression> &expression);
+  virtual ~PredicatePushDown();
   void apply(PlanPtr &root) override;
-  std::string name() override { return std::string("Const_fold"); }
+  std::string name() override { return std::string("PredicatePushDown"); }
+
+ private:
+  std::shared_ptr<Query_expression> m_query_expr;
+};
+
+class AggregationPushDown : public Rule {
+ public:
+  AggregationPushDown() = default;
+  AggregationPushDown(std::shared_ptr<Query_expression> &expression);
+  virtual ~AggregationPushDown();
+  void apply(PlanPtr &root) override;
+  std::string name() override { return std::string("AggregationPushDown"); }
+
+ private:
+  std::shared_ptr<Query_expression> m_query_expr;
+};
+
+class TopNPushDown : public Rule {
+ public:
+  TopNPushDown() = default;
+  TopNPushDown(std::shared_ptr<Query_expression> &expression);
+  virtual ~TopNPushDown();
+  void apply(PlanPtr &root) override;
+  std::string name() override { return std::string("TopNPushDown"); }
 
  private:
   std::shared_ptr<Query_expression> m_query_expr;
@@ -50,4 +74,4 @@ class Const_fold : public Rule {
 
 }  // namespace Optimizer
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_CONST_FOLD_RULE_H__
+#endif  //__SHANNONBASE_CONDITION_PUSHDOWN_RULE_H__

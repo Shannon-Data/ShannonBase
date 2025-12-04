@@ -28,21 +28,18 @@
 #include <memory>
 
 #include "storage/rapid_engine/include/rapid_object.h"
-
+#include "storage/rapid_engine/optimizer/query_plan.h"
 class Query_expression;
 class Query_block;
 class CostEstimator;
 namespace ShannonBase {
 namespace Optimizer {
-
-enum class OptimizeType { DEFAULT_TYPE = 0, CONST_FOLD_RULE, END_TYPE };
-
 class Rule : public MemoryObject {
  public:
-  Rule() {}
-  virtual ~Rule() {}
+  Rule() = default;
+  virtual ~Rule() = default;
 
-  virtual void apply() = 0;
+  virtual void apply(PlanPtr &root) = 0;
   virtual std::string name() = 0;
   std::shared_ptr<CostEstimator> m_cost_estimator;
 };

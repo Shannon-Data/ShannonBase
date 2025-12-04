@@ -475,6 +475,8 @@ class Imcu : public MemoryObject {
 
   inline row_id_t get_start_row() const { return m_header.start_row; }
 
+  inline void new_start_row(row_id_t rowid) { m_header.start_row = rowid; }
+
   inline row_id_t get_end_row() const { return m_header.end_row; }
 
   inline size_t get_capacity() const { return m_header.capacity; }
