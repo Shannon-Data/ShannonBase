@@ -30,6 +30,11 @@ include(${CMAKE_SOURCE_DIR}/storage/innobase/innodb.cmake)
 
 ADD_DEFINITIONS(-DLOG_SUBSYSTEM_TAG="Rapid")
 
+FIND_PACKAGE(ONNXRuntime REQUIRED)
+
+MY_CHECK_CXX_COMPILER_WARNING("-Wextra-semi" HAS_EXTRA_SEMI_WARNING) #for ONNXRuntime extra ‘;’ after in-class function definition [-Werror=extra-semi]
+MY_CHECK_CXX_COMPILER_WARNING("-Wno-extra-semi" HAS_NO_EXTRA_SEMI_WARNING)
+
 # --- Explicit InnoDB include dirs ---
 SET(INNOBASE_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/storage/innobase         # For "ut/ut.h", "sync0/..." etc.
@@ -42,6 +47,10 @@ SET(SHANNON_RAPID_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/include                    # global include
   ${CMAKE_SOURCE_DIR}/sql                        # SQL headers
   ${CMAKE_SOURCE_DIR}/extra/lightgbm/include     # LightGBM
+)
+
+LIST(APPEND SHANNON_RAPID_INCLUDE_DIRS
+    ${ONNXRUNTIME_INCLUDE_DIRS}
 )
 
 # --- Source files ---
@@ -210,6 +219,7 @@ SET(SHANNON_RAPID_LIBRARIES
     ${NUMA_LIBRARY}
     _lightgbm
     gomp
+    ${ONNXRUNTIME_LIBRARIES}
 )
 
 # --- Add Lakehouse libraries if enabled ---
@@ -232,7 +242,9 @@ MYSQL_ADD_PLUGIN(shannon_rapid
 
 # PUBLIC: Suppress specific warnings for this target and dependents
 TARGET_COMPILE_OPTIONS(shannon_rapid PUBLIC -Wno-error=unused-parameter)
-
+IF(HAS_NO_EXTRA_SEMI_WARNING)
+    TARGET_COMPILE_OPTIONS(shannon_rapid PRIVATE "${HAS_NO_EXTRA_SEMI_WARNING}")
+ENDIF()
 # --- Include directories configuration ---
 # PUBLIC: InnoDB headers are part of the API and needed by dependents (e.g., MySQL core)
 # PRIVATE: Rapid internal headers are not exposed to dependents
@@ -245,6 +257,24 @@ TARGET_INCLUDE_DIRECTORIES(shannon_rapid
 
 # --- Link directories ---
 TARGET_LINK_DIRECTORIES(shannon_rapid PRIVATE ${ONNXRUNTIME_LIB_DIR})
+
+IF(UNIX AND NOT APPLE)
+    GET_TARGET_PROPERTY(SHANNON_RAPID_RPATH shannon_rapid INSTALL_RPATH)
+    IF(NOT SHANNON_RAPID_RPATH)
+        SET(SHANNON_RAPID_RPATH "")
+    ENDIF()
+    
+    IF(ONNXRUNTIME_LIB_DIR)
+        LIST(APPEND SHANNON_RAPID_RPATH "${ONNXRUNTIME_LIB_DIR}")
+    ENDIF()
+    
+    SET_TARGET_PROPERTIES(shannon_rapid PROPERTIES INSTALL_RPATH "${SHANNON_RAPID_RPATH}")
+    
+    SET_TARGET_PROPERTIES(shannon_rapid PROPERTIES 
+        BUILD_WITH_INSTALL_RPATH FALSE
+        BUILD_RPATH "${ONNXRUNTIME_LIB_DIR};$ORIGIN/../lib"
+    )
+ENDIF()
 
 # --- Windows-specific configuration for Lakehouse ---
 IF(WITH_LAKEHOUSE AND WIN32)
