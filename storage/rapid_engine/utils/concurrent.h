@@ -99,43 +99,92 @@ T cowait_sync_with(boost::asio::thread_pool &pool, boost::asio::awaitable<T> aw)
 
 class latch {
  public:
-  explicit latch(int count) : m_count(count) { assert(count >= 0); }
+  enum class result_t {
+    SUCCESS = 0,
+    INVALID_ARGUMENT,  // update <= 0
+    EXCEEDS_COUNT,     // update > m_count
+    ALREADY_ZERO       // m_count alread 0
+  };
+
+  explicit latch(std::ptrdiff_t count) : m_count(count) { assert(count >= 0); }
 
   latch(const latch &) = delete;
   latch &operator=(const latch &) = delete;
 
-  void wait() {
+  result_t count_down(std::ptrdiff_t update = 1) {
+    if (update <= 0) return result_t::INVALID_ARGUMENT;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_count == 0) return result_t::ALREADY_ZERO;
+
+    if (update > m_count) return result_t::EXCEEDS_COUNT;
+
+    m_count -= update;
+    if (m_count == 0) m_cv.notify_all();
+    return result_t::SUCCESS;
+  }
+
+  result_t arrive_and_wait(std::ptrdiff_t update = 1) {
+    if (update <= 0) return result_t::INVALID_ARGUMENT;
+
+    std::unique_lock<std::mutex> lock(m_mutex);
+    if (m_count == 0) return result_t::ALREADY_ZERO;
+    if (update > m_count) return result_t::EXCEEDS_COUNT;
+
+    m_count -= update;
+    (m_count == 0) ? m_cv.notify_all() : m_cv.wait(lock, [this] { return m_count == 0; });
+    return result_t::SUCCESS;
+  }
+
+  void wait() const {
     std::unique_lock<std::mutex> lock(m_mutex);
     m_cv.wait(lock, [this] { return m_count == 0; });
   }
 
-  bool try_wait() const {
+  template <typename Rep, typename Period>
+  bool wait_for(const std::chrono::duration<Rep, Period> &timeout) const {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    return m_cv.wait_for(lock, timeout, [this] { return m_count == 0; });
+  }
+
+  template <typename Clock, typename Duration>
+  bool wait_until(const std::chrono::time_point<Clock, Duration> &time) const {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    return m_cv.wait_until(lock, time, [this] { return m_count == 0; });
+  }
+
+  bool try_wait() const noexcept {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_count == 0;
   }
 
-  void count_down(int update = 1) {
-    assert(update > 0);
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (update <= m_count) {
-      m_count -= update;
-      if (m_count == 0) {
-        m_cv.notify_all();
-      }
-    }
-  }
-
-  int current_count() const {
+  std::ptrdiff_t current_count() const noexcept {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_count;
   }
 
+  static constexpr std::ptrdiff_t max() noexcept { return std::numeric_limits<std::ptrdiff_t>::max(); }
+
+  static const char *result_to_string(result_t r) noexcept {
+    switch (r) {
+      case result_t::SUCCESS:
+        return "success";
+      case result_t::INVALID_ARGUMENT:
+        return "invalid_argument";
+      case result_t::EXCEEDS_COUNT:
+        return "exceeds_count";
+      case result_t::ALREADY_ZERO:
+        return "already_zero";
+      default:
+        return "unknown";
+    }
+  }
+
  private:
   mutable std::mutex m_mutex;
-  std::condition_variable m_cv;
-  int m_count;
+  mutable std::condition_variable m_cv;
+  std::ptrdiff_t m_count;
 };
-
 }  // namespace Utils
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_CONCURRENT_UTIL_H__

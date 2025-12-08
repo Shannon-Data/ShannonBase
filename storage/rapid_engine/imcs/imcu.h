@@ -410,6 +410,7 @@ class Imcu : public MemoryObject {
    */
   Imcu *compact();
 
+  bool prune(const Predicate *pred) const;
   /**
    * Check if compaction is required
    */

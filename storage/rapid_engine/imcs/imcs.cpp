@@ -378,7 +378,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
             .append(context->m_table_name.c_str())
             .append(" to rapid failed.");
         my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
-        return HA_ERR_GENERIC;
+        return true;
       }
     }
 
@@ -399,7 +399,16 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
 
   tmp = shannon_file->parallel_scan(scan_ctx_guard.ctx, scan_ctx_guard.thread_ctxs.data(), init_fn, load_fn, end_fn);
   // Wait for scan to complete or error
-  completion_latch->wait();
+  if (!completion_latch->wait_for(std::chrono::seconds(900))) {
+    // Timeout occurred
+    std::string errmsg;
+    errmsg.append("Parallel load timeout for ")
+        .append(context->m_schema_name.c_str())
+        .append(".")
+        .append(context->m_table_name.c_str());
+    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    return HA_ERR_GENERIC;
+  }
 
   /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
     without locks. Now, do full scan, but multi-thread scan will impl in future. */

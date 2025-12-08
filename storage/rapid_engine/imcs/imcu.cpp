@@ -622,6 +622,15 @@ Imcu *Imcu::compact() {
   return new_imcu.get();
 }
 
+bool Imcu::prune(const Predicate *pred) const {
+  // Use min/max to check if IMCU can be pruned
+  // Add other operators: OP_LT, OP_BETWEEN, etc.
+  // For OP_LT: return m_header.min_value >= cmp->value.double_value;
+  // Handle different types (int, date) via template or switch
+
+  return false;
+}
+
 bool Imcu::serialize(std::ostream &out) const { return false; }
 
 bool Imcu::deserialize(std::istream &in) { return false; }

@@ -47,7 +47,8 @@
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/ml/ml.h"
 #include "storage/rapid_engine/populate/log_populate.h"
-
+extern char mysql_home[FN_REFLEN];
+extern char mysql_llm_home[FN_REFLEN];
 namespace ShannonBase {
 namespace Utils {
 // open table by name. return table ptr, otherwise return nullptr.
@@ -289,22 +290,48 @@ bool Util::standard_cost_threshold_classifier(THD *thd) {
 // returns true goes to secondary engine, otherwise, false go to innodb.
 bool Util::decision_tree_classifier(THD *thd) {
   std::string text, reason;
-  // here to use trained decision tree to classify the query.
 
+  // Validate THD and query structure
+  if (!thd || !thd->lex || !thd->lex->unit || !thd->lex->unit->first_query_block()) {
+    text = "secondary_engine_not_used";
+    reason = "Invalid query structure";
+    write_trace_reason(thd, text.c_str(), reason.c_str());
+    return false;
+  }
+
+  // Build model path
+  std::string home_path(mysql_llm_home);
+  if (!home_path.length()) {
+    home_path.append(mysql_home);
+  }
+  std::string model_path(home_path);
+  model_path.append("llm-models/shannon_rapid_classifier.onnx");
+
+  // Initialize Query Arbitrator
   ShannonBase::ML::Query_arbitrator qa;
-  std::string mode_path = "./shannon_rapid_classifier.onnx";
-  qa.load_model(mode_path);
-  auto where = qa.predict(thd->lex->unit->first_query_block()->join);
+  if (!qa.load_model(model_path)) {
+    text = "secondary_engine_not_used";
+    reason = "ML model not available, fallback to primary";
+    write_trace_reason(thd, text.c_str(), reason.c_str());
+    return false;
+  }
+
+  // Get Query_block (available at pre-prepare stage)
+  Query_block *qb = thd->lex->unit->first_query_block();
+
+  // Make prediction using Query_block instead of JOIN
+  auto where = qa.predict(qb);
+
   if (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) {
     text = "secondary_engine_used";
-    reason = "The Query_arbitrator do the prediction, goes to secondary engine.";
+    reason = "Query_arbitrator prediction: OLAP query suitable for secondary engine";
   } else {
     text = "secondary_engine_not_used";
-    reason = "The Query_arbitrator do the prediction, goes to primary engine.";
+    reason = "Query_arbitrator prediction: OLTP query, use primary engine";
   }
   write_trace_reason(thd, text.c_str(), reason.c_str());
 
-  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY) ? true : false;
+  return (where == ShannonBase::ML::Query_arbitrator::WHERE2GO::TO_SECONDARY);
 }
 
 // dynamic feature normalization for determining which engine should to go.
