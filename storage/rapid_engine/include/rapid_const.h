@@ -84,8 +84,6 @@
 #define SHANNON_VECTOR_WIDTH 128  // ARM NEON
 #endif
 
-constexpr uint64 SHANNON_PARTS_PARALLEL = 32;
-
 extern char *mysql_llm_home_ptr;
 namespace ShannonBase {
 using row_id_t = size_t;
@@ -125,6 +123,7 @@ constexpr double SHANNON_TO_MUCH_POP_THRESHOLD_RATIO = 0.85;
 constexpr uint64 SHANNON_POP_BUFF_THRESHOLD_COUNT = 10000;
 
 constexpr uint64 SHANNON_PARALLEL_LOAD_THRESHOLD = 10000;
+constexpr uint64 SHANNON_PARALLEL_PARTTB_THRESHOLD = 32;
 
 constexpr uint64 SHANNON_DEFAULT_SELF_LOAD_INTERVAL = 86400;
 constexpr uint64 SHANNON_DEFAULT_SELF_LOAD_FILL_PERCENTAGE = 70;

@@ -60,6 +60,7 @@
 
 namespace ShannonBase {
 extern ulonglong rpd_para_load_threshold;
+extern ulonglong rpd_para_parttb_load_threshold;
 SHANNON_THREAD_LOCAL std::string Rapid_load_context::extra_info_t::m_active_part_key;
 namespace Imcs {
 Imcs *Imcs::m_instance{nullptr};
@@ -103,6 +104,7 @@ bool PartitionLoadThreadContext::initialize(const Rapid_load_context *context) {
 int PartitionLoadThreadContext::end_transactions() {
   auto ret{ShannonBase::SHANNON_SUCCESS};
   if (m_transactions_ended || !m_thd) return ret;
+
   ret = (m_error.load()) ? (trans_rollback_stmt(m_thd) || trans_rollback(m_thd))
                          : (trans_commit_stmt(m_thd) || trans_commit(m_thd));
   m_transactions_ended = true;
@@ -121,7 +123,6 @@ void PartitionLoadThreadContext::cleanup() {
   if (m_table) {
     closefrm(m_table, false);  // should be freed by mysql_secondary_load_or_unload. in `closefrm`, it dont decrease
                                // refcnt of m_histograms.
-
     /**
      * in `open_table_from_share` `m_histograms` ref_cnt is increased, therefore, here, we should decrease its refcnt by
      * onw.
@@ -143,14 +144,20 @@ void PartitionLoadThreadContext::cleanup() {
 
 bool PartitionLoadThreadContext::clone_handler(ha_innopart *file, const Rapid_load_context *context,
                                                std::mutex &clone_mutex) {
-  std::lock_guard<std::mutex> lock(clone_mutex);
   THD *original_thd = context->m_table->in_use;
-  context->m_table->in_use = m_thd;
-  m_handler = static_cast<ha_innopart *>(file->clone(context->m_table->s->normalized_path.str, m_thd->mem_root));
-  context->m_table->in_use = original_thd;
+  const char *normalized_path = context->m_table->s->normalized_path.str;
 
-  if (!m_handler) return true;
+  ha_innopart *cloned_handler = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(clone_mutex);
+    context->m_table->in_use = m_thd;
+    cloned_handler = static_cast<ha_innopart *>(file->clone(normalized_path, m_thd->mem_root));
+    context->m_table->in_use = original_thd;
+  }
 
+  if (!cloned_handler) return true;
+
+  m_handler = cloned_handler;
   m_handler->change_table_ptr(m_table, m_table->s);
   m_table->file = m_handler;
 
@@ -502,7 +509,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
   context->m_thd->set_sent_row_count(0);
 
   unsigned int num_threads = std::thread::hardware_concurrency() * 0.8;
-  if (num_threads == 0) num_threads = SHANNON_PARTS_PARALLEL;
+  if (num_threads == 0) num_threads = SHANNON_PARALLEL_PARTTB_THRESHOLD;
 
   std::vector<partition_load_task_t> tasks;
   tasks.reserve(context->m_extra_info.m_partition_infos.size());
@@ -547,9 +554,10 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
 #endif
 
     if (task_handler == nullptr) {
-      std::lock_guard<std::mutex> lock(error_mutex);
       task.error_msg = "Handler clone is null for partition " + std::to_string(task.part_id);
       task.result = HA_ERR_GENERIC;
+      std::lock_guard<std::mutex> lock(error_mutex);
+      has_error.store(true);
       return HA_ERR_GENERIC;
     }
 
@@ -599,8 +607,11 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
       // parttable is shared_ptr/unique_ptr to PartTable
       if ((partition_ptr->insert_row(context, rec_buff.get())) == INVALID_ROW_ID) {
         std::lock_guard<std::mutex> lock(error_mutex);
-        task.error_msg = "load data from " + sch_name + "." + table_name + "." + task.part_key + " to rapid failed";
-        task.result = HA_ERR_GENERIC;
+        if (!has_error.load()) {
+          task.error_msg = "load data from " + sch_name + "." + table_name + "." + task.part_key + " to rapid failed";
+          task.result = HA_ERR_GENERIC;
+          has_error.store(true);
+        }
         return HA_ERR_GENERIC;
       }
 
@@ -642,9 +653,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
     ctx.end_transactions();  // Then end transactions
   };
 
-  for (unsigned int i = 0; i < num_threads; ++i) {  // to start the worker threads.
-    workers_pool.emplace_back(worker_func);
-  }
+  for (unsigned int i = 0; i < num_threads; ++i) workers_pool.emplace_back(worker_func);
 
   for (auto &worker : workers_pool) {
     if (worker.joinable()) worker.join();
@@ -704,7 +713,8 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
   ut_a(m_rpd_parttables.find(table_id) != m_rpd_parttables.end());
 
   auto ret{ShannonBase::SHANNON_SUCCESS};
-  auto parall_scan = (context->m_extra_info.m_partition_infos.size() > SHANNON_PARTS_PARALLEL) ? true : false;
+  auto parall_scan =
+      (context->m_extra_info.m_partition_infos.size() > ShannonBase::rpd_para_parttb_load_threshold) ? true : false;
   ret = parall_scan ? load_innodbpart_parallel(context, dynamic_cast<ha_innopart *>(source->file))
                     : load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file));
   if (ret) {

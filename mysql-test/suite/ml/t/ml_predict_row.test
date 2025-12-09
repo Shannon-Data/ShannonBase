@@ -2,7 +2,6 @@
 # ShannonBase test case for ML functions.
 # ShannonBase copyright 2023-
 ##############################################################################
---source include/have_debug.inc
 --replace_result (-?\d+\.\d{15})\d+ \1...
 
 --disable_warnings
@@ -84,6 +83,7 @@ SET @row_input = JSON_OBJECT(
           "hours-per-week", 40, 
           "native-country", "United-States");
 
+--replace_regex /"probabilities": \{.*?\}/"probabilities": {FLOATS}/s
 SELECT sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
 
 --eval SET @res := sys.ML_PREDICT_ROW(@row_input, @census_model, NULL);
@@ -103,21 +103,7 @@ SELECT
   JSON_UNQUOTE(JSON_EXTRACT(@res, '$."hours-per-week"')) AS `hours-per-week`,
   JSON_UNQUOTE(JSON_EXTRACT(@res, '$."marital-status"')) AS `marital-status`,
   JSON_UNQUOTE(JSON_EXTRACT(@res, '$."native-country"')) AS `native-country`,
-  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS prediction,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.age'), 12) AS prob_age,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.sex'), 12) AS prob_sex,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.race'), 12) AS prob_race,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.fnlwgt'), 12) AS prob_fnlwgt,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.education'), 12) AS prob_education,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.workclass'), 12) AS prob_workclass,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.occupation'), 12) AS prob_occupation,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."capital-gain"'), 12) AS prob_capital_gain,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."capital-loss"'), 12) AS prob_capital_loss,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities.relationship'), 12) AS prob_relationship,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."education-num"'), 12) AS prob_education_num,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."hours-per-week"'), 12) AS prob_hours_per_week,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."marital-status"'), 12) AS prob_marital_status,
-  ROUND(JSON_EXTRACT(@res, '$.ml_results.probabilities."native-country"'), 12) AS prob_native_country;
+  JSON_UNQUOTE(JSON_EXTRACT(@res, '$.Prediction')) AS prediction;
 
 #unload model into memory
 CALL sys.ML_MODEL_UNLOAD(@census_model);

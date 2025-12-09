@@ -371,17 +371,20 @@ class PartitionLoadHandlerLock {
     }
   }
 
-  virtual ~PartitionLoadHandlerLock() {
-    if (m_locked && m_handler) {
-      m_handler->ha_external_lock(m_thd, F_UNLCK);
-    }
-  }
+  virtual ~PartitionLoadHandlerLock() { unlock(); }
 
   inline bool is_locked() const { return m_locked; }
 
   // Prevent copying
   PartitionLoadHandlerLock(const PartitionLoadHandlerLock &) = delete;
   PartitionLoadHandlerLock &operator=(const PartitionLoadHandlerLock &) = delete;
+
+  void unlock() {
+    if (m_locked && m_handler) {
+      m_handler->ha_external_lock(m_thd, F_UNLCK);
+      m_locked = false;
+    }
+  }
 
  private:
   handler *m_handler;
