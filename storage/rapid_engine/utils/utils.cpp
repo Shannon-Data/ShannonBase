@@ -453,6 +453,5 @@ ColumnMapGuard::~ColumnMapGuard() {
       break;
   }
 }
-
 }  // namespace Utils
 }  // namespace ShannonBase

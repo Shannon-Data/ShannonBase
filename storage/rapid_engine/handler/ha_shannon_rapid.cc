@@ -100,6 +100,7 @@ LoadedTables *shannon_loaded_tables = nullptr;
 uint64 rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
 ulonglong rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
 ulonglong rpd_para_load_threshold = ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD;
+ulonglong rpd_para_parttb_load_threshold = ShannonBase::SHANNON_PARALLEL_PARTTB_THRESHOLD;
 int rpd_async_column_threshold = ShannonBase::DEFAULT_N_FIELD_PARALLEL;
 long unsigned int rpd_sync_mode_int = static_cast<int>(ShannonBase::Populate::SyncMode::DIRECT_NOTIFICATION);
 bool rpd_self_load_enabled = false;
@@ -1364,6 +1365,9 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_pop_buffer_size_max", (char *)&ShannonBase::rpd_pop_buff_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
     /*the max row number of used to enable parallel load for secondary_load*/
     {"rapid_parallel_load_max", (char *)&ShannonBase::rpd_para_load_threshold, SHOW_LONG, SHOW_SCOPE_GLOBAL},
+    /*the max part table number of used to enable parallel load for secondary_load*/
+    {"rapid_parallel_part_load_threshold", (char *)&ShannonBase::rpd_para_parttb_load_threshold, SHOW_LONG,
+     SHOW_SCOPE_GLOBAL},
     /*the mode to aysnc the changes to rapid*/
     {"rapid_async_mode", (char *)&ShannonBase::Populate::g_sync_mode, SHOW_INT, SHOW_SCOPE_GLOBAL},
     /*the max column number of used to aysnc reading or parsing log*/
@@ -1522,6 +1526,41 @@ static void rpd_para_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, c
 
   *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
   ShannonBase::rpd_para_load_threshold = *static_cast<const int *>(save);
+}
+
+/** Validate passed-in "value" is a valid monitor counter name.
+ This function is registered as a callback with MySQL.
+ @return 0 for valid name */
+static int rpd_para_parttb_load_threshold_validate(THD *,                          /*!< in: thread handle */
+                                                   SYS_VAR *,                      /*!< in: pointer to system
+                                                                                                   variable */
+                                                   void *save,                     /*!< out: immediate result
+                                                                                   for update function */
+                                                   struct st_mysql_value *value) { /*!< in: incoming string */
+  long long input_val;
+  if (value->val_int(value, &input_val)) {
+    return 1;
+  }
+
+  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_PARALLEL_PARTTB_THRESHOLD) {
+    return 1;
+  }
+
+  *static_cast<int *>(save) = static_cast<int>(input_val);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+/** Update the system variable rpd_para_parttb_load_threshold.
+This function is registered as a callback with MySQL.
+@param[in]  thd       thread handle
+@param[out] var_ptr   where the formal string goes
+@param[in]  save      immediate result from chesck function */
+static void rpd_para_parttb_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+
+  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
+  ShannonBase::rpd_para_parttb_load_threshold = *static_cast<const int *>(save);
 }
 
 /** Update the system variable rpd_async_threshold.
@@ -1872,6 +1911,18 @@ static MYSQL_SYSVAR_ULONGLONG(parallel_load_max,
                               ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD, //max
                               0);
 
+static MYSQL_SYSVAR_ULONGLONG(parallel_part_load_threshold,
+                              ShannonBase::rpd_para_parttb_load_threshold,
+                              PLUGIN_VAR_OPCMDARG,
+                              "Threshold number of part table used to use parallel load for secondary_load "
+                              "from innodb to rapid engine..",
+                              rpd_para_parttb_load_threshold_validate,
+                              rpd_para_parttb_load_threshold_update,
+                              ShannonBase::SHANNON_PARALLEL_PARTTB_THRESHOLD, //default val
+                              ShannonBase::SHANNON_PARALLEL_PARTTB_THRESHOLD,  //min
+                              1024, //max
+                              0);
+
 static MYSQL_SYSVAR_ENUM(sync_mode,
                         ShannonBase::rpd_sync_mode_int,
                         PLUGIN_VAR_OPCMDARG,
@@ -1995,6 +2046,7 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
     MYSQL_SYSVAR(pop_buffer_size_max),
     MYSQL_SYSVAR(parallel_load_max),
+    MYSQL_SYSVAR(parallel_part_load_threshold),
     MYSQL_SYSVAR(sync_mode),
     MYSQL_SYSVAR(async_column_threshold),
     MYSQL_SYSVAR(self_load_enabled),

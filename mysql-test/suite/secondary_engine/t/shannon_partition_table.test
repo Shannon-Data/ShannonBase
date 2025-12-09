@@ -7,7 +7,7 @@
 create database test_partition;
 alter database test_partition CHARACTER SET ascii COLLATE ascii_bin; 
 use test_partition;
-
+set global rapid_parallel_part_load_threshold =2;
 CREATE TABLE LINEITEM ( L_ORDERKEY    BIGINT NOT NULL,
                         L_PARTKEY     INTEGER NOT NULL,
                         L_SUPPKEY     INTEGER NOT NULL,
@@ -68,6 +68,7 @@ alter table LINEITEM secondary_unload;
 
 drop table LINEITEM;
 
+set global rapid_parallel_part_load_threshold =32;
 CREATE TABLE LINEITEM1 ( L_ORDERKEY    BIGINT NOT NULL,
                         L_PARTKEY     INTEGER NOT NULL,
                         L_SUPPKEY     INTEGER NOT NULL,

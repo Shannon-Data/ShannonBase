@@ -1084,6 +1084,9 @@ The following options may be given as the first argument:
  --rapid-parallel-load-max[=#] 
  Max number of rows used to use parallel load for
  secondary_load from innodb to rapid engine..
+ --rapid-parallel-part-load-threshold[=#] 
+ Threshold number of part table used to use parallel load
+ for secondary_load from innodb to rapid engine..
  --rapid-pop-buffer-size-max[=#] 
  Number of memory used for populating the changes in
  innodb to rapid engine..
@@ -1954,6 +1957,7 @@ rapid-max-purger-timeout 5000
 rapid-memory-size-max 536870912
 rapid-min-versions-for-purge 10
 rapid-parallel-load-max 10000
+rapid-parallel-part-load-threshold 32
 rapid-pop-buffer-size-max 268435456
 rapid-purge-batch-size 64
 rapid-purge-efficiency-threshold 0.1

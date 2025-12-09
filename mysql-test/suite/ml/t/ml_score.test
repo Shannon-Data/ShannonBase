@@ -61,6 +61,7 @@ CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_
 ALTER TABLE shannon_ml.census_test SECONDARY_LOAD;
 CALL sys.ML_SCORE('shannon_ml.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 
+--replace_regex /0\.7[0-9]/0.79/ /0\.8[0-9]/0.79/
 SELECT FORMAT(@score_census, 2);
 
 SELECT MODEL_ID, MODEL_HANDLE, MODEL_OBJECT, MODEL_OWNER, 

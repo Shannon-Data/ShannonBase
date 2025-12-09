@@ -81,6 +81,8 @@ rapid_min_versions_for_purge
 rapid_min_versions_for_purge
 rapid_parallel_load_max
 rapid_parallel_load_max
+rapid_parallel_part_load_threshold
+rapid_parallel_part_load_threshold
 rapid_pop_buffer_size_max
 rapid_pop_buffer_size_max
 rapid_purge_batch_size
