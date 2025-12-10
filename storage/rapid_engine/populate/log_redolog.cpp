@@ -1567,7 +1567,7 @@ byte *LogParser::parse_or_apply_log_rec_body(Rapid_load_context *context, mlog_i
   page_t *page{nullptr};
   page_zip_des_t *page_zip{nullptr};
   dict_index_t *index{nullptr};
-  page_type_t page_type{FIL_PAGE_TYPE_ALLOCATED};
+  [[maybe_unused]] page_type_t page_type{FIL_PAGE_TYPE_ALLOCATED};
 
   /**
    * Here, the page perhaps reomved when delete all records opers delivered.

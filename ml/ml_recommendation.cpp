@@ -191,7 +191,7 @@ int ML_recommendation::train(THD *, Json_wrapper &model_object, Json_wrapper &mo
   return 0;
 }
 
-int ML_recommendation::load(THD *thd, std::string &model_content) {
+int ML_recommendation::load(THD *thd [[maybe_unused]], std::string &model_content) {
   std::lock_guard<std::mutex> lock(models_mutex);
   assert(thd && model_content.length() && m_handler_name.length());
 

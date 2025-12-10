@@ -3,6 +3,8 @@ use sh_para_load;
 SHOW  VARIABLES like "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
+rapid_gc_interval_scn	1000000
+rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
 rapid_memory_size_max	536870912
 rapid_min_versions_for_purge	10
@@ -21,6 +23,8 @@ SET GLOBAL rapid_parallel_load_max=10;
 SHOW VARIABLES like "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
+rapid_gc_interval_scn	1000000
+rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
 rapid_memory_size_max	536870912
 rapid_min_versions_for_purge	10
@@ -259,6 +263,8 @@ SET GLOBAL rapid_parallel_load_max = 10000;
 SHOW  VARIABLES like "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
+rapid_gc_interval_scn	1000000
+rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
 rapid_memory_size_max	536870912
 rapid_min_versions_for_purge	10

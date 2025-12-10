@@ -352,12 +352,24 @@ class PartitionLoadThreadContext {
   int end_transactions();
   void cleanup();
 
+  bool allocate_buffer(size_t size) {
+    m_buff_size = size;
+    m_rec_buff = std::make_unique<uchar[]>(m_buff_size);
+    return m_rec_buff != nullptr;
+  }
+
+  inline size_t buffer_size() const { return m_buff_size; }
+  inline uchar *allocated_buffer() const { return m_rec_buff.get(); }
+
  private:
   std::atomic<bool> m_error{false};
   bool m_transactions_ended{false};
-  THD *m_thd;
-  ha_innopart *m_handler;
-  TABLE *m_table;
+  THD *m_thd{nullptr};
+  ha_innopart *m_handler{nullptr};
+  TABLE *m_table{nullptr};
+
+  std::unique_ptr<uchar[]> m_rec_buff{nullptr};
+  size_t m_buff_size{0};
 };
 
 // Manages InnoDB transaction state by acquiring/releasing external locks.

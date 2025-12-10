@@ -508,9 +508,6 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
 
   context->m_thd->set_sent_row_count(0);
 
-  unsigned int num_threads = std::thread::hardware_concurrency() * 0.8;
-  if (num_threads == 0) num_threads = SHANNON_PARALLEL_PARTTB_THRESHOLD;
-
   std::vector<partition_load_task_t> tasks;
   tasks.reserve(context->m_extra_info.m_partition_infos.size());
 
@@ -522,8 +519,9 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
     task.rows_loaded = 0;
     tasks.push_back(std::move(task));
   }
-
+  unsigned int num_threads = std::max(1u, static_cast<unsigned int>(std::thread::hardware_concurrency() * 0.8));
   num_threads = std::min(num_threads, static_cast<unsigned int>(tasks.size()));
+  if (num_threads < 2 && tasks.size() > 1) num_threads = 2;
 
   std::mutex error_mutex, clone_mutex;
   std::atomic<uint64_t> total_rows{0};
@@ -542,7 +540,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
     }
   }
 
-  auto load_one_partition = [&](partition_load_task_t &task,
+  auto load_one_partition = [&](PartitionLoadThreadContext *ctx, partition_load_task_t &task,
                                 ha_innopart *task_handler) -> int {  // Lambda: load a partition.
     int result{ShannonBase::SHANNON_SUCCESS};
     task.rows_loaded = 0;
@@ -585,9 +583,10 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
     part_initialized = true;
 
     int tmp{HA_ERR_GENERIC};
-    std::unique_ptr<uchar[]> rec_buff = std::make_unique<uchar[]>(context->m_table->s->rec_buff_length);
-    memset(rec_buff.get(), 0, context->m_table->s->rec_buff_length);
-    while ((tmp = task_handler->rnd_next_in_part(task.part_id, rec_buff.get())) != HA_ERR_END_OF_FILE) {
+    auto rec_buff = ctx->allocated_buffer();
+    memset(rec_buff, 0, ctx->buffer_size());
+
+    while ((tmp = task_handler->rnd_next_in_part(task.part_id, rec_buff)) != HA_ERR_END_OF_FILE) {
       if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
       DBUG_EXECUTE_IF("secondary_engine_rapid_part_table_load_error", {
@@ -605,7 +604,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
         return HA_ERR_GENERIC;
       }
       // parttable is shared_ptr/unique_ptr to PartTable
-      if ((partition_ptr->insert_row(context, rec_buff.get())) == INVALID_ROW_ID) {
+      if ((partition_ptr->insert_row(context, rec_buff)) == INVALID_ROW_ID) {
         std::lock_guard<std::mutex> lock(error_mutex);
         if (!has_error.load()) {
           task.error_msg = "load data from " + sch_name + "." + table_name + "." + task.part_key + " to rapid failed";
@@ -615,7 +614,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
         return HA_ERR_GENERIC;
       }
 
-      memset(rec_buff.get(), 0, context->m_table->s->rec_buff_length);
+      memset(rec_buff, 0, ctx->buffer_size());
       task.rows_loaded++;
       if (tmp == HA_ERR_RECORD_DELETED && !context->m_thd->killed) continue;
     }
@@ -624,10 +623,20 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
     return result;
   };
 
+  if (context->m_thd->in_multi_stmt_transaction_mode()) trans_commit_stmt(context->m_thd);
+
+  DBUG_EXECUTE_IF("check_trx_state", {
+    if (trx_sys->mysql_trx_list.length > 0) {
+      sql_print_warning("trx_sys->mysql_trx_list has %lu transactions before load", trx_sys->mysql_trx_list.length);
+    }
+  });
+
   std::atomic_size_t task_idx{0};
   std::vector<std::thread> workers_pool;  // thread pool.
   auto worker_func = [&]() {
     PartitionLoadThreadContext ctx;
+    ctx.allocate_buffer(context->m_table->s->rec_buff_length);
+
     std::unique_ptr<PartitionLoadHandlerLock> handler_lock{nullptr};
     if (ctx.initialize(context) || ctx.clone_handler(file, context, clone_mutex)) {
       has_error.store(true);
@@ -640,7 +649,7 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
       size_t current_task = task_idx.fetch_add(1);
       if (current_task >= tasks.size() || has_error.load()) break;
 
-      auto result = load_one_partition(tasks[current_task], ctx.handler());
+      auto result = load_one_partition(&ctx, tasks[current_task], ctx.handler());
       if (result != ShannonBase::SHANNON_SUCCESS) {
         has_error.store(true);
         ctx.set_error();

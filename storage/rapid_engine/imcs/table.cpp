@@ -384,7 +384,7 @@ void Table::update_statistics(bool force) {
     // check all IMCUs
     for (auto &imcu : m_imcus) {
       assert(imcu);
-      // imcu->update_statistic();
+      imcu->update_statistics();
       //  [TODO]: collection statistics.
     }
 

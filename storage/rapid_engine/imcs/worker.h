@@ -171,7 +171,6 @@ class BkgWorkerPool : public MemoryObject {
 
  private:
   static std::atomic<uint64_t> m_last_gc_scn;
-  static std::atomic<uint64_t> m_gc_interval_scn;
   static std::thread m_auto_thread;
   static std::atomic<bool> m_auto_thread_running;
   static std::once_flag m_once;
