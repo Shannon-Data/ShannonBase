@@ -250,7 +250,7 @@ TABLE *Utils::open_table_by_name(const std::string &schema_name, const std::stri
   return table_list.table;
 }
 
-int Utils::close_table(TABLE *table) {
+int Utils::close_table(TABLE *table [[maybe_unused]]) {
   assert(table);
   // The table will be closed by `close_thread_tables()` in the caller.
   // No manual cleanup is required here.

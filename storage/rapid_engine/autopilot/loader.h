@@ -147,8 +147,20 @@ class SelfLoadManager {
     return m_instance;
   }
 
-  int initialize();
-  int deinitialize();
+  void start() {
+    if (!m_instance) return;
+    m_instance->initialize();
+    m_instance->start_self_load_worker();
+  }
+
+  void shutdown() {
+    if (m_instance) {
+      m_instance->deinitialize();
+      delete m_instance;
+      m_instance = nullptr;
+    }
+  }
+
   inline bool initialized() { return m_intialized.load(); }
 
   // RPD Mirror management.
@@ -192,6 +204,9 @@ class SelfLoadManager {
   ~SelfLoadManager() = default;
   SelfLoadManager(const SelfLoadManager &) = delete;
   SelfLoadManager &operator=(const SelfLoadManager &) = delete;
+
+  int initialize();
+  int deinitialize();
 
   // Self-Load jobs.
   void decay_importance();

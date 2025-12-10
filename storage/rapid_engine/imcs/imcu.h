@@ -506,6 +506,11 @@ class Imcu : public MemoryObject {
    */
   bool deserialize(std::istream &in);
 
+  /**
+   * Update IMCU-level statistics
+   */
+  void update_statistics() {}
+
  private:
   /**
    * Initialize the header
@@ -537,11 +542,6 @@ class Imcu : public MemoryObject {
    */
   void log_transaction(row_id_t local_row_id, OPER_TYPE operation, Transaction::ID txn_id,
                        const std::unordered_map<uint32_t, RowBuffer::ColumnValue> *updates = nullptr) {}
-
-  /**
-   * Update IMCU-level statistics
-   */
-  void update_statistics() {}
 
   /**
    * Increment the internal version counter

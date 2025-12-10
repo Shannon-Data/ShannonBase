@@ -112,6 +112,8 @@ ulonglong rpd_max_purger_timeout = SHANNON_DEFAULT_MAX_PURGER_TIMEOUT;
 ulonglong rpd_purge_batch_size = SHANNON_DEFAULT_MAX_PURGER_TIMEOUT;
 ulonglong rpd_min_versions_for_purge = SHANNON_DEFAULT_MAX_PURGER_TIMEOUT;
 double rpd_purge_efficiency_threshold = SHANNON_DEFAULT_PURGE_EFFICIENCY_THRESHOLD;
+ulonglong rpd_gc_interval_scn = ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN;
+int32 rpd_gc_interval_time = ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME;
 
 std::atomic<size_t> rapid_allocated_mem_size = 0;
 rpd_columns_container rpd_columns_info;
@@ -1389,6 +1391,10 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_min_versions_for_purge", (char *)&ShannonBase::rpd_min_versions_for_purge, SHOW_LONG, SHOW_SCOPE_GLOBAL},
     {"rapid_purge_efficiency_threshold", (char *)&ShannonBase::rpd_purge_efficiency_threshold, SHOW_DOUBLE,
      SHOW_SCOPE_GLOBAL},
+    /*the interval scn of GC*/
+    {"gc_interval_scn", (char *)&ShannonBase::rpd_gc_interval_scn, SHOW_LONG, SHOW_SCOPE_GLOBAL},
+    /*the interval time of GC*/
+    {"gc_interval_time", (char *)&ShannonBase::rpd_gc_interval_time, SHOW_INT, SHOW_SCOPE_GLOBAL},
     {NullS, NullS, SHOW_INT, SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
@@ -1593,13 +1599,9 @@ static int rpd_async_threshold_validate(THD *,                          /*!< in:
     return 1;
   }
 
-  if (value->val_int(value, &input_val)) {
-    return 1;
-  }
+  if (value->val_int(value, &input_val)) return 1;
 
-  if (input_val < 1 || input_val > ShannonBase::MAX_N_FIELD_PARALLEL) {
-    return 1;
-  }
+  if (input_val < 1 || input_val > ShannonBase::MAX_N_FIELD_PARALLEL) return 1;
 
   *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -1686,13 +1688,9 @@ static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void
   ShannonBase::rpd_self_load_enabled = *static_cast<const bool *>(save);
   auto instance = ShannonBase::Autopilot::SelfLoadManager::instance();
   if (ShannonBase::rpd_self_load_enabled) {  // to start AutoLoader thread.
-    if (!instance->initialized()) {
-      instance->initialize();
-      instance->start_self_load_worker();
-    }
+    if (!instance->initialized()) instance->start();
   } else {
-    instance->stop_self_load_worker();
-    instance->deinitialize();
+    instance->shutdown();
   }
 }
 
@@ -1744,13 +1742,9 @@ static int rpd_max_purger_timeout_validate(THD *,                          /*!< 
                                                                            for update function */
                                            struct st_mysql_value *value) { /*!< in: incoming string */
   longlong input_val;
-  if (value->val_int(value, &input_val)) {
-    return 1;
-  }
+  if (value->val_int(value, &input_val)) return 1;
 
-  if (input_val < ShannonBase::SHANNON_MIN_PURGER_TIMEOUT) {
-    return 1;
-  }
+  if (input_val < ShannonBase::SHANNON_MIN_PURGER_TIMEOUT) return 1;
 
   *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -1779,13 +1773,10 @@ static int rpd_purge_batch_size_validate(THD *,                          /*!< in
                                                                          for update function */
                                          struct st_mysql_value *value) { /*!< in: incoming string */
   long long input_val;
-  if (value->val_int(value, &input_val)) {
-    return 1;
-  }
+  if (value->val_int(value, &input_val)) return 1;
 
-  if (input_val < ShannonBase::SHANNON_MIN_PURGE_BATCH_SIZE || input_val > ShannonBase::SHANNON_MAX_PURGE_BATCH_SIZE) {
+  if (input_val < ShannonBase::SHANNON_MIN_PURGE_BATCH_SIZE || input_val > ShannonBase::SHANNON_MAX_PURGE_BATCH_SIZE)
     return 1;
-  }
 
   *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -1814,13 +1805,10 @@ static int rpd_min_versions_for_purge_validate(THD *,                          /
                                                                                for update function */
                                                struct st_mysql_value *value) { /*!< in: incoming string */
   long long input_val;
-  if (value->val_int(value, &input_val)) {
-    return 1;
-  }
+  if (value->val_int(value, &input_val)) return 1;
 
-  if (input_val < ShannonBase::SHANNON_MIN_PURGE_BATCH_SIZE || input_val > ShannonBase::SHANNON_MAX_PURGE_BATCH_SIZE) {
+  if (input_val < ShannonBase::SHANNON_MIN_PURGE_BATCH_SIZE || input_val > ShannonBase::SHANNON_MAX_PURGE_BATCH_SIZE)
     return 1;
-  }
 
   *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -1872,6 +1860,52 @@ static void rpd_purge_efficiency_threshold_update(THD *thd,         /*!< in: thr
   }
 
   ShannonBase::rpd_purge_efficiency_threshold = in_val;
+}
+
+static int rpd_gc_interval_scn_validate(THD *,                          /*!< in: thread handle */
+                                        SYS_VAR *,                      /*!< in: pointer to system
+                                                                                        variable */
+                                        void *save,                     /*!< out: immediate result
+                                                                        for update function */
+                                        struct st_mysql_value *value) { /*!< in: incoming string */
+  long long input_val;
+  if (value->val_int(value, &input_val)) return 1;
+
+  if (static_cast<size_t>(input_val) < ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN) return 1;
+
+  *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+static void rpd_gc_interval_scn_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
+
+  *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
+  ShannonBase::rpd_gc_interval_scn = *static_cast<const ulong *>(save);
+}
+
+static int rpd_gc_interval_time_validate(THD *,                          /*!< in: thread handle */
+                                         SYS_VAR *,                      /*!< in: pointer to system
+                                                                                         variable */
+                                         void *save,                     /*!< out: immediate result
+                                                                         for update function */
+                                         struct st_mysql_value *value) { /*!< in: incoming string */
+  long long input_val;
+  if (value->val_int(value, &input_val)) return 1;
+
+  if (static_cast<size_t>(input_val) < ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME) return 1;
+
+  *static_cast<int *>(save) = static_cast<int>(input_val);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+static void rpd_gc_interval_time_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  /* check if there is an actual change */
+  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+
+  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
+  ShannonBase::rpd_gc_interval_time = *static_cast<const int *>(save);
 }
 
 // clang-format off
@@ -2041,6 +2075,28 @@ static MYSQL_SYSVAR_DOUBLE(purge_efficiency_threshold,
                            1,
                            0);
 
+static MYSQL_SYSVAR_ULONGLONG(gc_interval_scn,
+                              ShannonBase::rpd_gc_interval_scn,
+                              PLUGIN_VAR_OPCMDARG,
+                              "Initiates a garbage collection cycle when the difference between the current System"
+                              "Change Number (SCN) and the last recorded GC SCN exceeds this threshold value.",
+                              rpd_gc_interval_scn_validate,
+                              rpd_gc_interval_scn_update,
+                              ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN, // default val
+                              ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN,  // min
+                              ULLONG_MAX, // max
+                              0);
+
+static MYSQL_SYSVAR_INT(gc_interval_time,
+                        ShannonBase::rpd_gc_interval_time,
+                        PLUGIN_VAR_OPCMDARG,
+                        "How frequently does garbage collection occur in second",
+                        rpd_gc_interval_time_validate,
+                        rpd_gc_interval_time_update,
+                        ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME, // default val
+                        ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME,  // min
+                        INT_MAX, // max
+                        0);
 // clang-format on
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
@@ -2057,6 +2113,8 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(purge_batch_size),
     MYSQL_SYSVAR(min_versions_for_purge),
     MYSQL_SYSVAR(purge_efficiency_threshold),
+    MYSQL_SYSVAR(gc_interval_scn),
+    MYSQL_SYSVAR(gc_interval_time),
     nullptr,
 };
 
@@ -2113,6 +2171,9 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
+  if (ShannonBase::Autopilot::SelfLoadManager::instance())
+    ShannonBase::Autopilot::SelfLoadManager::instance()->shutdown();
+
   while (ShannonBase::Populate::Populator::active()) {
     ShannonBase::Populate::sys_pop_started.store(false);
     os_event_set(log_sys->rapid_events[0]);

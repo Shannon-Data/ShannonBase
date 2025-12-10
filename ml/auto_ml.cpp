@@ -335,7 +335,8 @@ int Auto_ML::explain(THD *thd, String *sch_tb_name, String *target_column_name, 
              : HA_ERR_GENERIC;
 }
 
-int Auto_ML::model_active(THD *thd, String *in_sch_tb_name, Json_wrapper & /*out_model_info*/) {
+int Auto_ML::model_active(THD *thd [[maybe_unused]], String *in_sch_tb_name [[maybe_unused]],
+                          Json_wrapper & /*out_model_info*/) {
   assert(thd && in_sch_tb_name);
   return 0;
 }

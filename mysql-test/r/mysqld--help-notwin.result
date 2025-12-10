@@ -1069,6 +1069,12 @@ The following options may be given as the first argument:
  --rapid-async-column-threshold[=#] 
  Max number of columns will do async-corountine for
  reading data or parsing log 
+ --rapid-gc-interval-scn[=#] 
+ Initiates a garbage collection cycle when the difference
+ between the current SystemChange Number (SCN) and the
+ last recorded GC SCN exceeds this threshold value.
+ --rapid-gc-interval-time[=#] 
+ How frequently does garbage collection occur in second
  --rapid-max-purger-timeout[=#] 
  Default value of spin delay (in spin rounds)1000 spin
  round takes 4us, 25000 takes 1ms for busy waiting.
@@ -1953,6 +1959,8 @@ query-prealloc-size 8192
 range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
 rapid-async-column-threshold 16
+rapid-gc-interval-scn 1000000
+rapid-gc-interval-time 30
 rapid-max-purger-timeout 5000
 rapid-memory-size-max 536870912
 rapid-min-versions-for-purge 10
