@@ -403,7 +403,6 @@ class PartitionLoadHandlerLock {
   THD *m_thd;
   bool m_locked;
 };
-
 }  // namespace Imcs
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_IMCS_H__
