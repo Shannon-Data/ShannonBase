@@ -93,10 +93,12 @@ bool PartitionLoadThreadContext::initialize(const Rapid_load_context *context) {
     return true;
   }
 
-  m_table->in_use = m_thd;
+  m_table->in_use = nullptr;
+  m_table->file = nullptr;
   m_table->alias_name_used = context->m_table->alias_name_used;
-  m_table->read_set = context->m_table->read_set;
-  m_table->write_set = context->m_table->write_set;
+
+  bitmap_copy(&m_table->def_read_set, context->m_table->read_set);
+  bitmap_copy(&m_table->def_write_set, context->m_table->write_set);
 
   return false;
 }
@@ -144,23 +146,21 @@ void PartitionLoadThreadContext::cleanup() {
 
 bool PartitionLoadThreadContext::clone_handler(ha_innopart *file, const Rapid_load_context *context,
                                                std::mutex &clone_mutex) {
-  THD *original_thd = context->m_table->in_use;
   const char *normalized_path = context->m_table->s->normalized_path.str;
-
   ha_innopart *cloned_handler = nullptr;
   {
     std::lock_guard<std::mutex> lock(clone_mutex);
+    THD *saved = context->m_table->in_use;
     context->m_table->in_use = m_thd;
     cloned_handler = static_cast<ha_innopart *>(file->clone(normalized_path, m_thd->mem_root));
-    context->m_table->in_use = original_thd;
+    context->m_table->in_use = saved;
+
+    if (!cloned_handler) return true;
+
+    m_handler = cloned_handler;
+    m_handler->change_table_ptr(m_table, m_table->s);
+    m_table->file = m_handler;
   }
-
-  if (!cloned_handler) return true;
-
-  m_handler = cloned_handler;
-  m_handler->change_table_ptr(m_table, m_table->s);
-  m_table->file = m_handler;
-
   // Note: ha_open() is not needed because:
   // 1. ha_innopart::clone() inherits the open state from the source handler
   // 2. change_table_ptr() updates internal pointers while preserving the open state
@@ -626,8 +626,9 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
   if (context->m_thd->in_multi_stmt_transaction_mode()) trans_commit_stmt(context->m_thd);
 
   DBUG_EXECUTE_IF("check_trx_state", {
-    if (trx_sys->mysql_trx_list.length > 0) {
-      sql_print_warning("trx_sys->mysql_trx_list has %lu transactions before load", trx_sys->mysql_trx_list.length);
+    if (UT_LIST_GET_LEN(trx_sys->mysql_trx_list) > 0) {
+      sql_print_warning("trx_sys->mysql_trx_list has %lu transactions before load",
+                        UT_LIST_GET_LEN(trx_sys->mysql_trx_list));
     }
   });
 
