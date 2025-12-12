@@ -168,6 +168,9 @@ class Rapid_load_context : public Rapid_context {
   // current transaction.
   Transaction *m_trx{nullptr};
 
+  // the loading table id.
+  ulonglong m_table_id{0};
+
   // the primary key of this table.
   TABLE *m_table{nullptr};
 

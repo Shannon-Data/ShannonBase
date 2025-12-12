@@ -196,6 +196,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   // start to read data from innodb and load to rapid.
   ShannonBase::Rapid_load_context context;
   context.m_table = const_cast<TABLE *>(&table);
+  context.m_table_id = static_cast<ha_innobase *>(table.file)->get_table_id();
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = table.s->db.str;
@@ -234,7 +235,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 
   m_share = new RapidPartShare(table);
   m_share->file = this;
-  m_share->m_tableid = static_cast<ha_innobase *>(table.file)->get_table_id();
+  m_share->m_tableid = context.m_table_id;
   shannon_loaded_tables->add(table.s->db.str, table.s->table_name.str, m_share);
   if (shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) == nullptr) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table.s->db.str, table.s->table_name.str);

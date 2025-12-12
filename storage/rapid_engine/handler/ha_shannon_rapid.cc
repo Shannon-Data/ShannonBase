@@ -349,6 +349,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   ShannonBase::Rapid_load_context context;
   context.m_thd = m_thd;
   context.m_table = const_cast<TABLE *>(&table_arg);
+  context.m_table_id = static_cast<ha_innobase *>(table_arg.file)->get_table_id();
   context.m_schema_name = table_arg.s->db.str;
   context.m_table_name = table_arg.s->table_name.str;
   context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
@@ -370,7 +371,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
   m_share = new RapidShare(table_arg);
   m_share->file = this;
-  m_share->m_tableid = static_cast<ha_innobase *>(table_arg.file)->get_table_id();
+  m_share->m_tableid = context.m_table_id;
   shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) == nullptr) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
@@ -387,7 +388,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
     ShannonBase::rpd_column_info_t row_rpd_columns;
     strncpy(row_rpd_columns.schema_name, table_arg.s->db.str, table_arg.s->db.length);
-    row_rpd_columns.table_id = static_cast<uint>(table_arg.s->table_map_id.id());
+    row_rpd_columns.table_id = context.m_table_id;
     row_rpd_columns.column_id = field_ptr->field_index();
     strncpy(row_rpd_columns.column_name, field_ptr->field_name, sizeof(row_rpd_columns.column_name) - 1);
     strncpy(row_rpd_columns.table_name, table_arg.s->table_name.str, sizeof(row_rpd_columns.table_name) - 1);
@@ -432,6 +433,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
 
   ShannonBase::Rapid_load_context context;
   context.m_table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
+  context.m_table_id = table_id;
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = db_name;

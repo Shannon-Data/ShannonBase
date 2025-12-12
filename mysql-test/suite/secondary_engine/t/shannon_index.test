@@ -177,7 +177,7 @@ SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering'
 insert into employees values(1006, 'PPT', 'Sales', 4530.32);
 insert into employees values(1007, 'TPP', 'Sales', 5430.32);
 
---sleep 10
+--sleep 2
 
 --connection connection_1
 --echo [conn1]
