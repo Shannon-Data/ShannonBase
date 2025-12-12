@@ -259,7 +259,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   int tmp{HA_ERR_GENERIC};
   m_thd->set_sent_row_count(0);
 
-  auto table_id = file->get_table_id();
+  auto table_id = context->m_table_id;
   ut_a(m_rpd_tables.find(table_id) != m_rpd_tables.end());
 
   while ((tmp = shannon_file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
@@ -306,7 +306,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   RpdTable *source_table{nullptr};
   {
     std::shared_lock lk(this->m_table_mutex);
-    auto table_id = file->get_table_id();
+    auto table_id = context->m_table_id;
     if (m_rpd_tables.find(table_id) == m_rpd_tables.end()) {
       my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
       return HA_ERR_GENERIC;
@@ -317,22 +317,21 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   struct ScanCtxGuard {
     handler *file;
     void *ctx{nullptr};
-    std::vector<void *> thread_ctxs;
+    std::vector<parall_scan_cookie_t *> thread_ctxs;
+    std::vector<std::unique_ptr<parall_scan_cookie_t>> cookie_storage;
     ScanCtxGuard(handler *f) : file(f) {}
     ~ScanCtxGuard() {
       if (ctx) file->parallel_scan_end(ctx);
-      for (auto &it : thread_ctxs) {
-        delete static_cast<parall_scan_cookie_t *>(it);
-        it = nullptr;
-      }
+      cookie_storage.clear();
       thread_ctxs.clear();
     }
 
     void set_thread_ctxs(size_t num_threads) {
       thread_ctxs.resize(num_threads);
+      cookie_storage.resize(num_threads);
       for (auto i = 0u; i < num_threads; ++i) {
-        parall_scan_cookie_t *cookie = new parall_scan_cookie_t;
-        thread_ctxs[i] = static_cast<void *>(cookie);
+        cookie_storage[i] = std::make_unique<parall_scan_cookie_t>();
+        thread_ctxs[i] = cookie_storage[i].get();
       }
     }
   } scan_ctx_guard(shannon_file);
@@ -404,7 +403,8 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     completion_latch->count_down();
   };
 
-  tmp = shannon_file->parallel_scan(scan_ctx_guard.ctx, scan_ctx_guard.thread_ctxs.data(), init_fn, load_fn, end_fn);
+  tmp = shannon_file->parallel_scan(scan_ctx_guard.ctx, reinterpret_cast<void **>(scan_ctx_guard.thread_ctxs.data()),
+                                    init_fn, load_fn, end_fn);
   // Wait for scan to complete or error
   if (!completion_latch->wait_for(std::chrono::seconds(900))) {
     // Timeout occurred
@@ -442,9 +442,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
 }
 
 int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) {
-  std::string sch_name(context->m_schema_name.c_str()), table_name(context->m_table_name.c_str());
-
-  auto table_id = file->get_table_id();
+  auto table_id = context->m_table_id;
   if (m_rpd_parttables.find(table_id) == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
   auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[table_id].get());
   assert(part_tb_ptr);
@@ -458,7 +456,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
     Rapid_load_context::extra_info_t::m_active_part_key = partkey;
     // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
     if (file->inited == handler::NONE && file->rnd_init_in_part(part_id, true)) {
-      my_error(ER_NO_SUCH_TABLE, MYF(0), sch_name, table_name);
+      my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
       return HA_ERR_GENERIC;
     }
 
@@ -469,7 +467,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
       if (tmp == HA_ERR_KEY_NOT_FOUND) break;
 
       DBUG_EXECUTE_IF("secondary_engine_rapid_load_table_error", {
-        my_error(ER_SECONDARY_ENGINE, MYF(0), sch_name, table_name);
+        my_error(ER_SECONDARY_ENGINE, MYF(0), context->m_schema_name, context->m_table_name);
         file->rnd_end_in_part(part_id, true);
         return HA_ERR_GENERIC;
       });
@@ -479,9 +477,9 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
         file->rnd_end_in_part(part_id, true);
         std::string errmsg;
         errmsg.append("load data from ")
-            .append(sch_name)
+            .append(context->m_schema_name)
             .append(".")
-            .append(table_name)
+            .append(context->m_table_name)
             .append(".")
             .append(partkey)
             .append(" to rapid failed");
@@ -500,8 +498,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
 }
 
 int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopart *file) {
-  std::string sch_name(context->m_schema_name.c_str()), table_name(context->m_table_name.c_str());
-  auto table_id = file->get_table_id();
+  auto table_id = context->m_table_id;
   if (m_rpd_parttables.find(table_id) == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
   auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[table_id].get());
   assert(part_tb_ptr);
@@ -607,7 +604,8 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
       if ((partition_ptr->insert_row(context, rec_buff)) == INVALID_ROW_ID) {
         std::lock_guard<std::mutex> lock(error_mutex);
         if (!has_error.load()) {
-          task.error_msg = "load data from " + sch_name + "." + table_name + "." + task.part_key + " to rapid failed";
+          task.error_msg = "load data from " + context->m_schema_name + "." + context->m_table_name + "." +
+                           task.part_key + " to rapid failed";
           task.result = HA_ERR_GENERIC;
           has_error.store(true);
         }
@@ -672,8 +670,9 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
   if (has_error.load()) {
     for (const auto &task : tasks) {
       if (task.result == ShannonBase::SHANNON_SUCCESS) continue;
-      task.error_msg.size() ? my_error(ER_SECONDARY_ENGINE, MYF(0), task.error_msg.c_str())
-                            : my_error(ER_NO_SUCH_TABLE, MYF(0), sch_name.c_str(), table_name.c_str());
+      task.error_msg.size()
+          ? my_error(ER_SECONDARY_ENGINE, MYF(0), task.error_msg.c_str())
+          : my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
       return HA_ERR_GENERIC;
     }
   }
@@ -685,13 +684,12 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
 int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   if (create_table_memo(context, source)) {
     std::string errmsg;
-    auto table_id = static_cast<ha_innobase *>(source->file)->get_table_id();
-    cleanup(table_id);
+    cleanup(context->m_table_id);
 
     errmsg.append("create table memo for ")
-        .append(context->m_schema_name)
+        .append(source->s->db.str)
         .append(".")
-        .append(context->m_table_name)
+        .append(source->s->table_name.str)
         .append(" failed.");
     my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
     return HA_ERR_GENERIC;
@@ -707,7 +705,7 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
 }
 
 int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
-  auto table_id = static_cast<ha_innobase *>(source->file)->get_table_id();
+  auto table_id = context->m_table_id;
   if (create_parttable_memo(context, source)) {
     std::string errmsg;
     cleanup(table_id);
@@ -777,12 +775,7 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
     return HA_ERR_GENERIC;
   }
 
-  auto table = share ? (share->m_source_table ? const_cast<TABLE *>(share->m_source_table) : nullptr) : nullptr;
-  table_id_t table_id{0};
-  if (table) {
-    table_id = static_cast<ha_innobase *>(table->file)->get_table_id();
-  }
-
+  auto table_id = context->m_table_id;
   int ret{ShannonBase::SHANNON_SUCCESS};
   if (is_partition)
     unload_innodbpart(context, table_id, error_if_not_loaded);
