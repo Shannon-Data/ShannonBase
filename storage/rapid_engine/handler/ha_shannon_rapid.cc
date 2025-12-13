@@ -357,6 +357,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_extra_info.m_keynr = active_index;
   context.m_extra_info.m_key_len = table_arg.file->ref_length;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
+  ShannonBase::TransactionGuard guard(context.m_trx);
 
   context.m_extra_info.m_trxid = context.m_trx->get_id();
   // at loading step, to set SCN to non-zero, it means it committed after inserted with explicit begin/commit.
@@ -369,6 +370,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     return HA_ERR_GENERIC;
   }
 
+  guard.commit();
   m_share = new RapidShare(table_arg);
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
@@ -1373,7 +1375,7 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_parallel_part_load_threshold", (char *)&ShannonBase::rpd_para_parttb_load_threshold, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
     /*the mode to aysnc the changes to rapid*/
-    {"rapid_async_mode", (char *)&ShannonBase::Populate::g_sync_mode, SHOW_INT, SHOW_SCOPE_GLOBAL},
+    {"rapid_async_mode", (char *)&ShannonBase::Populate::g_sync_mode, SHOW_CHAR, SHOW_SCOPE_GLOBAL},
     /*the max column number of used to aysnc reading or parsing log*/
     {"rapid_async_column_threshold", (char *)&ShannonBase::rpd_async_column_threshold, SHOW_INT, SHOW_SCOPE_GLOBAL},
     /*to enable self load or disable*/
@@ -1477,13 +1479,8 @@ static int rpd_pop_buff_size_max_validate(THD *,                          /*!< i
     return 1;
   }
 
-  if (value->val_int(value, &input_val)) {
-    return 1;
-  }
-
-  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
-    return 1;
-  }
+  if (value->val_int(value, &input_val)) return 1;
+  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) return 1;
 
   *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -1550,7 +1547,7 @@ static int rpd_para_parttb_load_threshold_validate(THD *,                       
     return 1;
   }
 
-  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_PARALLEL_PARTTB_THRESHOLD) {
+  if (input_val < 1 || (uint)input_val > 3 * std::thread::hardware_concurrency()) {
     return 1;
   }
 
@@ -1690,7 +1687,7 @@ static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void
   ShannonBase::rpd_self_load_enabled = *static_cast<const bool *>(save);
   auto instance = ShannonBase::Autopilot::SelfLoadManager::instance();
   if (ShannonBase::rpd_self_load_enabled) {  // to start AutoLoader thread.
-    if (!instance->initialized()) instance->start();
+    if (instance && !instance->initialized()) instance->start();
   } else {
     instance->shutdown();
   }
@@ -1872,8 +1869,7 @@ static int rpd_gc_interval_scn_validate(THD *,                          /*!< in:
                                         struct st_mysql_value *value) { /*!< in: incoming string */
   long long input_val;
   if (value->val_int(value, &input_val)) return 1;
-
-  if (static_cast<size_t>(input_val) < ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN) return 1;
+  if (input_val < 0) return 1;
 
   *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -1896,7 +1892,7 @@ static int rpd_gc_interval_time_validate(THD *,                          /*!< in
   long long input_val;
   if (value->val_int(value, &input_val)) return 1;
 
-  if (static_cast<size_t>(input_val) < ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME) return 1;
+  if (input_val < 0) return 1;
 
   *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;

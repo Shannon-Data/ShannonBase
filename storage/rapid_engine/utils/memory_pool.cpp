@@ -85,7 +85,7 @@ MemoryPool::SubPool::~SubPool() {
 }
 
 MemoryPool::MemoryPool(const Config &config) : m_config(config), m_shutdown(false) {
-  validate_config();
+  if (!validate_config()) return;
 
   if (!m_config.is_sub_pool) {
     // Root pool: allocate new memory
@@ -208,7 +208,7 @@ void MemoryPool::deallocate(void *ptr, size_t size) noexcept {
       return;
     }
 
-    const AllocationInfo &info = it->second;
+    const AllocationInfo info = it->second;
     auto &subpool = m_subpools[info.pool_index];
 
     {
@@ -508,16 +508,16 @@ MemoryPool::PoolStats::Snapshot MemoryPool::stats() const noexcept { return m_st
 
 void MemoryPool::set_log_level(LogLevel level) { m_config.log_level = level; }
 
-void MemoryPool::validate_config() {
-  if (m_config.initial_size < 10 * 1024 * 1024) {
-    throw std::invalid_argument("Initial size must be at least 10MB");
-  }
-  if (m_config.small_pool_ratio < 0.0 || m_config.small_pool_ratio > 0.5) {
-    throw std::invalid_argument("Small pool ratio must be between 0.0 and 0.5");
-  }
-  if (m_config.expansion_trigger_threshold <= 0.0 || m_config.expansion_trigger_threshold > 1.0) {
-    throw std::invalid_argument("Expansion trigger must be between 0.0 and 1.0");
-  }
+bool MemoryPool::validate_config() {
+  if (m_config.initial_size < 10 * 1024 * 1024) return false;
+  // throw std::invalid_argument("Initial size must be at least 10MB");
+
+  if (m_config.small_pool_ratio < 0.0 || m_config.small_pool_ratio > 0.5) return false;
+  // throw std::invalid_argument("Small pool ratio must be between 0.0 and 0.5");
+
+  if (m_config.expansion_trigger_threshold <= 0.0 || m_config.expansion_trigger_threshold > 1.0) return false;
+  // throw std::invalid_argument("Expansion trigger must be between 0.0 and 1.0");
+  return true;
 }
 
 void MemoryPool::initialize_pools(size_t total_size) {

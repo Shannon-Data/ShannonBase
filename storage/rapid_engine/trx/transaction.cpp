@@ -302,33 +302,31 @@ bool TransactionCoordinator::commit_transaction(Transaction *trx) {
 
   Transaction::ID txn_id = trx->get_id();
 
-  std::unique_lock lock(m_txns_mutex);
+  TransactionInfo info;
+  {
+    std::unique_lock lock(m_txns_mutex);
 
-  auto it = m_active_txns.find(txn_id);
-  if (it == m_active_txns.end()) return false;
+    auto it = m_active_txns.find(txn_id);
+    if (it == m_active_txns.end()) return false;
 
-  TransactionInfo &info = it->second;
+    uint64_t commit_scn = Transaction::VersionManager::instance().allocate_scn();
 
-  // Allocate commit SCN from VersionManager
-  uint64_t commit_scn = Transaction::VersionManager::instance().allocate_scn();
+    it->second.commit_scn = commit_scn;
+    it->second.commit_time = std::chrono::system_clock::now();
+    it->second.status = TransactionInfo::COMMITTED;
+    trx->m_commit_scn = commit_scn;
 
-  info.commit_scn = commit_scn;
-  info.commit_time = std::chrono::system_clock::now();
-  info.status = TransactionInfo::COMMITTED;
-  trx->m_commit_scn = commit_scn;
+    info = std::move(it->second);
 
-  // Notify IMCUs
-  for (auto *imcu : info.modified_imcus) {
-    imcu->get_transaction_journal()->commit_transaction(txn_id, commit_scn);
+    m_active_txns.erase(it);
+    update_min_active_scn();
   }
 
-  m_active_txns.erase(it);
-  update_min_active_scn();
-
-  // Invalidate visibility cache for modified IMCUs
   for (auto *imcu : info.modified_imcus) {
-    invalidate_visibility_cache(imcu);
+    imcu->get_transaction_journal()->commit_transaction(txn_id, info.commit_scn);
   }
+
+  for (auto *imcu : info.modified_imcus) invalidate_visibility_cache(imcu);
 
   m_total_committed.fetch_add(1, std::memory_order_relaxed);
   return true;

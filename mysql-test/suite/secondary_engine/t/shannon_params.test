@@ -41,5 +41,94 @@ SET GLOBAL rapid_self_load_base_relation_fill_percentage = 80;
 SET GLOBAL rapid_self_load_interval_seconds=864;
 SHOW VARIABLES LIKE "%rapid%";
 
+SET GLOBAL rapid_async_column_threshold =10;
+SHOW VARIABLES LIKE "%rapid_async_column_threshold%";
+
+SET GLOBAL rapid_gc_interval_scn = 10;
+SHOW VARIABLES LIKE "%rapid_gc_interval_scn%";
+
+SET GLOBAL rapid_gc_interval_time=20;
+SHOW VARIABLES LIKE "%rapid_gc_interval_time%";
+
+SET GLOBAL rapid_max_purger_timeout=3000;
+SHOW VARIABLES LIKE "%rapid_max_purger_timeout%";
+
+SET GLOBAL rapid_memory_size_max=2000;
+SHOW VARIABLES LIKE "%rapid_memory_size_max%";
+
+SET GLOBAL rapid_min_versions_for_purge=2;
+SHOW VARIABLES LIKE "%rapid_min_versions_for_purge%";
+
+SET GLOBAL rapid_parallel_load_max=100;
+SHOW VARIABLES LIKE "%rapid_parallel_load_max%";
+
+--error 1231
+SET GLOBAL rapid_parallel_part_load_threshold=100;
+SHOW VARIABLES LIKE "%rapid_parallel_part_load_threshold%";
+
+SET GLOBAL rapid_parallel_part_load_threshold=8;
+SHOW VARIABLES LIKE "%rapid_parallel_part_load_threshold%";
+
+--ERROR 1238
+SET GLOBAL rapid_pop_buffer_size_max=100;
+SHOW VARIABLES LIKE "%rapid_pop_buffer_size_max%";
+
+SET GLOBAL rapid_purge_batch_size=1024;
+SHOW VARIABLES LIKE "%rapid_purge_batch_size%";
+
+SET GLOBAL rapid_purge_efficiency_threshold=0.10;
+SHOW VARIABLES LIKE "%rapid_purge_efficiency_threshold%";
+
+SET GLOBAL rapid_self_load_base_relation_fill_percentage=80;
+SHOW VARIABLES LIKE "%rapid_self_load_base_relation_fill_percentage%";
+
+SET GLOBAL rapid_self_load_enabled=false;
+SHOW VARIABLES LIKE "%rapid_self_load_enabled%";
+
+SET GLOBAL rapid_self_load_enabled=true;
+SHOW VARIABLES LIKE "%rapid_self_load_enabled%";
+
+SET GLOBAL rapid_self_load_interval_seconds=1000;
+SHOW VARIABLES LIKE "%rapid_self_load_interval_seconds%";
+
+SET GLOBAL rapid_self_load_skip_quiet_check=ON;
+SHOW VARIABLES LIKE "%rapid_self_load_skip_quiet_check%";
+SET GLOBAL rapid_self_load_skip_quiet_check=1;
+SHOW VARIABLES LIKE "%rapid_self_load_skip_quiet_check%";
+
+SET GLOBAL rapid_self_load_skip_quiet_check=OFF;
+SHOW VARIABLES LIKE "%rapid_self_load_skip_quiet_check%";
+SET GLOBAL rapid_self_load_skip_quiet_check=0;
+SHOW VARIABLES LIKE "%rapid_self_load_skip_quiet_check%";
+
+SET rapid_use_dynamic_offload=ON;
+SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
+SET rapid_use_dynamic_offload=1;
+SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
+
+SET rapid_use_dynamic_offload=OFF;
+SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
+SET rapid_use_dynamic_offload=0;
+SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
+
+SET GLOBAL rapid_sync_mode=0;
+SHOW VARIABLES LIKE "%rapid_sync_mode%";
+SET GLOBAL rapid_sync_mode=DIRECT_NOTIFICATION;
+SHOW VARIABLES LIKE "%rapid_sync_mode%";
+
+SET GLOBAL rapid_sync_mode=1;
+SHOW VARIABLES LIKE "%rapid_sync_mode%";
+SET GLOBAL rapid_sync_mode=REDO_LOG_PARSE;
+SHOW VARIABLES LIKE "%rapid_sync_mode%";
+
+SET GLOBAL rapid_sync_mode=2;
+SHOW VARIABLES LIKE "%rapid_sync_mode%";
+SET GLOBAL rapid_sync_mode=HYBRID;
+SHOW VARIABLES LIKE "%rapid_sync_mode%";
+
+--error 1231
+SET GLOBAL rapid_sync_mode=3;
+SHOW VARIABLES LIKE "%rapid_sync_mode%";
+
 --enable_warnings
 DROP DATABASE sh_params;
