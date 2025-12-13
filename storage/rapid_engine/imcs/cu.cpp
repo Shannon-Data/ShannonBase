@@ -58,7 +58,8 @@ CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32_t col_idx, size_t ca
   m_header.compression_level = field_meta.compression_level;
 
   m_data_capacity = capacity * m_header.normalized_length;
-  uchar *raw_ptr = static_cast<uchar *>(m_memory_pool.get()->allocate_auto(m_data_capacity, SHANNON_DATA_AREAR_NAME));
+  if (m_data_capacity < 64 * 1024) m_data_capacity = 64 * 1024;  // see the ref: MemoryPool::allocate_auto
+  uchar *raw_ptr = static_cast<uchar *>(m_memory_pool.get()->allocate_auto(m_data_capacity));
   if (!raw_ptr) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "CU memory allocation failed");
     return;

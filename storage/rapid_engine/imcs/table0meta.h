@@ -50,7 +50,6 @@ struct SHANNON_ALIGNAS TableConfig {
   std::string tenant_name{SHANNON_DATA_AREAR_NAME};
   uint64_t max_table_mem_size{SHANNON_DEFAULT_MEMRORY_SIZE};
   uint64_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};
-  uint64_t max_imcu_size_mb{SHANNON_MAX_IMCU_MEMRORY_SIZE};
 };
 
 struct SHANNON_ALIGNAS FieldMetadata {
@@ -90,6 +89,7 @@ struct SHANNON_ALIGNAS Key {
 
 struct SHANNON_ALIGNAS TableMetadata {
   // Basic information
+  size_t table_size{0};
   std::string db_name;
   std::string table_name;
   table_id_t table_id{0};
@@ -104,8 +104,7 @@ struct SHANNON_ALIGNAS TableMetadata {
   std::vector<ulong> null_bitmasks;
 
   // IMCU configuration
-  size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};             // Default 8192000
-  size_t max_imcu_size_mb{SHANNON_MAX_IMCU_MEMRORY_SIZE};  // Default 256 MB
+  size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};  // Default 8192000
 
   // Global statistics
   std::atomic<uint64_t> total_imcus{0};

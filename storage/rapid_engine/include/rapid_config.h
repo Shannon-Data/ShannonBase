@@ -32,8 +32,7 @@ namespace ShannonBase {
 
 struct RpdEngineConfig {
   // IMCU Configuration
-  size_t rows_per_imcu = SHANNON_ROWS_IN_CHUNK;             // Number of rows per IMCU
-  size_t max_imcu_size_mb = SHANNON_MAX_IMCU_MEMRORY_SIZE;  // Maximum IMCU size (MB)
+  size_t rows_per_imcu = SHANNON_ROWS_IN_CHUNK;  // Number of rows per IMCU
 
   // Compression Configuration
   Compress::Compression_level compression_level = Compress::MEDIUM;

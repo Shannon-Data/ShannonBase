@@ -58,12 +58,12 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
     : m_mem_root(std::move(std::make_unique<MEM_ROOT>())), m_source_table(mysql_table) {
   m_memory_pool = ShannonBase::Utils::MemoryPool::create_from_parent(
       ShannonBase::g_rpd_memory_pool,
-      config.tenant_name + ":" + mysql_table->s->db.str + mysql_table->s->table_name.str, config.max_table_mem_size);
+      config.tenant_name + ":" + mysql_table->s->db.str + ":" + mysql_table->s->table_name.str,
+      config.max_table_mem_size);
   m_metadata.db_name = mysql_table->s->db.str;
   m_metadata.table_name = mysql_table->s->table_name.str;
   m_metadata.table_id = static_cast<ha_innobase *>(mysql_table->file)->get_table_id();
   m_metadata.rows_per_imcu = config.rows_per_imcu;
-  m_metadata.max_imcu_size_mb = config.max_imcu_size_mb;
 
   // from MySQL TABLE get fields infor.
   m_metadata.db_low_byte_first = mysql_table->s->db_low_byte_first;
@@ -135,7 +135,6 @@ Table::~Table() {
     m_imcus.clear();
     m_imcu_index.clear();
   }
-
   if (m_memory_pool) m_memory_pool.reset();
 }
 
@@ -193,6 +192,8 @@ void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<Key
     auto key_part = key_parts[key_part_id];
     auto key_field_ind = key_part.key_field_ind;
     Field *field = m_metadata.fields[key_field_ind].source_fld;
+    auto original_fld_ptr = field->field_ptr();
+
     const CHARSET_INFO *cs = field->charset();
     auto fld_ptr = rowdata + col_offsets[field->field_index()];
     field->set_field_ptr(fld_ptr);
@@ -237,6 +238,8 @@ void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<Key
     }
     to_key += length;
     remain_len -= length;
+
+    field->set_field_ptr(original_fld_ptr);
   }
 }
 
@@ -250,9 +253,7 @@ int Table::create_index_memo(const Rapid_load_context *context) {
 
 int Table::register_transaction(Transaction *trx) {
   assert(trx);
-  for (auto &imcu : m_imcus) {
-    trx->register_imcu_modification(imcu.get());
-  }
+  for (auto &imcu : m_imcus) trx->register_imcu_modification(imcu.get());
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -262,9 +263,7 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
                                   m_metadata.null_byte_offsets.data(), m_metadata.null_bitmasks.data());
 
   Imcu *current_imcu = get_or_create_write_imcu();
-  if (!current_imcu) {
-    return INVALID_ROW_ID;
-  }
+  if (!current_imcu) return INVALID_ROW_ID;
 
   row_id_t local_row_id = current_imcu->insert_row(context, row_data);
   if (local_row_id == INVALID_ROW_ID) {  // full.
@@ -275,7 +274,6 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
 
   // global current rowid.
   auto rowid = current_imcu->get_start_row() + local_row_id;
-
   for (auto &key : m_metadata.keys) {  // user defined indexes.
     if (build_index(context, key, rowid, rowdata, m_metadata.col_offsets.data(), m_metadata.null_byte_offsets.data(),
                     m_metadata.null_bitmasks.data()))
@@ -283,7 +281,6 @@ row_id_t Table::insert_row(const Rapid_load_context *context, uchar *rowdata) {
   }
 
   m_metadata.total_rows.fetch_add(1);
-
   return rowid;
 }
 

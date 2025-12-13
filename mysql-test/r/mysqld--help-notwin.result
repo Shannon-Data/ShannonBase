@@ -1083,7 +1083,7 @@ The following options may be given as the first argument:
  of`innodb_log_writer_spin_delay`.
  --rapid-memory-size-max[=#] 
  Number of memory size that used for rapid engine, and it
- must not be oversize half of physical mem size.
+ must not be oversize half of physical mem size(MB).
  --rapid-min-versions-for-purge[=#] 
  Minimum number of versions required for a chunk to be
  eligible for purging
@@ -1962,7 +1962,7 @@ rapid-async-column-threshold 16
 rapid-gc-interval-scn 1000000
 rapid-gc-interval-time 30
 rapid-max-purger-timeout 5000
-rapid-memory-size-max 536870912
+rapid-memory-size-max 2147483648
 rapid-min-versions-for-purge 10
 rapid-parallel-load-max 10000
 rapid-parallel-part-load-threshold 32

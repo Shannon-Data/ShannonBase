@@ -94,6 +94,7 @@ namespace ShannonBase {
 
 MEM_ROOT rapid_mem_root(PSI_NOT_INSTRUMENTED, 1024);
 std::shared_ptr<Utils::MemoryPool> g_rpd_memory_pool{nullptr};
+ShannonBase::Optimizer::CostEstimator *g_cost_est_instances{nullptr};
 handlerton *shannon_rapid_hton_ptr{nullptr};
 
 LoadedTables *shannon_loaded_tables = nullptr;
@@ -296,8 +297,7 @@ ha_rows ha_rapid::records_in_range(unsigned int index, key_range *min_key, key_r
 double ha_rapid::scan_time() {
   DBUG_TRACE;
 
-  const double t = (stats.records + stats.deleted) *
-                   Optimizer::CostModelServer::Instance(Optimizer::CostEstimator::Type::RPD_ENG)->io_factor();
+  const double t = (stats.records + stats.deleted) * ShannonBase::g_cost_est_instances->io_factor();
   return t;
 }
 
@@ -357,6 +357,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_extra_info.m_keynr = active_index;
   context.m_extra_info.m_key_len = table_arg.file->ref_length;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
+  ShannonBase::TransactionGuard guard(context.m_trx);
 
   context.m_extra_info.m_trxid = context.m_trx->get_id();
   // at loading step, to set SCN to non-zero, it means it committed after inserted with explicit begin/commit.
@@ -369,6 +370,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     return HA_ERR_GENERIC;
   }
 
+  guard.commit();
   m_share = new RapidShare(table_arg);
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
@@ -856,11 +858,11 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
     auto is_partitioned{false};
     dd::cache::Dictionary_client *dc = current_thd->dd_client();
     const dd::Table *table_obj = nullptr;
-    if (!dc->acquire(db, table_name, &table_obj) && table_obj)
+    if (dc && !dc->acquire(db, table_name, &table_obj) && table_obj)
       is_partitioned = (table_obj->partition_type() != dd::Table::PT_NONE);
 
-    auto &self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
-    self_load_inst->add_table(db, table_name, create_info->secondary_engine.str, is_partitioned);
+    auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+    if (self_load_inst) self_load_inst->add_table(db, table_name, create_info->secondary_engine.str, is_partitioned);
   }
 }
 
@@ -1037,9 +1039,7 @@ void NotifyAfterDelete(THD *thd, void *args) {
 void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
   if (executed_in == SelectExecutedIn::kPrimaryEngine) return;
 
-  if (!thd || !thd->lex) {
-    return;
-  }
+  if (!thd || !thd->lex) return;
 
   double query_cost = 0.0f;
   if (thd->lex->query_block && thd->lex->query_block->join && thd->lex->query_block->join->best_read) {
@@ -1048,12 +1048,11 @@ void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
   }
 
   double cost_threshold = thd->variables.secondary_engine_cost_threshold;
-  if (query_cost <= cost_threshold) {  // update only if query coast is higher than threshold.
+  if (query_cost <= cost_threshold)  // update only if query coast is higher than threshold.
     return;
-  }
 
-  auto &self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
-  self_load_inst->update_table_stats(thd, thd->lex->query_tables, executed_in);
+  auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+  if (self_load_inst) self_load_inst->update_table_stats(thd, thd->lex->query_tables, executed_in);
 }
 
 // In this function, Dynamic offload combines mysql plan features
@@ -1373,7 +1372,7 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_parallel_part_load_threshold", (char *)&ShannonBase::rpd_para_parttb_load_threshold, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
     /*the mode to aysnc the changes to rapid*/
-    {"rapid_async_mode", (char *)&ShannonBase::Populate::g_sync_mode, SHOW_INT, SHOW_SCOPE_GLOBAL},
+    {"rapid_async_mode", (char *)&ShannonBase::Populate::g_sync_mode, SHOW_CHAR, SHOW_SCOPE_GLOBAL},
     /*the max column number of used to aysnc reading or parsing log*/
     {"rapid_async_column_threshold", (char *)&ShannonBase::rpd_async_column_threshold, SHOW_INT, SHOW_SCOPE_GLOBAL},
     /*to enable self load or disable*/
@@ -1440,25 +1439,22 @@ This function is registered as a callback with MySQL.
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from check function */
 static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
-  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
+  int new_size = *static_cast<const int *>(save);
+  if (static_cast<uint64>(new_size) == ShannonBase::rpd_mem_sz_max) return;
 
   if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-             "Tables have been loaded, cannot change the rapid params,"
+             "Tables have been loaded, cannot change the rapid IMCS memory params,"
              "must unload all loaded tables");
     return;
   }
 
-  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  ShannonBase::rpd_mem_sz_max = *static_cast<const int *>(save);
-
-  ShannonBase::g_rpd_memory_pool = nullptr;  // reset first, then reallocation the new size.
-  ShannonBase::Utils::MemoryPool::Config config(ShannonBase::rpd_mem_sz_max);
-  ShannonBase::g_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
-  if (!ShannonBase::g_rpd_memory_pool) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "resize the rapid memory size failed");
-    return;
-  }
+  auto pool_size = new_size * ShannonBase::SHANNON_MB;
+  ShannonBase::Utils::MemoryPool::Config new_config(pool_size);
+  ShannonBase::g_rpd_memory_pool->reinitialize(new_config);
+  ShannonBase::rpd_mem_sz_max = new_size;
+  *static_cast<int *>(var_ptr) = new_size;
+  return;
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -1477,13 +1473,8 @@ static int rpd_pop_buff_size_max_validate(THD *,                          /*!< i
     return 1;
   }
 
-  if (value->val_int(value, &input_val)) {
-    return 1;
-  }
-
-  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
-    return 1;
-  }
+  if (value->val_int(value, &input_val)) return 1;
+  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) return 1;
 
   *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -1550,7 +1541,7 @@ static int rpd_para_parttb_load_threshold_validate(THD *,                       
     return 1;
   }
 
-  if (input_val < 1 || (uint)input_val > ShannonBase::SHANNON_PARALLEL_PARTTB_THRESHOLD) {
+  if (input_val < 1 || (uint)input_val > 3 * std::thread::hardware_concurrency()) {
     return 1;
   }
 
@@ -1690,9 +1681,9 @@ static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void
   ShannonBase::rpd_self_load_enabled = *static_cast<const bool *>(save);
   auto instance = ShannonBase::Autopilot::SelfLoadManager::instance();
   if (ShannonBase::rpd_self_load_enabled) {  // to start AutoLoader thread.
-    if (!instance->initialized()) instance->start();
+    if (instance && !instance->initialized()) instance->start();
   } else {
-    instance->shutdown();
+    if (instance && instance->initialized()) instance->shutdown();
   }
 }
 
@@ -1872,8 +1863,7 @@ static int rpd_gc_interval_scn_validate(THD *,                          /*!< in:
                                         struct st_mysql_value *value) { /*!< in: incoming string */
   long long input_val;
   if (value->val_int(value, &input_val)) return 1;
-
-  if (static_cast<size_t>(input_val) < ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN) return 1;
+  if (input_val < 0) return 1;
 
   *static_cast<ulong *>(save) = static_cast<ulong>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -1896,7 +1886,7 @@ static int rpd_gc_interval_time_validate(THD *,                          /*!< in
   long long input_val;
   if (value->val_int(value, &input_val)) return 1;
 
-  if (static_cast<size_t>(input_val) < ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME) return 1;
+  if (input_val < 0) return 1;
 
   *static_cast<int *>(save) = static_cast<int>(input_val);
   return ShannonBase::SHANNON_SUCCESS;
@@ -1915,7 +1905,7 @@ static MYSQL_SYSVAR_ULONG(memory_size_max,
                           ShannonBase::rpd_mem_sz_max,
                           PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
                           "Number of memory size that used for rapid engine, and it must "
-                          "not be oversize half of physical mem size.",
+                          "not be oversize half of physical mem size(MB).",
                           rpd_mem_size_max_validate,
                           rpd_mem_size_max_update,
                           ShannonBase::SHANNON_MAX_MEMRORY_SIZE,
@@ -2129,6 +2119,8 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   ShannonBase::Utils::MemoryPool::Config config(ShannonBase::rpd_mem_sz_max);
   ShannonBase::g_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
+  ShannonBase::g_cost_est_instances =
+      ShannonBase::Optimizer::CostModelServer::Instance(ShannonBase::Optimizer::CostEstimator::Type::RPD_ENG);
 
   handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);
   ShannonBase::shannon_rapid_hton_ptr = shannon_rapid_hton;
@@ -2173,8 +2165,8 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
-  if (ShannonBase::Autopilot::SelfLoadManager::instance())
-    ShannonBase::Autopilot::SelfLoadManager::instance()->shutdown();
+  auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+  if (self_load_inst && self_load_inst->initialized()) self_load_inst->shutdown();
 
   while (ShannonBase::Populate::Populator::active()) {
     ShannonBase::Populate::sys_pop_started.store(false);

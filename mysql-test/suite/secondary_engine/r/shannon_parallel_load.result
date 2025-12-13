@@ -6,7 +6,7 @@ rapid_async_column_threshold	16
 rapid_gc_interval_scn	1000000
 rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
-rapid_memory_size_max	536870912
+rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32
@@ -26,7 +26,7 @@ rapid_async_column_threshold	16
 rapid_gc_interval_scn	1000000
 rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
-rapid_memory_size_max	536870912
+rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10
 rapid_parallel_part_load_threshold	32
@@ -73,6 +73,9 @@ INSERT INTO with_primary_key (name, age, email, country) VALUES
 ('刘芳 Liu Fang', 34, 'liufang@example.com', '韩国/Korea'),
 ('Daniel White', 39, 'daniel.w@example.com', '巴西/Brazil'),
 ('杨洋 Yang Yang', 36, 'yangyang@example.com', '印度/India');
+ANALYZE TABLE with_primary_key;
+Table	Op	Msg_type	Msg_text
+sh_para_load.with_primary_key	analyze	status	OK
 ALTER TABLE with_primary_key SECONDARY_LOAD;
 SELECT * FROM with_primary_key WHERE id > 10;
 id	name	age	email	country
@@ -145,6 +148,9 @@ INSERT INTO without_primary_key (student_id, student_name, class_name, score) VA
 ('S2023018', '吴敏 Wu Min', '三班/Class 3', 89.0),
 ('S2023019', 'Daniel White', '一班/Class 1', 81.5),
 ('S2023020', '孙丽 Sun Li', '二班/Class 2', 96.0);
+ANALYZE TABLE without_primary_key;
+Table	Op	Msg_type	Msg_text
+sh_para_load.without_primary_key	analyze	status	OK
 ALTER TABLE without_primary_key SECONDARY_LOAD;
 SELECT * FROM without_primary_key WHERE student_id = 'S2023009';
 student_id	student_name	class_name	score
@@ -184,6 +190,9 @@ INSERT INTO with_unique_index (product_code, product_name, category, price) VALU
 ('P1018', '钢笔 Fountain Pen', '文具/Stationery', 199.00),
 ('P1019', '笔记本 Notebook', '文具/Stationery', 29.00),
 ('P1020', '水杯 Water Bottle', '日用品/Daily', 59.00);
+ANALYZE TABLE with_unique_index;
+Table	Op	Msg_type	Msg_text
+sh_para_load.with_unique_index	analyze	status	OK
 ALTER TABLE with_unique_index SECONDARY_LOAD;
 SELECT * FROM with_unique_index WHERE product_code = 'P1013';
 product_code	product_name	category	price
@@ -237,6 +246,9 @@ INSERT INTO with_secondary_index (order_id, customer_name, product_name, order_d
 ('ORD20230018', '王十二 Wang Shier', '钢笔 Fountain Pen', '2023-02-01', 199.00, '已发货/Shipped'),
 ('ORD20230019', 'Daniel White', '笔记本 Notebook', '2023-02-02', 29.00, '处理中/Processing'),
 ('ORD20230020', '刘十三 Liu Shisan', '水杯 Water Bottle', '2023-02-03', 59.00, '已完成/Completed');
+ANALYZE TABLE with_secondary_index;
+Table	Op	Msg_type	Msg_text
+sh_para_load.with_secondary_index	analyze	status	OK
 ALTER TABLE with_secondary_index SECONDARY_LOAD;
 SELECT * FROM with_secondary_index WHERE order_id > 'ORD20230011';
 order_id	customer_name	product_name	order_date	amount	status
@@ -266,7 +278,7 @@ rapid_async_column_threshold	16
 rapid_gc_interval_scn	1000000
 rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
-rapid_memory_size_max	536870912
+rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32

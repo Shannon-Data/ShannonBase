@@ -45,6 +45,7 @@ INSERT INTO with_primary_key (name, age, email, country) VALUES
 ('Daniel White', 39, 'daniel.w@example.com', '巴西/Brazil'),
 ('杨洋 Yang Yang', 36, 'yangyang@example.com', '印度/India');
 
+ANALYZE TABLE with_primary_key;
 ALTER TABLE with_primary_key SECONDARY_LOAD;
 SELECT * FROM with_primary_key WHERE id > 10;
 EXPLAIN SELECT * FROM with_primary_key WHERE id = 10;
@@ -87,6 +88,7 @@ INSERT INTO without_primary_key (student_id, student_name, class_name, score) VA
 ('S2023019', 'Daniel White', '一班/Class 1', 81.5),
 ('S2023020', '孙丽 Sun Li', '二班/Class 2', 96.0);
 
+ANALYZE TABLE without_primary_key;
 ALTER TABLE without_primary_key SECONDARY_LOAD;
 
 SELECT * FROM without_primary_key WHERE student_id = 'S2023009';
@@ -126,6 +128,7 @@ INSERT INTO with_unique_index (product_code, product_name, category, price) VALU
 ('P1018', '钢笔 Fountain Pen', '文具/Stationery', 199.00),
 ('P1019', '笔记本 Notebook', '文具/Stationery', 29.00),
 ('P1020', '水杯 Water Bottle', '日用品/Daily', 59.00);
+ANALYZE TABLE with_unique_index;
 
 ALTER TABLE with_unique_index SECONDARY_LOAD;
 
@@ -173,6 +176,7 @@ INSERT INTO with_secondary_index (order_id, customer_name, product_name, order_d
 ('ORD20230018', '王十二 Wang Shier', '钢笔 Fountain Pen', '2023-02-01', 199.00, '已发货/Shipped'),
 ('ORD20230019', 'Daniel White', '笔记本 Notebook', '2023-02-02', 29.00, '处理中/Processing'),
 ('ORD20230020', '刘十三 Liu Shisan', '水杯 Water Bottle', '2023-02-03', 59.00, '已完成/Completed');
+ANALYZE TABLE with_secondary_index;
 
 ALTER TABLE with_secondary_index SECONDARY_LOAD;
 SELECT * FROM with_secondary_index WHERE order_id > 'ORD20230011';
