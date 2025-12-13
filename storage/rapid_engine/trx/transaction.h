@@ -72,9 +72,7 @@ class Transaction : public MemoryObject {
         // Rule 2: Version created after snapshot is not visible
         if (version_scn > scn) return false;
         // Rule 3: Version created by uncommitted transaction is not visible
-        for (auto txn_id : active_txns) {
-          if (txn_id == creator_txn) return false;
-        }
+        if (std::find(active_txns.begin(), active_txns.end(), creator_txn) != active_txns.end()) return false;
         // Rule 4: Committed version before snapshot is visible
         return true;
       }

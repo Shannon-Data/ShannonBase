@@ -142,8 +142,8 @@ struct TableInfo {
 
 class SelfLoadManager {
  public:
-  static SelfLoadManager *&instance() {
-    std::call_once(one, [&] { m_instance = new SelfLoadManager(); });
+  static SelfLoadManager *instance() {
+    std::call_once(one, [] { m_instance = new SelfLoadManager(); });
     return m_instance;
   }
 

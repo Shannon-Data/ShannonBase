@@ -196,7 +196,8 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   ut_a(source);
   auto ret{ShannonBase::SHANNON_SUCCESS};
   TableConfig table_cfg;
-  table_cfg.max_table_mem_size = SHANNON_TABLE_MEMRORY_SIZE;
+  table_cfg.max_table_mem_size = SHANNON_TABLE_MEMRORY_SIZE;  // size of per table.
+  table_cfg.rows_per_imcu = SHANNON_ROWS_IN_CHUNK;            // size of per imcu
   std::unique_ptr<RpdTable> rpd_table = std::make_unique<Table>(source, table_cfg);
 
   // step 1: create index memo of this table, which is built from MySQL Table key info.
@@ -223,7 +224,7 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
 int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
   TableConfig table_cfg;
-  table_cfg.max_table_mem_size = SHANNON_TABLE_MEMRORY_SIZE;
+  table_cfg.max_table_mem_size = 0.1 * SHANNON_SMALL_TABLE_MEMRORY_SIZE;  // Parent Table[placeholder]
   auto rpd_part_table = std::make_unique<PartTable>(source, table_cfg);
 
   if (rpd_part_table->build_partitions(context)) {

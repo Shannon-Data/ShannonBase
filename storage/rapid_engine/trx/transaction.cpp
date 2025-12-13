@@ -70,9 +70,12 @@ Transaction::Transaction(THD *thd) : m_thd(thd) {
 Transaction::~Transaction() {
   release_snapshot();
 
-  if (is_active()) rollback();
+  if (trx_is_started(m_trx_impl)) trx_rollback_for_mysql(m_trx_impl);
 
-  if (m_registered_in_coordinator && is_active()) TransactionCoordinator::instance().unregister_transaction(this);
+  m_registered_in_coordinator = false;
+  m_start_scn = 0;
+  m_commit_scn = 0;
+  m_stmt_active = false;
 
   trx_free_for_mysql(m_trx_impl);
 }
@@ -222,15 +225,14 @@ int Transaction::rollback() {
   if (trx_is_started(m_trx_impl)) {
     if (m_registered_in_coordinator) {
       TransactionCoordinator::instance().rollback_transaction(this);
-      // reset status flags，alllow this transaction obj can be reused.
+
       m_registered_in_coordinator = false;
       m_start_scn = 0;
       m_commit_scn = 0;
     }
     error = trx_rollback_for_mysql(m_trx_impl);
+    m_stmt_active = false;
   }
-
-  m_stmt_active = false;
   return (error != DB_SUCCESS) ? HA_ERR_GENERIC : SHANNON_SUCCESS;
 }
 
@@ -302,33 +304,31 @@ bool TransactionCoordinator::commit_transaction(Transaction *trx) {
 
   Transaction::ID txn_id = trx->get_id();
 
-  std::unique_lock lock(m_txns_mutex);
+  TransactionInfo info;
+  {
+    std::unique_lock lock(m_txns_mutex);
 
-  auto it = m_active_txns.find(txn_id);
-  if (it == m_active_txns.end()) return false;
+    auto it = m_active_txns.find(txn_id);
+    if (it == m_active_txns.end()) return false;
 
-  TransactionInfo &info = it->second;
+    uint64_t commit_scn = Transaction::VersionManager::instance().allocate_scn();
 
-  // Allocate commit SCN from VersionManager
-  uint64_t commit_scn = Transaction::VersionManager::instance().allocate_scn();
+    it->second.commit_scn = commit_scn;
+    it->second.commit_time = std::chrono::system_clock::now();
+    it->second.status = TransactionInfo::COMMITTED;
+    trx->m_commit_scn = commit_scn;
 
-  info.commit_scn = commit_scn;
-  info.commit_time = std::chrono::system_clock::now();
-  info.status = TransactionInfo::COMMITTED;
-  trx->m_commit_scn = commit_scn;
+    info = std::move(it->second);
 
-  // Notify IMCUs
-  for (auto *imcu : info.modified_imcus) {
-    imcu->get_transaction_journal()->commit_transaction(txn_id, commit_scn);
+    m_active_txns.erase(it);
+    update_min_active_scn();
   }
 
-  m_active_txns.erase(it);
-  update_min_active_scn();
-
-  // Invalidate visibility cache for modified IMCUs
   for (auto *imcu : info.modified_imcus) {
-    invalidate_visibility_cache(imcu);
+    imcu->get_transaction_journal()->commit_transaction(txn_id, info.commit_scn);
   }
+
+  for (auto *imcu : info.modified_imcus) invalidate_visibility_cache(imcu);
 
   m_total_committed.fetch_add(1, std::memory_order_relaxed);
   return true;
@@ -338,30 +338,27 @@ bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
   assert(trx != nullptr);
   Transaction::ID txn_id = trx->get_id();
 
-  std::unique_lock lock(m_txns_mutex);
+  std::vector<Imcs::Imcu *> modified_imcus;
+  {
+    std::unique_lock lock(m_txns_mutex);
+    auto it = m_active_txns.find(txn_id);
+    if (it == m_active_txns.end()) return false;
 
-  auto it = m_active_txns.find(txn_id);
-  if (it == m_active_txns.end()) return false;
-
-  TransactionInfo &info = it->second;
-  info.status = TransactionInfo::ABORTED;
-
-  // Notify all IMCUs
-  for (auto *imcu : info.modified_imcus) {
-    if (imcu->get_transaction_journal()) imcu->get_transaction_journal()->abort_transaction(txn_id);
+    TransactionInfo &info = it->second;
+    info.status = TransactionInfo::ABORTED;
+    modified_imcus = info.modified_imcus;
+    m_active_txns.erase(it);
+    update_min_active_scn();
+    m_total_aborted.fetch_add(1, std::memory_order_relaxed);
   }
 
-  //  removes from all active trxn.
-  m_active_txns.erase(it);
-  update_min_active_scn();
-
-  // Invalidate visibility cache
-  for (auto *imcu : info.modified_imcus) {
-    invalidate_visibility_cache(imcu);
+  for (auto *imcu : modified_imcus) {
+    if (auto *journal = imcu->get_transaction_journal()) {
+      journal->abort_transaction(txn_id);
+    }
   }
 
-  // update statistics
-  m_total_aborted.fetch_add(1, std::memory_order_relaxed);
+  for (auto *imcu : modified_imcus) invalidate_visibility_cache(imcu);
   return true;
 }
 

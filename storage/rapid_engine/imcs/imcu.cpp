@@ -43,7 +43,7 @@ namespace ShannonBase {
 namespace Imcs {
 Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_t capacity,
            std::shared_ptr<Utils::MemoryPool> mem_pool)
-    : m_owner_table(owner), m_memory_pool(mem_pool) {
+    : m_memory_pool(mem_pool), m_owner_table(owner) {
   m_header.imcu_id = owner->meta().total_imcus.fetch_add(1);
   m_header.start_row = start_row;
   m_header.end_row = start_row + capacity;
@@ -54,6 +54,10 @@ Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_
 
   // to indicate which row is deleted or not. row-level shared.
   m_header.del_mask = std::make_unique<bit_array_t>(m_header.capacity);
+
+  m_column_units.reserve(owner->meta().fields.size());
+  m_cu_array.reserve(owner->meta().fields.size());
+  m_header.null_masks.reserve(owner->meta().fields.size());
 
   for (auto &fld_meta : owner->meta().fields) {
     if (fld_meta.is_secondary_field) {
@@ -78,8 +82,6 @@ Imcu::Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_
   // create row dir index associated with this imcu.
   m_header.row_directory = std::make_unique<RowDirectory>(m_header.capacity, table_meta.num_columns);
 }
-
-Imcu::~Imcu() {}
 
 row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &row_data) {
   // 1. allocate local row_id.

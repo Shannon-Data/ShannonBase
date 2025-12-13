@@ -363,11 +363,9 @@ class Table : public RpdTable {
     // Prepare new IMCU outside lock
     std::shared_ptr<Imcu> candidate = std::make_shared<Imcu>(this, m_metadata, 0 /* will set start_row under lock */,
                                                              m_metadata.rows_per_imcu, m_memory_pool);
-
     // Slow path: take exclusive lock to publish
     {
       std::unique_lock lock(m_table_mutex);
-      // recheck
       if (!m_imcus.empty()) {
         auto cur = m_imcus.back();
         if (cur && !cur->is_full()) return cur.get();
