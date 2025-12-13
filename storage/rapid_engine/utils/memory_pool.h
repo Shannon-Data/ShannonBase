@@ -446,7 +446,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   std::atomic<bool> m_shutdown;  ///< Shutdown flag
 
   // Internal Methods
-  void validate_config();
+  bool validate_config();
   void initialize_pools(size_t total_size);
   void initialize_as_sub_pool(void *parent_memory, size_t size);
   void *allocate_from_pool(int pool_idx, size_t aligned_size, size_t actual_size, const std::string &tenant_id);

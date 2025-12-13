@@ -285,7 +285,7 @@ class Imcu : public MemoryObject {
   Imcu(RpdTable *owner, TableMetadata &table_meta, row_id_t start_row, size_t capacity,
        std::shared_ptr<Utils::MemoryPool> mem_pool);
   Imcu() = default;
-  virtual ~Imcu();
+  virtual ~Imcu() = default;
 
   inline RpdTable *owner() { return m_owner_table; }
 
@@ -549,6 +549,9 @@ class Imcu : public MemoryObject {
   inline void increment_version() { m_version.fetch_add(1, std::memory_order_release); }
 
  private:
+  // Memory Management
+  std::shared_ptr<Utils::MemoryPool> m_memory_pool;
+
   Imcu_header m_header;
 
   // key: column_id, value: CU
@@ -568,9 +571,6 @@ class Imcu : public MemoryObject {
 
   // Back Reference
   RpdTable *m_owner_table;
-
-  // Memory Management
-  std::shared_ptr<Utils::MemoryPool> m_memory_pool;
 };
 }  // namespace Imcs
 }  // namespace ShannonBase
