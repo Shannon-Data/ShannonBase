@@ -233,13 +233,6 @@ class LogParser {
   inline bool check_key_field(std::unordered_map<std::string, ShannonBase::key_meta_t>& keys,
                               const char* field_name);
 
-  // build the keys from field values.
-  // @param field_values[in] , the map of field values. <field_name, field data>
-  // @param key_values[in/out], the map of key data, <key_name, key data>.
-  // @return 0 success, otherwise failed.
-  int build_key(const Rapid_load_context *context, std::unordered_map<std::string, mysql_field_t> &field_values,
-                 std::map<std::string, key_info_t>& keys);
-
   byte *advance_parseMetadataLog(table_id_t id, uint64_t version, byte *ptr,
                                  byte *end);
 
@@ -259,6 +252,15 @@ class LogParser {
                                                    const page_id_t &page_id,
                                                    ulint parsed_bytes,
                                                    bool parse_only);
+
+  bool rec_to_mysql_format(Rapid_load_context *context,
+                                  mem_heap_t *heap,
+                                  const rec_t *rec,
+                                  const dict_index_t *index,
+                                  const ulint *offsets,
+                                  uchar **mysql_rec_out,
+                                  size_t *rec_len_out);
+
   /** parse a rec and get all feidls data in mysql format and save these values
    * into a vector. all field values store in feild_values' and store key info
    * into context. [field_name, field_value] and [key_name, key_value]*/

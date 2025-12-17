@@ -121,17 +121,13 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
 }
 
 Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(mysql_table, config) {
-  // [TODO] intial global compoent.
-  // m_txn_coordinator = std::make_unique<Transaction_Coordinator>();
-  // m_version_manager = std::make_unique<Global_Version_Manager>();
-  // m_bg_workers = std::make_unique<Background_Worker_Pool>(config.background_worker_threads);
-
   // create intial IMCU
   create_initial_imcu();
 }
 
 Table::~Table() {
   {
+    std::scoped_lock lk(m_imcu_mtex);
     m_imcus.clear();
     m_imcu_index.clear();
   }
