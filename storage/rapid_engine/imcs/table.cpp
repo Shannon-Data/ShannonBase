@@ -194,8 +194,12 @@ void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<Key
     auto fld_ptr = rowdata + col_offsets[field->field_index()];
     field->set_field_ptr(fld_ptr);
 
+    bool is_null{false};
     if (key_part.null_bit) {
-      *to_key++ = (field->is_null() ? 1 : 0);
+      auto null_byte = null_byte_offsets[key_field_ind];
+      auto null_mask = null_bitmasks[key_field_ind];
+      is_null = (rowdata[null_byte] & null_mask) != 0;
+      *to_key++ = (is_null ? 1 : 0);
       remain_len--;
     }
 
@@ -203,7 +207,25 @@ void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<Key
     if (key_part.key_part_flag & HA_BLOB_PART || key_part.key_part_flag & HA_VAR_LENGTH_PART) {
       remain_len -= HA_KEY_BLOB_LENGTH;
       length = std::min<uint>(remain_len, key_part.length);
-      field->get_key_image(to_key, length, Field::itRAW);
+      if (field->type() == MYSQL_TYPE_VARCHAR) {  // this migirant from field_varstring::get_key_image.
+        uint32 data_length = (field->get_length_bytes() == 1) ? (uint32)fld_ptr[0] : uint32(uint2korr(fld_ptr));
+        uint f_length = is_null ? 0 : data_length;
+        uint local_char_length = length / cs->mbmaxlen;
+        uchar *pos = fld_ptr + field->get_length_bytes();
+        local_char_length = my_charpos(cs, pos, pos + f_length, local_char_length);
+        f_length = std::min(f_length, local_char_length);
+        /* Key is always stored with 2 bytes */
+        int2store(to_key, f_length);
+        memcpy(to_key + HA_KEY_BLOB_LENGTH, pos, f_length);
+        if (f_length < length) {
+          /*
+            Must clear this as we do a memcmp in opt_range.cc to detect
+            identical keys
+          */
+          memset(to_key + HA_KEY_BLOB_LENGTH + f_length, 0, (length - f_length));
+        }
+      } else if (field->type() == MYSQL_TYPE_BLOB)
+        field->get_key_image(to_key, length, Field::itRAW);
       to_key += HA_KEY_BLOB_LENGTH;
     } else {
       switch (field->type()) {
