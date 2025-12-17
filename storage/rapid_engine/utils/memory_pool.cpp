@@ -25,14 +25,15 @@
 */
 #include "storage/rapid_engine/utils/memory_pool.h"
 
-#include "sql/log.h"
-
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+
+#include "mysqld_error.h"
+#include "sql/log.h"
 
 namespace ShannonBase {
 namespace Utils {
@@ -66,9 +67,6 @@ MemoryPool::SubPool::SubPool(size_t size, size_t alignment)
     : memory_base(nullptr), total_size(size), current_offset(0), is_from_parent(false), parent_ref() {
   // Allocate new memory for root pool
   memory_base = aligned_alloc_portable(alignment, size);
-  if (!memory_base) {
-    throw std::bad_alloc();
-  }
 }
 
 MemoryPool::SubPool::SubPool(void *base, size_t size)
@@ -92,14 +90,8 @@ MemoryPool::MemoryPool(const Config &config) : m_config(config), m_shutdown(fals
     initialize_pools(m_config.initial_size);
 
     // Start background monitoring thread
-    if (m_config.allow_expansion || m_config.auto_defragmentation) {
+    if (m_config.allow_expansion || m_config.auto_defragmentation)
       m_monitor_thread = std::thread(&MemoryPool::monitor_loop, this);
-    }
-
-    log(LogLevel::INFO, "MemoryPool initialized");
-    log(LogLevel::INFO, "  Total: " + format_size(m_config.initial_size));
-    log(LogLevel::INFO, "  Small Pool: " + format_size(m_subpools[0]->total_size));
-    log(LogLevel::INFO, "  Large Pool: " + format_size(m_subpools[1]->total_size));
   }
   // Sub-pool initialization is deferred to initialize_as_sub_pool()
 }
@@ -128,12 +120,8 @@ MemoryPool::~MemoryPool() noexcept {
       }
 
       // Step 2: using parent deallocate
-      try {
-        parent->deallocate(m_subpool_base, subpool_size);
-        log(LogLevel::INFO, "Successfully returned sub-pool memory block: " + format_size(subpool_size));
-      } catch (...) {
-        log(LogLevel::ERROR, "Failed to return sub-pool memory via deallocate");
-      }
+      auto res = parent->deallocate(m_subpool_base, subpool_size);
+      if (res != Result::OK) log(LogLevel::ERROR, "Failed to return sub-pool memory via deallocate");
 
       // Step 3: remove itself from parent child list
       {
@@ -154,10 +142,10 @@ MemoryPool::~MemoryPool() noexcept {
   cleanup();
 }
 
-void MemoryPool::reinitialize(const Config &new_config) {
+MemoryPool::Result MemoryPool::reinitialize(const Config &new_config) {
   if (m_config.is_sub_pool) {
-    log(LogLevel::ERROR, "reinitialize() not allowed on sub-pool");
-    return;
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "reinitialize() not allowed on sub-pool");
+    return MemoryPool::Result::FAILED_SUBPOOL_RECURSIVE;
   }
 
   // Step 1:reset status.
@@ -186,13 +174,9 @@ void MemoryPool::reinitialize(const Config &new_config) {
     m_monitor_thread = std::thread(&MemoryPool::monitor_loop, this);
   }
 
-  log(LogLevel::INFO, "MemoryPool reinitialized");
-  log(LogLevel::INFO, "  Total: " + format_size(m_config.initial_size));
-  log(LogLevel::INFO, "  Small Pool: " + format_size(m_subpools[0]->total_size));
-  log(LogLevel::INFO, "  Large Pool: " + format_size(m_subpools[1]->total_size));
-
   // Step 5: update statistics
   m_stats.total_capacity.store(m_config.initial_size, std::memory_order_relaxed);
+  return MemoryPool::Result::OK;
 }
 
 void *MemoryPool::allocate(size_t size, SubPoolType pool_type, const std::string &tenant_id) {
@@ -229,100 +213,64 @@ void *MemoryPool::allocate_auto(size_t size, const std::string &tenant_id) {
   return allocate(size, type, tenant_id);
 }
 
-void MemoryPool::deallocate(void *ptr, size_t size) noexcept {
-  if (!ptr) return;
+MemoryPool::Result MemoryPool::deallocate(void *ptr, size_t size) noexcept {
+  MemoryPool::Result res{MemoryPool::Result::OK};
+  if (!ptr) return res;
 
-  try {
-    std::scoped_lock lock(m_alloc_mutex);
-    auto it = m_allocations.find(ptr);
-    if (it == m_allocations.end()) {
-      log(LogLevel::WARNING, "deallocate: pointer " + std::to_string((uintptr_t)ptr) +
-                                 " not found in m_allocations, size=" + format_size(size));
-      return;
-    }
+  std::scoped_lock lock(m_alloc_mutex);
+  auto it = m_allocations.find(ptr);
+  if (it == m_allocations.end()) return res;
 
-    const AllocationInfo info = it->second;
-    auto &subpool = m_subpools[info.pool_index];
-    {
-      std::scoped_lock pool_lock(subpool->mutex);
-      FreeBlock block{info.offset, info.aligned_size};
-      subpool->free_blocks.push_back(block);
-      merge_adjacent_free_blocks(subpool.get());
-    }
-
-    if (!info.tenant_id.empty()) update_tenant_usage(info.tenant_id, -(ssize_t)size);
-
-    m_stats.used_bytes.fetch_sub(size, std::memory_order_relaxed);
-    m_stats.deallocation_count.fetch_add(1, std::memory_order_relaxed);
-    m_allocations.erase(it);
-
-    log(LogLevel::DEBUG,
-        "deallocate: freed " + format_size(info.aligned_size) + " at offset " + std::to_string(info.offset));
-
-  } catch (const std::exception &e) {
-    log(LogLevel::ERROR, "deallocate error: " + std::string(e.what()));
+  const AllocationInfo info = it->second;
+  auto &subpool = m_subpools[info.pool_index];
+  {
+    std::scoped_lock pool_lock(subpool->mutex);
+    FreeBlock block{info.offset, info.aligned_size};
+    subpool->free_blocks.push_back(block);
+    merge_adjacent_free_blocks(subpool.get());
   }
+
+  if (!info.tenant_id.empty()) update_tenant_usage(info.tenant_id, -(ssize_t)size);
+
+  m_stats.used_bytes.fetch_sub(size, std::memory_order_relaxed);
+  m_stats.deallocation_count.fetch_add(1, std::memory_order_relaxed);
+  m_allocations.erase(it);
+
+  return res;
 }
 
 bool MemoryPool::expand(size_t additional_size) {
-  if (!m_config.allow_expansion) {
-    log(LogLevel::WARNING, "Expansion not allowed");
-    return false;
+  if (!m_config.allow_expansion || m_config.is_sub_pool) return false;
+
+  if (additional_size < m_config.min_expansion_size) return false;
+
+  size_t small_pool_addition = static_cast<size_t>(additional_size * m_config.small_pool_ratio);
+  size_t large_pool_addition = additional_size - small_pool_addition;
+
+  bool success = true;
+  if (small_pool_addition > 0) success &= expand_subpool(0, small_pool_addition);
+
+  if (large_pool_addition > 0) success &= expand_subpool(1, large_pool_addition);
+
+  if (success) {
+    m_stats.expansion_count.fetch_add(1, std::memory_order_relaxed);
+    log(LogLevel::INFO, "Expanded by " + format_size(additional_size));
   }
-
-  if (m_config.is_sub_pool) {
-    log(LogLevel::WARNING, "Sub-pools cannot be expanded");
-    return false;
-  }
-
-  if (additional_size < m_config.min_expansion_size) {
-    log(LogLevel::WARNING, "Expansion size too small, minimum: " + format_size(m_config.min_expansion_size));
-    return false;
-  }
-
-  try {
-    size_t small_pool_addition = static_cast<size_t>(additional_size * m_config.small_pool_ratio);
-    size_t large_pool_addition = additional_size - small_pool_addition;
-
-    bool success = true;
-    if (small_pool_addition > 0) success &= expand_subpool(0, small_pool_addition);
-
-    if (large_pool_addition > 0) success &= expand_subpool(1, large_pool_addition);
-
-    if (success) {
-      m_stats.expansion_count.fetch_add(1, std::memory_order_relaxed);
-      log(LogLevel::INFO, "Expanded by " + format_size(additional_size));
-    }
-
-    return success;
-  } catch (const std::exception &e) {
-    log(LogLevel::ERROR, "Expansion failed: " + std::string(e.what()));
-    return false;
-  }
+  return success;
 }
 
 bool MemoryPool::defragment() {
-  if (!m_config.auto_defragmentation) {
-    log(LogLevel::WARNING, "Defragmentation not enabled");
-    return false;
+  if (!m_config.auto_defragmentation) return false;
+
+  bool success = true;
+  for (size_t i = 0; i < m_subpools.size(); ++i) success &= defragment_subpool(i);
+
+  if (success) {
+    m_stats.defragmentation_count.fetch_add(1, std::memory_order_relaxed);
+    log(LogLevel::INFO, "Defragmentation completed");
   }
 
-  try {
-    log(LogLevel::INFO, "Starting defragmentation...");
-
-    bool success = true;
-    for (size_t i = 0; i < m_subpools.size(); ++i) success &= defragment_subpool(i);
-
-    if (success) {
-      m_stats.defragmentation_count.fetch_add(1, std::memory_order_relaxed);
-      log(LogLevel::INFO, "Defragmentation completed");
-    }
-
-    return success;
-  } catch (const std::exception &e) {
-    log(LogLevel::ERROR, "Defragmentation failed: " + std::string(e.what()));
-    return false;
-  }
+  return success;
 }
 
 void MemoryPool::reset() noexcept {
@@ -334,53 +282,44 @@ void MemoryPool::reset() noexcept {
     if (!m_child_pools.empty()) return;
   }
 
-  try {
-    // reset all subpool.
-    for (auto &subpool : m_subpools) {
-      std::scoped_lock lock(subpool->mutex);
-      subpool->current_offset = 0;
-      subpool->free_blocks.clear();
-    }
-
-    // cleanup allocated track
-    {
-      std::scoped_lock lock(m_alloc_mutex);
-      m_allocations.clear();
-    }
-
-    // reset the statistics
-    {
-      std::scoped_lock lock(m_tenant_mutex);
-      for (auto &[_, tenant] : m_tenants) {
-        tenant->current_usage.store(0, std::memory_order_relaxed);
-        tenant->peak_usage.store(0, std::memory_order_relaxed);
-        tenant->allocation_count.store(0, std::memory_order_relaxed);
-      }
-    }
-
-    // reset pool statistics.
-    m_stats.allocated_bytes.store(0, std::memory_order_relaxed);
-    m_stats.used_bytes.store(0, std::memory_order_relaxed);
-    m_stats.peak_usage.store(0, std::memory_order_relaxed);
-    m_stats.allocation_count.store(0, std::memory_order_relaxed);
-    m_stats.deallocation_count.store(0, std::memory_order_relaxed);
-
-    log(LogLevel::INFO, "Reset completed");
-  } catch (const std::exception &e) {
-    log(LogLevel::ERROR, "Reset failed: " + std::string(e.what()));
+  // reset all subpool.
+  for (auto &subpool : m_subpools) {
+    std::scoped_lock lock(subpool->mutex);
+    subpool->current_offset = 0;
+    subpool->free_blocks.clear();
   }
+
+  // cleanup allocated track
+  {
+    std::scoped_lock lock(m_alloc_mutex);
+    m_allocations.clear();
+  }
+
+  // reset the statistics
+  {
+    std::scoped_lock lock(m_tenant_mutex);
+    for (auto &[_, tenant] : m_tenants) {
+      tenant->current_usage.store(0, std::memory_order_relaxed);
+      tenant->peak_usage.store(0, std::memory_order_relaxed);
+      tenant->allocation_count.store(0, std::memory_order_relaxed);
+    }
+  }
+
+  // reset pool statistics.
+  m_stats.allocated_bytes.store(0, std::memory_order_relaxed);
+  m_stats.used_bytes.store(0, std::memory_order_relaxed);
+  m_stats.peak_usage.store(0, std::memory_order_relaxed);
+  m_stats.allocation_count.store(0, std::memory_order_relaxed);
+  m_stats.deallocation_count.store(0, std::memory_order_relaxed);
 }
 
 void MemoryPool::set_tenant_quota(const std::string &tenant_id, size_t quota) {
   std::scoped_lock lock(m_tenant_mutex);
-
   auto it = m_tenants.find(tenant_id);
   if (it != m_tenants.end())
     it->second->quota = quota;
   else
     m_tenants[tenant_id] = std::make_unique<TenantConfig>(tenant_id, quota);
-
-  log(LogLevel::INFO, "Tenant '" + tenant_id + "' quota set to " + format_size(quota));
 }
 
 size_t MemoryPool::get_tenant_usage(const std::string &tenant_id) const {
@@ -392,7 +331,8 @@ size_t MemoryPool::get_tenant_usage(const std::string &tenant_id) const {
 
 std::shared_ptr<MemoryPool> MemoryPool::create_sub_pool(size_t sub_pool_size, const std::string &tenant_name) {
   if (m_config.is_sub_pool) {
-    throw std::runtime_error("Cannot create sub-pool from another sub-pool");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Cannot create sub-pool from another sub-pool");
+    return nullptr;
   }
 
   Config sub_config = m_config;
@@ -422,7 +362,8 @@ std::shared_ptr<MemoryPool> MemoryPool::create_sub_pool(size_t sub_pool_size, co
 std::shared_ptr<MemoryPool> MemoryPool::create_from_parent(const std::shared_ptr<MemoryPool> &parent_pool,
                                                            const std::string &tenant_name, size_t sub_pool_size) {
   if (!parent_pool) {
-    throw std::invalid_argument("Parent pool cannot be null");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Parent pool cannot be null");
+    return nullptr;
   }
 
   return parent_pool->create_sub_pool(sub_pool_size, tenant_name);
@@ -578,14 +519,14 @@ MemoryPool::PoolStats::Snapshot MemoryPool::stats() const noexcept { return m_st
 void MemoryPool::set_log_level(LogLevel level) { m_config.log_level = level; }
 
 bool MemoryPool::validate_config() {
-  if (m_config.initial_size < 10 * 1024 * 1024) return false;
-  // throw std::invalid_argument("Initial size must be at least 10MB");
-
-  if (m_config.small_pool_ratio < 0.0 || m_config.small_pool_ratio > 0.5) return false;
-  // throw std::invalid_argument("Small pool ratio must be between 0.0 and 0.5");
-
-  if (m_config.expansion_trigger_threshold <= 0.0 || m_config.expansion_trigger_threshold > 1.0) return false;
-  // throw std::invalid_argument("Expansion trigger must be between 0.0 and 1.0");
+  if (m_config.small_pool_ratio < 0.0 || m_config.small_pool_ratio > 0.5) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Small pool ratio must be between 0.0 and 0.5");
+    return false;
+  }
+  if (m_config.expansion_trigger_threshold <= 0.0 || m_config.expansion_trigger_threshold > 1.0) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Expansion trigger must be between 0.0 and 1.0");
+    return false;
+  }
   return true;
 }
 
@@ -616,33 +557,18 @@ void MemoryPool::initialize_as_sub_pool(void *parent_memory, size_t size) {
 void *MemoryPool::allocate_from_pool(int pool_idx, size_t aligned_size, size_t actual_size,
                                      const std::string &tenant_id) {
   if (unlikely(aligned_size == 0)) aligned_size = m_config.alignment;
-  if (aligned_size == 0) {
-    log(LogLevel::ERROR, "Zero alignment size after config adjustment");
-    return nullptr;
-  }
-  if (pool_idx < 0 || pool_idx >= static_cast<int>(m_subpools.size())) {
-    log(LogLevel::ERROR,
-        "Pool index out of bounds: " + std::to_string(pool_idx) + ", max=" + std::to_string(m_subpools.size()));
-    return nullptr;
-  }
+  if (aligned_size == 0) return nullptr;
+
+  if (pool_idx < 0 || pool_idx >= static_cast<int>(m_subpools.size())) return nullptr;
 
   auto &subpool = m_subpools[pool_idx];
-  if (!subpool) {
-    log(LogLevel::ERROR, "Subpool is null at index: " + std::to_string(pool_idx));
-    return nullptr;
-  }
+  if (!subpool) return nullptr;
 
   std::scoped_lock lock(subpool->mutex);
-  if (!subpool->memory_base) {
-    log(LogLevel::ERROR, "Memory base is null for subpool: " + std::to_string(pool_idx));
-    return nullptr;
-  }
+  if (!subpool->memory_base) return nullptr;
 
-  if (subpool->current_offset > subpool->total_size) {
-    log(LogLevel::ERROR, "Current offset exceeds total size: offset=" + std::to_string(subpool->current_offset) +
-                             ", total=" + std::to_string(subpool->total_size));
-    return nullptr;
-  }
+  if (subpool->current_offset > subpool->total_size) return nullptr;
+
   void *ptr = try_allocate_from_free_blocks(subpool.get(), aligned_size);
   if (ptr) {
 #ifndef NDEBUG
@@ -841,18 +767,14 @@ void MemoryPool::update_peak_usage() noexcept {
 
 void MemoryPool::monitor_loop() {
   while (!m_shutdown.load(std::memory_order_acquire)) {
-    try {
-      std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    cleanup_expired_children();
 
-      cleanup_expired_children();
-
-      auto s = m_stats.snapshot();
-      if (m_config.allow_expansion && s.usage_percentage >= 85.0)
-        expand(std::max(m_config.initial_size / 4, m_config.min_expansion_size));
-      if (m_config.auto_defragmentation && s.fragmentation_ratio >= 0.3) {
-        defragment();
-      }
-    } catch (...) {
+    auto s = m_stats.snapshot();
+    if (m_config.allow_expansion && s.usage_percentage >= 85.0)
+      expand(std::max(m_config.initial_size / 4, m_config.min_expansion_size));
+    if (m_config.auto_defragmentation && s.fragmentation_ratio >= 0.3) {
+      defragment();
     }
   }
 }
@@ -874,10 +796,6 @@ void MemoryPool::cleanup_expired_children() noexcept {
   if (m_child_pools.size() < old_size) {
     log(LogLevel::DEBUG, "Cleaned " + std::to_string(old_size - m_child_pools.size()) + " expired sub-pools");
   }
-}
-
-void MemoryPool::log(LogLevel level, const std::string &message) const {
-  DBUG_PRINT("memory_pool", ("[%d] %s", static_cast<int>(level), message.c_str()));
 }
 
 void *MemoryPool::aligned_alloc_portable(size_t alignment, size_t size) noexcept {
@@ -914,6 +832,10 @@ std::string MemoryPool::format_size(size_t bytes) {
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(2) << size << " " << units[unit];
   return oss.str();
+}
+
+void MemoryPool::log(LogLevel level, const std::string &message) const {
+  DBUG_PRINT("memory_pool", ("[%d] %s", static_cast<int>(level), message.c_str()));
 }
 }  // namespace Utils
 }  // namespace ShannonBase

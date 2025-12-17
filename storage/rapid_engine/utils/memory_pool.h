@@ -129,6 +129,12 @@ namespace Utils {
 class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
  public:
   /**
+   * @enum Oper Result Typle
+   * @brief Type of result for allocation
+   */
+  enum class Result { OK = 0, BAD_ALLOCATION, FAILED_SUBPOOL_RECURSIVE, UNKNOWN_RESULT };
+
+  /**
    * @enum SubPoolType
    * @brief Type of sub-pool for allocation targeting
    */
@@ -240,7 +246,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
   MemoryPool(const MemoryPool &) = delete;
   MemoryPool &operator=(const MemoryPool &) = delete;
 
-  void reinitialize(const Config &new_config);
+  Result reinitialize(const Config &new_config);
 
   // Memory Allocation/Deallocation Interface
   /**
@@ -269,7 +275,7 @@ class MemoryPool : public std::enable_shared_from_this<MemoryPool> {
    * @param size Original allocation size
    * @note This function never throws
    */
-  void deallocate(void *ptr, size_t size) noexcept;
+  Result deallocate(void *ptr, size_t size) noexcept;
 
   // Pool Management Interface
   /**

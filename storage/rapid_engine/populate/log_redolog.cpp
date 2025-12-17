@@ -137,104 +137,6 @@ bool LogParser::check_key_field(std::unordered_map<std::string, ShannonBase::key
   return false;
 }
 
-int LogParser::build_key(const Rapid_load_context *context,
-                         std::unordered_map<std::string, mysql_field_t> &field_values,
-                         std::map<std::string, key_info_t> &keys) {
-#if 0
-  std::string sch_tb = context->m_schema_name + ":" + context->m_table_name;
-  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table(sch_tb);
-  auto &matched_keys = rpd_tb->get_source_keys();
-  ut_a(matched_keys.size() > 0);
-
-  for (const auto &[key_name, key_meta] : matched_keys) {
-    const size_t key_len = key_meta.first;
-    const auto &key_fields = key_meta.second;
-
-    std::unique_ptr<uchar[]> key_buff(new uchar[key_len]);
-    memset(key_buff.get(), 0x0, key_meta.first);
-
-    uint key_offset{0u};
-    for (const std::string &key_field : key_fields) {
-      auto mysql_key = field_values.find(key_field);
-      ut_a(mysql_key != field_values.end());
-      auto &mysql_field = mysql_key->second;
-
-      if (mysql_field.has_nullbit) {
-        if (key_offset >= key_len) {
-          return HA_ERR_GENERIC;
-        }
-        *key_buff.get() = (mysql_field.is_null) ? 1 : 0;
-        key_offset++;
-      }
-
-      auto cs = rpd_tb->get_field(key_field) ? rpd_tb->get_field(key_field)->header()->m_charset : nullptr;
-
-      // blob or var string type.
-      switch (mysql_field.mtype) {
-        case DATA_BLOB:
-        case DATA_VARCHAR:
-        case DATA_VARMYSQL: {
-          if (key_offset + HA_KEY_BLOB_LENGTH + mysql_field.mlength > key_len) {
-            return HA_ERR_GENERIC;
-          }
-          int2store(key_buff.get() + key_offset, mysql_field.plength);
-          key_offset += HA_KEY_BLOB_LENGTH;
-          std::memcpy(key_buff.get() + key_offset, mysql_field.data.get(), mysql_field.mlength);
-          key_offset += mysql_field.mlength;
-        } break;
-        case DATA_DOUBLE:
-        case DATA_FLOAT:
-        case DATA_DECIMAL:
-        case DATA_FIXBINARY: {
-          if (key_offset + mysql_field.mlength > key_len) {
-            return HA_ERR_GENERIC;
-          }
-          ut_a(mysql_field.mlength == mysql_field.plength);
-          auto field_ptr = rpd_tb->get_field(key_field)->header()->m_source_fld;
-          uchar encoding[8] = {0};
-          auto val = Utils::Util::get_field_numeric<double>(field_ptr, mysql_field.data.get(), nullptr);
-          ShannonBase::Imcs::Index::Encoder<double>::EncodeData(val, encoding);
-          std::memcpy(key_buff.get() + key_offset, encoding, mysql_field.mlength);
-          key_offset += mysql_field.mlength;
-        } break;
-        case DATA_INT: {
-          if (key_offset + mysql_field.mlength > key_len) {
-            return HA_ERR_GENERIC;
-          }
-          ut_a(mysql_field.mlength == mysql_field.plength);
-          auto field_ptr = rpd_tb->get_field(key_field)->header()->m_source_fld;
-          switch (field_ptr->type()) {
-            case MYSQL_TYPE_LONG: {
-              uchar encoding[4] = {0};
-              auto val = Utils::Util::get_field_numeric<int32_t>(field_ptr, mysql_field.data.get(), nullptr);
-              ShannonBase::Imcs::Index::Encoder<int32_t>::EncodeData(val, encoding);
-              std::memcpy(key_buff.get() + key_offset, encoding, mysql_field.mlength);
-            } break;
-            default: {
-            } break;
-          }
-          key_offset += mysql_field.mlength;
-        } break;
-        default: {
-          // other types.
-          if (key_offset + mysql_field.mlength > key_len) {
-            return HA_ERR_GENERIC;
-          }
-          std::memcpy(key_buff.get() + key_offset, mysql_field.data.get(), mysql_field.mlength);
-          key_offset += mysql_field.mlength;
-          if (key_offset < key_len && cs)
-            cs->cset->fill(cs, (char *)key_buff.get() + key_offset, key_meta.first - key_offset, ' ');
-        } break;
-      }
-    }
-
-    key_info_t key_info = {key_meta.first, std::move(key_buff)};
-    keys.emplace(key_name, std::move(key_info));
-  }
-#endif
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
 int LogParser::store_field_in_mysql_format(const dict_index_t *index, const dict_col_t *col, const byte *dest,
                                            const byte *src, ulint mlen, ulint plen) {
   mysql_row_templ_t templ;
@@ -523,6 +425,69 @@ byte *LogParser::parse_tablespace_redo_extend(byte *ptr, const byte *end, const 
   return ptr;
 }
 
+bool LogParser::rec_to_mysql_format(Rapid_load_context *context, mem_heap_t *heap, const rec_t *rec,
+                                    const dict_index_t *index, const ulint *offsets, uchar **mysql_rec_out,
+                                    size_t *rec_len_out) {
+  // 1. calc MySQL record length
+  size_t mysql_rec_len = 0;
+  for (ulint i = 0; i < index->n_fields; i++) {
+    const dict_col_t *col = index->get_col(i);
+    mysql_rec_len += col->get_max_size();
+    if (col->mtype == DATA_VARCHAR) mysql_rec_len += (col->len > 255) ? 2 : 1;
+  }
+
+  // NULL bitmap space.
+  mysql_rec_len += UT_BITS_IN_BYTES(index->n_nullable);
+
+  // 2. allocate MySQL format rec buffer.
+  uchar *mysql_rec = static_cast<uchar *>(mem_heap_alloc(heap, mysql_rec_len));
+  memset(mysql_rec, 0, mysql_rec_len);
+
+  // 3. create row_prebuilt_t
+  row_prebuilt_t *prebuilt = row_create_prebuilt(index->table, mysql_rec_len);
+  if (!prebuilt) return false;
+
+  // 4. convert
+  mem_heap_t *blob_heap = nullptr;
+  bool success = row_sel_store_mysql_rec(mysql_rec,  // MySQL format rec
+                                         prebuilt,   // prebuilt
+                                         rec,        // InnoDB format rec
+                                         nullptr,    // vrow
+                                         true,       // rec_clust (cluster or not)
+                                         index,      // index
+                                         index,      // prebuilt
+                                         offsets,    // offsets arrary
+                                         false,      // clust_templ_for_sec
+                                         nullptr,    // lob_undo
+                                         blob_heap   // BLOB heap
+  );
+
+  if (!success) {
+    row_prebuilt_free(prebuilt, true);
+    if (blob_heap) mem_heap_free(blob_heap);
+    return false;
+  }
+
+  // 5. get TRX_ID(if needed)
+  ulint trx_id_col = dict_table_get_sys_col_no(index->table, DATA_TRX_ID);
+  if (trx_id_col != ULINT_UNDEFINED) {
+    // get TRX_ID from MySQL rec
+    const uchar *trx_id_ptr = mysql_rec + prebuilt->mysql_prefix_len;
+    for (ulint i = 0; i < trx_id_col; i++) {
+      trx_id_ptr += prebuilt->mysql_template[i].mysql_col_len;
+    }
+    context->m_extra_info.m_trxid = mach_read_from_6(trx_id_ptr);
+  }
+
+  // 6. results
+  *mysql_rec_out = mysql_rec;
+  *rec_len_out = mysql_rec_len;
+
+  row_prebuilt_free(prebuilt, true);
+  if (blob_heap) mem_heap_free(blob_heap);
+  return true;
+}
+
 bool LogParser::rec_field_parse(Rapid_load_context *context, mem_heap_t *heap, Imcs::RpdTable *rpd_table,
                                 const rec_t *rec, const dict_index_t *index, const ulint *offsets,
                                 const dict_index_t *real_index, const ulint *real_offsets, size_t idx,
@@ -732,7 +697,6 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
   ut_ad(rec_offs_validate(rec, index, offsets));
   ut_ad(rec_offs_size(offsets));
 
-#if 0
   ut_a(offsets);
   ut_a(rec == nullptr || rec_get_n_fields(rec, index) >= rec_offs_n_fields(offsets));
 
@@ -741,11 +705,9 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
 
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
-  std::string sch_tb;
-  sch_tb.append(context->m_schema_name).append(":").append(context->m_table_name);
-  auto rpd_table = imcs_instance->get_rpd_table(sch_tb);
+  auto rpd_table = dict_table_is_partition(real_index->table) ? imcs_instance->get_rpd_parttable(real_index->table->id)
+                                                              : imcs_instance->get_rpd_table(real_index->table->id);
   auto field_mutex = std::make_shared<std::mutex>();
-
   std::unique_ptr<mem_heap_t, decltype(&mem_heap_free)> heap(mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE),
                                                              mem_heap_free);
   auto heap_ptr = heap.get();
@@ -764,7 +726,6 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
     rec_field_parse(context, heap_ptr, rpd_table, rec, index, offsets, real_index, real_offsets, idx, *field_mutex,
                     field_values);
   }
-#endif
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -799,90 +760,73 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
     UNIV_MEM_ASSERT_RW(rec_start, extra_size);
   }
 #endif /* UNIV_DEBUG_VALGRIND */
-#if 0
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
-  std::string sch_tb(context->m_schema_name);
-  sch_tb.append(":").append(context->m_table_name);
-  auto rpd_tb = imcs_instance->get_rpd_table(sch_tb);
-  auto log_parser_pool = ShannonBase::Imcs::Imcs::pool();
-
+  auto rpd_tb = dict_table_is_partition(real_index->table) ? imcs_instance->get_rpd_parttable(real_index->table->id)
+                                                           : imcs_instance->get_rpd_table(real_index->table->id);
   // no user defined index.
   if (!strncmp(real_index->name(), innobase_index_reserve_name, strlen(innobase_index_reserve_name))) {
     context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(SHANNON_DATA_DB_ROW_ID_LEN);
     context->m_extra_info.m_key_len = SHANNON_DATA_DB_ROW_ID_LEN;
   } else {
-    auto key_len = rpd_tb->first_field()->header()->m_key_len.load();
+    auto key_len = context->m_extra_info.m_key_len;
     context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(key_len);
     context->m_extra_info.m_key_len = key_len;
   }
 
+  auto res{ShannonBase::SHANNON_SUCCESS};
+  std::unique_ptr<mem_heap_t, decltype(&mem_heap_free)> heap(mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE),
+                                                             mem_heap_free);
+  auto heap_ptr = heap.get();
+  uchar *mysql_rec{nullptr};
+  size_t mysql_rec_len{0};
+  if (rec_to_mysql_format(context, heap_ptr, rec, index, offsets, &mysql_rec, &mysql_rec_len)) return HA_ERR_GENERIC;
+
   switch (type) {
-
     case MLOG_REC_DELETE: {
-      if (all) return imcs_instance->delete_rows(context, {});
+      if (all) return rpd_tb->delete_rows(context, {});
 
-      std::unordered_map<std::string, mysql_field_t> row_field_value;
-      // step 1:to get all field data of deleting row.
-      if (index->n_fields <= ShannonBase::rpd_async_column_threshold)
-        parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
-      else
-        ShannonBase::Utils::cowait_sync_with(
-            *log_parser_pool, parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
-
-      std::map<std::string, key_info_t> keys;
-      if (build_key(context, row_field_value, keys)) return HA_ERR_WRONG_IN_RECORD;
-
-      // step 2: go throug all the data to find the matched rows. if found the do deletion.
-      auto found_rowid = find_matched_row(context, keys);
-      if (found_rowid != INVALID_ROW_ID && imcs_instance->delete_rows(context, {found_rowid})) {
-        return HA_ERR_WRONG_IN_RECORD;
-      }
+      auto rowid = rpd_tb->locate_row(context, mysql_rec);
+      if (rowid == INVALID_ROW_ID) return HA_ERR_GENERIC;
+      res = rpd_tb->delete_row(context, rowid);
     } break;
     case MLOG_REC_INSERT: {
-      std::unordered_map<std::string, mysql_field_t> row_field_value;  //<field_name, field>
-      // step 1:to get all field data of inserting row.
-      if (index->n_fields <= ShannonBase::rpd_async_column_threshold)
-        parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
-      else
-        ShannonBase::Utils::cowait_sync_with(
-            *log_parser_pool, parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
-
-      // step 2: insert all field data into CUs.
-      auto rowid = 0;//imcs_instance->reserve_row_id(sch_tb);
-      if (imcs_instance->write_row_from_log(context, rowid, row_field_value)) return HA_ERR_WRONG_IN_RECORD;
-
-      // step3: insert the index info.
-      std::map<std::string, key_info_t> keys;
-      if (build_key(context, row_field_value, keys) || imcs_instance->build_indexes_from_keys(context, keys, rowid))
-        return HA_ERR_WRONG_IN_RECORD;
+      res = rpd_tb->insert_row(context, mysql_rec);
     } break;
     case MLOG_REC_UPDATE_IN_PLACE: {
       ut_a(upd);
-      std::unordered_map<std::string, mysql_field_t> row_field_value;
-      // step 1:to get all field data of updating row.
-      if (index->n_fields <= ShannonBase::rpd_async_column_threshold)
-        parse_rec_fields(context, rec, index, offsets, real_index, row_field_value);
-      else
-        ShannonBase::Utils::cowait_sync_with(
-            *log_parser_pool, parse_rec_fields_async(context, rec, index, offsets, real_index, row_field_value));
+      auto global_row_id = rpd_tb->locate_row(context, mysql_rec);
 
-      // step 2: insert all field data into CUs.
-      std::map<std::string, key_info_t> keys;
-      if (build_key(context, row_field_value, keys)) return HA_ERR_WRONG_IN_RECORD;
+      // step 1: to parse the changed fields. <changed col id, new_value>
+      auto n_cols = rpd_tb->meta().num_columns;
+      ShannonBase::Imcs::RowBuffer new_row_data(n_cols);
+      new_row_data.copy_from_mysql_fields(context, const_cast<uchar *>(mysql_rec), rpd_tb->meta().fields,
+                                          rpd_tb->meta().col_offsets.data(), rpd_tb->meta().null_byte_offsets.data(),
+                                          rpd_tb->meta().null_bitmasks.data());
 
-      // step 3: find all matched rows according to rec.
-      auto found_rowid = find_matched_row(context, keys);
-      if (found_rowid == INVALID_ROW_ID) return HA_ERR_WRONG_IN_RECORD;
+      std::unordered_map<uint32_t, ShannonBase::Imcs::RowBuffer::ColumnValue> updates;
+      for (size_t idx = 0; idx < n_cols; idx++) {
+        Field *field = rpd_tb->meta().fields[idx].source_fld;
 
-      // step 4: to update rows. TODO: update key field.
-      if (!imcs_instance->update_row_from_log(context, found_rowid, row_field_value)) return HA_ERR_WRONG_IN_RECORD;
+        ptrdiff_t offset = rpd_tb->meta().col_offsets[idx];
+        size_t field_length = field->pack_length();
+
+        // comp field is changed or not.
+        if (std::memcmp(mysql_rec + offset, mysql_rec + offset, field_length) != 0) {  // record has been changed.
+          // read the new value.
+          auto col_val = new_row_data.get_column_mutable(idx);
+          updates.emplace(idx, std::move(*col_val));
+        }
+      }
+
+      // step 2: update row.
+      res = rpd_tb->update_row(context, global_row_id, updates);
     } break;
     default:
+      assert(false);
       break;
   }
-#endif
-  return ShannonBase::SHANNON_SUCCESS;
+  return res;
 }
 
 byte *LogParser::parse_cur_and_apply_delete_mark_rec(Rapid_load_context *context, byte *ptr, /*!< in: buffer */
