@@ -57,6 +57,7 @@ std::chrono::nanoseconds Timer::lap() {
   m_begin = now;
   return lap_duration;
 }
+
 std::string Timer::lap_formatted() {
   auto stream = std::stringstream{};
   return stream.str();

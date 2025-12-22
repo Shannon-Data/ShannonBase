@@ -32,29 +32,6 @@
 
 namespace ShannonBase {
 namespace Imcs {
-
-VarlenDataPool::BlockHeader::BlockHeader()
-    : block_id(0), size(0), used_size(0), magic(MAGIC_NUMBER), next_free(nullptr) {}
-
-bool VarlenDataPool::BlockHeader::is_valid() const { return magic == MAGIC_NUMBER; }
-
-size_t VarlenDataPool::BlockHeader::available_space() const { return size - sizeof(BlockHeader) - used_size; }
-
-VarlenDataPool::VarlenReference::VarlenReference() : block_id(0), offset(0), length(0), storage_type(INLINE) {}
-
-bool VarlenDataPool::VarlenReference::is_inline() const { return storage_type == INLINE; }
-
-bool VarlenDataPool::VarlenReference::is_pool() const { return storage_type == POOL; }
-
-bool VarlenDataPool::VarlenReference::is_overflow() const { return storage_type == OVERFLOW; }
-
-VarlenDataPool::OverflowPage::OverflowPage()
-    : page_id(0), page_size(0), data_length(0), file_offset(0), mapped_data(nullptr) {}
-
-VarlenDataPool::PoolHeader::PoolHeader() : total_size(0), used_size(0), block_count(0), free_blocks(0) {}
-
-VarlenDataPool::FreeList::FreeList() : head(nullptr), count(0) {}
-
 VarlenDataPool::VarlenDataPool(size_t initial_size, std::shared_ptr<Utils::MemoryPool> mem_pool)
     : m_next_block_id(1),
       m_next_overflow_page_id(1),

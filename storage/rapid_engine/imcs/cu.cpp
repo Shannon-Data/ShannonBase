@@ -42,7 +42,7 @@
 
 namespace ShannonBase {
 namespace Imcs {
-CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32_t col_idx, size_t capacity,
+CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32 col_idx, size_t capacity,
        std::shared_ptr<ShannonBase::Utils::MemoryPool> mem_pool)
     : m_memory_pool(mem_pool) {
   m_header.owner_imcu = owner;
@@ -118,15 +118,11 @@ size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn) {
         // purgeable.
         ColumnVersionManager::Column_Version *to_delete = current;
         current = current->prev;
-
-        if (prev_valid) {
-          prev_valid->prev = current;
-        }
+        if (prev_valid) prev_valid->prev = current;
 
         delete to_delete;
         purged++;
-      } else {
-        // keep.
+      } else {  // keep.
         found_visible = true;
         prev_valid = current;
         current = current->prev;
@@ -134,13 +130,8 @@ size_t CU::ColumnVersionManager::purge(uint64_t min_active_scn) {
     }
 
     // If the entire version chain has been purged
-    if (head == nullptr) {
-      it = m_versions.erase(it);
-    } else {
-      ++it;
-    }
+    it = (head == nullptr) ? m_versions.erase(it) : ++it;
   }
-
   return purged;
 }
 
@@ -159,9 +150,9 @@ bool CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar 
     m_header.data_size.fetch_add(m_header.normalized_length);
   } else {
     if (m_header.local_dict && (m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM)) {
-      uint32_t dict_id = m_header.local_dict->store(data, len, m_header.encoding);
-      std::memcpy(dest, &dict_id, sizeof(uint32_t));
-      m_header.data_size.fetch_add(sizeof(uint32_t));
+      uint32 dict_id = m_header.local_dict->store(data, len, m_header.encoding);
+      std::memcpy(dest, &dict_id, sizeof(uint32));
+      m_header.data_size.fetch_add(sizeof(uint32));
     } else {
       std::memcpy(dest, data, std::min(len, m_header.normalized_length.load()));
       m_header.data_size.fetch_add(std::min(len, m_header.normalized_length.load()));
@@ -187,17 +178,15 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
   // 3. write new value.
   {
     std::lock_guard lock(m_data_mutex);
-
     auto dest = static_cast<void *>(const_cast<uchar *>(get_data_address(local_row_id)));
-
     if (len == UNIV_SQL_NULL) {
       // NULL values are handled by the null_mask of IMCU
       std::memset(dest, 0x0, m_header.normalized_length);
     } else {
       // dealing with encoding.
       if (m_header.local_dict && (m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM)) {
-        uint32_t dict_id = m_header.local_dict.get()->store(new_data, len, m_header.encoding);
-        std::memcpy(dest, &dict_id, sizeof(uint32_t));
+        uint32 dict_id = m_header.local_dict.get()->store(new_data, len, m_header.encoding);
+        std::memcpy(dest, &dict_id, sizeof(uint32));
       } else {
         std::memcpy(dest, new_data, std::min(len, m_header.normalized_length.load(std::memory_order_relaxed)));
       }
@@ -219,15 +208,12 @@ size_t CU::read(const Rapid_context *context, row_id_t local_row_id, uchar *buff
   if (local_row_id >= m_header.capacity) return 0;
 
   // check IMCU's NULL mask.
-  if (m_header.owner_imcu->is_null(m_header.column_id, local_row_id)) {
-    return UNIV_SQL_NULL;
-  }
+  if (m_header.owner_imcu->is_null(m_header.column_id, local_row_id)) return UNIV_SQL_NULL;
 
   const uchar *src = m_data.get() + local_row_id * m_header.normalized_length;
-
   // dealing with dictionary encode.
   if (m_header.local_dict && (m_header.field_metadata->real_type() != MYSQL_TYPE_ENUM)) {
-    uint32_t dict_id = *reinterpret_cast<const uint32_t *>(src);
+    uint32 dict_id = *reinterpret_cast<const uint32 *>(src);
     auto decode_str = m_header.local_dict->get(dict_id);
     std::memcpy(buffer, decode_str.c_str(), decode_str.length());
     return decode_str.length();
@@ -255,11 +241,9 @@ size_t CU::purge_versions(const Rapid_context *context, uint64_t min_active_scn)
   return m_version_manager->purge(min_active_scn);
 }
 
-bool CU::encode_value(const Rapid_context *context, const uchar *data, size_t len, uint32_t &encoded) { return false; }
+bool CU::encode_value(const Rapid_context *context, const uchar *data, size_t len, uint32 &encoded) { return false; }
 
-bool CU::decode_value(const Rapid_context *context, uint32_t encoded, uchar *buffer, size_t &len) const {
-  return false;
-}
+bool CU::decode_value(const Rapid_context *context, uint32 encoded, uchar *buffer, size_t &len) const { return false; }
 
 bool CU::compress() { return false; }
 
@@ -270,10 +254,8 @@ void CU::update_statistics(const uchar *data, size_t len) {
 
   double value = Utils::Util::get_field_numeric<double>(m_header.field_metadata, data, nullptr);
   m_header.sum.fetch_add(value);
-
   m_header.min_value.store(std::min(m_header.min_value.load(std::memory_order_relaxed), value));
   m_header.max_value.store(std::max(m_header.max_value.load(std::memory_order_relaxed), value));
-
   m_header.avg = m_header.sum.load(std::memory_order_relaxed) / m_header.total_count.load(std::memory_order_relaxed);
 }
 

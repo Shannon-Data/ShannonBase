@@ -73,7 +73,7 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
   m_metadata.null_bitmasks.resize(m_metadata.num_columns);
 
   m_metadata.fields.reserve(m_metadata.num_columns);
-  for (uint32_t ind = 0; ind < m_metadata.num_columns; ind++) {
+  for (uint32 ind = 0; ind < m_metadata.num_columns; ind++) {
     Field *field = mysql_table->field[ind];
 
     m_metadata.col_offsets[ind] = field->offset(mysql_table->record[0]);
@@ -116,7 +116,8 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
         .global_min = 0.0,
         .global_max = 0.0,
         .distinct_count = 0,
-        .null_ratio = 0.0});
+        .null_ratio = 0.0,
+        .statistics = std::make_unique<ColumnStatistics>(ind, field->field_name, field->type())});
   }
 }
 
@@ -248,9 +249,7 @@ void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<Key
         default: {
           ut_a(length == field->pack_length());
           size_t bytes = field->get_key_image(to_key, length, Field::itRAW);
-          if (bytes < length) {
-            cs->cset->fill(cs, reinterpret_cast<char *>(to_key + bytes), length - bytes, ' ');
-          }
+          if (bytes < length) cs->cset->fill(cs, reinterpret_cast<char *>(to_key + bytes), length - bytes, ' ');
         } break;
       }
     }
@@ -347,7 +346,7 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
 }
 
 int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
-                      const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates) {
+                      const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) {
   // 1. locate IMCU.
   Imcu *imcu = locate_imcu_by_rowid(global_row_id);
   if (!imcu) return false;
@@ -377,38 +376,28 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
   return global_row_id;
 }
 
-uint64_t Table::get_row_count(const Rapid_scan_context *context) const {
+uint64 Table::get_row_count(const Rapid_scan_context *context) const {
   assert(context);
   return 0;
 }
 
-ColumnStatistics Table::get_column_stats(uint32_t col_idx) const {
+ColumnStatistics *Table::get_column_stats(uint32 col_idx) const {
   assert(col_idx);
+  if (col_idx >= m_metadata.fields.size()) return nullptr;
 
-  ColumnStatistics col_stat(col_idx, "col_name", MYSQL_TYPE_NULL);
-  return col_stat;
+  return m_metadata.fields[col_idx].statistics.get();
 }
 
 void Table::update_statistics(bool force) {
   std::unique_lock lock(m_table_mutex);
-
-  for (uint32_t col_idx = 0; col_idx < m_metadata.num_columns; col_idx++) {
-    auto stats = std::make_unique<ColumnStatistics>(col_idx, m_metadata.fields[col_idx].field_name,
-                                                    m_metadata.fields[col_idx].type);
-
-    // check all IMCUs
-    for (auto &imcu : m_imcus) {
-      assert(imcu);
-      imcu->update_statistics();
-      //  [TODO]: collection statistics.
-    }
-
-    stats->finalize();
-    // m_column_stats[col_idx] = std::move(stats);
+  for (auto &imcu : m_imcus) {
+    assert(imcu);
+    imcu->update_statistics();
   }
+  for (const auto &col_stat : m_metadata.fields) col_stat.statistics->finalize();
 }
 
-size_t Table::garbage_collect(uint64_t min_active_scn) {
+size_t Table::garbage_collect(uint64 min_active_scn) {
   size_t total_freed = 0;
 
   // 1. perform GC on each IMCU.

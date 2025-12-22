@@ -26,22 +26,12 @@
 #ifndef __SHANNONBASE_COL_STATS_H__
 #define __SHANNONBASE_COL_STATS_H__
 
-#include <algorithm>
 #include <atomic>
-#include <cfloat>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
-#include "field_types.h"  //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"  //uintxxx
-
-#include "storage/innobase/include/ut0dbg.h"
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -65,38 +55,33 @@ class RpdTable;
 class Imcu;
 class ColumnStatistics {
  public:
-  struct BasicStats {
+  struct SHANNON_ALIGNAS BasicStats {
     // Numerical statistics
-    double min_value;
-    double max_value;
-    double sum;
-    double avg;
-    double variance;  // Variance
-    double stddev;    // Standard deviation
+    double min_value{DBL_MAX};
+    double max_value{DBL_MIN};
+    double sum{0.0};
+    double avg{0.0};
+    double variance{0.0};  // Variance
+    double stddev{0.0};    // Standard deviation
 
     // Count statistics
-    uint64_t row_count;       // Total row count
-    uint64_t null_count;      // NULL count
-    uint64_t distinct_count;  // Unique value count (estimated)
+    uint64 row_count{0};       // Total row count
+    uint64 null_count{0};      // NULL count
+    uint64 distinct_count{0};  // Unique value count (estimated)
 
     // Data characteristics
-    double null_fraction;  // NULL fraction
-    double cardinality;    // Cardinality (distinct_count / row_count)
-
-    BasicStats();
+    double null_fraction{0.0};  // NULL fraction
+    double cardinality{0.0};    // Cardinality (distinct_count / row_count)
   };
 
-  struct StringStats {
+  struct SHANNON_ALIGNAS StringStats {
     std::string min_string;  // Lexicographical minimum
     std::string max_string;  // Lexicographical maximum
 
-    double avg_length;    // Average length
-    uint64_t max_length;  // Maximum length
-    uint64_t min_length;  // Minimum length
-
-    uint64_t empty_count;  // Empty string count
-
-    StringStats();
+    double avg_length{0.0};         // Average length
+    uint64 max_length{0};           // Maximum length
+    uint64 min_length{UINT64_MAX};  // Minimum length
+    uint64 empty_count{0};          // Empty string count
   };
 
   // Histogram
@@ -107,16 +92,16 @@ class ColumnStatistics {
    */
   class EquiHeightHistogram {
    public:
-    struct Bucket {
-      double lower_bound;       // Lower bound
-      double upper_bound;       // Upper bound
-      uint64_t count;           // Row count
-      uint64_t distinct_count;  // Distinct value count
-
-      Bucket();
+    struct SHANNON_ALIGNAS Bucket {
+      double lower_bound{DBL_MAX};  // Lower bound
+      double upper_bound{DBL_MIN};  // Upper bound
+      uint64 count{0};              // Row count
+      uint64 distinct_count{0};     // Distinct value count
     };
 
-    explicit EquiHeightHistogram(size_t num_buckets = 64);
+    explicit EquiHeightHistogram(size_t num_buckets = 64) : m_bucket_count(num_buckets) {
+      m_buckets.reserve(num_buckets);
+    }
 
     /**
      * Build histogram
@@ -136,17 +121,17 @@ class ColumnStatistics {
     /**
      * Get total row count
      */
-    uint64_t get_total_rows() const;
+    uint64 get_total_rows() const;
 
     /**
      * Get bucket count
      */
-    size_t get_bucket_count() const;
+    size_t get_bucket_count() const { return m_buckets.size(); }
 
     /**
      * Get buckets
      */
-    const std::vector<Bucket> &get_buckets() const;
+    const std::vector<Bucket> &get_buckets() const { return m_buckets; }
 
    private:
     std::vector<Bucket> m_buckets;
@@ -154,12 +139,12 @@ class ColumnStatistics {
   };
 
   // Quantiles
-  struct Quantiles {
+  struct SHANNON_ALIGNAS Quantiles {
     static constexpr size_t NUM_QUANTILES = 100;  // Percentiles
 
     double values[NUM_QUANTILES + 1];  // 0%, 1%, 2%, ..., 100%
 
-    Quantiles();
+    Quantiles() { std::fill(std::begin(values), std::end(values), 0.0); }
 
     /**
      * Compute quantiles
@@ -174,7 +159,7 @@ class ColumnStatistics {
     /**
      * Get median
      */
-    double get_median() const;
+    double get_median() const { return values[50]; }
   };
 
   // HyperLogLog (Cardinality Estimation)
@@ -186,17 +171,17 @@ class ColumnStatistics {
    */
   class HyperLogLog {
    public:
-    HyperLogLog();
+    HyperLogLog() : m_registers(NUM_REGISTERS, 0) {}
 
     /**
      * Add value
      */
-    void add(uint64_t hash);
+    void add(uint64 hash);
 
     /**
      * Estimate cardinality
      */
-    uint64_t estimate() const;
+    uint64 estimate() const;
 
     /**
      * Merge another HyperLogLog
@@ -212,7 +197,7 @@ class ColumnStatistics {
     /**
      * Count leading zeros
      */
-    static uint8_t count_leading_zeros(uint64_t x);
+    static uint8_t count_leading_zeros(uint64 x);
   };
 
   // Sampler
@@ -222,7 +207,9 @@ class ColumnStatistics {
    */
   class ReservoirSampler {
    public:
-    explicit ReservoirSampler(size_t sample_size = 10000);
+    explicit ReservoirSampler(size_t sample_size = 10000) : m_sample_size(sample_size), m_seen_count(0) {
+      m_samples.reserve(sample_size);
+    }
 
     /**
      * Add value
@@ -232,12 +219,15 @@ class ColumnStatistics {
     /**
      * Get samples
      */
-    const std::vector<double> &get_samples() const;
+    const std::vector<double> &get_samples() const { return m_samples; }
 
     /**
      * Get sample rate
      */
-    double get_sample_rate() const;
+    double get_sample_rate() const {
+      if (m_seen_count == 0) return 0.0;
+      return static_cast<double>(m_samples.size()) / m_seen_count;
+    }
 
    private:
     std::vector<double> m_samples;
@@ -267,13 +257,13 @@ class ColumnStatistics {
    */
   void finalize();
 
-  const BasicStats &get_basic_stats() const;
+  const BasicStats &get_basic_stats() const { return m_basic_stats; }
 
-  const StringStats *get_string_stats() const;
+  const StringStats *get_string_stats() const { return m_string_stats.get(); }
 
-  const EquiHeightHistogram *get_histogram() const;
+  const EquiHeightHistogram *get_histogram() const { return m_histogram.get(); }
 
-  const Quantiles *get_quantiles() const;
+  const Quantiles *get_quantiles() const { return m_quantiles.get(); }
 
   /**
    * Estimate selectivity (range query)
@@ -324,7 +314,7 @@ class ColumnStatistics {
   std::chrono::system_clock::time_point m_last_update;
 
   // Version number (for detecting staleness)
-  uint64_t m_version;
+  uint64 m_version;
 
   /**
    * Compute variance

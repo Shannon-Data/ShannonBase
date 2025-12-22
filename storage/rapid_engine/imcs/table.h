@@ -32,6 +32,8 @@
 #include <string>
 #include <vector>
 
+#include "my_inttypes.h"
+
 #include "storage/rapid_engine/include/rapid_object.h"
 
 #include "storage/rapid_engine/imcs/cu.h"
@@ -150,7 +152,7 @@ class RpdTable : public MemoryObject {
    * @return: Returns SHANNON_SUCCESS on success
    */
   virtual int update_row(const Rapid_load_context *context, row_id_t global_row_id,
-                         const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates) = 0;
+                         const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) = 0;
 
   /**
    * @brief returen the global record row id in the table.
@@ -168,12 +170,12 @@ class RpdTable : public MemoryObject {
   /**
    * Get row count (considering visibility)
    */
-  virtual uint64_t get_row_count(const Rapid_scan_context *context) const = 0;
+  virtual uint64 get_row_count(const Rapid_scan_context *context) const = 0;
 
   /**
    * Get column statistics
    */
-  virtual ColumnStatistics get_column_stats(uint32_t col_idx) const = 0;
+  virtual ColumnStatistics *get_column_stats(uint32 col_idx) const = 0;
 
   /**
    * Update statistics
@@ -183,7 +185,7 @@ class RpdTable : public MemoryObject {
   /**
    * Garbage collection
    */
-  virtual size_t garbage_collect(uint64_t min_active_scn) = 0;
+  virtual size_t garbage_collect(uint64 min_active_scn) = 0;
 
   /**
    * Compress IMCUs
@@ -213,8 +215,8 @@ class RpdTable : public MemoryObject {
   }
 
  protected:
-  uint32_t generate_table_id() {
-    static std::atomic<uint32_t> counter{1};
+  uint32 generate_table_id() {
+    static std::atomic<uint32> counter{1};
     return counter.fetch_add(1);
   }
 
@@ -278,27 +280,25 @@ class Table : public RpdTable {
   virtual size_t delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &row_ids) override;
 
   virtual int update_row(const Rapid_load_context *context, row_id_t global_row_id,
-                         const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates) override;
+                         const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) override;
 
   virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata) override;
 
-  virtual uint64_t get_row_count(const Rapid_scan_context *context) const override;
+  virtual uint64 get_row_count(const Rapid_scan_context *context) const override;
 
-  virtual ColumnStatistics get_column_stats(uint32_t col_idx) const override;
+  virtual ColumnStatistics *get_column_stats(uint32 col_idx) const override;
 
   virtual void update_statistics(bool force = false) override;
 
-  virtual size_t garbage_collect(uint64_t min_active_scn) override;
+  virtual size_t garbage_collect(uint64 min_active_scn) override;
 
   virtual size_t compact(double delete_ratio_threshold = 0.5) override;
 
   virtual bool reorganize() override;
 
   virtual Index::Index<uchar, row_id_t> *get_index(std::string key_name) final {
-    if (m_indexes.find(key_name) == m_indexes.end())
-      return nullptr;
-    else
-      return m_indexes[key_name].get();
+    if (m_indexes.find(key_name) == m_indexes.end()) return nullptr;
+    return m_indexes[key_name].get();
   }
 
   virtual Imcu *locate_imcu(size_t imcu_id) override {
@@ -361,8 +361,8 @@ class Table : public RpdTable {
     }
 
     // Prepare new IMCU outside lock
-    std::shared_ptr<Imcu> candidate = std::make_shared<Imcu>(this, m_metadata, 0 /* will set start_row under lock */,
-                                                             m_metadata.rows_per_imcu, m_memory_pool);
+    auto candidate = std::make_shared<Imcu>(this, m_metadata, 0 /* will set start_row under lock */,
+                                            m_metadata.rows_per_imcu, m_memory_pool);
     // Slow path: take exclusive lock to publish
     {
       std::unique_lock lock(m_table_mutex);
@@ -389,11 +389,6 @@ class Table : public RpdTable {
       idx.end_row = imcu->get_end_row();
       idx.imcu = imcu;
 
-      // TODO: collect statistics infor.
-      // min_values[x] =xxx;
-      // max_values[x] =yyy;
-      // bool has_deletes = true;
-      // double delete_ratio = 0.5;
       m_imcu_index.push_back(idx);
     }
   }
@@ -486,22 +481,19 @@ class PartTable : public RpdTable {
   }
 
   virtual int update_row(const Rapid_load_context *context, row_id_t global_row_id,
-                         const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates) override {
+                         const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) override {
     return 0;
   }
 
   virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata) override { return INVALID_ROW_ID; }
 
-  virtual uint64_t get_row_count(const Rapid_scan_context *context) const override { return 0; }
+  virtual uint64 get_row_count(const Rapid_scan_context *context) const override { return 0; }
 
-  virtual ColumnStatistics get_column_stats(uint32_t col_idx) const override {
-    ColumnStatistics col_stat(col_idx, "col_name", MYSQL_TYPE_NULL);
-    return col_stat;
-  }
+  virtual ColumnStatistics *get_column_stats(uint32 col_idx) const override { return nullptr; }
 
   virtual void update_statistics(bool force = false) override {}
 
-  virtual size_t garbage_collect(uint64_t min_active_scn) override { return 0; }
+  virtual size_t garbage_collect(uint64 min_active_scn) override { return 0; }
 
   virtual size_t compact(double delete_ratio_threshold = 0.5) override { return 0; }
 

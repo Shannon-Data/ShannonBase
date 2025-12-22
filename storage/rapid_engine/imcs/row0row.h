@@ -47,11 +47,7 @@
 #ifndef __SHANNONBASE_ROW0ROW_H__
 #define __SHANNONBASE_ROW0ROW_H__
 
-#include <algorithm>
 #include <atomic>  //std::atomic<T>
-#include <ctime>
-#include <functional>
-#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -62,7 +58,6 @@
 #include "my_list.h"    //for LIST
 #include "sql/table.h"  //for TABLE
 
-//#include "storage/innobase/include/univ.i"  //UNIV_SQL_NULL
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/predicate.h"
@@ -253,12 +248,12 @@ class StorageIndex {
    * @param col_idx: Column index
    * @param value: Numeric value (converted)
    */
-  void update(uint32_t col_idx, double value);
+  void update(uint32 col_idx, double value);
 
   /**
    * Update NULL statistics
    */
-  void update_null(uint32_t col_idx);
+  void update_null(uint32 col_idx);
 
   /**
    * Batch rebuild statistics (scan all data)
@@ -269,33 +264,33 @@ class StorageIndex {
   /**
    * Get column statistics - returns a snapshot
    */
-  const ColumnStats *get_column_stats_snapshot(uint32_t col_idx) const;
+  const ColumnStats *get_column_stats_snapshot(uint32 col_idx) const;
 
   /**
    * Get individual atomic values (for read-only access)
    */
-  inline double get_min_value(uint32_t col_idx) const {
+  inline double get_min_value(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return DBL_MAX;
 
     std::shared_lock lock(m_mutex);
     return m_column_stats[col_idx].min_value.load(std::memory_order_acquire);
   }
 
-  inline double get_max_value(uint32_t col_idx) const {
+  inline double get_max_value(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return DBL_MIN;
 
     std::shared_lock lock(m_mutex);
     return m_column_stats[col_idx].max_value.load(std::memory_order_acquire);
   }
 
-  inline size_t get_null_count(uint32_t col_idx) const {
+  inline size_t get_null_count(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return 0;
 
     std::shared_lock lock(m_mutex);
     return m_column_stats[col_idx].null_count.load(std::memory_order_acquire);
   }
 
-  inline bool get_has_null(uint32_t col_idx) const {
+  inline bool get_has_null(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return false;
 
     std::shared_lock lock(m_mutex);
@@ -319,7 +314,7 @@ class StorageIndex {
   /**
    * Update string statistics (requires mutex protection)
    */
-  void update_string_stats(uint32_t col_idx, const std::string &value);
+  void update_string_stats(uint32 col_idx, const std::string &value);
 
   inline void mark_dirty() { m_dirty.store(true, std::memory_order_relaxed); }
 
@@ -435,7 +430,7 @@ class RowBuffer {
    * @param col_idx: Column index
    * @return: Column value (read-only)
    */
-  inline const ColumnValue *get_column(uint32_t col_idx) const {
+  inline const ColumnValue *get_column(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return nullptr;
     return &m_columns[col_idx];
   }
@@ -443,7 +438,7 @@ class RowBuffer {
   /**
    * Get column value (mutable)
    */
-  inline ColumnValue *get_column_mutable(uint32_t col_idx) {
+  inline ColumnValue *get_column_mutable(uint32 col_idx) {
     if (col_idx >= m_num_columns) return nullptr;
     return &m_columns[col_idx];
   }
@@ -462,8 +457,7 @@ class RowBuffer {
    * @param length: Data length
    * @param type: Data type
    */
-  void set_column_zero_copy(uint32_t col_idx, const uchar *data, size_t length,
-                            enum_field_types type = MYSQL_TYPE_NULL);
+  void set_column_zero_copy(uint32 col_idx, const uchar *data, size_t length, enum_field_types type = MYSQL_TYPE_NULL);
 
   /**
    * Batch set column values (zero-copy)
@@ -483,12 +477,12 @@ class RowBuffer {
    * @param length: Data length
    * @param type: Data type
    */
-  void set_column_copy(uint32_t col_idx, const uchar *data, size_t length, enum_field_types type = MYSQL_TYPE_NULL);
+  void set_column_copy(uint32 col_idx, const uchar *data, size_t length, enum_field_types type = MYSQL_TYPE_NULL);
 
   /**
    * Set NULL column
    */
-  void set_column_null(uint32_t col_idx) {
+  void set_column_null(uint32 col_idx) {
     if (col_idx >= m_num_columns) return;
 
     ColumnValue &col = m_columns[col_idx];
@@ -501,7 +495,7 @@ class RowBuffer {
   /**
    * Check if column is NULL
    */
-  inline bool is_column_null(uint32_t col_idx) const {
+  inline bool is_column_null(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return true;
     return m_columns[col_idx].flags.is_null == 1;
   }
@@ -509,7 +503,7 @@ class RowBuffer {
   /**
    * Get column data pointer
    */
-  inline const uchar *get_column_data(uint32_t col_idx) const {
+  inline const uchar *get_column_data(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return nullptr;
     return m_columns[col_idx].data;
   }
@@ -517,7 +511,7 @@ class RowBuffer {
   /**
    * Get column data length
    */
-  inline size_t get_column_length(uint32_t col_idx) const {
+  inline size_t get_column_length(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return 0;
     return m_columns[col_idx].length;
   }
@@ -526,12 +520,12 @@ class RowBuffer {
   /**
    * Get column integer value
    */
-  int64_t get_column_int(uint32_t col_idx) const;
+  int64_t get_column_int(uint32 col_idx) const;
 
   /**
    * Get column floating-point value
    */
-  double get_column_double(uint32_t col_idx) const;
+  double get_column_double(uint32 col_idx) const;
 
   /**
    * Get column string value
@@ -539,7 +533,7 @@ class RowBuffer {
    * @param buffer_size: Buffer size
    * @return: Actual length
    */
-  size_t get_column_string(uint32_t col_idx, char *buffer, size_t buffer_size) const;
+  size_t get_column_string(uint32 col_idx, char *buffer, size_t buffer_size) const;
 
   // Batch Operations
   /**
@@ -658,7 +652,7 @@ class RowBuffer {
   // Internal helper to extract field data from different sources
   struct FieldDataInfo {
     uchar *data_ptr;
-    uint32_t data_len;
+    uint32 data_len;
     bool is_null;
   };
 
@@ -760,9 +754,9 @@ class RowDirectory {
    */
   struct SHANNON_ALIGNAS RowEntry {
     // Row start offset (relative to CU base address)
-    uint32_t offset;
+    uint32 offset;
     // Actual row length (after compression or variable-length encoding)
-    uint32_t length;
+    uint32 length;
     // Row flags
     struct Flags {
       uint8_t is_compressed : 1;  // Whether compressed
@@ -773,7 +767,7 @@ class RowDirectory {
     } flags;
 
     // Checksum (optional, for data integrity checking)
-    uint32_t checksum;
+    uint32 checksum;
     RowEntry() : offset(0), length(0), checksum(0) { std::memset(&flags, 0, sizeof(flags)); }
   };
 
@@ -784,9 +778,9 @@ class RowDirectory {
    */
   struct SHANNON_ALIGNAS ColumnOffsetTable {
     // Relative offset of each column within the row
-    std::vector<uint16_t> column_offsets;
+    std::vector<uint16> column_offsets;
     // Actual length of each column
-    std::vector<uint16_t> column_lengths;
+    std::vector<uint16> column_lengths;
     ColumnOffsetTable(size_t num_columns) {
       column_offsets.reserve(num_columns);
       column_lengths.reserve(num_columns);
@@ -848,7 +842,7 @@ class RowDirectory {
    * @param length: Data length
    * @param is_compressed: Whether compressed
    */
-  void set_row_entry(row_id_t row_id, uint32_t offset, uint32_t length, bool is_compressed = false);
+  void set_row_entry(row_id_t row_id, uint32 offset, uint32 length, bool is_compressed = false);
 
   /**
    * Get row entry
@@ -878,8 +872,8 @@ class RowDirectory {
    * @param column_offsets: Column offset array
    * @param column_lengths: Column length array
    */
-  void build_column_offset_table(row_id_t row_id, const std::vector<uint16_t> &column_offsets,
-                                 const std::vector<uint16_t> &column_lengths);
+  void build_column_offset_table(row_id_t row_id, const std::vector<uint16> &column_offsets,
+                                 const std::vector<uint16> &column_lengths);
 
   /**
    * Get column offset table
@@ -894,7 +888,7 @@ class RowDirectory {
    * @param col_idx: Column index
    * @return: Column offset, returns UINT16_MAX on failure
    */
-  uint16_t get_column_offset(row_id_t row_id, uint32_t col_idx) const;
+  uint16 get_column_offset(row_id_t row_id, uint32 col_idx) const;
 
   /**
    * Get actual column length
@@ -902,7 +896,7 @@ class RowDirectory {
    * @param col_idx: Column index
    * @return: Column length, returns 0 on failure
    */
-  uint16_t get_column_length(row_id_t row_id, uint32_t col_idx) const;
+  uint16 get_column_length(row_id_t row_id, uint32 col_idx) const;
 
   /**
    * Batch get row offsets (for vectorized scanning)
@@ -911,7 +905,7 @@ class RowDirectory {
    * @param offsets: Output offset array (pre-allocated)
    * @param lengths: Output length array (pre-allocated)
    */
-  void get_batch_offsets(row_id_t start_row, size_t count, uint32_t *offsets, uint32_t *lengths) const;
+  void get_batch_offsets(row_id_t start_row, size_t count, uint32 *offsets, uint32 *lengths) const;
 
   /**
    * Update compression statistics
@@ -964,7 +958,7 @@ class RowDirectory {
   /**
    * Calculate checksum (simple CRC32)
    */
-  uint32_t compute_checksum(uint32_t offset, uint32_t length) const {
+  uint32 compute_checksum(uint32 offset, uint32 length) const {
     // Simplified implementation, should use standard CRC32 in practice
     return offset ^ length ^ 0xDEADBEEF;
   }

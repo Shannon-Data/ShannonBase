@@ -31,12 +31,15 @@
 #include <string>
 #include <vector>
 
+#include "my_inttypes.h"
+
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
 class Field;
 namespace ShannonBase {
 namespace Imcs {
+class ColumnStatistics;
 /**
  * @brief Table load type (self-load or user-initiated).
  */
@@ -48,13 +51,13 @@ enum class LoadType {
 
 struct SHANNON_ALIGNAS TableConfig {
   std::string tenant_name{SHANNON_DATA_AREAR_NAME};
-  uint64_t max_table_mem_size{SHANNON_DEFAULT_MEMRORY_SIZE};
-  uint64_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};
+  uint64 max_table_mem_size{SHANNON_DEFAULT_MEMRORY_SIZE};
+  uint64 rows_per_imcu{SHANNON_ROWS_IN_CHUNK};
 };
 
 struct SHANNON_ALIGNAS FieldMetadata {
   Field *source_fld{nullptr};
-  uint32_t field_id{0};
+  uint32 field_id{0};
   std::string field_name;
   enum_field_types type{MYSQL_TYPE_NULL};
   size_t pack_length{0};
@@ -71,10 +74,12 @@ struct SHANNON_ALIGNAS FieldMetadata {
   double global_min{0.0}, global_max{0.0f};
   size_t distinct_count{0};
   double null_ratio{0.0};
+
+  std::unique_ptr<ColumnStatistics> statistics{nullptr};
 };
 
 struct SHANNON_ALIGNAS KeyPart {
-  uint8_t null_bit{0};
+  uint8 null_bit{0};
   uint key_field_ind;
   uint16 key_part_flag{0}; /* 0 or HA_REVERSE_SORT */
   uint16 length{0};
@@ -96,7 +101,7 @@ struct SHANNON_ALIGNAS TableMetadata {
 
   bool db_low_byte_first{false}; /* Portable row format */
   // Column information
-  uint32_t num_columns{0};
+  uint32 num_columns{0};
   std::vector<FieldMetadata> fields;
   std::vector<Key> keys;  // key name <-->key part info.
   std::vector<ulong> col_offsets;
@@ -107,13 +112,13 @@ struct SHANNON_ALIGNAS TableMetadata {
   size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};  // Default 8192000
 
   // Global statistics
-  std::atomic<uint64_t> total_imcus{0};
-  std::atomic<uint64_t> total_rows{0};
-  std::atomic<uint64_t> deleted_rows{0};
-  std::atomic<uint64_t> version_count{0};
+  std::atomic<uint64> total_imcus{0};
+  std::atomic<uint64> total_rows{0};
+  std::atomic<uint64> deleted_rows{0};
+  std::atomic<uint64> version_count{0};
 
-  std::atomic<uint64_t> mysql_access_count{0};            // MySQL access counts.
-  std::atomic<uint64_t> heatwave_access_count{0};         // Rapid access counts.
+  std::atomic<uint64> mysql_access_count{0};              // MySQL access counts.
+  std::atomic<uint64> heatwave_access_count{0};           // Rapid access counts.
   double importance{0.0};                                 // importance score.
   std::atomic<time_t> last_accessed{std::time(nullptr)};  // the laste access time.
   LoadType load_type{LoadType::NOT_LOADED};               // load type.

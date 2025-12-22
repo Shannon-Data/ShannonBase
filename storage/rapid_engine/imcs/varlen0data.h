@@ -87,20 +87,20 @@ class VarlenDataPool : public MemoryObject {
    * Data block header
    */
   struct SHANNON_ALIGNAS BlockHeader {
-    uint32_t block_id;   // Block ID
-    uint32_t size;       // Block size (including header)
-    uint32_t used_size;  // Used size
-    uint32_t magic;      // Magic number (for validation)
+    uint32_t block_id{0};          // Block ID
+    uint32_t size{0};              // Block size (including header)
+    uint32_t used_size{0};         // Used size
+    uint32_t magic{MAGIC_NUMBER};  // Magic number (for validation)
 
-    BlockHeader *next_free;  // Next free block (for free list)
+    BlockHeader *next_free{nullptr};  // Next free block (for free list)
 
     static constexpr uint32_t MAGIC_NUMBER = 0xDEADBEEF;
 
-    BlockHeader();
+    BlockHeader() = default;
 
-    bool is_valid() const;
+    bool is_valid() const { return magic == MAGIC_NUMBER; }
 
-    size_t available_space() const;
+    size_t available_space() const { return size - sizeof(BlockHeader) - used_size; }
   };
 
   /**
@@ -119,10 +119,10 @@ class VarlenDataPool : public MemoryObject {
    * Variable-length data reference (stored in CU's main data area)
    */
   struct SHANNON_ALIGNAS VarlenReference {
-    uint32_t block_id;     // Block ID
-    uint32_t offset;       // Offset within block
-    uint32_t length;       // Data length
-    uint8_t storage_type;  // Storage type
+    uint32_t block_id{0};          // Block ID
+    uint32_t offset{0};            // Offset within block
+    uint32_t length{0};            // Data length
+    uint8_t storage_type{INLINE};  // Storage type
 
     enum Storage_Type : uint8_t {
       INLINE = 0,   // Inline storage (stored in CU data area)
@@ -130,40 +130,40 @@ class VarlenDataPool : public MemoryObject {
       OVERFLOW = 2  // Overflow storage (external file)
     };
 
-    VarlenReference();
+    VarlenReference() = default;
 
-    bool is_inline() const;
-    bool is_pool() const;
-    bool is_overflow() const;
+    bool is_inline() const { return storage_type == INLINE; }
+    bool is_pool() const { return storage_type == POOL; }
+    bool is_overflow() const { return storage_type == OVERFLOW; }
   };
 
   /**
    * Overflow page (external storage)
    */
   struct SHANNON_ALIGNAS OverflowPage {
-    uint64_t page_id;      // Page ID
-    uint32_t page_size;    // Page size
-    uint32_t data_length;  // Actual data length
+    uint64_t page_id{0};      // Page ID
+    uint32_t page_size{0};    // Page size
+    uint32_t data_length{0};  // Actual data length
 
-    std::string file_path;  // File path
-    uint64_t file_offset;   // File offset
+    std::string file_path;    // File path
+    uint64_t file_offset{0};  // File offset
 
     // Optional: memory mapping
-    uchar *mapped_data;  // Mapped data pointer
+    uchar *mapped_data{nullptr};  // Mapped data pointer
 
-    OverflowPage();
+    OverflowPage() = default;
   };
 
   /**
    * Allocation statistics
    */
   struct SHANNON_ALIGNAS AllocationStats {
-    size_t allocation_count;
-    size_t deallocation_count;
-    size_t overflow_count;
-    size_t total_size;
-    size_t used_size;
-    double fragmentation_ratio;
+    size_t allocation_count{0};
+    size_t deallocation_count{0};
+    size_t overflow_count{0};
+    size_t total_size{0};
+    size_t used_size{0};
+    double fragmentation_ratio{0.0};
   };
 
   /**
@@ -260,12 +260,12 @@ class VarlenDataPool : public MemoryObject {
  private:
   // Pool metadata
   struct SHANNON_ALIGNAS PoolHeader {
-    size_t total_size;   // Total size
-    size_t used_size;    // Used size
-    size_t block_count;  // Block count
-    size_t free_blocks;  // Free block count
+    size_t total_size{0};   // Total size
+    size_t used_size{0};    // Used size
+    size_t block_count{0};  // Block count
+    size_t free_blocks{0};  // Free block count
 
-    PoolHeader();
+    PoolHeader() = default;
   };
 
   PoolHeader m_header;
@@ -277,10 +277,10 @@ class VarlenDataPool : public MemoryObject {
 
   // Free block linked list (grouped by size)
   struct SHANNON_ALIGNAS FreeList {
-    BlockHeader *head;
-    size_t count;
+    BlockHeader *head{nullptr};
+    size_t count{0};
 
-    FreeList();
+    FreeList() = default;
   };
 
   // Free lists (different size levels)

@@ -30,11 +30,11 @@
 
 #include <limits.h>
 #include <iostream>
-#include <random>
-#include <regex>
 
 #include "sql/field.h"                    //Field
 #include "sql/field_common_properties.h"  // is_numeric_type
+
+#include "storage/innobase/include/ut0dbg.h"
 
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -42,28 +42,6 @@
 
 namespace ShannonBase {
 namespace Imcs {
-ColumnStatistics::BasicStats::BasicStats()
-    : min_value(DBL_MAX),
-      max_value(DBL_MIN),
-      sum(0.0),
-      avg(0.0),
-      variance(0.0),
-      stddev(0.0),
-      row_count(0),
-      null_count(0),
-      distinct_count(0),
-      null_fraction(0.0),
-      cardinality(0.0) {}
-
-ColumnStatistics::StringStats::StringStats() : avg_length(0.0), max_length(0), min_length(UINT64_MAX), empty_count(0) {}
-
-ColumnStatistics::EquiHeightHistogram::Bucket::Bucket()
-    : lower_bound(0.0), upper_bound(0.0), count(0), distinct_count(0) {}
-
-ColumnStatistics::EquiHeightHistogram::EquiHeightHistogram(size_t num_buckets) : m_bucket_count(num_buckets) {
-  m_buckets.reserve(num_buckets);
-}
-
 void ColumnStatistics::EquiHeightHistogram::build(const std::vector<double> &values) {
   if (values.empty()) return;
 
@@ -101,8 +79,8 @@ void ColumnStatistics::EquiHeightHistogram::build(const std::vector<double> &val
 double ColumnStatistics::EquiHeightHistogram::estimate_selectivity(double lower, double upper) const {
   if (m_buckets.empty()) return 0.5;
 
-  uint64_t estimated_rows = 0;
-  uint64_t total_rows = 0;
+  uint64 estimated_rows = 0;
+  uint64 total_rows = 0;
 
   for (const auto &bucket : m_buckets) {
     total_rows += bucket.count;
@@ -123,7 +101,7 @@ double ColumnStatistics::EquiHeightHistogram::estimate_selectivity(double lower,
 
       if (bucket_range > 0) {
         double ratio = overlap_range / bucket_range;
-        estimated_rows += static_cast<uint64_t>(bucket.count * ratio);
+        estimated_rows += static_cast<uint64>(bucket.count * ratio);
       }
     }
   }
@@ -143,22 +121,13 @@ double ColumnStatistics::EquiHeightHistogram::estimate_equality_selectivity(doub
   return 0.0;
 }
 
-uint64_t ColumnStatistics::EquiHeightHistogram::get_total_rows() const {
-  uint64_t total = 0;
+uint64 ColumnStatistics::EquiHeightHistogram::get_total_rows() const {
+  uint64 total = 0;
   for (const auto &bucket : m_buckets) {
     total += bucket.count;
   }
   return total;
 }
-
-size_t ColumnStatistics::EquiHeightHistogram::get_bucket_count() const { return m_buckets.size(); }
-
-const std::vector<ColumnStatistics::EquiHeightHistogram::Bucket> &ColumnStatistics::EquiHeightHistogram::get_buckets()
-    const {
-  return m_buckets;
-}
-
-ColumnStatistics::Quantiles::Quantiles() { std::fill(std::begin(values), std::end(values), 0.0); }
 
 void ColumnStatistics::Quantiles::compute(const std::vector<double> &sorted_values) {
   if (sorted_values.empty()) return;
@@ -180,16 +149,12 @@ double ColumnStatistics::Quantiles::get_percentile(double p) const {
   return values[idx];
 }
 
-double ColumnStatistics::Quantiles::get_median() const { return values[50]; }
-
-ColumnStatistics::HyperLogLog::HyperLogLog() : m_registers(NUM_REGISTERS, 0) {}
-
-void ColumnStatistics::HyperLogLog::add(uint64_t hash) {
+void ColumnStatistics::HyperLogLog::add(uint64 hash) {
   // 1. Extract register index (low REGISTER_BITS bits)
   size_t idx = hash & ((1 << REGISTER_BITS) - 1);
 
   // 2. Calculate leading zero count
-  uint64_t remaining = hash >> REGISTER_BITS;
+  uint64 remaining = hash >> REGISTER_BITS;
   uint8_t leading_zeros = count_leading_zeros(remaining) + 1;
 
   // 3. Update register (take maximum)
@@ -198,7 +163,7 @@ void ColumnStatistics::HyperLogLog::add(uint64_t hash) {
   }
 }
 
-uint64_t ColumnStatistics::HyperLogLog::estimate() const {
+uint64 ColumnStatistics::HyperLogLog::estimate() const {
   double alpha = 0.7213 / (1.0 + 1.079 / NUM_REGISTERS);
 
   double sum = 0.0;
@@ -218,7 +183,7 @@ uint64_t ColumnStatistics::HyperLogLog::estimate() const {
     estimate = NUM_REGISTERS * std::log(static_cast<double>(NUM_REGISTERS) / zero_count);
   }
 
-  return static_cast<uint64_t>(estimate);
+  return static_cast<uint64>(estimate);
 }
 
 void ColumnStatistics::HyperLogLog::merge(const HyperLogLog &other) {
@@ -227,7 +192,7 @@ void ColumnStatistics::HyperLogLog::merge(const HyperLogLog &other) {
   }
 }
 
-uint8_t ColumnStatistics::HyperLogLog::count_leading_zeros(uint64_t x) {
+uint8_t ColumnStatistics::HyperLogLog::count_leading_zeros(uint64 x) {
   if (x == 0) return 64;
 
   uint8_t count = 0;
@@ -236,10 +201,6 @@ uint8_t ColumnStatistics::HyperLogLog::count_leading_zeros(uint64_t x) {
     x <<= 1;
   }
   return count;
-}
-
-ColumnStatistics::ReservoirSampler::ReservoirSampler(size_t sample_size) : m_sample_size(sample_size), m_seen_count(0) {
-  m_samples.reserve(sample_size);
 }
 
 void ColumnStatistics::ReservoirSampler::add(double value) {
@@ -254,13 +215,6 @@ void ColumnStatistics::ReservoirSampler::add(double value) {
       m_samples[idx] = value;
     }
   }
-}
-
-const std::vector<double> &ColumnStatistics::ReservoirSampler::get_samples() const { return m_samples; }
-
-double ColumnStatistics::ReservoirSampler::get_sample_rate() const {
-  if (m_seen_count == 0) return 0.0;
-  return static_cast<double>(m_samples.size()) / m_seen_count;
 }
 
 ColumnStatistics::ColumnStatistics(uint32_t col_id, const std::string &col_name, enum_field_types col_type)
@@ -290,7 +244,7 @@ void ColumnStatistics::update(double value) {
   m_sampler->add(value);
 
   // Update HyperLogLog
-  uint64_t hash = std::hash<double>{}(value);
+  uint64 hash = std::hash<double>{}(value);
   m_hll->add(hash);
 }
 
@@ -319,7 +273,7 @@ void ColumnStatistics::update(const std::string &value) {
   }
 
   // Update HyperLogLog
-  uint64_t hash = std::hash<std::string>{}(value);
+  uint64 hash = std::hash<std::string>{}(value);
   m_hll->add(hash);
 }
 
@@ -355,14 +309,6 @@ void ColumnStatistics::finalize() {
   m_last_update = std::chrono::system_clock::now();
   m_version++;
 }
-
-const ColumnStatistics::BasicStats &ColumnStatistics::get_basic_stats() const { return m_basic_stats; }
-
-const ColumnStatistics::StringStats *ColumnStatistics::get_string_stats() const { return m_string_stats.get(); }
-
-const ColumnStatistics::EquiHeightHistogram *ColumnStatistics::get_histogram() const { return m_histogram.get(); }
-
-const ColumnStatistics::Quantiles *ColumnStatistics::get_quantiles() const { return m_quantiles.get(); }
 
 double ColumnStatistics::estimate_range_selectivity(double lower, double upper) const {
   if (m_histogram) {

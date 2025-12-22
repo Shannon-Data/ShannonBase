@@ -30,30 +30,12 @@
 
 namespace ShannonBase {
 namespace Imcs {
-PredicateValue::PredicateValue() : type(PredicateValueType::NULL_VALUE), ptr_value(nullptr) {}
-
-PredicateValue::PredicateValue(int64_t val) : type(PredicateValueType::INT), int_value(val) {}
-
-PredicateValue::PredicateValue(double val) : type(PredicateValueType::DOUBLE), double_value(val) {}
-
-PredicateValue::PredicateValue(const std::string &val) : type(PredicateValueType::STRING), string_value(val) {}
-
-PredicateValue::PredicateValue(const char *val) : type(PredicateValueType::STRING), string_value(val) {}
-
-PredicateValue PredicateValue::null_value() {
-  PredicateValue val;
-  val.type = PredicateValueType::NULL_VALUE;
-  return val;
-}
-
-bool PredicateValue::is_null() const { return type == PredicateValueType::NULL_VALUE; }
-
-int64_t PredicateValue::as_int() const {
+int64 PredicateValue::as_int() const {
   switch (type) {
     case PredicateValueType::INT:
       return int_value;
     case PredicateValueType::DOUBLE:
-      return static_cast<int64_t>(double_value);
+      return static_cast<int64>(double_value);
     case PredicateValueType::STRING:
       return std::stoll(string_value);
     default:
@@ -87,46 +69,6 @@ std::string PredicateValue::as_string() const {
   }
 }
 
-bool PredicateValue::operator==(const PredicateValue &other) const {
-  if (type != other.type) return false;
-
-  switch (type) {
-    case PredicateValueType::NULL_VALUE:
-      return true;
-    case PredicateValueType::INT:
-      return int_value == other.int_value;
-    case PredicateValueType::DOUBLE:
-      return std::abs(double_value - other.double_value) < 1e-9;
-    case PredicateValueType::STRING:
-      return string_value == other.string_value;
-    default:
-      return false;
-  }
-}
-
-bool PredicateValue::operator<(const PredicateValue &other) const {
-  if (type != other.type) return false;
-
-  switch (type) {
-    case PredicateValueType::INT:
-      return int_value < other.int_value;
-    case PredicateValueType::DOUBLE:
-      return double_value < other.double_value;
-    case PredicateValueType::STRING:
-      return string_value < other.string_value;
-    default:
-      return false;
-  }
-}
-
-bool PredicateValue::operator<=(const PredicateValue &other) const { return *this < other || *this == other; }
-
-bool PredicateValue::operator>(const PredicateValue &other) const { return !(*this <= other); }
-
-bool PredicateValue::operator>=(const PredicateValue &other) const { return !(*this < other); }
-
-bool PredicateValue::operator!=(const PredicateValue &other) const { return !(*this == other); }
-
 void Predicate::evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
                                bit_array_t &result) const {
   // Default implementation: row-by-row evaluation
@@ -139,18 +81,6 @@ void Predicate::evaluate_batch(const unsigned char **row_data, size_t num_rows, 
     }
   }
 }
-
-Simple_Predicate::Simple_Predicate(uint32_t col_id, PredicateOperator op_type, const PredicateValue &val,
-                                   enum_field_types type)
-    : Predicate(op_type), column_id(col_id), value(val), column_type(type) {}
-
-Simple_Predicate::Simple_Predicate(uint32_t col_id, const PredicateValue &min_val, const PredicateValue &max_val,
-                                   enum_field_types type)
-    : Predicate(PredicateOperator::BETWEEN), column_id(col_id), value(min_val), value2(max_val), column_type(type) {}
-
-Simple_Predicate::Simple_Predicate(uint32_t col_id, const std::vector<PredicateValue> &values, bool is_not_in,
-                                   enum_field_types type)
-    : Predicate(is_not_in ? PredicateOperator::NOT_IN : PredicateOperator::IN), value_list(values), column_type(type) {}
 
 bool Simple_Predicate::evaluate(const unsigned char **row_data, size_t num_columns) const {
   if (column_id >= num_columns) return false;
@@ -296,7 +226,7 @@ bool Simple_Predicate::apply_storage_index(const StorageIndex *storage_index) co
   }
 }
 
-std::vector<uint32_t> Simple_Predicate::get_columns() const { return {column_id}; }
+std::vector<uint32> Simple_Predicate::get_columns() const { return {column_id}; }
 
 std::unique_ptr<Predicate> Simple_Predicate::clone() const { return std::make_unique<Simple_Predicate>(*this); }
 
@@ -605,16 +535,16 @@ PredicateValue Simple_Predicate::extract_value(const unsigned char *data) const 
 
   switch (column_type) {
     case MYSQL_TYPE_TINY:
-      return PredicateValue(static_cast<int64_t>(*reinterpret_cast<const int8_t *>(data)));
+      return PredicateValue(static_cast<int64>(*reinterpret_cast<const int8_t *>(data)));
 
     case MYSQL_TYPE_SHORT:
-      return PredicateValue(static_cast<int64_t>(*reinterpret_cast<const int16_t *>(data)));
+      return PredicateValue(static_cast<int64>(*reinterpret_cast<const int16_t *>(data)));
 
     case MYSQL_TYPE_LONG:
-      return PredicateValue(static_cast<int64_t>(*reinterpret_cast<const int32_t *>(data)));
+      return PredicateValue(static_cast<int64>(*reinterpret_cast<const int32_t *>(data)));
 
     case MYSQL_TYPE_LONGLONG:
-      return PredicateValue(*reinterpret_cast<const int64_t *>(data));
+      return PredicateValue(*reinterpret_cast<const int64 *>(data));
 
     case MYSQL_TYPE_FLOAT:
       return PredicateValue(static_cast<double>(*reinterpret_cast<const float *>(data)));
@@ -884,8 +814,8 @@ bool Compound_Predicate::apply_storage_index(const StorageIndex *storage_index) 
   }
 }
 
-std::vector<uint32_t> Compound_Predicate::get_columns() const {
-  std::vector<uint32_t> columns;
+std::vector<uint32> Compound_Predicate::get_columns() const {
+  std::vector<uint32> columns;
 
   for (const auto &child : children) {
     auto child_cols = child->get_columns();
@@ -978,19 +908,18 @@ double Compound_Predicate::estimate_selectivity(const StorageIndex *storage_inde
   }
 }
 
-std::unique_ptr<Simple_Predicate> Predicate_Builder::create_simple(uint32_t col_id, PredicateOperator op,
+std::unique_ptr<Simple_Predicate> Predicate_Builder::create_simple(uint32 col_id, PredicateOperator op,
                                                                    const PredicateValue &value, enum_field_types type) {
   return std::make_unique<Simple_Predicate>(col_id, op, value, type);
 }
 
-std::unique_ptr<Simple_Predicate> Predicate_Builder::create_between(uint32_t col_id, const PredicateValue &min_val,
+std::unique_ptr<Simple_Predicate> Predicate_Builder::create_between(uint32 col_id, const PredicateValue &min_val,
                                                                     const PredicateValue &max_val,
                                                                     enum_field_types type) {
   return std::make_unique<Simple_Predicate>(col_id, min_val, max_val, type);
 }
 
-std::unique_ptr<Simple_Predicate> Predicate_Builder::create_in(uint32_t col_id,
-                                                               const std::vector<PredicateValue> &values,
+std::unique_ptr<Simple_Predicate> Predicate_Builder::create_in(uint32 col_id, const std::vector<PredicateValue> &values,
                                                                bool is_not_in, enum_field_types type) {
   return std::make_unique<Simple_Predicate>(col_id, values, is_not_in, type);
 }
