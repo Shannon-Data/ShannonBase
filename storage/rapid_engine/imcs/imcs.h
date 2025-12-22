@@ -31,7 +31,6 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
-#include <tuple>
 #include <unordered_map>
 
 #include "my_inttypes.h"
@@ -60,8 +59,8 @@ class DataTable;
 class Imcs : public MemoryObject {
  public:
   // make ctor and dctor private.
-  Imcs() {}
-  virtual ~Imcs() {}
+  Imcs() = default;
+  virtual ~Imcs() = default;
 
   int initialize();
   int deinitialize();
@@ -295,6 +294,10 @@ class PartitionLoadThreadContext {
  public:
   PartitionLoadThreadContext() : m_thd(nullptr), m_handler(nullptr), m_table(nullptr) { my_thread_init(); }
 
+  // Prevent copying
+  PartitionLoadThreadContext(const PartitionLoadThreadContext &) = delete;
+  PartitionLoadThreadContext &operator=(const PartitionLoadThreadContext &) = delete;
+
   ~PartitionLoadThreadContext() {
     cleanup();
     my_thread_end();
@@ -343,14 +346,9 @@ class PartitionLoadThreadContext {
   inline ha_innopart *handler() { return m_handler; }
   inline TABLE *table() { return m_table; }
 
-  // Prevent copying
-  PartitionLoadThreadContext(const PartitionLoadThreadContext &) = delete;
-  PartitionLoadThreadContext &operator=(const PartitionLoadThreadContext &) = delete;
-
   inline void set_error() { m_error.store(true); }
 
   int end_transactions();
-  void cleanup();
 
   bool allocate_buffer(size_t size) {
     m_buff_size = size;
@@ -362,6 +360,8 @@ class PartitionLoadThreadContext {
   inline uchar *allocated_buffer() const { return m_rec_buff.get(); }
 
  private:
+  void cleanup();
+
   std::atomic<bool> m_error{false};
   bool m_transactions_ended{false};
   THD *m_thd{nullptr};
@@ -383,14 +383,12 @@ class PartitionLoadHandlerLock {
     }
   }
 
-  virtual ~PartitionLoadHandlerLock() { unlock(); }
-
-  inline bool is_locked() const { return m_locked; }
-
-  // Prevent copying
   PartitionLoadHandlerLock(const PartitionLoadHandlerLock &) = delete;
   PartitionLoadHandlerLock &operator=(const PartitionLoadHandlerLock &) = delete;
 
+  virtual ~PartitionLoadHandlerLock() { unlock(); }
+
+  inline bool is_locked() const { return m_locked; }
   void unlock() {
     if (m_locked && m_handler) {
       m_handler->ha_external_lock(m_thd, F_UNLCK);
@@ -399,8 +397,8 @@ class PartitionLoadHandlerLock {
   }
 
  private:
-  handler *m_handler;
-  THD *m_thd;
+  handler *m_handler{nullptr};
+  THD *m_thd{nullptr};
   bool m_locked;
 };
 }  // namespace Imcs

@@ -75,7 +75,7 @@ class Lz4Compressor final : public CompressAlgorithm {
 
   std::string decompress(std::string_view data) const override {
     if (data.empty()) return {};
-    std::string out(data.size() * 4, '\0');  // 保守估计
+    std::string out(data.size() * 4, '\0');
     const int sz =
         LZ4_decompress_safe(data.data(), out.data(), static_cast<int>(data.size()), static_cast<int>(out.capacity()));
     if (sz < 0) return {};

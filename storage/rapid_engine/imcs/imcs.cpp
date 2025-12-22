@@ -137,6 +137,7 @@ void PartitionLoadThreadContext::cleanup() {
 
     m_table = nullptr;
   }
+
   if (m_thd) {
     m_thd->restore_globals();
     delete m_thd;
@@ -315,13 +316,13 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     source_table = m_rpd_tables[table_id].get();
   }
 
-  struct ScanCtxGuard {
+  struct ParallelScanCtxGuard {
     handler *file;
     void *ctx{nullptr};
     std::vector<parall_scan_cookie_t *> thread_ctxs;
     std::vector<std::unique_ptr<parall_scan_cookie_t>> cookie_storage;
-    ScanCtxGuard(handler *f) : file(f) {}
-    ~ScanCtxGuard() {
+    ParallelScanCtxGuard(handler *f) : file(f) {}
+    ~ParallelScanCtxGuard() {
       if (ctx) file->parallel_scan_end(ctx);
       cookie_storage.clear();
       thread_ctxs.clear();
@@ -408,7 +409,6 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
                                     init_fn, load_fn, end_fn);
   // Wait for scan to complete or error
   if (!completion_latch->wait_for(std::chrono::seconds(900))) {
-    // Timeout occurred
     std::string errmsg;
     errmsg.append("Parallel load timeout for ")
         .append(context->m_schema_name.c_str())

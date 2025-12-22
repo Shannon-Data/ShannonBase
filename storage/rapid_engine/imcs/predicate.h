@@ -52,6 +52,8 @@
 #include <vector>
 
 #include "include/field_types.h"  // enum_field_types
+#include "my_inttypes.h"
+
 #include "storage/rapid_engine/include/rapid_object.h"
 
 namespace ShannonBase {
@@ -109,32 +111,66 @@ class PredicateValue {
   PredicateValueType type;
 
   union {
-    int64_t int_value;
+    int64 int_value;
     double double_value;
     void *ptr_value;
   };
 
   std::string string_value;  // Used for strings and BLOBs
 
-  PredicateValue();
-  explicit PredicateValue(int64_t val);
-  explicit PredicateValue(double val);
-  explicit PredicateValue(const std::string &val);
-  explicit PredicateValue(const char *val);
+  PredicateValue() : type(PredicateValueType::NULL_VALUE), ptr_value(nullptr) {}
+  explicit PredicateValue(int64 val) : type(PredicateValueType::INT), int_value(val) {}
+  explicit PredicateValue(double val) : type(PredicateValueType::DOUBLE), double_value(val) {}
+  explicit PredicateValue(const std::string &val) : type(PredicateValueType::STRING), string_value(val) {}
+  explicit PredicateValue(const char *val) : type(PredicateValueType::STRING), string_value(val) {}
 
-  static PredicateValue null_value();
-  bool is_null() const;
+  static PredicateValue null_value() {
+    PredicateValue val;
+    val.type = PredicateValueType::NULL_VALUE;
+    return val;
+  }
 
-  int64_t as_int() const;
+  bool is_null() const { return type == PredicateValueType::NULL_VALUE; }
+
+  int64 as_int() const;
   double as_double() const;
   std::string as_string() const;
 
-  bool operator==(const PredicateValue &other) const;
-  bool operator<(const PredicateValue &other) const;
-  bool operator<=(const PredicateValue &other) const;
-  bool operator>(const PredicateValue &other) const;
-  bool operator>=(const PredicateValue &other) const;
-  bool operator!=(const PredicateValue &other) const;
+  bool operator==(const PredicateValue &other) const {
+    if (type != other.type) return false;
+
+    switch (type) {
+      case PredicateValueType::NULL_VALUE:
+        return true;
+      case PredicateValueType::INT:
+        return int_value == other.int_value;
+      case PredicateValueType::DOUBLE:
+        return std::abs(double_value - other.double_value) < 1e-9;
+      case PredicateValueType::STRING:
+        return string_value == other.string_value;
+      default:
+        return false;
+    }
+  }
+
+  bool operator<(const PredicateValue &other) const {
+    if (type != other.type) return false;
+
+    switch (type) {
+      case PredicateValueType::INT:
+        return int_value < other.int_value;
+      case PredicateValueType::DOUBLE:
+        return double_value < other.double_value;
+      case PredicateValueType::STRING:
+        return string_value < other.string_value;
+      default:
+        return false;
+    }
+  }
+  bool operator<=(const PredicateValue &other) const { return *this < other || *this == other; }
+  bool operator>(const PredicateValue &other) const { return !(*this <= other); }
+  bool operator>=(const PredicateValue &other) const { return !(*this < other); }
+  bool operator!=(const PredicateValue &other) const { return !(*this == other); }
 };
 
 /**
@@ -178,7 +214,7 @@ class Predicate {
   /**
    * Get involved columns
    */
-  virtual std::vector<uint32_t> get_columns() const = 0;
+  virtual std::vector<uint32> get_columns() const = 0;
 
   /**
    * Clone predicate
@@ -207,16 +243,21 @@ class Predicate {
  */
 class Simple_Predicate : public Predicate {
  public:
-  Simple_Predicate(uint32_t col_id, PredicateOperator op_type, const PredicateValue &val,
-                   enum_field_types type = MYSQL_TYPE_NULL);
+  Simple_Predicate(uint32 col_id, PredicateOperator op_type, const PredicateValue &val,
+                   enum_field_types type = MYSQL_TYPE_NULL)
+      : Predicate(op_type), column_id(col_id), value(val), column_type(type) {}
 
   // BETWEEN constructor
-  Simple_Predicate(uint32_t col_id, const PredicateValue &min_val, const PredicateValue &max_val,
-                   enum_field_types type = MYSQL_TYPE_NULL);
+  Simple_Predicate(uint32 col_id, const PredicateValue &min_val, const PredicateValue &max_val,
+                   enum_field_types type = MYSQL_TYPE_NULL)
+      : Predicate(PredicateOperator::BETWEEN), column_id(col_id), value(min_val), value2(max_val), column_type(type) {}
 
   // IN constructor
-  Simple_Predicate(uint32_t col_id, const std::vector<PredicateValue> &values, bool is_not_in = false,
-                   enum_field_types type = MYSQL_TYPE_NULL);
+  Simple_Predicate(uint32 col_id, const std::vector<PredicateValue> &values, bool is_not_in = false,
+                   enum_field_types type = MYSQL_TYPE_NULL)
+      : Predicate(is_not_in ? PredicateOperator::NOT_IN : PredicateOperator::IN),
+        value_list(values),
+        column_type(type) {}
 
   // Evaluation implementation
   bool evaluate(const unsigned char **row_data, size_t num_columns) const override;
@@ -228,13 +269,13 @@ class Simple_Predicate : public Predicate {
   bool apply_storage_index(const StorageIndex *storage_index) const override;
 
   // Helper methods
-  std::vector<uint32_t> get_columns() const override;
+  std::vector<uint32> get_columns() const override;
   std::unique_ptr<Predicate> clone() const override;
   std::string to_string() const override;
   double estimate_selectivity(const StorageIndex *storage_index = nullptr) const override;
 
  public:
-  uint32_t column_id;                      // Column index
+  uint32 column_id;                        // Column index
   PredicateValue value;                    // Comparison value
   PredicateValue value2;                   // Second value (for BETWEEN)
   std::vector<PredicateValue> value_list;  // Value list (for IN)
@@ -273,7 +314,7 @@ class Compound_Predicate : public Predicate {
   bool apply_storage_index(const StorageIndex *storage_index) const override;
 
   // Helper methods
-  std::vector<uint32_t> get_columns() const override;
+  std::vector<uint32> get_columns() const override;
   std::unique_ptr<Predicate> clone() const override;
   std::string to_string() const override;
   double estimate_selectivity(const StorageIndex *storage_index = nullptr) const override;
@@ -287,15 +328,15 @@ class Compound_Predicate : public Predicate {
  */
 class Predicate_Builder {
  public:
-  static std::unique_ptr<Simple_Predicate> create_simple(uint32_t col_id, PredicateOperator op,
+  static std::unique_ptr<Simple_Predicate> create_simple(uint32 col_id, PredicateOperator op,
                                                          const PredicateValue &value,
                                                          enum_field_types type = MYSQL_TYPE_NULL);
 
-  static std::unique_ptr<Simple_Predicate> create_between(uint32_t col_id, const PredicateValue &min_val,
+  static std::unique_ptr<Simple_Predicate> create_between(uint32 col_id, const PredicateValue &min_val,
                                                           const PredicateValue &max_val,
                                                           enum_field_types type = MYSQL_TYPE_NULL);
 
-  static std::unique_ptr<Simple_Predicate> create_in(uint32_t col_id, const std::vector<PredicateValue> &values,
+  static std::unique_ptr<Simple_Predicate> create_in(uint32 col_id, const std::vector<PredicateValue> &values,
                                                      bool is_not_in = false, enum_field_types type = MYSQL_TYPE_NULL);
 
   static std::unique_ptr<Compound_Predicate> create_and(std::vector<std::unique_ptr<Predicate>> predicates);

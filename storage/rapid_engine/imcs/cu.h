@@ -25,17 +25,9 @@
 */
 #ifndef __SHANNONBASE_CU_H__
 #define __SHANNONBASE_CU_H__
-
-#include <algorithm>
 #include <atomic>
-#include <cfloat>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <functional>
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include "field_types.h"  //for MYSQL_TYPE_XXX
@@ -66,10 +58,10 @@ class Imcu;
 class CU : public MemoryObject {
  public:
   // CU Header
-  struct CU_header {
+  struct SHANNON_ALIGNAS CU_header {
     // Basic Information
-    Imcu *owner_imcu{nullptr};           // Back reference to IMCU
-    std::atomic<uint32_t> column_id{0};  // Column index
+    Imcu *owner_imcu{nullptr};         // Back reference to IMCU
+    std::atomic<uint32> column_id{0};  // Column index
 
     Field *field_metadata{nullptr};            // Field metadata
     enum_field_types type{MYSQL_TYPE_NULL};    // Data type
@@ -105,7 +97,7 @@ class CU : public MemoryObject {
   };
 
  public:
-  CU(Imcu *owner, const FieldMetadata &field_meta, uint32_t col_idx, size_t capacity,
+  CU(Imcu *owner, const FieldMetadata &field_meta, uint32 col_idx, size_t capacity,
      std::shared_ptr<ShannonBase::Utils::MemoryPool> mem_pool);
 
   virtual ~CU() = default;
@@ -206,7 +198,7 @@ class CU : public MemoryObject {
    * @param encoded: Encoded value (dictionary ID)
    * @return: Returns true if successful
    */
-  bool encode_value(const Rapid_context *context, const uchar *data, size_t len, uint32_t &encoded);
+  bool encode_value(const Rapid_context *context, const uchar *data, size_t len, uint32 &encoded);
 
   /**
    * Dictionary decoding
@@ -215,7 +207,7 @@ class CU : public MemoryObject {
    * @param len: Output length
    * @return: Returns true if successful
    */
-  bool decode_value(const Rapid_context *context, uint32_t encoded, uchar *buffer, size_t &len) const;
+  bool decode_value(const Rapid_context *context, uint32 encoded, uchar *buffer, size_t &len) const;
 
   /**
    * Compress column data (background compression)
@@ -307,18 +299,15 @@ class CU : public MemoryObject {
    */
   class ColumnVersionManager {
    public:
-    struct Column_Version {
-      Transaction::ID txn_id;
-      uint64_t scn;
+    struct SHANNON_ALIGNAS Column_Version {
+      Transaction::ID txn_id{Transaction::MAX_ID};
+      uint64_t scn{0};
       std::chrono::system_clock::time_point timestamp;
 
       // Column value (does not include metadata, metadata is in IMCU's Transaction Journal)
-      std::unique_ptr<uchar[]> old_value;
-      size_t value_length;
-
+      std::unique_ptr<uchar[]> old_value{nullptr};
+      size_t value_length{0};
       Column_Version *prev{nullptr};  // Version chain
-
-      Column_Version() : value_length(0), prev(nullptr) {}
     };
 
    private:
@@ -352,7 +341,7 @@ class CU : public MemoryObject {
     }
   };
 
-  std::unique_ptr<ColumnVersionManager> m_version_manager;
+  std::unique_ptr<ColumnVersionManager> m_version_manager{nullptr};
 
   // Locking and Concurrency Control
   // CU-level lock (protects data writes)

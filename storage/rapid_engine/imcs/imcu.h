@@ -47,11 +47,7 @@
 #ifndef __SHANNONBASE_IMCU_H__
 #define __SHANNONBASE_IMCU_H__
 
-#include <algorithm>
 #include <atomic>  //std::atomic<T>
-#include <ctime>
-#include <functional>
-#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -91,7 +87,7 @@ class Imcu : public MemoryObject {
   // IMCU Header
   struct SHANNON_ALIGNAS Imcu_header {
     // Basic Information
-    uint32_t imcu_id{0};                  // IMCU identifier
+    uint32 imcu_id{0};                    // IMCU identifier
     row_id_t start_row{0};                // Global start row ID
     row_id_t end_row{0};                  // Global end row ID (exclusive)
     size_t capacity{0};                   // Capacity (number of rows)
@@ -102,25 +98,25 @@ class Imcu : public MemoryObject {
 
     // Row-level Metadata (Shared). [TODO] In future we will use Hybrid Approach
     // Delete bitmap (shared across all columns)
-    std::unique_ptr<bit_array_t> del_mask;
+    std::unique_ptr<bit_array_t> del_mask{nullptr};
 
     // NULL bitmaps (per column)
     // null_masks[col_idx] = NULL bitmap of the column
     std::vector<std::unique_ptr<bit_array_t>> null_masks;
 
     // Lightweight transaction journal (metadata only)
-    std::unique_ptr<TransactionJournal> txn_journal;
+    std::unique_ptr<TransactionJournal> txn_journal{nullptr};
 
     // Storage index (per-column statistics)
-    std::unique_ptr<StorageIndex> storage_index;
+    std::unique_ptr<StorageIndex> storage_index{nullptr};
 
     // Optional row directory (for quick lookup of variable-length rows)
-    std::unique_ptr<RowDirectory> row_directory;
+    std::unique_ptr<RowDirectory> row_directory{nullptr};
 
     // IMCU-level Statistics
-    std::atomic<uint64_t> insert_count{0};
-    std::atomic<uint64_t> update_count{0};
-    std::atomic<uint64_t> delete_count{0};
+    std::atomic<uint64> insert_count{0};
+    std::atomic<uint64> update_count{0};
+    std::atomic<uint64> delete_count{0};
 
     std::atomic<double> avg_row_size{0};
     std::atomic<size_t> compressed_size{0};
@@ -129,8 +125,8 @@ class Imcu : public MemoryObject {
     // Transaction Boundaries
     Transaction::ID min_trx_id{Transaction::MAX_ID};
     Transaction::ID max_trx_id{0};
-    uint64_t min_scn{UINT64_MAX};
-    uint64_t max_scn{0};
+    uint64 min_scn{UINT64_MAX};
+    uint64 max_scn{0};
 
     // GC Information
     std::chrono::system_clock::time_point last_gc_time{std::chrono::system_clock::now()};
@@ -326,7 +322,7 @@ class Imcu : public MemoryObject {
    * @return SHANNON_SUCCESS on success
    */
   int update_row(const Rapid_load_context *context, row_id_t local_row_id,
-                 const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates);
+                 const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates);
 
   /**
    * Scan the IMCU (vectorized)
@@ -337,7 +333,7 @@ class Imcu : public MemoryObject {
    * @return number of scanned rows
    */
   size_t scan(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
-              const std::vector<uint32_t> &projection, RowCallback callback);
+              const std::vector<uint32> &projection, RowCallback callback);
 
   /**
   Imcu::scan_range - Scan a specified range within the IMCU
@@ -350,7 +346,7 @@ class Imcu : public MemoryObject {
   @return Actual number of rows scanned and returned
   */
   size_t scan_range(Rapid_scan_context *context, size_t start_offset, size_t limit,
-                    const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32_t> &projection,
+                    const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
                     RowCallback callback);
   /**
    * Check row visibility (core: single-row check)
@@ -361,7 +357,7 @@ class Imcu : public MemoryObject {
    * @return true if visible
    */
   bool is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Transaction::ID reader_txn_id,
-                      uint64_t reader_scn) const;
+                      uint64 reader_scn) const;
 
   /**
    * Batch visibility check (vectorized)
@@ -380,7 +376,7 @@ class Imcu : public MemoryObject {
    * @param context: scan context
    * @param output: output buffer
    */
-  bool read_row(Rapid_scan_context *context, row_id_t local_row_id, const std::vector<uint32_t> &col_indices,
+  bool read_row(Rapid_scan_context *context, row_id_t local_row_id, const std::vector<uint32> &col_indices,
                 RowBuffer &output);
 
   // Storage Index Operations
@@ -402,7 +398,7 @@ class Imcu : public MemoryObject {
    * @param min_active_scn: minimum active SCN
    * @return number of bytes reclaimed
    */
-  size_t garbage_collect(uint64_t min_active_scn);
+  size_t garbage_collect(uint64 min_active_scn);
 
   /**
    * Compact this IMCU (remove deleted rows)
@@ -432,7 +428,7 @@ class Imcu : public MemoryObject {
 
   inline bool is_empty() const { return m_header.current_rows.load(std::memory_order_acquire) == 0; }
 
-  inline bool is_null(uint32_t col_idx, row_id_t local_row_id) {
+  inline bool is_null(uint32 col_idx, row_id_t local_row_id) {
     if (col_idx > m_header.null_masks.size()) return false;
     return Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id);
   }
@@ -488,12 +484,12 @@ class Imcu : public MemoryObject {
 
   inline TransactionJournal *get_transaction_journal() const { return m_header.txn_journal.get(); }
   // CU Management
-  inline CU *get_cu(uint32_t col_idx) {
+  inline CU *get_cu(uint32 col_idx) {
     auto it = m_column_units.find(col_idx);
     return (it != m_column_units.end()) ? it->second.get() : nullptr;
   }
 
-  inline const CU *get_cu(uint32_t col_idx) const { return get_cu(col_idx); }
+  inline const CU *get_cu(uint32 col_idx) const { return get_cu(col_idx); }
 
   // Serialization
   /**
@@ -541,7 +537,7 @@ class Imcu : public MemoryObject {
    * Record transaction log entry
    */
   void log_transaction(row_id_t local_row_id, OPER_TYPE operation, Transaction::ID txn_id,
-                       const std::unordered_map<uint32_t, RowBuffer::ColumnValue> *updates = nullptr) {}
+                       const std::unordered_map<uint32, RowBuffer::ColumnValue> *updates = nullptr) {}
 
   /**
    * Increment the internal version counter
@@ -555,7 +551,7 @@ class Imcu : public MemoryObject {
   Imcu_header m_header;
 
   // key: column_id, value: CU
-  std::unordered_map<uint32_t, std::unique_ptr<CU>> m_column_units;
+  std::unordered_map<uint32, std::unique_ptr<CU>> m_column_units;
 
   // Ordered CU index (for efficient batch operations)
   std::vector<CU *> m_cu_array;
@@ -567,7 +563,7 @@ class Imcu : public MemoryObject {
   std::mutex m_cu_creation_mutex;
 
   // Optimistic concurrency version counter
-  std::atomic<uint64_t> m_version{0};
+  std::atomic<uint64> m_version{0};
 
   // Back Reference
   RpdTable *m_owner_table;

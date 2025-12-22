@@ -41,7 +41,7 @@
 
 namespace ShannonBase {
 namespace Imcs {
-void StorageIndex::update(uint32_t col_idx, double value) {
+void StorageIndex::update(uint32 col_idx, double value) {
   if (col_idx >= m_num_columns) return;
 
   std::unique_lock lock(m_mutex);
@@ -65,7 +65,7 @@ void StorageIndex::update(uint32_t col_idx, double value) {
   }
 }
 
-void StorageIndex::update_null(uint32_t col_idx) {
+void StorageIndex::update_null(uint32 col_idx) {
   if (col_idx >= m_num_columns) return;
 
   std::unique_lock lock(m_mutex);
@@ -77,7 +77,7 @@ void StorageIndex::update_null(uint32_t col_idx) {
 
 void StorageIndex::rebuild(const Imcu *imcu) {}
 
-const StorageIndex::ColumnStats *StorageIndex::get_column_stats_snapshot(uint32_t col_idx) const {
+const StorageIndex::ColumnStats *StorageIndex::get_column_stats_snapshot(uint32 col_idx) const {
   if (col_idx >= m_num_columns) return nullptr;
 
   std::shared_lock lock(m_mutex);
@@ -87,7 +87,7 @@ const StorageIndex::ColumnStats *StorageIndex::get_column_stats_snapshot(uint32_
 bool StorageIndex::can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const {
   for (const auto &predict : predicates) {
     auto pred = down_cast<Simple_Predicate *>(predict.get());
-    uint32_t col_idx = pred->column_id;
+    uint32 col_idx = pred->column_id;
     if (col_idx >= m_num_columns) continue;
 
     // Use atomic loads for fast path checking
@@ -146,7 +146,7 @@ double StorageIndex::estimate_selectivity(const std::vector<Predicate> &predicat
   return std::max(0.0001, std::min(1.0, selectivity));
 }
 
-void StorageIndex::update_string_stats(uint32_t col_idx, const std::string &value) {
+void StorageIndex::update_string_stats(uint32 col_idx, const std::string &value) {
   if (col_idx >= m_num_columns) return;
 
   auto &stats = m_column_stats[col_idx];
@@ -310,7 +310,7 @@ RowBuffer::ColumnValue &RowBuffer::ColumnValue::operator=(ColumnValue &&other) n
   return *this;
 }
 
-void RowBuffer::set_column_zero_copy(uint32_t col_idx, const uchar *data, size_t length, enum_field_types type) {
+void RowBuffer::set_column_zero_copy(uint32 col_idx, const uchar *data, size_t length, enum_field_types type) {
   if (col_idx >= m_num_columns) return;
 
   ColumnValue &col = m_columns[col_idx];
@@ -329,7 +329,7 @@ void RowBuffer::set_columns_zero_copy(const uchar **data_ptrs, const size_t *len
   }
 }
 
-void RowBuffer::set_column_copy(uint32_t col_idx, const uchar *data, size_t length, enum_field_types type) {
+void RowBuffer::set_column_copy(uint32 col_idx, const uchar *data, size_t length, enum_field_types type) {
   if (col_idx >= m_num_columns) return;
   ColumnValue &col = m_columns[col_idx];
   col.length = length;
@@ -351,25 +351,25 @@ void RowBuffer::set_column_copy(uint32_t col_idx, const uchar *data, size_t leng
   }
 }
 
-int64_t RowBuffer::get_column_int(uint32_t col_idx) const {
+int64_t RowBuffer::get_column_int(uint32 col_idx) const {
   const ColumnValue *col = get_column(col_idx);
   if (!col || col->flags.is_null) return 0;
 
   switch (col->type) {
     case MYSQL_TYPE_TINY:
-      return *reinterpret_cast<const int8_t *>(col->data);
+      return *reinterpret_cast<const int8 *>(col->data);
     case MYSQL_TYPE_SHORT:
-      return *reinterpret_cast<const int16_t *>(col->data);
+      return *reinterpret_cast<const int16 *>(col->data);
     case MYSQL_TYPE_LONG:
-      return *reinterpret_cast<const int32_t *>(col->data);
+      return *reinterpret_cast<const int32 *>(col->data);
     case MYSQL_TYPE_LONGLONG:
-      return *reinterpret_cast<const int64_t *>(col->data);
+      return *reinterpret_cast<const int64 *>(col->data);
     default:
       return 0;
   }
 }
 
-double RowBuffer::get_column_double(uint32_t col_idx) const {
+double RowBuffer::get_column_double(uint32 col_idx) const {
   const ColumnValue *col = get_column(col_idx);
   if (!col || col->flags.is_null) return 0.0;
 
@@ -383,7 +383,7 @@ double RowBuffer::get_column_double(uint32_t col_idx) const {
   }
 }
 
-size_t RowBuffer::get_column_string(uint32_t col_idx, char *buffer, size_t buffer_size) const {
+size_t RowBuffer::get_column_string(uint32 col_idx, char *buffer, size_t buffer_size) const {
   const ColumnValue *col = get_column(col_idx);
   if (!col || col->flags.is_null || !col->data) {
     if (buffer_size > 0) buffer[0] = '\0';
@@ -562,7 +562,7 @@ int RowBuffer::copy_from_mysql_fields(const Rapid_load_context *context, uchar *
 
 int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) const {
   size_t read_set_col_idx{0};
-  for (uint32_t col_idx = 0; col_idx < to->s->fields; col_idx++) {
+  for (uint32 col_idx = 0; col_idx < to->s->fields; col_idx++) {
     Field *source_fld = to->field[col_idx];
     // Skip if not in read_set or marked as NOT_SECONDARY
     if (!bitmap_is_set(to->read_set, col_idx) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
@@ -584,7 +584,7 @@ int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) 
       if (source_fld->real_type() == MYSQL_TYPE_ENUM) {  // Handle ENUM type
         source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data, source_fld->pack_length());
       } else {  // Handle string/blob with dictionary encoding
-        auto rpd_field = meta->fields[col_idx];
+        auto &rpd_field = meta->fields[col_idx];
         if (rpd_field.dictionary) {  // Decode from dictionary
           auto text_id = *reinterpret_cast<const uint32 *>(col_value.data);
           auto text = rpd_field.dictionary->get(text_id);
@@ -609,7 +609,7 @@ boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *t
   std::vector<size_t> read_set_indices;
   read_set_indices.reserve(m_num_columns);
 
-  for (uint32_t col_idx = 0; col_idx < to->s->fields; col_idx++) {
+  for (uint32 col_idx = 0; col_idx < to->s->fields; col_idx++) {
     Field *source_fld = to->field[col_idx];
     if (!bitmap_is_set(to->read_set, col_idx) || source_fld->is_flag_set(NOT_SECONDARY_FLAG)) {
       continue;
@@ -633,7 +633,7 @@ boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *t
     auto field_read_pool = ShannonBase::Imcs::Imcs::pool();
     // Launch parallel tasks for each column in the batch
     for (size_t idx = batch_start; idx < batch_end; ++idx) {
-      uint32_t col_idx = read_set_indices[idx];
+      uint32 col_idx = read_set_indices[idx];
       Field *source_fld = to->field[col_idx];
       // Spawn async task for this column
       boost::asio::co_spawn(
@@ -672,7 +672,7 @@ boost::asio::awaitable<int> RowBuffer::copy_to_mysql_fields_async(const TABLE *t
                   source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data,
                                    source_fld->pack_length());
                 } else {  // Handle string/blob with dictionary encoding
-                  auto rpd_field = meta->fields[col_idx];
+                  auto &rpd_field = meta->fields[col_idx];
                   if (rpd_field.dictionary) {  // Decode from dictionary
                     auto text_id = *reinterpret_cast<const uint32 *>(col_value.data);
                     auto text = rpd_field.dictionary->get(text_id);
@@ -784,7 +784,7 @@ RowDirectory &RowDirectory::operator=(RowDirectory &&other) noexcept {
   return *this;
 }
 
-void RowDirectory::set_row_entry(row_id_t row_id, uint32_t offset, uint32_t length, bool is_compressed) {
+void RowDirectory::set_row_entry(row_id_t row_id, uint32 offset, uint32 length, bool is_compressed) {
   if (row_id >= m_capacity) return;
 
   std::unique_lock lock(m_mutex);
@@ -829,8 +829,8 @@ void RowDirectory::mark_overflow(row_id_t row_id) {
   m_overflow_count.fetch_add(1);
 }
 
-void RowDirectory::build_column_offset_table(row_id_t row_id, const std::vector<uint16_t> &column_offsets,
-                                             const std::vector<uint16_t> &column_lengths) {
+void RowDirectory::build_column_offset_table(row_id_t row_id, const std::vector<uint16> &column_offsets,
+                                             const std::vector<uint16> &column_lengths) {
   if (!m_enable_column_offsets || row_id >= m_capacity) return;
 
   std::unique_lock lock(m_mutex);
@@ -849,7 +849,7 @@ const RowDirectory::ColumnOffsetTable *RowDirectory::get_column_offset_table(row
   return (it != m_column_offset_tables.end()) ? it->second.get() : nullptr;
 }
 
-uint16_t RowDirectory::get_column_offset(row_id_t row_id, uint32_t col_idx) const {
+uint16 RowDirectory::get_column_offset(row_id_t row_id, uint32 col_idx) const {
   const RowDirectory::ColumnOffsetTable *table = get_column_offset_table(row_id);
   if (table && col_idx < table->column_offsets.size()) {
     return table->column_offsets[col_idx];
@@ -857,7 +857,7 @@ uint16_t RowDirectory::get_column_offset(row_id_t row_id, uint32_t col_idx) cons
   return UINT16_MAX;
 }
 
-uint16_t RowDirectory::get_column_length(row_id_t row_id, uint32_t col_idx) const {
+uint16 RowDirectory::get_column_length(row_id_t row_id, uint32 col_idx) const {
   const RowDirectory::ColumnOffsetTable *table = get_column_offset_table(row_id);
   if (table && col_idx < table->column_lengths.size()) {
     return table->column_lengths[col_idx];
@@ -865,7 +865,7 @@ uint16_t RowDirectory::get_column_length(row_id_t row_id, uint32_t col_idx) cons
   return 0;
 }
 
-void RowDirectory::get_batch_offsets(row_id_t start_row, size_t count, uint32_t *offsets, uint32_t *lengths) const {
+void RowDirectory::get_batch_offsets(row_id_t start_row, size_t count, uint32 *offsets, uint32 *lengths) const {
   std::shared_lock lock(m_mutex);
   size_t end = std::min(start_row + count, m_capacity);
   for (size_t i = start_row; i < end; i++) {
@@ -896,8 +896,8 @@ size_t RowDirectory::get_directory_size() const {
   std::shared_lock lock(m_mutex);
   size_t offset_table_size = 0;
   for (const auto &[row_id, table] : m_column_offset_tables) {
-    offset_table_size += table->column_offsets.size() * sizeof(uint16_t);
-    offset_table_size += table->column_lengths.size() * sizeof(uint16_t);
+    offset_table_size += table->column_offsets.size() * sizeof(uint16);
+    offset_table_size += table->column_lengths.size() * sizeof(uint16);
   }
   return base_size + offset_table_size;
 }
@@ -907,7 +907,7 @@ bool RowDirectory::validate() const {
   for (size_t i = 0; i < m_capacity; i++) {
     const RowEntry &entry = m_entries[i];
     // Verify checksum
-    uint32_t expected_checksum = compute_checksum(entry.offset, entry.length);
+    uint32 expected_checksum = compute_checksum(entry.offset, entry.length);
     if (entry.checksum != expected_checksum) return false;
   }
 

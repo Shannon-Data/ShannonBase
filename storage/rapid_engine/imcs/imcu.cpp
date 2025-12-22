@@ -92,7 +92,7 @@ row_id_t Imcu::insert_row(const Rapid_load_context *context, const RowBuffer &ro
   }
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
-  uint64_t scn = context->m_extra_info.m_scn;
+  uint64 scn = context->m_extra_info.m_scn;
 
   // 2. record Transaction_Journal, if it's not `load` oper.
   if (context->m_extra_info.m_oper != Rapid_context::extra_info_t::OperType::LOAD) {
@@ -156,7 +156,7 @@ int Imcu::delete_row(const Rapid_load_context *context, row_id_t local_row_id) {
 
   // 3. record transaction journal.
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
-  uint64_t scn = context->m_extra_info.m_scn;  // if committed.
+  uint64 scn = context->m_extra_info.m_scn;  // if committed.
 
   {
     std::unique_lock lock(m_header_mutex);
@@ -194,7 +194,7 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
   if (local_row_ids.empty()) return 0;
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
-  uint64_t scn = context->m_extra_info.m_scn;
+  uint64 scn = context->m_extra_info.m_scn;
 
   std::unique_lock lock(m_header_mutex);
 
@@ -235,7 +235,7 @@ size_t Imcu::delete_rows(const Rapid_load_context *context, const std::vector<ro
 }
 
 int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
-                     const std::unordered_map<uint32_t, RowBuffer::ColumnValue> &updates) {
+                     const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) {
   // 1. check boundary.
   if (local_row_id >= m_header.current_rows.load()) return HA_ERR_KEY_NOT_FOUND;
 
@@ -246,7 +246,7 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
   }
 
   Transaction::ID txn_id = context->m_extra_info.m_trxid;
-  uint64_t scn = context->m_extra_info.m_scn;
+  uint64 scn = context->m_extra_info.m_scn;
 
   // 3. record row level TxnJ.
   {
@@ -297,13 +297,13 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
 }
 
 size_t Imcu::scan(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
-                  const std::vector<uint32_t> &projection, RowCallback callback) {
+                  const std::vector<uint32> &projection, RowCallback callback) {
   return scan_range(context, 0, SHANNON_BATCH_NUM, predicates, projection, callback);
 }
 
 size_t Imcu::scan_range(Rapid_scan_context *context, size_t start_offset, size_t limit,
                         const std::vector<std::unique_ptr<Predicate>> &predicates,
-                        const std::vector<uint32_t> &projection, RowCallback callback) {
+                        const std::vector<uint32> &projection, RowCallback callback) {
   size_t num_rows = m_header.current_rows.load();
   if (start_offset >= num_rows) return 0;
 
@@ -357,7 +357,7 @@ size_t Imcu::scan_range(Rapid_scan_context *context, size_t start_offset, size_t
     for (row_id_t local_row_id : matching_rows) {
       // read the loaded CUs.
       for (size_t i = 0; i < projection.size(); i++) {
-        uint32_t col_idx = projection[i];
+        uint32 col_idx = projection[i];
         if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
           row_buffer[i] = nullptr;
         } else {
@@ -381,7 +381,7 @@ size_t Imcu::scan_range(Rapid_scan_context *context, size_t start_offset, size_t
 }
 
 bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Transaction::ID reader_txn_id,
-                          uint64_t reader_scn) const {
+                          uint64 reader_scn) const {
   return 0;
 }
 
@@ -410,7 +410,7 @@ void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_ro
   }
 }
 
-bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const std::vector<uint32_t> &col_indices,
+bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const std::vector<uint32> &col_indices,
                     RowBuffer &output) {
   return 0;
 }
@@ -545,7 +545,7 @@ void Imcu::update_storage_index() {
   m_header.last_modified = std::chrono::system_clock::now();
 }
 
-size_t Imcu::garbage_collect(uint64_t min_active_scn) {
+size_t Imcu::garbage_collect(uint64 min_active_scn) {
   size_t freed = 0;
 
   // 1. purege TxnJ.
