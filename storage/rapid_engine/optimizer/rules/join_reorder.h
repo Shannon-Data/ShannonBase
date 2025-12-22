@@ -41,7 +41,7 @@ class JoinReOrder : public Rule {
   JoinReOrder() = default;
   JoinReOrder(std::shared_ptr<Query_expression> &expression);
   virtual ~JoinReOrder();
-  void apply(PlanPtr &root) override;
+  void apply(Plan &root) override;
   std::string name() override { return std::string("JoinReOrder"); }
 
  private:

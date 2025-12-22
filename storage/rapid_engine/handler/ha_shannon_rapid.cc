@@ -137,7 +137,7 @@ LoadedTables::~LoadedTables() {
 
 void LoadedTables::add(const std::string &db, const std::string &table, RapidShare *rs) {
   std::lock_guard<std::mutex> guard(m_mutex);
-  std::string keystr = db + ":" + table;
+  std::string keystr = db + "." + table;
   auto it = m_tables.find(keystr);
   if (it != m_tables.end()) {  // replace with new one.
     delete it->second;
@@ -149,13 +149,13 @@ void LoadedTables::add(const std::string &db, const std::string &table, RapidSha
 
 RapidShare *LoadedTables::get(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
-  auto it = m_tables.find(db + ":" + table);
+  auto it = m_tables.find(db + "." + table);
   return it != m_tables.end() ? it->second : nullptr;
 }
 
 void LoadedTables::erase(const std::string &db, const std::string &table) {
   std::lock_guard<std::mutex> guard(m_mutex);
-  auto it = m_tables.find(db + ":" + table);
+  auto it = m_tables.find(db + "." + table);
   if (it != m_tables.end()) {
     delete it->second;
     m_tables.erase(it);
@@ -169,7 +169,7 @@ void LoadedTables::table_infos(uint index, ulonglong &tid, std::string &schema, 
   for (auto &item : m_tables) {
     if (count == index) {
       std::string keystr = item.first;
-      size_t colon_pos = keystr.find(':');
+      size_t colon_pos = keystr.find('.');
       if (colon_pos == std::string::npos) continue;
 
       schema = keystr.substr(0, colon_pos);
@@ -346,7 +346,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_table_id = table_arg.file->get_table_id();
   context.m_schema_name = table_arg.s->db.str;
   context.m_table_name = table_arg.s->table_name.str;
-  context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
+  context.m_sch_tb_name = context.m_schema_name + "." + context.m_table_name;
   context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
   context.m_extra_info.m_keynr = active_index;
   context.m_extra_info.m_key_len = table_arg.file->ref_length;
@@ -377,6 +377,8 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
 
   guard.commit();
   m_share = new RapidShare(table_arg);
+  m_share->m_source_table = &table_arg;
+  m_share->is_partitioned = false;
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
 
@@ -1271,7 +1273,10 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   }
 
   JOIN *join = lex->unit->first_query_block()->join;
-  if (!join || join->tables == 0) return false;
+  if (!join) return false;
+  if (lex->using_hypergraph_optimizer() && lex->unit->root_access_path()) {
+    assert(false);  // purecov: deadcode
+  }
 
   // now, 6 core optimization rules applying（prune，push down, reorder, etc.）
   ShannonBase::Optimizer::Optimizer rpd_optimizer;

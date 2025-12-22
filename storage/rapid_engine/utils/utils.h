@@ -230,13 +230,13 @@ class Util {
 
   static inline std::string get_key_name(Field *field) {
     std::ostringstream ostr;
-    ostr << field->table->s->db.str << ":" << *field->table_name << ":" << field->field_name;
+    ostr << field->table->s->db.str << "." << *field->table_name << "." << field->field_name;
     return ostr.str();
   }
 
   static inline std::string get_key_name(const char *db_name, const char *table_name, const char *field_name) {
     std::ostringstream ostr;
-    ostr << db_name << ":" << table_name << ":" << field_name;
+    ostr << db_name << "." << table_name << "." << field_name;
     return ostr.str();
   }
 

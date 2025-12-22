@@ -66,6 +66,7 @@ struct RapidShare {
 
   // source table. Here, using ulonglong not table_id_t,
   // we dont want to include too much innobase header files.
+  bool is_partitioned{false};
   ulonglong m_tableid{0};
   const char *m_db_name{nullptr}, *m_table_name{nullptr};
   handler *file{nullptr};

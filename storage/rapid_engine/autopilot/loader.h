@@ -194,7 +194,7 @@ class SelfLoadManager {
   inline int update_table_state(const std::string &schema, const std::string &table, table_access_stats_t::State state,
                                 ShannonBase::load_type_t load_type) {
     std::unique_lock lock(m_tables_mutex);
-    std::string full_name = schema + ":" + table;
+    std::string full_name = schema + "." + table;
     if (m_rpd_mirror_tables.find(full_name) == m_rpd_mirror_tables.end()) return SHANNON_SUCCESS;
 
     m_rpd_mirror_tables[full_name]->stats.state = state;
@@ -237,7 +237,7 @@ class SelfLoadManager {
   // format: <schema_id, schema_name>
   std::unordered_map<int, std::string> m_schema_tables;
 
-  // format: <schema_name+":"+table_name, estimated_size>
+  // format: <schema_name+"."+table_name, estimated_size>
   std::unordered_map<std::string, uint64_t> m_table_stats;
 
   // (RPD Mirror), global meta information.

@@ -54,7 +54,7 @@ namespace Imcs {
 namespace Index {
 
 template <>
-void Encoder<float>::EncodeData(float value, unsigned char *key) {
+void Encoder<float>::Encode(float value, unsigned char *key) {
   uint32_t val;
   std::memcpy(&val, &value, sizeof(float));
 
@@ -71,7 +71,7 @@ void Encoder<float>::EncodeData(float value, unsigned char *key) {
 }
 
 template <>
-void Encoder<double>::EncodeData(double value, unsigned char *key) {
+void Encoder<double>::Encode(double value, unsigned char *key) {
   uint64_t u;
   std::memcpy(&u, &value, sizeof(double));
 
@@ -111,7 +111,7 @@ void Encoder<double>::EncodeData(double value, unsigned char *key) {
 }
 
 template <>
-float Encoder<float>::DecodeData(const unsigned char *key) {
+float Encoder<float>::Decode(const unsigned char *key) {
   uint32_t val = 0;
 
   val |= (uint32_t)key[0] << 24;
@@ -131,7 +131,7 @@ float Encoder<float>::DecodeData(const unsigned char *key) {
 }
 
 template <>
-double Encoder<double>::DecodeData(const unsigned char *key) {
+double Encoder<double>::Decode(const unsigned char *key) {
   uint64_t u = 0;
   for (int i = 0; i < 8; i++) {
     u = (u << 8) | key[i];
@@ -159,19 +159,19 @@ double Encoder<double>::DecodeData(const unsigned char *key) {
 }
 
 template <>
-void Encoder<int8_t>::EncodeData(int8_t value, unsigned char *key) {
+void Encoder<int8_t>::Encode(int8_t value, unsigned char *key) {
   uint8_t val = static_cast<uint8_t>(value) ^ (1u << 7);
   key[0] = val & 0xFF;
 }
 
 template <>
-int8_t Encoder<int8_t>::DecodeData(const unsigned char *key) {
+int8_t Encoder<int8_t>::Decode(const unsigned char *key) {
   uint8_t val = key[0] ^ (1u << 7);
   return static_cast<int8_t>(val);
 }
 
 template <>
-void Encoder<int16_t>::EncodeData(int16_t value, unsigned char *key) {
+void Encoder<int16_t>::Encode(int16_t value, unsigned char *key) {
   uint16_t val = static_cast<uint16_t>(value) ^ (1u << 15);
 
   key[0] = (val >> 8) & 0xFF;
@@ -179,7 +179,7 @@ void Encoder<int16_t>::EncodeData(int16_t value, unsigned char *key) {
 }
 
 template <>
-int16_t Encoder<int16_t>::DecodeData(const unsigned char *key) {
+int16_t Encoder<int16_t>::Decode(const unsigned char *key) {
   uint16_t val = 0;
 
   val |= (uint16_t)key[0] << 8;
@@ -190,7 +190,7 @@ int16_t Encoder<int16_t>::DecodeData(const unsigned char *key) {
 }
 
 template <>
-void Encoder<int32_t>::EncodeData(int32_t value, unsigned char *key) {
+void Encoder<int32_t>::Encode(int32_t value, unsigned char *key) {
   uint32_t val = static_cast<uint32_t>(value) ^ (1u << 31);
 
   key[0] = (val >> 24) & 0xFF;
@@ -200,7 +200,7 @@ void Encoder<int32_t>::EncodeData(int32_t value, unsigned char *key) {
 }
 
 template <>
-int32_t Encoder<int32_t>::DecodeData(const unsigned char *key) {
+int32_t Encoder<int32_t>::Decode(const unsigned char *key) {
   uint32_t val = 0;
 
   val |= (uint32_t)key[0] << 24;
@@ -213,7 +213,7 @@ int32_t Encoder<int32_t>::DecodeData(const unsigned char *key) {
 }
 
 template <>
-void Encoder<int64_t>::EncodeData(int64_t value, unsigned char *key) {
+void Encoder<int64_t>::Encode(int64_t value, unsigned char *key) {
   uint64_t val = static_cast<uint64_t>(value) ^ (1ULL << 63);
 
   key[0] = (val >> 56) & 0xFF;
@@ -227,7 +227,7 @@ void Encoder<int64_t>::EncodeData(int64_t value, unsigned char *key) {
 }
 
 template <>
-int64_t Encoder<int64_t>::DecodeData(const unsigned char *key) {
+int64_t Encoder<int64_t>::Decode(const unsigned char *key) {
   uint64_t val = 0;
 
   val |= (uint64_t)key[0] << 56;
@@ -245,23 +245,23 @@ int64_t Encoder<int64_t>::DecodeData(const unsigned char *key) {
 
 // big-endian
 template <>
-void Encoder<uint8_t>::EncodeData(uint8_t value, unsigned char *key) {
+void Encoder<uint8_t>::Encode(uint8_t value, unsigned char *key) {
   key[0] = value & 0xFF;
 }
 
 template <>
-uint8_t Encoder<uint8_t>::DecodeData(const unsigned char *key) {
+uint8_t Encoder<uint8_t>::Decode(const unsigned char *key) {
   return key[0];
 }
 
 template <>
-void Encoder<uint16_t>::EncodeData(uint16_t value, unsigned char *key) {
+void Encoder<uint16_t>::Encode(uint16_t value, unsigned char *key) {
   key[0] = (value >> 8) & 0xFF;
   key[1] = value & 0xFF;
 }
 
 template <>
-uint16_t Encoder<uint16_t>::DecodeData(const unsigned char *key) {
+uint16_t Encoder<uint16_t>::Decode(const unsigned char *key) {
   uint16_t val = 0;
   val |= (uint16_t)key[0] << 8;
   val |= (uint16_t)key[1];
@@ -269,7 +269,7 @@ uint16_t Encoder<uint16_t>::DecodeData(const unsigned char *key) {
 }
 
 template <>
-void Encoder<uint32_t>::EncodeData(uint32_t value, unsigned char *key) {
+void Encoder<uint32_t>::Encode(uint32_t value, unsigned char *key) {
   key[0] = (value >> 24) & 0xFF;
   key[1] = (value >> 16) & 0xFF;
   key[2] = (value >> 8) & 0xFF;
@@ -277,7 +277,7 @@ void Encoder<uint32_t>::EncodeData(uint32_t value, unsigned char *key) {
 }
 
 template <>
-uint32_t Encoder<uint32_t>::DecodeData(const unsigned char *key) {
+uint32_t Encoder<uint32_t>::Decode(const unsigned char *key) {
   uint32_t val = 0;
   val |= (uint32_t)key[0] << 24;
   val |= (uint32_t)key[1] << 16;
@@ -287,7 +287,7 @@ uint32_t Encoder<uint32_t>::DecodeData(const unsigned char *key) {
 }
 
 template <>
-void Encoder<uint64_t>::EncodeData(uint64_t value, unsigned char *key) {
+void Encoder<uint64_t>::Encode(uint64_t value, unsigned char *key) {
   key[0] = (value >> 56) & 0xFF;
   key[1] = (value >> 48) & 0xFF;
   key[2] = (value >> 40) & 0xFF;
@@ -299,7 +299,7 @@ void Encoder<uint64_t>::EncodeData(uint64_t value, unsigned char *key) {
 }
 
 template <>
-uint64_t Encoder<uint64_t>::DecodeData(const unsigned char *key) {
+uint64_t Encoder<uint64_t>::Decode(const unsigned char *key) {
   uint64_t val = 0;
   val |= (uint64_t)key[0] << 56;
   val |= (uint64_t)key[1] << 48;

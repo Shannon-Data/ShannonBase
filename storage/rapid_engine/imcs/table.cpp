@@ -56,7 +56,7 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
     : m_mem_root(std::move(std::make_unique<MEM_ROOT>())), m_source_table(mysql_table) {
   m_memory_pool = ShannonBase::Utils::MemoryPool::create_from_parent(
       ShannonBase::shannon_rpd_memory_pool,
-      config.tenant_name + ":" + mysql_table->s->db.str + ":" + mysql_table->s->table_name.str,
+      config.tenant_name + "." + mysql_table->s->db.str + "." + mysql_table->s->table_name.str,
       config.max_table_mem_size);
   m_metadata.db_name = mysql_table->s->db.str;
   m_metadata.table_name = mysql_table->s->table_name.str;
@@ -234,14 +234,14 @@ void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<Key
         case MYSQL_TYPE_NEWDECIMAL: {
           uchar encoding[8] = {0};
           auto val = Utils::Util::get_field_numeric<double>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-          Index::Encoder<double>::EncodeData(val, encoding);
+          Index::Encoder<double>::Encode(val, encoding);
           std::memcpy(to_key, encoding, length);  // decimal stored length: 5 not 8.
         } break;
         case MYSQL_TYPE_LONG: {
           ut_a(length == sizeof(int32_t));
           uchar encoding[4] = {0};
           auto val = Utils::Util::get_field_numeric<int32_t>(field, fld_ptr, nullptr, m_metadata.db_low_byte_first);
-          Index::Encoder<int32_t>::EncodeData(val, encoding);
+          Index::Encoder<int32_t>::Encode(val, encoding);
           std::memcpy(to_key, encoding, length);
         } break;
         default: {

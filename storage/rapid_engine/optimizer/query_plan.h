@@ -43,13 +43,15 @@ class Item_func;
 namespace ShannonBase {
 namespace Imcs {
 class RpdTable;
-}
+class Predicate;
+}  // namespace Imcs
 namespace Optimizer {
 class PlanNode : public MemoryObject {
  public:
   enum class Type : uint8_t {
     SCAN,
     HASH_JOIN,
+    NESTED_LOOP_JOIN,
     LOCAL_AGGREGATE,
     GLOBAL_AGGREGATE,
     FILTER,
@@ -69,13 +71,21 @@ class PlanNode : public MemoryObject {
   bool vectorized{true};
 };
 
-using PlanPtr = std::unique_ptr<PlanNode>;
+using Plan = std::unique_ptr<PlanNode>;
 class ScanTable : public PlanNode {
  public:
   Imcs::RpdTable *rpd_table;
   bool use_storage_index{false};
   Type type() const override { return Type::SCAN; }
   std::string ToString(int indent) const override;
+};
+
+class Filter : public PlanNode {
+ public:
+  Type type() const override { return Type::FILTER; }
+  std::string ToString(int indent) const override;
+  std::unique_ptr<ShannonBase::Imcs::Predicate> predict{nullptr};
+  bool materialize_subqueries{false};
 };
 
 class HashJoin : public PlanNode {
@@ -86,9 +96,18 @@ class HashJoin : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
+class NestLoopJoin : public PlanNode {
+ public:
+  std::vector<Item *> join_conditions;
+  bool allow_spill{false};
+  Type type() const override { return Type::NESTED_LOOP_JOIN; }
+  std::string ToString(int indent) const override;
+};
+
 class LocalAgg : public PlanNode {
  public:
   std::vector<Item *> group_by;
+  std::vector<Item *> order_by;
   std::vector<Item_func *> aggregates;
   Type type() const override { return Type::LOCAL_AGGREGATE; }
   std::string ToString(int indent) const override;
@@ -100,7 +119,7 @@ class GlobalAgg : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
-class RapidTopN : public PlanNode {
+class TopN : public PlanNode {
  public:
   ORDER *order{nullptr};
   ha_rows limit{0};
@@ -114,6 +133,17 @@ class ZeroRows : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
+class Limit : public PlanNode {
+ public:
+  ha_rows limit{0};
+  ha_rows offset{0};
+  bool count_all_rows;
+  bool reject_multiple_rows;
+
+  Type type() const override { return Type::LIMIT; }
+  std::string ToString(int indent) const override;
+};
+
 class QueryPlan : public MemoryObject {
  public:
   QueryPlan() = default;
@@ -124,7 +154,7 @@ class QueryPlan : public MemoryObject {
 
   AccessPath *BuildAccessPath(THD *thd) const;
 
-  PlanPtr root;
+  Plan root;
   double total_cost{0.0};
   std::string plan_id;
 };

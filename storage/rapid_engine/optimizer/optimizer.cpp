@@ -30,9 +30,11 @@
 #include "sql/iterators/timing_iterator.h"
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/cost_model.h"
+#include "sql/range_optimizer/range_optimizer.h"  //KEY_PART
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"                      //Query_expression
 #include "sql/sql_optimizer.h"                //JOIN
+#include "sql/table.h"                        //Table
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
 #include "storage/rapid_engine/cost/cost.h"
@@ -49,6 +51,8 @@
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
+#include "storage/rapid_engine/imcs/imcs.h"
 namespace ShannonBase {
 namespace Optimizer {
 Timer::Timer() { m_begin = std::chrono::steady_clock::now(); }
@@ -64,10 +68,8 @@ std::string Timer::lap_formatted() {
   return stream.str();
 }
 
-// ctor
-Optimizer::Optimizer(std::shared_ptr<Query_expression> &expr, const std::shared_ptr<CostEstimator> &cost_estimator) {}
-
 void Optimizer::AddDefaultRules() {
+  // becareful the order of rules. The rules be applied in the order of added.
   m_optimize_rules.emplace_back(std::make_unique<StorageIndexPrune>());
   m_optimize_rules.emplace_back(std::make_unique<PredicatePushDown>());
   m_optimize_rules.emplace_back(std::make_unique<JoinReOrder>());
@@ -83,14 +85,160 @@ void Optimizer::Optimize(OptimizeContext *context, THD *thd, JOIN *join) {
   QueryPlan plan;
   plan.root = get_query_plan(context, thd, join);
   for (auto &rule : m_optimize_rules) {
-    // PlanNode *new_root = pass->Apply(plan.root.get(), thd);
     rule->apply(plan.root);
-    // plan.root.reset(new_root);
     plan.total_cost = CostModelServer::Instance(CostEstimator::Type::RPD_ENG)->cost(plan.root);
   }
 }
 
-PlanPtr Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join) { return nullptr; }
+Plan Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join) {
+  if (!join || !join->query_expression()->root_access_path()) return std::make_unique<ZeroRows>();
+
+  Plan plan_root = translate_access_path(context, thd, join->query_expression()->root_access_path(), join);
+  if (!plan_root) return std::make_unique<ZeroRows>();
+  return plan_root;
+}
+
+Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath *path, const JOIN *join) {
+  if (!path) return nullptr;
+
+  switch (path->type) {
+    case AccessPath::TABLE_SCAN:
+    case AccessPath::INDEX_SCAN:
+    case AccessPath::INDEX_RANGE_SCAN: {
+      auto scan = std::make_unique<ScanTable>();
+      TABLE *table{nullptr};
+      if (path->type == AccessPath::INDEX_SCAN)
+        table = path->index_scan().table;
+      else if (path->type == AccessPath::INDEX_RANGE_SCAN) {
+        const auto &irs = path->index_range_scan();
+        if (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr) {
+          table = irs.used_key_part[0].field->table;
+        }
+      } else
+        table = path->table_scan().table;
+
+      assert(table);
+
+      auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+      auto table_id = share ? share->m_tableid : 0;
+      scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
+                                                : Imcs::Imcs::instance()->get_rpd_table(table_id);
+      scan->estimated_rows = path->count_examined_rows;
+      return scan;
+    } break;
+
+    case AccessPath::HASH_JOIN: {
+      auto hashjoin_node = std::make_unique<HashJoin>();
+      // gets the hash_join struct.
+      auto &param = path->hash_join();
+      // Recursively convert children
+      hashjoin_node->children.push_back(translate_access_path(ctx, thd, param.outer, join));
+      hashjoin_node->children.push_back(translate_access_path(ctx, thd, param.inner, join));
+
+      // Extract Join Conditions
+      if (param.join_predicate) {
+        for (auto *cond : param.join_predicate->expr->equijoin_conditions) {
+          hashjoin_node->join_conditions.push_back(cond);
+        }
+        // Handle other conditions...
+      }
+
+      hashjoin_node->allow_spill = param.allow_spill_to_disk;
+      hashjoin_node->estimated_rows = path->num_output_rows();
+      return hashjoin_node;
+    } break;
+
+    case AccessPath::NESTED_LOOP_JOIN: {
+      auto nestloop_node = std::make_unique<NestLoopJoin>();
+      // gets the nested_loop_join struct.
+      auto &param = path->nested_loop_join();
+      // Recursively convert children
+      nestloop_node->children.push_back(translate_access_path(ctx, thd, param.outer, join));
+      nestloop_node->children.push_back(translate_access_path(ctx, thd, param.inner, join));
+      // Extract Join Conditions
+      if (param.join_predicate) {
+        for (auto *cond : param.join_predicate->expr->equijoin_conditions) {
+          nestloop_node->join_conditions.push_back(cond);
+        }
+        // Handle other conditions...
+      }
+      return nestloop_node;
+    } break;
+
+    case AccessPath::AGGREGATE: {
+      auto agg = std::make_unique<LocalAgg>();
+      auto param = path->aggregate();
+
+      agg->children.push_back(translate_access_path(ctx, thd, param.child, join));
+      fill_aggregate_info(agg.get(), join);
+      return agg;
+    } break;
+
+    case AccessPath::LIMIT_OFFSET: {
+      auto topn = std::make_unique<Limit>();
+      auto param = path->limit_offset();
+
+      topn->limit = param.limit;
+      topn->offset = param.offset;
+      topn->children.push_back(translate_access_path(ctx, thd, param.child, join));
+      return topn;
+    } break;
+
+    case AccessPath::FILTER: {
+      auto filter = std::make_unique<Filter>();
+      auto param = path->filter();
+
+      filter->children.push_back(translate_access_path(ctx, thd, param.child, join));
+      filter->predict.reset(convert_item_to_predicate(thd, param.condition));
+      filter->materialize_subqueries = param.materialize_subqueries;
+      return filter;
+    } break;
+
+    default:
+      return nullptr;
+  }
+}
+
+void Optimizer::fill_aggregate_info(LocalAgg *node, const JOIN *join) {
+  Query_block *query_block = join->query_block;
+  for (ORDER *ord = query_block->order_list.first; ord; ord = ord->next) {
+    if (ord->item && *ord->item) node->order_by.push_back(*ord->item);
+  }
+
+  for (ORDER *ord = query_block->group_list.first; ord; ord = ord->next) {
+    if (ord->item && *ord->item) node->group_by.push_back(*ord->item);
+  }
+
+  auto fields = query_block->get_fields_list();
+  for (auto it = fields->begin(); it != fields->end(); ++it) {
+    Item *item = *it;
+    switch (item->type()) {
+      case Item::SUM_FUNC_ITEM:
+        node->aggregates.push_back(static_cast<Item_func *>(item));
+        break;
+      case Item::AGGR_FIELD_ITEM:
+        node->aggregates.push_back(static_cast<Item_func *>(item));
+        break;
+      case Item::FUNC_ITEM: {
+        Item_func *func_item = static_cast<Item_func *>(item);
+        switch (func_item->functype()) {
+          case Item_func::LEAST_FUNC: {
+          } break;
+          case Item_func::GREATEST_FUNC: {
+          } break;
+          default:
+            break;
+        }
+      } break;
+      default:
+        break;
+    }
+  }
+}
+
+Imcs::Predicate *Optimizer::convert_item_to_predicate(THD *thd, Item *item) {
+  return nullptr;  // TODO: implement item to predicate conversion.
+}
 
 bool Optimizer::EstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost) {
   *secondary_engine_cost = join.best_read * 0.8;

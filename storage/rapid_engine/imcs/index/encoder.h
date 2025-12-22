@@ -33,8 +33,8 @@ namespace Index {
 template <typename T>
 class Encoder {
  public:
-  static void EncodeData(T value, unsigned char *key);
-  static T DecodeData(const unsigned char *key);
+  static void Encode(T value, unsigned char *key);
+  static T Decode(const unsigned char *key);
 };
 
 }  // namespace Index

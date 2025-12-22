@@ -185,7 +185,7 @@ int SelfLoadManager::load_mysql_table_stats() {
 
     auto size_mb = ((data_len + index_data_len) * row_cnt) / (1024 * 1024);
     if (size_mb <= SHANNON_TABLE_MEMRORY_SIZE) size_mb = SHANNON_TABLE_MEMRORY_SIZE;
-    m_table_stats.emplace(sch_str + ":" + tb_name_str, size_mb ? size_mb : 1);
+    m_table_stats.emplace(sch_str + "." + tb_name_str, size_mb ? size_mb : 1);
   }
   cat_tables_ptr->file->ha_rnd_end();
 
@@ -252,7 +252,7 @@ int SelfLoadManager::load_mysql_tables_info() {
     bool is_partitioned = (opt_str.find("PARTITIONED") != std::string::npos);
     if (is_partitioned) tb_info.get()->partitioned = true;
 
-    auto key_str = tb_info.get()->schema_name + ":" + tb_info.get()->table_name;
+    auto key_str = tb_info.get()->schema_name + "." + tb_info.get()->table_name;
     // ut_a(m_table_stats.find(key_str) != m_table_stats.end());
     if (m_table_stats.find(key_str) != m_table_stats.end())
       tb_info.get()->estimated_size = m_table_stats[key_str];
@@ -310,7 +310,7 @@ int SelfLoadManager::get_innodb_thread_num() { return thd_parallel_read_threads(
 
 TableInfo *SelfLoadManager::get_table_info(const std::string &schema, const std::string &table) {
   std::shared_lock lock(m_tables_mutex);
-  std::string full_name = schema + ":" + table;
+  std::string full_name = schema + "." + table;
 
   auto it = m_rpd_mirror_tables.find(full_name);
   return (it != m_rpd_mirror_tables.end()) ? it->second.get() : nullptr;
@@ -324,7 +324,7 @@ std::unordered_map<std::string, std::unique_ptr<TableInfo>> &SelfLoadManager::ta
 int SelfLoadManager::add_table(const std::string &schema, const std::string &table, const std::string &secondary_engine,
                                bool is_partition) {
   std::unique_lock lock(m_tables_mutex);
-  auto sch_tb = schema + ":" + table;
+  auto sch_tb = schema + "." + table;
   if (m_rpd_mirror_tables.find(sch_tb) == m_rpd_mirror_tables.end()) {
     auto table_info = std::make_unique<TableInfo>();
     table_info->schema_name = schema;
@@ -350,7 +350,7 @@ int SelfLoadManager::add_table(const std::string &schema, const std::string &tab
 }
 
 int SelfLoadManager::erase_table(const std::string &schema, const std::string &table) {
-  auto sch_tb = schema + ":" + table;
+  auto sch_tb = schema + "." + table;
   std::unique_lock lock(m_tables_mutex);
   m_rpd_mirror_tables.erase(sch_tb);
 
@@ -359,7 +359,7 @@ int SelfLoadManager::erase_table(const std::string &schema, const std::string &t
 
 int SelfLoadManager::remove_table(const std::string &schema, const std::string &table) {
   std::unique_lock lock(m_tables_mutex);
-  auto sch_tb = schema + ":" + table;
+  auto sch_tb = schema + "." + table;
   if (m_rpd_mirror_tables.find(sch_tb) == m_rpd_mirror_tables.end()) return SHANNON_SUCCESS;
 
   m_rpd_mirror_tables[sch_tb]->stats.state = table_access_stats_t::State::NOT_LOADED;
@@ -371,7 +371,7 @@ TableInfo *SelfLoadManager::get_table_info(TABLE *table) {
 
   std::string schema_name(table->s->db.str, table->s->db.length);
   std::string table_name(table->s->table_name.str, table->s->table_name.length);
-  std::string full_name = schema_name + ":" + table_name;
+  std::string full_name = schema_name + "." + table_name;
 
   std::shared_lock lock(m_tables_mutex);
   auto it = m_rpd_mirror_tables.find(full_name);
@@ -632,7 +632,7 @@ void SelfLoadManager::unload_cold_tables() {
 
   // unload the cold table.
   for (const auto &full_name : tables_to_unload) {
-    size_t pos = full_name.find(':');
+    size_t pos = full_name.find('.');
     if (pos != std::string::npos) {
       std::string schema = full_name.substr(0, pos);
       std::string table = full_name.substr(pos + 1);
@@ -682,7 +682,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
       auto unload_candidate = unload_queue.top();
       unload_queue.pop();
 
-      size_t pos = unload_candidate.full_name.find(':');
+      size_t pos = unload_candidate.full_name.find('.');
       if (pos != std::string::npos) {
         std::string schema = unload_candidate.full_name.substr(0, pos);
         std::string table = unload_candidate.full_name.substr(pos + 1);
@@ -692,7 +692,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
     }
 
     if (current_memory + load_candidate.estimated_size <= memory_threshold) {
-      size_t pos = load_candidate.full_name.find(':');
+      size_t pos = load_candidate.full_name.find('.');
       if (pos != std::string::npos) {
         std::string schema = load_candidate.full_name.substr(0, pos);
         std::string table = load_candidate.full_name.substr(pos + 1);
@@ -752,7 +752,7 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   context.m_schema_name = schema;
   context.m_table_name = table;
   context.m_thd = current_thd;
-  context.m_sch_tb_name = schema + ":" + table;
+  context.m_sch_tb_name = schema + "." + table;
 
   TABLE *source_table = Utils::Util::open_table_by_name(current_thd, schema, table, TL_READ_WITH_SHARED_LOCKS);
   if (!source_table) return HA_ERR_GENERIC;

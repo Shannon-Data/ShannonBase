@@ -31,7 +31,7 @@ namespace Optimizer {
 
 Const_fold::Const_fold(std::shared_ptr<Query_expression> &expression) : m_query_expr(expression) {}
 Const_fold::~Const_fold() {}
-void Const_fold::apply(PlanPtr &root) {}
+void Const_fold::apply(Plan &root) {}
 
 }  // namespace Optimizer
 }  // namespace ShannonBase

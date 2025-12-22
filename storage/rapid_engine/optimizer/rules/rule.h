@@ -39,7 +39,7 @@ class Rule : public MemoryObject {
   Rule() = default;
   virtual ~Rule() = default;
 
-  virtual void apply(PlanPtr &root) = 0;
+  virtual void apply(Plan &root) = 0;
   virtual std::string name() = 0;
   std::shared_ptr<CostEstimator> m_cost_estimator;
 };

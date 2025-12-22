@@ -56,7 +56,7 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table,
   m_metrics.reset();
 
   std::string key(m_table->s->db.str);
-  key.append(":").append(m_table->s->table_name.str);
+  key.append(".").append(m_table->s->table_name.str);
 
   const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
   const dd::Table *table_def = nullptr;

@@ -68,7 +68,7 @@ class CardinalityEstimator;
 class Optimizer : public MemoryObject {
  public:
   Optimizer() = default;
-  explicit Optimizer(std::shared_ptr<Query_expression> &, const std::shared_ptr<CostEstimator> &);
+  explicit Optimizer(std::shared_ptr<Query_expression> &, const std::shared_ptr<CostEstimator> &) {}
 
   template <typename T, typename... Args>
   T *add_rule(Args &&...args) {
@@ -100,7 +100,7 @@ class Optimizer : public MemoryObject {
   static bool EstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost);
 
  private:
-  PlanPtr get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join);
+  Plan get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join);
   /**
    * Determines if a given access path can be vectorized based on its type and properties.
    *
@@ -136,6 +136,11 @@ class Optimizer : public MemoryObject {
    * @see CanPathBeVectorized()
    */
   static bool CheckChildVectorization(AccessPath *child_path);
+
+  Plan translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath *path, const JOIN *join);
+
+  void fill_aggregate_info(LocalAgg *node, const JOIN *join);
+  Imcs::Predicate *convert_item_to_predicate(THD *thd, Item *item);
 
   std::atomic<bool> m_registered{false};
   std::vector<std::unique_ptr<Rule>> m_optimize_rules;

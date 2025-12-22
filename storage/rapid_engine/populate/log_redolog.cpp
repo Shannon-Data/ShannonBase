@@ -126,7 +126,7 @@ bool LogParser::check_key_field(std::unordered_map<std::string, ShannonBase::key
   std::string fld_name(field_name);
   for (auto &key : keys) {
     for (auto &fld : key.second.second) {
-      size_t pos = fld.rfind(':');
+      size_t pos = fld.rfind('.');
       if (pos != std::string::npos) {
         std::string last_part = fld.substr(pos + 1);
         if (last_part == fld_name) return true;
