@@ -30,6 +30,6 @@ namespace ShannonBase {
 namespace Optimizer {
 JoinReOrder::JoinReOrder(std::shared_ptr<Query_expression> &expression) : m_query_expr(expression) {}
 JoinReOrder::~JoinReOrder() {}
-void JoinReOrder::apply(PlanPtr &root) {}
+void JoinReOrder::apply(Plan &root) {}
 }  // namespace Optimizer
 }  // namespace ShannonBase

@@ -202,7 +202,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = table.s->db.str;
   context.m_table_name = table.s->table_name.str;
-  context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
+  context.m_sch_tb_name = context.m_schema_name + "." + context.m_table_name;
 
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   context.m_trx->begin_stmt();
@@ -255,6 +255,8 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   meta_ref.loading_progress = 1.0;
 
   m_share = new RapidPartShare(table);
+  m_share->m_source_table = &table;
+  m_share->is_partitioned = true;
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
 

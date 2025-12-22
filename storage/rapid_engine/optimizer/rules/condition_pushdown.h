@@ -41,7 +41,7 @@ class PredicatePushDown : public Rule {
   PredicatePushDown() = default;
   PredicatePushDown(std::shared_ptr<Query_expression> &expression);
   virtual ~PredicatePushDown();
-  void apply(PlanPtr &root) override;
+  void apply(Plan &root) override;
   std::string name() override { return std::string("PredicatePushDown"); }
 
  private:
@@ -53,7 +53,7 @@ class AggregationPushDown : public Rule {
   AggregationPushDown() = default;
   AggregationPushDown(std::shared_ptr<Query_expression> &expression);
   virtual ~AggregationPushDown();
-  void apply(PlanPtr &root) override;
+  void apply(Plan &root) override;
   std::string name() override { return std::string("AggregationPushDown"); }
 
  private:
@@ -65,7 +65,7 @@ class TopNPushDown : public Rule {
   TopNPushDown() = default;
   TopNPushDown(std::shared_ptr<Query_expression> &expression);
   virtual ~TopNPushDown();
-  void apply(PlanPtr &root) override;
+  void apply(Plan &root) override;
   std::string name() override { return std::string("TopNPushDown"); }
 
  private:

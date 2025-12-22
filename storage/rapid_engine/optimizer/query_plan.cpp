@@ -36,6 +36,16 @@ std::string ScanTable::ToString(int indent) const {
          (use_storage_index ? " [Pruned]" : "");
 }
 
+std::string Filter::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ Filter (vectorized)";
+}
+
+std::string NestLoopJoin::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ Nested Loop Join (vectorized)";
+}
+
 std::string HashJoin::ToString(int indent) const {
   std::string pad(indent, ' ');
   return pad + "→ Hash Join (vectorized)";
@@ -51,9 +61,14 @@ std::string GlobalAgg::ToString(int indent) const {
   return pad + "→ Global Aggregate";
 }
 
-std::string RapidTopN::ToString(int indent) const {
+std::string TopN::ToString(int indent) const {
   std::string pad(indent, ' ');
   return pad + "→ Top-N (limit=" + std::to_string(limit) + ")";
+}
+
+std::string Limit::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ Limit (limit=" + std::to_string(limit) + ", offset=" + std::to_string(offset) + ")";
 }
 
 std::string ZeroRows::ToString(int indent) const { return "→ Zero Rows"; }

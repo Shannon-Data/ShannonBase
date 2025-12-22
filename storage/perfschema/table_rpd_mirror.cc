@@ -192,7 +192,7 @@ int table_rpd_mirror::make_row(uint index [[maybe_unused]]) {
   m_row.recommend_thr_num = ShannonBase::Autopilot::SelfLoadManager::get_innodb_thread_num();
   // auto tid =0;
   std::string sch_tb = m_row.schema_name;
-  sch_tb = sch_tb + ":" + m_row.table_name;
+  sch_tb = sch_tb + "." + m_row.table_name;
   auto parts = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info.logical_part_loaded_at_scn;
   m_row.query_partitions = logical_part_vector_to_json(parts);
 

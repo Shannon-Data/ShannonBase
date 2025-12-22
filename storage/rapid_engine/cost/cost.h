@@ -41,7 +41,7 @@ class CostEstimator : public MemoryObject {
   enum class Type : uint8_t { NONE = 0, RPD_ENG };
 
   // to calc the cost of `query_plan`.
-  virtual double cost(const PlanPtr &query_plan) = 0;
+  virtual double cost(const Plan &query_plan) = 0;
   virtual inline double cpu_factor() const { return m_cpu_factor; }
   virtual inline double memory_factor() const { return m_memory_factor; }
   virtual inline double io_factor() const { return m_io_factor; }
@@ -63,7 +63,7 @@ class RpdCostEstimator : public CostEstimator {
     m_io_factor = 1.0;
   }
 
-  double cost(const PlanPtr &query_plan) override;
+  double cost(const Plan &query_plan) override;
 };
 
 class CostModelServer : public Cost_model_server {

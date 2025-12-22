@@ -153,7 +153,7 @@ struct SHANNON_ALIGNAS TableInfo {
 
   rpd_table_meta_info_t meta_info;
 
-  std::string full_name() const { return schema_name + ":" + table_name; }
+  std::string full_name() const { return schema_name + "." + table_name; }
 };
 
 // Map from (db_name, table_name) to the RapidShare with table state.

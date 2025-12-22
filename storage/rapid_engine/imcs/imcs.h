@@ -53,7 +53,7 @@ class DataTable;
 /** An IMCS is consist of CUs. Some chunks are made of a CU. Header and body is
  * two parts of a CU. Header has meta information about this CU, and the body
  * has the read data. All chunks stored consecutively in a CU.  key format of a
- * CU is listed as following: `db_name_str` + ":" + `table_name_str` + ":" +
+ * CU is listed as following: `db_name_str` + "." + `table_name_str` + "." +
  * `field_index`. */
 class Imcs : public MemoryObject {
  public:
@@ -185,10 +185,10 @@ class Imcs : public MemoryObject {
   static std::unique_ptr<boost::asio::thread_pool> m_imcs_pool;
 
   std::shared_mutex m_table_mutex;
-  // loaded tables. key format: schema_name + ":" + table_name.
+  // loaded tables. key format: schema_name + "." + table_name.
   std::unordered_map<table_id_t, std::unique_ptr<RpdTable>> m_rpd_tables;
 
-  // loaded partitioned tables. key format: schema_name + ":" + table_name.
+  // loaded partitioned tables. key format: schema_name + "." + table_name.
   std::unordered_map<table_id_t, std::unique_ptr<RpdTable>> m_rpd_parttables;
 
   // the current version of imcs.

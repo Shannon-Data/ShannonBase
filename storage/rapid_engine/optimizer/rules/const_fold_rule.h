@@ -41,7 +41,7 @@ class Const_fold : public Rule {
   Const_fold() = default;
   Const_fold(std::shared_ptr<Query_expression> &expression);
   virtual ~Const_fold();
-  void apply(PlanPtr &root) override;
+  void apply(Plan &root) override;
   std::string name() override { return std::string("Const_fold"); }
 
  private:

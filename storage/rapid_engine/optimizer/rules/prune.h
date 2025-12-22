@@ -32,7 +32,7 @@
 #include "storage/rapid_engine/optimizer/rules/rule.h"
 class Query_expression;
 class Query_block;
-
+class Item;
 namespace ShannonBase {
 namespace Optimizer {
 
@@ -41,7 +41,7 @@ class StorageIndexPrune : public Rule {
   StorageIndexPrune() = default;
   StorageIndexPrune(std::shared_ptr<Query_expression> &expression);
   virtual ~StorageIndexPrune();
-  void apply(PlanPtr &root) override;
+  void apply(Plan &root) override;
   std::string name() override { return std::string("StorageIndexPrune"); }
 
  private:
@@ -53,13 +53,20 @@ class ProjectionPruning : public Rule {
   ProjectionPruning() = default;
   ProjectionPruning(std::shared_ptr<Query_expression> &expression);
   virtual ~ProjectionPruning();
-  void apply(PlanPtr &root) override;
+  void apply(Plan &root) override;
   std::string name() override { return std::string("ProjectionPruning"); }
 
  private:
   std::shared_ptr<Query_expression> m_query_expr;
 };
 
+class ColumnCollector {
+ public:
+  // Maps "db_name.table_name" -> Set of field indices (0-based)
+  std::map<std::string, std::set<uint32_t>> used_columns;
+
+  void visit(Item *item);
+};
 }  // namespace Optimizer
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_OBJECT_PRUNE_RULE_H__

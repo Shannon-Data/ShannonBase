@@ -83,7 +83,7 @@ show variables like "%rapid_self%";
 select * from performance_schema.rpd_mirror order by TABLE_NAME;
 
 --replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
-select * from performance_schema.rpd_tables;
+select * from performance_schema.rpd_tables order by id, SNAPSHOT_SCN;
 
 set global rapid_self_load_enabled=off;
 drop database sh_self_load_test4;

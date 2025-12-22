@@ -30,7 +30,7 @@ namespace Optimizer {
 std::unordered_map<CostEstimator::Type, CostEstimator *> CostModelServer::instances_;
 std::mutex CostModelServer::instance_mutex_;
 
-double RpdCostEstimator::cost(const PlanPtr &query_plan) {
+double RpdCostEstimator::cost(const Plan &query_plan) {
   double cost = 0.0;
   return cost;
 }

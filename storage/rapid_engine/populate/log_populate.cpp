@@ -172,7 +172,7 @@ static void table_worker_func(table_worker_context *ctx) {
 #ifndef NDEBUG
         context.m_schema_name = change_rec.m_schema_name;
         context.m_table_name = change_rec.m_table_name;
-        context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
+        context.m_sch_tb_name = context.m_schema_name + "." + context.m_table_name;
 #endif
         context.m_offpage_data0 = change_rec.m_offpage_data0.empty() ? nullptr : &change_rec.m_offpage_data0;
         context.m_offpage_data1 = change_rec.m_offpage_data1.empty() ? nullptr : &change_rec.m_offpage_data1;

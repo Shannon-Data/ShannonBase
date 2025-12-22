@@ -31,15 +31,15 @@ namespace Optimizer {
 
 PredicatePushDown::PredicatePushDown(std::shared_ptr<Query_expression> &expression) : m_query_expr(expression) {}
 PredicatePushDown::~PredicatePushDown() {}
-void PredicatePushDown::apply(PlanPtr &root) {}
+void PredicatePushDown::apply(Plan &root) {}
 
 AggregationPushDown::AggregationPushDown(std::shared_ptr<Query_expression> &expression) : m_query_expr(expression) {}
 AggregationPushDown::~AggregationPushDown() {}
-void AggregationPushDown::apply(PlanPtr &root) {}
+void AggregationPushDown::apply(Plan &root) {}
 
 TopNPushDown::TopNPushDown(std::shared_ptr<Query_expression> &expression) : m_query_expr(expression) {}
 TopNPushDown::~TopNPushDown() {}
-void TopNPushDown::apply(PlanPtr &root) {}
+void TopNPushDown::apply(Plan &root) {}
 
 }  // namespace Optimizer
 }  // namespace ShannonBase
