@@ -32,6 +32,8 @@
 #include "sql/handler.h"
 #include "thr_lock.h"
 
+#include "storage/rapid_engine/include/rapid_status.h"
+
 class THD;
 struct TABLE;
 struct TABLE_SHARE;

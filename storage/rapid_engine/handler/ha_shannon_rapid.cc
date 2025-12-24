@@ -69,7 +69,8 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_const.h"  //const
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_status.h"  //column stats
+#include "storage/rapid_engine/include/rapid_loaded_table.h"
+
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/writable_access_path.h"
@@ -98,6 +99,10 @@ ShannonBase::Optimizer::CostEstimator *g_cost_est_instances{nullptr};
 handlerton *shannon_rapid_hton_ptr{nullptr};
 
 LoadedTables *shannon_loaded_tables = nullptr;
+std::map<int, rpd_table_meta_info_t> shannon_loading_tables_meta;
+
+ShannonBase::Autopilot::SelfLoadManager *self_load_mngr_inst{nullptr};
+
 uint64 rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
 ulonglong rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
 ulonglong rpd_para_load_threshold = ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD;
@@ -349,7 +354,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   ShannonBase::Rapid_load_context context;
   context.m_thd = m_thd;
   context.m_table = const_cast<TABLE *>(&table_arg);
-  context.m_table_id = static_cast<ha_innobase *>(table_arg.file)->get_table_id();
+  context.m_table_id = table_arg.file->get_table_id();
   context.m_schema_name = table_arg.s->db.str;
   context.m_table_name = table_arg.s->table_name.str;
   context.m_sch_tb_name = context.m_schema_name + ":" + context.m_table_name;
@@ -358,22 +363,36 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   context.m_extra_info.m_key_len = table_arg.file->ref_length;
   context.m_trx = Transaction::get_or_create_trx(m_thd);
   ShannonBase::TransactionGuard guard(context.m_trx);
-
   context.m_extra_info.m_trxid = context.m_trx->get_id();
   // at loading step, to set SCN to non-zero, it means it committed after inserted with explicit begin/commit.
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
 
+  auto &meta_ref = shannon_loading_tables_meta[context.m_table_id];
+  meta_ref.tid = context.m_table_id;
+  meta_ref.snapshot_scn = context.m_extra_info.m_scn;
+  ha_rows num_rows{0};
+  table_arg.file->ha_records(&num_rows);
+  meta_ref.nrows = num_rows;
+  meta_ref.size_bytes = meta_ref.nrows * table_arg.s->rec_buff_length;
+  meta_ref.load_start_stamp = std::chrono::system_clock::now();
+  meta_ref.loading_progress = 0.1;
+
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
+    shannon_loading_tables_meta.erase(context.m_table_id);
     std::string err;
     err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" load failed");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
     return HA_ERR_GENERIC;
   }
+  meta_ref.load_end_stamp = std::chrono::system_clock::now();
+  meta_ref.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+  meta_ref.loading_progress = 1.0;
 
   guard.commit();
   m_share = new RapidShare(table_arg);
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
+
   shannon_loaded_tables->add(table_arg.s->db.str, table_arg.s->table_name.str, m_share);
   if (shannon_loaded_tables->get(table_arg.s->db.str, table_arg.s->table_name.str) == nullptr) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
@@ -396,13 +415,6 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     strncpy(row_rpd_columns.table_name, table_arg.s->table_name.str, sizeof(row_rpd_columns.table_name) - 1);
     auto key_name =
         ShannonBase::Utils::Util::get_key_name(table_arg.s->db.str, table_arg.s->table_name.str, field_ptr->field_name);
-#if 0  // TODO: refact
-    ShannonBase::Compress::Dictionary* dict =
-      ShannonBase::Imcs::Imcs::instance()->get_cu(key_name)->get_header()->m_local_dict.get();
-    if (dict)
-      row_rpd_columns.data_dict_bytes = dict->content_size();
-    row_rpd_columns.data_placement_index = 0;
-#endif
     std::string comment(field_ptr->comment.str);
     memset(row_rpd_columns.encoding, 0x0, NAME_LEN);
     if (comment.find("SORTED") != std::string::npos)
@@ -412,8 +424,11 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     else
       strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
     row_rpd_columns.ndv = 0;
+    row_rpd_columns.avg_byte_width_inc_null = field_ptr->pack_length();
     ShannonBase::rpd_columns_info.push_back(row_rpd_columns);
   }
+
+  if (self_load_mngr_inst) self_load_mngr_inst->add_table(context.m_schema_name, context.m_table_name, "", false);
 
   // start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();
@@ -441,6 +456,9 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
 
+  if (shannon_loading_tables_meta.find(table_id) != shannon_loading_tables_meta.end())
+    shannon_loading_tables_meta.erase(table_id);
+
   Imcs::Imcs::instance()->unload_table(&context, table_id, false);
 
   // ease the meta info.
@@ -453,6 +471,10 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   }
 
   shannon_loaded_tables->erase(db_name, table_name);
+
+  if (ShannonBase::self_load_mngr_inst)
+    ShannonBase::self_load_mngr_inst->change_table_stat(db_name, table_name,
+                                                        ShannonBase::load_status_t::NOLOAD_RPDGSTABSTATE);
 
   // to try stop main thread, if there're no tables loaded.
   if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::end();
@@ -868,16 +890,18 @@ SecondaryEngineGraphSimplificationRequestParameters SecondaryEngineCheckOptimize
 }
 
 void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const char *table_name) {
-  if (!dd::get_dictionary()->is_dd_schema_name(db) && !dd::get_dictionary()->is_system_table_name(db, table_name) &&
-      create_info->secondary_engine.str) {
+  if (!dd::get_dictionary()->is_dd_schema_name(db) && !dd::get_dictionary()->is_system_table_name(db, table_name)) {
     auto is_partitioned{false};
     dd::cache::Dictionary_client *dc = current_thd->dd_client();
     const dd::Table *table_obj = nullptr;
     if (dc && !dc->acquire(db, table_name, &table_obj) && table_obj)
       is_partitioned = (table_obj->partition_type() != dd::Table::PT_NONE);
 
-    auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
-    if (self_load_inst) self_load_inst->add_table(db, table_name, create_info->secondary_engine.str, is_partitioned);
+    std::string eng_str;
+    if (create_info->secondary_engine.str) eng_str = create_info->secondary_engine.str;
+
+    if (ShannonBase::self_load_mngr_inst)
+      ShannonBase::self_load_mngr_inst->add_table(db, table_name, eng_str, is_partitioned);
   }
 }
 
@@ -1066,8 +1090,8 @@ void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
   if (query_cost <= cost_threshold)  // update only if query coast is higher than threshold.
     return;
 
-  auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
-  if (self_load_inst) self_load_inst->update_table_stats(thd, thd->lex->query_tables, executed_in);
+  if (ShannonBase::self_load_mngr_inst)
+    ShannonBase::self_load_mngr_inst->update_table_stats(thd, thd->lex->query_tables, executed_in);
 }
 
 // In this function, Dynamic offload combines mysql plan features
@@ -1691,14 +1715,20 @@ static TYPELIB rapid_sync_mode_typelib = {array_elements(ShannonBase::Populate::
                                           "rapid_sync_mode_typelib", ShannonBase::Populate::sync_mode_names, nullptr};
 
 static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void *save) {
+  if (*static_cast<bool *>(var_ptr) == *static_cast<const bool *>(save)) return;
+
   bool new_value = *static_cast<const bool *>(save);
   *static_cast<bool *>(var_ptr) = new_value;
   ShannonBase::rpd_self_load_enabled = *static_cast<const bool *>(save);
-  auto instance = ShannonBase::Autopilot::SelfLoadManager::instance();
+  if (!ShannonBase::self_load_mngr_inst)
+    ShannonBase::self_load_mngr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+
   if (ShannonBase::rpd_self_load_enabled) {  // to start AutoLoader thread.
-    if (instance && !instance->initialized()) instance->start();
+    if (ShannonBase::self_load_mngr_inst && ShannonBase::self_load_mngr_inst->initialized())
+      ShannonBase::self_load_mngr_inst->start();
   } else {
-    if (instance && instance->initialized()) instance->shutdown();
+    if (ShannonBase::self_load_mngr_inst && ShannonBase::self_load_mngr_inst->initialized())
+      ShannonBase::self_load_mngr_inst->shutdown();
   }
 }
 
@@ -2176,12 +2206,14 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
     return 1;
   };
 
-  return instance_->initialize();
+  auto ret = instance_->initialize();
+  ShannonBase::self_load_mngr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+  return ret;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
-  auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
-  if (self_load_inst && self_load_inst->initialized()) self_load_inst->shutdown();
+  if (ShannonBase::self_load_mngr_inst && ShannonBase::self_load_mngr_inst->initialized())
+    ShannonBase::self_load_mngr_inst->shutdown();
 
   while (ShannonBase::Populate::Populator::active()) {
     ShannonBase::Populate::sys_pop_started.store(false);

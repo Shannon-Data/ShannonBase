@@ -5069,6 +5069,9 @@ class handler {
   */
   virtual void parallel_scan_end(void *scan_ctx [[maybe_unused]]) { return; }
 
+  // get table id
+  virtual uint64_t get_table_id() const { return 0; }
+
   /** Check if the table is ready for bulk load
   @param[in] thd user session
   @return true iff bulk load can be done on the table. */

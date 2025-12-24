@@ -1,0 +1,95 @@
+# restart
+create database sh_self_load_test2;
+use sh_self_load_test2;
+create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
+insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+select name, score, id, gender from tt where score >=1  and score < 3 order by id;
+name	score	id	gender
+n1	1	1	m
+n2	2	2	f
+select * from tt where score >=1  and id < 3 order by id;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+select * from tt where id >=1  and id < 3 order by id;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
+select * from tt1 where score >=1  and id < 3 order by id;
+score	name	id	gender
+10	n1	1	m
+20	n2	2	f
+select * from tt1 where score >=1  and score < 3 order by id;
+score	name	id	gender
+select * from tt1 where id >=1  and id < 3 order by id;
+score	name	id	gender
+10	n1	1	m
+20	n2	2	f
+select score from tt1 where id > 2  and score = 30 order by id;
+score
+30
+create table tt2 (score int, name char(10), id int primary key, gender char(1));
+insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt2 secondary_engine=rapid;
+select * from tt2 order by id;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+3	n3	3	m
+create table tt3 (score int primary key, name char(10), id int, gender char(1), key(id, score));
+insert into tt3 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt3 secondary_engine=rapid;
+select * from tt3 where score >1 order by id;
+score	name	id	gender
+2	n2	2	f
+3	n3	3	m
+create table tt4 (score double primary key, name char(10), id int, gender char(1));
+insert into tt4 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
+alter table tt4 secondary_engine=rapid;
+select * from performance_schema.rpd_mirror where SCHEMA_NAME = "sh_self_load_test2" order by TABLE_NAME;
+SCHEMA_NAME	TABLE_NAME	MYSQL_ACCESS_COUNT	HEATWAVE_ACCESS_COUNT	IMPORTANCE	LAST_QUERIED	LAST_QUERIED_IN_HEATWAVE	STATE	RECOMMENDED_READ_THREADS	QUERIED_PARTITIONS
+sh_self_load_test2	tt	0	0	0	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test2	tt1	0	0	0	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test2	tt2	0	0	0	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test2	tt3	0	0	0	IGNORE	IGNORE	NOT_LOADED	4	[]
+sh_self_load_test2	tt4	0	0	0	IGNORE	IGNORE	NOT_LOADED	4	[]
+alter table tt secondary_load;
+alter table tt1 secondary_load;
+alter table tt2 secondary_load;
+alter table tt3 secondary_load;
+select * from performance_schema.rpd_mirror where SCHEMA_NAME = "%sh_self_load_test2%" order by TABLE_NAME;
+SCHEMA_NAME	TABLE_NAME	MYSQL_ACCESS_COUNT	HEATWAVE_ACCESS_COUNT	IMPORTANCE	LAST_QUERIED	LAST_QUERIED_IN_HEATWAVE	STATE	RECOMMENDED_READ_THREADS	QUERIED_PARTITIONS
+SELECT * FROM performance_schema.rpd_table_id;
+ID	NAME	SCHEMA_NAME	TABLE_NAME
+IGNORE	sh_self_load_test2\tt	sh_self_load_test2	tt
+IGNORE	sh_self_load_test2\tt1	sh_self_load_test2	tt1
+IGNORE	sh_self_load_test2\tt2	sh_self_load_test2	tt2
+IGNORE	sh_self_load_test2\tt3	sh_self_load_test2	tt3
+SELECT * FROM performance_schema.rpd_preload_stats;
+TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	AVG_BYTE_WIDTH_INC_NULL
+sh_self_load_test2	tt	score	4
+sh_self_load_test2	tt	name	40
+sh_self_load_test2	tt	id	4
+sh_self_load_test2	tt	gender	4
+sh_self_load_test2	tt1	score	4
+sh_self_load_test2	tt1	name	40
+sh_self_load_test2	tt1	id	4
+sh_self_load_test2	tt1	gender	4
+sh_self_load_test2	tt2	score	4
+sh_self_load_test2	tt2	name	40
+sh_self_load_test2	tt2	id	4
+sh_self_load_test2	tt2	gender	4
+sh_self_load_test2	tt3	score	4
+sh_self_load_test2	tt3	name	40
+sh_self_load_test2	tt3	id	4
+sh_self_load_test2	tt3	gender	4
+SELECT * FROM performance_schema.rpd_tables order by ID;
+ID	SNAPSHOT_SCN	PERSISTED_SCN	POOL_TYPE	DATA_PLACEMENT_TYPE	NROWS	LOAD_STATUS	LOAD_PROGRESS	SIZE_BYTES	TRANSFORMATION_BYTES	QUERY_COUNT	LAST_QUERIED	LOAD_START_TIMESTAMP	LOAD_END_TIMESTAMP	RECOVERY_SOURCE	RECOVERY_START_TIMESTAMP	RECOVERY_END_TIMESTAMP	LOAD_TYPE	LOGICAL_PARTS_LOADED_AT_SCN	AUTO_ZMP_COLUMNS	ACE_MODEL
+IGNORE	IGNORE	0	SNAPSHOT	0	0	NOLOAD_RPDGSTABSTATE	0	0	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+drop database sh_self_load_test2;

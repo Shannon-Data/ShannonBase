@@ -1,6 +1,7 @@
 create database tpch_1024;
 alter database tpch_1024 CHARACTER SET ascii COLLATE ascii_bin;
 use tpch_1024;
+set global rapid_async_column_threshold = 16;
 CREATE TABLE SUPPLIER ( S_SUPPKEY     INTEGER NOT NULL,
 S_NAME        CHAR(25) NOT NULL,
 S_ADDRESS     VARCHAR(40) NOT NULL,

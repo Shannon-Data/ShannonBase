@@ -45,7 +45,7 @@
 #include "sql/table.h"
 
 #include "ml_algorithm.h"
-#include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
+#include "storage/rapid_engine/include/rapid_loaded_table.h"  //loaded table.
 
 namespace ShannonBase {
 namespace ML {

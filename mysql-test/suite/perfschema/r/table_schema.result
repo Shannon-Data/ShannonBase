@@ -1192,9 +1192,12 @@ def	performance_schema	rpd_mirror	SCHEMA_NAME	1	NULL	NO	char	128	512	NULL	NULL	N
 def	performance_schema	rpd_mirror	TABLE_NAME	2	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
 def	performance_schema	rpd_mirror	MYSQL_ACCESS_COUNT	3	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_mirror	HEATWAVE_ACCESS_COUNT	4	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_mirror	LAST_QUERIED	5	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
-def	performance_schema	rpd_mirror	LAST_QUERIED_IN_RAPID	6	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
-def	performance_schema	rpd_mirror	STATE	7	NULL	NO	enum	19	76	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	enum('NOT_LOADED','LOADED','INSUFFICIENT_MEMORY')			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	IMPORTANCE	5	NULL	NO	double	NULL	NULL	22	NULL	NULL	NULL	NULL	double unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	LAST_QUERIED	6	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	LAST_QUERIED_IN_HEATWAVE	7	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	STATE	8	NOT_LOADED	NO	enum	10	40	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	enum('NOT_LOADED','LOADED')			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	RECOMMENDED_READ_THREADS	9	NULL	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int			select,insert,update,references			NULL
+def	performance_schema	rpd_mirror	QUERIED_PARTITIONS	10	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	NULL	json			select,insert,update,references			NULL
 def	performance_schema	rpd_preload_stats	TABLE_SCHEMA	1	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
 def	performance_schema	rpd_preload_stats	TABLE_NAME	2	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
 def	performance_schema	rpd_preload_stats	COLUMN_NAME	3	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
@@ -1202,21 +1205,24 @@ def	performance_schema	rpd_preload_stats	AVG_BYTE_WIDTH_INC_NULL	4	NULL	NO	bigin
 def	performance_schema	rpd_tables	ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_tables	SNAPSHOT_SCN	2	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_tables	PERSISTED_SCN	3	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	POOL_TYPE	4	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	POOL_TYPE	4	SNAPSHOT	NO	enum	13	52	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	enum('SNAPSHOT','TRANSACTIONAL','VOLATILE')			select,insert,update,references			NULL
 def	performance_schema	rpd_tables	DATA_PLACEMENT_TYPE	5	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	T_NROWS	6	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	LOAD_STATUS	7	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	LOAD_PROGRESS	8	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	NROWS	6	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOAD_STATUS	7	AVAIL_RPDGSTABSTATE	NO	enum	28	112	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	enum('NOLOAD_RPDGSTABSTATE','LOADING_RPDGSTABSTATE','AVAIL_RPDGSTABSTATE','UNLOADING_RPDGSTABSTATE','INRECOVERY_RPDGSTABSTATE','STALE_RPDGSTABSTATE','UNAVAIL_RPDGSTABSTATE','RECOVERYFAILED_RPDGSTABSTATE')			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOAD_PROGRESS	8	NULL	NO	int	NULL	NULL	10	0	NULL	NULL	NULL	int unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_tables	SIZE_BYTES	9	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_tables	TRANSFORMATION_BYTES	10	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	E_NROWS	11	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	QUERY_COUNT	12	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	LAST_QUERIED	13	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	LOAD_START_TIMESTAMP	14	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	LOAD_END_TIMESTAMP	15	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	RECOVERY_SOURCE	16	NULL	NO	char	128	512	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(128)			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	RECOVERY_START_TIMESTAMP	17	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
-def	performance_schema	rpd_tables	RECOVERY_END_TIMESTAMP	18	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	QUERY_COUNT	11	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LAST_QUERIED	12	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOAD_START_TIMESTAMP	13	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOAD_END_TIMESTAMP	14	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	RECOVERY_SOURCE	15	MYSQL	NO	enum	13	52	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	enum('MYSQL','OBJECTSTORAGE')			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	RECOVERY_START_TIMESTAMP	16	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	RECOVERY_END_TIMESTAMP	17	NULL	NO	timestamp	NULL	NULL	NULL	NULL	0	NULL	NULL	timestamp			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOAD_TYPE	18	USER	NO	enum	4	16	NULL	NULL	NULL	utf8mb4	utf8mb4_0900_ai_ci	enum('USER','SELF')			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	LOGICAL_PARTS_LOADED_AT_SCN	19	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	NULL	json			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	AUTO_ZMP_COLUMNS	20	NULL	YES	json	NULL	NULL	NULL	NULL	NULL	NULL	NULL	json			select,insert,update,references			NULL
+def	performance_schema	rpd_tables	ACE_MODEL	21	NULL	YES	tinyint	NULL	NULL	3	0	NULL	NULL	NULL	tinyint(1)			select,insert,update,references			NULL
 def	performance_schema	rpd_table_id	ID	1	NULL	NO	bigint	NULL	NULL	20	0	NULL	NULL	NULL	bigint unsigned			select,insert,update,references			NULL
 def	performance_schema	rpd_table_id	NAME	2	NULL	NO	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(64)			select,insert,update,references			NULL
 def	performance_schema	rpd_table_id	SCHEMA_NAME	3	NULL	NO	char	64	256	NULL	NULL	NULL	utf8mb4	utf8mb4_bin	char(64)			select,insert,update,references			NULL
