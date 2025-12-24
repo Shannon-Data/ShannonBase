@@ -205,6 +205,14 @@ bool RapidCursor::read(const uchar *key_value, Row_Result &result) { return fals
 
 bool RapidCursor::range_scan(const uchar *start_key, const uchar *end_key, RowCallback &cb) { return false; }
 
+row_id_t RapidCursor::position(const unsigned char *record) { return 0; }
+
+int RapidCursor::rnd_pos(uchar *buff, uchar *pos) {
+  position(m_current_row_idx.load(std::memory_order_acquire));
+  auto ret = next(buff);
+  return (ret) ? ret : ShannonBase::SHANNON_SUCCESS;
+}
+
 int RapidCursor::next(uchar *buf) {
   assert(m_scan_initialized.load(std::memory_order_acquire));
   if (!m_scan_initialized.load(std::memory_order_acquire)) init();

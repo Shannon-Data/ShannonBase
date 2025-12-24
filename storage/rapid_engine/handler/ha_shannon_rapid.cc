@@ -505,6 +505,21 @@ int ha_rapid::rnd_end(void) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+void ha_rapid::position(const unsigned char *record) {
+  // Here, table should has a PK, otherwise, it cannot be loaded. Therefore, ref stores the rowid of `record`.
+  if (m_cursor) {
+    auto pos = m_cursor->position(record);
+    memcpy(ref, &pos, sizeof(row_id_t));
+  }
+}
+
+int ha_rapid::rnd_pos(unsigned char *buff, unsigned char *pos) {
+  int error{HA_ERR_KEY_NOT_FOUND};
+
+  if (inited == handler::RND && m_cursor) error = m_cursor->rnd_pos(buff, pos);
+  return error;
+}
+
 /** Reads the next row in a table scan (also used to read the FIRST row
  in a table scan).
  @return 0, HA_ERR_END_OF_FILE, or error number */

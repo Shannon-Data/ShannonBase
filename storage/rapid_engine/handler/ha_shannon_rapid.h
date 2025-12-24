@@ -105,7 +105,7 @@ class ha_rapid : public handler {
 
   int rnd_next(uchar *buf) override;
 
-  int rnd_pos(unsigned char *, unsigned char *) override { return HA_ERR_WRONG_COMMAND; }
+  int rnd_pos(unsigned char *buff, unsigned char *pos) override;
 
   int info(unsigned int) override;
 
@@ -133,7 +133,7 @@ class ha_rapid : public handler {
 
   ha_rows records_in_range(unsigned int index, key_range *min_key, key_range *max_key) override;
 
-  void position(const unsigned char *) override {}
+  void position(const unsigned char *) override;
 
   int records(ha_rows *num_rows) override;
 

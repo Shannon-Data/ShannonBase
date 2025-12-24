@@ -1,0 +1,126 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+create database sh_test7;
+use sh_test7;
+set use_secondary_engine=forced;
+
+CREATE TABLE test_numeric_types (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    col_bigint BIGINT,
+    col_bool BOOL,
+    col_decimal DECIMAL(10,2),
+    col_double DOUBLE,
+    col_float FLOAT,
+    col_int INT,
+    col_integer INTEGER,
+    col_mediumint MEDIUMINT,
+    col_smallint SMALLINT,
+    col_tinyint TINYINT
+) ENGINE=InnoDB secondary_engine=rapid;
+
+INSERT INTO test_numeric_types VALUES
+(1, 9223372036854775807, TRUE, 99999999.99, 1.7976931348623157E+308, 3.402823466E+38, 2147483647, 2147483647, 8388607, 32767, 127),
+(2, -9223372036854775808, FALSE, -99999999.99, -1.7976931348623157E+308, -3.402823466E+38, -2147483648, -2147483648, -8388608, -32768, -128),
+(3, 0, NULL, 0.00, 0.0, 0.0, 0, 0, 0, 0, 0);
+
+ALTER TABLE test_numeric_types SECONDARY_LOAD;
+
+EXPLAIN SELECT * FROM test_numeric_types ORDER BY id;
+
+SELECT * FROM test_numeric_types ORDER BY id;
+
+SELECT 
+    SUM(col_bigint) as sum_bigint,
+    AVG(col_decimal) as avg_decimal,
+    MAX(col_double) as max_double,
+    MIN(col_float) as min_float
+FROM test_numeric_types;
+
+SET sql_mode = 'STRICT_ALL_TABLES';
+
+CREATE TABLE test_temporal_types (
+    id INT PRIMARY KEY,
+    col_date DATE,
+    col_datetime DATETIME,
+    col_time TIME,
+    col_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    col_year YEAR
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPId;
+
+INSERT INTO test_temporal_types (id, col_date, col_datetime, col_time, col_year) VALUES
+(1, '2024-01-01', '2024-01-01 12:30:45', '12:30:45', 2024),
+(2, '2024-12-31', '2024-12-31 23:59:59', '23:59:59', 2024),
+(3, '0000-00-00', '0000-00-00 00:00:00', '00:00:00', 0000);
+
+ALTER TABLE test_temporal_types SECONDARY_LOAD;
+
+--ERROR 1292
+INSERT INTO test_temporal_types (id, col_date) VALUES (4, '2024-02-30');
+
+--replace_column 5 IGNORE
+SELECT * FROM test_temporal_types ORDER BY id;
+
+EXPLAIN SELECT 
+    YEAR(col_date) as year_from_date,
+    MONTH(col_datetime) as month_from_datetime,
+    HOUR(col_time) as hour_from_time
+FROM test_temporal_types;
+
+SELECT 
+    YEAR(col_date) as year_from_date,
+    MONTH(col_datetime) as month_from_datetime,
+    HOUR(col_time) as hour_from_time
+FROM test_temporal_types;
+
+CREATE TABLE test_string_types (
+    id INT PRIMARY KEY,
+    col_char CHAR(10),
+    col_varchar VARCHAR(255),
+    col_text TEXT,
+    col_tinytext TINYTEXT,
+    col_mediumtext MEDIUMTEXT,
+    col_longtext LONGTEXT,
+    col_enum ENUM('small', 'medium', 'large')
+) ENGINE=InnoDB  SECONDARY_ENGINE=RAPID;
+
+INSERT INTO test_string_types VALUES
+(1, 'char', 'varchar text', REPEAT('text ', 10), 'tiny', REPEAT('medium ', 100), REPEAT('long ', 1000), 'medium'),
+(2, 'test', 'another varchar', 'text content', 'tiny2', REPEAT('x', 1000), REPEAT('y', 10000), 'large'),
+(3, '', '', '', '', '', '', 'small');
+
+ALTER TABLE test_string_types SECONDARY_LOAD;
+EXPLAIN SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
+       LENGTH(col_longtext) as longtext_length, col_enum
+FROM test_string_types ORDER BY id;
+
+SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
+       LENGTH(col_longtext) as longtext_length, col_enum
+FROM test_string_types ORDER BY id;
+
+SELECT 
+    CONCAT(col_char, '-', col_varchar) as concatenated,
+    UPPER(col_enum) as enum_upper,
+    LENGTH(col_text) as text_length
+FROM test_string_types WHERE id = 1;
+
+CREATE TABLE IF NOT EXISTS test_json_types (
+    id INT PRIMARY KEY,
+    col_json JSON
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+
+--ERROR 3877
+alter table test_json_types secondary_load;
+
+CREATE TABLE test_unsupported_types (
+    id INT PRIMARY KEY,
+    col_blob BLOB,
+    col_geometry GEOMETRY,
+    col_set SET('a', 'b', 'c')
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+--ERROR 3877
+alter table test_unsupported_types secondary_load;
+
+drop database sh_test7;

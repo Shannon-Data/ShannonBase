@@ -1,0 +1,71 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+create database sh_test8;
+use sh_test8;
+set use_secondary_engine=forced;
+CREATE TABLE test_timestamp_limits (
+    id INT PRIMARY KEY,
+    ts1 TIMESTAMP,
+    ts2 TIMESTAMP NULL,
+    ts3 TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) SECONDARY_ENGINE=RAPID;
+
+CREATE TABLE test_enum_limits (
+    id INT PRIMARY KEY,
+    size ENUM('xs', 's', 'm', 'l', 'xl'),
+    status ENUM('active', 'inactive', 'pending')
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO test_enum_limits VALUES (1, 'm', 'active');
+--ERROR 1265
+INSERT INTO test_enum_limits VALUES (2, 'xxl', 'active');
+
+--ERROR 1074
+CREATE TABLE test_string_limits (
+    id INT PRIMARY KEY,
+    varchar_max VARCHAR(65534),
+    text_column TEXT,
+    tiny_text TINYTEXT,
+    medium_text MEDIUMTEXT,
+    long_text LONGTEXT
+) SECONDARY_ENGINE=RAPID;
+
+CREATE TABLE test_string_limits (
+    id INT PRIMARY KEY,
+    varchar_max VARCHAR(16300),
+    text_column TEXT,
+    tiny_text TINYTEXT,
+    medium_text MEDIUMTEXT,
+    long_text LONGTEXT
+) SECONDARY_ENGINE=RAPID;
+
+
+SET sql_mode = '';
+CREATE TABLE test_non_strict (
+    id INT PRIMARY KEY,
+    d DATE,
+    dt DATETIME
+)  SECONDARY_ENGINE=RAPID;
+ALTER TABLE test_non_strict SECONDARY_LOAD;
+INSERT INTO test_non_strict VALUES (1, '0000-00-00', '0000-00-00 00:00:00');
+
+INSERT INTO test_non_strict VALUES (2, '2024-02-30', '2024-02-30 25:61:61');
+
+
+SELECT * FROM test_non_strict;
+
+SET sql_mode = 'STRICT_ALL_TABLES';
+CREATE TABLE test_strict (
+    id INT PRIMARY KEY,
+    d DATE,
+    dt DATETIME
+)  SECONDARY_ENGINE=RAPID;
+ALTER TABLE test_strict SECONDARY_LOAD;
+INSERT INTO test_strict VALUES (1, '2024-01-01', '2024-01-01 12:00:00');
+
+--ERROR 1292
+INSERT INTO test_strict VALUES (2, '2024-02-30', '2024-01-01 12:00:00');
+drop database sh_test8;

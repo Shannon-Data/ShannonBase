@@ -1,0 +1,63 @@
+create database sh_test8;
+use sh_test8;
+set use_secondary_engine=forced;
+CREATE TABLE test_timestamp_limits (
+id INT PRIMARY KEY,
+ts1 TIMESTAMP,
+ts2 TIMESTAMP NULL,
+ts3 TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) SECONDARY_ENGINE=RAPID;
+CREATE TABLE test_enum_limits (
+id INT PRIMARY KEY,
+size ENUM('xs', 's', 'm', 'l', 'xl'),
+status ENUM('active', 'inactive', 'pending')
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO test_enum_limits VALUES (1, 'm', 'active');
+INSERT INTO test_enum_limits VALUES (2, 'xxl', 'active');
+ERROR 01000: Data truncated for column 'size' at row 1
+CREATE TABLE test_string_limits (
+id INT PRIMARY KEY,
+varchar_max VARCHAR(65534),
+text_column TEXT,
+tiny_text TINYTEXT,
+medium_text MEDIUMTEXT,
+long_text LONGTEXT
+) SECONDARY_ENGINE=RAPID;
+ERROR 42000: Column length too big for column 'varchar_max' (max = 16383); use BLOB or TEXT instead
+CREATE TABLE test_string_limits (
+id INT PRIMARY KEY,
+varchar_max VARCHAR(16300),
+text_column TEXT,
+tiny_text TINYTEXT,
+medium_text MEDIUMTEXT,
+long_text LONGTEXT
+) SECONDARY_ENGINE=RAPID;
+SET sql_mode = '';
+CREATE TABLE test_non_strict (
+id INT PRIMARY KEY,
+d DATE,
+dt DATETIME
+)  SECONDARY_ENGINE=RAPID;
+ALTER TABLE test_non_strict SECONDARY_LOAD;
+INSERT INTO test_non_strict VALUES (1, '0000-00-00', '0000-00-00 00:00:00');
+INSERT INTO test_non_strict VALUES (2, '2024-02-30', '2024-02-30 25:61:61');
+Warnings:
+Warning	1264	Out of range value for column 'd' at row 1
+Warning	1265	Data truncated for column 'dt' at row 1
+SELECT * FROM test_non_strict;
+id	d	dt
+1	0000-00-00	0000-00-00 00:00:00
+2	0000-00-00	0000-00-00 00:00:00
+SET sql_mode = 'STRICT_ALL_TABLES';
+Warnings:
+Warning	3135	'NO_ZERO_DATE', 'NO_ZERO_IN_DATE' and 'ERROR_FOR_DIVISION_BY_ZERO' sql modes should be used with strict mode. They will be merged with strict mode in a future release.
+CREATE TABLE test_strict (
+id INT PRIMARY KEY,
+d DATE,
+dt DATETIME
+)  SECONDARY_ENGINE=RAPID;
+ALTER TABLE test_strict SECONDARY_LOAD;
+INSERT INTO test_strict VALUES (1, '2024-01-01', '2024-01-01 12:00:00');
+INSERT INTO test_strict VALUES (2, '2024-02-30', '2024-01-01 12:00:00');
+ERROR 22007: Incorrect date value: '2024-02-30' for column 'd' at row 1
+drop database sh_test8;

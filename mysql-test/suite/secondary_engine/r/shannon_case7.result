@@ -1,0 +1,131 @@
+create database sh_test7;
+use sh_test7;
+set use_secondary_engine=forced;
+CREATE TABLE test_numeric_types (
+id INT PRIMARY KEY AUTO_INCREMENT,
+col_bigint BIGINT,
+col_bool BOOL,
+col_decimal DECIMAL(10,2),
+col_double DOUBLE,
+col_float FLOAT,
+col_int INT,
+col_integer INTEGER,
+col_mediumint MEDIUMINT,
+col_smallint SMALLINT,
+col_tinyint TINYINT
+) ENGINE=InnoDB secondary_engine=rapid;
+INSERT INTO test_numeric_types VALUES
+(1, 9223372036854775807, TRUE, 99999999.99, 1.7976931348623157E+308, 3.402823466E+38, 2147483647, 2147483647, 8388607, 32767, 127),
+(2, -9223372036854775808, FALSE, -99999999.99, -1.7976931348623157E+308, -3.402823466E+38, -2147483648, -2147483648, -8388608, -32768, -128),
+(3, 0, NULL, 0.00, 0.0, 0.0, 0, 0, 0, 0, 0);
+ALTER TABLE test_numeric_types SECONDARY_LOAD;
+EXPLAIN SELECT * FROM test_numeric_types ORDER BY id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	test_numeric_types	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using filesort; Using secondary engine Rapid
+Warnings:
+Note	1003	/* select#1 */ select `sh_test7`.`test_numeric_types`.`id` AS `id`,`sh_test7`.`test_numeric_types`.`col_bigint` AS `col_bigint`,`sh_test7`.`test_numeric_types`.`col_bool` AS `col_bool`,`sh_test7`.`test_numeric_types`.`col_decimal` AS `col_decimal`,`sh_test7`.`test_numeric_types`.`col_double` AS `col_double`,`sh_test7`.`test_numeric_types`.`col_float` AS `col_float`,`sh_test7`.`test_numeric_types`.`col_int` AS `col_int`,`sh_test7`.`test_numeric_types`.`col_integer` AS `col_integer`,`sh_test7`.`test_numeric_types`.`col_mediumint` AS `col_mediumint`,`sh_test7`.`test_numeric_types`.`col_smallint` AS `col_smallint`,`sh_test7`.`test_numeric_types`.`col_tinyint` AS `col_tinyint` from `sh_test7`.`test_numeric_types` order by `sh_test7`.`test_numeric_types`.`id`
+SELECT * FROM test_numeric_types ORDER BY id;
+id	col_bigint	col_bool	col_decimal	col_double	col_float	col_int	col_integer	col_mediumint	col_smallint	col_tinyint
+1	9223372036854775807	1	99999999.99	1.7976931348623157e308	3.40282e38	2147483647	2147483647	8388607	32767	127
+2	-9223372036854775808	0	-99999999.99	-1.7976931348623157e308	-3.40282e38	-2147483648	-2147483648	-8388608	-32768	-128
+3	0	NULL	0.00	0	0	0	0	0	0	0
+SELECT 
+SUM(col_bigint) as sum_bigint,
+AVG(col_decimal) as avg_decimal,
+MAX(col_double) as max_double,
+MIN(col_float) as min_float
+FROM test_numeric_types;
+sum_bigint	avg_decimal	max_double	min_float
+-1	0.000000	1.7976931348623157e308	-3.40282e38
+SET sql_mode = 'STRICT_ALL_TABLES';
+Warnings:
+Warning	3135	'NO_ZERO_DATE', 'NO_ZERO_IN_DATE' and 'ERROR_FOR_DIVISION_BY_ZERO' sql modes should be used with strict mode. They will be merged with strict mode in a future release.
+CREATE TABLE test_temporal_types (
+id INT PRIMARY KEY,
+col_date DATE,
+col_datetime DATETIME,
+col_time TIME,
+col_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+col_year YEAR
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPId;
+INSERT INTO test_temporal_types (id, col_date, col_datetime, col_time, col_year) VALUES
+(1, '2024-01-01', '2024-01-01 12:30:45', '12:30:45', 2024),
+(2, '2024-12-31', '2024-12-31 23:59:59', '23:59:59', 2024),
+(3, '0000-00-00', '0000-00-00 00:00:00', '00:00:00', 0000);
+ALTER TABLE test_temporal_types SECONDARY_LOAD;
+INSERT INTO test_temporal_types (id, col_date) VALUES (4, '2024-02-30');
+ERROR 22007: Incorrect date value: '2024-02-30' for column 'col_date' at row 1
+SELECT * FROM test_temporal_types ORDER BY id;
+id	col_date	col_datetime	col_time	col_timestamp	col_year
+1	2024-01-01	2024-01-01 12:30:45	12:30:45	IGNORE	2024
+2	2024-12-31	2024-12-31 23:59:59	23:59:59	IGNORE	2024
+3	0000-00-00	0000-00-00 00:00:00	00:00:00	IGNORE	0000
+EXPLAIN SELECT 
+YEAR(col_date) as year_from_date,
+MONTH(col_datetime) as month_from_datetime,
+HOUR(col_time) as hour_from_time
+FROM test_temporal_types;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	test_temporal_types	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using secondary engine Rapid
+Warnings:
+Note	1003	/* select#1 */ select year(`sh_test7`.`test_temporal_types`.`col_date`) AS `year_from_date`,month(`sh_test7`.`test_temporal_types`.`col_datetime`) AS `month_from_datetime`,hour(`sh_test7`.`test_temporal_types`.`col_time`) AS `hour_from_time` from `sh_test7`.`test_temporal_types`
+SELECT 
+YEAR(col_date) as year_from_date,
+MONTH(col_datetime) as month_from_datetime,
+HOUR(col_time) as hour_from_time
+FROM test_temporal_types;
+year_from_date	month_from_datetime	hour_from_time
+2024	1	12
+2024	12	23
+0	0	0
+CREATE TABLE test_string_types (
+id INT PRIMARY KEY,
+col_char CHAR(10),
+col_varchar VARCHAR(255),
+col_text TEXT,
+col_tinytext TINYTEXT,
+col_mediumtext MEDIUMTEXT,
+col_longtext LONGTEXT,
+col_enum ENUM('small', 'medium', 'large')
+) ENGINE=InnoDB  SECONDARY_ENGINE=RAPID;
+INSERT INTO test_string_types VALUES
+(1, 'char', 'varchar text', REPEAT('text ', 10), 'tiny', REPEAT('medium ', 100), REPEAT('long ', 1000), 'medium'),
+(2, 'test', 'another varchar', 'text content', 'tiny2', REPEAT('x', 1000), REPEAT('y', 10000), 'large'),
+(3, '', '', '', '', '', '', 'small');
+ALTER TABLE test_string_types SECONDARY_LOAD;
+EXPLAIN SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
+LENGTH(col_longtext) as longtext_length, col_enum
+FROM test_string_types ORDER BY id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	test_string_types	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using filesort; Using secondary engine Rapid
+Warnings:
+Note	1003	/* select#1 */ select `sh_test7`.`test_string_types`.`id` AS `id`,`sh_test7`.`test_string_types`.`col_char` AS `col_char`,`sh_test7`.`test_string_types`.`col_varchar` AS `col_varchar`,left(`sh_test7`.`test_string_types`.`col_text`,20) AS `text_preview`,length(`sh_test7`.`test_string_types`.`col_longtext`) AS `longtext_length`,`sh_test7`.`test_string_types`.`col_enum` AS `col_enum` from `sh_test7`.`test_string_types` order by `sh_test7`.`test_string_types`.`id`
+SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
+LENGTH(col_longtext) as longtext_length, col_enum
+FROM test_string_types ORDER BY id;
+id	col_char	col_varchar	text_preview	longtext_length	col_enum
+1	char	varchar text	text text text text 	5000	medium
+2	test	another varchar	text content	10000	large
+3				0	small
+SELECT 
+CONCAT(col_char, '-', col_varchar) as concatenated,
+UPPER(col_enum) as enum_upper,
+LENGTH(col_text) as text_length
+FROM test_string_types WHERE id = 1;
+concatenated	enum_upper	text_length
+char-varchar text	MEDIUM	50
+CREATE TABLE IF NOT EXISTS test_json_types (
+id INT PRIMARY KEY,
+col_json JSON
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+alter table test_json_types secondary_load;
+ERROR HY000: test_json_types.col_json type not allowed
+CREATE TABLE test_unsupported_types (
+id INT PRIMARY KEY,
+col_blob BLOB,
+col_geometry GEOMETRY,
+col_set SET('a', 'b', 'c')
+) ENGINE=InnoDB SECONDARY_ENGINE=RAPID;
+alter table test_unsupported_types secondary_load;
+ERROR HY000: test_unsupported_types.col_geometry type not allowed
+drop database sh_test7;
