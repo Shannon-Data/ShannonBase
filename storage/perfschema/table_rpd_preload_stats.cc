@@ -45,6 +45,7 @@
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
+#include "storage/rapid_engine/include/rapid_loaded_table.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 
 THR_LOCK table_rpd_preload_stats::m_table_lock;

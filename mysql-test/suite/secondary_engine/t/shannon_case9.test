@@ -1,0 +1,48 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+create database sh_test9;
+use sh_test9;
+set use_secondary_engine=forced;
+show variables like "rapid_async_column_threshold";
+
+
+CREATE TABLE perf_test (
+    id INT PRIMARY KEY,
+    a INT, b INT, c INT, d INT, e INT, f INT, g INT, h INT, i INT, j INT,
+    k VARCHAR(100), l VARCHAR(100), m VARCHAR(100), n VARCHAR(100), o VARCHAR(100)
+) SECONDARY_ENGINE=RAPID;
+
+DELIMITER |;
+CREATE PROCEDURE populate_data()
+BEGIN
+    DECLARE i INT DEFAULT 1;
+    WHILE i <= 10 DO
+        INSERT INTO perf_test VALUES (
+            i,
+            i, i+1, i+2, i+3, i+4, i+5, i+6, i+7, i+8, i+9,
+            CONCAT('text', i), CONCAT('text', i+1), CONCAT('text', i+2),
+            CONCAT('text', i+3), CONCAT('text', i+4)
+        );
+        SET i = i + 1;
+    END WHILE;
+END|
+DELIMITER ;|
+
+CALL populate_data();
+DROP PROCEDURE populate_data;
+
+ALTER TABLE perf_test secondary_load;
+
+#Tables have been loaded, cannot change the rapid params
+--ERROR 3877
+set global rapid_async_column_threshold=4;
+ALTER TABLE perf_test secondary_unload;
+
+set global rapid_async_column_threshold=4;
+ALTER TABLE perf_test secondary_load;
+SELECT * FROM perf_test;
+
+drop database sh_test9;
