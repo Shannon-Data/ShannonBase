@@ -26,7 +26,7 @@ CREATE TABLE LINEITEM ( L_ORDERKEY    BIGINT NOT NULL,
                         L_COMMENT      VARCHAR(44) NOT NULL,
                         PRIMARY KEY (L_ORDERKEY, L_LINENUMBER))
                         PARTITION BY KEY()
-                        PARTITIONS 4;
+                        PARTITIONS 11;
 
 alter table LINEITEM secondary_engine NULL;
 
@@ -87,7 +87,7 @@ CREATE TABLE LINEITEM1 ( L_ORDERKEY    BIGINT NOT NULL,
                         L_COMMENT      VARCHAR(44) NOT NULL,
                         PRIMARY KEY (L_ORDERKEY, L_LINENUMBER))
                         PARTITION BY KEY()
-                        PARTITIONS 3;
+                        PARTITIONS 10;
 
 alter table LINEITEM1 secondary_engine NULL;
 

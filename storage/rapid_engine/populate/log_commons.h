@@ -117,7 +117,7 @@
 namespace ShannonBase {
 namespace Populate {
 inline const char *sync_mode_names[] = {"DIRECT_NOTIFICATION", "REDO_LOG_PARSE", "HYBRID", nullptr};
-enum class SyncMode : uint8 {
+enum class SyncMode : uint {
   DIRECT_NOTIFICATION = 0,  // notification-based
   REDO_LOG_PARSE,           // redo-log based
   HYBRID                    // hybrid mode.

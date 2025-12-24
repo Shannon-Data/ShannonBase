@@ -106,6 +106,10 @@ class RapidCursor : public MemoryObject {
   // to the next rows.
   int next(uchar *buf);
 
+  int rnd_pos(uchar *buff, uchar *pos);
+
+  row_id_t position(const unsigned char *record);
+
   boost::asio::awaitable<int> next_async(uchar *buf);
 
   // read the data in data in batch mode.
