@@ -46,6 +46,7 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/include/rapid_loaded_table.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -83,14 +84,16 @@ class HandlerGuard {
 };
 
 std::optional<std::string> SelfLoadManager::extract_secondary_engine(const std::string &input) {
+  auto eng_str = input;
+  std::transform(eng_str.begin(), eng_str.end(), eng_str.begin(), [](unsigned char c) { return std::toupper(c); });
   const std::string key = "SECONDARY_ENGINE=";
-  size_t pos = input.find(key);
-  if (pos == std::string::npos) return std::nullopt;
+  size_t pos = eng_str.find(key);
+  if (pos == std::string::npos) return eng_str;
 
   pos += key.length();
-  size_t end_pos = input.find_first_of(";", pos);
-  if (end_pos == std::string::npos) end_pos = input.length();
-  return input.substr(pos, end_pos - pos);
+  size_t end_pos = eng_str.find_first_of(";", pos);
+  if (end_pos == std::string::npos) end_pos = eng_str.length();
+  return eng_str.substr(pos, end_pos - pos);
 }
 
 // to scan mysq.schema, to get all schem information. such as schema_id, schema_name, etc.
@@ -223,13 +226,10 @@ int SelfLoadManager::load_mysql_tables_info() {
     auto option_txt_fld = *(cat_tables_ptr->field + FIELD_OPTIONS_OFFSET_TABLES);
     String opt_strstr;
     auto opt_str = std::string(option_txt_fld->val_str(&opt_strstr)->c_ptr());
-    std::transform(opt_str.begin(), opt_str.end(), opt_str.begin(), [](unsigned char c) { return std::toupper(c); });
-    // valid option: `secondary_engine=rapid` or `secondary_engine=`
+    // valid option: `secondary_engine=rapid` or `secondary_engine=` or 'rapid'
     // invalid option will be skipped. such as `secondary_engine=asdfasd`
     auto res = extract_secondary_engine(opt_str);
-    if (!res)
-      continue;
-    else {
+    if (res) {
       auto val = res.value();
       if (val.find("RAPID") == std::string::npos && val.find("NULL") == std::string::npos && !val.empty()) continue;
     }
@@ -253,17 +253,18 @@ int SelfLoadManager::load_mysql_tables_info() {
     if (ShannonBase::shannon_loaded_tables->get(tb_info.get()->schema_name, tb_info.get()->table_name)) {
       tb_info.get()->excluded_from_self_load = true;
       tb_info.get()->stats.state = TableAccessStats::State::LOADED;
-      tb_info.get()->stats.load_type = TableAccessStats::LoadType::USER;
+      tb_info.get()->stats.load_type = ShannonBase::load_type_t::USER;
     } else {
       tb_info.get()->excluded_from_self_load = false;
       tb_info.get()->stats.state = TableAccessStats::State::NOT_LOADED;
-      tb_info.get()->stats.load_type = TableAccessStats::LoadType::SELF;
+      tb_info.get()->stats.load_type = ShannonBase::load_type_t::SELF;
     }
 
     tb_info.get()->stats.last_queried_time = std::chrono::system_clock::now();
     tb_info.get()->stats.last_queried_time_in_rpd = std::chrono::system_clock::now();
 
-    m_rpd_mirror_tables.emplace(key_str, std::move(tb_info));
+    if (m_rpd_mirror_tables.find(key_str) == m_rpd_mirror_tables.end())
+      m_rpd_mirror_tables.emplace(key_str, std::move(tb_info));
   }
   cat_tables_ptr->file->ha_rnd_end();
 
@@ -273,25 +274,34 @@ int SelfLoadManager::load_mysql_tables_info() {
   return SHANNON_SUCCESS;
 }
 
+SelfLoadManager::SelfLoadManager() { initialize(); }
+SelfLoadManager::~SelfLoadManager() { deinitialize(); }
+
 int SelfLoadManager::initialize() {
+  if (m_intialized.load(std::memory_order_relaxed)) return SHANNON_SUCCESS;
+
   auto ret{SHANNON_SUCCESS};
   ret = load_mysql_schema_info() || load_mysql_table_stats() || load_mysql_tables_info();
   if (ret == SHANNON_SUCCESS) m_intialized.store(true);
 
-  start_self_load_worker();
-  return ret;
+  return SHANNON_SUCCESS;
 }
 
 int SelfLoadManager::deinitialize() {
-  stop_self_load_worker();
+  if (!m_intialized.load(std::memory_order_relaxed)) return SHANNON_SUCCESS;
 
   std::unique_lock lock(m_tables_mutex);
   m_rpd_mirror_tables.clear();
   m_schema_tables.clear();
   m_table_stats.clear();
   m_intialized.store(false);
+
+  delete m_instance;
+  m_instance = nullptr;
   return SHANNON_SUCCESS;
 }
+
+int SelfLoadManager::get_innodb_thread_num() { return thd_parallel_read_threads(current_thd); }
 
 TableInfo *SelfLoadManager::get_table_info(const std::string &schema, const std::string &table) {
   std::shared_lock lock(m_tables_mutex);
@@ -308,17 +318,13 @@ std::unordered_map<std::string, std::unique_ptr<TableInfo>> &SelfLoadManager::ge
 
 int SelfLoadManager::add_table(const std::string &schema, const std::string &table, const std::string &secondary_engine,
                                bool is_partition) {
-  std::shared_lock lock(m_tables_mutex);
-
   auto table_info = std::make_unique<TableInfo>();
   table_info->schema_name = schema;
   table_info->table_name = table;
   table_info->secondary_engine = secondary_engine;
   table_info->partitioned = is_partition;
   // to check should we remove this table or not.
-  auto eng_str = secondary_engine;
-  std::transform(eng_str.begin(), eng_str.end(), eng_str.begin(), [](unsigned char c) { return std::toupper(c); });
-  auto res = extract_secondary_engine(eng_str);
+  auto res = extract_secondary_engine(secondary_engine);
   if (res) {
     auto val = res.value();
     if (val.find("RAPID") == std::string::npos && val.find("NULL") == std::string::npos && !val.empty())
@@ -328,12 +334,35 @@ int SelfLoadManager::add_table(const std::string &schema, const std::string &tab
   if (ShannonBase::shannon_loaded_tables->get(schema, table)) {
     table_info->excluded_from_self_load = true;
     table_info->stats.state = TableAccessStats::State::LOADED;
-    table_info->stats.load_type = TableAccessStats::LoadType::USER;
+    table_info->stats.load_type = ShannonBase::load_type_t::USER;
   } else {
     table_info->stats.state = TableAccessStats::State::NOT_LOADED;
-    table_info->stats.load_type = TableAccessStats::LoadType::SELF;
+    table_info->stats.load_type = ShannonBase::load_type_t::SELF;
   }
-  m_rpd_mirror_tables.emplace(table_info->full_name(), std::move(table_info));
+
+  std::unique_lock lock(m_tables_mutex);
+  auto sch_tb = table_info->schema_name + ":" + table_info->table_name;
+  if (m_rpd_mirror_tables.find(sch_tb) == m_rpd_mirror_tables.end())
+    m_rpd_mirror_tables.emplace(table_info->full_name(), std::move(table_info));
+  else {
+    m_rpd_mirror_tables[sch_tb]->stats.state = TableAccessStats::State::LOADED;
+    m_rpd_mirror_tables[sch_tb]->stats.load_type = ShannonBase::load_type_t::USER;
+  }
+
+  return SHANNON_SUCCESS;
+}
+
+int SelfLoadManager::change_table_stat(const std::string &schema, const std::string &table,
+                                       ShannonBase::load_status_t type) {
+  std::unique_lock lock(m_tables_mutex);
+  auto sch_tb = schema + ":" + table;
+  if (m_rpd_mirror_tables.find(sch_tb) == m_rpd_mirror_tables.end()) return SHANNON_SUCCESS;
+
+  if (type == ShannonBase::load_status_t::NOLOAD_RPDGSTABSTATE) {
+    m_rpd_mirror_tables[sch_tb]->stats.state = TableAccessStats::State::NOT_LOADED;
+    m_rpd_mirror_tables[sch_tb]->stats.load_type = ShannonBase::load_type_t::USER;
+  }
+
   return SHANNON_SUCCESS;
 }
 
@@ -344,7 +373,7 @@ TableInfo *SelfLoadManager::get_table_info(TABLE *table) {
   std::string table_name(table->s->table_name.str, table->s->table_name.length);
   std::string full_name = schema_name + ":" + table_name;
 
-  std::shared_lock<std::shared_mutex> lock(m_tables_mutex);
+  std::shared_lock lock(m_tables_mutex);
   auto it = m_rpd_mirror_tables.find(full_name);
   if (it != m_rpd_mirror_tables.end()) return it->second.get();
   return nullptr;
@@ -572,7 +601,7 @@ void SelfLoadManager::unload_cold_tables() {
       std::shared_lock stats_lock(table_info->stats.stats_mutex);
 
       // Check if it's a cold self-loaded table
-      if (table_info->stats.load_type == TableAccessStats::SELF &&
+      if (table_info->stats.load_type == ShannonBase::load_type_t::SELF &&
           table_info->stats.state == TableAccessStats::LOADED && table_info->stats.importance.load() == 0.0 &&
           table_info->stats.last_queried_time < cold_threshold) {
         tables_to_unload.push_back(full_name);
@@ -611,7 +640,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
         candidate.estimated_size = table_info->estimated_size;
         load_queue.push(candidate);
       } else if (table_info->stats.state == TableAccessStats::LOADED &&
-                 table_info->stats.load_type == TableAccessStats::SELF) {
+                 table_info->stats.load_type == ShannonBase::load_type_t::SELF) {
         UnloadCandidate candidate;
         candidate.full_name = full_name;
         candidate.importance = table_info->stats.importance.load();
@@ -694,7 +723,7 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   int result{SHANNON_SUCCESS};
   // Check if memory is sufficient
   if (!can_load_table(table_info->estimated_size)) {
-    update_table_state(schema, table, TableAccessStats::INSUFFICIENT_MEMORY, TableAccessStats::SELF);
+    update_table_state(schema, table, TableAccessStats::INSUFFICIENT_MEMORY, ShannonBase::load_type_t::SELF);
     return HA_ERR_GENERIC;
   }
 
@@ -716,13 +745,13 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
 
   if (result == SHANNON_SUCCESS) {
     // update the state to loaded.
-    update_table_state(schema, table, TableAccessStats::LOADED, TableAccessStats::SELF);
+    update_table_state(schema, table, TableAccessStats::LOADED, ShannonBase::load_type_t::SELF);
 
     //  Updates the actually used memory (if different from estimate)
     // TODO: Get actual memory usage and update table_info->estimated_size
   } else {
     // failed，set the state to INSUFFICIENT_MEMORY.
-    update_table_state(schema, table, TableAccessStats::INSUFFICIENT_MEMORY, TableAccessStats::SELF);
+    update_table_state(schema, table, TableAccessStats::INSUFFICIENT_MEMORY, ShannonBase::load_type_t::SELF);
   }
   return result;
 }
@@ -731,10 +760,10 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   // Checks if it's a user-loaded table
   auto table_info = get_table_info(schema, table);
 
-  if (table_info && table_info->stats.load_type == TableAccessStats::USER &&
+  if (table_info && table_info->stats.load_type == ShannonBase::load_type_t::USER &&
       table_info->stats.state == TableAccessStats::LOADED) {
     // User-loaded m_rpd_mirror_tables are downgraded to self-loaded but not actually unloaded
-    update_table_state(schema, table, TableAccessStats::LOADED, TableAccessStats::SELF);
+    update_table_state(schema, table, TableAccessStats::LOADED, ShannonBase::load_type_t::SELF);
 
     sql_print_warning(
         "Self-Load feature is enabled: table `%s`.`%s` "
@@ -753,7 +782,7 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   int result = Imcs::Imcs::instance()->unload_table(&context, schema.c_str(), table.c_str(), table_info->partitioned);
   if (result == SHANNON_SUCCESS) {
     // update state to unloaded.
-    update_table_state(schema, table, TableAccessStats::NOT_LOADED, TableAccessStats::SELF);
+    update_table_state(schema, table, TableAccessStats::NOT_LOADED, ShannonBase::load_type_t::SELF);
   }
   return result;
 }

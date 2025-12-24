@@ -37,7 +37,9 @@ Created jun 6, 2025 */
 #include "storage/innobase/handler/ha_innodb.h"
 #include "storage/innobase/include/dict0dd.h"  //dd_is_partitioned
 
+#include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/include/rapid_loaded_table.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -196,7 +198,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   // start to read data from innodb and load to rapid.
   ShannonBase::Rapid_load_context context;
   context.m_table = const_cast<TABLE *>(&table);
-  context.m_table_id = static_cast<ha_innobase *>(table.file)->get_table_id();
+  context.m_table_id = table.file->get_table_id();
   context.m_thd = m_thd;
   context.m_extra_info.m_keynr = active_index;
   context.m_schema_name = table.s->db.str;
@@ -207,8 +209,10 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   context.m_trx->begin_stmt();
   context.m_extra_info.m_trxid = context.m_trx->get_id();
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();  // see the commont on RpdTable load.
+  auto &meta_ref = shannon_loading_tables_meta[context.m_table_id];
 
   // use specific partion. such as partition(p1, p2, p10, ..., pn).
+  std::vector<logical_part_loaded_t> part_tb_infos;
   Table_ref *table_list = m_thd->lex->query_block->get_table_list();
   if (table_list->partition_names && table.file->get_partition_handler()) {
     partition_info *part_info = table_list->table->part_info;
@@ -219,23 +223,42 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
       if (part_info->get_part_elem(str->c_ptr(), &part_id) && part_id != NOT_A_PARTITION_ID) {
         context.m_extra_info.m_partition_infos.emplace(std::make_pair(str->c_ptr(), part_id));
       }
+      part_tb_infos.emplace_back(logical_part_loaded_t{.id = part_id,
+                                                       .name = std::string(str->c_ptr()),
+                                                       .load_scn = context.m_extra_info.m_scn,
+                                                       .load_type = load_type_t::USER});
     }
   } else {  // using all part.
     for (auto index = 0u; index < table.part_info->get_tot_partitions(); index++) {
       auto part_name = table.part_info->partitions[index]->partition_name;
       context.m_extra_info.m_partition_infos.emplace(std::make_pair(part_name, index));
+      part_tb_infos.emplace_back(logical_part_loaded_t{
+          .id = index, .name = part_name, .load_scn = context.m_extra_info.m_scn, .load_type = load_type_t::USER});
     }
   }
+  meta_ref.logical_part_loaded_at_scn = std::move(part_tb_infos);
+  meta_ref.snapshot_scn = context.m_extra_info.m_scn;
+  ha_rows num_rows{0};
+  table.file->ha_records(&num_rows);
+  meta_ref.nrows = num_rows;
+  meta_ref.size_bytes = meta_ref.nrows * table.s->rec_buff_length;
+  meta_ref.load_start_stamp = std::chrono::system_clock::now();
+  meta_ref.loading_progress = 0.1;
 
   if (Imcs::Imcs::instance()->load_parttable(&context, const_cast<TABLE *>(&table))) {
+    shannon_loading_tables_meta.erase(context.m_table_id);
     my_error(ER_SECONDARY_ENGINE, MYF(0), table.s->db.str, table.s->table_name.str);
     context.m_trx->rollback_stmt();
     return HA_ERR_GENERIC;
   }
+  meta_ref.load_end_stamp = std::chrono::system_clock::now();
+  meta_ref.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+  meta_ref.loading_progress = 1.0;
 
   m_share = new RapidPartShare(table);
   m_share->file = this;
   m_share->m_tableid = context.m_table_id;
+
   shannon_loaded_tables->add(table.s->db.str, table.s->table_name.str, m_share);
   if (shannon_loaded_tables->get(table.s->db.str, table.s->table_name.str) == nullptr) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table.s->db.str, table.s->table_name.str);
@@ -255,13 +278,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
     strncpy(row_rpd_columns.table_name, table.s->table_name.str, sizeof(row_rpd_columns.table_name) - 1);
     auto key_name =
         ShannonBase::Utils::Util::get_key_name(table.s->db.str, table.s->table_name.str, field_ptr->field_name);
-#if 0  // TODO: refact
-    ShannonBase::Compress::Dictionary* dict =
-      ShannonBase::Imcs::Imcs::instance()->get_cu(key_name)->get_header()->m_local_dict.get();
-    if (dict)
-      row_rpd_columns.data_dict_bytes = dict->content_size();
-    row_rpd_columns.data_placement_index = 0;
-#endif
+
     std::string comment(field_ptr->comment.str);
     memset(row_rpd_columns.encoding, 0x0, NAME_LEN);
     if (comment.find("SORTED") != std::string::npos)
@@ -271,8 +288,13 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
     else
       strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
     row_rpd_columns.ndv = 0;
+    row_rpd_columns.avg_byte_width_inc_null = field_ptr->pack_length();
     ShannonBase::rpd_columns_info.push_back(row_rpd_columns);
   }
+
+  auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+  if (self_load_inst) self_load_inst->add_table(context.m_schema_name, context.m_table_name, "", true);
+
   // start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();
   return ShannonBase::SHANNON_SUCCESS;
@@ -297,6 +319,9 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
 
+  if (shannon_loading_tables_meta.find(table_id) == shannon_loading_tables_meta.end())
+    shannon_loading_tables_meta.erase(table_id);
+
   Imcs::Imcs::instance()->unload_table(&context, table_id, false, true);
 
   // ease the meta info.
@@ -312,6 +337,10 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   // partitions, not all alter table xxx secondary_unload partition(p0, p10). Under this stage,
   // we think that the table is still in loading status.
   shannon_loaded_tables->erase(db_name, table_name);
+
+  if (ShannonBase::self_load_mngr_inst)
+    ShannonBase::self_load_mngr_inst->change_table_stat(db_name, table_name,
+                                                        ShannonBase::load_status_t::NOLOAD_RPDGSTABSTATE);
 
   if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::end();
 

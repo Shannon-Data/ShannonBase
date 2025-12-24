@@ -94,6 +94,7 @@
 
 #include "sql/handler.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_status.h"
 
 class Field;
 class THD;
@@ -119,7 +120,7 @@ struct TableAccessStats {
   std::chrono::system_clock::time_point last_queried_time_in_rpd;
 
   enum State { NOT_LOADED = 0, LOADED, INSUFFICIENT_MEMORY } state{NOT_LOADED};
-  enum LoadType { SELF, USER } load_type{SELF};
+  ShannonBase::load_type_t load_type{ShannonBase::load_type_t::USER};
 
   std::shared_mutex stats_mutex;
   TableAccessStats()
@@ -148,31 +149,24 @@ class SelfLoadManager {
   }
 
   void start() {
-    if (!m_instance) return;
-    m_instance->initialize();
-    m_instance->start_self_load_worker();
+    if (!m_instance || !m_intialized) return;
+    start_self_load_worker();
   }
 
   void shutdown() {
-    if (m_instance) {
-      m_instance->deinitialize();
-      delete m_instance;
-      m_instance = nullptr;
-    }
+    if (!m_instance || !m_intialized) return;
+    stop_self_load_worker();
   }
 
   inline bool initialized() { return m_intialized.load(); }
+
+  static int get_innodb_thread_num();
 
   // RPD Mirror management.
   int add_table(const std::string &schema, const std::string &table,
                 const std::string &secondary_engine = ShannonBase::rapid_hton_name, bool is_partition = false);
 
-  inline int remove_table(const std::string &schema, const std::string &table) {
-    std::unique_lock lock(m_tables_mutex);
-    std::string full_name = schema + ":" + table;
-    m_rpd_mirror_tables.erase(full_name);
-    return SHANNON_SUCCESS;
-  }
+  int change_table_stat(const std::string &schema, const std::string &table, ShannonBase::load_status_t type);
 
   void update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in);
   TableInfo *get_table_info(const std::string &schema, const std::string &table);
@@ -200,8 +194,8 @@ class SelfLoadManager {
   static constexpr double UPDATE_WEIGHT = 0.2;  // A smaller weight makes importance changes smoother
 
  private:
-  SelfLoadManager() = default;
-  ~SelfLoadManager() = default;
+  SelfLoadManager();
+  ~SelfLoadManager();
   SelfLoadManager(const SelfLoadManager &) = delete;
   SelfLoadManager &operator=(const SelfLoadManager &) = delete;
 
@@ -228,7 +222,7 @@ class SelfLoadManager {
   TableInfo *get_table_info(TABLE *table);
 
   inline int update_table_state(const std::string &schema, const std::string &table, TableAccessStats::State state,
-                                TableAccessStats::LoadType load_type) {
+                                ShannonBase::load_type_t load_type) {
     std::shared_lock lock(m_tables_mutex);
     std::string full_name = schema + ":" + table;
 

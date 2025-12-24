@@ -39,6 +39,8 @@
 #include "my_inttypes.h"
 #include "mysql_com.h"
 #include "sql/sql_const.h"  // UUID_LENGTH
+#include "sql-common/json_dom.h"
+
 #include "storage/perfschema/pfs_engine_table.h"
 #include "storage/rapid_engine/autopilot/loader.h"
 /**
@@ -49,12 +51,6 @@
 /**
   The rpd_mirror table keeps track of all existing tables in the DB System, whose engine is InnoDB.
 */
-enum STAT_ENUM {
-  NOT_LOADED = 1,
-  LOADED,
-  INSUFFICIENT_MEMORY
-};
-
 struct st_row_rpd_mirror {
   //The schema name.
   char schema_name[NAME_LEN] {0};
@@ -64,12 +60,18 @@ struct st_row_rpd_mirror {
   ulonglong msyql_access_count{0};
   //Number of times the table has been accessed by the MySQL HeatWave Cluster.
   ulonglong rpd_access_count{0};
+  //importance.
+  double importance{0.0};
   //The timestamp of the last DB System query that referenced the table.
   ulonglong last_queried_timestamp{0};
   //The timestamp of the last MySQL HeatWave query that referenced the table.
   ulonglong last_queried_in_rpd_timestamp{0};
   //The table state: loaded or not loaded.
-  STAT_ENUM state{STAT_ENUM::NOT_LOADED};
+  ulonglong state{0};
+  //recommend read thread num.
+  int recommend_thr_num {0};
+  //query partition
+  Json_wrapper query_partitions;
 };
 
 /** Table PERFORMANCE_SCHEMA.RPD_TABLES. */
