@@ -38,6 +38,7 @@
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/include/rapid_loaded_table.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
 #include "storage/rapid_engine/optimizer/rules/const_fold_rule.h"

@@ -1,0 +1,219 @@
+create database sh_self_load2;
+use sh_self_load2;
+create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
+insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt secondary_load;
+select name, score, id, gender from tt where score >=1  and score < 3 order by id;
+name	score	id	gender
+n1	1	1	m
+n2	2	2	f
+select * from tt where score >=1  and id < 3 order by id;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+select * from tt where id >=1  and id < 3 order by id;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
+alter table tt1 secondary_load;
+select * from tt1 where score >=1  and id < 3 order by id;
+score	name	id	gender
+10	n1	1	m
+20	n2	2	f
+select * from tt1 where score >=1  and score < 3 order by id;
+score	name	id	gender
+select * from tt1 where id >=1  and id < 3 order by id;
+score	name	id	gender
+10	n1	1	m
+20	n2	2	f
+select score from tt1 where id > 2  and score = 30 order by id;
+score
+30
+create table tt2 (score int, name char(10), id int primary key, gender char(1));
+insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt2 secondary_engine=rapid;
+alter table tt2 secondary_load;
+select * from tt2 order by id;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+3	n3	3	m
+create table tt3 (score int primary key, name char(10), id int, gender char(1), key(id, score));
+insert into tt3 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt3 secondary_engine=rapid;
+alter table tt3 secondary_load;
+select * from tt3 where score >1 order by id;
+score	name	id	gender
+2	n2	2	f
+3	n3	3	m
+create table tt4 (score double primary key, name char(10), id int, gender char(1));
+insert into tt4 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
+alter table tt4 secondary_engine=rapid;
+alter table tt4 secondary_load;
+CREATE TABLE LINEITEM4 (
+L_ORDERKEY    BIGINT NOT NULL,
+L_PARTKEY     INTEGER NOT NULL,
+L_SUPPKEY     INTEGER NOT NULL,
+L_LINENUMBER  INTEGER NOT NULL,
+L_QUANTITY    DECIMAL(15,2) NOT NULL,
+L_EXTENDEDPRICE  DECIMAL(15,2) NOT NULL,
+L_DISCOUNT    DECIMAL(15,2) NOT NULL,
+L_TAX         DECIMAL(15,2) NOT NULL,
+L_RETURNFLAG  CHAR(1) NOT NULL,
+L_LINESTATUS  CHAR(1) NOT NULL,
+L_SHIPDATE    DATE NOT NULL,
+L_COMMITDATE  DATE NOT NULL,
+L_RECEIPTDATE DATE NOT NULL,
+L_SHIPINSTRUCT CHAR(25) NOT NULL,
+L_SHIPMODE     CHAR(10) NOT NULL,
+L_COMMENT      VARCHAR(44) NOT NULL,
+PRIMARY KEY (L_ORDERKEY, L_LINENUMBER, L_SHIPDATE)
+)
+PARTITION BY RANGE (YEAR(L_SHIPDATE)) (
+PARTITION p1995 VALUES LESS THAN (1996),
+PARTITION p1996 VALUES LESS THAN (1997),
+PARTITION p1997 VALUES LESS THAN (1998),
+PARTITION p_future VALUES LESS THAN MAXVALUE
+);
+alter table LINEITEM4 secondary_engine NULL;
+alter table LINEITEM4 change L_RETURNFLAG L_RETURNFLAG CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM4 change L_LINESTATUS L_LINESTATUS CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM4 change L_SHIPINSTRUCT L_SHIPINSTRUCT CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM4 change L_COMMENT L_COMMENT VARCHAR(44) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM4 change L_SHIPMODE L_SHIPMODE CHAR(10) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM4 change L_ORDERKEY L_ORDERKEY BIGINT NOT NULL COMMENT 'RAPID_COLUMN=DATA_PLACEMENT_KEY=1';
+alter table LINEITEM4 secondary_engine RAPID;
+alter table LINEITEM4 secondary_load;
+select * from performance_schema.rpd_tables;
+ID	SNAPSHOT_SCN	PERSISTED_SCN	POOL_TYPE	DATA_PLACEMENT_TYPE	NROWS	LOAD_STATUS	LOAD_PROGRESS	SIZE_BYTES	TRANSFORMATION_BYTES	QUERY_COUNT	LAST_QUERIED	LOAD_START_TIMESTAMP	LOAD_END_TIMESTAMP	RECOVERY_SOURCE	RECOVERY_START_TIMESTAMP	RECOVERY_END_TIMESTAMP	LOAD_TYPE	LOGICAL_PARTS_LOADED_AT_SCN	AUTO_ZMP_COLUMNS	ACE_MODEL
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	192	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	0	AVAIL_RPDGSTABSTATE	100	0	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+select * from performance_schema.rpd_table_id;
+ID	NAME	SCHEMA_NAME	TABLE_NAME
+IGNORE	sh_self_load2\LINEITEM4	sh_self_load2	LINEITEM4
+IGNORE	sh_self_load2\ttNEITEM4	sh_self_load2	ttNEITEM4
+IGNORE	sh_self_load2\tt1EITEM4	sh_self_load2	tt1EITEM4
+IGNORE	sh_self_load2\tt2EITEM4	sh_self_load2	tt2EITEM4
+IGNORE	sh_self_load2\tt3EITEM4	sh_self_load2	tt3EITEM4
+IGNORE	sh_self_load2\tt4EITEM4	sh_self_load2	tt4EITEM4
+select * from performance_schema.rpd_columns;
+TABLE_ID	COLUMN_ID	NDV	ENCODING	DATA_PLACEMENT_INDEX	DICT_SIZE_BTYES
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	SORTED	0	0
+IGNORE	IGNORE	0	SORTED	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	N/A	0	0
+IGNORE	IGNORE	0	SORTED	0	0
+IGNORE	IGNORE	0	SORTED	0	0
+IGNORE	IGNORE	0	SORTED	0	0
+select * from performance_schema.rpd_column_id;
+ID	TABLE_ID	COLUMN_NAME
+IGNORE	IGNORE	score
+IGNORE	IGNORE	name
+IGNORE	IGNORE	id
+IGNORE	IGNORE	gender
+IGNORE	IGNORE	score
+IGNORE	IGNORE	name
+IGNORE	IGNORE	id
+IGNORE	IGNORE	gender
+IGNORE	IGNORE	score
+IGNORE	IGNORE	name
+IGNORE	IGNORE	id
+IGNORE	IGNORE	gender
+IGNORE	IGNORE	score
+IGNORE	IGNORE	name
+IGNORE	IGNORE	id
+IGNORE	IGNORE	gender
+IGNORE	IGNORE	score
+IGNORE	IGNORE	name
+IGNORE	IGNORE	id
+IGNORE	IGNORE	gender
+IGNORE	IGNORE	L_ORDERKEY
+IGNORE	IGNORE	L_PARTKEY
+IGNORE	IGNORE	L_SUPPKEY
+IGNORE	IGNORE	L_LINENUMBER
+IGNORE	IGNORE	L_QUANTITY
+IGNORE	IGNORE	L_EXTENDEDPRICE
+IGNORE	IGNORE	L_DISCOUNT
+IGNORE	IGNORE	L_TAX
+IGNORE	IGNORE	L_RETURNFLAG
+IGNORE	IGNORE	L_LINESTATUS
+IGNORE	IGNORE	L_SHIPDATE
+IGNORE	IGNORE	L_COMMITDATE
+IGNORE	IGNORE	L_RECEIPTDATE
+IGNORE	IGNORE	L_SHIPINSTRUCT
+IGNORE	IGNORE	L_SHIPMODE
+IGNORE	IGNORE	L_COMMENT
+select * from performance_schema.rpd_preload_stats;
+TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	AVG_BYTE_WIDTH_INC_NULL
+sh_self_load2	tt	score	4
+sh_self_load2	tt	name	40
+sh_self_load2	tt	id	4
+sh_self_load2	tt	gender	4
+sh_self_load2	tt1	score	4
+sh_self_load2	tt1	name	40
+sh_self_load2	tt1	id	4
+sh_self_load2	tt1	gender	4
+sh_self_load2	tt2	score	4
+sh_self_load2	tt2	name	40
+sh_self_load2	tt2	id	4
+sh_self_load2	tt2	gender	4
+sh_self_load2	tt3	score	4
+sh_self_load2	tt3	name	40
+sh_self_load2	tt3	id	4
+sh_self_load2	tt3	gender	4
+sh_self_load2	tt4	score	8
+sh_self_load2	tt4	name	40
+sh_self_load2	tt4	id	4
+sh_self_load2	tt4	gender	4
+sh_self_load2	LINEITEM4	L_ORDERKEY	8
+sh_self_load2	LINEITEM4	L_PARTKEY	4
+sh_self_load2	LINEITEM4	L_SUPPKEY	4
+sh_self_load2	LINEITEM4	L_LINENUMBER	4
+sh_self_load2	LINEITEM4	L_QUANTITY	7
+sh_self_load2	LINEITEM4	L_EXTENDEDPRICE	7
+sh_self_load2	LINEITEM4	L_DISCOUNT	7
+sh_self_load2	LINEITEM4	L_TAX	7
+sh_self_load2	LINEITEM4	L_RETURNFLAG	4
+sh_self_load2	LINEITEM4	L_LINESTATUS	4
+sh_self_load2	LINEITEM4	L_SHIPDATE	3
+sh_self_load2	LINEITEM4	L_COMMITDATE	3
+sh_self_load2	LINEITEM4	L_RECEIPTDATE	3
+sh_self_load2	LINEITEM4	L_SHIPINSTRUCT	100
+sh_self_load2	LINEITEM4	L_SHIPMODE	40
+sh_self_load2	LINEITEM4	L_COMMENT	177
+drop database sh_self_load2;

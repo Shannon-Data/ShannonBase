@@ -62,7 +62,7 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
       config.max_table_mem_size);
   m_metadata.db_name = mysql_table->s->db.str;
   m_metadata.table_name = mysql_table->s->table_name.str;
-  m_metadata.table_id = static_cast<ha_innobase *>(mysql_table->file)->get_table_id();
+  m_metadata.table_id = mysql_table->file->get_table_id();
   m_metadata.rows_per_imcu = config.rows_per_imcu;
 
   // from MySQL TABLE get fields infor.

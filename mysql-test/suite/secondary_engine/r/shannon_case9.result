@@ -1,0 +1,45 @@
+create database sh_test9;
+use sh_test9;
+set use_secondary_engine=forced;
+show variables like "rapid_async_column_threshold";
+Variable_name	Value
+rapid_async_column_threshold	16
+CREATE TABLE perf_test (
+id INT PRIMARY KEY,
+a INT, b INT, c INT, d INT, e INT, f INT, g INT, h INT, i INT, j INT,
+k VARCHAR(100), l VARCHAR(100), m VARCHAR(100), n VARCHAR(100), o VARCHAR(100)
+) SECONDARY_ENGINE=RAPID;
+CREATE PROCEDURE populate_data()
+BEGIN
+DECLARE i INT DEFAULT 1;
+WHILE i <= 10 DO
+INSERT INTO perf_test VALUES (
+i,
+i, i+1, i+2, i+3, i+4, i+5, i+6, i+7, i+8, i+9,
+CONCAT('text', i), CONCAT('text', i+1), CONCAT('text', i+2),
+CONCAT('text', i+3), CONCAT('text', i+4)
+);
+SET i = i + 1;
+END WHILE;
+END|
+CALL populate_data();
+DROP PROCEDURE populate_data;
+ALTER TABLE perf_test secondary_load;
+set global rapid_async_column_threshold=4;
+ERROR HY000: Tables have been loaded, cannot change the rapid params
+ALTER TABLE perf_test secondary_unload;
+set global rapid_async_column_threshold=4;
+ALTER TABLE perf_test secondary_load;
+SELECT * FROM perf_test;
+id	a	b	c	d	e	f	g	h	i	j	k	l	m	n	o
+1	1	2	3	4	5	6	7	8	9	10	text1	text2	text3	text4	text5
+2	2	3	4	5	6	7	8	9	10	11	text2	text3	text4	text5	text6
+3	3	4	5	6	7	8	9	10	11	12	text3	text4	text5	text6	text7
+4	4	5	6	7	8	9	10	11	12	13	text4	text5	text6	text7	text8
+5	5	6	7	8	9	10	11	12	13	14	text5	text6	text7	text8	text9
+6	6	7	8	9	10	11	12	13	14	15	text6	text7	text8	text9	text10
+7	7	8	9	10	11	12	13	14	15	16	text7	text8	text9	text10	text11
+8	8	9	10	11	12	13	14	15	16	17	text8	text9	text10	text11	text12
+9	9	10	11	12	13	14	15	16	17	18	text9	text10	text11	text12	text13
+10	10	11	12	13	14	15	16	17	18	19	text10	text11	text12	text13	text14
+drop database sh_test9;

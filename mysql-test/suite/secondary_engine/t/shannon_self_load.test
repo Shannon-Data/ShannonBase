@@ -76,7 +76,7 @@ ANALYZE TABLE simple_enum_table_5;
 
 SHOW CREATE TABLE performance_schema.rpd_mirror;
 
---replace_column 145 IGNORE 15 IGNORE 16 IGNORE
+--replace_column 14 IGNORE 15 IGNORE 16 IGNORE
 select * from information_schema.tables  where table_schema = 'sh_self_load';
 
 --sleep 61

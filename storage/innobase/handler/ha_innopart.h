@@ -618,6 +618,11 @@ class ha_innopart : public ha_innobase,
   */
   void parallel_scan_end(void *parallel_scan_ctx) override;
 
+  uint64_t get_table_id() const override { 
+    ut_ad(m_part_share != nullptr && m_tot_parts > 0);
+    auto ib_table = m_part_share->get_table_part(0);
+    return ib_table->id;
+  }
  private:
   /** Pointer to Ha_innopart_share on the TABLE_SHARE. */
   Ha_innopart_share *m_part_share;

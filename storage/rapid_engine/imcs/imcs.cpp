@@ -54,6 +54,7 @@
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/worker.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/include/rapid_loaded_table.h"
 #include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
@@ -227,7 +228,6 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
   TableConfig table_cfg;
   table_cfg.max_table_mem_size = 0.1 * SHANNON_SMALL_TABLE_MEMRORY_SIZE;  // Parent Table[placeholder]
   auto rpd_part_table = std::make_unique<PartTable>(source, table_cfg);
-
   if (rpd_part_table->build_partitions(context)) {
     std::string errmsg;
     errmsg.append("try to build ")
@@ -264,6 +264,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   auto table_id = context->m_table_id;
   ut_a(m_rpd_tables.find(table_id) != m_rpd_tables.end());
 
+  auto &meta_ref = shannon_loading_tables_meta[context->m_table_id];
   while ((tmp = shannon_file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
     /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
      without locks. Now, do full scan, but multi-thread scan will impl in future. */
@@ -274,6 +275,10 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
       shannon_file->ha_rnd_end();
       return HA_ERR_GENERIC;
     });
+
+    meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
+    meta_ref.loading_progress =
+        0.1 + ((m_thd->get_sent_row_count() * 1.0) / (meta_ref.nrows ? meta_ref.nrows : 1)) * 0.7;  // up to 80%
 
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     if ((m_rpd_tables[table_id].get()->insert_row(context, context->m_table->record[0])) == INVALID_ROW_ID) {
@@ -348,6 +353,8 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return HA_ERR_GENERIC;
   }
 
+  auto &meta_ref = shannon_loading_tables_meta[context->m_table_id];
+
   // to set the thread contexts. now set to nullptr,  you can use your own ctx. or resize(num_threads,
   // (void*)&scan_cookie);
   scan_ctx_guard.set_thread_ctxs(num_threads);
@@ -366,9 +373,9 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return false;
   };
 
-  Parallel_reader_adapter::Load_fn load_fn = [&context, &shannon_file, &source_table, &error_flag, &total_rows](
-                                                 void *cookie, uint nrows, void *rowdata,
-                                                 uint64_t partition_id) -> bool {
+  Parallel_reader_adapter::Load_fn load_fn = [&context, &shannon_file, &source_table, &error_flag, &total_rows,
+                                              &meta_ref](void *cookie, uint nrows, void *rowdata,
+                                                         uint64_t partition_id) -> bool {
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     auto scan_cookie = static_cast<parall_scan_cookie_t *>(cookie);  //, if you enable thread contexs.
     ut_a(scan_cookie);
@@ -377,6 +384,8 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     auto data_ptr = static_cast<uchar *>(rowdata);
     auto end_data_ptr = static_cast<uchar *>(rowdata) + ptrdiff_t(nrows * scan_cookie->row_len);
     for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie->row_len), index++) {
+      meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
+
       if ((source_table->insert_row(context, (uchar *)data_ptr)) == INVALID_ROW_ID) {
         error_flag.store(true);
         std::string errmsg;
@@ -393,6 +402,9 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     ut_a(data_ptr == end_data_ptr);
     scan_cookie->n_rows.store(nrows);
     total_rows.fetch_add(nrows);
+
+    meta_ref.loading_progress = 0.1 + ((total_rows * 1.0) / (meta_ref.nrows ? meta_ref.nrows : 1)) * 0.7;  // up to 80%
+
     return false;
   };
 
@@ -448,6 +460,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
   auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[table_id].get());
   assert(part_tb_ptr);
 
+  auto &meta_ref = shannon_loading_tables_meta[context->m_table_id];
   context->m_thd->set_sent_row_count(0);
   for (auto &[part_name, part_id] : context->m_extra_info.m_partition_infos) {
     auto partkey{part_name};
@@ -488,6 +501,11 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
       }
 
       context->m_thd->inc_sent_row_count(1);
+      meta_ref.load_status = load_status_t::LOADING_RPDGSTABSTATE;
+      meta_ref.loading_progress =
+          0.1 +
+          ((context->m_thd->get_sent_row_count() * 1.0) / (meta_ref.nrows ? meta_ref.nrows : 1)) * 0.7;  // up to 80%
+
       if (tmp == HA_ERR_RECORD_DELETED && !context->m_thd->killed) continue;
     }
 

@@ -39,7 +39,8 @@
 #include "my_inttypes.h"
 #include "mysql_com.h"
 #include "sql/sql_const.h"  // UUID_LENGTH
-#include "storage/perfschema/pfs_engine_table.h"
+#include "sql-common/json_dom.h"
+#include "storage/perfschema/pfs_engine_table.h" // json.
 
 /**
   @addtogroup performance_schema_tables
@@ -61,14 +62,17 @@ struct st_row_rpd_tables {
   ulonglong load_progress{0};
   ulonglong size_byte{0};
   ulonglong transformation_bytes{0};
-  ulonglong extranl_nrows{0};
   ulonglong query_count{0};
   double last_queried{0};
   double load_start_timestamp{0};
   double load_end_timestamp{0};
-  char recovery_source[NAME_LEN] {0};
+  ulonglong recovery_source;
   double reconvery_start_timestamp{0};
   double reconvery_end_timestamp{0};
+  ulonglong load_type{0};
+  Json_wrapper logical_part_loaded_at_scn;
+  Json_wrapper auto_zmp_columns;
+  bool ace_model{false};
 };
 
 /** Table PERFORMANCE_SCHEMA.RPD_TABLES. */

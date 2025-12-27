@@ -62,6 +62,7 @@ performance_schema	metadata_locks	COLUMN_NAME	utf8mb4_0900_ai_ci
 performance_schema	rpd_column_id	COLUMN_NAME	utf8mb4_bin
 performance_schema	rpd_columns	COLUMN_ID	NULL
 performance_schema	rpd_preload_stats	COLUMN_NAME	utf8mb4_bin
+performance_schema	rpd_tables	AUTO_ZMP_COLUMNS	NULL
 TRUNCATE TABLE performance_schema.events_waits_history_long;
 TRUNCATE TABLE performance_schema.events_statements_history_long;
 CREATE SCHEMA `BroKen`;

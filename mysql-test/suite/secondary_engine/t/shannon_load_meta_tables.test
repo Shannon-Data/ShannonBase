@@ -1,0 +1,93 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+#multi-times runs
+create database sh_self_load2;
+use sh_self_load2;
+
+create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
+insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt secondary_load;
+select name, score, id, gender from tt where score >=1  and score < 3 order by id;
+select * from tt where score >=1  and id < 3 order by id;
+select * from tt where id >=1  and id < 3 order by id;
+
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
+alter table tt1 secondary_load;
+select * from tt1 where score >=1  and id < 3 order by id;
+select * from tt1 where score >=1  and score < 3 order by id;
+select * from tt1 where id >=1  and id < 3 order by id;
+select score from tt1 where id > 2  and score = 30 order by id;
+
+create table tt2 (score int, name char(10), id int primary key, gender char(1));
+insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt2 secondary_engine=rapid;
+alter table tt2 secondary_load;
+select * from tt2 order by id;
+
+create table tt3 (score int primary key, name char(10), id int, gender char(1), key(id, score));
+insert into tt3 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt3 secondary_engine=rapid;
+alter table tt3 secondary_load;
+select * from tt3 where score >1 order by id;
+
+create table tt4 (score double primary key, name char(10), id int, gender char(1));
+insert into tt4 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
+alter table tt4 secondary_engine=rapid;
+alter table tt4 secondary_load;
+
+CREATE TABLE LINEITEM4 (
+    L_ORDERKEY    BIGINT NOT NULL,
+    L_PARTKEY     INTEGER NOT NULL,
+    L_SUPPKEY     INTEGER NOT NULL,
+    L_LINENUMBER  INTEGER NOT NULL,
+    L_QUANTITY    DECIMAL(15,2) NOT NULL,
+    L_EXTENDEDPRICE  DECIMAL(15,2) NOT NULL,
+    L_DISCOUNT    DECIMAL(15,2) NOT NULL,
+    L_TAX         DECIMAL(15,2) NOT NULL,
+    L_RETURNFLAG  CHAR(1) NOT NULL,
+    L_LINESTATUS  CHAR(1) NOT NULL,
+    L_SHIPDATE    DATE NOT NULL,
+    L_COMMITDATE  DATE NOT NULL,
+    L_RECEIPTDATE DATE NOT NULL,
+    L_SHIPINSTRUCT CHAR(25) NOT NULL,
+    L_SHIPMODE     CHAR(10) NOT NULL,
+    L_COMMENT      VARCHAR(44) NOT NULL,
+    PRIMARY KEY (L_ORDERKEY, L_LINENUMBER, L_SHIPDATE)
+)
+PARTITION BY RANGE (YEAR(L_SHIPDATE)) (
+    PARTITION p1995 VALUES LESS THAN (1996),
+    PARTITION p1996 VALUES LESS THAN (1997),
+    PARTITION p1997 VALUES LESS THAN (1998),
+    PARTITION p_future VALUES LESS THAN MAXVALUE
+);
+alter table LINEITEM4 secondary_engine NULL;
+
+alter table LINEITEM4 change L_RETURNFLAG L_RETURNFLAG CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM4 change L_LINESTATUS L_LINESTATUS CHAR(1) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM4 change L_SHIPINSTRUCT L_SHIPINSTRUCT CHAR(25) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM4 change L_COMMENT L_COMMENT VARCHAR(44) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+alter table LINEITEM4 change L_SHIPMODE L_SHIPMODE CHAR(10) NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=SORTED';
+#-- optimal data placement
+alter table LINEITEM4 change L_ORDERKEY L_ORDERKEY BIGINT NOT NULL COMMENT 'RAPID_COLUMN=DATA_PLACEMENT_KEY=1';
+alter table LINEITEM4 secondary_engine RAPID;
+alter table LINEITEM4 secondary_load;
+
+--replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
+select * from performance_schema.rpd_tables;
+
+--replace_column 1 IGNORE
+select * from performance_schema.rpd_table_id;
+
+--replace_column 1 IGNORE 2 IGNORE
+select * from performance_schema.rpd_columns;
+
+--replace_column 1 IGNORE 2 IGNORE
+select * from performance_schema.rpd_column_id;
+
+select * from performance_schema.rpd_preload_stats;
+
+drop database sh_self_load2;
