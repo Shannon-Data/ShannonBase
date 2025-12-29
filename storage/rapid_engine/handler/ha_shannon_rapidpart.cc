@@ -338,9 +338,7 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   // we think that the table is still in loading status.
   shannon_loaded_tables->erase(db_name, table_name);
 
-  if (ShannonBase::self_load_mngr_inst)
-    ShannonBase::self_load_mngr_inst->change_table_stat(db_name, table_name,
-                                                        ShannonBase::load_status_t::NOLOAD_RPDGSTABSTATE);
+  if (ShannonBase::self_load_mngr_inst) ShannonBase::self_load_mngr_inst->remove_table(db_name, table_name);
 
   if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::end();
 

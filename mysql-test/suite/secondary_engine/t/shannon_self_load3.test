@@ -1,0 +1,58 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
+#multi-times runs
+create database sh_self_load_test3;
+use sh_self_load_test3;
+
+create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
+insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+select name, score, id, gender from tt where score >=1  and score < 3 order by id;
+select * from tt where score >=1  and id < 3 order by id;
+select * from tt where id >=1  and id < 3 order by id;
+
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
+select * from tt1 where score >=1  and id < 3 order by id;
+select * from tt1 where score >=1  and score < 3 order by id;
+select * from tt1 where id >=1  and id < 3 order by id;
+select score from tt1 where id > 2  and score = 30 order by id;
+
+create table tt2 (score int, name char(10), id int primary key, gender char(1));
+insert into tt2 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
+alter table tt2 secondary_engine=rapid;
+select * from tt2 order by id;
+
+--replace_column 6 IGNORE 7 IGNORE
+select * from performance_schema.rpd_mirror order by TABLE_NAME;
+
+alter table tt secondary_load;
+alter table tt1 secondary_load;
+alter table tt2 secondary_load;
+
+--replace_column 6 IGNORE 7 IGNORE
+select * from performance_schema.rpd_mirror order by TABLE_NAME;
+
+--replace_column 1 IGNORE
+SELECT * FROM performance_schema.rpd_table_id;
+
+SELECT * FROM performance_schema.rpd_preload_stats;
+
+--replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
+SELECT * FROM performance_schema.rpd_tables order by ID;
+
+alter table tt1 secondary_unload;
+drop table tt2;
+--replace_column 6 IGNORE 7 IGNORE
+select * from performance_schema.rpd_mirror order by TABLE_NAME;
+
+
+drop database sh_self_load_test3;
+
+--replace_column 6 IGNORE 7 IGNORE
+select * from performance_schema.rpd_mirror order by TABLE_NAME;
