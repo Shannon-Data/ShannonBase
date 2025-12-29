@@ -472,9 +472,7 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
 
   shannon_loaded_tables->erase(db_name, table_name);
 
-  if (ShannonBase::self_load_mngr_inst)
-    ShannonBase::self_load_mngr_inst->change_table_stat(db_name, table_name,
-                                                        ShannonBase::load_status_t::NOLOAD_RPDGSTABSTATE);
+  if (ShannonBase::self_load_mngr_inst) ShannonBase::self_load_mngr_inst->remove_table(db_name, table_name);
 
   // to try stop main thread, if there're no tables loaded.
   if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::end();
@@ -903,6 +901,13 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
     if (ShannonBase::self_load_mngr_inst)
       ShannonBase::self_load_mngr_inst->add_table(db, table_name, eng_str, is_partitioned);
   }
+}
+
+void NotifyDropTable(Table_ref *tab) {
+  if (!tab) return;
+
+  if (ShannonBase::self_load_mngr_inst)
+    ShannonBase::self_load_mngr_inst->erase_table(tab->get_db_name(), tab->get_table_name());
 }
 
 /**
@@ -2174,6 +2179,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->flags = HTON_IS_SECONDARY_ENGINE;
   shannon_rapid_hton->db_type = DB_TYPE_RAPID;
   shannon_rapid_hton->notify_create_table = NotifyCreateTable;
+  shannon_rapid_hton->notify_drop_table = NotifyDropTable;
   shannon_rapid_hton->notify_after_insert = NotifyAfterInsert;
   shannon_rapid_hton->notify_after_update = NotifyAfterUpdate;
   shannon_rapid_hton->notify_after_delete = NotifyAfterDelete;

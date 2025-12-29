@@ -115,7 +115,7 @@ enum class loader_state_t {
 struct TableAccessStats {
   std::atomic<uint64_t> mysql_access_count{0};
   std::atomic<uint64_t> heatwave_access_count{0};
-  std::atomic<double> importance{0.0};
+  std::atomic<double> importance{1.0};
   std::chrono::system_clock::time_point last_queried_time;
   std::chrono::system_clock::time_point last_queried_time_in_rpd;
 
@@ -136,7 +136,7 @@ struct TableInfo {
   uint64_t estimated_size{0};
   bool partitioned{false};
   TableAccessStats stats;
-  bool excluded_from_self_load{true};
+  bool excluded_from_self_load{false};
 
   std::string full_name() const { return schema_name + ":" + table_name; }
 };
@@ -166,7 +166,10 @@ class SelfLoadManager {
   int add_table(const std::string &schema, const std::string &table,
                 const std::string &secondary_engine = ShannonBase::rapid_hton_name, bool is_partition = false);
 
-  int change_table_stat(const std::string &schema, const std::string &table, ShannonBase::load_status_t type);
+  int remove_table(const std::string &schema, const std::string &table);
+
+  // erase an item from RPD Mirror table.
+  int erase_table(const std::string &schema, const std::string &table);
 
   void update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in);
   TableInfo *get_table_info(const std::string &schema, const std::string &table);
@@ -223,16 +226,12 @@ class SelfLoadManager {
 
   inline int update_table_state(const std::string &schema, const std::string &table, TableAccessStats::State state,
                                 ShannonBase::load_type_t load_type) {
-    std::shared_lock lock(m_tables_mutex);
+    std::unique_lock lock(m_tables_mutex);
     std::string full_name = schema + ":" + table;
+    if (m_rpd_mirror_tables.find(full_name) == m_rpd_mirror_tables.end()) return SHANNON_SUCCESS;
 
-    auto it = m_rpd_mirror_tables.find(full_name);
-    if (it != m_rpd_mirror_tables.end()) {
-      std::unique_lock stats_lock(it->second->stats.stats_mutex);
-      it->second->stats.state = state;
-      it->second->stats.load_type = load_type;
-    }
-
+    m_rpd_mirror_tables[full_name]->stats.state = state;
+    m_rpd_mirror_tables[full_name]->stats.load_type = load_type;
     return SHANNON_SUCCESS;
   }
 

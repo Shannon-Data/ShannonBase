@@ -61,7 +61,7 @@ struct st_row_rpd_mirror {
   //Number of times the table has been accessed by the MySQL HeatWave Cluster.
   ulonglong rpd_access_count{0};
   //importance.
-  double importance{0.0};
+  double importance{1.0};
   //The timestamp of the last DB System query that referenced the table.
   ulonglong last_queried_timestamp{0};
   //The timestamp of the last MySQL HeatWave query that referenced the table.
