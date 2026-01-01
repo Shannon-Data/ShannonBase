@@ -46,18 +46,17 @@
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_status.h"
 #include "storage/rapid_engine/utils/memory_pool.h"  //Blob
 #include "storage/rapid_engine/utils/utils.h"        //Blob
 namespace ShannonBase {
 // global memory pool
-extern std::shared_ptr<ShannonBase::Utils::MemoryPool> g_rpd_memory_pool;
+extern std::shared_ptr<ShannonBase::Utils::MemoryPool> shannon_rpd_memory_pool;
 namespace Imcs {
 
 RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
     : m_mem_root(std::move(std::make_unique<MEM_ROOT>())), m_source_table(mysql_table) {
   m_memory_pool = ShannonBase::Utils::MemoryPool::create_from_parent(
-      ShannonBase::g_rpd_memory_pool,
+      ShannonBase::shannon_rpd_memory_pool,
       config.tenant_name + ":" + mysql_table->s->db.str + ":" + mysql_table->s->table_name.str,
       config.max_table_mem_size);
   m_metadata.db_name = mysql_table->s->db.str;

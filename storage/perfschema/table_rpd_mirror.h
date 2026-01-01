@@ -20,7 +20,7 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
+
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
 
@@ -35,11 +35,11 @@
 #include <sys/types.h>
 
 #include "my_base.h"
-#include "mysql_com.h" // NAME_LENGTH
 #include "my_inttypes.h"
+#include "mysql_com.h"  // NAME_LENGTH
 #include "mysql_com.h"
-#include "sql/sql_const.h"  // UUID_LENGTH
 #include "sql-common/json_dom.h"
+#include "sql/sql_const.h"  // UUID_LENGTH
 
 #include "storage/perfschema/pfs_engine_table.h"
 #include "storage/rapid_engine/autopilot/loader.h"
@@ -52,25 +52,25 @@
   The rpd_mirror table keeps track of all existing tables in the DB System, whose engine is InnoDB.
 */
 struct st_row_rpd_mirror {
-  //The schema name.
-  char schema_name[NAME_LEN] {0};
-  //The table name.
-  char table_name[NAME_LEN] {0};
-  //Number of times the table has been accessed by the DB System.
+  // The schema name.
+  char schema_name[NAME_LEN]{0};
+  // The table name.
+  char table_name[NAME_LEN]{0};
+  // Number of times the table has been accessed by the DB System.
   ulonglong msyql_access_count{0};
-  //Number of times the table has been accessed by the MySQL HeatWave Cluster.
+  // Number of times the table has been accessed by the MySQL HeatWave Cluster.
   ulonglong rpd_access_count{0};
-  //importance.
+  // importance.
   double importance{1.0};
-  //The timestamp of the last DB System query that referenced the table.
+  // The timestamp of the last DB System query that referenced the table.
   ulonglong last_queried_timestamp{0};
-  //The timestamp of the last MySQL HeatWave query that referenced the table.
+  // The timestamp of the last MySQL HeatWave query that referenced the table.
   ulonglong last_queried_in_rpd_timestamp{0};
-  //The table state: loaded or not loaded.
+  // The table state: loaded or not loaded.
   ulonglong state{0};
-  //recommend read thread num.
-  int recommend_thr_num {0};
-  //query partition
+  // recommend read thread num.
+  int recommend_thr_num{0};
+  // query partition
   Json_wrapper query_partitions;
 };
 
@@ -93,7 +93,7 @@ class table_rpd_mirror : public PFS_engine_table {
   /** Next position. */
   pos_t m_next_pos;
 
-  std::unordered_map<std::string, std::unique_ptr<ShannonBase::Autopilot::TableInfo>>::iterator m_it;
+  std::unordered_map<std::string, std::unique_ptr<ShannonBase::TableInfo>>::iterator m_it;
 
  protected:
   /**
@@ -104,8 +104,7 @@ class table_rpd_mirror : public PFS_engine_table {
     @param read_all         true if all columns are read.
   */
 
-  int read_row_values(TABLE *table, unsigned char *buf, Field **fields,
-                      bool read_all) override;
+  int read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) override;
 
   table_rpd_mirror();
 
@@ -122,4 +121,4 @@ class table_rpd_mirror : public PFS_engine_table {
 };
 
 /** @} */
-#endif //__TABLE_SHANNONBASE_RPD_MIRROR_H__
+#endif  //__TABLE_SHANNONBASE_RPD_MIRROR_H__

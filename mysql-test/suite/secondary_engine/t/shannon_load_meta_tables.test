@@ -3,9 +3,12 @@
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
 #multi-times runs
-create database sh_self_load2;
-use sh_self_load2;
+create database sh_load_meta_tables_db;
+use sh_load_meta_tables_db;
 
 create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
 insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
@@ -90,4 +93,4 @@ select * from performance_schema.rpd_column_id;
 
 select * from performance_schema.rpd_preload_stats;
 
-drop database sh_self_load2;
+drop database sh_load_meta_tables_db;

@@ -50,18 +50,19 @@
 #include "storage/innobase/include/mach0data.h"
 #include "storage/innobase/include/univ.i"    //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
+#include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/worker.h"
+#include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_loaded_table.h"
-#include "storage/rapid_engine/include/rapid_status.h"
+#include "storage/rapid_engine/include/rapid_table_info.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
 namespace ShannonBase {
-extern ulonglong rpd_para_load_threshold;
-extern ulonglong rpd_para_parttb_load_threshold;
+extern ulonglong shannon_rpd_para_load_threshold;
+extern ulonglong shannon_rpd_para_parttb_load_threshold;
 SHANNON_THREAD_LOCAL std::string Rapid_load_context::extra_info_t::m_active_part_key;
 namespace Imcs {
 Imcs *Imcs::m_instance{nullptr};
@@ -264,7 +265,8 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   auto table_id = context->m_table_id;
   ut_a(m_rpd_tables.find(table_id) != m_rpd_tables.end());
 
-  auto &meta_ref = shannon_loading_tables_meta[context->m_table_id];
+  auto sch_tb = context->m_schema_name + ":" + context->m_table_name;
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info;
   while ((tmp = shannon_file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
     /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
      without locks. Now, do full scan, but multi-thread scan will impl in future. */
@@ -353,7 +355,8 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return HA_ERR_GENERIC;
   }
 
-  auto &meta_ref = shannon_loading_tables_meta[context->m_table_id];
+  auto sch_tb = context->m_schema_name + ":" + context->m_table_name;
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info;
 
   // to set the thread contexts. now set to nullptr,  you can use your own ctx. or resize(num_threads,
   // (void*)&scan_cookie);
@@ -460,7 +463,8 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
   auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[table_id].get());
   assert(part_tb_ptr);
 
-  auto &meta_ref = shannon_loading_tables_meta[context->m_table_id];
+  auto sch_tb = context->m_schema_name + ":" + context->m_table_name;
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info;
   context->m_thd->set_sent_row_count(0);
   for (auto &[part_name, part_id] : context->m_extra_info.m_partition_infos) {
     auto partkey{part_name};
@@ -715,10 +719,11 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   }
 
   // if the rec count is more than threshold and has primary key, it can be use parallel load, otherwise not.
-  auto parall_scan = (dynamic_cast<ha_innobase *>(source->file)->stats.records > ShannonBase::rpd_para_load_threshold &&
-                      !context->m_table->s->is_missing_primary_key())
-                         ? true
-                         : false;
+  auto parall_scan =
+      (dynamic_cast<ha_innobase *>(source->file)->stats.records > ShannonBase::shannon_rpd_para_load_threshold &&
+       !context->m_table->s->is_missing_primary_key())
+          ? true
+          : false;
   return !parall_scan ? load_innodb(context, dynamic_cast<ha_innobase *>(source->file))
                       : load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file));
 }
@@ -741,7 +746,8 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
 
   auto ret{ShannonBase::SHANNON_SUCCESS};
   auto parall_scan =
-      (context->m_extra_info.m_partition_infos.size() > ShannonBase::rpd_para_parttb_load_threshold) ? true : false;
+      (context->m_extra_info.m_partition_infos.size() > ShannonBase::shannon_rpd_para_parttb_load_threshold) ? true
+                                                                                                             : false;
   ret = parall_scan ? load_innodbpart_parallel(context, dynamic_cast<ha_innopart *>(source->file))
                     : load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file));
   if (ret) {

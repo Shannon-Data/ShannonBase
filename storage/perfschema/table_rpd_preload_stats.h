@@ -31,8 +31,8 @@
 #include <sys/types.h>
 
 #include "my_base.h"
-#include "mysql_com.h" // NAME_LENGTH
 #include "my_inttypes.h"
+#include "mysql_com.h"  // NAME_LENGTH
 #include "mysql_com.h"
 #include "sql/sql_const.h"  // UUID_LENGTH
 #include "storage/perfschema/pfs_engine_table.h"
@@ -41,11 +41,11 @@
   @file storage/perfschema/table_rpd_preload_stats.h
   Table table_rpd_preload_stats (declarations).
 */
-struct st_rpd_preload_stats  {
-  char table_schema[NAME_LEN] ={0};
-  char table_name[NAME_LEN] ={0};
-  char column_name[NAME_LEN] ={0};
-  ulonglong avg_byte_width_inc_null {0};
+struct st_rpd_preload_stats {
+  char table_schema[NAME_LEN] = {0};
+  char table_name[NAME_LEN] = {0};
+  char column_name[NAME_LEN] = {0};
+  ulonglong avg_byte_width_inc_null{0};
 };
 
 /** Table PERFORMANCE_SCHEMA.rpd_preload_stats . */
@@ -76,8 +76,7 @@ class table_rpd_preload_stats : public PFS_engine_table {
     @param read_all         true if all columns are read.
   */
 
-  int read_row_values(TABLE *table, unsigned char *buf, Field **fields,
-                      bool read_all) override;
+  int read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) override;
 
   table_rpd_preload_stats();
 
@@ -93,4 +92,4 @@ class table_rpd_preload_stats : public PFS_engine_table {
   void reset_position() override;
 };
 
-#endif //__TABLE_SHANNONBASE_RPD_PRELOAD_STATS_H__
+#endif  //__TABLE_SHANNONBASE_RPD_PRELOAD_STATS_H__

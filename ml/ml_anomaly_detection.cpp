@@ -31,7 +31,6 @@
 #include "sql/sql_class.h"
 
 #include "ml_utils.h"
-#include "storage/rapid_engine/include/rapid_status.h"
 
 namespace ShannonBase {
 namespace ML {

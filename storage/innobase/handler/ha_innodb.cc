@@ -215,7 +215,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <sstream>
 #include <string>
 #include <vector>
-#include "../rapid_engine/include/rapid_status.h"
+//#include "../rapid_engine/include/rapid_status.h"
 #include "../rapid_engine/imcs/imcs.h"
 
 #ifdef HAVE_UNISTD_H

@@ -1,3 +1,4 @@
+# restart
 create database sh_self_load;
 use sh_self_load;
 #connection_1, cconnection_2

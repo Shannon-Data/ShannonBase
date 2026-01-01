@@ -33,20 +33,19 @@
 
 #include <stddef.h>
 
-#include "thr_lock.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
+#include "thr_lock.h"
 
 #include "sql/field.h"
 #include "sql/plugin_table.h"
+#include "sql/sql_table.h"  // shannon_rpd_columns_info
 #include "sql/table.h"
-#include "sql/sql_table.h" // rpd_columns_info
 
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
-#include "storage/rapid_engine/include/rapid_loaded_table.h"
-#include "storage/rapid_engine/include/rapid_status.h"
+#include "storage/rapid_engine/include/rapid_column_info.h"
 
 /*
   Callbacks implementation for RPD_COLUMNS.
@@ -64,7 +63,7 @@ Plugin_table table_rpd_columns::m_table_def(
     "  COLUMN_ID BIGINT unsigned not null,\n"
     "  NDV BIGINT unsigned not null,\n"
     "  ENCODING CHAR(32) collate utf8mb4_bin not null,\n"
-    "  DATA_PLACEMENT_INDEX BIGINT unsigned not null,\n"    
+    "  DATA_PLACEMENT_INDEX BIGINT unsigned not null,\n"
     "  DICT_SIZE_BTYES BIGINT unsigned not null\n",
     /* Options */
     " ENGINE=PERFORMANCE_SCHEMA",
@@ -86,23 +85,19 @@ PFS_engine_table_share table_rpd_columns::m_share = {
     false /* m_in_purgatory */
 };
 
-PFS_engine_table *table_rpd_columns::create(
-    PFS_engine_table_share *) {
-  return new table_rpd_columns();
-}
+PFS_engine_table *table_rpd_columns::create(PFS_engine_table_share *) { return new table_rpd_columns(); }
 
-table_rpd_columns::table_rpd_columns()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
+table_rpd_columns::table_rpd_columns() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
   m_row.colum_id = 0;
   m_row.table_id = 0;
   m_row.ndv = 0;
-  memset (m_row.encoding, 0x0, NAME_LEN);
+  memset(m_row.encoding, 0x0, NAME_LEN);
   m_row.data_placement_index = 0;
-  m_row.dict_size_bytes =0;
+  m_row.dict_size_bytes = 0;
 }
 
 table_rpd_columns::~table_rpd_columns() {
-  //clear.
+  // clear.
 }
 
 void table_rpd_columns::reset_position() {
@@ -110,13 +105,10 @@ void table_rpd_columns::reset_position() {
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_columns::get_row_count() {
-  return ShannonBase::rpd_columns_info.size();
-}
+ha_rows table_rpd_columns::get_row_count() { return ShannonBase::shannon_rpd_columns_info.size(); }
 
 int table_rpd_columns::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count();
-       m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -138,31 +130,27 @@ int table_rpd_columns::rnd_pos(const void *pos) {
   return make_row(m_pos.m_index);
 }
 
-int table_rpd_columns::make_row(uint index[[maybe_unused]]) {
+int table_rpd_columns::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::rpd_columns_info.size()) {
+  if (index >= ShannonBase::shannon_rpd_columns_info.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.colum_id = ShannonBase::rpd_columns_info[index].column_id;
-    m_row.table_id = ShannonBase::rpd_columns_info[index].table_id;
-    m_row.data_placement_index = ShannonBase::rpd_columns_info[index].data_placement_index;
-    m_row.dict_size_bytes = ShannonBase::rpd_columns_info[index].data_dict_bytes;
-    m_row.ndv = ShannonBase::rpd_columns_info[index].ndv;
+    m_row.colum_id = ShannonBase::shannon_rpd_columns_info[index].column_id;
+    m_row.table_id = ShannonBase::shannon_rpd_columns_info[index].table_id;
+    m_row.data_placement_index = ShannonBase::shannon_rpd_columns_info[index].data_placement_index;
+    m_row.dict_size_bytes = ShannonBase::shannon_rpd_columns_info[index].data_dict_bytes;
+    m_row.ndv = ShannonBase::shannon_rpd_columns_info[index].ndv;
     memset(m_row.encoding, 0x0, NAME_LEN);
-    strncpy(m_row.encoding, ShannonBase::rpd_columns_info[index].encoding,
-            sizeof(m_row.encoding));
+    strncpy(m_row.encoding, ShannonBase::shannon_rpd_columns_info[index].encoding, sizeof(m_row.encoding));
   }
   return 0;
 }
 
-int table_rpd_columns::read_row_values(TABLE *table,
-                                         unsigned char *buf,
-                                         Field **fields,
-                                         bool read_all) {
+int table_rpd_columns::read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) {
   Field *f;
 
-  //assert(table->s->null_bytes == 0);
+  // assert(table->s->null_bytes == 0);
   buf[0] = 0;
 
   for (; (f = *fields); fields++) {

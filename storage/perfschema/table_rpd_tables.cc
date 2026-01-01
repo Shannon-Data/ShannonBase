@@ -32,21 +32,21 @@
 
 #include <stddef.h>
 
-#include "thr_lock.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
+#include "thr_lock.h"
 
 #include "sql/field.h"
 #include "sql/plugin_table.h"
+#include "sql/sql_table.h"
 #include "sql/table.h"
-#include "sql/sql_table.h" // rpd_columns_info
 
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
-#include "storage/rapid_engine/include/rapid_loaded_table.h"
-#include "storage/rapid_engine/include/rapid_status.h"
 
+#include "storage/rapid_engine/autopilot/loader.h"
+#include "storage/rapid_engine/include/rapid_table_info.h"
 /*
   Callbacks implementation for RPD_TABLES.
 */
@@ -65,7 +65,9 @@ Plugin_table table_rpd_tables::m_table_def(
     "  POOL_TYPE ENUM(\'SNAPSHOT\', \'TRANSACTIONAL\', \'VOLATILE\') not null default \'SNAPSHOT\',\n"
     "  DATA_PLACEMENT_TYPE BIGINT unsigned not null,\n"
     "  NROWS BIGINT unsigned not null,\n"
-    "  LOAD_STATUS ENUM(\'NOLOAD_RPDGSTABSTATE\', \'LOADING_RPDGSTABSTATE\', \'AVAIL_RPDGSTABSTATE\', \'UNLOADING_RPDGSTABSTATE\', \'INRECOVERY_RPDGSTABSTATE\', \'STALE_RPDGSTABSTATE\', \'UNAVAIL_RPDGSTABSTATE\', \'RECOVERYFAILED_RPDGSTABSTATE\') not null default \'AVAIL_RPDGSTABSTATE\',\n"
+    "  LOAD_STATUS ENUM(\'NOLOAD_RPDGSTABSTATE\', \'LOADING_RPDGSTABSTATE\', \'AVAIL_RPDGSTABSTATE\', "
+    "\'UNLOADING_RPDGSTABSTATE\', \'INRECOVERY_RPDGSTABSTATE\', \'STALE_RPDGSTABSTATE\', \'UNAVAIL_RPDGSTABSTATE\', "
+    "\'RECOVERYFAILED_RPDGSTABSTATE\') not null default \'AVAIL_RPDGSTABSTATE\',\n"
     "  LOAD_PROGRESS INT unsigned not null,\n"
     "  SIZE_BYTES BIGINT unsigned not null,\n"
     "  TRANSFORMATION_BYTES BIGINT unsigned not null,\n"
@@ -100,17 +102,14 @@ PFS_engine_table_share table_rpd_tables::m_share = {
     false /* m_in_purgatory */
 };
 
-PFS_engine_table *table_rpd_tables::create(
-    PFS_engine_table_share *) {
-  return new table_rpd_tables();
+PFS_engine_table *table_rpd_tables::create(PFS_engine_table_share *) {
+   return new table_rpd_tables(); 
 }
 
-table_rpd_tables::table_rpd_tables()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
-}
+table_rpd_tables::table_rpd_tables() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {}
 
 table_rpd_tables::~table_rpd_tables() {
-  //clear.
+  // clear.
 }
 
 void table_rpd_tables::reset_position() {
@@ -118,13 +117,12 @@ void table_rpd_tables::reset_position() {
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_tables::get_row_count() {
-  return ShannonBase::shannon_loading_tables_meta.size();
+ha_rows table_rpd_tables::get_row_count() { 
+  return ShannonBase::Autopilot::SelfLoadManager::tables().size(); 
 }
 
 int table_rpd_tables::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count();
-       m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -146,42 +144,39 @@ int table_rpd_tables::rnd_pos(const void *pos) {
   return make_row(m_pos.m_index);
 }
 
-static uint64_t to_milliseconds_timestamp(const std::chrono::system_clock::time_point& tp) {
+static uint64_t to_milliseconds_timestamp(const std::chrono::system_clock::time_point &tp) {
   auto duration = tp.time_since_epoch();
   auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration);
   return static_cast<uint64_t>(micros.count());
 }
 
 static Json_wrapper logical_part_vector_to_json(
-  const std::vector<ShannonBase::logical_part_loaded_t>& logical_part_loaded_at_scn) {
-
+    const std::vector<ShannonBase::logical_part_loaded_t> &logical_part_loaded_at_scn) {
   Json_array *json_array = new (std::nothrow) Json_array();
   if (!json_array) return Json_wrapper();
 
   if (logical_part_loaded_at_scn.empty()) return Json_wrapper(json_array);
-  for (const auto& part : logical_part_loaded_at_scn) {
-      Json_object *json_obj = new (std::nothrow) Json_object();
-      if (!json_obj) {
-        delete json_array;
-        return Json_wrapper();
-      }
+  for (const auto &part : logical_part_loaded_at_scn) {
+    Json_object *json_obj = new (std::nothrow) Json_object();
+    if (!json_obj) {
+      delete json_array;
+      return Json_wrapper();
+    }
 
-      json_obj->add_alias("id", new (std::nothrow) Json_uint(part.id));
-      json_obj->add_alias("name",
-          new (std::nothrow) Json_string(part.name.c_str(),
-                                       part.name.length()));
-      json_obj->add_alias("scn", new (std::nothrow) Json_uint(part.load_scn));
-      if (part.load_type == ShannonBase::load_type_t::USER)
-        json_obj->add_alias("type", new (std::nothrow) Json_string("USER"));
-      else
-        json_obj->add_alias("type", new (std::nothrow) Json_string("SELF"));
+    json_obj->add_alias("id", new (std::nothrow) Json_uint(part.id));
+    json_obj->add_alias("name", new (std::nothrow) Json_string(part.name.c_str(), part.name.length()));
+    json_obj->add_alias("scn", new (std::nothrow) Json_uint(part.load_scn));
+    if (part.load_type == ShannonBase::load_type_t::USER)
+      json_obj->add_alias("type", new (std::nothrow) Json_string("USER"));
+    else
+      json_obj->add_alias("type", new (std::nothrow) Json_string("SELF"));
 
-      json_array->append_alias(json_obj);
+    json_array->append_alias(json_obj);
   }
   return Json_wrapper(json_array);
 }
 
-static Json_wrapper auto_zmp_columns_to_json(const std::vector<int>& auto_zmp_columns) {
+static Json_wrapper auto_zmp_columns_to_json(const std::vector<int> &auto_zmp_columns) {
   Json_array *json_array = new (std::nothrow) Json_array();
   if (!json_array) return Json_wrapper();
   if (auto_zmp_columns.empty()) return Json_wrapper(json_array);
@@ -189,56 +184,57 @@ static Json_wrapper auto_zmp_columns_to_json(const std::vector<int>& auto_zmp_co
   for (int col_id : auto_zmp_columns) {
     Json_int *json_value = new (std::nothrow) Json_int(col_id);
     if (!json_value) {
-        delete json_array;
-        return Json_wrapper();
+      delete json_array;
+      return Json_wrapper();
     }
     json_array->append_alias(json_value);
   }
   return Json_wrapper(json_array);
 }
 
-int table_rpd_tables::make_row(uint index[[maybe_unused]]) {
+int table_rpd_tables::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::shannon_loading_tables_meta.size()) {
+  if (index >= get_row_count()) {
     return HA_ERR_END_OF_FILE;
   } else {
-      auto it = ShannonBase::shannon_loading_tables_meta.begin();
-      std::advance(it, index);
-      if (it == ShannonBase::shannon_loading_tables_meta.end()) return HA_ERR_END_OF_FILE;
-      auto& meta = it->second;
-      m_row.id = meta.tid;
-      m_row.snapshot_scn = meta.snapshot_scn;
-      m_row.persisted_scn = meta.persisted_scn;
-      m_row.pool_type = static_cast<ulonglong>(meta.pool_type);
-      m_row.data_placement_type = meta.data_placement_type;
-      m_row.table_nrows = meta.nrows;
-      m_row.load_status = (ulonglong)meta.load_status;
-      m_row.load_progress = meta.loading_progress * 100;
-      m_row.size_byte = meta.size_bytes;
-      m_row.transformation_bytes = meta.transformation_bytes;
-      m_row.query_count = meta.query_cnt;
-      m_row.last_queried = to_milliseconds_timestamp(meta.last_queried);
-      m_row.load_start_timestamp = to_milliseconds_timestamp(meta.load_start_stamp);
-      m_row.load_end_timestamp = to_milliseconds_timestamp(meta.load_end_stamp);
-      m_row.reconvery_start_timestamp = to_milliseconds_timestamp(meta.recovery_start_stamp);
-      m_row.reconvery_end_timestamp = to_milliseconds_timestamp(meta.recovery_end_stamp);
-      m_row.recovery_source = static_cast<ulonglong>(meta.recovery_source);
-      m_row.load_type = static_cast<ulonglong>(meta.load_type);
-      m_row.logical_part_loaded_at_scn = logical_part_vector_to_json(meta.logical_part_loaded_at_scn);
-      m_row.auto_zmp_columns = auto_zmp_columns_to_json(meta.auto_zmp_columns);
-      m_row.ace_model = meta.ace_model;
+    auto it = ShannonBase::Autopilot::SelfLoadManager::tables().begin();
+    std::advance(it, index);
+    if (it == ShannonBase::Autopilot::SelfLoadManager::tables().end()) return HA_ERR_END_OF_FILE;
+    auto table_info = it->second.get();
+    m_row.id = table_info->tid;
+    auto &meta = table_info->meta_info;
+
+    if (table_info->stats.state != ShannonBase::table_access_stats_t::State::LOADED) std::advance(it, index);
+
+    m_row.snapshot_scn = meta.snapshot_scn;
+    m_row.persisted_scn = meta.persisted_scn;
+    m_row.pool_type = static_cast<ulonglong>(meta.pool_type);
+    m_row.data_placement_type = meta.data_placement_type;
+    m_row.table_nrows = meta.nrows;
+    m_row.load_status = (ulonglong)meta.load_status;
+    m_row.load_progress = meta.loading_progress * 100;
+    m_row.size_byte = meta.size_bytes;
+    m_row.transformation_bytes = meta.transformation_bytes;
+    m_row.query_count = meta.query_cnt;
+    m_row.last_queried = to_milliseconds_timestamp(meta.last_queried);
+    m_row.load_start_timestamp = to_milliseconds_timestamp(meta.load_start_stamp);
+    m_row.load_end_timestamp = to_milliseconds_timestamp(meta.load_end_stamp);
+    m_row.reconvery_start_timestamp = to_milliseconds_timestamp(meta.recovery_start_stamp);
+    m_row.reconvery_end_timestamp = to_milliseconds_timestamp(meta.recovery_end_stamp);
+    m_row.recovery_source = static_cast<ulonglong>(meta.recovery_source);
+    m_row.load_type = static_cast<ulonglong>(meta.load_type);
+    m_row.logical_part_loaded_at_scn = logical_part_vector_to_json(meta.logical_part_loaded_at_scn);
+    m_row.auto_zmp_columns = auto_zmp_columns_to_json(meta.auto_zmp_columns);
+    m_row.ace_model = meta.ace_model;
   }
   return 0;
 }
 
-int table_rpd_tables::read_row_values(TABLE *table,
-                                         unsigned char *buf,
-                                         Field **fields,
-                                         bool read_all) {
+int table_rpd_tables::read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) {
   Field *f;
 
-  //assert(table->s->null_bytes == 0);
+  // assert(table->s->null_bytes == 0);
   buf[0] = 0;
 
   for (; (f = *fields); fields++) {
@@ -253,8 +249,8 @@ int table_rpd_tables::read_row_values(TABLE *table,
         case 2: /** PERSISTED_SCN */
           set_field_ulonglong(f, m_row.persisted_scn);
           break;
-        case 3: /**pool_type */
-          set_field_enum(f, m_row.pool_type + 1); //ENUM in MySQL is 1-based indexed.
+        case 3:                                    /**pool_type */
+          set_field_enum(f, m_row.pool_type + 1);  // ENUM in MySQL is 1-based indexed.
           break;
         case 4: /**data_placement_type */
           set_field_ulonglong(f, m_row.data_placement_type);

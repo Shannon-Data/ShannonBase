@@ -44,7 +44,7 @@
 #include "storage/innobase/include/ut0dbg.h"  //for ut_a
 
 //#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
-#include "storage/rapid_engine/include/rapid_loaded_table.h"  //loaded table.
+#include "storage/rapid_engine/include/rapid_table_info.h"  //loaded table.
 
 // clang-format off
 // clang-format on

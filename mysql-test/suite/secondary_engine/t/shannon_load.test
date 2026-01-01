@@ -5,6 +5,9 @@
 
 --source include/no_ps_protocol.inc 
 
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
 --echo #
 --echo # Load into and unload from secondary engine.
 --echo #
@@ -148,4 +151,3 @@ ALTER TABLE t1 SECONDARY_LOAD;
 --error ER_SECONDARY_ENGINE
 ALTER TABLE t2 SECONDARY_LOAD;
 DROP TABLE t1, t2;
-

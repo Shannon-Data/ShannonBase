@@ -33,20 +33,20 @@
 
 #include <stddef.h>
 
-#include "thr_lock.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
+#include "thr_lock.h"
 
 #include "sql/field.h"
 #include "sql/plugin_table.h"
+#include "sql/sql_table.h"
 #include "sql/table.h"
-#include "sql/sql_table.h" // rpd_columns_info
 
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
-#include "storage/rapid_engine/include/rapid_loaded_table.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
+#include "storage/rapid_engine/include/rapid_table_info.h"
 /*
   Callbacks implementation for RPD_TABLE_ID.
 */
@@ -82,21 +82,17 @@ PFS_engine_table_share table_rpd_table_id::m_share = {
     false /* m_in_purgatory */
 };
 
-PFS_engine_table *table_rpd_table_id::create(
-    PFS_engine_table_share *) {
-  return new table_rpd_table_id();
-}
+PFS_engine_table *table_rpd_table_id::create(PFS_engine_table_share *) { return new table_rpd_table_id(); }
 
-table_rpd_table_id::table_rpd_table_id()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
+table_rpd_table_id::table_rpd_table_id() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
   m_row.table_id = 0;
-  memset (m_row.full_table_name, 0x0, NAME_LEN);
-  memset (m_row.schema_name, 0x0, NAME_LEN);
-  memset (m_row.table_name, 0x0, NAME_LEN);
+  memset(m_row.full_table_name, 0x0, NAME_LEN);
+  memset(m_row.schema_name, 0x0, NAME_LEN);
+  memset(m_row.table_name, 0x0, NAME_LEN);
 }
 
 table_rpd_table_id::~table_rpd_table_id() {
-  //clear.
+  // clear.
 }
 
 void table_rpd_table_id::reset_position() {
@@ -104,13 +100,10 @@ void table_rpd_table_id::reset_position() {
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_table_id::get_row_count() {
-  return ShannonBase::shannon_loaded_tables->size();
-}
+ha_rows table_rpd_table_id::get_row_count() { return ShannonBase::shannon_loaded_tables->size(); }
 
 int table_rpd_table_id::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count();
-       m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -132,7 +125,7 @@ int table_rpd_table_id::rnd_pos(const void *pos) {
   return make_row(m_pos.m_index);
 }
 
-int table_rpd_table_id::make_row(uint index[[maybe_unused]]) {
+int table_rpd_table_id::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
   if (index >= ShannonBase::shannon_loaded_tables->size()) {
@@ -144,19 +137,16 @@ int table_rpd_table_id::make_row(uint index[[maybe_unused]]) {
     m_row.table_id = tableid;
     full_name = schema + "\\" + table;
     strncpy(m_row.full_table_name, full_name.c_str(), full_name.length());
-    strncpy(m_row.schema_name,schema.c_str(), schema.length());
+    strncpy(m_row.schema_name, schema.c_str(), schema.length());
     strncpy(m_row.table_name, table.c_str(), table.length());
   }
   return 0;
 }
 
-int table_rpd_table_id::read_row_values(TABLE *table,
-                                         unsigned char *buf,
-                                         Field **fields,
-                                         bool read_all) {
+int table_rpd_table_id::read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) {
   Field *f;
 
-  //assert(table->s->null_bytes == 0);
+  // assert(table->s->null_bytes == 0);
   buf[0] = 0;
 
   for (; (f = *fields); fields++) {
