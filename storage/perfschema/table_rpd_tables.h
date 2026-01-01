@@ -20,7 +20,7 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-   
+
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
 
@@ -35,12 +35,12 @@
 #include <sys/types.h>
 
 #include "my_base.h"
-#include "mysql_com.h" // NAME_LENGTH
 #include "my_inttypes.h"
+#include "mysql_com.h"  // NAME_LENGTH
 #include "mysql_com.h"
-#include "sql/sql_const.h"  // UUID_LENGTH
 #include "sql-common/json_dom.h"
-#include "storage/perfschema/pfs_engine_table.h" // json.
+#include "sql/sql_const.h"                        // UUID_LENGTH
+#include "storage/perfschema/pfs_engine_table.h"  // json.
 
 /**
   @addtogroup performance_schema_tables
@@ -52,10 +52,10 @@
   length field denoted by @<field_name@>_length.
 */
 struct st_row_rpd_tables {
-  ulonglong id {0};
-  ulonglong snapshot_scn {0};
-  ulonglong persisted_scn {0};
-  ulonglong pool_type {0};
+  ulonglong id{0};
+  ulonglong snapshot_scn{0};
+  ulonglong persisted_scn{0};
+  ulonglong pool_type{0};
   ulonglong data_placement_type{0};
   ulonglong table_nrows{0};
   ulonglong load_status{0};
@@ -103,8 +103,7 @@ class table_rpd_tables : public PFS_engine_table {
     @param read_all         true if all columns are read.
   */
 
-  int read_row_values(TABLE *table, unsigned char *buf, Field **fields,
-                      bool read_all) override;
+  int read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) override;
 
   table_rpd_tables();
 
@@ -121,4 +120,4 @@ class table_rpd_tables : public PFS_engine_table {
 };
 
 /** @} */
-#endif //__TABLE_SHANNONBASE_RPD_TABLES_H__
+#endif  //__TABLE_SHANNONBASE_RPD_TABLES_H__

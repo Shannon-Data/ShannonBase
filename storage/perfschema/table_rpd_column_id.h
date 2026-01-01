@@ -36,8 +36,8 @@
 #include <sys/types.h>
 
 #include "my_base.h"
-#include "mysql_com.h" // NAME_LENGTH
 #include "my_inttypes.h"
+#include "mysql_com.h"  // NAME_LENGTH
 #include "mysql_com.h"
 #include "sql/sql_const.h"  // UUID_LENGTH
 #include "storage/perfschema/pfs_engine_table.h"
@@ -58,10 +58,10 @@ struct THR_LOCK;
 */
 
 struct st_row_rpd_column_id {
-  ulonglong column_id {0};
-  ulonglong table_id {0};
-  char column_name[NAME_LEN] {0};
-  uint column_name_length {0};
+  ulonglong column_id{0};
+  ulonglong table_id{0};
+  char column_name[NAME_LEN]{0};
+  uint column_name_length{0};
 };
 
 /** Table PERFORMANCE_SCHEMA.RPD_COLUMN_ID. */
@@ -92,8 +92,7 @@ class table_rpd_column_id : public PFS_engine_table {
     @param read_all         true if all columns are read.
   */
 
-  int read_row_values(TABLE *table, unsigned char *buf, Field **fields,
-                      bool read_all) override;
+  int read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) override;
 
   table_rpd_column_id();
 

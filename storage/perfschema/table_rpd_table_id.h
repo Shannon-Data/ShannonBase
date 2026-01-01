@@ -36,8 +36,8 @@
 #include <sys/types.h>
 
 #include "my_base.h"
-#include "mysql_com.h" // NAME_LENGTH
 #include "my_inttypes.h"
+#include "mysql_com.h"  // NAME_LENGTH
 #include "mysql_com.h"
 #include "sql/sql_const.h"  // UUID_LENGTH
 #include "storage/perfschema/pfs_engine_table.h"
@@ -58,10 +58,10 @@ struct THR_LOCK;
 */
 
 struct st_row_rpd_table_id {
-  ulonglong table_id {0};
-  char full_table_name[NAME_LEN] ={0}; //including schema_name
-  char schema_name[NAME_LEN] ={0};
-  char table_name[NAME_LEN] ={0};
+  ulonglong table_id{0};
+  char full_table_name[NAME_LEN] = {0};  // including schema_name
+  char schema_name[NAME_LEN] = {0};
+  char table_name[NAME_LEN] = {0};
 };
 
 /** Table PERFORMANCE_SCHEMA.RPD_TABLE_ID. */
@@ -92,8 +92,7 @@ class table_rpd_table_id : public PFS_engine_table {
     @param read_all         true if all columns are read.
   */
 
-  int read_row_values(TABLE *table, unsigned char *buf, Field **fields,
-                      bool read_all) override;
+  int read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) override;
 
   table_rpd_table_id();
 
@@ -110,4 +109,4 @@ class table_rpd_table_id : public PFS_engine_table {
 };
 
 /** @} */
-#endif //__TABLE_SHANNONBASE_RPD_TABLE_ID_H__
+#endif  //__TABLE_SHANNONBASE_RPD_TABLE_ID_H__

@@ -37,8 +37,8 @@
 
 #include "storage/rapid_engine/trx/transaction.h"
 namespace ShannonBase {
-extern ulonglong rpd_gc_interval_scn;
-extern int32 rpd_gc_interval_time;
+extern ulonglong shannon_rpd_purge_efficiency_threshold;
+extern int32 shannon_rpd_gc_interval_time;
 namespace Imcs {
 std::mutex BkgWorkerPool::m_auto_cv_mutex;
 std::condition_variable BkgWorkerPool::m_auto_cv;
@@ -57,7 +57,7 @@ void BkgWorkerPool::auto_maintenance_thread() {
   while (m_auto_thread_running.load(std::memory_order_acquire)) {
     {
       std::unique_lock<std::mutex> lock(m_auto_cv_mutex);
-      m_auto_cv.wait_for(lock, std::chrono::seconds(ShannonBase::rpd_gc_interval_time),
+      m_auto_cv.wait_for(lock, std::chrono::seconds(ShannonBase::shannon_rpd_gc_interval_time),
                          []() { return !m_auto_thread_running.load(std::memory_order_acquire); });
     }
 
@@ -70,10 +70,10 @@ void BkgWorkerPool::auto_maintenance_thread() {
     // 1. auto GC
     uint64_t current_scn = TransactionCoordinator::instance().get_current_scn();
     uint64_t last = m_last_gc_scn.load(std::memory_order_acquire);
-    if (current_scn > last && current_scn - last >= ShannonBase::rpd_gc_interval_scn) {
+    if (current_scn > last && current_scn - last >= ShannonBase::shannon_rpd_purge_efficiency_threshold) {
       imcs->for_each_table([&](RpdTable *table) {
         if (m_auto_thread_running.load(std::memory_order_acquire)) {
-          uint64_t min_active_scn = current_scn - ShannonBase::rpd_gc_interval_scn;
+          uint64_t min_active_scn = current_scn - ShannonBase::shannon_rpd_purge_efficiency_threshold;
           pool->schedule_gc(table, min_active_scn);
         }
       });

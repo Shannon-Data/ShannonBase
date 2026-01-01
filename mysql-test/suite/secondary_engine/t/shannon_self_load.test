@@ -3,6 +3,9 @@
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
 # USED FOR self load.
 create database sh_self_load;
 use sh_self_load;

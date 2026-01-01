@@ -34,21 +34,20 @@
 #include <chrono>
 #include <ctime>
 
-#include "thr_lock.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
+#include "thr_lock.h"
 
 #include "sql/field.h"
 #include "sql/plugin_table.h"
+#include "sql/sql_table.h"
 #include "sql/table.h"
-#include "sql/sql_table.h" // rpd_columns_info
 
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
 
-#include "storage/rapid_engine/include/rapid_loaded_table.h"
-#include "storage/rapid_engine/include/rapid_status.h"
+#include "storage/rapid_engine/autopilot/loader.h"
 
 /*
   Callbacks implementation for RPD_TABLES.
@@ -92,37 +91,26 @@ PFS_engine_table_share table_rpd_mirror::m_share = {
     false /* m_in_purgatory */
 };
 
-PFS_engine_table *table_rpd_mirror::create(
-    PFS_engine_table_share *) {
-  return new table_rpd_mirror();
-}
+PFS_engine_table *table_rpd_mirror::create(PFS_engine_table_share *) { return new table_rpd_mirror(); }
 
-table_rpd_mirror::table_rpd_mirror()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
-  if (ShannonBase::self_load_mngr_inst)
-    m_it = ShannonBase::self_load_mngr_inst->get_all_tables().begin();
+table_rpd_mirror::table_rpd_mirror() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
+  m_it = ShannonBase::Autopilot::SelfLoadManager::tables().begin();
 }
 
 table_rpd_mirror::~table_rpd_mirror() {
-  //clear.
+  // clear.
 }
 
 void table_rpd_mirror::reset_position() {
   m_pos.m_index = 0;
   m_next_pos.m_index = 0;
-  if (ShannonBase::self_load_mngr_inst)
-    m_it = ShannonBase::self_load_mngr_inst->get_all_tables().begin();
+  m_it = ShannonBase::Autopilot::SelfLoadManager::tables().begin();
 }
 
-ha_rows table_rpd_mirror::get_row_count() {
-  if (ShannonBase::self_load_mngr_inst)
-    return ShannonBase::self_load_mngr_inst->get_all_tables().size();
-  return 0;
-}
+ha_rows table_rpd_mirror::get_row_count() { return ShannonBase::Autopilot::SelfLoadManager::tables().size(); }
 
 int table_rpd_mirror::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count();
-       m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -144,52 +132,49 @@ int table_rpd_mirror::rnd_pos(const void *pos) {
   return make_row(m_pos.m_index);
 }
 
-static uint64_t to_milliseconds_timestamp(const std::chrono::system_clock::time_point& tp) {
+static uint64_t to_milliseconds_timestamp(const std::chrono::system_clock::time_point &tp) {
   auto duration = tp.time_since_epoch();
   auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration);
   return static_cast<uint64_t>(micros.count());
 }
 
 static Json_wrapper logical_part_vector_to_json(
-  const std::vector<ShannonBase::logical_part_loaded_t>& logical_part_loaded_at_scn) {
-
+    const std::vector<ShannonBase::logical_part_loaded_t> &logical_part_loaded_at_scn) {
   Json_array *json_array = new (std::nothrow) Json_array();
   if (!json_array) return Json_wrapper();
 
   if (logical_part_loaded_at_scn.empty()) return Json_wrapper(json_array);
-  for (const auto& part : logical_part_loaded_at_scn) {
-      Json_object *json_obj = new (std::nothrow) Json_object();
-      if (!json_obj) {
-        delete json_array;
-        return Json_wrapper();
-      }
+  for (const auto &part : logical_part_loaded_at_scn) {
+    Json_object *json_obj = new (std::nothrow) Json_object();
+    if (!json_obj) {
+      delete json_array;
+      return Json_wrapper();
+    }
 
-      json_obj->add_alias("id", new (std::nothrow) Json_uint(part.id));
-      json_obj->add_alias("name",
-          new (std::nothrow) Json_string(part.name.c_str(),
-                                       part.name.length()));
-      json_obj->add_alias("scn", new (std::nothrow) Json_uint(part.load_scn));
-      if (part.load_type == ShannonBase::load_type_t::USER)
-        json_obj->add_alias("type", new (std::nothrow) Json_string("USER"));
-      else
-        json_obj->add_alias("type", new (std::nothrow) Json_string("SELF"));
+    json_obj->add_alias("id", new (std::nothrow) Json_uint(part.id));
+    json_obj->add_alias("name", new (std::nothrow) Json_string(part.name.c_str(), part.name.length()));
+    json_obj->add_alias("scn", new (std::nothrow) Json_uint(part.load_scn));
+    if (part.load_type == ShannonBase::load_type_t::USER)
+      json_obj->add_alias("type", new (std::nothrow) Json_string("USER"));
+    else
+      json_obj->add_alias("type", new (std::nothrow) Json_string("SELF"));
 
-      json_array->append_alias(json_obj);
+    json_array->append_alias(json_obj);
   }
   return Json_wrapper(json_array);
 }
 
-int table_rpd_mirror::make_row(uint index[[maybe_unused]]) {
+int table_rpd_mirror::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
   auto rpd_mirr_table = m_it->second.get();
 
   memset(m_row.schema_name, 0x0, NAME_LEN);
   strncpy(m_row.schema_name, rpd_mirr_table->schema_name.c_str(),
-         (rpd_mirr_table->schema_name.length() > NAME_LEN) ? NAME_LEN : rpd_mirr_table->schema_name.length());
+          (rpd_mirr_table->schema_name.length() > NAME_LEN) ? NAME_LEN : rpd_mirr_table->schema_name.length());
 
   memset(m_row.table_name, 0x0, NAME_LEN);
   strncpy(m_row.table_name, rpd_mirr_table->table_name.c_str(),
-         (rpd_mirr_table->table_name.length() > NAME_LEN) ? NAME_LEN : rpd_mirr_table->table_name.length());
+          (rpd_mirr_table->table_name.length() > NAME_LEN) ? NAME_LEN : rpd_mirr_table->table_name.length());
 
   m_row.msyql_access_count = rpd_mirr_table->stats.mysql_access_count.load();
   m_row.rpd_access_count = rpd_mirr_table->stats.heatwave_access_count.load();
@@ -199,27 +184,26 @@ int table_rpd_mirror::make_row(uint index[[maybe_unused]]) {
   m_row.last_queried_in_rpd_timestamp = to_milliseconds_timestamp(rpd_mirr_table->stats.last_queried_time_in_rpd);
   m_row.last_queried_timestamp = to_milliseconds_timestamp(rpd_mirr_table->stats.last_queried_time);
 
-  if (rpd_mirr_table->stats.state == ShannonBase::Autopilot::TableAccessStats::NOT_LOADED)
-    m_row.state = 0; //STAT_ENUM::NOT_LOADED;
-  else if (rpd_mirr_table->stats.state == ShannonBase::Autopilot::TableAccessStats::LOADED)
-    m_row.state = 1; //STAT_ENUM::LOADED;
+  if (rpd_mirr_table->stats.state == ShannonBase::table_access_stats_t::NOT_LOADED)
+    m_row.state = 0;  // STAT_ENUM::NOT_LOADED;
+  else if (rpd_mirr_table->stats.state == ShannonBase::table_access_stats_t::LOADED)
+    m_row.state = 1;  // STAT_ENUM::LOADED;
 
   m_row.recommend_thr_num = ShannonBase::Autopilot::SelfLoadManager::get_innodb_thread_num();
-  auto tid =0;
-  auto parts = ShannonBase::shannon_loading_tables_meta[tid].logical_part_loaded_at_scn;
+  // auto tid =0;
+  std::string sch_tb = m_row.schema_name;
+  sch_tb = sch_tb + ":" + m_row.table_name;
+  auto parts = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info.logical_part_loaded_at_scn;
   m_row.query_partitions = logical_part_vector_to_json(parts);
 
   std::advance(m_it, 1);
   return 0;
 }
 
-int table_rpd_mirror::read_row_values(TABLE *table,
-                                        unsigned char *buf,
-                                        Field **fields,
-                                        bool read_all) {
+int table_rpd_mirror::read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) {
   Field *f;
 
-  //assert(table->s->null_bytes == 0);
+  // assert(table->s->null_bytes == 0);
   buf[0] = 0;
 
   for (; (f = *fields); fields++) {

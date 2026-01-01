@@ -44,8 +44,7 @@
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_loaded_table.h"
-#include "storage/rapid_engine/include/rapid_status.h"
+#include "storage/rapid_engine/include/rapid_table_info.h"
 #include "storage/rapid_engine/ml/ml.h"
 #include "storage/rapid_engine/populate/log_populate.h"
 extern char mysql_home[FN_REFLEN];

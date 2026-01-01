@@ -1,5 +1,6 @@
-create database sh_self_load2;
-use sh_self_load2;
+# restart
+create database sh_load_meta_tables_db;
+use sh_load_meta_tables_db;
 create table tt (score int , name char(10), id int primary key, gender char(1)) secondary_engine=rapid;
 insert into tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 alter table tt secondary_load;
@@ -88,20 +89,20 @@ alter table LINEITEM4 secondary_engine RAPID;
 alter table LINEITEM4 secondary_load;
 select * from performance_schema.rpd_tables;
 ID	SNAPSHOT_SCN	PERSISTED_SCN	POOL_TYPE	DATA_PLACEMENT_TYPE	NROWS	LOAD_STATUS	LOAD_PROGRESS	SIZE_BYTES	TRANSFORMATION_BYTES	QUERY_COUNT	LAST_QUERIED	LOAD_START_TIMESTAMP	LOAD_END_TIMESTAMP	RECOVERY_SOURCE	RECOVERY_START_TIMESTAMP	RECOVERY_END_TIMESTAMP	LOAD_TYPE	LOGICAL_PARTS_LOADED_AT_SCN	AUTO_ZMP_COLUMNS	ACE_MODEL
-IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
-IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
-IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
-IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
-IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	192	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
 IGNORE	IGNORE	0	SNAPSHOT	0	0	AVAIL_RPDGSTABSTATE	100	0	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	192	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
+IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
 select * from performance_schema.rpd_table_id;
 ID	NAME	SCHEMA_NAME	TABLE_NAME
-IGNORE	sh_self_load2\LINEITEM4	sh_self_load2	LINEITEM4
-IGNORE	sh_self_load2\ttNEITEM4	sh_self_load2	ttNEITEM4
-IGNORE	sh_self_load2\tt1EITEM4	sh_self_load2	tt1EITEM4
-IGNORE	sh_self_load2\tt2EITEM4	sh_self_load2	tt2EITEM4
-IGNORE	sh_self_load2\tt3EITEM4	sh_self_load2	tt3EITEM4
-IGNORE	sh_self_load2\tt4EITEM4	sh_self_load2	tt4EITEM4
+IGNORE	sh_load_meta_tables_db\LINEITEM4	sh_load_meta_tables_db	LINEITEM4
+IGNORE	sh_load_meta_tables_db\ttNEITEM4	sh_load_meta_tables_db	ttNEITEM4
+IGNORE	sh_load_meta_tables_db\tt1EITEM4	sh_load_meta_tables_db	tt1EITEM4
+IGNORE	sh_load_meta_tables_db\tt2EITEM4	sh_load_meta_tables_db	tt2EITEM4
+IGNORE	sh_load_meta_tables_db\tt3EITEM4	sh_load_meta_tables_db	tt3EITEM4
+IGNORE	sh_load_meta_tables_db\tt4EITEM4	sh_load_meta_tables_db	tt4EITEM4
 select * from performance_schema.rpd_columns;
 TABLE_ID	COLUMN_ID	NDV	ENCODING	DATA_PLACEMENT_INDEX	DICT_SIZE_BTYES
 IGNORE	IGNORE	0	N/A	0	0
@@ -180,40 +181,40 @@ IGNORE	IGNORE	L_SHIPMODE
 IGNORE	IGNORE	L_COMMENT
 select * from performance_schema.rpd_preload_stats;
 TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	AVG_BYTE_WIDTH_INC_NULL
-sh_self_load2	tt	score	4
-sh_self_load2	tt	name	40
-sh_self_load2	tt	id	4
-sh_self_load2	tt	gender	4
-sh_self_load2	tt1	score	4
-sh_self_load2	tt1	name	40
-sh_self_load2	tt1	id	4
-sh_self_load2	tt1	gender	4
-sh_self_load2	tt2	score	4
-sh_self_load2	tt2	name	40
-sh_self_load2	tt2	id	4
-sh_self_load2	tt2	gender	4
-sh_self_load2	tt3	score	4
-sh_self_load2	tt3	name	40
-sh_self_load2	tt3	id	4
-sh_self_load2	tt3	gender	4
-sh_self_load2	tt4	score	8
-sh_self_load2	tt4	name	40
-sh_self_load2	tt4	id	4
-sh_self_load2	tt4	gender	4
-sh_self_load2	LINEITEM4	L_ORDERKEY	8
-sh_self_load2	LINEITEM4	L_PARTKEY	4
-sh_self_load2	LINEITEM4	L_SUPPKEY	4
-sh_self_load2	LINEITEM4	L_LINENUMBER	4
-sh_self_load2	LINEITEM4	L_QUANTITY	7
-sh_self_load2	LINEITEM4	L_EXTENDEDPRICE	7
-sh_self_load2	LINEITEM4	L_DISCOUNT	7
-sh_self_load2	LINEITEM4	L_TAX	7
-sh_self_load2	LINEITEM4	L_RETURNFLAG	4
-sh_self_load2	LINEITEM4	L_LINESTATUS	4
-sh_self_load2	LINEITEM4	L_SHIPDATE	3
-sh_self_load2	LINEITEM4	L_COMMITDATE	3
-sh_self_load2	LINEITEM4	L_RECEIPTDATE	3
-sh_self_load2	LINEITEM4	L_SHIPINSTRUCT	100
-sh_self_load2	LINEITEM4	L_SHIPMODE	40
-sh_self_load2	LINEITEM4	L_COMMENT	177
-drop database sh_self_load2;
+sh_load_meta_tables_db	tt	score	4
+sh_load_meta_tables_db	tt	name	40
+sh_load_meta_tables_db	tt	id	4
+sh_load_meta_tables_db	tt	gender	4
+sh_load_meta_tables_db	tt1	score	4
+sh_load_meta_tables_db	tt1	name	40
+sh_load_meta_tables_db	tt1	id	4
+sh_load_meta_tables_db	tt1	gender	4
+sh_load_meta_tables_db	tt2	score	4
+sh_load_meta_tables_db	tt2	name	40
+sh_load_meta_tables_db	tt2	id	4
+sh_load_meta_tables_db	tt2	gender	4
+sh_load_meta_tables_db	tt3	score	4
+sh_load_meta_tables_db	tt3	name	40
+sh_load_meta_tables_db	tt3	id	4
+sh_load_meta_tables_db	tt3	gender	4
+sh_load_meta_tables_db	tt4	score	8
+sh_load_meta_tables_db	tt4	name	40
+sh_load_meta_tables_db	tt4	id	4
+sh_load_meta_tables_db	tt4	gender	4
+sh_load_meta_tables_db	LINEITEM4	L_ORDERKEY	8
+sh_load_meta_tables_db	LINEITEM4	L_PARTKEY	4
+sh_load_meta_tables_db	LINEITEM4	L_SUPPKEY	4
+sh_load_meta_tables_db	LINEITEM4	L_LINENUMBER	4
+sh_load_meta_tables_db	LINEITEM4	L_QUANTITY	7
+sh_load_meta_tables_db	LINEITEM4	L_EXTENDEDPRICE	7
+sh_load_meta_tables_db	LINEITEM4	L_DISCOUNT	7
+sh_load_meta_tables_db	LINEITEM4	L_TAX	7
+sh_load_meta_tables_db	LINEITEM4	L_RETURNFLAG	4
+sh_load_meta_tables_db	LINEITEM4	L_LINESTATUS	4
+sh_load_meta_tables_db	LINEITEM4	L_SHIPDATE	3
+sh_load_meta_tables_db	LINEITEM4	L_COMMITDATE	3
+sh_load_meta_tables_db	LINEITEM4	L_RECEIPTDATE	3
+sh_load_meta_tables_db	LINEITEM4	L_SHIPINSTRUCT	100
+sh_load_meta_tables_db	LINEITEM4	L_SHIPMODE	40
+sh_load_meta_tables_db	LINEITEM4	L_COMMENT	177
+drop database sh_load_meta_tables_db;

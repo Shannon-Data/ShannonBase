@@ -83,18 +83,14 @@
 #ifndef __SHANNONBASE_AUTOPILOT_LOADER_H__
 #define __SHANNONBASE_AUTOPILOT_LOADER_H__
 
-#include <atomic>
 #include <condition_variable>
-#include <cstdio>
-#include <functional>
-#include <memory>
-#include <mutex>
+#include <mutex>  // once_flag
 #include <shared_mutex>
 #include <string>
 
 #include "sql/handler.h"
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_status.h"
+#include "storage/rapid_engine/include/rapid_table_info.h"
 
 class Field;
 class THD;
@@ -110,35 +106,6 @@ enum class loader_state_t {
   LOADER_STATE_STOP,    /*!< self-loader thread should be stopped */
   LOADER_STATE_EXIT,    /*!< self-loader thread has been shutdown */
   LOADER_STATE_DISABLED /*!< self-loader thread was never started */
-};
-
-struct TableAccessStats {
-  std::atomic<uint64_t> mysql_access_count{0};
-  std::atomic<uint64_t> heatwave_access_count{0};
-  std::atomic<double> importance{1.0};
-  std::chrono::system_clock::time_point last_queried_time;
-  std::chrono::system_clock::time_point last_queried_time_in_rpd;
-
-  enum State { NOT_LOADED = 0, LOADED, INSUFFICIENT_MEMORY } state{NOT_LOADED};
-  ShannonBase::load_type_t load_type{ShannonBase::load_type_t::USER};
-
-  std::shared_mutex stats_mutex;
-  TableAccessStats()
-      : last_queried_time(std::chrono::system_clock::now()),
-        last_queried_time_in_rpd(std::chrono::system_clock::now()) {}
-};
-
-// RPD Mirror Table Info.
-struct TableInfo {
-  std::string schema_name;
-  std::string table_name;
-  std::string secondary_engine;
-  uint64_t estimated_size{0};
-  bool partitioned{false};
-  TableAccessStats stats;
-  bool excluded_from_self_load{false};
-
-  std::string full_name() const { return schema_name + ":" + table_name; }
 };
 
 class SelfLoadManager {
@@ -173,7 +140,7 @@ class SelfLoadManager {
 
   void update_table_stats(THD *thd, Table_ref *table_lists, SelectExecutedIn executed_in);
   TableInfo *get_table_info(const std::string &schema, const std::string &table);
-  std::unordered_map<std::string, std::unique_ptr<TableInfo>> &get_all_tables();
+  static std::unordered_map<std::string, std::unique_ptr<TableInfo>> &tables();
 
   bool is_system_quiet();
 
@@ -224,14 +191,14 @@ class SelfLoadManager {
 
   TableInfo *get_table_info(TABLE *table);
 
-  inline int update_table_state(const std::string &schema, const std::string &table, TableAccessStats::State state,
+  inline int update_table_state(const std::string &schema, const std::string &table, table_access_stats_t::State state,
                                 ShannonBase::load_type_t load_type) {
     std::unique_lock lock(m_tables_mutex);
     std::string full_name = schema + ":" + table;
     if (m_rpd_mirror_tables.find(full_name) == m_rpd_mirror_tables.end()) return SHANNON_SUCCESS;
 
     m_rpd_mirror_tables[full_name]->stats.state = state;
-    m_rpd_mirror_tables[full_name]->stats.load_type = load_type;
+    m_rpd_mirror_tables[full_name]->meta_info.load_type = load_type;
     return SHANNON_SUCCESS;
   }
 
@@ -244,7 +211,7 @@ class SelfLoadManager {
 
  private:
   // load/unload strategies.
-  struct LoadCandidate {
+  struct SHANNON_ALIGNAS LoadCandidate {
     std::string full_name;
     double importance;
     uint64_t estimated_size;
@@ -254,7 +221,7 @@ class SelfLoadManager {
     }
   };
 
-  struct UnloadCandidate {
+  struct SHANNON_ALIGNAS UnloadCandidate {
     std::string full_name;
     double importance;
 
@@ -267,15 +234,15 @@ class SelfLoadManager {
   static SelfLoadManager *m_instance;
   std::atomic<bool> m_intialized{false};
 
-  // (RPD Mirror)
-  std::shared_mutex m_tables_mutex;
-  std::unordered_map<std::string, std::unique_ptr<TableInfo>> m_rpd_mirror_tables;
-
   // format: <schema_id, schema_name>
   std::unordered_map<int, std::string> m_schema_tables;
 
   // format: <schema_name+":"+table_name, estimated_size>
   std::unordered_map<std::string, uint64_t> m_table_stats;
+
+  // (RPD Mirror), global meta information.
+  static std::shared_mutex m_tables_mutex;
+  static std::unordered_map<std::string, std::unique_ptr<TableInfo>> m_rpd_mirror_tables;
 
   // mysql.tables.
   // schema_id
@@ -296,10 +263,15 @@ class SelfLoadManager {
   static constexpr uint FIELD_CAT_NAME_OFFSET_SCHEMA = 2;
 
   // mysql.table_stats
+  // schema name
   static constexpr uint FIELD_SCH_NAME_OFFSET_STATS = 0;
+  // table name
   static constexpr uint FIELD_TABLE_NAME_OFFSET_STATS = 1;
+  // table # of rows
   static constexpr uint FIELD_TABLE_ROWS_OFFSET_STATS = 2;
+  // data length
   static constexpr uint FIELD_DATA_LEN_OFFSET_STATS = 4;
+  // index length
   static constexpr uint FIELD_INDEX_LEN_OFFSET_STATS = 6;
 };
 }  // namespace Autopilot

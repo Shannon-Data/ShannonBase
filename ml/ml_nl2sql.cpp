@@ -53,8 +53,6 @@
 #include "ml_utils.h"                         //ml utils
 #include "storage/innobase/include/ut0dbg.h"  //for ut_a
 
-#include "storage/rapid_engine/include/rapid_status.h"  //loaded table.
-
 namespace ShannonBase {
 namespace ML {
 void ML_chat::Generate() {}

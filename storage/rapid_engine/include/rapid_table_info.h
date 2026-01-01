@@ -23,49 +23,21 @@
 
    Shannon Data AI.
 */
-#ifndef __SHANNONBASE_RPD_STATS_H__
-#define __SHANNONBASE_RPD_STATS_H__
+#ifndef __SHANNONBASE_RPD_STATS_LOADED_TABLE_INFO_H__
+#define __SHANNONBASE_RPD_STATS_LOADED_TABLE_INFO_H__
 
-#include <chrono>
-#include <vector>
+#include <map>
+#include <mutex>
+#include <shared_mutex>
+#include <string>
 
-#include "include/mysql_com.h"  // NAME_LEN
+#include "storage/rapid_engine/include/rapid_const.h"
 
-class handlerton;
 namespace ShannonBase {
-class LoadedTables;
-// All the stats of loaded table of rapid.
-struct shannon_rpd_column_info_t {
-  shannon_rpd_column_info_t() {
-    table_id = 0;
-    column_id = 0;
-    ndv = 0;
-    data_placement_index = 0;
-    data_dict_bytes = 0;
-    avg_byte_width_inc_null = 0;
-  }
-
-  /**schema name*/
-  char schema_name[NAME_LEN] = {0};
-  /**table id of loaded table*/
-  uint table_id{0};
-  /**table_name loaded into rapid*/
-  char table_name[NAME_LEN] = {0};
-  /**cloumn name with charset info*/
-  char column_name[NAME_LEN] = {0};
-  /**columun id of loaded table*/
-  uint column_id{0};
-  /**The number of distinct values in the column.*/
-  longlong ndv{0};
-  /**The type of encoding used.*/
-  char encoding[NAME_LEN] = {0};
-  /**data placement index*/
-  uint data_placement_index{0};
-  /**The dictionary size per column, in bytes.*/
-  longlong data_dict_bytes{0};
-  /**avg width byte.*/
-  uint32 avg_byte_width_inc_null{0};
-};
+class RapidShare;
+namespace Autopilot {
+class SelfLoadManager;
+}
 
 enum class pool_type_t { SNAPSHOT, TRANSACTIONAL, VOLATILE };
 
@@ -92,8 +64,6 @@ struct logical_part_loaded_t {
 };
 
 struct rpd_table_meta_info_t {
-  uint tid;
-
   // The system change number (SCN) of the table snapshot. and The SCN up to which changes are persisted.
   uint64_t snapshot_scn{0}, persisted_scn{0};
 
@@ -151,18 +121,73 @@ struct rpd_table_meta_info_t {
   bool ace_model{false};
 };
 
-using rpd_column_info_t = shannon_rpd_column_info_t;
-using rpd_columns_container = std::vector<rpd_column_info_t>;
+struct SHANNON_ALIGNAS table_access_stats_t {
+  std::atomic<uint64_t> mysql_access_count{0};
+  std::atomic<uint64_t> heatwave_access_count{0};
 
-// all column infos of all loaded tables, which's used for
-// performance_schema.rpd_column_xxx.
-extern rpd_columns_container rpd_columns_info;
+  std::atomic<double> importance{1.0};
+
+  std::chrono::system_clock::time_point last_queried_time;
+  std::chrono::system_clock::time_point last_queried_time_in_rpd;
+
+  enum State { NOT_LOADED = 0, LOADED, INSUFFICIENT_MEMORY } state{NOT_LOADED};
+
+  std::shared_mutex stats_mutex;
+  table_access_stats_t()
+      : last_queried_time(std::chrono::system_clock::now()),
+        last_queried_time_in_rpd(std::chrono::system_clock::now()) {}
+};
+
+struct SHANNON_ALIGNAS TableInfo {
+  uint tid;
+
+  std::string schema_name, table_name, secondary_engine;
+
+  uint64_t estimated_size{0};
+
+  bool partitioned{false};
+
+  bool excluded_from_self_load{false};
+
+  table_access_stats_t stats;
+
+  rpd_table_meta_info_t meta_info;
+
+  std::string full_name() const { return schema_name + ":" + table_name; }
+};
+
+// Map from (db_name, table_name) to the RapidShare with table state.
+class LoadedTables {
+  // "db:table" <-> Share.
+  std::map<std::string, RapidShare *> m_tables;
+  mutable std::mutex m_mutex;
+
+ public:
+  LoadedTables() = default;
+  virtual ~LoadedTables();
+
+  void add(const std::string &db, const std::string &table, RapidShare *rs);
+
+  RapidShare *get(const std::string &db, const std::string &table);
+
+  void erase(const std::string &db, const std::string &table);
+
+  auto size() const {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    return m_tables.size();
+  }
+
+  void table_infos(uint index, ulonglong &tid, std::string &schema, std::string &table);
+};
+
+// all the loaded tables information.
+extern LoadedTables *shannon_loaded_tables;
+
+extern Autopilot::SelfLoadManager *shannon_self_load_mgr_inst;
 
 // the max memory size of rpd engine, initialized in xx_rapid.cc
-extern uint64 rpd_mem_sz_max;
+extern uint64 shannon_rpd_mem_sz_max;
 
-extern std::atomic<size_t> rapid_allocated_mem_size;
-
-extern std::map<int, rpd_table_meta_info_t> shannon_loading_tables_meta;
+extern std::atomic<size_t> shannon_rpd_allocated_mem_size;
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_RPD_STATS_H__
+#endif  //__SHANNONBASE_RPD_STATS_LOADED_TABLE_INFO_H__

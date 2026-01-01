@@ -5,8 +5,11 @@
 
 --source include/no_ps_protocol.inc 
 
-CREATE DATABASE rpd_load_test;
-USE rpd_load_test;
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
+CREATE DATABASE rpd_load_info_db;
+USE rpd_load_info_db;
 
 --echo #
 --echo # Load into and unload from secondary engine test.
@@ -53,4 +56,4 @@ SELECT * FROM performance_schema.rpd_column_id;
 SELECT * FROM performance_schema.rpd_table_id;
 
 DROP TABLE t1;
-DROP DATABASE rpd_load_test;
+DROP DATABASE rpd_load_info_db;

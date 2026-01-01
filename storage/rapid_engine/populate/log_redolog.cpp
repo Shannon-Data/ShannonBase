@@ -57,7 +57,7 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
-extern int rpd_async_column_threshold;
+extern int shannon_rpd_async_column_threshold;
 namespace Populate {
 // to cache the found index_t usd by log parser, and used for next time.
 std::unordered_map<uint64, const dict_index_t *> g_index_cache;

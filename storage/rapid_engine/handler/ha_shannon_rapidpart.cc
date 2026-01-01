@@ -38,16 +38,16 @@ Created jun 6, 2025 */
 #include "storage/innobase/include/dict0dd.h"  //dd_is_partitioned
 
 #include "storage/rapid_engine/autopilot/loader.h"
+#include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_loaded_table.h"
-#include "storage/rapid_engine/include/rapid_status.h"
+#include "storage/rapid_engine/include/rapid_table_info.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/table0view.h"
 
 namespace ShannonBase {
-extern int rpd_async_column_threshold;
+extern int shannon_rpd_async_column_threshold;
 ha_rapidpart::ha_rapidpart(handlerton *hton, TABLE_SHARE *table)
     : ha_rapid(hton, table), Partition_helper(this), m_thd(ha_thd()), m_share(nullptr) {}
 
@@ -89,7 +89,7 @@ int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
   if (m_current_part_empty) return error;
 
   if (inited == handler::RND && m_start_of_scan) {
-    if (table_share->fields <= static_cast<uint>(ShannonBase::rpd_async_column_threshold)) {
+    if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_async_column_threshold)) {
       error = m_cursor->next(buf);
     } else {
       auto reader_pool = ShannonBase::Imcs::Imcs::pool();
@@ -209,7 +209,6 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   context.m_trx->begin_stmt();
   context.m_extra_info.m_trxid = context.m_trx->get_id();
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();  // see the commont on RpdTable load.
-  auto &meta_ref = shannon_loading_tables_meta[context.m_table_id];
 
   // use specific partion. such as partition(p1, p2, p10, ..., pn).
   std::vector<logical_part_loaded_t> part_tb_infos;
@@ -236,6 +235,9 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
           .id = index, .name = part_name, .load_scn = context.m_extra_info.m_scn, .load_type = load_type_t::USER});
     }
   }
+
+  auto sch_tb = context.m_schema_name + ":" + context.m_table_name;
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info;
   meta_ref.logical_part_loaded_at_scn = std::move(part_tb_infos);
   meta_ref.snapshot_scn = context.m_extra_info.m_scn;
   ha_rows num_rows{0};
@@ -246,7 +248,6 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   meta_ref.loading_progress = 0.1;
 
   if (Imcs::Imcs::instance()->load_parttable(&context, const_cast<TABLE *>(&table))) {
-    shannon_loading_tables_meta.erase(context.m_table_id);
     my_error(ER_SECONDARY_ENGINE, MYF(0), table.s->db.str, table.s->table_name.str);
     context.m_trx->rollback_stmt();
     return HA_ERR_GENERIC;
@@ -289,7 +290,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
       strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
     row_rpd_columns.ndv = 0;
     row_rpd_columns.avg_byte_width_inc_null = field_ptr->pack_length();
-    ShannonBase::rpd_columns_info.push_back(row_rpd_columns);
+    ShannonBase::shannon_rpd_columns_info.push_back(row_rpd_columns);
   }
 
   auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
@@ -319,16 +320,13 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   context.m_schema_name = db_name;
   context.m_table_name = table_name;
 
-  if (shannon_loading_tables_meta.find(table_id) == shannon_loading_tables_meta.end())
-    shannon_loading_tables_meta.erase(table_id);
-
   Imcs::Imcs::instance()->unload_table(&context, table_id, false, true);
 
   // ease the meta info.
-  for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::rpd_columns_info.begin();
-       it != ShannonBase::rpd_columns_info.end();) {
+  for (ShannonBase::rpd_columns_container::iterator it = ShannonBase::shannon_rpd_columns_info.begin();
+       it != ShannonBase::shannon_rpd_columns_info.end();) {
     if (!strcmp(db_name, it->schema_name) && !strcmp(table_name, it->table_name))
-      it = ShannonBase::rpd_columns_info.erase(it);
+      it = ShannonBase::shannon_rpd_columns_info.erase(it);
     else
       ++it;
   }
@@ -338,7 +336,8 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   // we think that the table is still in loading status.
   shannon_loaded_tables->erase(db_name, table_name);
 
-  if (ShannonBase::self_load_mngr_inst) ShannonBase::self_load_mngr_inst->remove_table(db_name, table_name);
+  if (ShannonBase::shannon_self_load_mgr_inst)
+    ShannonBase::shannon_self_load_mgr_inst->remove_table(db_name, table_name);
 
   if (!shannon_loaded_tables->size()) ShannonBase::Populate::Populator::end();
 

@@ -33,9 +33,9 @@
 
 #include <stddef.h>
 
-#include "thr_lock.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
+#include "thr_lock.h"
 
 #include "sql/field.h"
 #include "sql/plugin_table.h"
@@ -45,8 +45,8 @@
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
-#include "storage/rapid_engine/include/rapid_loaded_table.h"
-#include "storage/rapid_engine/include/rapid_status.h"
+#include "storage/rapid_engine/include/rapid_column_info.h"
+
 /*
   Callbacks implementation for RPD_COLUMN_ID.
 */
@@ -81,20 +81,16 @@ PFS_engine_table_share table_rpd_column_id::m_share = {
     false /* m_in_purgatory */
 };
 
-PFS_engine_table *table_rpd_column_id::create(
-    PFS_engine_table_share *) {
-  return new table_rpd_column_id();
-}
+PFS_engine_table *table_rpd_column_id::create(PFS_engine_table_share *) { return new table_rpd_column_id(); }
 
-table_rpd_column_id::table_rpd_column_id()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
+table_rpd_column_id::table_rpd_column_id() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
   m_row.column_id = 0;
   m_row.table_id = 0;
   m_row.column_name_length = 0;
 }
 
 table_rpd_column_id::~table_rpd_column_id() {
-  //clear.
+  // clear.
 }
 
 void table_rpd_column_id::reset_position() {
@@ -102,13 +98,10 @@ void table_rpd_column_id::reset_position() {
   m_next_pos.m_index = 0;
 }
 
-ha_rows table_rpd_column_id::get_row_count() {
-  return ShannonBase::rpd_columns_info.size();
-}
+ha_rows table_rpd_column_id::get_row_count() { return ShannonBase::shannon_rpd_columns_info.size(); }
 
 int table_rpd_column_id::rnd_next() {
-  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count();
-       m_pos.next()) {
+  for (m_pos.set_at(&m_next_pos); m_pos.m_index < get_row_count(); m_pos.next()) {
     make_row(m_pos.m_index);
     m_next_pos.set_after(&m_pos);
     return 0;
@@ -130,29 +123,25 @@ int table_rpd_column_id::rnd_pos(const void *pos) {
   return make_row(m_pos.m_index);
 }
 
-int table_rpd_column_id::make_row(uint index[[maybe_unused]]) {
+int table_rpd_column_id::make_row(uint index [[maybe_unused]]) {
   DBUG_TRACE;
   // Set default values.
-  if (index >= ShannonBase::rpd_columns_info.size()) {
+  if (index >= ShannonBase::shannon_rpd_columns_info.size()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    m_row.column_id = ShannonBase::rpd_columns_info[index].column_id;
-    m_row.table_id = ShannonBase::rpd_columns_info[index].table_id;
+    m_row.column_id = ShannonBase::shannon_rpd_columns_info[index].column_id;
+    m_row.table_id = ShannonBase::shannon_rpd_columns_info[index].table_id;
 
-    strncpy(m_row.column_name, ShannonBase::rpd_columns_info[index].column_name,
-            sizeof(m_row.column_name));
-    m_row.column_name_length = strlen(ShannonBase::rpd_columns_info[index].column_name);
+    strncpy(m_row.column_name, ShannonBase::shannon_rpd_columns_info[index].column_name, sizeof(m_row.column_name));
+    m_row.column_name_length = strlen(ShannonBase::shannon_rpd_columns_info[index].column_name);
   }
   return 0;
 }
 
-int table_rpd_column_id::read_row_values(TABLE *table,
-                                         unsigned char *buf,
-                                         Field **fields,
-                                         bool read_all) {
+int table_rpd_column_id::read_row_values(TABLE *table, unsigned char *buf, Field **fields, bool read_all) {
   Field *f;
 
-  //assert(table->s->null_bytes == 0);
+  // assert(table->s->null_bytes == 0);
   buf[0] = 0;
 
   for (; (f = *fields); fields++) {

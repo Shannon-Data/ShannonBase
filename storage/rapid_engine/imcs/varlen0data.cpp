@@ -27,7 +27,6 @@
 
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_status.h"  //status inf
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
