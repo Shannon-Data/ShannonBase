@@ -40,7 +40,7 @@
 #include "sql/table.h"        //TABLE
 
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/populate/log_commons.h"  //sys_pop_buff
+#include "storage/rapid_engine/populate/log_commons.h"  //shannon_pop_buff
 
 #include "storage/innobase/include/mach0data.h"
 #include "storage/rapid_engine/trx/transaction.h"  //Transaction

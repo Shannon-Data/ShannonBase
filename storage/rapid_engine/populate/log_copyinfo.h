@@ -149,7 +149,7 @@ class CopyInfoParser {
    *   - 0 if schema mismatch, parsing, or update fails.
    *
    * @note
-   *   - This function is only used when `g_sync_mode == COPY_INFO`.
+   *   - This function is only used when `shannon_propagation_mode == COPY_INFO`.
    *   - It does not perform any physical logging; the LSN was already assigned
    *     in `NotifyAfterUpdate()` before enqueuing the record.
    */

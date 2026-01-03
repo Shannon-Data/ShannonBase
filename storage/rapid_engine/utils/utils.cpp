@@ -343,7 +343,7 @@ bool Util::dynamic_feature_normalization(THD *thd) {
   // If queue is too long or CP is too long, this mechanism wants to progressively start
   // shifting queries to mysql, moving gradually towards the heavier queries
   if (ShannonBase::Populate::Populator::active() &&
-      ShannonBase::Populate::sys_pop_buff.size() * ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO >
+      ShannonBase::Populate::shannon_pop_buff.size() * ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO >
           ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE) {
     return false;
   }
@@ -354,8 +354,8 @@ bool Util::dynamic_feature_normalization(THD *thd) {
       auto share = ShannonBase::shannon_loaded_tables->get(table_ref->db, table_ref->table_name);
       auto table_id = share ? share->m_tableid : 0;
       {
-        std::shared_lock lk(ShannonBase::Populate::sys_pop_buff_mutex);
-        if (ShannonBase::Populate::sys_pop_buff.find(table_id) != ShannonBase::Populate::sys_pop_buff.end()) {
+        std::shared_lock lk(ShannonBase::Populate::shannon_pop_buff_mutex);
+        if (ShannonBase::Populate::shannon_pop_buff.find(table_id) != ShannonBase::Populate::shannon_pop_buff.end()) {
           return false;  // still in propation processing.
         }
       }

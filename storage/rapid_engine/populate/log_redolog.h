@@ -56,9 +56,9 @@ class RpdTable;
 }
 class Rapid_load_context;
 namespace Populate {
-extern std::unordered_map<uint64, const dict_index_t *> g_index_cache;
-extern std::unordered_map<uint64, std::pair<std::string, std::string>> g_index_names;
-extern std::shared_mutex g_index_cache_mutex;
+extern std::unordered_map<uint64, const dict_index_t *> shannon_indexes_cache;
+extern std::unordered_map<uint64, std::pair<std::string, std::string>> shannon_indexes_name;
+extern std::shared_mutex shannon_indexes_cache_mutex;
 
 /**
  * To parse the redo log file, it used to populate the changes from ionnodb
@@ -176,22 +176,22 @@ class LogParser {
 
   // only user's index be retrieved from dd_table.
   inline const dict_index_t *find_index(uint64 idx_id, std::string& db_name, std::string& table_name) {
-    std::shared_lock slock(ShannonBase::Populate::g_index_cache_mutex);
-    if (g_index_cache.find(idx_id) == g_index_cache.end()) {
+    std::shared_lock slock(ShannonBase::Populate::shannon_indexes_cache_mutex);
+    if (shannon_indexes_cache.find(idx_id) == shannon_indexes_cache.end()) {
       //assert(false);
       return nullptr;
     } else {
-      db_name = g_index_names[idx_id].first;
-      table_name = g_index_names[idx_id].second;
+      db_name = shannon_indexes_name[idx_id].first;
+      table_name = shannon_indexes_name[idx_id].second;
       slock.unlock();
 
       // check it be loaded or not.
       auto share = ShannonBase::shannon_loaded_tables->get(db_name.c_str(), table_name.c_str());
       if (!share) return nullptr;
 
-      assert(g_index_cache[idx_id]);
-      return (g_index_cache[idx_id]->type == DICT_CLUSTERED || /*clusted index*/
-              g_index_cache[idx_id]->type == (DICT_CLUSTERED | DICT_UNIQUE)/*primary key*/) ? g_index_cache[idx_id]: nullptr;
+      assert(shannon_indexes_cache[idx_id]);
+      return (shannon_indexes_cache[idx_id]->type == DICT_CLUSTERED || /*clusted index*/
+              shannon_indexes_cache[idx_id]->type == (DICT_CLUSTERED | DICT_UNIQUE)/*primary key*/) ? shannon_indexes_cache[idx_id]: nullptr;
     }
 
     assert(false);

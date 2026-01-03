@@ -265,8 +265,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
   auto table_id = context->m_table_id;
   ut_a(m_rpd_tables.find(table_id) != m_rpd_tables.end());
 
-  auto sch_tb = context->m_schema_name + ":" + context->m_table_name;
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info;
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
   while ((tmp = shannon_file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
     /*** ha_rnd_next can return RECORD_DELETED for MyISAM when one thread is reading and another deleting
      without locks. Now, do full scan, but multi-thread scan will impl in future. */
@@ -355,8 +354,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     return HA_ERR_GENERIC;
   }
 
-  auto sch_tb = context->m_schema_name + ":" + context->m_table_name;
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info;
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
 
   // to set the thread contexts. now set to nullptr,  you can use your own ctx. or resize(num_threads,
   // (void*)&scan_cookie);
@@ -463,8 +461,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
   auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[table_id].get());
   assert(part_tb_ptr);
 
-  auto sch_tb = context->m_schema_name + ":" + context->m_table_name;
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info;
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
   context->m_thd->set_sent_row_count(0);
   for (auto &[part_name, part_id] : context->m_extra_info.m_partition_infos) {
     auto partkey{part_name};

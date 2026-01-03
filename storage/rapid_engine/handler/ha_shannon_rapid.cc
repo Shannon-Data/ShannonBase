@@ -123,7 +123,8 @@ ulonglong shannon_rpd_para_parttb_load_threshold = ShannonBase::SHANNON_PARALLEL
 int shannon_rpd_async_column_threshold = ShannonBase::DEFAULT_N_FIELD_PARALLEL;
 
 // rapid change propagation mode, including DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID.
-long unsigned int shannon_rpd_propagate_mode = static_cast<int>(ShannonBase::Populate::SyncMode::DIRECT_NOTIFICATION);
+long unsigned int shannon_rpd_propagate_mode =
+    static_cast<int>(ShannonBase::Populate::PropagateMode::DIRECT_NOTIFICATION);
 
 // self-load related parameters.
 bool shannon_rpd_self_load_enabled = false;
@@ -382,8 +383,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   // at loading step, to set SCN to non-zero, it means it committed after inserted with explicit begin/commit.
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
 
-  auto sch_tb = context.m_schema_name + ":" + context.m_table_name;
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info;
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context.m_sch_tb_name]->meta_info;
   meta_ref.snapshot_scn = context.m_extra_info.m_scn;
   ha_rows num_rows{0};
   table_arg.file->ha_records(&num_rows);
@@ -985,7 +985,8 @@ static void read_off_page_data(TABLE *table,
 // table->record[0], table->record[1] and COPY_INFO, etc. After that you can insert these changes to rapid. The other
 // way is we use now, the redo log.
 void NotifyAfterInsert(THD *thd, void *args) {
-  if (!thd || !args || ShannonBase::Populate::g_sync_mode.load() == ShannonBase::Populate::SyncMode::REDO_LOG_PARSE)
+  if (!thd || !args ||
+      ShannonBase::Populate::shannon_propagation_mode.load() == ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE)
     return;
   struct comb_args {
     TABLE *arg1;
@@ -1022,7 +1023,8 @@ void NotifyAfterInsert(THD *thd, void *args) {
 
 // old_row = table->record[1], new_row = table->record[0]
 void NotifyAfterUpdate(THD *thd, void *args) {
-  if (!thd || !args || ShannonBase::Populate::g_sync_mode.load() == ShannonBase::Populate::SyncMode::REDO_LOG_PARSE)
+  if (!thd || !args ||
+      ShannonBase::Populate::shannon_propagation_mode.load() == ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE)
     return;
   struct comb_args {
     TABLE *arg1;
@@ -1060,7 +1062,8 @@ void NotifyAfterUpdate(THD *thd, void *args) {
 }
 
 void NotifyAfterDelete(THD *thd, void *args) {
-  if (!thd || !args || ShannonBase::Populate::g_sync_mode.load() == ShannonBase::Populate::SyncMode::REDO_LOG_PARSE)
+  if (!thd || !args ||
+      ShannonBase::Populate::shannon_propagation_mode.load() == ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE)
     return;
   struct comb_args {
     TABLE *arg1;
@@ -1130,7 +1133,7 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
   auto primary_plan_info = shannon_statement_context->get_cached_primary_plan_info();
   ut_a(primary_plan_info);
 
-  // 1: to check whether there're changes in sys_pop_buff, which will be used for query.
+  // 1: to check whether there're changes in shannon_pop_buff, which will be used for query.
   // if there're still do populating, then goes to innodb. and gets cardinality of tables.
   ut_a(thd->variables.use_secondary_engine != SECONDARY_ENGINE_FORCED);
   for (auto &table_ref : shannon_statement_context->get_query_tables()) {
@@ -1139,8 +1142,8 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
 
     auto table_id = share ? share->m_tableid : 0;
     {
-      std::shared_lock lk(ShannonBase::Populate::sys_pop_buff_mutex);
-      if (ShannonBase::Populate::sys_pop_buff.find(table_id) != ShannonBase::Populate::sys_pop_buff.end()) {
+      std::shared_lock lk(ShannonBase::Populate::shannon_pop_buff_mutex);
+      if (ShannonBase::Populate::shannon_pop_buff.find(table_id) != ShannonBase::Populate::shannon_pop_buff.end()) {
         SetSecondaryEngineOffloadFailedReason(thd, "still in propagation stage");
         return true;  // still in propation processing.
       }
@@ -1148,10 +1151,10 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
     if (ShannonBase::Populate::Populator::mark_table_required(table_id)) return true;
   }
 
-  // 2: to check whether the sys_pop_data_sz has too many data to populate.
+  // 2: to check whether the shannon_pop_data_sz has too many data to populate.
   uint64 too_much_pop_threshold = static_cast<uint64_t>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
                                                         ShannonBase::shannon_rpd_pop_buff_sz_max);
-  if (ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold) {
+  if (ShannonBase::Populate::shannon_pop_data_sz > too_much_pop_threshold) {
     SetSecondaryEngineOffloadFailedReason(thd, "too much changes need to populate");
     return true;
   }
@@ -1227,7 +1230,7 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
   } else if (likely(thd->variables.rapid_use_dynamic_offload && !is_very_fast_query(thd))) {
     // 1: static sceanrio.
     if (likely(!ShannonBase::Populate::Populator::active() ||
-               (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::sys_pop_buff.empty()))) {
+               (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::shannon_pop_buff.empty()))) {
       return ShannonBase::Utils::Util::decision_tree_classifier(thd);
     } else {
       // 2: dynamic scenario.
@@ -1284,8 +1287,8 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   // to much changes to populate, then goes to primary engine.
   ulonglong too_much_pop_threshold = static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
                                                             ShannonBase::shannon_rpd_pop_buff_sz_max);
-  if (unlikely(ShannonBase::Populate::sys_pop_buff.size() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
-               ShannonBase::Populate::sys_pop_data_sz > too_much_pop_threshold)) {
+  if (unlikely(ShannonBase::Populate::shannon_pop_buff.size() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
+               ShannonBase::Populate::shannon_pop_data_sz > too_much_pop_threshold)) {
     SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, the change propation lag is too much");
     return true;
   }
@@ -1429,7 +1432,7 @@ static SHOW_VAR rapid_status_variables[] = {
     {"rapid_parallel_part_load_threshold", (char *)&ShannonBase::shannon_rpd_para_parttb_load_threshold, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
     /*the mode to aysnc the changes to rapid*/
-    {"rapid_async_mode", (char *)&ShannonBase::Populate::g_sync_mode, SHOW_CHAR, SHOW_SCOPE_GLOBAL},
+    {"rapid_async_mode", (char *)&ShannonBase::Populate::shannon_propagation_mode, SHOW_CHAR, SHOW_SCOPE_GLOBAL},
     /*the max column number of used to aysnc reading or parsing log*/
     {"rapid_async_column_threshold", (char *)&ShannonBase::shannon_rpd_async_column_threshold, SHOW_INT,
      SHOW_SCOPE_GLOBAL},
@@ -1669,17 +1672,17 @@ static void rpd_sync_mode_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *var [[
   auto new_val = *static_cast<const int *>(save);
   switch (new_val) {
     case 0:
-      ShannonBase::Populate::g_sync_mode.store(ShannonBase::Populate::SyncMode::DIRECT_NOTIFICATION);
+      ShannonBase::Populate::shannon_propagation_mode.store(ShannonBase::Populate::PropagateMode::DIRECT_NOTIFICATION);
       break;
     case 1:
-      ShannonBase::Populate::g_sync_mode.store(ShannonBase::Populate::SyncMode::REDO_LOG_PARSE);
+      ShannonBase::Populate::shannon_propagation_mode.store(ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE);
       break;
     case 2:
-      ShannonBase::Populate::g_sync_mode.store(ShannonBase::Populate::SyncMode::HYBRID);
+      ShannonBase::Populate::shannon_propagation_mode.store(ShannonBase::Populate::PropagateMode::HYBRID);
       break;
     default:
       sql_print_error("Invalid sync mode: %d, using default", new_val);
-      ShannonBase::Populate::g_sync_mode.store(ShannonBase::Populate::SyncMode::DIRECT_NOTIFICATION);
+      ShannonBase::Populate::shannon_propagation_mode.store(ShannonBase::Populate::PropagateMode::DIRECT_NOTIFICATION);
   }
 }
 
@@ -1731,8 +1734,9 @@ static int rpd_sync_mode_validate(THD *,                          /*!< in: threa
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-static TYPELIB rapid_sync_mode_typelib = {array_elements(ShannonBase::Populate::sync_mode_names) - 1,
-                                          "rapid_sync_mode_typelib", ShannonBase::Populate::sync_mode_names, nullptr};
+static TYPELIB rapid_sync_mode_typelib = {array_elements(ShannonBase::Populate::propagation_mode_names) - 1,
+                                          "rapid_sync_mode_typelib", ShannonBase::Populate::propagation_mode_names,
+                                          nullptr};
 
 static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void *save) {
   if (*static_cast<bool *>(var_ptr) == *static_cast<const bool *>(save)) return;
@@ -2020,7 +2024,7 @@ static MYSQL_SYSVAR_ENUM(sync_mode,
                         "The synchronization mode of changes propagation: DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID",
                         rpd_sync_mode_validate,
                         rpd_sync_mode_update,
-                        static_cast<uint>(ShannonBase::Populate::SyncMode::DIRECT_NOTIFICATION), // default
+                        static_cast<uint>(ShannonBase::Populate::PropagateMode::DIRECT_NOTIFICATION), // default
                         &rapid_sync_mode_typelib
 );
 
@@ -2237,7 +2241,7 @@ static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
     ShannonBase::shannon_self_load_mgr_inst->shutdown();
 
   while (ShannonBase::Populate::Populator::active()) {
-    ShannonBase::Populate::sys_pop_started.store(false);
+    ShannonBase::Populate::shannon_propagation_thread_started.store(false);
     os_event_set(log_sys->rapid_events[0]);
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }

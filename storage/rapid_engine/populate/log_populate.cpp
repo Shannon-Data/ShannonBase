@@ -65,22 +65,22 @@ namespace ShannonBase {
 namespace Populate {
 constexpr uint32_t MAX_RETRY_COUNT = 3;
 // to identify synchonization mode.
-std::atomic<SyncMode> g_sync_mode{SyncMode::DIRECT_NOTIFICATION};
+std::atomic<PropagateMode> shannon_propagation_mode{PropagateMode::DIRECT_NOTIFICATION};
 
 // should be pay more attention to syc relation between this thread
 // and log_buffer write. if we stop changes poping, should stop writing
 // firstly, then stop this thread.
-std::unordered_map<table_id_t, std::unique_ptr<table_pop_buffer_t>> sys_pop_buff;
-std::shared_mutex sys_pop_buff_mutex;
+std::unordered_map<table_id_t, std::unique_ptr<table_pop_buffer_t>> shannon_pop_buff;
+std::shared_mutex shannon_pop_buff_mutex;
 
 // does the pop thread started or not.
-std::atomic<bool> sys_pop_started{false};
+std::atomic<bool> shannon_propagation_thread_started{false};
 
-// how many data was in sys_pop_buff in total?
-std::atomic<uint64> sys_pop_data_sz{0};
+// how many data was in shannon_pop_buff in total?
+std::atomic<uint64> shannon_pop_data_sz{0};
 
 // how many times applied round.
-static uint64 sys_rapid_loop_count{0};
+static uint64 shannon_rpd_loop_counter{0};
 
 struct table_worker_context {
   table_id_t table_key;
@@ -154,7 +154,7 @@ static void table_worker_func(table_worker_context *ctx) {
       ctx->pending_records.clear();
       ctx->pending_size.store(0, std::memory_order_release);
       size_t total_batch_size = ctx->pending_size.load(std::memory_order_relaxed);
-      sys_pop_data_sz.fetch_sub(total_batch_size, std::memory_order_release);
+      shannon_pop_data_sz.fetch_sub(total_batch_size, std::memory_order_release);
     }
     lock.unlock();
 
@@ -270,7 +270,7 @@ table_worker_context *table_worker_context::get_or_create_table_worker(const tab
 }
 
 /**
- * main entry of pop thread. it monitors sys_pop_buff, a new mtr_log_rect_t
+ * main entry of pop thread. it monitors shannon_pop_buff, a new mtr_log_rect_t
  * is coming, then it starts a new worker to dealing with this mtr_log_rec_t.
  */
 static void parse_log_func_main(log_t *log_ptr) {
@@ -282,15 +282,15 @@ static void parse_log_func_main(log_t *log_ptr) {
 
   // ref: https://dev.mysql.com/doc/heatwave/en/mys-hw-change-propagation.html
   while (srv_shutdown_state.load(std::memory_order_acquire) == SRV_SHUTDOWN_NONE &&
-         sys_pop_started.load(std::memory_order_acquire)) {
+         shannon_propagation_thread_started.load(std::memory_order_acquire)) {
     const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::microseconds{POP_MAX_WAIT_TIMEOUT};
 
     // Step 1: Wait for trigger condition (64MB or 200ms or query-driven)
     auto stop_condition = [&](bool wait) {
       {
         // cond1: table has be marked flushed.
-        std::shared_lock<std::shared_mutex> lk(sys_pop_buff_mutex);
-        for (const auto &[key, tbuf] : sys_pop_buff) {
+        std::shared_lock<std::shared_mutex> lk(shannon_pop_buff_mutex);
+        for (const auto &[key, tbuf] : shannon_pop_buff) {
           if (tbuf->pending_flush.load(std::memory_order_acquire)) {
             return true;
           }
@@ -305,8 +305,8 @@ static void parse_log_func_main(log_t *log_ptr) {
       // cond3: has waited for `MAX_WAIT_TIMEOUT`, timeout.
       if (std::chrono::steady_clock::now() >= wait_deadline) {
         {
-          std::shared_lock<std::shared_mutex> lk(sys_pop_buff_mutex);
-          for (const auto &[key, tbuf] : sys_pop_buff) {
+          std::shared_lock<std::shared_mutex> lk(shannon_pop_buff_mutex);
+          for (const auto &[key, tbuf] : shannon_pop_buff) {
             if (tbuf->data_size.load(std::memory_order_acquire) > 0) {
               tbuf->pending_flush.store(true, std::memory_order_release);
             }
@@ -322,13 +322,13 @@ static void parse_log_func_main(log_t *log_ptr) {
     os_event_wait_for(log_ptr->rapid_events[0], 0, std::chrono::microseconds{POP_MAX_WAIT_TIMEOUT}, stop_condition);
     os_event_reset(log_sys->rapid_events[0]);
 
-    if (!sys_pop_started.load()) break;
+    if (!shannon_propagation_thread_started.load()) break;
 
     // Step 2: collect all need flush tables (query-driven + over threshold）
     std::vector<table_id_t> tables_to_flush;
     {
-      std::shared_lock<std::shared_mutex> lk(sys_pop_buff_mutex);
-      for (auto &[key, tbuf] : sys_pop_buff) {
+      std::shared_lock<std::shared_mutex> lk(shannon_pop_buff_mutex);
+      for (auto &[key, tbuf] : shannon_pop_buff) {
         if (tbuf->pending_flush.exchange(false, std::memory_order_acq_rel)) {
           tables_to_flush.push_back(key);
         }
@@ -340,11 +340,11 @@ static void parse_log_func_main(log_t *log_ptr) {
     for (const auto &table_key : tables_to_flush) {
       std::unique_ptr<table_pop_buffer_t> tbuf;
       {
-        std::unique_lock lk(sys_pop_buff_mutex);
-        auto it = sys_pop_buff.find(table_key);
-        if (it == sys_pop_buff.end()) continue;
+        std::unique_lock lk(shannon_pop_buff_mutex);
+        auto it = shannon_pop_buff.find(table_key);
+        if (it == shannon_pop_buff.end()) continue;
         tbuf = std::move(it->second);
-        sys_pop_buff.erase(it);
+        shannon_pop_buff.erase(it);
       }
 
       // batch processing
@@ -369,10 +369,10 @@ static void parse_log_func_main(log_t *log_ptr) {
       }
     }
 
-    sys_rapid_loop_count++;
+    shannon_rpd_loop_counter++;
   }
 
-  sys_pop_started.store(false, std::memory_order_seq_cst);
+  shannon_propagation_thread_started.store(false, std::memory_order_seq_cst);
 }
 
 std::unique_ptr<Populator::Impl> Populator::m_impl = nullptr;
@@ -431,7 +431,7 @@ void PopulatorImpl::send_notify_impl() { os_event_set(log_sys->rapid_events[0]);
 void PopulatorImpl::start_impl() {
   if (!active_impl() && shannon_loaded_tables->size()) {
     srv_threads.m_change_pop_cordinator = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
-    ShannonBase::Populate::sys_pop_started.store(true, std::memory_order_seq_cst);
+    ShannonBase::Populate::shannon_propagation_thread_started.store(true, std::memory_order_seq_cst);
     srv_threads.m_change_pop_cordinator.start();
     ut_a(active_impl());
   }
@@ -440,8 +440,8 @@ void PopulatorImpl::start_impl() {
 void PopulatorImpl::unload_impl(const table_id_t &table_id) {
   if (unlikely(!active_impl() || !shannon_loaded_tables->size())) return;
   {
-    std::unique_lock lk(sys_pop_buff_mutex);
-    sys_pop_buff.erase(table_id);
+    std::unique_lock lk(shannon_pop_buff_mutex);
+    shannon_pop_buff.erase(table_id);
   }
 
   std::unique_ptr<table_worker_context> ctx_to_destroy;
@@ -499,20 +499,20 @@ void PopulatorImpl::end_impl() {
   }
 
   // Step 4: stop coordinator main thread
-  sys_pop_started.store(false, std::memory_order_seq_cst);
+  shannon_propagation_thread_started.store(false, std::memory_order_seq_cst);
   os_event_set(log_sys->rapid_events[0]);
   if (thread_is_active(srv_threads.m_change_pop_cordinator)) {
     srv_threads.m_change_pop_cordinator.join();
   }
 
   // Step 5: clear all status
-  sys_rapid_loop_count = 0;
-  g_index_cache.clear();
-  g_index_names.clear();
-  g_propagating_tables.clear();
+  shannon_rpd_loop_counter = 0;
+  shannon_indexes_cache.clear();
+  shannon_indexes_name.clear();
+  shannon_pop_tables.clear();
   {
-    std::unique_lock<std::shared_mutex> lock(sys_pop_buff_mutex);
-    sys_pop_buff.clear();
+    std::unique_lock<std::shared_mutex> lock(shannon_pop_buff_mutex);
+    shannon_pop_buff.clear();
   }
 
   ut_a(!active_impl());
@@ -526,15 +526,15 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   bool need_wakeup = false;
 
   {
-    std::shared_lock<std::shared_mutex> slk(sys_pop_buff_mutex);
-    auto it = sys_pop_buff.find(table_key);
-    if (it != sys_pop_buff.end()) {
+    std::shared_lock<std::shared_mutex> slk(shannon_pop_buff_mutex);
+    auto it = shannon_pop_buff.find(table_key);
+    if (it != shannon_pop_buff.end()) {
       auto &tbuf = *it->second;
 
       change_candidate_t candidate_item(start_lsn, std::move(*changed_rec));
       if (tbuf.change_candiates.try_put(std::move(candidate_item))) {
         size_t old_sz = tbuf.data_size.fetch_add(rec_sz, std::memory_order_relaxed);
-        sys_pop_data_sz.fetch_add(rec_sz, std::memory_order_relaxed);
+        shannon_pop_data_sz.fetch_add(rec_sz, std::memory_order_relaxed);
 
         bool crossed_threshold =
             (old_sz <= SHANNON_POPULATION_HRESHOLD_SIZE) && (old_sz + rec_sz > SHANNON_POPULATION_HRESHOLD_SIZE);
@@ -551,13 +551,13 @@ uint PopulatorImpl::write_impl(FILE *file, uint64_t start_lsn, change_record_buf
   }
 
   {
-    std::unique_lock<std::shared_mutex> ulk(sys_pop_buff_mutex);
-    auto [it, inserted] = sys_pop_buff.emplace(table_key, std::make_unique<table_pop_buffer_t>());
+    std::unique_lock<std::shared_mutex> ulk(shannon_pop_buff_mutex);
+    auto [it, inserted] = shannon_pop_buff.emplace(table_key, std::make_unique<table_pop_buffer_t>());
     auto &tbuf = *it->second;
     change_candidate_t item(start_lsn, std::move(*changed_rec));  // new item to insert.
     if (tbuf.change_candiates.try_put(std::move(item))) {
       size_t old_sz = tbuf.data_size.fetch_add(rec_sz, std::memory_order_relaxed);
-      sys_pop_data_sz.fetch_add(rec_sz, std::memory_order_relaxed);
+      shannon_pop_data_sz.fetch_add(rec_sz, std::memory_order_relaxed);
 
       if (old_sz == 0 || old_sz + rec_sz > SHANNON_POPULATION_HRESHOLD_SIZE ||
           tbuf.queried.exchange(false, std::memory_order_acq_rel)) {
@@ -608,15 +608,15 @@ int PopulatorImpl::load_indexes_caches_impl() {
     `RECOVERY_INDEX_TABLE_NAME` table. TRX_SYS_SPACE*/
     if (ret && ((index_rec->space_id() != SYSTEM_TABLE_SPACE) && !index_rec->table->is_system_schema() &&
                 !index_rec->table->is_dd_table)) {
-      std::shared_lock slock(g_index_cache_mutex);
-      if (g_index_cache.find(index_rec->id) == g_index_cache.end()) {  // add new one.
+      std::shared_lock slock(shannon_indexes_cache_mutex);
+      if (shannon_indexes_cache.find(index_rec->id) == shannon_indexes_cache.end()) {  // add new one.
         slock.unlock();
-        std::unique_lock<std::shared_mutex> ex_lock(g_index_cache_mutex);
-        if (g_index_cache.find(index_rec->id) == g_index_cache.end()) {  // double check
-          g_index_cache[index_rec->id] = index_rec;
+        std::unique_lock<std::shared_mutex> ex_lock(shannon_indexes_cache_mutex);
+        if (shannon_indexes_cache.find(index_rec->id) == shannon_indexes_cache.end()) {  // double check
+          shannon_indexes_cache[index_rec->id] = index_rec;
           std::string db_name, table_name;
           index_rec->table->get_table_name(db_name, table_name);
-          g_index_names[index_rec->id] = std::make_pair(db_name, table_name);
+          shannon_indexes_name[index_rec->id] = std::make_pair(db_name, table_name);
         }
       }
     }
@@ -656,8 +656,9 @@ void PopulatorImpl::print_info_impl(FILE *file) { /* in: output stream */
           "rapid log data remaining size: " ULINTPF
           " KB\n"
           "rapid log data remaining line: " ULINTPF "\n",
-          ShannonBase::Populate::sys_pop_started ? "running" : "stopped", ShannonBase::Populate::sys_rapid_loop_count,
-          ShannonBase::Populate::sys_pop_data_sz / 1024, ShannonBase::Populate::sys_pop_buff.size());
+          ShannonBase::Populate::shannon_propagation_thread_started ? "running" : "stopped",
+          ShannonBase::Populate::shannon_rpd_loop_counter, ShannonBase::Populate::shannon_pop_data_sz / 1024,
+          ShannonBase::Populate::shannon_pop_buff.size());
 }
 
 bool PopulatorImpl::is_loaded_table_impl(std::string sch_name, std::string table_name) {
@@ -666,9 +667,9 @@ bool PopulatorImpl::is_loaded_table_impl(std::string sch_name, std::string table
 }
 
 bool PopulatorImpl::mark_table_required_impl(const table_id_t &table_id) {
-  std::shared_lock<std::shared_mutex> lk(sys_pop_buff_mutex);
-  auto it = sys_pop_buff.find(table_id);
-  if (it != sys_pop_buff.end()) {
+  std::shared_lock<std::shared_mutex> lk(shannon_pop_buff_mutex);
+  auto it = shannon_pop_buff.find(table_id);
+  if (it != shannon_pop_buff.end()) {
     it->second->queried.store(true, std::memory_order_release);
     it->second->pending_flush.store(true, std::memory_order_release);
     os_event_set(log_sys->rapid_events[0]);  // <--- invoke the coordinator immdiately！！
