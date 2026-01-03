@@ -62,11 +62,11 @@ extern int shannon_rpd_self_load_base_relation_fill_percentage;  // default perc
 extern ulonglong shannon_rpd_purge_batch_size;
 
 namespace Populate {
-extern std::shared_mutex g_propagating_table_mutex;
-extern std::multiset<std::string> g_propagating_tables;
+extern std::shared_mutex shannon_pop_table_mutex;
+extern std::multiset<std::string> shannon_pop_tables;
 
-// how many data was in sys_pop_buff?
-extern std::atomic<uint64> sys_pop_data_sz;
+// how many data was in shannon_pop_buff?
+extern std::atomic<uint64> shannon_pop_data_sz;
 }  // namespace Populate
 
 namespace Autopilot {
@@ -560,9 +560,8 @@ bool SelfLoadManager::is_system_quiet() {
     // TODO: to detemine whether is being loaded into Rpd.
 
     // to check Change Propagation's delay.
-    std::shared_lock lk(ShannonBase::Populate::g_propagating_table_mutex);
-    if (ShannonBase::Populate::g_propagating_tables.find(full_name) !=
-        ShannonBase::Populate::g_propagating_tables.end())
+    std::shared_lock lk(ShannonBase::Populate::shannon_pop_table_mutex);
+    if (ShannonBase::Populate::shannon_pop_tables.find(full_name) != ShannonBase::Populate::shannon_pop_tables.end())
       return false;  // is still in change propagating.
   }
   return true;
@@ -753,6 +752,7 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   context.m_schema_name = schema;
   context.m_table_name = table;
   context.m_thd = current_thd;
+  context.m_sch_tb_name = schema + ":" + table;
 
   TABLE *source_table = Utils::Util::open_table_by_name(current_thd, schema, table, TL_READ_WITH_SHARED_LOCKS);
   if (!source_table) return HA_ERR_GENERIC;
@@ -762,10 +762,9 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   ha_rows num_rows{0};
   source_table->file->ha_records(&num_rows);
 
-  auto sch_tb = schema + ":" + table;
-  m_rpd_mirror_tables[sch_tb]->meta_info.load_start_stamp = std::chrono::system_clock::now();
-  m_rpd_mirror_tables[sch_tb]->meta_info.load_status = load_status_t::LOADING_RPDGSTABSTATE;
-  m_rpd_mirror_tables[sch_tb]->meta_info.nrows = num_rows;
+  m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_start_stamp = std::chrono::system_clock::now();
+  m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_status = load_status_t::LOADING_RPDGSTABSTATE;
+  m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.nrows = num_rows;
 
   if (context.m_extra_info.m_partition_infos.size() > 0) {
     result = Imcs::Imcs::instance()->load_parttable(&context, source_table);
@@ -777,9 +776,9 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   if (result == SHANNON_SUCCESS) {
     update_table_state(schema, table, table_access_stats_t::LOADED, ShannonBase::load_type_t::SELF);
 
-    m_rpd_mirror_tables[sch_tb]->meta_info.load_type = load_type_t::SELF;
-    m_rpd_mirror_tables[sch_tb]->meta_info.load_end_stamp = std::chrono::system_clock::now();
-    m_rpd_mirror_tables[sch_tb]->meta_info.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_type = load_type_t::SELF;
+    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_end_stamp = std::chrono::system_clock::now();
+    m_rpd_mirror_tables[context.m_sch_tb_name]->meta_info.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
 
   } else {
     // failed，set the state to INSUFFICIENT_MEMORY.

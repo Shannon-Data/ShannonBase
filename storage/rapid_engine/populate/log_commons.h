@@ -116,18 +116,18 @@
 
 namespace ShannonBase {
 namespace Populate {
-inline const char *sync_mode_names[] = {"DIRECT_NOTIFICATION", "REDO_LOG_PARSE", "HYBRID", nullptr};
-enum class SyncMode : uint {
+inline const char *propagation_mode_names[] = {"DIRECT_NOTIFICATION", "REDO_LOG_PARSE", "HYBRID", nullptr};
+enum class PropagateMode : uint {
   DIRECT_NOTIFICATION = 0,  // notification-based
   REDO_LOG_PARSE,           // redo-log based
   HYBRID                    // hybrid mode.
 };
 
 // to identify synchonization mode.
-extern std::atomic<SyncMode> g_sync_mode;
+extern std::atomic<PropagateMode> shannon_propagation_mode;
 
 // running flag of pop thread.
-extern std::atomic<bool> sys_pop_started;
+extern std::atomic<bool> shannon_propagation_thread_started;
 
 enum class Source : uint8 {
   UN_KNOWN = 0,

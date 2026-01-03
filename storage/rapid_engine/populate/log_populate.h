@@ -91,18 +91,18 @@ constexpr uint16_t BATCH_PROCESS_NUM = 256;
  * opers.
  * for populate the changes to rapid. we copy all DML opers mlog record into change_record_buff_t
  * when transaction commits. `mtr_t::Command::execute`. After that cp all change_record_buff_t to
- * sys_pop_buff.
+ * shannon_pop_buff.
  */
 // sys pop buffer, the changed records copied into this buffer. then propagation thread
 // do the real work.
-extern std::unordered_map<table_id_t, std::unique_ptr<table_pop_buffer_t>> sys_pop_buff;
-extern std::shared_mutex sys_pop_buff_mutex;
+extern std::unordered_map<table_id_t, std::unique_ptr<table_pop_buffer_t>> shannon_pop_buff;
+extern std::shared_mutex shannon_pop_buff_mutex;
 
-// how many data was in sys_pop_buff?
-extern std::atomic<uint64> sys_pop_data_sz;
+// how many data was in shannon_pop_buff?
+extern std::atomic<uint64> shannon_pop_data_sz;
 
-extern std::shared_mutex g_propagating_table_mutex;
-extern std::multiset<std::string> g_propagating_tables;
+extern std::shared_mutex shannon_pop_table_mutex;
+extern std::multiset<std::string> shannon_pop_tables;
 
 class PopulatorImpl : public Populator::Impl {
  public:
@@ -136,19 +136,19 @@ class PopulatorImpl : public Populator::Impl {
    *
    * This function serves as the main data ingestion entry point for the Rapid
    * log population subsystem. Depending on the input target, it either:
-   *   - Appends the change record into the in-memory buffer (`sys_pop_buff`),
+   *   - Appends the change record into the in-memory buffer (`shannon_pop_buff`),
    *     to be consumed later by the background populator thread (`parse_log_func_main()`), or
    *   - Sends the change record to a remote sink (e.g., distributed node, log replicator)
    *     — currently marked as TODO.
    *
    * @param[in] file
    *   Target output stream. If `nullptr`, the record will be pushed into
-   *   `sys_pop_buff`. Otherwise, it represents a writable file handle or
+   *   `shannon_pop_buff`. Otherwise, it represents a writable file handle or
    *   network stream (future extension).
    *
    * @param[in] start_lsn
    *   The starting LSN (Log Sequence Number) corresponding to this change
-   *   record. It serves as the unique key for indexing `sys_pop_buff`.
+   *   record. It serves as the unique key for indexing `shannon_pop_buff`.
    *
    * @param[in,out] changed_rec
    *   The change record buffer, which contains serialized redo or copy-info
@@ -161,8 +161,8 @@ class PopulatorImpl : public Populator::Impl {
    *
    * @note
    * - When `file == nullptr`, this function transfers ownership of `changed_rec`
-   *   into the global `sys_pop_buff` and increases the global memory usage counter
-   *   `sys_pop_data_sz` atomically.
+   *   into the global `shannon_pop_buff` and increases the global memory usage counter
+   *   `shannon_pop_data_sz` atomically.
    * - The background thread (`rapid_log_coordinator`) periodically monitors
    *   the buffer size and launches worker threads to process and propagate
    *   these buffered changes.

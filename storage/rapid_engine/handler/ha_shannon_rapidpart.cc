@@ -236,8 +236,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
     }
   }
 
-  auto sch_tb = context.m_schema_name + ":" + context.m_table_name;
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[sch_tb]->meta_info;
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context.m_sch_tb_name]->meta_info;
   meta_ref.logical_part_loaded_at_scn = std::move(part_tb_infos);
   meta_ref.snapshot_scn = context.m_extra_info.m_scn;
   ha_rows num_rows{0};

@@ -986,10 +986,10 @@ void mtr_t::Command::execute() {
     bool need_propagate = (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
                           ShannonBase::Populate::Populator::active() &&
                           !recv_recovery_is_on() &&
-                          (ShannonBase::Populate::g_sync_mode.load() ==
-                            ShannonBase::Populate::SyncMode::REDO_LOG_PARSE ||
-                           ShannonBase::Populate::g_sync_mode.load() ==
-                            ShannonBase::Populate::SyncMode::HYBRID) &&
+                          (ShannonBase::Populate::shannon_propagation_mode.load() ==
+                            ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE ||
+                           ShannonBase::Populate::shannon_propagation_mode.load() ==
+                            ShannonBase::Populate::PropagateMode::HYBRID) &&
                           mtr_touches_rapid_tables());
     if (need_propagate) {
       //after each of block copied to log.buf without holes, then cpy to pop.
