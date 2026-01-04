@@ -39,7 +39,7 @@
 #include "storage/rapid_engine/imcs/table0view.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 /**
  * Usage:
  *

@@ -40,7 +40,7 @@
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/utils/SIMD.h"
 #include "storage/rapid_engine/utils/utils.h"
 class Field;

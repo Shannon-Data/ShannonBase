@@ -50,14 +50,13 @@
 #include "storage/innobase/include/mach0data.h"
 #include "storage/innobase/include/univ.i"    //UNIV_SQL_NULL
 #include "storage/innobase/include/ut0dbg.h"  //ut_ad
+
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
-#include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/worker.h"
 #include "storage/rapid_engine/include/rapid_column_info.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_table_info.h"
-#include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
 namespace ShannonBase {
@@ -207,7 +206,7 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   if ((ret = rpd_table.get()->create_index_memo(context))) return ret;
 
   // step 2: set the load type.
-  rpd_table.get()->set_load_type(LoadType::USER_LOADED);
+  rpd_table.get()->set_load_type(load_type_t::USER);
 
   // step3 : add to rpd_table cahce.
   m_rpd_tables.emplace(rpd_table->meta().table_id, std::move(rpd_table));

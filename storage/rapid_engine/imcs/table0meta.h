@@ -31,23 +31,18 @@
 #include <string>
 #include <vector>
 
+#include "include/field_types.h"  // enum_field_types
 #include "my_inttypes.h"
 
 #include "storage/rapid_engine/compress/algorithms.h"
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_table_info.h"
 
 class Field;
 namespace ShannonBase {
 namespace Imcs {
 class ColumnStatistics;
-/**
- * @brief Table load type (self-load or user-initiated).
- */
-enum class LoadType {
-  NOT_LOADED = 0,  ///< Table not yet loaded into memory.
-  SELF_LOADED,     ///< Automatically loaded by system background process.
-  USER_LOADED      ///< Explicitly loaded by user request.
-};
 
 struct SHANNON_ALIGNAS TableConfig {
   std::string tenant_name{SHANNON_DATA_AREAR_NAME};
@@ -66,8 +61,8 @@ struct SHANNON_ALIGNAS FieldMetadata {
   bool is_key{false};
   bool is_secondary_field{false};
 
-  Compress::Compression_level compression_level{Compress::Compression_level::DEFAULT};
-  Compress::Encoding_type encoding;
+  Compress::COMPRESS_LEVEL compression_level{Compress::COMPRESS_LEVEL::DEFAULT};
+  Compress::ENCODING_TYPE encoding;
   const CHARSET_INFO *charset{nullptr};
   std::shared_ptr<Compress::Dictionary> dictionary;
 
@@ -117,11 +112,12 @@ struct SHANNON_ALIGNAS TableMetadata {
   std::atomic<uint64> deleted_rows{0};
   std::atomic<uint64> version_count{0};
 
-  std::atomic<uint64> mysql_access_count{0};              // MySQL access counts.
-  std::atomic<uint64> heatwave_access_count{0};           // Rapid access counts.
-  double importance{0.0};                                 // importance score.
-  std::atomic<time_t> last_accessed{std::time(nullptr)};  // the laste access time.
-  LoadType load_type{LoadType::NOT_LOADED};               // load type.
+  std::atomic<uint64> mysql_access_count{0};                 // MySQL access counts.
+  std::atomic<uint64> heatwave_access_count{0};              // Rapid access counts.
+  double importance{0.0};                                    // importance score.
+  std::atomic<time_t> last_accessed{std::time(nullptr)};     // the laste access time.
+  load_type_t load_type{load_type_t::USER};                  // load type.
+  load_status_t status{load_status_t::AVAIL_RPDGSTABSTATE};  // loaded status
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

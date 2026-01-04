@@ -41,10 +41,10 @@
 #include "storage/innobase/include/trx0types.h"
 #include "storage/innobase/rem/rec.h"  // rec_get_status
 
+#include "storage/rapid_engine/include/rapid_config.h"  //LoaedTables
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/include/rapid_table_info.h"  //LoaedTables
-#include "storage/rapid_engine/utils/concurrent.h"          //asio
+#include "storage/rapid_engine/include/rapid_types.h"
+#include "storage/rapid_engine/utils/concurrent.h"  //asio
 #include "storage/rapid_engine/utils/cpu.h"
 
 // clang-format off

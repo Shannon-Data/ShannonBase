@@ -26,22 +26,24 @@
 #ifndef __SHANNONBASE_RPD_CONFIG_H__
 #define __SHANNONBASE_RPD_CONFIG_H__
 #include <cstring>
+#include "storage/rapid_engine/autopilot/loader.h"
+#include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_table_info.h"
 
 namespace ShannonBase {
-
-struct RpdEngineConfig {
+struct SHANNON_ALIGNAS RpdEngineConfig {
   // IMCU Configuration
   size_t rows_per_imcu = SHANNON_ROWS_IN_CHUNK;  // Number of rows per IMCU
 
   // Compression Configuration
-  Compress::Compression_level compression_level = Compress::MEDIUM;
+  Compress::COMPRESS_LEVEL compression_level = Compress::COMPRESS_LEVEL::DEFAULT;
   bool enable_dictionary_encoding = true;
   size_t dictionary_max_size = 65536;  // Maximum dictionary entries
 
   // Memory Configuration
-  size_t memory_pool_size_mb = SHANNON_DEFAULT_MEMRORY_SIZE;  // Memory pool size (MB)
-  size_t max_memory_usage_mb = SHANNON_DEFAULT_MEMRORY_SIZE;  // Maximum memory usage (MB)
+  uint64 memory_pool_size_mb = SHANNON_DEFAULT_MEMRORY_SIZE;        // Memory pool size (MB)
+  uint64 max_memory_usage_mb = 1.5 * SHANNON_DEFAULT_MEMRORY_SIZE;  // Maximum memory usage (MB)
 
   // Concurrency Configuration
   size_t max_concurrent_transactions = 1000;
@@ -70,5 +72,13 @@ struct RpdEngineConfig {
   bool enable_detailed_logging = false;
   bool enable_performance_counters = true;
 };
+
+// shannonbase engine configuration.
+extern std::unique_ptr<RpdEngineConfig> shannon_rpd_engine_cfg;
+
+// all the loaded tables information.
+extern LoadedTables *shannon_loaded_tables;
+
+extern Autopilot::SelfLoadManager *shannon_self_load_mgr_inst;
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RPD_OBJECT_H__

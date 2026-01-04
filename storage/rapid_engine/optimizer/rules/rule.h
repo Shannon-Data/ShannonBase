@@ -27,7 +27,7 @@
 #define __SHANNONBASE_RULES_H__
 #include <memory>
 
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
 class Query_expression;
 class Query_block;

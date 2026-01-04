@@ -43,7 +43,7 @@
  */
 namespace ShannonBase {
 namespace Compress {
-Dictionary::Dictionary(Encoding_type type) : m_encoding_type(type), m_next_id(1) {  // 0 reserved for unknown
+Dictionary::Dictionary(ENCODING_TYPE type) : m_encoding_type(type), m_next_id(1) {  // 0 reserved for unknown
   m_storage.reserve(kInitialCapacity);
 
   // "unknown" takes ID 0
@@ -53,13 +53,13 @@ Dictionary::Dictionary(Encoding_type type) : m_encoding_type(type), m_next_id(1)
   m_storage[0] = std::move(unknown);
 }
 
-uint32 Dictionary::store(const uchar *data, size_t len, Encoding_type type) {
+uint32 Dictionary::store(const uchar *data, size_t len, ENCODING_TYPE type) {
   if (!data || len == 0) return DEFAULT_STRID;
 
   std::string payload(reinterpret_cast<const char *>(data), len);
   char flag = '\x00';
 
-  if (len >= kMinCompressThreshold && type != Encoding_type::NONE) {
+  if (len >= kMinCompressThreshold && type != ENCODING_TYPE::NONE) {
     auto compressed = get_compressor(type)->compress(payload);
     if (!compressed.empty() && compressed.size() + 16 < len) {
       payload = std::move(compressed);

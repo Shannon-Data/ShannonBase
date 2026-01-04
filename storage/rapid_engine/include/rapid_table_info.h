@@ -179,15 +179,5 @@ class LoadedTables {
 
   void table_infos(uint index, ulonglong &tid, std::string &schema, std::string &table);
 };
-
-// all the loaded tables information.
-extern LoadedTables *shannon_loaded_tables;
-
-extern Autopilot::SelfLoadManager *shannon_self_load_mgr_inst;
-
-// the max memory size of rpd engine, initialized in xx_rapid.cc
-extern uint64 shannon_rpd_mem_sz_max;
-
-extern std::atomic<size_t> shannon_rpd_allocated_mem_size;
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RPD_STATS_LOADED_TABLE_INFO_H__

@@ -36,10 +36,6 @@
 
 #include "storage/innobase/include/ut0dbg.h"
 
-#include "storage/rapid_engine/imcs/imcs.h"
-#include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/utils/utils.h"
-
 namespace ShannonBase {
 namespace Imcs {
 void ColumnStatistics::EquiHeightHistogram::build(const std::vector<double> &values) {
