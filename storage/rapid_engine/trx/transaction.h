@@ -32,7 +32,7 @@
 #include "sql/current_thd.h"
 
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/utils/utils.h"
 class THD;
 class trx_t;

@@ -39,7 +39,7 @@
 #include "sql/field.h"                                            //Field
 #include "sql/tztime.h"                                           //timzone
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
-#include "storage/rapid_engine/include/rapid_object.h"            // bit_array_t
+#include "storage/rapid_engine/include/rapid_types.h"             // bit_array_t
 
 class THD;
 class TABLE;

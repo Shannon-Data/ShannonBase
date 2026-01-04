@@ -52,8 +52,8 @@
 
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_table_info.h"
 #include "storage/rapid_engine/populate/log_copyinfo.h"
 #include "storage/rapid_engine/populate/log_redolog.h"
 

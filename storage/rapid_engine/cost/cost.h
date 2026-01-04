@@ -25,7 +25,7 @@
 */
 #ifndef __SHANNONBASE_COST_H__
 #define __SHANNONBASE_COST_H__
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 
 #include "include/my_base.h"
 #include "sql/handler.h"  //Cost_estimator

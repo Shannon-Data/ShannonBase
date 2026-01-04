@@ -59,15 +59,14 @@
 #include "sql/table.h"  //for TABLE
 
 #include "storage/innobase/include/univ.i"  //UNIV_SQL_NULL
+
 #include "storage/rapid_engine/compress/algorithms.h"
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/imcs/row0row.h"
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/trx/transaction.h"   // Transaction_Journal
-#include "storage/rapid_engine/utils/concurrent.h"  //asio
+#include "storage/rapid_engine/include/rapid_types.h"
+#include "storage/rapid_engine/trx/transaction.h"  // Transaction_Journal
 #include "storage/rapid_engine/utils/memory_pool.h"
 
 class Field;
@@ -85,7 +84,7 @@ class Imcu;
 class Imcu : public MemoryObject {
  public:
   // IMCU Header
-  struct SHANNON_ALIGNAS Imcu_header {
+  struct SHANNON_ALIGNAS imcu_header_t {
     // Basic Information
     uint32 imcu_id{0};                    // IMCU identifier
     row_id_t start_row{0};                // Global start row ID
@@ -144,10 +143,10 @@ class Imcu : public MemoryObject {
     };
     std::atomic<Status> status{ACTIVE};
 
-    Imcu_header() = default;
+    imcu_header_t() = default;
 
     // Copy constructor (deep copy)
-    Imcu_header(const Imcu_header &other)
+    imcu_header_t(const imcu_header_t &other)
         : imcu_id(other.imcu_id),
           start_row(other.start_row),
           end_row(other.end_row),
@@ -180,7 +179,7 @@ class Imcu : public MemoryObject {
     }
 
     // Move constructor
-    Imcu_header(Imcu_header &&other) noexcept
+    imcu_header_t(imcu_header_t &&other) noexcept
         : imcu_id(other.imcu_id),
           start_row(other.start_row),
           end_row(other.end_row),
@@ -208,12 +207,12 @@ class Imcu : public MemoryObject {
           delete_ratio(other.delete_ratio),
           status(other.status.load()) {}
 
-    Imcu_header &operator=(Imcu_header other) noexcept {
+    imcu_header_t &operator=(imcu_header_t other) noexcept {
       swap(*this, other);
       return *this;
     }
 
-    Imcu_header &operator=(Imcu_header &&other) noexcept {
+    imcu_header_t &operator=(imcu_header_t &&other) noexcept {
       if (this != &other) {
         imcu_id = other.imcu_id;
         start_row = other.start_row;
@@ -246,7 +245,7 @@ class Imcu : public MemoryObject {
     }
 
     // Swap helper (for copy-and-swap)
-    friend void swap(Imcu_header &a, Imcu_header &b) noexcept {
+    friend void swap(imcu_header_t &a, imcu_header_t &b) noexcept {
       using std::swap;
       swap(a.imcu_id, b.imcu_id);
       swap(a.start_row, b.start_row);
@@ -285,9 +284,9 @@ class Imcu : public MemoryObject {
 
   inline RpdTable *owner() { return m_owner_table; }
 
-  inline Imcu_header::Status get_status() const { return m_header.status.load(std::memory_order_acquire); }
+  inline imcu_header_t::Status get_status() const { return m_header.status.load(std::memory_order_acquire); }
 
-  inline void set_status(Imcu_header::Status status) { m_header.status.store(status, std::memory_order_release); }
+  inline void set_status(imcu_header_t::Status status) { m_header.status.store(status, std::memory_order_release); }
 
   inline double deleted_ratio() const { return m_header.delete_ratio; }
   /**
@@ -423,7 +422,7 @@ class Imcu : public MemoryObject {
   // Status Queries
   inline bool is_full() const {
     return m_header.current_rows.load(std::memory_order_acquire) >= m_header.capacity ||
-           m_header.status.load(std::memory_order_acquire) == Imcu_header::READ_ONLY;
+           m_header.status.load(std::memory_order_acquire) == imcu_header_t::READ_ONLY;
   }
 
   inline bool is_empty() const { return m_header.current_rows.load(std::memory_order_acquire) == 0; }
@@ -443,7 +442,7 @@ class Imcu : public MemoryObject {
     size_t total_size = 0;
 
     // Header size.
-    total_size += sizeof(Imcu_header);
+    total_size += sizeof(imcu_header_t);
 
     // delete bit mask.Storage_Index
     if (m_header.del_mask) {
@@ -526,7 +525,7 @@ class Imcu : public MemoryObject {
 
     if (current >= m_header.capacity) {
       m_header.current_rows.fetch_sub(1, std::memory_order_relaxed);
-      m_header.status.store(Imcu_header::READ_ONLY);
+      m_header.status.store(imcu_header_t::READ_ONLY);
       return INVALID_ROW_ID;
     }
 
@@ -548,7 +547,7 @@ class Imcu : public MemoryObject {
   // Memory Management
   std::shared_ptr<Utils::MemoryPool> m_memory_pool;
 
-  Imcu_header m_header;
+  imcu_header_t m_header;
 
   // key: column_id, value: CU
   std::unordered_map<uint32, std::unique_ptr<CU>> m_column_units;

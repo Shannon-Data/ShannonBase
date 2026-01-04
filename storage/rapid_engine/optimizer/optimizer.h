@@ -32,7 +32,7 @@
 #include <string>
 #include <vector>
 
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
 #include "storage/rapid_engine/optimizer/rules/rule.h"
 

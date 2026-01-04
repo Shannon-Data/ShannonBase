@@ -27,7 +27,7 @@
 #define __SHANNONBASE_STATISTICS_H__
 
 #include "include/my_inttypes.h"
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 
 namespace ShannonBase {
 namespace Optimizer {

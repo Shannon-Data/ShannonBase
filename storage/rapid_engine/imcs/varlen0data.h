@@ -41,7 +41,7 @@
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 /**
  * VarlenDataPool (Variable-length Data Pool)

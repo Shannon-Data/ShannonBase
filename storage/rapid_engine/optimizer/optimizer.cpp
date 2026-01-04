@@ -37,9 +37,9 @@
 
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/include/rapid_column_info.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_table_info.h"
 #include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
 #include "storage/rapid_engine/optimizer/rules/const_fold_rule.h"
 #include "storage/rapid_engine/optimizer/rules/join_reorder.h"

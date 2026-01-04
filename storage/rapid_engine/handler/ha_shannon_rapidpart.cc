@@ -38,13 +38,12 @@ Created jun 6, 2025 */
 #include "storage/innobase/include/dict0dd.h"  //dd_is_partitioned
 
 #include "storage/rapid_engine/autopilot/loader.h"
-#include "storage/rapid_engine/include/rapid_column_info.h"
-#include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_table_info.h"
-#include "storage/rapid_engine/utils/utils.h"
-
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/table0view.h"
+#include "storage/rapid_engine/include/rapid_column_info.h"
+#include "storage/rapid_engine/include/rapid_config.h"
+#include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 extern int shannon_rpd_async_column_threshold;

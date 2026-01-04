@@ -59,15 +59,12 @@
 #include "sql/table.h"  //for TABLE
 
 #include "storage/rapid_engine/compress/algorithms.h"
-#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_object.h"
-
+#include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/utils/concurrent.h"  //asio
-#include "storage/rapid_engine/utils/memory_pool.h"
 
 class Field;
 namespace ShannonBase {

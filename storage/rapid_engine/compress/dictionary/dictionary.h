@@ -48,25 +48,25 @@ class Dictionary {
   static constexpr uint64 INVALID_STRID = static_cast<uint64>(-1);
   static constexpr size_t kMinCompressThreshold = 64;
 
-  explicit Dictionary(Encoding_type type = Encoding_type::NONE);
+  explicit Dictionary(ENCODING_TYPE type = ENCODING_TYPE::NONE);
   ~Dictionary() = default;
 
   Dictionary(const Dictionary &) = delete;
   Dictionary &operator=(const Dictionary &) = delete;
 
-  uint32 store(const uchar *str, size_t len, Encoding_type type = Encoding_type::NONE);
+  uint32 store(const uchar *str, size_t len, ENCODING_TYPE type = ENCODING_TYPE::NONE);
   int32 id(uint64 strid, String &ret_val);
   std::string get(uint64 strid);
   int64 id(const std::string &str);
 
   inline uint32 store(const uchar *str, size_t len, int) { return store(str, len, m_encoding_type); }
-  inline Encoding_type get_algo() const { return m_encoding_type; }
+  inline ENCODING_TYPE get_algo() const { return m_encoding_type; }
   inline uint32 content_size() const { return static_cast<uint32>(m_next_id.load()); }
 
   size_t size() const { return m_next_id.load(); }
 
  private:
-  const Encoding_type m_encoding_type;
+  const ENCODING_TYPE m_encoding_type;
 
   // index is ID. id ↔ flag + payload
   std::vector<std::string> m_storage;

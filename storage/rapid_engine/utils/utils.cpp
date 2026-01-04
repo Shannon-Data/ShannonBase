@@ -43,8 +43,8 @@
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_table_info.h"
 #include "storage/rapid_engine/ml/ml.h"
 #include "storage/rapid_engine/populate/log_populate.h"
 extern char mysql_home[FN_REFLEN];
@@ -391,7 +391,7 @@ bool Util::check_dict_encoding_projection(THD *thd) {
       auto field_ptr = *(table_ref->table->field + j);
       if (field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) continue;
       auto dict_algo = rpd_table->meta().fields[j].dictionary.get()->get_algo();
-      if (dict_algo == ShannonBase::Compress::Encoding_type::NONE) return true;
+      if (dict_algo == ShannonBase::Compress::ENCODING_TYPE::NONE) return true;
     }
   }
 

@@ -41,7 +41,7 @@
 #include "storage/innobase/include/trx0types.h"
 
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 
 class IB_thread;

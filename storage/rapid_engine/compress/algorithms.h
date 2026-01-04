@@ -37,9 +37,9 @@
 namespace ShannonBase {
 namespace Compress {
 
-enum class Encoding_type { NONE, SORTED, VARLEN };
-enum class compress_algos { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
-enum class Compression_level { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
+enum class ENCODING_TYPE { NONE, SORTED, VARLEN };
+enum class COMPRESS_ALGO { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
+enum class COMPRESS_LEVEL { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
 
 class CompressAlgorithm {
  public:
@@ -48,8 +48,8 @@ class CompressAlgorithm {
   virtual std::string decompress(std::string_view data) const = 0;
 };
 
-CompressAlgorithm *get_compressor(Encoding_type type);
-CompressAlgorithm *get_compressor(compress_algos algo);
+CompressAlgorithm *get_compressor(ENCODING_TYPE type);
+CompressAlgorithm *get_compressor(COMPRESS_ALGO algo);
 }  // namespace Compress
 }  // namespace ShannonBase
 

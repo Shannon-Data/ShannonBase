@@ -32,7 +32,7 @@
 
 #include "include/my_inttypes.h"
 #include "sql/sql_lex.h"
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 class key_range;
 namespace ShannonBase {
 namespace Reader {

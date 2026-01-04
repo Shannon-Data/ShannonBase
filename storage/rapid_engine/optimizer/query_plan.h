@@ -33,7 +33,7 @@
 #include <vector>
 
 #include "include/my_base.h"  // ha_rows
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 
 class THD;
 class Query_expression;

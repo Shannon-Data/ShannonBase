@@ -126,7 +126,7 @@ class Rapid_context : public Secondary_engine_execution_context {
 
     Transaction::ID m_scn{0};
 
-    Compress::Encoding_type m_algo{Compress::Encoding_type::SORTED};
+    Compress::ENCODING_TYPE m_algo{Compress::ENCODING_TYPE::SORTED};
 
     // index scan info.
     // the active key no.

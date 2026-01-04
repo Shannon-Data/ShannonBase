@@ -35,7 +35,7 @@
 #include <thread>
 #include <vector>
 
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 namespace ShannonBase {
 namespace Imcs {
 /**
