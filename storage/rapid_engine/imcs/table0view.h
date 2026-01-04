@@ -31,7 +31,7 @@
 #include <utility>
 #include <vector>
 
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/imcs/index/iterator.h"

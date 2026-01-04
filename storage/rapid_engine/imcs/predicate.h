@@ -54,7 +54,7 @@
 #include "include/field_types.h"  // enum_field_types
 #include "my_inttypes.h"
 
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 
 namespace ShannonBase {
 namespace Imcs {

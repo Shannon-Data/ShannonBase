@@ -36,8 +36,7 @@
 #include "sql/field.h"                    //Field
 #include "sql/field_common_properties.h"  // is_numeric_type
 
-#include "storage/rapid_engine/imcs/imcs.h"
-#include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {

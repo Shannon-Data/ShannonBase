@@ -45,9 +45,9 @@
 #include "storage/innobase/include/srv0srv.h"
 
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_table_info.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 #ifdef UNIV_PFS_THREAD
@@ -713,7 +713,7 @@ uint64_t SelfLoadManager::get_current_memory_usage() {
 }
 
 uint64_t SelfLoadManager::get_memory_threshold() {
-  uint64_t max_memory = ShannonBase::shannon_rpd_mem_sz_max;
+  uint64_t max_memory = ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb;
   uint32_t fill_percentage = ShannonBase::shannon_rpd_self_load_base_relation_fill_percentage;
   return (max_memory * fill_percentage) / 100;
 }

@@ -46,7 +46,7 @@
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/table_helper.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
-#include "storage/rapid_engine/include/rapid_table_info.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 /*
   Callbacks implementation for RPD_TABLE_ID.
 */

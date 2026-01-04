@@ -134,25 +134,25 @@ static thread_local auto tl_zstd = std::make_unique<ZstdCompressor>();
 static thread_local auto tl_lz4 = std::make_unique<Lz4Compressor>();
 static thread_local auto tl_zlib = std::make_unique<ZlibCompressor>();
 
-CompressAlgorithm *get_compressor(Encoding_type type) {
+CompressAlgorithm *get_compressor(ENCODING_TYPE type) {
   switch (type) {
-    case Encoding_type::VARLEN:
+    case ENCODING_TYPE::VARLEN:
       return tl_lz4.get();
-    case Encoding_type::SORTED:
-    case Encoding_type::NONE:
+    case ENCODING_TYPE::SORTED:
+    case ENCODING_TYPE::NONE:
     default:
       return tl_zstd.get();
   }
 }
 
-CompressAlgorithm *get_compressor(compress_algos algo) {
+CompressAlgorithm *get_compressor(COMPRESS_ALGO algo) {
   switch (algo) {
-    case compress_algos::LZ4:
+    case COMPRESS_ALGO::LZ4:
       return tl_lz4.get();
-    case compress_algos::ZLIB:
+    case COMPRESS_ALGO::ZLIB:
       return tl_zlib.get();
-    case compress_algos::ZSTD:
-    case compress_algos::DEFAULT:
+    case COMPRESS_ALGO::ZSTD:
+    case COMPRESS_ALGO::DEFAULT:
     default:
       return tl_zstd.get();
   }

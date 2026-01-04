@@ -36,7 +36,7 @@
 #include <parquet/arrow/writer.h>
 
 #include "include/my_inttypes.h"
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/reader/reader.h"
 
 class key_range;

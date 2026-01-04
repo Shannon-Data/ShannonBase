@@ -34,7 +34,7 @@
 
 #include "my_inttypes.h"
 
-#include "storage/rapid_engine/include/rapid_object.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcu.h"
@@ -94,7 +94,7 @@ class RpdTable : public MemoryObject {
   virtual TYPE type() const = 0;
 
   /** @brief set the load type. */
-  void set_load_type(LoadType load_type) { m_metadata.load_type = load_type; }
+  void set_load_type(load_type_t load_type) { m_metadata.load_type = load_type; }
 
   /**
    * Registers a transaction with all IMCUs in this table

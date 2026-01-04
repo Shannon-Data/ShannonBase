@@ -37,13 +37,11 @@
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/utils/memory_pool.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/col0stats.h"
-#include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/imcs/varlen0data.h"
 
@@ -70,8 +68,8 @@ class CU : public MemoryObject {
     const CHARSET_INFO *charset{nullptr};
 
     // Encoding and Compression
-    Compress::Encoding_type encoding{Compress::Encoding_type::NONE};
-    Compress::Compression_level compression_level{Compress::Compression_level::DEFAULT};
+    Compress::ENCODING_TYPE encoding{Compress::ENCODING_TYPE::NONE};
+    Compress::COMPRESS_LEVEL compression_level{Compress::COMPRESS_LEVEL::DEFAULT};
 
     // Local dictionary (for string encoding)
     std::shared_ptr<Compress::Dictionary> local_dict{nullptr};

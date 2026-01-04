@@ -67,11 +67,9 @@
 #include "storage/rapid_engine/imcs/imcs.h"        // IMCS
 #include "storage/rapid_engine/imcs/table0view.h"  //RapidCursor
 #include "storage/rapid_engine/include/rapid_column_info.h"
+#include "storage/rapid_engine/include/rapid_config.h"  //RpdEngineConfig
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_const.h"  //const
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_table_info.h"
-
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/writable_access_path.h"
@@ -96,9 +94,11 @@ namespace ShannonBase {
 
 MEM_ROOT rapid_mem_root(PSI_NOT_INSTRUMENTED, 1024);
 
+std::unique_ptr<RpdEngineConfig> shannon_rpd_engine_cfg{nullptr};
+
 // Global rapid engine instances.
 std::shared_ptr<Utils::MemoryPool> shannon_rpd_memory_pool{nullptr};
-std::atomic<size_t> shannon_rpd_allocated_mem_size = 0;
+
 rpd_columns_container shannon_rpd_columns_info;
 
 ShannonBase::Optimizer::CostEstimator *shannon_rpd_cost_est_instances{nullptr};
@@ -108,9 +108,6 @@ LoadedTables *shannon_loaded_tables = nullptr;
 
 // Self-Load manager instance.
 ShannonBase::Autopilot::SelfLoadManager *shannon_self_load_mgr_inst{nullptr};
-
-// rapid imcs memory area size.
-uint64 shannon_rpd_mem_sz_max = ShannonBase::SHANNON_DEFAULT_MEMRORY_SIZE;
 
 // rapid change propagation buffer size.
 ulonglong shannon_rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
@@ -1423,7 +1420,8 @@ static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share,
  */
 static SHOW_VAR rapid_status_variables[] = {
     /*the max memory used for rapid.*/
-    {"rapid_memory_size_max", (char *)&ShannonBase::shannon_rpd_mem_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
+    {"rapid_memory_size_max", (char *)&ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb, SHOW_LONG,
+     SHOW_SCOPE_GLOBAL},
     /*the max size of pop buffer size.*/
     {"rapid_pop_buffer_size_max", (char *)&ShannonBase::shannon_rpd_pop_buff_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
     /*the max row number of used to enable parallel load for secondary_load*/
@@ -1502,7 +1500,7 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from check function */
 static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   int new_size = *static_cast<const int *>(save);
-  if (static_cast<uint64>(new_size) == ShannonBase::shannon_rpd_mem_sz_max) return;
+  if (static_cast<uint64>(new_size) == ShannonBase::shannon_rpd_engine_cfg->max_memory_usage_mb) return;
 
   if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
@@ -1514,7 +1512,7 @@ static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const vo
   auto pool_size = new_size * ShannonBase::SHANNON_MB;
   ShannonBase::Utils::MemoryPool::Config new_config(pool_size);
   ShannonBase::shannon_rpd_memory_pool->reinitialize(new_config);
-  ShannonBase::shannon_rpd_mem_sz_max = new_size;
+  ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb = new_size;
   *static_cast<int *>(var_ptr) = new_size;
   return;
 }
@@ -1971,7 +1969,7 @@ static void rpd_gc_interval_time_update(THD *thd, SYS_VAR *, void *var_ptr, cons
 
 // clang-format off
 static MYSQL_SYSVAR_ULONG(memory_size_max,
-                          ShannonBase::shannon_rpd_mem_sz_max,
+                          ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb,
                           PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
                           "Number of memory size that used for rapid engine, and it must "
                           "not be oversize half of physical mem size(MB).",
@@ -2185,8 +2183,9 @@ static SHOW_VAR rapid_status_variables_export[] = {
 
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
+  ShannonBase::shannon_rpd_engine_cfg.reset(new ShannonBase::RpdEngineConfig());
 
-  ShannonBase::Utils::MemoryPool::Config config(ShannonBase::shannon_rpd_mem_sz_max);
+  ShannonBase::Utils::MemoryPool::Config config(ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb);
   ShannonBase::shannon_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
   ShannonBase::shannon_rpd_cost_est_instances =
       ShannonBase::Optimizer::CostModelServer::Instance(ShannonBase::Optimizer::CostEstimator::Type::RPD_ENG);

@@ -42,8 +42,7 @@
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/include/rapid_const.h"
-#include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/utils/concurrent.h"
+#include "storage/rapid_engine/include/rapid_types.h"
 
 class ha_innobase;
 class ha_innopart;

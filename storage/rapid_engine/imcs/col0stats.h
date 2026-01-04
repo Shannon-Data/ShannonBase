@@ -33,16 +33,11 @@
 
 #include "my_inttypes.h"  //uintxxx
 
-#include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
-#include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/include/rapid_object.h"
-#include "storage/rapid_engine/utils/memory_pool.h"
-
-#include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
-#include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/imcs/varlen0data.h"
+#include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
+#include "storage/rapid_engine/include/rapid_types.h"
 
 class Field;
 namespace ShannonBase {
@@ -53,7 +48,7 @@ namespace Imcs {
 class Dictionary;
 class RpdTable;
 class Imcu;
-class ColumnStatistics {
+class ColumnStatistics : public MemoryObject {
  public:
   struct SHANNON_ALIGNAS BasicStats {
     // Numerical statistics

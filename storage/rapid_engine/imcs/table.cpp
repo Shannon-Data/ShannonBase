@@ -42,7 +42,6 @@
 
 #include "storage/innobase/handler/ha_innodb.h"
 
-#include "storage/rapid_engine/imcs/cu.h"  //CU
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 #include "storage/rapid_engine/include/rapid_context.h"
@@ -87,15 +86,15 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
       std::transform(comment.begin(), comment.end(), comment.begin(), ::toupper);
     }
 
-    Compress::Encoding_type encoding = Compress::Encoding_type::NONE;
+    Compress::ENCODING_TYPE encoding = Compress::ENCODING_TYPE::NONE;
     const char *const patt_str = "RAPID_COLUMN\\s*=\\s*ENCODING\\s*=\\s*(SORTED|VARLEN)";
     std::regex column_encoding_patt(patt_str, std::regex_constants::nosubs | std::regex_constants::icase);
 
     if (std::regex_search(comment, column_encoding_patt)) {
       if (comment.find("SORTED") != std::string::npos)
-        encoding = Compress::Encoding_type::SORTED;
+        encoding = Compress::ENCODING_TYPE::SORTED;
       else if (comment.find("VARLEN") != std::string::npos)
-        encoding = Compress::Encoding_type::VARLEN;
+        encoding = Compress::ENCODING_TYPE::VARLEN;
     }
 
     m_metadata.fields.emplace_back(FieldMetadata{
@@ -108,7 +107,7 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
         .nullable = field->is_nullable(),
         .is_key = field->is_flag_set(PRI_KEY_FLAG),
         .is_secondary_field = !field->is_flag_set(NOT_SECONDARY_FLAG),
-        .compression_level = Compress::Compression_level::DEFAULT,
+        .compression_level = Compress::COMPRESS_LEVEL::DEFAULT,
         .encoding = encoding,
         .charset = field->charset(),
         .dictionary = is_string_type(field->type()) ? std::make_shared<Compress::Dictionary>(encoding) : nullptr,
@@ -470,7 +469,7 @@ int PartTable::build_partitions(const Rapid_load_context *context) {
     }
 
     // step 2: set load type.
-    sub_part_table.get()->set_load_type(LoadType::USER_LOADED);
+    sub_part_table.get()->set_load_type(load_type_t::USER);
 
     // step 4: Adding the Table meta obj into partitions table meta information.
     m_partitions.emplace(part_key, std::move(sub_part_table));
