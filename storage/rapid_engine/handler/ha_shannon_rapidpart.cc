@@ -88,7 +88,7 @@ int ha_rapidpart::rnd_next_in_part(uint part_id, uchar *buf) {
   if (m_current_part_empty) return error;
 
   if (inited == handler::RND && m_start_of_scan) {
-    if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_async_column_threshold)) {
+    if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold)) {
       error = m_cursor->next(buf);
     } else {
       auto reader_pool = ShannonBase::Imcs::Imcs::pool();

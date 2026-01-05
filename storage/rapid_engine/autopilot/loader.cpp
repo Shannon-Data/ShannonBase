@@ -491,7 +491,7 @@ static void self_load_coordinator_main() {
   while (SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) {
     std::unique_lock<std::mutex> lock(SelfLoadManager::m_worker_mutex);
 
-    auto timeout = std::chrono::seconds(ShannonBase::shannon_rpd_self_load_interval_sec);
+    auto timeout = std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec);
     if (SelfLoadManager::m_worker_cv.wait_for(lock, timeout, []() {
           auto state = SelfLoadManager::m_worker_state.load();
           return state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT;
@@ -503,12 +503,12 @@ static void self_load_coordinator_main() {
         SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_EXIT)
       break;
 
-    if (!ShannonBase::shannon_rpd_self_load_enabled) continue;
+    if (!ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) continue;
 
     /** If the system is not quiet, self-load thread waits for 300 seconds for a maximum of 10 times before checking
       again. If the system is still busy, the current self-load invocation is skipped until the next wake-up interval,
       as determined by rapid_self_load_interval_seconds.*/
-    if (!ShannonBase::shannon_rpd_self_load_skip_quiet_check) {
+    if (!ShannonBase::shannon_rpd_engine_cfg.self_load_skip_quiet_check) {
       int attempts = 0;
       while (!self_load_inst->is_system_quiet() && attempts < SelfLoadManager::MAX_QUIET_WAIT_ATTEMPTS) {
         std::this_thread::sleep_for(std::chrono::seconds(SelfLoadManager::QUIET_WAIT_SECONDS));
@@ -713,8 +713,8 @@ uint64_t SelfLoadManager::get_current_memory_usage() {
 }
 
 uint64_t SelfLoadManager::get_memory_threshold() {
-  uint64_t max_memory = ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb;
-  uint32_t fill_percentage = ShannonBase::shannon_rpd_self_load_base_relation_fill_percentage;
+  uint64_t max_memory = ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb;
+  uint32_t fill_percentage = ShannonBase::shannon_rpd_engine_cfg.self_load_base_relation_fill_percentage;
   return (max_memory * fill_percentage) / 100;
 }
 

@@ -715,11 +715,11 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
   }
 
   // if the rec count is more than threshold and has primary key, it can be use parallel load, otherwise not.
-  auto parall_scan =
-      (dynamic_cast<ha_innobase *>(source->file)->stats.records > ShannonBase::shannon_rpd_para_load_threshold &&
-       !context->m_table->s->is_missing_primary_key())
-          ? true
-          : false;
+  auto parall_scan = (dynamic_cast<ha_innobase *>(source->file)->stats.records >
+                          ShannonBase::shannon_rpd_engine_cfg.para_load_threshold &&
+                      !context->m_table->s->is_missing_primary_key())
+                         ? true
+                         : false;
   return !parall_scan ? load_innodb(context, dynamic_cast<ha_innobase *>(source->file))
                       : load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file));
 }
@@ -742,8 +742,9 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
 
   auto ret{ShannonBase::SHANNON_SUCCESS};
   auto parall_scan =
-      (context->m_extra_info.m_partition_infos.size() > ShannonBase::shannon_rpd_para_parttb_load_threshold) ? true
-                                                                                                             : false;
+      (context->m_extra_info.m_partition_infos.size() > ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold)
+          ? true
+          : false;
   ret = parall_scan ? load_innodbpart_parallel(context, dynamic_cast<ha_innopart *>(source->file))
                     : load_innodbpart(context, dynamic_cast<ha_innopart *>(source->file));
   if (ret) {

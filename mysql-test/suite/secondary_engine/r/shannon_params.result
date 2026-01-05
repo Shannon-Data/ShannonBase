@@ -15,20 +15,19 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	16
 rapid_gc_interval_scn	1000000
-rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32
 rapid_pop_buffer_size_max	268435456
+rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
-rapid_sync_mode	DIRECT_NOTIFICATION
 rapid_use_dynamic_offload	ON
 SET rapid_async_column_threshold=11;
 ERROR HY000: Variable 'rapid_async_column_threshold' is a GLOBAL variable and should be set with SET GLOBAL
@@ -37,20 +36,19 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	11
 rapid_gc_interval_scn	1000000
-rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32
 rapid_pop_buffer_size_max	268435456
+rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
-rapid_sync_mode	DIRECT_NOTIFICATION
 rapid_use_dynamic_offload	ON
 ALTER TABLE  t1 secondary_load;
 SET GLOBAL rapid_async_column_threshold=10;
@@ -61,20 +59,19 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	10
 rapid_gc_interval_scn	1000000
-rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32
 rapid_pop_buffer_size_max	268435456
+rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400
 rapid_self_load_skip_quiet_check	OFF
-rapid_sync_mode	DIRECT_NOTIFICATION
 rapid_use_dynamic_offload	ON
 SET GLOBAL rapid_self_load_enabled=on;
 SET GLOBAL rapid_self_load_base_relation_fill_percentage = 80;
@@ -83,20 +80,19 @@ SHOW VARIABLES LIKE "%rapid%";
 Variable_name	Value
 rapid_async_column_threshold	10
 rapid_gc_interval_scn	1000000
-rapid_gc_interval_time	30
 rapid_max_purger_timeout	5000
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
 rapid_parallel_load_max	10000
 rapid_parallel_part_load_threshold	32
 rapid_pop_buffer_size_max	268435456
+rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
 rapid_self_load_base_relation_fill_percentage	80
 rapid_self_load_enabled	ON
 rapid_self_load_interval_seconds	864
 rapid_self_load_skip_quiet_check	OFF
-rapid_sync_mode	DIRECT_NOTIFICATION
 rapid_use_dynamic_offload	ON
 SET GLOBAL rapid_async_column_threshold =10;
 SHOW VARIABLES LIKE "%rapid_async_column_threshold%";
@@ -106,10 +102,6 @@ SET GLOBAL rapid_gc_interval_scn = 10;
 SHOW VARIABLES LIKE "%rapid_gc_interval_scn%";
 Variable_name	Value
 rapid_gc_interval_scn	10
-SET GLOBAL rapid_gc_interval_time=20;
-SHOW VARIABLES LIKE "%rapid_gc_interval_time%";
-Variable_name	Value
-rapid_gc_interval_time	20
 SET GLOBAL rapid_max_purger_timeout=3000;
 SHOW VARIABLES LIKE "%rapid_max_purger_timeout%";
 Variable_name	Value
@@ -196,33 +188,33 @@ SET rapid_use_dynamic_offload=0;
 SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
 Variable_name	Value
 rapid_use_dynamic_offload	OFF
-SET GLOBAL rapid_sync_mode=0;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+SET GLOBAL rapid_propagation_mode=0;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 Variable_name	Value
-rapid_sync_mode	DIRECT_NOTIFICATION
-SET GLOBAL rapid_sync_mode=DIRECT_NOTIFICATION;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+rapid_propagation_mode	DIRECT_NOTIFICATION
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 Variable_name	Value
-rapid_sync_mode	DIRECT_NOTIFICATION
-SET GLOBAL rapid_sync_mode=1;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+rapid_propagation_mode	DIRECT_NOTIFICATION
+SET GLOBAL rapid_propagation_mode=1;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 Variable_name	Value
-rapid_sync_mode	REDO_LOG_PARSE
-SET GLOBAL rapid_sync_mode=REDO_LOG_PARSE;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+rapid_propagation_mode	REDO_LOG_PARSE
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 Variable_name	Value
-rapid_sync_mode	REDO_LOG_PARSE
-SET GLOBAL rapid_sync_mode=2;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+rapid_propagation_mode	REDO_LOG_PARSE
+SET GLOBAL rapid_propagation_mode=2;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 Variable_name	Value
-rapid_sync_mode	HYBRID
-SET GLOBAL rapid_sync_mode=HYBRID;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+rapid_propagation_mode	HYBRID
+SET GLOBAL rapid_propagation_mode=HYBRID;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 Variable_name	Value
-rapid_sync_mode	HYBRID
-SET GLOBAL rapid_sync_mode=3;
-ERROR 42000: Variable 'rapid_sync_mode' can't be set to the value of '3'
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+rapid_propagation_mode	HYBRID
+SET GLOBAL rapid_propagation_mode=3;
+ERROR 42000: Variable 'rapid_propagation_mode' can't be set to the value of '3'
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 Variable_name	Value
-rapid_sync_mode	HYBRID
+rapid_propagation_mode	HYBRID
 DROP DATABASE sh_params;

@@ -1073,8 +1073,6 @@ The following options may be given as the first argument:
  Initiates a garbage collection cycle when the difference
  between the current SystemChange Number (SCN) and the
  last recorded GC SCN exceeds this threshold value.
- --rapid-gc-interval-time[=#] 
- How frequently does garbage collection occur in second
  --rapid-max-purger-timeout[=#] 
  Default value of spin delay (in spin rounds)1000 spin
  round takes 4us, 25000 takes 1ms for busy waiting.
@@ -1096,6 +1094,9 @@ The following options may be given as the first argument:
  --rapid-pop-buffer-size-max[=#] 
  Number of memory used for populating the changes in
  innodb to rapid engine..
+ --rapid-propagation-mode[=name] 
+ The synchronization mode of changes propagation:
+ DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID
  --rapid-purge-batch-size[=#] 
  Process chunks in batches, number of chunks to process in
  a single purge batch
@@ -1115,11 +1116,9 @@ The following options may be given as the first argument:
  --rapid-self-load-interval-seconds[=#] 
  Wake-up interval of the Self-Load thread Default value:
  86400s (24h). Note that if the interval is changed while
- rapid_self_load_enabled=TRUE, the new value might not be
- picked up until the next wakeup of the Self-Load Worker.
- Therefore, the recommended order of setting the variables
- is: 1. rapid_self_load_interval_seconds=<new value>; 2.
- rapid_self_load_enabled=TRUE;
+ it's TRUE, the new value might not be picked up until the
+ next wakeup of the Self-Load Worker. Therefore, the
+ recommended order of setting the variables is: 1.
  --rapid-self-load-skip-quiet-check 
  self-loaded, tables will not interfere with user-issued
  secondary loads under any resource constraint. For
@@ -1127,9 +1126,6 @@ The following options may be given as the first argument:
  an incoming user load, some self-loaded tables will have
  to be unloaded to make room for the newly user-loaded
  table. 
- --rapid-sync-mode[=name] 
- The synchronization mode of changes propagation:
- DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID
  --read-buffer-size=# 
  Each thread that does a sequential scan allocates a
  buffer of this size for each table it scans. If you do
@@ -1960,20 +1956,19 @@ range-alloc-block-size 4096
 range-optimizer-max-mem-size 8388608
 rapid-async-column-threshold 16
 rapid-gc-interval-scn 1000000
-rapid-gc-interval-time 30
 rapid-max-purger-timeout 5000
 rapid-memory-size-max 2147483648
 rapid-min-versions-for-purge 10
 rapid-parallel-load-max 10000
 rapid-parallel-part-load-threshold 32
 rapid-pop-buffer-size-max 268435456
+rapid-propagation-mode DIRECT_NOTIFICATION
 rapid-purge-batch-size 64
 rapid-purge-efficiency-threshold 0.1
 rapid-self-load-base-relation-fill-percentage 70
 rapid-self-load-enabled FALSE
 rapid-self-load-interval-seconds 86400
 rapid-self-load-skip-quiet-check FALSE
-rapid-sync-mode DIRECT_NOTIFICATION
 read-buffer-size 131072
 read-only FALSE
 read-rnd-buffer-size 262144
