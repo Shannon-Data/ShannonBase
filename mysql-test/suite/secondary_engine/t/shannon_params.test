@@ -47,9 +47,6 @@ SHOW VARIABLES LIKE "%rapid_async_column_threshold%";
 SET GLOBAL rapid_gc_interval_scn = 10;
 SHOW VARIABLES LIKE "%rapid_gc_interval_scn%";
 
-SET GLOBAL rapid_gc_interval_time=20;
-SHOW VARIABLES LIKE "%rapid_gc_interval_time%";
-
 SET GLOBAL rapid_max_purger_timeout=3000;
 SHOW VARIABLES LIKE "%rapid_max_purger_timeout%";
 
@@ -111,24 +108,24 @@ SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
 SET rapid_use_dynamic_offload=0;
 SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
 
-SET GLOBAL rapid_sync_mode=0;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
-SET GLOBAL rapid_sync_mode=DIRECT_NOTIFICATION;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+SET GLOBAL rapid_propagation_mode=0;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
+SET GLOBAL rapid_propagation_mode=DIRECT_NOTIFICATION;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 
-SET GLOBAL rapid_sync_mode=1;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
-SET GLOBAL rapid_sync_mode=REDO_LOG_PARSE;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+SET GLOBAL rapid_propagation_mode=1;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
+SET GLOBAL rapid_propagation_mode=REDO_LOG_PARSE;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 
-SET GLOBAL rapid_sync_mode=2;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
-SET GLOBAL rapid_sync_mode=HYBRID;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+SET GLOBAL rapid_propagation_mode=2;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
+SET GLOBAL rapid_propagation_mode=HYBRID;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 
 --error 1231
-SET GLOBAL rapid_sync_mode=3;
-SHOW VARIABLES LIKE "%rapid_sync_mode%";
+SET GLOBAL rapid_propagation_mode=3;
+SHOW VARIABLES LIKE "%rapid_propagation_mode%";
 
 --enable_warnings
 DROP DATABASE sh_params;

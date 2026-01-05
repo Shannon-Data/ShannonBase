@@ -97,7 +97,7 @@ handlerton *shannon_rapid_hton_ptr{nullptr};
 MEM_ROOT rapid_mem_root(PSI_NOT_INSTRUMENTED, 1024);
 
 // shannon rapid engine configuration.
-std::unique_ptr<RpdEngineConfig> shannon_rpd_engine_cfg(new ShannonBase::RpdEngineConfig());
+RpdEngineConfig shannon_rpd_engine_cfg = RpdEngineConfig::Configuration();
 
 // Global rapid engine instances.
 std::shared_ptr<Utils::MemoryPool> shannon_rpd_memory_pool{nullptr};
@@ -112,34 +112,6 @@ LoadedTables *shannon_loaded_tables = nullptr;
 
 // Self-Load manager instance.
 ShannonBase::Autopilot::SelfLoadManager *shannon_self_load_mgr_inst{nullptr};
-
-// rapid change propagation buffer size.
-ulonglong shannon_rpd_pop_buff_sz_max = ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE;
-
-// rapid parallel loading threshold.
-ulonglong shannon_rpd_para_load_threshold = ShannonBase::SHANNON_PARALLEL_LOAD_THRESHOLD;
-ulonglong shannon_rpd_para_parttb_load_threshold = ShannonBase::SHANNON_PARALLEL_PARTTB_THRESHOLD;
-
-// rapid async parsing column number threshold, to accelerate large column number table scan.
-int shannon_rpd_async_column_threshold = ShannonBase::DEFAULT_N_FIELD_PARALLEL;
-
-// rapid change propagation mode, including DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID.
-long unsigned int shannon_rpd_propagate_mode =
-    static_cast<int>(ShannonBase::Populate::PropagateMode::DIRECT_NOTIFICATION);
-
-// self-load related parameters.
-bool shannon_rpd_self_load_enabled = false;
-ulonglong shannon_rpd_self_load_interval_sec = SHANNON_DEFAULT_SELF_LOAD_INTERVAL;  // 24hurs
-bool shannon_rpd_self_load_skip_quiet_check = false;
-int shannon_rpd_self_load_base_relation_fill_percentage = SHANNON_DEFAULT_SELF_LOAD_FILL_PERCENTAGE;  // percentage.
-
-// rapid purger related parameters.
-ulonglong shannon_rpd_max_purger_timeout = SHANNON_DEFAULT_MAX_PURGER_TIMEOUT;
-ulonglong shannon_rpd_purge_batch_size = SHANNON_DEFAULT_MAX_PURGER_TIMEOUT;
-ulonglong shannon_rpd_min_versions_for_purge = SHANNON_DEFAULT_MAX_PURGER_TIMEOUT;
-double shannon_rpd_purge_efficiency_threshold = SHANNON_DEFAULT_PURGE_EFFICIENCY_THRESHOLD;
-ulonglong shannon_rpd_gc_interval_scn = ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN;
-int32 shannon_rpd_gc_interval_time = ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME;
 
 bool Rapid_execution_context::BestPlanSoFar(const JOIN &join, double cost) {
   if (&join != m_current_join) {
@@ -561,7 +533,7 @@ int ha_rapid::rnd_next(uchar *buf) {
   int error{HA_ERR_END_OF_FILE};
 
   if (inited == handler::RND) {
-    if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_async_column_threshold)) {
+    if (table_share->fields <= static_cast<uint>(ShannonBase::shannon_rpd_engine_cfg.async_column_threshold)) {
       error = m_cursor->next(buf);
     } else {
       auto reader_pool = ShannonBase::Imcs::Imcs::pool();
@@ -1154,7 +1126,7 @@ static bool RapidPrepareEstimateQueryCosts(THD *thd, LEX *lex) {
 
   // 2: to check whether the shannon_pop_data_sz has too many data to populate.
   uint64 too_much_pop_threshold = static_cast<uint64_t>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
-                                                        ShannonBase::shannon_rpd_pop_buff_sz_max);
+                                                        ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
   if (ShannonBase::Populate::shannon_pop_data_sz > too_much_pop_threshold) {
     SetSecondaryEngineOffloadFailedReason(thd, "too much changes need to populate");
     return true;
@@ -1287,7 +1259,7 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
   // auto statement_context = thd->secondary_engine_statement_context();
   // to much changes to populate, then goes to primary engine.
   ulonglong too_much_pop_threshold = static_cast<ulonglong>(ShannonBase::SHANNON_TO_MUCH_POP_THRESHOLD_RATIO *
-                                                            ShannonBase::shannon_rpd_pop_buff_sz_max);
+                                                            ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max);
   if (unlikely(ShannonBase::Populate::shannon_pop_buff.size() > ShannonBase::SHANNON_POP_BUFF_THRESHOLD_COUNT ||
                ShannonBase::Populate::shannon_pop_data_sz > too_much_pop_threshold)) {
     SetSecondaryEngineOffloadFailedReason(thd, "RapidOptimize, the change propation lag is too much");
@@ -1424,43 +1396,46 @@ static handler *rapid_create_handler(handlerton *hton, TABLE_SHARE *table_share,
  */
 static SHOW_VAR rapid_status_variables[] = {
     /*the max memory used for rapid.*/
-    {"rapid_memory_size_max", (char *)&ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb, SHOW_LONG,
+    {"rapid_memory_size_max", (char *)&ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
     /*the max size of pop buffer size.*/
-    {"rapid_pop_buffer_size_max", (char *)&ShannonBase::shannon_rpd_pop_buff_sz_max, SHOW_LONG, SHOW_SCOPE_GLOBAL},
-    /*the max row number of used to enable parallel load for secondary_load*/
-    {"rapid_parallel_load_max", (char *)&ShannonBase::shannon_rpd_para_load_threshold, SHOW_LONG, SHOW_SCOPE_GLOBAL},
-    /*the max part table number of used to enable parallel load for secondary_load*/
-    {"rapid_parallel_part_load_threshold", (char *)&ShannonBase::shannon_rpd_para_parttb_load_threshold, SHOW_LONG,
+    {"rapid_pop_buffer_size_max", (char *)&ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
+    /*the max row number of used to enable parallel load for secondary_load*/
+    {"rapid_parallel_load_max", (char *)&ShannonBase::shannon_rpd_engine_cfg.para_load_threshold, SHOW_LONG,
+     SHOW_SCOPE_GLOBAL},
+    /*the max part table number of used to enable parallel load for secondary_load*/
+    {"rapid_parallel_part_load_threshold", (char *)&ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold,
+     SHOW_LONG, SHOW_SCOPE_GLOBAL},
     /*the mode to aysnc the changes to rapid*/
-    {"rapid_async_mode", (char *)&ShannonBase::Populate::shannon_propagation_mode, SHOW_CHAR, SHOW_SCOPE_GLOBAL},
+    {"rapid_propagation_mode", (char *)&ShannonBase::shannon_rpd_engine_cfg.propagate_mode, SHOW_CHAR,
+     SHOW_SCOPE_GLOBAL},
     /*the max column number of used to aysnc reading or parsing log*/
-    {"rapid_async_column_threshold", (char *)&ShannonBase::shannon_rpd_async_column_threshold, SHOW_INT,
+    {"rapid_async_column_threshold", (char *)&ShannonBase::shannon_rpd_engine_cfg.async_column_threshold, SHOW_INT,
      SHOW_SCOPE_GLOBAL},
     /*to enable self load or disable*/
-    {"rapid_self_load_enabled", (char *)&ShannonBase::shannon_rpd_self_load_enabled, SHOW_BOOL, SHOW_SCOPE_GLOBAL},
+    {"rapid_self_load_enabled", (char *)&ShannonBase::shannon_rpd_engine_cfg.self_load_enabled, SHOW_BOOL,
+     SHOW_SCOPE_GLOBAL},
     /*the interval value of self load in second*/
-    {"rapid_self_load_interval_seconds", (char *)&ShannonBase::shannon_rpd_self_load_interval_sec, SHOW_LONG,
+    {"rapid_self_load_interval_seconds", (char *)&ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
     /*to skip the quiet check or not*/
-    {"rapid_self_load_skip_quiet_check", (char *)&ShannonBase::shannon_rpd_self_load_skip_quiet_check, SHOW_BOOL,
-     SHOW_SCOPE_GLOBAL},
+    {"rapid_self_load_skip_quiet_check", (char *)&ShannonBase::shannon_rpd_engine_cfg.self_load_skip_quiet_check,
+     SHOW_BOOL, SHOW_SCOPE_GLOBAL},
     /*the value of fill percentage of main memory*/
     {"rapid_self_load_base_relation_fill_percentage",
-     (char *)&ShannonBase::shannon_rpd_self_load_base_relation_fill_percentage, SHOW_INT, SHOW_SCOPE_GLOBAL},
-    /*to enable self load or disable*/
-    {"rapid_max_purger_timeout", (char *)&ShannonBase::shannon_rpd_max_purger_timeout, SHOW_LONG, SHOW_SCOPE_GLOBAL},
-    {"rapid_purge_batch_size", (char *)&ShannonBase::shannon_rpd_purge_batch_size, SHOW_LONG, SHOW_SCOPE_GLOBAL},
-    {"rapid_min_versions_for_purge", (char *)&ShannonBase::shannon_rpd_min_versions_for_purge, SHOW_LONG,
+     (char *)&ShannonBase::shannon_rpd_engine_cfg.self_load_base_relation_fill_percentage, SHOW_INT, SHOW_SCOPE_GLOBAL},
+    {"rapid_max_purger_timeout", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
-    {"rapid_purge_efficiency_threshold", (char *)&ShannonBase::shannon_rpd_purge_efficiency_threshold, SHOW_DOUBLE,
+    {"rapid_purge_batch_size", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_batch_size, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
+    {"rapid_min_versions_for_purge", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_min_version, SHOW_LONG,
+     SHOW_SCOPE_GLOBAL},
+    {"rapid_purge_efficiency_threshold", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold,
+     SHOW_DOUBLE, SHOW_SCOPE_GLOBAL},
     /*the interval scn of GC*/
-    {"gc_interval_scn", (char *)&ShannonBase::shannon_rpd_purge_efficiency_threshold, SHOW_LONG, SHOW_SCOPE_GLOBAL},
-    /*the interval time of GC*/
-    {"gc_interval_time", (char *)&ShannonBase::shannon_rpd_gc_interval_time, SHOW_INT, SHOW_SCOPE_GLOBAL},
-    {NullS, NullS, SHOW_INT, SHOW_SCOPE_GLOBAL}};
+    {"rapid_gc_interval_scn", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn, SHOW_LONG,
+     SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
  * VARIABLES. */
@@ -1504,7 +1479,7 @@ This function is registered as a callback with MySQL.
 @param[in]  save      immediate result from check function */
 static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
   int new_size = *static_cast<const int *>(save);
-  if (static_cast<uint64>(new_size) == ShannonBase::shannon_rpd_engine_cfg->max_memory_usage_mb) return;
+  if (static_cast<uint64>(new_size) == ShannonBase::shannon_rpd_engine_cfg.max_memory_usage_mb) return;
 
   if (ShannonBase::Populate::Populator::active() || ShannonBase::shannon_loaded_tables->size()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
@@ -1516,7 +1491,7 @@ static void rpd_mem_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, const vo
   auto pool_size = new_size * ShannonBase::SHANNON_MB;
   ShannonBase::Utils::MemoryPool::Config new_config(pool_size);
   ShannonBase::shannon_rpd_memory_pool->reinitialize(new_config);
-  ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb = new_size;
+  ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb = new_size;
   *static_cast<int *>(var_ptr) = new_size;
   return;
 }
@@ -1553,7 +1528,7 @@ static void rpd_pop_buff_size_max_update(THD *thd, SYS_VAR *, void *var_ptr, con
   if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
 
   *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  ShannonBase::shannon_rpd_pop_buff_sz_max = *static_cast<const int *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max = *static_cast<const int *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -1588,7 +1563,7 @@ static void rpd_para_load_threshold_update(THD *thd, SYS_VAR *, void *var_ptr, c
   if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
 
   *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  ShannonBase::shannon_rpd_para_load_threshold = *static_cast<const int *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.para_load_threshold = *static_cast<const int *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -1623,7 +1598,7 @@ static void rpd_para_parttb_load_threshold_update(THD *thd, SYS_VAR *, void *var
   if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
 
   *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  ShannonBase::shannon_rpd_para_parttb_load_threshold = *static_cast<const int *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold = *static_cast<const int *>(save);
 }
 
 /** Update the system variable rpd_async_threshold.
@@ -1637,7 +1612,7 @@ static void rpd_async_threshold_update(MYSQL_THD thd [[maybe_unused]], SYS_VAR *
   if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
 
   *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  ShannonBase::shannon_rpd_async_column_threshold = *static_cast<const int *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.async_column_threshold = *static_cast<const int *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -1745,11 +1720,11 @@ static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void
 
   bool new_value = *static_cast<const bool *>(save);
   *static_cast<bool *>(var_ptr) = new_value;
-  ShannonBase::shannon_rpd_self_load_enabled = *static_cast<const bool *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.self_load_enabled = *static_cast<const bool *>(save);
   if (!ShannonBase::shannon_self_load_mgr_inst)
     ShannonBase::shannon_self_load_mgr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
 
-  if (ShannonBase::shannon_rpd_self_load_enabled) {  // to start AutoLoader thread.
+  if (ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) {  // to start AutoLoader thread.
     if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
       ShannonBase::shannon_self_load_mgr_inst->start();
   } else {
@@ -1779,21 +1754,21 @@ static int check_self_load_interval(THD *thd, SYS_VAR *var, void *save, st_mysql
 static void update_self_load_interval(THD *, SYS_VAR *, void *var_ptr, const void *save) {
   ulonglong new_value = *static_cast<const ulonglong *>(save);
   *static_cast<ulonglong *>(var_ptr) = new_value;
-  ShannonBase::shannon_rpd_self_load_interval_sec = new_value;
+  ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec = new_value;
 }
 
 static void update_skip_quiet_check(THD *, SYS_VAR *, void *var_ptr, const void *save) {
   bool new_value = *static_cast<const bool *>(save);
   *static_cast<bool *>(var_ptr) = new_value;
 
-  ShannonBase::shannon_rpd_self_load_skip_quiet_check = new_value;
+  ShannonBase::shannon_rpd_engine_cfg.self_load_skip_quiet_check = new_value;
 }
 
 static void update_memory_fill_percentage(THD *, SYS_VAR *, void *var_ptr, const void *save) {
   int new_value = *static_cast<const int *>(save);
   *static_cast<int *>(var_ptr) = new_value;
 
-  ShannonBase::shannon_rpd_self_load_base_relation_fill_percentage = new_value;
+  ShannonBase::shannon_rpd_engine_cfg.self_load_base_relation_fill_percentage = new_value;
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -1824,7 +1799,7 @@ static void rpd_max_purger_timeout_update(THD *thd, SYS_VAR *, void *var_ptr, co
   if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
 
   *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
-  ShannonBase::shannon_rpd_max_purger_timeout = *static_cast<const ulong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds = *static_cast<const ulong *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -1856,7 +1831,7 @@ static void rpd_purge_batch_size_update(THD *thd, SYS_VAR *, void *var_ptr, cons
   if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
 
   *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
-  ShannonBase::shannon_rpd_purge_batch_size = *static_cast<const ulong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.gc_batch_size = *static_cast<const ulong *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -1888,7 +1863,7 @@ static void rpd_min_versions_for_purge_update(THD *thd, SYS_VAR *, void *var_ptr
   if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
 
   *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
-  ShannonBase::shannon_rpd_min_versions_for_purge = *static_cast<const ulong *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.gc_min_version = *static_cast<const ulong *>(save);
 }
 
 /** Update the system variable shannon_rpd_purge_efficiency_threshold.
@@ -1923,7 +1898,7 @@ static void rpd_purge_efficiency_threshold_update(THD *thd,         /*!< in: thr
     in_val = 1;
   }
 
-  ShannonBase::shannon_rpd_purge_efficiency_threshold = in_val;
+  ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold = in_val;
 }
 
 static int rpd_gc_interval_scn_validate(THD *,                          /*!< in: thread handle */
@@ -1945,35 +1920,12 @@ static void rpd_gc_interval_scn_update(THD *thd, SYS_VAR *, void *var_ptr, const
   if (*static_cast<ulong *>(var_ptr) == *static_cast<const ulong *>(save)) return;
 
   *static_cast<ulong *>(var_ptr) = *static_cast<const ulong *>(save);
-  ShannonBase::shannon_rpd_purge_efficiency_threshold = *static_cast<const ulong *>(save);
-}
-
-static int rpd_gc_interval_time_validate(THD *,                          /*!< in: thread handle */
-                                         SYS_VAR *,                      /*!< in: pointer to system
-                                                                                         variable */
-                                         void *save,                     /*!< out: immediate result
-                                                                         for update function */
-                                         struct st_mysql_value *value) { /*!< in: incoming string */
-  long long input_val;
-  if (value->val_int(value, &input_val)) return 1;
-
-  if (input_val < 0) return 1;
-
-  *static_cast<int *>(save) = static_cast<int>(input_val);
-  return ShannonBase::SHANNON_SUCCESS;
-}
-
-static void rpd_gc_interval_time_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
-  /* check if there is an actual change */
-  if (*static_cast<int *>(var_ptr) == *static_cast<const int *>(save)) return;
-
-  *static_cast<int *>(var_ptr) = *static_cast<const int *>(save);
-  ShannonBase::shannon_rpd_gc_interval_time = *static_cast<const int *>(save);
+  ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold = *static_cast<const ulong *>(save);
 }
 
 // clang-format off
 static MYSQL_SYSVAR_ULONG(memory_size_max,
-                          ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb,
+                          ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb,
                           PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
                           "Number of memory size that used for rapid engine, and it must "
                           "not be oversize half of physical mem size(MB).",
@@ -1985,7 +1937,7 @@ static MYSQL_SYSVAR_ULONG(memory_size_max,
                           0);
 
 static MYSQL_SYSVAR_ULONGLONG(pop_buffer_size_max,
-                              ShannonBase::shannon_rpd_pop_buff_sz_max,
+                              ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max,
                               PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                               "Number of memory used for populating the changes "
                               "in innodb to rapid engine..",
@@ -1997,7 +1949,7 @@ static MYSQL_SYSVAR_ULONGLONG(pop_buffer_size_max,
                               0);
 
 static MYSQL_SYSVAR_ULONGLONG(parallel_load_max,
-                              ShannonBase::shannon_rpd_para_load_threshold,
+                              ShannonBase::shannon_rpd_engine_cfg.para_load_threshold,
                               PLUGIN_VAR_OPCMDARG,
                               "Max number of rows used to use parallel load for secondary_load "
                               "from innodb to rapid engine..",
@@ -2009,7 +1961,7 @@ static MYSQL_SYSVAR_ULONGLONG(parallel_load_max,
                               0);
 
 static MYSQL_SYSVAR_ULONGLONG(parallel_part_load_threshold,
-                              ShannonBase::shannon_rpd_para_parttb_load_threshold,
+                              ShannonBase::shannon_rpd_engine_cfg.para_parttb_load_threshold,
                               PLUGIN_VAR_OPCMDARG,
                               "Threshold number of part table used to use parallel load for secondary_load "
                               "from innodb to rapid engine..",
@@ -2020,8 +1972,8 @@ static MYSQL_SYSVAR_ULONGLONG(parallel_part_load_threshold,
                               1024, //max
                               0);
 
-static MYSQL_SYSVAR_ENUM(sync_mode,
-                        ShannonBase::shannon_rpd_propagate_mode,
+static MYSQL_SYSVAR_ENUM(propagation_mode,
+                        ShannonBase::shannon_rpd_engine_cfg.propagate_mode,
                         PLUGIN_VAR_OPCMDARG,
                         "The synchronization mode of changes propagation: DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID",
                         rpd_sync_mode_validate,
@@ -2031,7 +1983,7 @@ static MYSQL_SYSVAR_ENUM(sync_mode,
 );
 
 static MYSQL_SYSVAR_INT(async_column_threshold,
-                        ShannonBase::shannon_rpd_async_column_threshold,
+                        ShannonBase::shannon_rpd_engine_cfg.async_column_threshold,
                         PLUGIN_VAR_OPCMDARG,
                         "Max number of columns will do async-corountine for reading data or parsing log ",
                         rpd_async_threshold_validate,
@@ -2042,7 +1994,7 @@ static MYSQL_SYSVAR_INT(async_column_threshold,
                         0);
 
 static MYSQL_SYSVAR_BOOL(self_load_enabled, 
-                         ShannonBase::shannon_rpd_self_load_enabled,
+                         ShannonBase::shannon_rpd_engine_cfg.self_load_enabled,
                          PLUGIN_VAR_OPCMDARG,
                         "self-loaded, tables will not interfere with user-issued secondary loads under any "
                         "resource constraint. For example, if there is not enough memory in the "
@@ -2053,14 +2005,13 @@ static MYSQL_SYSVAR_BOOL(self_load_enabled,
                          false);
 
 static MYSQL_SYSVAR_ULONGLONG(self_load_interval_seconds,
-                         ShannonBase::shannon_rpd_self_load_interval_sec,
+                         ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec,
                          PLUGIN_VAR_OPCMDARG,
                          "Wake-up interval of the Self-Load thread "
                          "Default value: 86400s (24h). Note that if the interval is changed while "
-                         "rapid_self_load_enabled=TRUE, the new value might not be picked up "
+                         "it's TRUE, the new value might not be picked up "
                          "until the next wakeup of the Self-Load Worker. Therefore, the recommended order of "
-                         "setting the variables is: 1. rapid_self_load_interval_seconds=<new value>; "
-                         "2. rapid_self_load_enabled=TRUE;",
+                         "setting the variables is: 1.",
                          check_self_load_interval,
                          update_self_load_interval,
                          86400/**24hrs */,
@@ -2069,7 +2020,7 @@ static MYSQL_SYSVAR_ULONGLONG(self_load_interval_seconds,
                          0);
 
 static MYSQL_SYSVAR_BOOL(self_load_skip_quiet_check,
-                         ShannonBase::shannon_rpd_self_load_skip_quiet_check,
+                         ShannonBase::shannon_rpd_engine_cfg.self_load_skip_quiet_check,
                          PLUGIN_VAR_OPCMDARG,
                          "self-loaded, tables will not interfere with user-issued secondary loads under any "
                          "resource constraint. For example, if there is not enough memory in the "
@@ -2080,7 +2031,7 @@ static MYSQL_SYSVAR_BOOL(self_load_skip_quiet_check,
                          false);
 
 static MYSQL_SYSVAR_INT(self_load_base_relation_fill_percentage,
-                         ShannonBase::shannon_rpd_self_load_base_relation_fill_percentage,
+                         ShannonBase::shannon_rpd_engine_cfg.self_load_base_relation_fill_percentage,
                          PLUGIN_VAR_OPCMDARG,
                          "Percentage of base memory quota above which the self-load thread "
                          "rpdserver and rpdmaster. Default value: 70%.",
@@ -2092,7 +2043,7 @@ static MYSQL_SYSVAR_INT(self_load_base_relation_fill_percentage,
                          0);
 
 static MYSQL_SYSVAR_ULONGLONG(max_purger_timeout,
-                              ShannonBase::shannon_rpd_max_purger_timeout,
+                              ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds,
                               PLUGIN_VAR_OPCMDARG,
                               "Default value of spin delay (in spin rounds)"
                               "1000 spin round takes 4us, 25000 takes 1ms for busy waiting. therefore, 200ms means"
@@ -2106,7 +2057,7 @@ static MYSQL_SYSVAR_ULONGLONG(max_purger_timeout,
                               0);
 
 static MYSQL_SYSVAR_ULONGLONG(purge_batch_size,
-                              ShannonBase::shannon_rpd_purge_batch_size,
+                              ShannonBase::shannon_rpd_engine_cfg.gc_batch_size,
                               PLUGIN_VAR_OPCMDARG,
                               "Process chunks in batches, number of chunks to process in a single purge batch",
                               rpd_purge_batch_size_validate,
@@ -2117,7 +2068,7 @@ static MYSQL_SYSVAR_ULONGLONG(purge_batch_size,
                               0);
                     
 static MYSQL_SYSVAR_ULONGLONG(min_versions_for_purge,
-                              ShannonBase::shannon_rpd_min_versions_for_purge,
+                              ShannonBase::shannon_rpd_engine_cfg.gc_min_version,
                               PLUGIN_VAR_OPCMDARG,
                               "Minimum number of versions required for a chunk to be eligible for purging",
                               rpd_min_versions_for_purge_validate,
@@ -2128,7 +2079,7 @@ static MYSQL_SYSVAR_ULONGLONG(min_versions_for_purge,
                               0);
 
 static MYSQL_SYSVAR_DOUBLE(purge_efficiency_threshold,
-                           ShannonBase::shannon_rpd_purge_efficiency_threshold,
+                           ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold,
                            PLUGIN_VAR_RQCMDARG,
                            "Purge efficiency threshold, only purge if >10% can be cleaned",
                            nullptr,
@@ -2139,7 +2090,7 @@ static MYSQL_SYSVAR_DOUBLE(purge_efficiency_threshold,
                            0);
 
 static MYSQL_SYSVAR_ULONGLONG(gc_interval_scn,
-                              ShannonBase::shannon_rpd_gc_interval_scn,
+                              ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn,
                               PLUGIN_VAR_OPCMDARG,
                               "Initiates a garbage collection cycle when the difference between the current System"
                               "Change Number (SCN) and the last recorded GC SCN exceeds this threshold value.",
@@ -2149,24 +2100,13 @@ static MYSQL_SYSVAR_ULONGLONG(gc_interval_scn,
                               ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN,  // min
                               ULLONG_MAX, // max
                               0);
-
-static MYSQL_SYSVAR_INT(gc_interval_time,
-                        ShannonBase::shannon_rpd_gc_interval_time,
-                        PLUGIN_VAR_OPCMDARG,
-                        "How frequently does garbage collection occur in second",
-                        rpd_gc_interval_time_validate,
-                        rpd_gc_interval_time_update,
-                        ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME, // default val
-                        ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME,  // min
-                        INT_MAX, // max
-                        0);
 // clang-format on
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
     MYSQL_SYSVAR(pop_buffer_size_max),
     MYSQL_SYSVAR(parallel_load_max),
     MYSQL_SYSVAR(parallel_part_load_threshold),
-    MYSQL_SYSVAR(sync_mode),
+    MYSQL_SYSVAR(propagation_mode),
     MYSQL_SYSVAR(async_column_threshold),
     MYSQL_SYSVAR(self_load_enabled),
     MYSQL_SYSVAR(self_load_interval_seconds),
@@ -2177,7 +2117,6 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(min_versions_for_purge),
     MYSQL_SYSVAR(purge_efficiency_threshold),
     MYSQL_SYSVAR(gc_interval_scn),
-    MYSQL_SYSVAR(gc_interval_time),
     nullptr,
 };
 
@@ -2188,7 +2127,7 @@ static SHOW_VAR rapid_status_variables_export[] = {
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_loaded_tables = new ShannonBase::LoadedTables();
 
-  ShannonBase::Utils::MemoryPool::Config config(ShannonBase::shannon_rpd_engine_cfg->memory_pool_size_mb);
+  ShannonBase::Utils::MemoryPool::Config config(ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_mb);
   ShannonBase::shannon_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
   ShannonBase::shannon_rpd_cost_est_instances =
       ShannonBase::Optimizer::CostModelServer::Instance(ShannonBase::Optimizer::CostEstimator::Type::RPD_ENG);

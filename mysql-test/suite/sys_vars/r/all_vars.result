@@ -75,8 +75,6 @@ rapid_async_column_threshold
 rapid_async_column_threshold
 rapid_gc_interval_scn
 rapid_gc_interval_scn
-rapid_gc_interval_time
-rapid_gc_interval_time
 rapid_max_purger_timeout
 rapid_max_purger_timeout
 rapid_memory_size_max
@@ -89,6 +87,8 @@ rapid_parallel_part_load_threshold
 rapid_parallel_part_load_threshold
 rapid_pop_buffer_size_max
 rapid_pop_buffer_size_max
+rapid_propagation_mode
+rapid_propagation_mode
 rapid_purge_batch_size
 rapid_purge_batch_size
 rapid_purge_efficiency_threshold
@@ -101,8 +101,6 @@ rapid_self_load_interval_seconds
 rapid_self_load_interval_seconds
 rapid_self_load_skip_quiet_check
 rapid_self_load_skip_quiet_check
-rapid_sync_mode
-rapid_sync_mode
 rapid_use_dynamic_offload
 regexp_stack_limit
 regexp_stack_limit
