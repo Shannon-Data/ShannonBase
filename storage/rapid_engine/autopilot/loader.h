@@ -130,7 +130,7 @@ class SelfLoadManager {
   static int get_innodb_thread_num();
 
   // RPD Mirror management.
-  int add_table(const std::string &schema, const std::string &table,
+  int add_table(const uint table_id, const std::string &schema, const std::string &table,
                 const std::string &secondary_engine = ShannonBase::rapid_hton_name, bool is_partition = false);
 
   int remove_table(const std::string &schema, const std::string &table);
@@ -185,6 +185,7 @@ class SelfLoadManager {
   int perform_self_load(const std::string &schema, const std::string &table);
   int perform_self_unload(const std::string &schema, const std::string &table);
 
+  int load_mysql_table_ids();
   int load_mysql_schema_info();
   int load_mysql_table_stats();
   int load_mysql_tables_info();
@@ -208,6 +209,12 @@ class SelfLoadManager {
   std::optional<std::string> extract_secondary_engine(const std::string &input);
 
   bool worker_active();
+
+  bool is_system_schema(const char *schema_name) {
+    return (strncmp(schema_name, "mysql", 5) == 0 || strncmp(schema_name, "information_schema", 18) == 0 ||
+            strncmp(schema_name, "performance_schema", 18) == 0 || strncmp(schema_name, "sys", 3) == 0 ||
+            strncmp(schema_name, "SYS_", 4) == 0);
+  }
 
  private:
   // load/unload strategies.
@@ -239,6 +246,9 @@ class SelfLoadManager {
 
   // format: <schema_name+"."+table_name, estimated_size>
   std::unordered_map<std::string, uint64_t> m_table_stats;
+
+  // format: <schema_name+"/"+table_name, table_id>
+  std::unordered_map<std::string, uint64_t> m_table_ids;
 
   // (RPD Mirror), global meta information.
   static std::shared_mutex m_tables_mutex;
@@ -273,6 +283,12 @@ class SelfLoadManager {
   static constexpr uint FIELD_DATA_LEN_OFFSET_STATS = 4;
   // index length
   static constexpr uint FIELD_INDEX_LEN_OFFSET_STATS = 6;
+
+  // information_schema.INNODB_TABLES
+  // schema id
+  static constexpr uint FIELD_CAT_ID_OFFSET_INNODB_TABLES = 0;
+  // schema name
+  static constexpr uint FIELD_CAT_NAME_OFFSET_INNODB_TABLES = 1;
 };
 }  // namespace Autopilot
 }  // namespace ShannonBase

@@ -273,7 +273,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
 
     ShannonBase::rpd_column_info_t row_rpd_columns;
     strncpy(row_rpd_columns.schema_name, table.s->db.str, table.s->db.length);
-    row_rpd_columns.table_id = static_cast<uint>(table.s->table_map_id.id());
+    row_rpd_columns.table_id = context.m_table_id;
     row_rpd_columns.column_id = field_ptr->field_index();
     strncpy(row_rpd_columns.column_name, field_ptr->field_name, sizeof(row_rpd_columns.column_name) - 1);
     strncpy(row_rpd_columns.table_name, table.s->table_name.str, sizeof(row_rpd_columns.table_name) - 1);
@@ -294,7 +294,8 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   }
 
   auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
-  if (self_load_inst) self_load_inst->add_table(context.m_schema_name, context.m_table_name, "", true);
+  if (self_load_inst)
+    self_load_inst->add_table(context.m_table_id, context.m_schema_name, context.m_table_name, "", true);
 
   // start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();
