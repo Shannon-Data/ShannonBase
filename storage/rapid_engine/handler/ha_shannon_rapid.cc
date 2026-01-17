@@ -418,7 +418,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   }
 
   if (shannon_self_load_mgr_inst)
-    shannon_self_load_mgr_inst->add_table(context.m_schema_name, context.m_table_name, "", false);
+    shannon_self_load_mgr_inst->add_table(context.m_table_id, context.m_schema_name, context.m_table_name, "", false);
 
   // start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();
@@ -881,13 +881,15 @@ void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const
     dd::cache::Dictionary_client *dc = current_thd->dd_client();
     const dd::Table *table_obj = nullptr;
     if (dc && !dc->acquire(db, table_name, &table_obj) && table_obj)
-      is_partitioned = (table_obj->partition_type() != dd::Table::PT_NONE);
+      is_partitioned = table_obj ? (table_obj->partition_type() != dd::Table::PT_NONE) : false;
 
     std::string eng_str;
     if (create_info->secondary_engine.str) eng_str = create_info->secondary_engine.str;
 
-    if (ShannonBase::shannon_self_load_mgr_inst)
-      ShannonBase::shannon_self_load_mgr_inst->add_table(db, table_name, eng_str, is_partitioned);
+    if (ShannonBase::shannon_self_load_mgr_inst) {
+      auto tid = table_obj ? table_obj->se_private_id() : 0;
+      ShannonBase::shannon_self_load_mgr_inst->add_table(tid, db, table_name, eng_str, is_partitioned);
+    }
   }
 }
 

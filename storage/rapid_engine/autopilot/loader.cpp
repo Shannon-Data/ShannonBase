@@ -36,10 +36,13 @@
 #include <queue>
 #include <regex>
 
+#include "sql/dd/cache/dictionary_client.h"
+#include "sql/dd/types/table.h"
 #include "sql/sql_base.h"
 #include "sql/sql_table.h"
 #include "sql/table.h"
 
+#include "storage/innobase/include/dict0dict.h"
 #include "storage/innobase/include/os0thread-create.h"
 #include "storage/innobase/include/srv0shutdown.h"
 #include "storage/innobase/include/srv0srv.h"
@@ -194,6 +197,33 @@ int SelfLoadManager::load_mysql_table_stats() {
   return SHANNON_SUCCESS;
 }
 
+// to scan information_schema.INNODB_TABLES, to get all table ids.
+int SelfLoadManager::load_mysql_table_ids() {
+  dd::cache::Dictionary_client *dd_client = current_thd->dd_client();
+
+  std::vector<const dd::Schema *> schemas;
+  if (dd_client->fetch_global_components(&schemas)) {
+    return HA_ERR_GENERIC;
+  }
+
+  for (const dd::Schema *schema : schemas) {
+    if (is_system_schema(schema->name().c_str())) continue;
+
+    std::vector<const dd::Table *> tables;
+    if (dd_client->fetch_schema_components(schema, &tables)) {
+      continue;
+    }
+
+    for (const dd::Table *dd_table : tables) {
+      std::string full_name = schema->name().c_str();
+      full_name.append(".").append(dd_table->name().c_str());
+      m_table_ids.emplace(full_name, dd_table->se_private_id());
+    }
+  }
+
+  return SHANNON_SUCCESS;
+}
+
 // to scan mysq.tables, to get all schem information. such as table_name, secondary_engine info, etc.
 int SelfLoadManager::load_mysql_tables_info() {
   auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "tables", TL_READ_WITH_SHARED_LOCKS);
@@ -259,6 +289,11 @@ int SelfLoadManager::load_mysql_tables_info() {
     else
       tb_info.get()->estimated_size = 0;
 
+    if (m_table_ids.find(key_str) != m_table_ids.end())
+      tb_info.get()->tid = static_cast<uint>(m_table_ids[key_str]);
+    else
+      tb_info.get()->tid = 0;
+
     if (ShannonBase::shannon_loaded_tables->get(tb_info.get()->schema_name, tb_info.get()->table_name))
       tb_info.get()->stats.state = table_access_stats_t::State::LOADED;
     else
@@ -286,7 +321,7 @@ int SelfLoadManager::initialize() {
   if (m_intialized.load(std::memory_order_relaxed)) return SHANNON_SUCCESS;
 
   auto ret{SHANNON_SUCCESS};
-  ret = load_mysql_schema_info() || load_mysql_table_stats() || load_mysql_tables_info();
+  ret = load_mysql_table_ids() || load_mysql_schema_info() || load_mysql_table_stats() || load_mysql_tables_info();
   if (ret == SHANNON_SUCCESS) m_intialized.store(true);
 
   return SHANNON_SUCCESS;
@@ -321,12 +356,13 @@ std::unordered_map<std::string, std::unique_ptr<TableInfo>> &SelfLoadManager::ta
   return m_rpd_mirror_tables;
 }
 
-int SelfLoadManager::add_table(const std::string &schema, const std::string &table, const std::string &secondary_engine,
-                               bool is_partition) {
+int SelfLoadManager::add_table(const uint table_id, const std::string &schema, const std::string &table,
+                               const std::string &secondary_engine, bool is_partition) {
   std::unique_lock lock(m_tables_mutex);
   auto sch_tb = schema + "." + table;
   if (m_rpd_mirror_tables.find(sch_tb) == m_rpd_mirror_tables.end()) {
     auto table_info = std::make_unique<TableInfo>();
+    table_info->tid = table_id;
     table_info->schema_name = schema;
     table_info->table_name = table;
     table_info->secondary_engine = secondary_engine;

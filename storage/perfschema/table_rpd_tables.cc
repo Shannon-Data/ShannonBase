@@ -102,14 +102,28 @@ PFS_engine_table_share table_rpd_tables::m_share = {
     false /* m_in_purgatory */
 };
 
+std::unordered_map<std::string, ShannonBase::TableInfo*> table_rpd_tables::m_tables;
+
 PFS_engine_table *table_rpd_tables::create(PFS_engine_table_share *) {
    return new table_rpd_tables(); 
 }
 
-table_rpd_tables::table_rpd_tables() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {}
+table_rpd_tables::table_rpd_tables() : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {
+  // Load table info from SelfLoadManager.
+  auto it = ShannonBase::Autopilot::SelfLoadManager::tables().begin();
+  for (; it != ShannonBase::Autopilot::SelfLoadManager::tables().end(); ++it) {
+    auto table_info = it->second.get();
+    if (table_info && table_info->stats.state != ShannonBase::table_access_stats_t::State::LOADED) {
+      continue;
+    }
+
+    table_rpd_tables::m_tables.emplace(it->first, table_info);
+  }
+}
 
 table_rpd_tables::~table_rpd_tables() {
   // clear.
+  table_rpd_tables::m_tables.clear();
 }
 
 void table_rpd_tables::reset_position() {
@@ -118,7 +132,7 @@ void table_rpd_tables::reset_position() {
 }
 
 ha_rows table_rpd_tables::get_row_count() { 
-  return ShannonBase::Autopilot::SelfLoadManager::tables().size(); 
+  return table_rpd_tables::m_tables.size();
 }
 
 int table_rpd_tables::rnd_next() {
@@ -198,14 +212,12 @@ int table_rpd_tables::make_row(uint index [[maybe_unused]]) {
   if (index >= get_row_count()) {
     return HA_ERR_END_OF_FILE;
   } else {
-    auto it = ShannonBase::Autopilot::SelfLoadManager::tables().begin();
+    auto it = table_rpd_tables::m_tables.begin();
     std::advance(it, index);
-    if (it == ShannonBase::Autopilot::SelfLoadManager::tables().end()) return HA_ERR_END_OF_FILE;
-    auto table_info = it->second.get();
+    if (it == table_rpd_tables::m_tables.end()) return HA_ERR_END_OF_FILE;
+    auto table_info = it->second;
     m_row.id = table_info->tid;
     auto &meta = table_info->meta_info;
-
-    if (table_info->stats.state != ShannonBase::table_access_stats_t::State::LOADED) std::advance(it, index);
 
     m_row.snapshot_scn = meta.snapshot_scn;
     m_row.persisted_scn = meta.persisted_scn;

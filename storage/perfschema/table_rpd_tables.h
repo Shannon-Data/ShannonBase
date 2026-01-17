@@ -40,6 +40,7 @@
 #include "mysql_com.h"
 #include "sql-common/json_dom.h"
 #include "sql/sql_const.h"                        // UUID_LENGTH
+#include "storage/rapid_engine/include/rapid_table_info.h"  // TableInfo
 #include "storage/perfschema/pfs_engine_table.h"  // json.
 
 /**
@@ -94,6 +95,7 @@ class table_rpd_tables : public PFS_engine_table {
   /** Next position. */
   pos_t m_next_pos;
 
+  static std::unordered_map<std::string, ShannonBase::TableInfo*> m_tables;
  protected:
   /**
     Read the current row values.
