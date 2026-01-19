@@ -25,14 +25,21 @@
 */
 #include "storage/rapid_engine/optimizer/optimizer.h"
 
+#include "sql/field.h"
+#include "sql/item.h"
+#include "sql/item_cmpfunc.h"
+#include "sql/item_func.h"
+#include "sql/item_sum.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/hash_join_iterator.h"  //HashJoinIterator
 #include "sql/iterators/timing_iterator.h"
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/cost_model.h"
-#include "sql/range_optimizer/range_optimizer.h"  //KEY_PART
+#include "sql/range_optimizer/range_optimizer.h"  //KEY_PART,QUICK_RANGE
+#include "sql/range_optimizer/tree.h"             //SEL_ARG
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"                      //Query_expression
+#include "sql/sql_opt_exec_shared.h"          //Index_lookup
 #include "sql/sql_optimizer.h"                //JOIN
 #include "sql/table.h"                        //Table
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
@@ -53,6 +60,7 @@
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+
 namespace ShannonBase {
 namespace Optimizer {
 Timer::Timer() { m_begin = std::chrono::steady_clock::now(); }
@@ -71,11 +79,11 @@ std::string Timer::lap_formatted() {
 void Optimizer::AddDefaultRules() {
   // becareful the order of rules. The rules be applied in the order of added.
   m_optimize_rules.emplace_back(std::make_unique<StorageIndexPrune>());
-  m_optimize_rules.emplace_back(std::make_unique<PredicatePushDown>());
-  m_optimize_rules.emplace_back(std::make_unique<JoinReOrder>());
-  m_optimize_rules.emplace_back(std::make_unique<AggregationPushDown>());
-  m_optimize_rules.emplace_back(std::make_unique<TopNPushDown>());
   m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
+  m_optimize_rules.emplace_back(std::make_unique<PredicatePushDown>());
+  m_optimize_rules.emplace_back(std::make_unique<TopNPushDown>());
+  m_optimize_rules.emplace_back(std::make_unique<AggregationPushDown>());
+  m_optimize_rules.emplace_back(std::make_unique<JoinReOrder>());
   m_registered.store(true, std::memory_order_relaxed);
 }
 
@@ -107,26 +115,29 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
     case AccessPath::INDEX_RANGE_SCAN: {
       auto scan = std::make_unique<ScanTable>();
       TABLE *table{nullptr};
-      if (path->type == AccessPath::INDEX_SCAN)
+      if (path->type == AccessPath::INDEX_SCAN) {
         table = path->index_scan().table;
-      else if (path->type == AccessPath::INDEX_RANGE_SCAN) {
+        scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
+      } else if (path->type == AccessPath::INDEX_RANGE_SCAN) {
         const auto &irs = path->index_range_scan();
         if (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr) {
           table = irs.used_key_part[0].field->table;
         }
-      } else
+        scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
+      } else {
         table = path->table_scan().table;
-
+        scan->scan_type = ScanTable::ScanType::FULL_TABLE_SCAN;
+      }
       assert(table);
 
       auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
       auto table_id = share ? share->m_tableid : 0;
       scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
                                                 : Imcs::Imcs::instance()->get_rpd_table(table_id);
-      scan->estimated_rows = path->count_examined_rows;
+      scan->estimated_rows = path->num_output_rows();
+      scan->source_table = table;
       return scan;
     } break;
-
     case AccessPath::HASH_JOIN: {
       auto hashjoin_node = std::make_unique<HashJoin>();
       // gets the hash_join struct.
@@ -147,11 +158,10 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
       hashjoin_node->estimated_rows = path->num_output_rows();
       return hashjoin_node;
     } break;
-
     case AccessPath::NESTED_LOOP_JOIN: {
       auto nestloop_node = std::make_unique<NestLoopJoin>();
-      // gets the nested_loop_join struct.
       auto &param = path->nested_loop_join();
+
       // Recursively convert children
       nestloop_node->children.push_back(translate_access_path(ctx, thd, param.outer, join));
       nestloop_node->children.push_back(translate_access_path(ctx, thd, param.inner, join));
@@ -164,7 +174,6 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
       }
       return nestloop_node;
     } break;
-
     case AccessPath::AGGREGATE: {
       auto agg = std::make_unique<LocalAgg>();
       auto param = path->aggregate();
@@ -173,7 +182,6 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
       fill_aggregate_info(agg.get(), join);
       return agg;
     } break;
-
     case AccessPath::LIMIT_OFFSET: {
       auto topn = std::make_unique<Limit>();
       auto param = path->limit_offset();
@@ -183,17 +191,34 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
       topn->children.push_back(translate_access_path(ctx, thd, param.child, join));
       return topn;
     } break;
-
     case AccessPath::FILTER: {
       auto filter = std::make_unique<Filter>();
       auto param = path->filter();
 
+      filter->condition = param.condition;
       filter->children.push_back(translate_access_path(ctx, thd, param.child, join));
-      filter->predict.reset(convert_item_to_predicate(thd, param.condition));
+      filter->predict = Optimizer::convert_item_to_predicate(thd, param.condition);
       filter->materialize_subqueries = param.materialize_subqueries;
       return filter;
     } break;
+    case AccessPath::SORT: {
+      auto topn = std::make_unique<TopN>();
+      auto param = path->sort();
 
+      topn->order = param.order;
+      topn->limit = param.limit;
+      topn->children.push_back(translate_access_path(ctx, thd, param.child, join));
+      return topn;
+    } break;
+    case AccessPath::EQ_REF: {
+      auto scan = std::make_unique<ScanTable>();
+      auto param = path->eq_ref();
+
+      scan->source_table = param.table;
+      scan->scan_type = ScanTable::ScanType::EQ_REF_SCAN;
+      scan->prune_predicate = Optimizer::convert_item_to_predicate(thd, param.ref);
+      return scan;
+    } break;
     default:
       return nullptr;
   }
@@ -236,8 +261,860 @@ void Optimizer::fill_aggregate_info(LocalAgg *node, const JOIN *join) {
   }
 }
 
-Imcs::Predicate *Optimizer::convert_item_to_predicate(THD *thd, Item *item) {
-  return nullptr;  // TODO: implement item to predicate conversion.
+/**
+ * Convert MySQL Item to Rapid Predicate
+ *
+ * This function translates MySQL's Item expression tree into our custom
+ * Predicate representation for optimized execution in IMCS.
+ *
+ * @param thd Thread handler
+ * @param item MySQL Item to convert
+ * @return Converted Predicate, or nullptr if not convertible
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(THD *thd, Item *item) {
+  if (!item) return nullptr;
+
+  // Handle different Item types
+  switch (item->type()) {
+    case Item::FUNC_ITEM:
+      return convert_func_item_to_predicate(thd, static_cast<Item_func *>(item));
+    case Item::COND_ITEM:
+      return convert_cond_item_to_predicate(thd, static_cast<Item_cond *>(item));
+    case Item::FIELD_ITEM:
+    case Item::INT_ITEM:
+    case Item::STRING_ITEM:
+    case Item::REAL_ITEM:
+    case Item::DECIMAL_ITEM:
+      // These are leaf nodes, typically part of a comparison
+      // They don't form predicates by themselves
+      return nullptr;
+    default:  // Unsupported Item type for predicate conversion
+      return nullptr;
+  }
+}
+
+/**
+ * Convert Index_lookup to Predicate
+ *
+ * Index_lookup contains range conditions for index scans.
+ * This function extracts the range conditions and converts them to predicates.
+ *
+ * @param thd Thread handler
+ * @param lookup Index lookup information
+ * @return Converted Predicate representing the index range conditions
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(THD *thd, Index_lookup *lookup) {
+  if (!lookup) return nullptr;
+
+  // Check if lookup is valid
+  if (lookup->key_err || lookup->key == -1 || lookup->key_parts == 0) return nullptr;
+
+  // Check for impossible NULL references
+  if (lookup->impossible_null_ref()) return nullptr;  // This will never match
+
+  // If there's only one key part, create a simple equality predicate
+  if (lookup->key_parts == 1) {
+    Item *item = lookup->items[0];
+    if (!item) return nullptr;
+
+    // Check if this key part has a guard condition
+    if (lookup->cond_guards && lookup->cond_guards[0] && !(*lookup->cond_guards[0])) {
+      // Guard is off - this condition is disabled
+      return nullptr;
+    }
+
+    // Extract field from the item
+    if (item->type() == Item::FIELD_ITEM) {
+      Item_field *field_item = static_cast<Item_field *>(item);
+      if (field_item->field) {
+        uint32 col_idx = field_item->field->field_index();
+        enum_field_types field_type = field_item->field->type();
+
+        // Get the value to compare against
+        Imcs::PredicateValue value = extract_value_from_item(thd, item);
+
+        // Check if this is a NULL-rejecting equality
+        bool is_null_rejecting = (lookup->null_rejecting & 1);
+        if (is_null_rejecting && value.is_null()) return nullptr;
+        return std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::EQUAL, value, field_type);
+      }
+    }
+
+    // Try to evaluate the item directly
+    Imcs::PredicateValue value = extract_value_from_item(thd, item);
+    if (value.is_null()) return nullptr;
+
+    // We couldn't extract field info - return nullptr
+    return nullptr;
+  }
+
+  // Multiple key parts - create compound predicate with AND
+  auto compound = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
+  bool has_predicates = false;
+
+  for (uint i = 0; i < lookup->key_parts; i++) {
+    Item *item = lookup->items[i];
+    if (!item) continue;
+
+    // Check if this key part has a guard condition
+    if (lookup->cond_guards && lookup->cond_guards[i]) {
+      if (!(*lookup->cond_guards[i])) continue;  // Guard is off - skip this condition
+    }
+
+    // Extract field information
+    uint32 col_idx = 0;
+    enum_field_types field_type = MYSQL_TYPE_NULL;
+
+    if (item->type() == Item::FIELD_ITEM) {
+      Item_field *field_item = static_cast<Item_field *>(item);
+      if (field_item->field) {
+        col_idx = field_item->field->field_index();
+        field_type = field_item->field->type();
+      } else
+        continue;
+    } else
+      continue;  // Not a field item - skip
+
+    // Get the value from the item
+    Imcs::PredicateValue value = extract_value_from_item(thd, item);
+    // Check for NULL-rejecting
+    bool is_null_rejecting = (lookup->null_rejecting & (1 << i));
+    if (is_null_rejecting && value.is_null()) {
+      // This key part rejects NULL - entire lookup is impossible
+      return nullptr;  // compound will be automatically destroyed
+    }
+
+    // Create equality predicate for this key part
+    auto pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::EQUAL, value, field_type);
+    compound->add_child(std::move(pred));
+    has_predicates = true;
+  }
+
+  if (!has_predicates) return nullptr;  // compound will be automatically destroyed
+
+  // If only one predicate was created, return it directly
+  if (compound->children.size() == 1)
+    return std::move(compound->children[0]);  // Transfer ownership of the single child
+
+  return compound;
+}
+
+/**
+ * Convert SEL_ARG tree to Predicate
+ *
+ * SEL_ARG represents the range tree for index optimization.
+ * It's a red-black tree structure containing range intervals.
+ *
+ * @param thd Thread handler
+ * @param sel_arg Range tree root
+ * @param key_part Key part information
+ * @return Converted Predicate
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_sel_arg_to_predicate(THD *thd, const SEL_ARG *sel_arg,
+                                                                         const KEY_PART_INFO *key_part) {
+  if (!sel_arg || sel_arg == opt_range::null_element) return nullptr;
+
+  // create root OR container, to build all discrete intervals
+  auto or_predicate = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::OR);
+
+  std::function<void(SEL_ARG *)> traverse_rb_tree = [&](SEL_ARG *arg) {
+    if (!arg || arg == opt_range::null_element) return;
+
+    // traverse left subtree (discrete intervals in red-black tree are OR relations)
+    traverse_rb_tree(arg->left);
+
+    // process current node's interval conditions
+    std::unique_ptr<Imcs::Predicate> current_node_pred;
+    Field *field = arg->field;
+    uint32 col_idx = field->field_index();
+    enum_field_types field_type = field->type();
+
+    if (arg->is_null_interval()) {
+      // case1: col IS NULL
+      current_node_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::IS_NULL,
+                                                                   Imcs::PredicateValue::null_value(), field_type);
+    } else if (arg->is_singlepoint()) {
+      // case2：col = 10
+      Imcs::PredicateValue val = extract_value_from_sel_arg_min(thd, arg, field_type);
+      current_node_pred =
+          std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::EQUAL, val, field_type);
+    } else {
+      // case：range: col > 10 AND col <= 20
+      uint min_flag = arg->get_min_flag();
+      uint max_flag = arg->get_max_flag();
+      bool has_min = !(min_flag & NO_MIN_RANGE);
+      bool has_max = !(max_flag & NO_MAX_RANGE);
+
+      if (has_min && has_max) {
+        Imcs::PredicateValue min_val = extract_value_from_sel_arg_min(thd, arg, field_type);
+        Imcs::PredicateValue max_val = extract_value_from_sel_arg_max(thd, arg, field_type);
+
+        // using between if both bounds are inclusive
+        if (!(min_flag & NEAR_MIN) && !(max_flag & NEAR_MAX)) {
+          current_node_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, min_val, max_val, field_type);
+        } else {
+          auto range_and = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
+          range_and->add_child(std::make_unique<Imcs::Simple_Predicate>(
+              col_idx,
+              (min_flag & NEAR_MIN) ? Imcs::PredicateOperator::GREATER_THAN : Imcs::PredicateOperator::GREATER_EQUAL,
+              min_val, field_type));
+          range_and->add_child(std::make_unique<Imcs::Simple_Predicate>(
+              col_idx, (max_flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL,
+              max_val, field_type));
+          current_node_pred = std::move(range_and);
+        }
+      } else if (has_min) {
+        Imcs::PredicateValue min_val = extract_value_from_sel_arg_min(thd, arg, field_type);
+        auto op =
+            (min_flag & NEAR_MIN) ? Imcs::PredicateOperator::GREATER_THAN : Imcs::PredicateOperator::GREATER_EQUAL;
+        current_node_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, op, min_val, field_type);
+      } else if (has_max) {
+        Imcs::PredicateValue max_val = extract_value_from_sel_arg_max(thd, arg, field_type);
+        auto op = (max_flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL;
+        current_node_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, op, max_val, field_type);
+      }
+    }
+
+    // processing And link to next key part if exists
+    // if current interval is followed by a restriction on the next column, recursively link them
+    if (current_node_pred && arg->next_key_part && arg->next_key_part->root) {
+      std::unique_ptr<Imcs::Predicate> next_part_pred =
+          convert_sel_arg_to_predicate(thd, arg->next_key_part->root, key_part + 1);
+
+      if (next_part_pred) {
+        auto multi_col_and = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
+        multi_col_and->add_child(std::move(current_node_pred));
+        multi_col_and->add_child(std::move(next_part_pred));
+        current_node_pred = std::move(multi_col_and);
+      }
+    }
+
+    // processing whole predicate and add to OR list
+    if (current_node_pred) {
+      or_predicate->add_child(std::move(current_node_pred));
+    }
+
+    traverse_rb_tree(arg->right);
+  };
+
+  traverse_rb_tree(const_cast<SEL_ARG *>(sel_arg));
+
+  // clean up empty OR
+  if (or_predicate->children.empty()) return nullptr;  // or_predicate will be automatically destroyed
+
+  // simplify single-node OR
+  if (or_predicate->children.size() == 1)
+    return std::move(or_predicate->children[0]);  // Transfer ownership of the single child
+
+  return or_predicate;
+}
+
+/**
+ * Convert QUICK_RANGE to Predicate
+ *
+ * QUICK_RANGE represents a range scan on an index.
+ * It contains min/max values and flags for each key part.
+ *
+ * @param thd Thread handler
+ * @param range Quick range information
+ * @param key_part Key part information
+ * @return Converted Predicate representing the range
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_quick_range_to_predicate(THD *thd, const QUICK_RANGE *range,
+                                                                             const KEY_PART_INFO *key_part) {
+  if (!range || !key_part) return nullptr;
+
+  // Get field information
+  Field *field = key_part->field;
+  if (!field) return nullptr;
+
+  uint32 col_idx = field->field_index();
+  enum_field_types field_type = field->type();
+
+  // Extract min and max values from range
+  bool has_min = !(range->flag & NO_MIN_RANGE);
+  bool has_max = !(range->flag & NO_MAX_RANGE);
+  bool min_inclusive = !(range->flag & NEAR_MIN);
+  bool max_inclusive = !(range->flag & NEAR_MAX);
+
+  // If we have both min and max, create BETWEEN predicate
+  if (has_min && has_max) {
+    // Extract values
+    Imcs::PredicateValue min_val = Optimizer::extract_value_from_key_part(thd, range->min_key, key_part, field_type);
+    Imcs::PredicateValue max_val = Optimizer::extract_value_from_key_part(thd, range->max_key, key_part, field_type);
+
+    // Adjust for inclusive/exclusive bounds
+    if (!min_inclusive || !max_inclusive) {
+      // If not fully inclusive, create compound predicate
+      auto compound = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
+      if (has_min) {
+        auto min_op = min_inclusive ? Imcs::PredicateOperator::GREATER_EQUAL : Imcs::PredicateOperator::GREATER_THAN;
+        auto min_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, min_op, min_val, field_type);
+        compound->add_child(std::move(min_pred));
+      }
+
+      if (has_max) {
+        auto max_op = max_inclusive ? Imcs::PredicateOperator::LESS_EQUAL : Imcs::PredicateOperator::LESS_THAN;
+        auto max_pred = std::make_unique<Imcs::Simple_Predicate>(col_idx, max_op, max_val, field_type);
+        compound->add_child(std::move(max_pred));
+      }
+      return compound;
+    } else {
+      // Both inclusive - create BETWEEN predicate
+      return std::make_unique<Imcs::Simple_Predicate>(col_idx, min_val, max_val, field_type);
+    }
+  }
+
+  // Only min bound
+  if (has_min) {
+    Imcs::PredicateValue min_val = Optimizer::extract_value_from_key_part(thd, range->min_key, key_part, field_type);
+    auto op = min_inclusive ? Imcs::PredicateOperator::GREATER_EQUAL : Imcs::PredicateOperator::GREATER_THAN;
+    return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, min_val, field_type);
+  }
+
+  // Only max bound
+  if (has_max) {
+    Imcs::PredicateValue max_val = Optimizer::extract_value_from_key_part(thd, range->max_key, key_part, field_type);
+    auto op = max_inclusive ? Imcs::PredicateOperator::LESS_EQUAL : Imcs::PredicateOperator::LESS_THAN;
+    return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, max_val, field_type);
+  }
+
+  // No bounds - this shouldn't happen
+  return nullptr;
+}
+
+/**
+ * Extract value from key part buffer
+ */
+Imcs::PredicateValue Optimizer::extract_value_from_key_part(THD *thd, const uchar *key_ptr,
+                                                            const KEY_PART_INFO *key_part,
+                                                            enum_field_types field_type) {
+  if (!key_ptr || !key_part || !key_part->field) return Imcs::PredicateValue::null_value();
+
+  Field *field = key_part->field;
+  // Handle NULL flag if present
+  if (key_part->null_bit) {
+    if (*key_ptr) return Imcs::PredicateValue::null_value();  // NULL flag is set
+    key_ptr++;                                                // Skip NULL byte
+  }
+
+  // Extract value based on field type
+  switch (field_type) {
+    case MYSQL_TYPE_TINY: {
+      int8 val = static_cast<int8>(*key_ptr);
+      return Imcs::PredicateValue(static_cast<int64>(val));
+    } break;
+    case MYSQL_TYPE_SHORT: {
+      int16 val = sint2korr(key_ptr);
+      return Imcs::PredicateValue(static_cast<int64>(val));
+    } break;
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG: {
+      int32 val = sint4korr(key_ptr);
+      return Imcs::PredicateValue(static_cast<int64>(val));
+    } break;
+    case MYSQL_TYPE_LONGLONG: {
+      int64 val = sint8korr(key_ptr);
+      return Imcs::PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_FLOAT: {
+      float val;
+      memcpy(&val, key_ptr, sizeof(float));
+      return Imcs::PredicateValue(static_cast<double>(val));
+    }
+    case MYSQL_TYPE_DOUBLE: {
+      double val;
+      memcpy(&val, key_ptr, sizeof(double));
+      return Imcs::PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING:
+    case MYSQL_TYPE_STRING: {
+      // String types - extract length and data
+      uint length;
+      const uchar *data_ptr = key_ptr;
+      if (key_part->length > 255) {
+        // 2-byte length prefix
+        length = uint2korr(data_ptr);
+        data_ptr += 2;
+      } else {
+        // 1-byte length prefix
+        length = *data_ptr;
+        data_ptr += 1;
+      }
+
+      // Limit to actual key part length
+      length = std::min(length, static_cast<uint>(key_part->length));
+      std::string str(reinterpret_cast<const char *>(data_ptr), length);
+      return Imcs::PredicateValue(str);
+    } break;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_TIMESTAMP: {
+      // For date/time types, convert to int64 representation
+      int64 val = sint8korr(key_ptr);
+      return Imcs::PredicateValue(val);
+    } break;
+    default:
+      // For other types, try to use the field's conversion
+      String str_buf;
+      field->set_key_image(key_ptr, key_part->length);
+      if (field->is_null()) return Imcs::PredicateValue::null_value();
+      switch (field->result_type()) {
+        case INT_RESULT:
+          return Imcs::PredicateValue(static_cast<int64>(field->val_int()));
+        case REAL_RESULT:
+          return Imcs::PredicateValue(static_cast<double>(field->val_real()));
+        case STRING_RESULT: {
+          String *str = field->val_str(&str_buf);
+          if (str) return Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+          return Imcs::PredicateValue::null_value();
+        }
+        default:
+          return Imcs::PredicateValue::null_value();
+      }
+  }
+}
+
+/**
+ * Extract value from SEL_ARG (single point)
+ */
+Imcs::PredicateValue Optimizer::extract_value_from_sel_arg(THD *thd, const SEL_ARG *sel_arg,
+                                                           enum_field_types field_type) {
+  if (!sel_arg) return Imcs::PredicateValue::null_value();
+  // For single point, min and max are the same
+  return extract_value_from_sel_arg_min(thd, sel_arg, field_type);
+}
+
+/**
+ * Extract minimum value from SEL_ARG
+ */
+Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_min(THD *thd, const SEL_ARG *sel_arg,
+                                                               enum_field_types field_type) {
+  if (!sel_arg || !sel_arg->field) return Imcs::PredicateValue::null_value();
+
+  // Get the field and extract value
+  Field *field = sel_arg->field;
+  // SEL_ARG stores values in field's native format
+  // We need to extract based on field type
+  switch (field_type) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT: {
+      auto val = *reinterpret_cast<short *>(sel_arg->min_value);
+      return Imcs::PredicateValue(static_cast<int64>(val));
+    } break;
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG: {
+      // For integer types, use min_value
+      auto val = *reinterpret_cast<long int *>(sel_arg->min_value);
+      return Imcs::PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_FLOAT:
+    case MYSQL_TYPE_DOUBLE: {
+      // For floating point, interpret min_value as double
+      double val;
+      memcpy(&val, &sel_arg->min_value, sizeof(double));
+      return Imcs::PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING:
+    case MYSQL_TYPE_STRING: {
+      // Try to get string from field
+      String str_buf;
+      // field->store(sel_arg->min_value, false);
+      String *str = field->val_str(&str_buf);
+      if (str) return Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+      return Imcs::PredicateValue::null_value();
+    } break;
+    default:
+      return Imcs::PredicateValue::null_value();
+  }
+}
+
+/**
+ * Extract maximum value from SEL_ARG
+ */
+Imcs::PredicateValue Optimizer::extract_value_from_sel_arg_max(THD *thd, const SEL_ARG *sel_arg,
+                                                               enum_field_types field_type) {
+  if (!sel_arg || !sel_arg->field) return Imcs::PredicateValue::null_value();
+
+  // Get the field and extract value
+  Field *field = sel_arg->field;
+  switch (field_type) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT: {
+      auto val = *reinterpret_cast<short *>(sel_arg->max_value);
+      return Imcs::PredicateValue(static_cast<int64>(val));
+    } break;
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG: {
+      auto val = *reinterpret_cast<long int *>(sel_arg->max_value);
+      return Imcs::PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_FLOAT:
+    case MYSQL_TYPE_DOUBLE: {
+      double val;
+      memcpy(&val, &sel_arg->max_value, sizeof(double));
+      return Imcs::PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_VARCHAR:
+    case MYSQL_TYPE_VAR_STRING:
+    case MYSQL_TYPE_STRING: {
+      String str_buf;
+      // field->store(sel_arg->max_value, false);
+      String *str = field->val_str(&str_buf);
+      if (str) return Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+
+      return Imcs::PredicateValue::null_value();
+    } break;
+    default:
+      return Imcs::PredicateValue::null_value();
+  }
+}
+
+/**
+ * Convert function Item to predicate (comparison operations)
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_func_item_to_predicate(THD *thd, Item_func *func) {
+  if (!func) return nullptr;
+
+  switch (func->functype()) {
+    case Item_func::EQ_FUNC:
+      return convert_comparison_to_predicate(thd, func, Imcs::PredicateOperator::EQUAL);
+    case Item_func::NE_FUNC:
+      return convert_comparison_to_predicate(thd, func, Imcs::PredicateOperator::NOT_EQUAL);
+    case Item_func::LT_FUNC:
+      return convert_comparison_to_predicate(thd, func, Imcs::PredicateOperator::LESS_THAN);
+    case Item_func::LE_FUNC:
+      return convert_comparison_to_predicate(thd, func, Imcs::PredicateOperator::LESS_EQUAL);
+    case Item_func::GT_FUNC:
+      return convert_comparison_to_predicate(thd, func, Imcs::PredicateOperator::GREATER_THAN);
+    case Item_func::GE_FUNC:
+      return convert_comparison_to_predicate(thd, func, Imcs::PredicateOperator::GREATER_EQUAL);
+    case Item_func::BETWEEN:
+      return convert_between_to_predicate(thd, static_cast<Item_func_between *>(func));
+    case Item_func::IN_FUNC:
+      return convert_in_to_predicate(thd, static_cast<Item_func_in *>(func));
+    case Item_func::ISNULL_FUNC:
+      return convert_isnull_to_predicate(thd, func);
+    case Item_func::ISNOTNULL_FUNC:
+      return convert_isnotnull_to_predicate(thd, func);
+    case Item_func::LIKE_FUNC:
+      return convert_like_to_predicate(thd, static_cast<Item_func_like *>(func), false);
+    case Item_func::COND_AND_FUNC:
+    case Item_func::COND_OR_FUNC:
+      // These should have been handled by convert_cond_item_to_predicate
+      return convert_cond_item_to_predicate(thd, static_cast<Item_cond *>(func));
+    default:
+      // Unsupported function type
+      return nullptr;
+  }
+}
+
+/**
+ * Convert condition Item to compound predicate (AND/OR/NOT)
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_cond_item_to_predicate(THD *thd, Item_cond *cond) {
+  if (!cond) return nullptr;
+
+  Imcs::PredicateOperator op;
+
+  switch (cond->functype()) {
+    case Item_func::COND_AND_FUNC:
+      op = Imcs::PredicateOperator::AND;
+      break;
+    case Item_func::COND_OR_FUNC:
+      op = Imcs::PredicateOperator::OR;
+      break;
+    default:
+      return nullptr;
+  }
+
+  // Create compound predicate
+  auto compound = std::make_unique<Imcs::Compound_Predicate>(op);
+
+  // Convert each child
+  List_iterator<Item> li(*cond->argument_list());
+  Item *item;
+  while ((item = li++)) {
+    std::unique_ptr<Imcs::Predicate> child_pred = Optimizer::convert_item_to_predicate(thd, item);
+    if (child_pred) compound->add_child(std::move(child_pred));
+  }
+
+  // If no children were converted, return nullptr
+  if (compound->children.empty()) {
+    return nullptr;
+  }
+  return compound;
+}
+
+/**
+ * Convert comparison operation to Simple_Predicate
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(THD *thd, Item_func *func,
+                                                                            Imcs::PredicateOperator op) {
+  if (func->argument_count() != 2) return nullptr;
+
+  Item *left = func->arguments()[0];
+  Item *right = func->arguments()[1];
+
+  // We need one side to be a field reference
+  Item_field *field_item = nullptr;
+  Item *value_item = nullptr;
+
+  if (left->type() == Item::FIELD_ITEM) {
+    field_item = static_cast<Item_field *>(left);
+    value_item = right;
+  } else if (right->type() == Item::FIELD_ITEM) {
+    field_item = static_cast<Item_field *>(right);
+    value_item = left;
+
+    // Swap operator direction if field is on right
+    op = swap_operator(op);
+  } else {
+    // Neither side is a field - can't create a simple predicate
+    return nullptr;
+  }
+
+  // Extract field information
+  if (!field_item->field) return nullptr;
+
+  Field *field = field_item->field;
+  uint32 col_idx = field->field_index();
+  enum_field_types field_type = field->type();
+
+  // Extract comparison value
+  Imcs::PredicateValue value = extract_value_from_item(thd, value_item);
+
+  // Create Simple_Predicate
+  return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, value, field_type);
+}
+
+/**
+ * Convert BETWEEN to predicate
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_between_to_predicate(THD *thd, Item_func_between *between) {
+  if (between->argument_count() != 3) return nullptr;
+
+  Item *field_arg = between->arguments()[0];
+  Item *min_arg = between->arguments()[1];
+  Item *max_arg = between->arguments()[2];
+
+  if (field_arg->type() != Item::FIELD_ITEM) return nullptr;
+
+  Item_field *field_item = static_cast<Item_field *>(field_arg);
+  if (!field_item->field) return nullptr;
+
+  Field *field = field_item->field;
+  uint32 col_idx = field->field_index();
+  enum_field_types field_type = field->type();
+
+  // Extract min and max values
+  Imcs::PredicateValue min_val = extract_value_from_item(thd, min_arg);
+  Imcs::PredicateValue max_val = extract_value_from_item(thd, max_arg);
+
+  // Check if this is NOT BETWEEN
+  bool is_negated = between->negated;
+  if (is_negated) {
+    // NOT BETWEEN: create compound predicate (val < min OR val > max)
+    auto compound = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::OR);
+    auto less_pred =
+        std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::LESS_THAN, min_val, field_type);
+    auto greater_pred =
+        std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::GREATER_THAN, max_val, field_type);
+
+    compound->add_child(std::move(less_pred));
+    compound->add_child(std::move(greater_pred));
+
+    return compound;
+  } else {
+    // BETWEEN: create simple predicate
+    return std::make_unique<Imcs::Simple_Predicate>(col_idx, min_val, max_val, field_type);
+  }
+}
+
+/**
+ * Convert IN to predicate
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_in_to_predicate(THD *thd, Item_func_in *in_func) {
+  if (in_func->argument_count() < 2) return nullptr;
+
+  Item *field_arg = in_func->arguments()[0];
+  if (field_arg->type() != Item::FIELD_ITEM) return nullptr;
+
+  Item_field *field_item = static_cast<Item_field *>(field_arg);
+  if (!field_item->field) return nullptr;
+
+  Field *field = field_item->field;
+  uint32 col_idx = field->field_index();
+  enum_field_types field_type = field->type();
+
+  // Extract values from IN list
+  std::vector<Imcs::PredicateValue> values;
+  for (uint i = 1; i < in_func->argument_count(); i++) {
+    Item *value_item = in_func->arguments()[i];
+    Imcs::PredicateValue val = extract_value_from_item(thd, value_item);
+    values.push_back(val);
+  }
+
+  bool is_negated = in_func->negated;
+  return std::make_unique<Imcs::Simple_Predicate>(col_idx, values, is_negated, field_type);
+}
+
+/**
+ * Convert IS NULL to predicate
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_isnull_to_predicate(THD *thd, Item_func *func) {
+  if (func->argument_count() != 1) return nullptr;
+
+  Item *arg = func->arguments()[0];
+  if (arg->type() != Item::FIELD_ITEM) return nullptr;
+
+  Item_field *field_item = static_cast<Item_field *>(arg);
+  if (!field_item->field) return nullptr;
+
+  Field *field = field_item->field;
+  uint32 col_idx = field->field_index();
+  enum_field_types field_type = field->type();
+
+  return std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::IS_NULL,
+                                                  Imcs::PredicateValue::null_value(), field_type);
+}
+
+/**
+ * Convert IS NOT NULL to predicate
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_isnotnull_to_predicate(THD *thd, Item_func *func) {
+  if (func->argument_count() != 1) return nullptr;
+
+  Item *arg = func->arguments()[0];
+  if (arg->type() != Item::FIELD_ITEM) return nullptr;
+
+  Item_field *field_item = static_cast<Item_field *>(arg);
+  if (!field_item->field) return nullptr;
+
+  Field *field = field_item->field;
+  uint32 col_idx = field->field_index();
+  enum_field_types field_type = field->type();
+
+  return std::make_unique<Imcs::Simple_Predicate>(col_idx, Imcs::PredicateOperator::IS_NOT_NULL,
+                                                  Imcs::PredicateValue::null_value(), field_type);
+}
+
+/**
+ * Convert LIKE to predicate
+ */
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_like_to_predicate(THD *thd, Item_func_like *like_func,
+                                                                      bool is_negated) {
+  if (like_func->argument_count() < 2) return nullptr;
+
+  Item *field_arg = like_func->arguments()[0];
+  Item *pattern_arg = like_func->arguments()[1];
+
+  if (field_arg->type() != Item::FIELD_ITEM) return nullptr;
+
+  Item_field *field_item = static_cast<Item_field *>(field_arg);
+  if (!field_item->field) return nullptr;
+
+  Field *field = field_item->field;
+  uint32 col_idx = field->field_index();
+  enum_field_types field_type = field->type();
+
+  // Extract pattern
+  Imcs::PredicateValue pattern = extract_value_from_item(thd, pattern_arg);
+  Imcs::PredicateOperator op = is_negated ? Imcs::PredicateOperator::NOT_LIKE : Imcs::PredicateOperator::LIKE;
+  return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, pattern, field_type);
+}
+
+/**
+ * Extract value from Item
+ */
+Imcs::PredicateValue Optimizer::extract_value_from_item(THD *thd, Item *item) {
+  if (!item) return Imcs::PredicateValue::null_value();
+
+  // Handle constant folding if needed
+  if (!item->const_item()) assert(false);
+
+  switch (item->type()) {
+    case Item::INT_ITEM: {
+      Item_int *int_item = static_cast<Item_int *>(item);
+      return Imcs::PredicateValue(static_cast<int64>(int_item->val_int()));
+    } break;
+    case Item::REAL_ITEM: {
+      Item_float *float_item = static_cast<Item_float *>(item);
+      return Imcs::PredicateValue(float_item->val_real());
+    } break;
+    case Item::DECIMAL_ITEM: {
+      Item_decimal *decimal_item = static_cast<Item_decimal *>(item);
+      return Imcs::PredicateValue(decimal_item->val_real());
+    } break;
+    case Item::STRING_ITEM: {
+      Item_string *string_item = static_cast<Item_string *>(item);
+      String *str = string_item->val_str(nullptr);
+      if (str) {
+        return Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+      }
+      return Imcs::PredicateValue::null_value();
+    } break;
+    case Item::NULL_ITEM:
+      return Imcs::PredicateValue::null_value();
+      break;
+    case Item::FUNC_ITEM: {
+      // Try to evaluate the function
+      Item_func *func = static_cast<Item_func *>(item);
+
+      if (func->result_type() == INT_RESULT) {
+        return Imcs::PredicateValue(static_cast<int64>(func->val_int()));
+      } else if (func->result_type() == REAL_RESULT) {
+        return Imcs::PredicateValue(func->val_real());
+      } else if (func->result_type() == STRING_RESULT) {
+        String str_buf;
+        String *str = func->val_str(&str_buf);
+        if (str) {
+          return Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+        }
+      }
+      return Imcs::PredicateValue::null_value();
+    } break;
+    default:
+      // For other types, try generic evaluation
+      if (item->result_type() == INT_RESULT) {
+        return Imcs::PredicateValue(static_cast<int64>(item->val_int()));
+      } else if (item->result_type() == REAL_RESULT) {
+        return Imcs::PredicateValue(item->val_real());
+      } else if (item->result_type() == STRING_RESULT) {
+        String str_buf;
+        String *str = item->val_str(&str_buf);
+        if (str) {
+          return Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+        }
+      }
+      return Imcs::PredicateValue::null_value();
+  }
+}
+
+/**
+ * Swap comparison operator when operands are reversed
+ */
+Imcs::PredicateOperator Optimizer::swap_operator(Imcs::PredicateOperator op) {
+  switch (op) {
+    case Imcs::PredicateOperator::LESS_THAN:
+      return Imcs::PredicateOperator::GREATER_THAN;
+    case Imcs::PredicateOperator::LESS_EQUAL:
+      return Imcs::PredicateOperator::GREATER_EQUAL;
+    case Imcs::PredicateOperator::GREATER_THAN:
+      return Imcs::PredicateOperator::LESS_THAN;
+    case Imcs::PredicateOperator::GREATER_EQUAL:
+      return Imcs::PredicateOperator::LESS_EQUAL;
+    case Imcs::PredicateOperator::EQUAL:
+    case Imcs::PredicateOperator::NOT_EQUAL:
+      // These are symmetric
+      return op;
+    default:
+      return op;
+  }
 }
 
 bool Optimizer::EstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost) {
@@ -517,6 +1394,5 @@ AccessPath *Optimizer::OptimizeAndRewriteAccessPath(OptimizeContext *context, Ac
 
   return nullptr;
 }
-
 }  // namespace Optimizer
 }  // namespace ShannonBase

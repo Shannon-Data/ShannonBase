@@ -32,6 +32,9 @@
 #include <string>
 #include <vector>
 
+#include "include/field_types.h"  //enum_field_types
+
+#include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
 #include "storage/rapid_engine/optimizer/rules/rule.h"
@@ -40,6 +43,14 @@ class THD;
 class Query_expression;
 class JOIN;
 class AccessPath;
+class Item_func;
+class Item_cond;
+class Item_func_between;
+class Item_func_in;
+class Item_func_like;
+struct Index_lookup;
+class SEL_ARG;
+class QUICK_RANGE;
 
 namespace ShannonBase {
 namespace Optimizer {
@@ -140,7 +151,37 @@ class Optimizer : public MemoryObject {
   Plan translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath *path, const JOIN *join);
 
   void fill_aggregate_info(LocalAgg *node, const JOIN *join);
-  Imcs::Predicate *convert_item_to_predicate(THD *thd, Item *item);
+
+  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Item *item);
+  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Index_lookup *lookup);
+
+  /**
+   * Helper functions for Item to Predicate conversion
+   */
+  static std::unique_ptr<Imcs::Predicate> convert_func_item_to_predicate(THD *thd, Item_func *func);
+  static std::unique_ptr<Imcs::Predicate> convert_cond_item_to_predicate(THD *thd, Item_cond *cond);
+
+  static std::unique_ptr<Imcs::Predicate> convert_comparison_to_predicate(THD *thd, Item_func *func,
+                                                                          Imcs::PredicateOperator op);
+  static std::unique_ptr<Imcs::Predicate> convert_between_to_predicate(THD *thd, Item_func_between *between);
+  static std::unique_ptr<Imcs::Predicate> convert_in_to_predicate(THD *thd, Item_func_in *in_func);
+  static std::unique_ptr<Imcs::Predicate> convert_isnull_to_predicate(THD *thd, Item_func *func);
+  static std::unique_ptr<Imcs::Predicate> convert_isnotnull_to_predicate(THD *thd, Item_func *func);
+  static std::unique_ptr<Imcs::Predicate> convert_like_to_predicate(THD *thd, Item_func_like *like_func,
+                                                                    bool is_negated);
+  static std::unique_ptr<Imcs::Predicate> convert_quick_range_to_predicate(THD *thd, const QUICK_RANGE *range,
+                                                                           const KEY_PART_INFO *key_part);
+  static std::unique_ptr<Imcs::Predicate> convert_sel_arg_to_predicate(THD *thd, const SEL_ARG *sel_arg,
+                                                                       const KEY_PART_INFO *key_part);
+  static Imcs::PredicateValue extract_value_from_key_part(THD *thd, const uchar *key_ptr, const KEY_PART_INFO *key_part,
+                                                          enum_field_types field_type);
+  static Imcs::PredicateValue extract_value_from_sel_arg(THD *thd, const SEL_ARG *sel_arg, enum_field_types field_type);
+  static Imcs::PredicateValue extract_value_from_sel_arg_min(THD *thd, const SEL_ARG *sel_arg,
+                                                             enum_field_types field_type);
+  static Imcs::PredicateValue extract_value_from_sel_arg_max(THD *thd, const SEL_ARG *sel_arg,
+                                                             enum_field_types field_type);
+  static Imcs::PredicateValue extract_value_from_item(THD *thd, Item *item);
+  static Imcs::PredicateOperator swap_operator(Imcs::PredicateOperator op);
 
   std::atomic<bool> m_registered{false};
   std::vector<std::unique_ptr<Rule>> m_optimize_rules;
