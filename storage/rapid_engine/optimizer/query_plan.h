@@ -45,9 +45,11 @@ namespace Imcs {
 class RpdTable;
 class Predicate;
 }  // namespace Imcs
+
 namespace Optimizer {
 class PlanNode : public MemoryObject {
  public:
+  // Type of the plan node.
   enum class Type : uint8_t {
     SCAN,
     HASH_JOIN,
@@ -62,32 +64,68 @@ class PlanNode : public MemoryObject {
   };
 
   virtual ~PlanNode() = default;
+  // Get the type of the plan node.
   virtual Type type() const = 0;
+  // Generate a string representation of the plan node with indentation.
   virtual std::string ToString(int indent = 0) const = 0;
 
+  // child nodes.
   std::vector<std::unique_ptr<PlanNode>> children;
+  // estimated cost.
   double cost{0.0};
+  // estimated output rows.
   ha_rows estimated_rows{0};
+  // can be vectorized or not.
   bool vectorized{true};
 };
 
+// Alias for a unique pointer to a PlanNode.
 using Plan = std::unique_ptr<PlanNode>;
+
+// Various plan node types.
+// ScanTable represents a table scan operation.
 class ScanTable : public PlanNode {
  public:
+  TABLE *source_table{nullptr};
   Imcs::RpdTable *rpd_table;
+
+  // Indicates whether storage index pruning is used.
   bool use_storage_index{false};
+  // Optional predicate for pruning.
+  std::unique_ptr<Imcs::Predicate> prune_predicate;
+
+  // list of column indices to read. Empty means read all columns
+  std::vector<uint32_t> projected_columns;
+
   Type type() const override { return Type::SCAN; }
+  enum class ScanType : uint8_t {
+    FULL_TABLE_SCAN,
+    INDEX_SCAN,
+    COVERING_INDEX_SCAN,
+    EQ_REF_SCAN
+  } scan_type{ScanType::FULL_TABLE_SCAN};
+
   std::string ToString(int indent) const override;
+
+  // Helper: check if a column should be read
+  inline bool should_read_column(uint32_t col_idx) const {
+    return projected_columns.empty() ||
+           std::find(projected_columns.begin(), projected_columns.end(), col_idx) != projected_columns.end();
+  }
 };
 
+// Filter represents a filtering operation.
 class Filter : public PlanNode {
  public:
+  Item *condition{nullptr};
+  bool materialize_subqueries{false};
+  std::unique_ptr<ShannonBase::Imcs::Predicate> predict{nullptr};
+
   Type type() const override { return Type::FILTER; }
   std::string ToString(int indent) const override;
-  std::unique_ptr<ShannonBase::Imcs::Predicate> predict{nullptr};
-  bool materialize_subqueries{false};
 };
 
+// Hash join represents a hash join operation.
 class HashJoin : public PlanNode {
  public:
   std::vector<Item *> join_conditions;
@@ -96,6 +134,7 @@ class HashJoin : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
+// Nested loop join represents a nested loop join operation.
 class NestLoopJoin : public PlanNode {
  public:
   std::vector<Item *> join_conditions;
@@ -104,6 +143,7 @@ class NestLoopJoin : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
+// LocalAgg represents a local aggregation operation.
 class LocalAgg : public PlanNode {
  public:
   std::vector<Item *> group_by;
@@ -113,12 +153,14 @@ class LocalAgg : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
+// GlobalAgg represnets a global aggregation operation.
 class GlobalAgg : public PlanNode {
  public:
   Type type() const override { return Type::GLOBAL_AGGREGATE; }
   std::string ToString(int indent) const override;
 };
 
+// TopN represents a top-N operation.
 class TopN : public PlanNode {
  public:
   ORDER *order{nullptr};
@@ -127,12 +169,14 @@ class TopN : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
+// ZeroRows represents an operation that produces zero rows.
 class ZeroRows : public PlanNode {
  public:
   Type type() const override { return Type::ZERO_ROWS; }
   std::string ToString(int indent) const override;
 };
 
+// Limit represents a limit operation.
 class Limit : public PlanNode {
  public:
   ha_rows limit{0};
@@ -144,6 +188,7 @@ class Limit : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
+// The overall query plan.
 class QueryPlan : public MemoryObject {
  public:
   QueryPlan() = default;

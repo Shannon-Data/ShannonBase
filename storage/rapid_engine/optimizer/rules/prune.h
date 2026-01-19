@@ -39,25 +39,48 @@ namespace Optimizer {
 class StorageIndexPrune : public Rule {
  public:
   StorageIndexPrune() = default;
-  StorageIndexPrune(std::shared_ptr<Query_expression> &expression);
-  virtual ~StorageIndexPrune();
-  void apply(Plan &root) override;
-  std::string name() override { return std::string("StorageIndexPrune"); }
+  virtual ~StorageIndexPrune() = default;
 
- private:
-  std::shared_ptr<Query_expression> m_query_expr;
+  std::string name() override { return std::string("StorageIndexPrune"); }
+  void apply(Plan &root) override;
 };
 
 class ProjectionPruning : public Rule {
  public:
   ProjectionPruning() = default;
-  ProjectionPruning(std::shared_ptr<Query_expression> &expression);
-  virtual ~ProjectionPruning();
-  void apply(Plan &root) override;
+  virtual ~ProjectionPruning() = default;
+
   std::string name() override { return std::string("ProjectionPruning"); }
+  void apply(Plan &root) override;
 
  private:
-  std::shared_ptr<Query_expression> m_query_expr;
+  /**
+   * Collect all referenced columns from the plan tree
+   * @param root Plan root node
+   * @return Map of "db.table" -> set of column indices
+   */
+  std::map<std::string, std::set<uint32_t>> collect_referenced_columns(Plan &root);
+
+  /**
+   * Extract columns from join conditions
+   */
+  void collect_from_join_conditions(const std::vector<Item *> &conditions,
+                                    std::map<std::string, std::set<uint32_t>> &columns);
+
+  /**
+   * Extract columns from aggregation node
+   */
+  void collect_from_aggregation(const LocalAgg *agg, std::map<std::string, std::set<uint32_t>> &columns);
+
+  /**
+   * Extract columns from filter predicates
+   */
+  void collect_from_filter(const Filter *filter, std::map<std::string, std::set<uint32_t>> &columns);
+
+  /**
+   * Visit an Item and collect field references
+   */
+  void visit_item(Item *item, std::map<std::string, std::set<uint32_t>> &columns);
 };
 
 class ColumnCollector {

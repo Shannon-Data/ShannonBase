@@ -876,20 +876,20 @@ SecondaryEngineGraphSimplificationRequestParameters SecondaryEngineCheckOptimize
 }
 
 void NotifyCreateTable(struct HA_CREATE_INFO *create_info, const char *db, const char *table_name) {
-  if (!dd::get_dictionary()->is_dd_schema_name(db) && !dd::get_dictionary()->is_system_table_name(db, table_name)) {
-    auto is_partitioned{false};
-    dd::cache::Dictionary_client *dc = current_thd->dd_client();
-    const dd::Table *table_obj = nullptr;
-    if (dc && !dc->acquire(db, table_name, &table_obj) && table_obj)
-      is_partitioned = table_obj ? (table_obj->partition_type() != dd::Table::PT_NONE) : false;
+  if (dd::get_dictionary()->is_dd_schema_name(db) || dd::get_dictionary()->is_system_table_name(db, table_name)) return;
 
-    std::string eng_str;
-    if (create_info->secondary_engine.str) eng_str = create_info->secondary_engine.str;
+  auto is_partitioned{false};
+  dd::cache::Dictionary_client *dc = current_thd->dd_client();
+  const dd::Table *table_obj = nullptr;
+  if (dc && !dc->acquire(db, table_name, &table_obj) && table_obj)
+    is_partitioned = table_obj ? (table_obj->partition_type() != dd::Table::PT_NONE) : false;
 
-    if (ShannonBase::shannon_self_load_mgr_inst) {
-      auto tid = table_obj ? table_obj->se_private_id() : 0;
-      ShannonBase::shannon_self_load_mgr_inst->add_table(tid, db, table_name, eng_str, is_partitioned);
-    }
+  std::string eng_str;
+  if (create_info->secondary_engine.str) eng_str = create_info->secondary_engine.str;
+
+  if (ShannonBase::shannon_self_load_mgr_inst) {
+    auto tid = table_obj ? table_obj->se_private_id() : 0;
+    ShannonBase::shannon_self_load_mgr_inst->add_table(tid, db, table_name, eng_str, is_partitioned);
   }
 }
 
