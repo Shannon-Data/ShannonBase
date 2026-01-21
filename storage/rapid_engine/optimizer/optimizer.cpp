@@ -19,7 +19,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, 2024, 2025, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2026, Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs optimizer.
 */
@@ -120,9 +120,8 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
         scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
       } else if (path->type == AccessPath::INDEX_RANGE_SCAN) {
         const auto &irs = path->index_range_scan();
-        if (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr) {
+        if (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr)
           table = irs.used_key_part[0].field->table;
-        }
         scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
       } else {
         table = path->table_scan().table;
@@ -140,12 +139,11 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
     } break;
     case AccessPath::HASH_JOIN: {
       auto hashjoin_node = std::make_unique<HashJoin>();
-      // gets the hash_join struct.
       auto &param = path->hash_join();
+
       // Recursively convert children
       hashjoin_node->children.push_back(translate_access_path(ctx, thd, param.outer, join));
       hashjoin_node->children.push_back(translate_access_path(ctx, thd, param.inner, join));
-
       // Extract Join Conditions
       if (param.join_predicate) {
         for (auto *cond : param.join_predicate->expr->equijoin_conditions) {
@@ -216,7 +214,25 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
 
       scan->source_table = param.table;
       scan->scan_type = ScanTable::ScanType::EQ_REF_SCAN;
-      scan->prune_predicate = Optimizer::convert_item_to_predicate(thd, param.ref);
+
+      // Check if this is a dynamic join condition (not a constant lookup)
+      bool dynamic_lookup{false};
+      for (uint i = 0; i < param.ref->key_parts; i++) {
+        Item *item = param.ref->items[i];
+        if (!item) continue;
+
+        // Check if this item references fields from other tables or is a non-constant expression
+        if (!item->const_item()) {
+          dynamic_lookup = true;
+          break;
+        }
+      }
+      // If this is a dynamic join condition, we cannot convert it to a static Predicate. Return nullptr
+      // to indicate this should be handled as a join condition during execution.
+      // This is a JOIN condition like "c.customer_id = o.customer_id"
+      // It should be handled by the join executor, not converted to a static filter predicate
+      scan->prune_predicate = dynamic_lookup ? nullptr : Optimizer::convert_item_to_predicate(thd, param.ref);
+
       return scan;
     } break;
     default:
@@ -299,15 +315,19 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(THD *thd, 
  * Index_lookup contains range conditions for index scans.
  * This function extracts the range conditions and converts them to predicates.
  *
+ * The items[] array may contain:
+ * 1. Constants lookup(for simple WHERE conditions like "id = 5")
+ * 2. Dynamic lookup Field references from other tables (for JOIN conditions like "t1.id = t2.id")
+ *
+ * For case 2, we CANNOT convert to a simple predicate with a constant value.
+ * Instead, we need to recognize this as a JOIN condition that will be evaluated dynamically during execution.
+ *
  * @param thd Thread handler
  * @param lookup Index lookup information
  * @return Converted Predicate representing the index range conditions
  */
 std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(THD *thd, Index_lookup *lookup) {
-  if (!lookup) return nullptr;
-
-  // Check if lookup is valid
-  if (lookup->key_err || lookup->key == -1 || lookup->key_parts == 0) return nullptr;
+  if (!lookup || !lookup->key_err || lookup->key == -1 || lookup->key_parts == 0) return nullptr;
 
   // Check for impossible NULL references
   if (lookup->impossible_null_ref()) return nullptr;  // This will never match
@@ -316,12 +336,10 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(THD *thd, 
   if (lookup->key_parts == 1) {
     Item *item = lookup->items[0];
     if (!item) return nullptr;
+    assert(item->const_item());
 
     // Check if this key part has a guard condition
-    if (lookup->cond_guards && lookup->cond_guards[0] && !(*lookup->cond_guards[0])) {
-      // Guard is off - this condition is disabled
-      return nullptr;
-    }
+    if (lookup->cond_guards && lookup->cond_guards[0] && !(*lookup->cond_guards[0])) return nullptr;
 
     // Extract field from the item
     if (item->type() == Item::FIELD_ITEM) {
@@ -375,10 +393,8 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(THD *thd, 
     } else
       continue;  // Not a field item - skip
 
-    // Get the value from the item
-    Imcs::PredicateValue value = extract_value_from_item(thd, item);
-    // Check for NULL-rejecting
-    bool is_null_rejecting = (lookup->null_rejecting & (1 << i));
+    Imcs::PredicateValue value = extract_value_from_item(thd, item);  // Get the value from the item
+    bool is_null_rejecting = (lookup->null_rejecting & (1 << i));     // Check for NULL-rejecting
     if (is_null_rejecting && value.is_null()) {
       // This key part rejects NULL - entire lookup is impossible
       return nullptr;  // compound will be automatically destroyed
@@ -395,7 +411,6 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_item_to_predicate(THD *thd, 
   // If only one predicate was created, return it directly
   if (compound->children.size() == 1)
     return std::move(compound->children[0]);  // Transfer ownership of the single child
-
   return compound;
 }
 
@@ -844,9 +859,8 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_cond_item_to_predicate(THD *
   }
 
   // If no children were converted, return nullptr
-  if (compound->children.empty()) {
-    return nullptr;
-  }
+  if (compound->children.empty()) return nullptr;
+
   return compound;
 }
 

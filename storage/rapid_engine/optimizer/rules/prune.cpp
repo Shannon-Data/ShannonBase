@@ -19,7 +19,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2026 Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs optimizer.
 */
@@ -35,57 +35,6 @@
 
 namespace ShannonBase {
 namespace Optimizer {
-void ColumnCollector::visit(Item *item) {
-  if (!item) return;
-
-  // 1. Handle Field Items (The Leaf Nodes we look for)
-  if (item->type() == Item::FIELD_ITEM) {
-    auto *f = static_cast<Item_field *>(item);
-    // Ensure field and table are valid
-    if (f->field && f->field->table) {
-      // Construct unique key: "db.table"
-      std::string key = std::string(f->field->table->s->db.str) + "." + std::string(f->field->table->s->table_name.str);
-
-      // Insert the field index (0-based)
-      used_columns[key].insert(f->field->field_index());
-    }
-    return;
-  }
-
-  // 2. Handle Function Items (e.g., ABS(col), col1 + col2)
-  // Item_sum (Aggregates) also inherits from Item_func
-  if (item->type() == Item::FUNC_ITEM || item->type() == Item::SUM_FUNC_ITEM) {
-    auto *func = static_cast<Item_func *>(item);
-    for (uint i = 0; i < func->argument_count(); i++) {
-      visit(func->arguments()[i]);
-    }
-    return;
-  }
-
-  // 3. Handle Condition Items (e.g., AND, OR, XOR)
-  if (item->type() == Item::COND_ITEM) {
-    auto *cond = static_cast<Item_cond *>(item);
-    List_iterator<Item> li(*cond->argument_list());
-    Item *it;
-    while ((it = li++)) {
-      visit(it);
-    }
-    return;
-  }
-
-  // 4. Handle Reference Items (e.g., references in HAVING or ORDER BY)
-  // These point to other items which might contain fields.
-  if (item->type() == Item::REF_ITEM) {
-    auto *ref = static_cast<Item_ref *>(item);
-    auto item_ptr = ref->ref_item();
-    if (item_ptr) visit(item_ptr);
-    return;
-  }
-
-  // Note: SUBSELECT_ITEM etc. are complex.
-  // Usually for projection pruning we care about the current level's table references.
-}
-
 void ProjectionPruning::apply(Plan &root) {
   if (!root) return;
 
@@ -108,36 +57,20 @@ void ProjectionPruning::apply(Plan &root) {
     if (it != referenced_columns.end()) {
       const auto &required_cols = it->second;
 
-      // Store the pruned column list in the scan node
-      // Note: You may need to add this field to ScanTable class:
-      // std::vector<uint32_t> projected_columns;
-
       // For now, we can estimate the cost reduction
       size_t total_columns = scan->rpd_table->meta().num_columns;
       size_t required_columns = required_cols.size();
 
       if (required_columns < total_columns && required_columns > 0) {
-        // Calculate pruning ratio
-        double pruning_ratio = static_cast<double>(required_columns) / total_columns;
-
-        // Adjust cost based on fewer columns to read
-        scan->cost *= pruning_ratio;
-
-        // Optional: Log the optimization
-        // printf("Projection pruning for %s: %zu/%zu columns (%.1f%% reduction)\n",
-        //        table_key.c_str(), required_columns, total_columns,
-        //        (1.0 - pruning_ratio) * 100.0);
-
-        // In a complete implementation, you would:
-        // scan->projected_columns.assign(required_cols.begin(), required_cols.end());
-        // Then during execution, only read these columns from CUs
+        double pruning_ratio = static_cast<double>(required_columns) / total_columns;  // Calculate pruning ratio
+        scan->cost *= pruning_ratio;  // Adjust cost based on fewer columns to read
+        scan->projected_columns.assign(required_cols.begin(), required_cols.end());
       }
     } else {
       // Edge case: No columns explicitly referenced
       // This can happen with COUNT(*) queries
       // In this case, we only need to read the row count metadata
       // Most efficient: just scan the IMCU headers without reading any CU data
-
       // Extreme optimization for COUNT(*)
       scan->cost *= 0.1;  // Very cheap, just count rows
     }
@@ -154,8 +87,7 @@ std::map<std::string, std::set<uint32_t>> ProjectionPruning::collect_referenced_
   auto collect_ref_columns_func = [&](PlanNode *node) {
     switch (node->type()) {
       case PlanNode::Type::HASH_JOIN:
-      case PlanNode::Type::NESTED_LOOP_JOIN: {
-        // Collect columns from join conditions
+      case PlanNode::Type::NESTED_LOOP_JOIN: {  // Collect columns from join conditions
         if (node->type() == PlanNode::Type::HASH_JOIN) {
           auto *join = static_cast<HashJoin *>(node);
           collect_from_join_conditions(join->join_conditions, columns);
@@ -163,34 +95,21 @@ std::map<std::string, std::set<uint32_t>> ProjectionPruning::collect_referenced_
           auto *join = static_cast<NestLoopJoin *>(node);
           collect_from_join_conditions(join->join_conditions, columns);
         }
-        break;
-      }
-
+      } break;
       case PlanNode::Type::LOCAL_AGGREGATE: {
         auto *agg = static_cast<LocalAgg *>(node);
         collect_from_aggregation(agg, columns);
-        break;
-      }
-
+      } break;
       case PlanNode::Type::FILTER: {
         auto *filter = static_cast<Filter *>(node);
         collect_from_filter(filter, columns);
-        break;
-      }
-
-      case PlanNode::Type::TOP_N: {
+      } break;
+      case PlanNode::Type::TOP_N: {  // Collect columns from ORDER BY
         auto *topn = static_cast<TopN *>(node);
-        // Collect columns from ORDER BY
-        if (topn->order) {
-          for (ORDER *ord = topn->order; ord; ord = ord->next) {
-            if (ord->item && *ord->item) {
-              visit_item(*ord->item, columns);
-            }
-          }
+        for (ORDER *ord = topn->order; ord; ord = ord->next) {
+          if (ord->item) visit_item(*ord->item, columns);
         }
-        break;
-      }
-
+      } break;
       default:
         break;
     }
@@ -198,7 +117,6 @@ std::map<std::string, std::set<uint32_t>> ProjectionPruning::collect_referenced_
 
   // Walk the entire plan tree and collect column references
   WalkPlan(root.get(), collect_ref_columns_func);
-
   return columns;
 }
 
@@ -215,12 +133,10 @@ void ProjectionPruning::collect_from_aggregation(const LocalAgg *agg,
   for (auto *item : agg->group_by) {
     visit_item(item, columns);
   }
-
   // Collect from ORDER BY
   for (auto *item : agg->order_by) {
     visit_item(item, columns);
   }
-
   // Collect from aggregate functions (SUM, AVG, MIN, MAX, etc.)
   for (auto *func : agg->aggregates) {
     visit_item(func, columns);
@@ -257,7 +173,6 @@ void ProjectionPruning::visit_item(Item *item, std::map<std::string, std::set<ui
 
       // Construct unique key: "db.table"
       std::string key = std::string(table->s->db.str) + "." + std::string(table->s->table_name.str);
-
       // Insert the field index (0-based)
       columns[key].insert(field->field_index());
     }
@@ -288,9 +203,7 @@ void ProjectionPruning::visit_item(Item *item, std::map<std::string, std::set<ui
   if (item->type() == Item::REF_ITEM) {
     auto *ref = static_cast<Item_ref *>(item);
     auto *ref_item = ref->ref_item();
-    if (ref_item) {
-      visit_item(ref_item, columns);
-    }
+    if (ref_item) visit_item(ref_item, columns);
     return;
   }
 
