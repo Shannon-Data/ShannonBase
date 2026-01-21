@@ -19,7 +19,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2026 Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs optimizer.
 */
@@ -95,6 +95,7 @@ class ScanTable : public PlanNode {
   std::unique_ptr<Imcs::Predicate> prune_predicate;
 
   // list of column indices to read. Empty means read all columns
+  // Then during execution, only read these columns from CUs
   std::vector<uint32_t> projected_columns;
 
   Type type() const override { return Type::SCAN; }

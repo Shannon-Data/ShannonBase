@@ -19,7 +19,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2026 Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs optimizer.
 */
@@ -181,6 +181,29 @@ class PredicatePushDown : public Rule {
    * @return Estimated selectivity [0.0, 1.0]
    */
   double estimate_selectivity(Item *predicate);
+
+  /**
+   * brief Checks if there are any remaining predicates in pending_filters, and if so, wraps a Filter node above the
+   * current node.
+   * @param node The already-processed plan node
+   * @param pending_filters The vector of predicates being passed down
+   * @return The wrapped (or unchanged) plan node
+   */
+  Plan wrap_if_pending(Plan node, std::vector<Item *> &pending_filters) {
+    if (!node) return nullptr;
+    if (pending_filters.empty()) return node;
+
+    Item *combined_cond = combine_with_and(pending_filters);
+    pending_filters.clear();
+    return create_filter_node(std::move(node), combined_cond);
+  }
+
+  /**
+   * brief Checks if the given item contains any aggregate function references.
+   * @param item The item to check
+   * @return true if the item contains aggregate function references, false otherwise
+   */
+  bool contains_aggregate_reference(Item *item);
 };
 
 class AggregationPushDown : public Rule {
@@ -192,13 +215,114 @@ class AggregationPushDown : public Rule {
   void apply(Plan &root) override;
 };
 
+/**
+ * TopN Pushdown Rule
+ *
+ * Optimization Strategy:
+ * 1. Push LIMIT below joins when safe (no ORDER BY or simple cases)
+ * 2. Convert LIMIT + ORDER BY to TopN operation
+ * 3. Push TopN as close to table scan as possible
+ *
+ * Benefits:
+ * - Reduces materialization of intermediate results
+ * - Enables early termination in scans
+ * - Better memory usage
+ *
+ * Example Transformation:
+ *
+ * BEFORE:
+ *   Limit(100)
+ *     └─ Sort(name)
+ *         └─ HashJoin
+ *             ├─ Scan(customers)  -- 1M rows
+ *             └─ Scan(orders)      -- 10M rows
+ *
+ * AFTER:
+ *   TopN(100, name)
+ *     └─ HashJoin
+ *         ├─ Scan(customers)
+ *         └─ Scan(orders)
+ */
 class TopNPushDown : public Rule {
  public:
   TopNPushDown() = default;
   virtual ~TopNPushDown() = default;
 
-  std::string name() override { return std::string("TopNPushDown"); }
   void apply(Plan &root) override;
+  std::string name() override { return std::string("TopNPushDown"); }
+
+ private:
+  /**
+   * Try to push limit/topn down through the plan tree
+   * @param node Current plan node
+   * @param pending_limit Pending limit to push down
+   * @param pending_offset Pending offset
+   * @param pending_order ORDER BY for TopN (nullptr if just LIMIT)
+   * @return Modified plan node
+   */
+  Plan push_limit_recursive(Plan &node, ha_rows pending_limit, ha_rows pending_offset, ORDER *pending_order);
+
+  /**
+   * Check if we can push limit below a join
+   * @param join Join node
+   * @param has_order_by Whether there's an ORDER BY
+   * @return true if safe to push
+   */
+  bool can_push_below_join(const Plan &join, bool has_order_by) const;
+
+  /**
+   * Create a TopN node (combines LIMIT + ORDER BY)
+   * @param child Child node
+   * @param limit Limit value
+   * @param offset Offset value
+   * @param order ORDER BY clause
+   * @return New TopN plan node
+   */
+  Plan create_topn_node(Plan child, ha_rows limit, ha_rows offset, ORDER *order);
+
+  /**
+   * Create a simple Limit node (no ORDER BY)
+   * @param child Child node
+   * @param limit Limit value
+   * @param offset Offset value
+   * @return New Limit plan node
+   */
+  Plan create_limit_node(Plan child, ha_rows limit, ha_rows offset);
+
+  /**
+   * Merge two limit operations
+   * @param outer_limit Outer limit
+   * @param outer_offset Outer offset
+   * @param inner_limit Inner limit
+   * @param inner_offset Inner offset
+   * @param result_limit Output: merged limit
+   * @param result_offset Output: merged offset
+   */
+  void merge_limits(ha_rows outer_limit, ha_rows outer_offset, ha_rows inner_limit, ha_rows inner_offset,
+                    ha_rows &result_limit, ha_rows &result_offset);
+
+  /**
+   * Check if ORDER BY only references columns from one table
+   * (useful for pushing TopN to one side of join)
+   * @param order ORDER BY clause
+   * @param available_tables Tables available in subtree
+   * @return true if ORDER BY only uses columns from available tables
+   */
+  bool order_by_uses_only_tables(ORDER *order, const std::unordered_set<std::string> &available_tables) const;
+
+  /**
+   * Get tables referenced by ORDER BY
+   * @param order ORDER BY clause
+   * @return Set of table names
+   */
+  std::unordered_set<std::string> get_order_by_tables(ORDER *order) const;
+
+  /**
+   * Get available tables in a plan subtree
+   * @param node Plan node
+   * @return Set of available table names
+   */
+  std::unordered_set<std::string> get_available_tables(const Plan &node) const;
 };
 }  // namespace Optimizer
 }  // namespace ShannonBase

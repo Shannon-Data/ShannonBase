@@ -19,7 +19,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2026 Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs optimizer.
 */
@@ -110,6 +110,9 @@ class Optimizer : public MemoryObject {
   // Rapid cost calculator, HGO AccessPath estimation.
   static bool EstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost);
 
+  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Item *item);
+  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Index_lookup *lookup);
+
  private:
   Plan get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join);
   /**
@@ -151,9 +154,6 @@ class Optimizer : public MemoryObject {
   Plan translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath *path, const JOIN *join);
 
   void fill_aggregate_info(LocalAgg *node, const JOIN *join);
-
-  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Item *item);
-  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Index_lookup *lookup);
 
   /**
    * Helper functions for Item to Predicate conversion

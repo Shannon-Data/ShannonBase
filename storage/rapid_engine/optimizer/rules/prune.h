@@ -19,7 +19,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.
+   Copyright (c) 2023, 2026 Shannon Data AI and/or its affiliates.
 
    The fundmental code for imcs optimizer.
 */
@@ -81,14 +81,6 @@ class ProjectionPruning : public Rule {
    * Visit an Item and collect field references
    */
   void visit_item(Item *item, std::map<std::string, std::set<uint32_t>> &columns);
-};
-
-class ColumnCollector {
- public:
-  // Maps "db_name.table_name" -> Set of field indices (0-based)
-  std::map<std::string, std::set<uint32_t>> used_columns;
-
-  void visit(Item *item);
 };
 }  // namespace Optimizer
 }  // namespace ShannonBase
