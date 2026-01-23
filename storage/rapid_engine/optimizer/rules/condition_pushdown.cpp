@@ -897,22 +897,15 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
     } break;
     case PlanNode::Type::TOP_N: {
       auto *topn = static_cast<TopN *>(node.get());
+      ha_rows new_limit = topn->limit;
+      ha_rows new_offset = pending_offset;
+      ORDER *new_order = topn->order;
 
       // If we have a pending limit, merge it
-      if (pending_limit > 0) {
-        ha_rows new_limit, new_offset;
-        merge_limits(pending_limit, pending_offset, topn->limit, 0,  // TopN doesn't have offset
-                     new_limit, new_offset);
-        topn->limit = new_limit;
+      if (pending_limit > 0) merge_limits(pending_limit, pending_offset, topn->limit, 0, new_limit, new_offset);
 
-        // Update cost estimate
-        topn->estimated_rows = std::min(topn->estimated_rows, new_limit);
-        topn->cost = topn->children[0]->cost * 1.2;  // Small overhead for TopN
-      }
-
-      // Continue pushing down to child
-      topn->children[0] = push_limit_recursive(topn->children[0], 0, 0, nullptr);
-      return std::move(node);
+      Plan child = std::move(topn->children[0]);
+      return push_limit_recursive(child, new_limit, new_offset, new_order);
     } break;
     case PlanNode::Type::LOCAL_AGGREGATE: {
       auto *agg = static_cast<LocalAgg *>(node.get());
@@ -930,17 +923,48 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
       }
       return std::move(node);
     } break;
-    case PlanNode::Type::HASH_JOIN:
-    case PlanNode::Type::NESTED_LOOP_JOIN: {
+    case PlanNode::Type::NESTED_LOOP_JOIN:
+    case PlanNode::Type::HASH_JOIN: {
+      /** some notes on pushing LIMIT/TOP N through JOINs:
+       * 1: Repeated Triggers for Inner Tables:
+       *
+       * Hash Join:
+       * The inner table (Build Side) is typically scanned only once to build the hash table. Adding a LIMIT to the
+       * inner table may result in an incomplete hash table and produce incorrect query results.
+       *
+       *  Nested Loop Join (NLJ):
+       * The inner table performs a scan for each row of the outer table (probe side). If you add LIMIT 10 to the inner
+       * table, it will stop after finding only 10 matching rows for the first row of the outer table. This can cause
+       * the join to miss valid matching rows (unless the business logic guarantees that each key in the inner table has
+       * at most 10 rows).
+       *
+       * 2: Order Preservation (Pipeline Property):
+       *
+       * NLJ preserves order in a streaming manner: If the driving table (left/outer table) is ordered, the output of
+       * the NLJ also follows that order. Therefore, pushing a TopN operation down to the left table can directly
+       * accelerate the entire join execution path.
+       *
+       * Hash Join, however, completely disrupts order (it's a blocking or hash-distributing operation). Even if
+       * sorting is pushed down to either side, the join output often requires re-sorting afterward. An exception is
+       * when the cost model determines that pre-sorting can reduce the size of hash buckets.
+       *
+       * 3: Prohibited Pushdown for Inner Tables:
+       * In NLJ, you must never push pending_limit down to children[1] (the inner table subplan). This would break the
+       * join predicate's semantics and produce incorrect query results.
+       *
+       * Overall Guideline:
+       * In TopNPushDown, the handling of NESTED_LOOP_JOIN should be more conservative:
+       * Left table (driving table): It is acceptable to proactively push down Limit or qualified TopN operations.
+       * Right table (driven table): Pushing down Limit operations is strictly prohibited except for specific semi-join
+       * optimizations.
+       */
       bool has_order_by = (pending_order != nullptr);
-
       // Check if we can push limit below join
       if (pending_limit > 0 && can_push_below_join(node, has_order_by)) {
         // For joins without ORDER BY, we can sometimes push limit to both sides
         if (!has_order_by) {
           // Push to both children with increased limit (safety margin)
           ha_rows child_limit = pending_limit * 10;  // Safety factor
-
           if (node->type() == PlanNode::Type::HASH_JOIN) {
             auto *hash_join = static_cast<HashJoin *>(node.get());
             hash_join->children[0] = push_limit_recursive(hash_join->children[0], child_limit, 0, nullptr);
@@ -949,6 +973,8 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
             auto *nest_join = static_cast<NestLoopJoin *>(node.get());
             nest_join->children[0] = push_limit_recursive(nest_join->children[0], child_limit, 0, nullptr);
             // For nested loop, don't push to inner side as it's executed multiple times
+            // An internal table (Right Side) cannot have a LIMIT clause because it needs to provide complete matching
+            // results for each row of the outer table.
             nest_join->children[1] = push_limit_recursive(nest_join->children[1], 0, 0, nullptr);
           }
           // Wrap join with limit
@@ -1030,33 +1056,32 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
       auto *filter = static_cast<Filter *>(node.get());
       // Push limit through filter
       filter->children[0] = push_limit_recursive(filter->children[0], pending_limit, pending_offset, pending_order);
+      filter->estimated_rows = std::min(filter->estimated_rows, filter->children[0]->estimated_rows);
       return std::move(node);
     } break;
     case PlanNode::Type::SCAN: {
-      // Reached leaf node - apply limit here if pending
+      auto scan = static_cast<ScanTable *>(node.get());
       if (pending_limit > 0) {
-        if (pending_order) {
-          return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order);
-        } else {
-          return create_limit_node(std::move(node), pending_limit, pending_offset);
-        }
+        scan->limit = pending_limit;
+        scan->order = pending_order;
+
+        if (scan->limit < scan->estimated_rows) scan->estimated_rows = scan->limit;
+        return std::move(node);
       }
       return std::move(node);
     } break;
-    default:
+    default: {
       // For other node types, process children and apply limit if pending
       for (auto &child : node->children) {
         child = push_limit_recursive(child, 0, 0, nullptr);
       }
 
       if (pending_limit > 0) {
-        if (pending_order) {
-          return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order);
-        } else {
-          return create_limit_node(std::move(node), pending_limit, pending_offset);
-        }
+        if (pending_order) return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order);
+        return create_limit_node(std::move(node), pending_limit, pending_offset);
       }
       return std::move(node);
+    }
   }
 }
 

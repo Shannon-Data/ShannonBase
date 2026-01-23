@@ -36,12 +36,20 @@
 
 namespace ShannonBase {
 namespace Optimizer {
+/**
+ * Cost Estimator Base Class
+ */
 class CostEstimator : public MemoryObject {
  public:
   enum class Type : uint8_t { NONE = 0, RPD_ENG };
 
   // to calc the cost of `query_plan`.
   virtual double cost(const Plan &query_plan) = 0;
+  // estimate join cost between two relations.
+  virtual double estimate_join_cost(ha_rows left_card, ha_rows right_card) = 0;
+  // estimate scan cost given rows and number of imcus.
+  virtual double estimate_scan_cost(ha_rows rows, size_t num_imcus) = 0;
+
   virtual inline double cpu_factor() const { return m_cpu_factor; }
   virtual inline double memory_factor() const { return m_memory_factor; }
   virtual inline double io_factor() const { return m_io_factor; }
@@ -54,18 +62,41 @@ class CostEstimator : public MemoryObject {
   virtual ~CostEstimator() = default;
 };
 
+/**
+ * RPD Engine Cost Estimator
+ */
 class RpdCostEstimator : public CostEstimator {
  public:
-  RpdCostEstimator() {
+  static constexpr double VECTOR_CPU_FACTOR = 0.001;  // vectorized CPU factor
+  static constexpr double HASH_BUILD_FACTOR = 0.02;   // Hash building cost factor
+  static constexpr double HASH_PROBE_FACTOR = 0.01;   // Hash probing cost factor
+
+  RpdCostEstimator(double cpu_factor, double mem_factor, double io_factor) {
     m_cost_estimator_type = CostEstimator::Type::RPD_ENG;
-    m_cpu_factor = 0.01;
-    m_memory_factor = 0.25;
-    m_io_factor = 1.0;
+    m_cpu_factor = cpu_factor;
+    m_memory_factor = mem_factor;
+    m_io_factor = io_factor;  // IMCS in memory, IO factor is very low
   }
 
+  /**
+   * calc the cost of `query_plan`, the total query tree.
+   */
   double cost(const Plan &query_plan) override;
+
+  /**
+   * estimate join cost between two relations. part of a query plan.
+   */
+  virtual double estimate_join_cost(ha_rows left_card, ha_rows right_card) override;
+
+  /**
+   * estimate scan cost given rows and number of imcus. part of a query plan.
+   */
+  virtual double estimate_scan_cost(ha_rows rows, size_t num_imcus) override;
 };
 
+/**
+ * Cost Model Server Singleton
+ */
 class CostModelServer : public Cost_model_server {
  public:
   CostModelServer() = default;

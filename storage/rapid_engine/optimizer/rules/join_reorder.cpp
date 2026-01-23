@@ -29,6 +29,7 @@
 #include "sql/item_cmpfunc.h"
 #include "sql/sql_class.h"
 
+#include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
@@ -198,20 +199,22 @@ JoinReOrder::JoinGraph JoinReOrder::build_join_graph(const std::vector<JoinNode>
   graph.num_tables = scans.size();
   graph.edges.resize(graph.num_tables);
 
+  auto *estimator = CostModelServer::Instance(CostEstimator::Type::RPD_ENG);
   // Create table info for each scan
   for (size_t i = 0; i < scans.size(); i++) {
     TableInfo info;
     info.table_id = i;
     info.scan_node = scans[i];
-
     auto *scan = static_cast<ScanTable *>((*scans[i]).get());
 
     // Start with MySQL's estimate as baseline
     info.mysql_cardinality = scan->estimated_rows;
     info.mysql_cost = scan->cost;
 
+    size_t total_imcus{0};
     if (scan->rpd_table) {
       // IMCS re-estimation: Use actual IMCS statistics
+      total_imcus = scan->rpd_table->meta().total_imcus.load();
       info.cardinality = scan->rpd_table->meta().total_rows.load();
       info.selectivity = 1.0;
 
@@ -219,11 +222,8 @@ JoinReOrder::JoinGraph JoinReOrder::build_join_graph(const std::vector<JoinNode>
       if (scan->use_storage_index && scan->prune_predicate) {
         // This is the KEY difference: IMCS knows about IMCU pruning
         double storage_index_selectivity = estimate_storage_index_selectivity(scan);
-
-        // MySQL doesn't account for this, so we get better estimates
         info.selectivity = storage_index_selectivity;
         info.cardinality = static_cast<ha_rows>(info.cardinality * info.selectivity);
-
         // Log if significantly different from MySQL's estimate
         if (info.cardinality < info.mysql_cardinality * 0.5) {
           DBUG_PRINT("rapid_optimizer", ("Storage Index pruning: MySQL estimated %llu rows, "
@@ -237,10 +237,8 @@ JoinReOrder::JoinGraph JoinReOrder::build_join_graph(const std::vector<JoinNode>
       info.cardinality = scan->estimated_rows;
       info.selectivity = 1.0;
     }
-
-    // IMCS-specific cost: vectorized scan is faster
-    info.cost = info.cardinality * VECTORIZED_SCAN_COST_PER_ROW;
-
+    info.cost = estimator ? estimator->estimate_scan_cost(info.cardinality, total_imcus)
+                          : static_cast<double>(info.cardinality) * 0.01;
     graph.tables.push_back(info);
   }
 
@@ -415,6 +413,7 @@ double JoinReOrder::estimate_join_selectivity(Item_field *left_field, Item_field
  * Reorder joins using dynamic programming (for small queries)
  */
 Plan JoinReOrder::reorder_with_dp(const JoinGraph &graph, Plan &root, double baseline_cost) {
+  auto cost_estimator = CostModelServer::Instance(CostEstimator::Type::RPD_ENG);
   size_t n = graph.num_tables;
   if (n == 0) return nullptr;
 
@@ -425,7 +424,13 @@ Plan JoinReOrder::reorder_with_dp(const JoinGraph &graph, Plan &root, double bas
   // Step 1: Initialize single-table states
   for (size_t i = 0; i < n; i++) {
     size_t subset = 1ULL << i;
-    dp[subset].cost = graph.tables[i].cost;
+    auto &table_info = graph.tables[i];
+    size_t imcus{0};
+    if (table_info.scan_node) {
+      auto *scan = static_cast<ScanTable *>(table_info.scan_node->get());
+      imcus = scan->rpd_table ? scan->rpd_table->meta().total_imcus.load() : 0;
+    }
+    dp[subset].cost = cost_estimator->estimate_scan_cost(graph.tables[i].cardinality, imcus);
     dp[subset].cardinality = graph.tables[i].cardinality;
     // Single tables don't need to record left/right_subset
   }
@@ -440,7 +445,7 @@ Plan JoinReOrder::reorder_with_dp(const JoinGraph &graph, Plan &root, double bas
         if (!has_join_edge(left, right, graph)) return;
 
         // Calculate the cost of current partition
-        double join_cost = calculate_join_cost(dp[left], dp[right], graph);
+        double join_cost = cost_estimator->estimate_join_cost(dp[left].cardinality, dp[right].cardinality);
         double total_cost = dp[left].cost + dp[right].cost + join_cost;
 
         // Update optimal solution for current subset
@@ -645,28 +650,7 @@ double JoinReOrder::calculate_hash_join_cost(ha_rows left_card, ha_rows right_ca
   // 2. Vectorized probe with larger side (batches of 1024 rows)
   // 3. Output materialization
 
-  ha_rows build_size = std::min(left_card, right_card);
-  ha_rows probe_size = std::max(left_card, right_card);
-
-  // Vectorized operations are faster than row-by-row
-  double build_cost = build_size * VECTORIZED_HASH_BUILD_COST;
-  double probe_cost = probe_size * VECTORIZED_HASH_PROBE_COST;
-
-  // Output cost (assume 10% selectivity if no better info)
-  ha_rows output_size = static_cast<ha_rows>(left_card * right_card * 0.1);
-  double output_cost = output_size * OUTPUT_COST_FACTOR;
-
-  return build_cost + probe_cost + output_cost;
-}
-
-/**
- * Calculate cost of joining two sub-plans
- * (using IMCS cost model)
- */
-double JoinReOrder::calculate_join_cost(const DPState &left, const DPState &right, const JoinGraph &graph) {
-  // Calculate cost of joining left and right sub-plans
-  double join_cost = calculate_hash_join_cost(left.cardinality, right.cardinality);
-  return left.cost + right.cost + join_cost;
+  return estimate_greedy_join_cost(left_card, right_card, JoinGraph{});
 }
 
 /**
@@ -826,10 +810,8 @@ Plan JoinReOrder::reconstruct_greedy_plan(const std::vector<size_t> &order, cons
  * Estimate greedy join cost
  */
 double JoinReOrder::estimate_greedy_join_cost(ha_rows left_card, ha_rows right_card, const JoinGraph &graph) {
-  ha_rows build_size = std::min(left_card, right_card);
-  ha_rows probe_size = std::max(left_card, right_card);
-
-  return build_size * HASH_BUILD_COST_FACTOR + probe_size * HASH_PROBE_COST_FACTOR;
+  auto *estimator = CostModelServer::Instance(CostEstimator::Type::RPD_ENG);
+  return estimator ? estimator->estimate_join_cost(left_card, right_card) : static_cast<double>(left_card) + right_card;
 }
 
 /**

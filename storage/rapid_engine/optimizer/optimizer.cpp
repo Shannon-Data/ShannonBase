@@ -89,12 +89,15 @@ void Optimizer::AddDefaultRules() {
 void Optimizer::Optimize(OptimizeContext *context, THD *thd, JOIN *join) {
   if (!m_registered.load()) AddDefaultRules();
 
+  auto *cost_model = CostModelServer::Instance(CostEstimator::Type::RPD_ENG);
   QueryPlan plan;
   plan.root = get_query_plan(context, thd, join);
   for (auto &rule : m_optimize_rules) {
+    Timer rule_timer;
     rule->apply(plan.root);
-    plan.total_cost = CostModelServer::Instance(CostEstimator::Type::RPD_ENG)->cost(plan.root);
   }
+
+  if (plan.root && cost_model) plan.total_cost = cost_model->cost(plan.root);
 }
 
 Plan Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join) {
@@ -205,6 +208,7 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
       topn->order = param.order;
       topn->limit = param.limit;
       topn->children.push_back(translate_access_path(ctx, thd, param.child, join));
+      topn->estimated_rows = topn->children[0]->estimated_rows;
       return topn;
     } break;
     case AccessPath::EQ_REF: {
@@ -234,8 +238,19 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
 
       return scan;
     } break;
-    default:
-      return nullptr;
+    case AccessPath::CONST_TABLE: {
+      auto zero_rows = std::make_unique<ZeroRows>();
+      zero_rows->rows_returned = 1;
+      return zero_rows;
+    } break;
+    default: {
+      // if Rapid can not handle, then re-encapsulate to a Fallback node
+      auto original = std::make_unique<MySQLNative>();
+      original->original_path = path;
+      original->estimated_rows = path->num_output_rows();
+      // no need to transalte anymore, because it's a MySQL AccessPath.
+      return original;
+    }
   }
 }
 

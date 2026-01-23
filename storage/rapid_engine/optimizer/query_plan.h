@@ -40,6 +40,7 @@ class Query_expression;
 class JOIN;
 class AccessPath;
 class Item_func;
+class ORDER;
 namespace ShannonBase {
 namespace Imcs {
 class RpdTable;
@@ -60,7 +61,8 @@ class PlanNode : public MemoryObject {
     PROJECTION,
     TOP_N,
     LIMIT,
-    ZERO_ROWS
+    ZERO_ROWS,
+    MYSQL_NATIVE
   };
 
   virtual ~PlanNode() = default;
@@ -91,12 +93,20 @@ class ScanTable : public PlanNode {
 
   // Indicates whether storage index pruning is used.
   bool use_storage_index{false};
+
   // Optional predicate for pruning.
   std::unique_ptr<Imcs::Predicate> prune_predicate;
 
   // list of column indices to read. Empty means read all columns
   // Then during execution, only read these columns from CUs
   std::vector<uint32_t> projected_columns;
+
+  // LIMIT and OFFSET for the scan
+  ha_rows limit{HA_POS_ERROR};  // HA_POS_ERROR no limit
+  ha_rows offset{0};
+
+  // ORDER BY pushdown（TopN optimization）
+  ORDER *order{nullptr};
 
   Type type() const override { return Type::SCAN; }
   enum class ScanType : uint8_t {
@@ -170,11 +180,12 @@ class TopN : public PlanNode {
   std::string ToString(int indent) const override;
 };
 
-// ZeroRows represents an operation that produces zero rows.
+// ZeroRows represents an operation that produces zero row or one row.
 class ZeroRows : public PlanNode {
  public:
   Type type() const override { return Type::ZERO_ROWS; }
   std::string ToString(int indent) const override;
+  ha_rows rows_returned{0};
 };
 
 // Limit represents a limit operation.
@@ -186,6 +197,18 @@ class Limit : public PlanNode {
   bool reject_multiple_rows;
 
   Type type() const override { return Type::LIMIT; }
+  std::string ToString(int indent) const override;
+};
+
+/**
+ * @brief The MySQLNative node is used to encapsulate original MySQL AccessPaths that are not currently handled by the
+ * Rapid engine.
+ */
+class MySQLNative : public PlanNode {
+ public:
+  AccessPath *original_path{nullptr};  // to save the original MySQL AccessPath pointer.
+
+  Type type() const override { return Type::MYSQL_NATIVE; }
   std::string ToString(int indent) const override;
 };
 

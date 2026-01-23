@@ -140,20 +140,8 @@ class JoinReOrder : public Rule {
 
  private:
   // Thresholds and limits
-  static constexpr size_t MAX_DP_TABLES = 8;                       // Use DP for ≤8 tables
-  static constexpr double REORDER_BENEFIT_THRESHOLD = 0.20;        // Only reorder if >20% improvement
-  static constexpr double CARDINALITY_DIFFERENCE_THRESHOLD = 2.0;  // Significant if >2x difference
-
-  // IMCS-specific cost factors (different from InnoDB)
-  static constexpr double VECTORIZED_HASH_BUILD_COST = 0.8;     // Vectorized build is faster
-  static constexpr double VECTORIZED_HASH_PROBE_COST = 0.4;     // Vectorized probe is faster
-  static constexpr double VECTORIZED_SCAN_COST_PER_ROW = 0.01;  // Column scan is cheap
-  static constexpr double OUTPUT_COST_FACTOR = 0.1;
-
-  // Legacy cost factors (kept for compatibility)
-  static constexpr double HASH_BUILD_COST_FACTOR = 1.0;
-  static constexpr double HASH_PROBE_COST_FACTOR = 0.5;
-  static constexpr double NESTED_LOOP_COST_FACTOR = 2.0;
+  static constexpr size_t MAX_DP_TABLES = 8;                 // Use DP for ≤8 tables
+  static constexpr double REORDER_BENEFIT_THRESHOLD = 0.20;  // Only reorder if >20% improvement
 
   /**
    * Calculate cost of current plan (MySQL's order)
@@ -214,11 +202,6 @@ class JoinReOrder : public Rule {
    * Reorder using greedy (returns nullptr if MySQL order is better)
    */
   Plan reorder_with_greedy(const JoinGraph &graph, Plan &root, double baseline_cost);
-
-  /**
-   * Calculate cost of joining two sub-plans
-   */
-  double calculate_join_cost(const DPState &left, const DPState &right, const JoinGraph &graph);
 
   /**
    * Estimate result cardinality of join

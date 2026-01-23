@@ -25,7 +25,8 @@
 */
 #include "storage/rapid_engine/optimizer/query_plan.h"
 
-#include "sql/sql_lex.h"                      //query_expression
+#include "sql/join_optimizer/access_path.h"   // AccessPath
+#include "sql/sql_lex.h"                      // query_expression
 #include "storage/rapid_engine/imcs/table.h"  // RpdTable
 
 namespace ShannonBase {
@@ -72,6 +73,11 @@ std::string Limit::ToString(int indent) const {
 }
 
 std::string ZeroRows::ToString(int indent) const { return "→ Zero Rows"; }
+
+std::string MySQLNative::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  return pad + "→ MySQL (" + std::to_string((int)original_path->type) + ")";
+}
 
 void WalkPlan(PlanNode *node, std::function<void(PlanNode *)> cb) {
   if (!node) return;
