@@ -213,6 +213,79 @@ class AggregationPushDown : public Rule {
 
   std::string name() override { return std::string("AggregationPushDown"); }
   void apply(Plan &root) override;
+
+ private:
+  /**
+   * Recursively push aggregation nodes down the plan tree
+   * @param node Current plan node
+   * @return Modified plan node
+   */
+  Plan push_aggregation_recursive(Plan &node);
+
+  /**
+   * Handle pushing aggregation below its child
+   * @param agg_node Aggregation plan node
+   * @return Modified plan node
+   */
+  Plan handle_aggregation_node(Plan &agg_node);
+
+  /**
+   * Handle pushing aggregation through a join
+   * @param join_node Join plan node
+   * @return Modified plan node
+   */
+  Plan handle_join_with_aggregation(Plan &join_node);
+
+  /**
+   * Check if two-phase aggregation can be applied
+   * @param agg Aggregation plan node
+   * @return true if two-phase aggregation is applicable
+   */
+  bool can_apply_two_phase_aggregation(const LocalAgg *agg);
+
+  /**
+   * Check if an aggregate function is decomposable
+   * @param agg_func Aggregate function item
+   * @return true if the aggregate function is decomposable
+   */
+  bool is_decomposable_aggregate(const Item_func *agg_func);
+
+  /**
+   * Create a two-phase aggregation plan
+   * @param global_agg_node Original aggregation node
+   * @return New plan with two-phase aggregation
+   */
+  Plan create_two_phase_aggregation(Plan global_agg_node);
+
+  /**
+   * Try to push aggregation below a join
+   * @param agg_node Aggregation plan node
+   * @return Modified plan node
+   */
+  Plan try_push_below_join(Plan agg_node);
+
+  /**
+   * Push aggregation to one side of the join
+   * @param agg_node Aggregation plan node
+   * @param join Join plan node
+   * @param push_to_left true to push to left side, false for right side
+   * @return Modified plan node
+   */
+  Plan push_aggregation_to_join_side(Plan agg_node, Plan &join, bool push_to_left);
+
+  /**
+   * Get tables referenced by an item
+   * @param item Item to analyze
+   * @return Set of table aliases/names
+   */
+  std::unordered_set<std::string> get_item_tables(Item *item);
+
+  /**
+   * Get available tables in a plan subtree
+   * @param node Plan node
+   * @return Set of available table names
+   */
+  std::unordered_set<std::string> get_available_tables(const Plan &node);
 };
 
 /**

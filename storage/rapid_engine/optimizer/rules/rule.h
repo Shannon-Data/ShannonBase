@@ -34,16 +34,21 @@ class Query_block;
 class CostEstimator;
 namespace ShannonBase {
 namespace Optimizer {
+/**
+ * Base class for optimization rules
+ */
 class Rule : public MemoryObject {
  public:
   Rule() = default;
   virtual ~Rule() = default;
 
+  /** Apply the optimization rule to the query plan
+   * @param root Root of the query plan
+   */
   virtual void apply(Plan &root) = 0;
   virtual std::string name() = 0;
   std::shared_ptr<CostEstimator> m_cost_estimator;
 };
-
 }  // namespace Optimizer
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_RULES_H__

@@ -36,6 +36,20 @@ class Item;
 namespace ShannonBase {
 namespace Optimizer {
 
+/**
+ * Storage Index Pruning Rule
+ *
+ * Optimization Strategy:
+ * 1. Analyze predicates applicable for storage index pruning
+ * 2. Mark ScanTable nodes to use StorageIndex for IMCU-level pruning
+ * 3. Estimate cost reduction based on expected IMCU skips
+ * 4. Enable vectorized execution for better performance
+ *
+ * Benefits:
+ * - Reduces number of IMCUs read from disk
+ * - Lowers I/O and CPU usage during scans
+ * - Improves overall query performance, especially for selective predicates
+ */
 class StorageIndexPrune : public Rule {
  public:
   StorageIndexPrune() = default;
@@ -45,6 +59,19 @@ class StorageIndexPrune : public Rule {
   void apply(Plan &root) override;
 };
 
+/**
+ * Projection Pruning Rule
+ *
+ * Optimization Strategy:
+ * 1. Identify columns that are not referenced in the final output
+ * 2. Remove unnecessary columns from intermediate processing steps
+ * 3. Reduce memory usage and improve performance by eliminating redundant data
+ *
+ * Benefits:
+ * - Reduces memory footprint during query execution
+ * - Improves performance by avoiding unnecessary column processing
+ * - Enhances overall query efficiency, especially for wide tables
+ */
 class ProjectionPruning : public Rule {
  public:
   ProjectionPruning() = default;
