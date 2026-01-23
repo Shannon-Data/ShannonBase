@@ -50,7 +50,6 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
-#include "storage/rapid_engine/optimizer/rules/const_fold_rule.h"
 #include "storage/rapid_engine/optimizer/rules/join_reorder.h"
 #include "storage/rapid_engine/optimizer/rules/prune.h"
 #include "storage/rapid_engine/utils/utils.h"

@@ -482,6 +482,8 @@ class Imcu : public MemoryObject {
   inline double get_delete_ratio() const { return m_header.delete_ratio; }
 
   inline TransactionJournal *get_transaction_journal() const { return m_header.txn_journal.get(); }
+
+  inline StorageIndex *get_storage_index() const { return m_header.storage_index.get(); }
   // CU Management
   inline CU *get_cu(uint32 col_idx) {
     auto it = m_column_units.find(col_idx);
@@ -547,6 +549,8 @@ class Imcu : public MemoryObject {
   // Memory Management
   std::shared_ptr<Utils::MemoryPool> m_memory_pool;
 
+  // IMCU-level read/write lock (protects header)
+  mutable std::shared_mutex m_header_mutex;
   imcu_header_t m_header;
 
   // key: column_id, value: CU
@@ -554,9 +558,6 @@ class Imcu : public MemoryObject {
 
   // Ordered CU index (for efficient batch operations)
   std::vector<CU *> m_cu_array;
-
-  // IMCU-level read/write lock (protects header)
-  mutable std::shared_mutex m_header_mutex;
 
   // CU creation mutex (prevents duplicate creation)
   std::mutex m_cu_creation_mutex;
