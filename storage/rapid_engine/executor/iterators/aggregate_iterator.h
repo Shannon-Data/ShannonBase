@@ -161,10 +161,10 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool m_seen_eof;
   table_map m_save_nullinfo;
 
-  int m_last_unchanged_group_item_idx;
-  int m_current_rollup_position;
-  String m_first_row_this_group;
-  String m_first_row_next_group;
+  int m_last_unchanged_grp_item_idx;
+  int m_current_rollup_pos;
+  String m_first_row_this_grp;
+  String m_first_row_next_grp;
   int m_output_slice;
 
   // Vectorization infrastructure
@@ -198,17 +198,17 @@ class VectorizedAggregateIterator final : public RowIterator {
     };
 
     std::vector<AggregateInfo> aggregate_infos;
-    bool can_vectorize_current_group{false};
+    bool can_vectorize_curr_grp{false};
     bool analysis_complete{false};
 
     // Performance state
-    size_t optimal_batch_size{1024};
+    size_t opt_batch_size{1024};
     double recent_processing_times[10]{0.0};
     size_t time_index{0};
 
     void reset() {
       current_batch.clear();
-      can_vectorize_current_group = false;
+      can_vectorize_curr_grp = false;
     }
   };
 
@@ -249,7 +249,6 @@ class VectorizedAggregateIterator final : public RowIterator {
   Field *GetPrimaryFieldForAggregate(Item_sum *item) const;
   void LogPerformanceMetrics();
 };
-
 }  // namespace Executor
 }  // namespace ShannonBase
 #endif  // __SHANNONBASE_TABLE_AGGREGATE_ITERATOR_H__

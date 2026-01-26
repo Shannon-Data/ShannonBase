@@ -72,7 +72,6 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
-#include "storage/rapid_engine/optimizer/writable_access_path.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/statistics/statistics.h"
@@ -1245,10 +1244,6 @@ static void AssertSupportedPath(const AccessPath *path) {
     default:
       break;
   }
-
-  // This secondary storage engine does not yet store anything in the auxiliary
-  // data member of AccessPath.
-  ut_a(path->secondary_engine_data == nullptr);
 }
 
 //  In this function, Dynamic offload retrieves info from rapid_statement_context and
@@ -1280,15 +1275,13 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
     assert(false);  // purecov: deadcode
   }
 
-  // now, 6 core optimization rules applying（prune，push down, reorder, etc.）
   ShannonBase::Optimizer::Optimizer rpd_optimizer;
-  rpd_optimizer.Optimize(context, thd, join);
-
-  lex->unit->root_access_path() = ShannonBase::Optimizer::WalkAndRewriteAccessPaths(
-      lex->unit->root_access_path(), join, WalkAccessPathPolicy::ENTIRE_TREE,
-      [&](AccessPath *path, const JOIN *join) -> AccessPath * {
-        return ShannonBase::Optimizer::Optimizer::OptimizeAndRewriteAccessPath(context, path, join);
-      });
+  auto plan = rpd_optimizer.Optimize(context, thd, join);
+  if (plan) {  // if optimized succeed, then using Rpd Plan to create accesspthat, otherwise, the original(mysql
+               // generated AP).
+    lex->unit->root_access_path() = plan->ToAccessPath(thd);
+    AssertSupportedPath(lex->unit->root_access_path());
+  }
   // Here, because we cannot get the parent node of corresponding iterator, we reset the type of access
   // path, then re-generates all the iterators. But, it makes the preformance regression for a `short`
   // AP workload. But, we will replace the itertor when we traverse iterator tree from root to leaves.
@@ -1359,7 +1352,7 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
     *secondary_engine_cost = cost;
   });
 
-  bool estimation_error = ShannonBase::Optimizer::Optimizer::EstimateJoinCostHGO(thd, join, secondary_engine_cost);
+  bool estimation_error = ShannonBase::Optimizer::Optimizer::RapidEstimateJoinCostHGO(thd, join, secondary_engine_cost);
   if (estimation_error) {
     SetSecondaryEngineOffloadFailedReason(thd, "Calc Rapid Estimated Join Cost failed");
     return true;

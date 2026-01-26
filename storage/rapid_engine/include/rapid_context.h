@@ -30,9 +30,9 @@
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"  //Secondary_engine_execution_context
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/optimizer/query_plan.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/trx/transaction.h"
-
 class trx_t;
 class ReadView;
 class TABLE;
@@ -57,7 +57,13 @@ extern std::unordered_map<std::string, SYS_FIELD_TYPE_ID> current_sys_field_map;
 class Rapid_statement_context : public Secondary_engine_statement_context {
  public:
   Rapid_statement_context() = default;
-  virtual ~Rapid_statement_context() {}
+  virtual ~Rapid_statement_context() = default;
+
+  void set_best_rapid_plan(ShannonBase::Optimizer::Plan plan) { m_best_rapid_plan = std::move(plan); }
+  ShannonBase::Optimizer::PlanNode *get_best_rapid_plan() { return m_best_rapid_plan.get(); }
+
+ private:
+  ShannonBase::Optimizer::Plan m_best_rapid_plan;
 };
 
 /**

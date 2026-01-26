@@ -157,8 +157,8 @@ class VectorizedTableScanIterator : public TableRowIterator {
       field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
     } else {
       Utils::ColumnMapGuard guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
-      const char *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
-      auto str_id = *(uint32 *)data_ptr;
+      auto *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
+      auto str_id = *reinterpret_cast<uint32 *>(const_cast<char *>(data_ptr));
 
       auto fld_idx = field->field_index();
       auto dict = m_cursor->table_source()->meta().fields[fld_idx].dictionary;
@@ -180,19 +180,19 @@ class VectorizedTableScanIterator : public TableRowIterator {
   }
 
  private:
-  TABLE *m_table;  ///< MySQL table structure pointer
+  TABLE *m_table;  ///< source MySQL table
 
   std::unique_ptr<ShannonBase::Imcs::RapidCursor> m_cursor;      ///< Underlying columnar data table
   std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing
 
   filter_func_t m_filter;  ///< Optional filter function for row-level filtering
 
-  size_t m_batch_size;               ///< Current batch size being used
-  size_t m_optimal_batch_size;       ///< Calculated optimal batch size
-  size_t m_current_batch_size{0};    ///< Size of the current batch being processed
-  size_t m_current_row_in_batch{0};  ///< Current row index within the batch
-  bool m_batch_exhausted{true};      ///< Flag indicating if current batch is fully processed
-  bool m_eof_reached{false};         ///< Flag indicating end of data has been reached
+  size_t m_batch_size;            ///< Current batch size being used
+  size_t m_opt_batch_size;        ///< Calculated optimal batch size
+  size_t m_curr_batch_size{0};    ///< Size of the current batch being processed
+  size_t m_curr_row_in_batch{0};  ///< Current row index within the batch
+  bool m_batch_exhausted{true};   ///< Flag indicating if current batch is fully processed
+  bool m_eof_reached{false};      ///< Flag indicating end of data has been reached
 
   std::vector<Field *> m_active_fields;  ///< Cached pointers to active fields for faster access
   std::vector<uint> m_field_indices;     ///< Field indices for column mapping
@@ -228,7 +228,6 @@ class VectorizedTableScanIterator : public TableRowIterator {
 
   mutable PerformanceMetrics m_metrics;  ///< Instance of performance metrics for this iterator
 };
-
 }  // namespace Executor
 }  // namespace ShannonBase
 #endif  // __SHANNONBASE_TABLE_SCAN_ITERATOR_H__

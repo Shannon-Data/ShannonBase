@@ -25,15 +25,23 @@
 */
 #ifndef __SHANNONBASE_OBJECT_PRUNE_RULE_H__
 #define __SHANNONBASE_OBJECT_PRUNE_RULE_H__
-
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
+#include "sql/item_func.h"
 #include "storage/rapid_engine/optimizer/rules/rule.h"
 class Query_expression;
 class Query_block;
 class Item;
+class Item_func;
 namespace ShannonBase {
+namespace Imcs {
+class RpdTable;
+}
 namespace Optimizer {
 
 /**
@@ -49,6 +57,10 @@ namespace Optimizer {
  * - Reduces number of IMCUs read from disk
  * - Lowers I/O and CPU usage during scans
  * - Improves overall query performance, especially for selective predicates
+ * Best Suited For:
+ * - Range predicates on sorted/clustered columns
+ * - Equality predicates with high selectivity
+ * - Temporal predicates (timestamp ranges)
  */
 class StorageIndexPrune : public Rule {
  public:
@@ -57,20 +69,109 @@ class StorageIndexPrune : public Rule {
 
   std::string name() override { return std::string("StorageIndexPrune"); }
   void apply(Plan &root) override;
+
+ private:
+  /**
+   * Recursively collect predicates flowing to each scan node
+   *
+   * @param node Current plan node
+   * @param scan_predicates Output map: ScanTable -> list of predicates
+   * @param current_predicates Predicates accumulated from ancestors
+   */
+  void collect_scan_predicates(PlanNode *node, std::map<ScanTable *, std::vector<Item *>> &scan_predicates,
+                               std::vector<Item *> &current_predicates);
+
+  /**
+   * Check if a predicate is suitable for Storage Index pruning
+   *
+   * Criteria:
+   * - Simple column comparisons (col OP value)
+   * - Range predicates on numeric/temporal types
+   * - Equality/IN predicates with good selectivity
+   *
+   * @param pred Predicate to analyze
+   * @param rpd_table Table metadata for column analysis
+   * @return true if predicate can benefit from Storage Index
+   */
+  bool is_storage_index_candidate(Item *pred, Imcs::RpdTable *rpd_table);
+
+  /**
+   * Check if a specific column is suitable for Storage Index
+   *
+   * @param rpd_table Table metadata
+   * @param col_idx Column index
+   * @param func_type Type of predicate (EQ, LT, GT, etc.)
+   * @return true if column benefits from indexing
+   */
+  bool is_column_suitable_for_index(Imcs::RpdTable *rpd_table, uint32_t col_idx, Item_func::Functype func_type);
+
+  /**
+   * Estimate pruning benefit and update scan node costs
+   *
+   * Updates:
+   * - scan->estimated_rows (based on selectivity)
+   * - scan->cost (based on IMCU skip ratio)
+   *
+   * @param scan Scan node to update
+   * @param predicates Predicates used for pruning
+   */
+  void estimate_pruning_benefit(ScanTable *scan, const std::vector<Item *> &predicates);
+
+  /**
+   * Estimate row-level selectivity of a predicate
+   *
+   * @param pred Predicate to estimate
+   * @param rpd_table Table for statistics lookup
+   * @return Selectivity [0.0, 1.0]
+   */
+  double estimate_predicate_selectivity(Item *pred, Imcs::RpdTable *rpd_table);
+
+  /**
+   * Estimate IMCU-level skip ratio
+   *
+   * This estimates what fraction of IMCUs can be skipped entirely
+   * based on min/max checks without reading IMCU data.
+   *
+   * @param pred Predicate to analyze
+   * @param rpd_table Table metadata
+   * @return Fraction of IMCUs that can be skipped [0.0, 1.0]
+   */
+  double estimate_imcu_skip_ratio(Item *pred, Imcs::RpdTable *rpd_table);
+
+  /**
+   * Split conjunctive condition (AND) into individual predicates
+   */
+  void split_conjunctions(Item *condition, std::vector<Item *> &predicates);
+
+  /**
+   * Get all tables referenced by an item
+   */
+  std::unordered_set<std::string> get_referenced_tables(Item *item);
+
+  /**
+   * Get available tables in a plan subtree
+   */
+  std::unordered_set<std::string> get_available_tables(const Plan &node);
+
+  /**
+   * Check if item contains aggregate function references
+   */
+  bool contains_aggregate_reference(Item *item);
 };
 
 /**
  * Projection Pruning Rule
  *
  * Optimization Strategy:
- * 1. Identify columns that are not referenced in the final output
- * 2. Remove unnecessary columns from intermediate processing steps
- * 3. Reduce memory usage and improve performance by eliminating redundant data
+ * 1. Identify columns referenced in query (SELECT, WHERE, JOIN, GROUP BY, ORDER BY)
+ * 2. Remove unnecessary columns from scan operations
+ * 3. Reduce memory footprint and I/O bandwidth
  *
  * Benefits:
- * - Reduces memory footprint during query execution
- * - Improves performance by avoiding unnecessary column processing
- * - Enhances overall query efficiency, especially for wide tables
+ * - Lower memory usage during query execution
+ * - Reduced I/O bandwidth (read fewer CUs)
+ * - Better cache utilization
+ * - Improved performance for wide tables
  */
 class ProjectionPruning : public Rule {
  public:
@@ -105,9 +206,9 @@ class ProjectionPruning : public Rule {
   void collect_from_filter(const Filter *filter, std::map<std::string, std::set<uint32_t>> &columns);
 
   /**
-   * Visit an Item and collect field references
+   * Helper function, visit an Item and collect field references
    */
-  void visit_item(Item *item, std::map<std::string, std::set<uint32_t>> &columns);
+  void collect_from_item(Item *item, std::map<std::string, std::set<uint32_t>> &columns);
 };
 }  // namespace Optimizer
 }  // namespace ShannonBase

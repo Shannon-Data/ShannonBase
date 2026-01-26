@@ -32,7 +32,9 @@
 #include <string>
 #include <vector>
 
-#include "include/my_base.h"  // ha_rows
+#include "include/my_base.h"                     // ha_rows
+#include "sql/join_optimizer/overflow_bitset.h"  // OverflowBitset
+#include "sql/olap.h"                            // olap_type
 #include "storage/rapid_engine/include/rapid_types.h"
 
 class THD;
@@ -41,6 +43,8 @@ class JOIN;
 class AccessPath;
 class Item_func;
 class ORDER;
+class Filesort;
+class JoinPredicate;
 namespace ShannonBase {
 namespace Imcs {
 class RpdTable;
@@ -59,6 +63,7 @@ class PlanNode : public MemoryObject {
     GLOBAL_AGGREGATE,
     FILTER,
     PROJECTION,
+    SORT,
     TOP_N,
     LIMIT,
     ZERO_ROWS,
@@ -68,9 +73,12 @@ class PlanNode : public MemoryObject {
   virtual ~PlanNode() = default;
   // Get the type of the plan node.
   virtual Type type() const = 0;
+  // Convert the plan node to an AccessPath for execution.
+  virtual AccessPath *ToAccessPath(THD *thd) = 0;
   // Generate a string representation of the plan node with indentation.
   virtual std::string ToString(int indent = 0) const = 0;
 
+  AccessPath *original_path{nullptr};  // to save the original MySQL AccessPath.
   // child nodes.
   std::vector<std::unique_ptr<PlanNode>> children;
   // estimated cost.
@@ -89,7 +97,7 @@ using Plan = std::unique_ptr<PlanNode>;
 class ScanTable : public PlanNode {
  public:
   TABLE *source_table{nullptr};
-  Imcs::RpdTable *rpd_table;
+  Imcs::RpdTable *rpd_table{nullptr};
 
   // Indicates whether storage index pruning is used.
   bool use_storage_index{false};
@@ -107,6 +115,9 @@ class ScanTable : public PlanNode {
 
   // ORDER BY pushdown（TopN optimization）
   ORDER *order{nullptr};
+
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::SCAN; }
   enum class ScanType : uint8_t {
@@ -128,9 +139,13 @@ class ScanTable : public PlanNode {
 // Filter represents a filtering operation.
 class Filter : public PlanNode {
  public:
+  // the source condition for filtering
   Item *condition{nullptr};
-  bool materialize_subqueries{false};
+  // predicate condition of converted `condition`, which is used for IMCS converted from `condtion`.
   std::unique_ptr<ShannonBase::Imcs::Predicate> predict{nullptr};
+
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::FILTER; }
   std::string ToString(int indent) const override;
@@ -139,8 +154,13 @@ class Filter : public PlanNode {
 // Hash join represents a hash join operation.
 class HashJoin : public PlanNode {
  public:
+  // the source join conditions from mysql `JOIN`.
   std::vector<Item *> join_conditions;
   bool allow_spill{false};
+
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
+
   Type type() const override { return Type::HASH_JOIN; }
   std::string ToString(int indent) const override;
 };
@@ -148,8 +168,16 @@ class HashJoin : public PlanNode {
 // Nested loop join represents a nested loop join operation.
 class NestLoopJoin : public PlanNode {
  public:
+  // the source join conditions in `Item` format from mysql `JOIN`.
+  const JoinPredicate *source_join_predicate{nullptr};
+  OverflowBitset equijoin_predicates;
   std::vector<Item *> join_conditions;
-  bool allow_spill{false};
+  bool pfs_batch_mode{false};
+  bool already_expanded_predicates{false};
+
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
+
   Type type() const override { return Type::NESTED_LOOP_JOIN; }
   std::string ToString(int indent) const override;
 };
@@ -157,9 +185,15 @@ class NestLoopJoin : public PlanNode {
 // LocalAgg represents a local aggregation operation.
 class LocalAgg : public PlanNode {
  public:
+  // the source condtions from mysql `group by` and `order by` and `aggregatiion funcs`.
   std::vector<Item *> group_by;
   std::vector<Item *> order_by;
   std::vector<Item_func *> aggregates;
+  olap_type olap;
+
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
+
   Type type() const override { return Type::LOCAL_AGGREGATE; }
   std::string ToString(int indent) const override;
 };
@@ -167,6 +201,9 @@ class LocalAgg : public PlanNode {
 // GlobalAgg represnets a global aggregation operation.
 class GlobalAgg : public PlanNode {
  public:
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
+
   Type type() const override { return Type::GLOBAL_AGGREGATE; }
   std::string ToString(int indent) const override;
 };
@@ -174,17 +211,46 @@ class GlobalAgg : public PlanNode {
 // TopN represents a top-N operation.
 class TopN : public PlanNode {
  public:
+  // the source condition item from mysql `order by ... limit`.
+  Filesort *filesort{nullptr};
   ORDER *order{nullptr};
-  ha_rows limit{0};
+  ha_rows limit{HA_POS_ERROR};  // HA_POS_ERROR rep: no limitation};
+
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
+
   Type type() const override { return Type::TOP_N; }
+  std::string ToString(int indent) const override;
+};
+
+// Sort represents a `oder by` operation.
+class Sort : public PlanNode {
+ public:
+  Filesort *filesort{nullptr};
+  ORDER *order{nullptr};
+
+  ha_rows limit{HA_POS_ERROR};
+  bool remove_duplicates{false};
+  bool unwrap_rollup{false};
+  bool force_sort_rowids{false};
+
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
+
+  Type type() const override { return Type::SORT; }
   std::string ToString(int indent) const override;
 };
 
 // ZeroRows represents an operation that produces zero row or one row.
 class ZeroRows : public PlanNode {
  public:
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
+
   Type type() const override { return Type::ZERO_ROWS; }
   std::string ToString(int indent) const override;
+
+  // estimated rows: 0 or 1(const table).
   ha_rows rows_returned{0};
 };
 
@@ -196,6 +262,9 @@ class Limit : public PlanNode {
   bool count_all_rows;
   bool reject_multiple_rows;
 
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
+
   Type type() const override { return Type::LIMIT; }
   std::string ToString(int indent) const override;
 };
@@ -206,7 +275,8 @@ class Limit : public PlanNode {
  */
 class MySQLNative : public PlanNode {
  public:
-  AccessPath *original_path{nullptr};  // to save the original MySQL AccessPath pointer.
+  // Convert to AccessPath for execution.
+  AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::MYSQL_NATIVE; }
   std::string ToString(int indent) const override;
@@ -220,8 +290,7 @@ class QueryPlan : public MemoryObject {
 
   std::string Explain() const;
   std::string ToString() const { return root ? root->ToString() : "EMPTY PLAN"; }
-
-  AccessPath *BuildAccessPath(THD *thd) const;
+  AccessPath *BuildAccessPath(THD *thd) const { return root ? root->ToAccessPath(thd) : nullptr; }
 
   Plan root;
   double total_cost{0.0};

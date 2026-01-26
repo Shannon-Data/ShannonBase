@@ -101,7 +101,7 @@ void JoinReOrder::apply(Plan &root) {
   // Step 1: Collect current join structure from MySQL's optimized plan
   std::vector<JoinNode> join_nodes;
   std::vector<Plan *> scan_nodes;
-  collect_join_nodes(root.get(), join_nodes, scan_nodes);
+  collect_join_nodes(root, join_nodes, scan_nodes);
 
   // If less than 2 tables, no reordering needed
   if (scan_nodes.size() < 2) return;
@@ -144,9 +144,10 @@ void JoinReOrder::apply(Plan &root) {
 /**
  * Collect all join nodes and base table scans from the plan tree
  */
-void JoinReOrder::collect_join_nodes(PlanNode *node, std::vector<JoinNode> &joins, std::vector<Plan *> &scans) {
-  if (!node) return;
+void JoinReOrder::collect_join_nodes(Plan &plan, std::vector<JoinNode> &joins, std::vector<Plan *> &scans) {
+  if (!plan) return;
 
+  PlanNode *node = plan.get();
   switch (node->type()) {
     case PlanNode::Type::HASH_JOIN:
     case PlanNode::Type::NESTED_LOOP_JOIN: {
@@ -166,20 +167,20 @@ void JoinReOrder::collect_join_nodes(PlanNode *node, std::vector<JoinNode> &join
 
       // Recursively collect from children
       for (auto &child : node->children) {
-        collect_join_nodes(child.get(), joins, scans);
+        collect_join_nodes(child, joins, scans);
       }
     } break;
     case PlanNode::Type::SCAN: {
-      scans.push_back(&node->children[0]);
+      scans.push_back(&plan);
     } break;
     case PlanNode::Type::FILTER: {
       // Descend through filter nodes
-      collect_join_nodes(node->children[0].get(), joins, scans);
+      collect_join_nodes(node->children[0], joins, scans);
     } break;
     default:
       // For other node types, descend to children
       for (auto &child : node->children) {
-        collect_join_nodes(child.get(), joins, scans);
+        collect_join_nodes(child, joins, scans);
       }
       break;
   }
@@ -256,7 +257,6 @@ JoinReOrder::JoinGraph JoinReOrder::build_join_graph(const std::vector<JoinNode>
       }
     }
   }
-
   return graph;
 }
 
@@ -325,19 +325,17 @@ int JoinReOrder::find_table_for_field(Item_field *field, const std::vector<Plan 
   if (!field->field || !field->field->table) return -1;
 
   std::string field_table =
-      std::string(field->field->table->s->db.str) + "." + std::string(field->field->table->s->table_name.str);
-
+      std::string(field->field->table->s->db.str).append(".").append(field->field->table->s->table_name.str);
   for (size_t i = 0; i < scans.size(); i++) {
     auto *scan = static_cast<ScanTable *>((*scans[i]).get());
     if (scan->source_table) {
       std::string scan_table =
-          std::string(scan->source_table->s->db.str) + "." + std::string(scan->source_table->s->table_name.str);
+          std::string(scan->source_table->s->db.str).append(".").append(scan->source_table->s->table_name.str);
       if (field_table == scan_table) {
         return static_cast<int>(i);
       }
     }
   }
-
   return -1;
 }
 
@@ -364,7 +362,6 @@ double JoinReOrder::estimate_storage_index_selectivity(ScanTable *scan) {
   } else if (auto *compound = dynamic_cast<Imcs::Compound_Predicate *>(pred)) {
     total_selectivity = compound->estimate_selectivity(storage_index);
   }
-
   return total_selectivity;
 }
 
@@ -404,7 +401,6 @@ double JoinReOrder::estimate_join_selectivity(Item_field *left_field, Item_field
 
   // Selectivity = 1 / max(NDV_left, NDV_right)
   double selectivity = 1.0 / std::max(left_ndv, right_ndv);
-
   // Clamp to reasonable range
   return std::max(0.001, std::min(1.0, selectivity));
 }
@@ -462,6 +458,10 @@ Plan JoinReOrder::reorder_with_dp(const JoinGraph &graph, Plan &root, double bas
   // Step 3: Final decision
   size_t all_tables = (1ULL << n) - 1;
   double best_cost = dp[all_tables].cost;
+  if (best_cost == 0 || dp[all_tables].left_subset == 0 || dp[all_tables].right_subset == 0) {
+    DBUG_PRINT("rapid_optimizer", ("No valid DP solution found. Keeping MySQL's original order."));
+    return nullptr;
+  }
 
   // If DP's optimal cost is not significantly better than baseline (considering threshold),
   // skip the reordering. This prevents frequent plan changes due to minor statistical fluctuations.
@@ -473,6 +473,57 @@ Plan JoinReOrder::reorder_with_dp(const JoinGraph &graph, Plan &root, double bas
 
   // Step 4: Reconstruct physical plan tree based on DP path
   return reconstruct_join_plan(all_tables, dp, graph, root);
+}
+
+/**
+ * Reconstruct join plan from DP solution
+ */
+Plan JoinReOrder::reconstruct_join_plan(size_t subset, std::vector<DPState> &dp, const JoinGraph &graph,
+                                        Plan &original_root) {
+  // Base case: Subset contains only one table, directly return the corresponding Scan node
+  if (__builtin_popcountll(subset) == 1) {
+    for (size_t i = 0; i < graph.num_tables; i++) {
+      if (subset & (1ULL << i)) {
+        // Take ownership of the original Scan node from JoinGraph
+        return std::move(*(graph.tables[i].scan_node));
+      }
+    }
+  }
+
+  // Recursive case: Reconstruct left and right sub-plans
+  size_t left_mask = dp[subset].left_subset;
+  size_t right_mask = dp[subset].right_subset;
+  if (left_mask == 0 || right_mask == 0) {
+    DBUG_PRINT("rapid_optimizer", ("Invalid DP state for subset %zu: left_mask=%zu, right_mask=%zu. "
+                                   "Likely a disconnected join graph or missing join conditions.",
+                                   subset, left_mask, right_mask));
+    return nullptr;
+  }
+
+  if ((left_mask | right_mask) != subset || (left_mask & right_mask) != 0) {
+    DBUG_PRINT("rapid_optimizer",
+               ("Invalid partition for subset %zu: left_mask=%zu, right_mask=%zu.", subset, left_mask, right_mask));
+    return nullptr;
+  }
+
+  Plan left_child = reconstruct_join_plan(left_mask, dp, graph, original_root);
+  Plan right_child = reconstruct_join_plan(right_mask, dp, graph, original_root);
+
+  if (!left_child || !right_child) return nullptr;
+
+  // Create a new HashJoin node
+  auto join = std::make_unique<HashJoin>();
+
+  // Key step: Collect all join predicates between these two subsets (t1.a = t2.a AND t1.b = t2.b ...)
+  join->join_conditions = collect_edges_between(left_mask, right_mask, graph);
+
+  join->children.push_back(std::move(left_child));
+  join->children.push_back(std::move(right_child));
+
+  // Pass statistical information
+  join->estimated_rows = dp[subset].cardinality;
+  join->cost = dp[subset].cost;
+  return join;
 }
 
 /**
@@ -603,7 +654,6 @@ double JoinReOrder::calculate_current_plan_cost(const Plan &root, const JoinGrap
       }
       break;
   }
-
   return total_cost;
 }
 
@@ -620,9 +670,7 @@ ha_rows JoinReOrder::re_estimate_cardinality(const PlanNode *node, const JoinGra
       // Find in graph (has IMCS re-estimated cardinality)
       for (const auto &table : graph.tables) {
         auto *graph_scan = static_cast<ScanTable *>((*table.scan_node).get());
-        if (graph_scan == scan) {
-          return table.cardinality;
-        }
+        if (graph_scan == scan) return table.cardinality;
       }
       // Fallback to node's estimate
       return scan->estimated_rows;
@@ -649,7 +697,6 @@ double JoinReOrder::calculate_hash_join_cost(ha_rows left_card, ha_rows right_ca
   // 1. Build hash table on smaller side
   // 2. Vectorized probe with larger side (batches of 1024 rows)
   // 3. Output materialization
-
   return estimate_greedy_join_cost(left_card, right_card, JoinGraph{});
 }
 
@@ -659,10 +706,7 @@ double JoinReOrder::calculate_hash_join_cost(ha_rows left_card, ha_rows right_ca
 ha_rows JoinReOrder::estimate_join_cardinality(const DPState &left, const DPState &right, const JoinGraph &graph) {
   // Default selectivity if no statistics available
   double selectivity = 0.1;
-
   // Try to find actual join selectivity from graph edges
-  // (This is simplified - production would track actual join conditions)
-
   ha_rows result = static_cast<ha_rows>(left.cardinality * right.cardinality * selectivity);
 
   // Clamp to reasonable range
@@ -682,7 +726,6 @@ size_t JoinReOrder::find_smallest_table(const JoinGraph &graph) {
       smallest = i;
     }
   }
-
   return smallest;
 }
 
@@ -698,7 +741,6 @@ bool JoinReOrder::has_join_edge(size_t left_subset, size_t right_subset, const J
       if (right_subset & (1ULL << edge.right_table)) return true;
     }
   }
-
   return false;
 }
 
@@ -728,46 +770,6 @@ void JoinReOrder::enumerate_partitions(size_t subset, std::function<void(size_t,
     size_t right = subset ^ left;
     if (right > 0) enum_partitions_fuc(left, right);
   }
-}
-
-/**
- * Reconstruct join plan from DP solution
- */
-Plan JoinReOrder::reconstruct_join_plan(size_t subset, std::vector<DPState> &dp, const JoinGraph &graph,
-                                        Plan &original_root) {
-  // Base case: Subset contains only one table, directly return the corresponding Scan node
-  if (__builtin_popcountll(subset) == 1) {
-    for (size_t i = 0; i < graph.num_tables; i++) {
-      if (subset & (1ULL << i)) {
-        // Take ownership of the original Scan node from JoinGraph
-        return std::move(*(graph.tables[i].scan_node));
-      }
-    }
-  }
-
-  // Recursive case: Reconstruct left and right sub-plans
-  size_t left_mask = dp[subset].left_subset;
-  size_t right_mask = dp[subset].right_subset;
-
-  Plan left_child = reconstruct_join_plan(left_mask, dp, graph, original_root);
-  Plan right_child = reconstruct_join_plan(right_mask, dp, graph, original_root);
-
-  if (!left_child || !right_child) return nullptr;
-
-  // Create a new HashJoin node
-  auto join = std::make_unique<HashJoin>();
-
-  // Key step: Collect all join predicates between these two subsets (t1.a = t2.a AND t1.b = t2.b ...)
-  join->join_conditions = collect_edges_between(left_mask, right_mask, graph);
-
-  join->children.push_back(std::move(left_child));
-  join->children.push_back(std::move(right_child));
-
-  // Pass statistical information
-  join->estimated_rows = dp[subset].cardinality;
-  join->cost = dp[subset].cost;
-
-  return join;
 }
 
 /**
@@ -802,7 +804,6 @@ Plan JoinReOrder::reconstruct_greedy_plan(const std::vector<size_t> &order, cons
     current_mask |= next_mask;
     current_plan = std::move(join);
   }
-
   return current_plan;
 }
 

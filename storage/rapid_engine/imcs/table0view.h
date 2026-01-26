@@ -62,7 +62,7 @@ class RapidCursor : public MemoryObject {
   inline RpdTable *table() const { return m_rpd_table; }
 
   // the parent table of partitions.
-  inline RpdTable *table_source() const { return m_source_rpd_table; }
+  inline RpdTable *table_source() const { return m_src_rpd_table; }
 
   // to reset to a new rpd table source. Used in Partition Table case.
   inline void active_table(RpdTable *rpd_table) {
@@ -73,12 +73,12 @@ class RapidCursor : public MemoryObject {
     m_row_buffer_cache.reserve(SHANNON_BATCH_NUM + 16);
 
     // Initialize scan position
-    m_current_row_idx.store(0, std::memory_order_release);
+    m_curr_row_idx.store(0, std::memory_order_release);
 
     m_batch_start = 0;
     m_batch_end = 0;
-    m_current_imcu_idx = 0;
-    m_current_imcu_offset = 0;
+    m_curr_imcu_idx = 0;
+    m_curr_imcu_offset = 0;
     m_scan_exhausted.store(false, std::memory_order_release);
   }
 
@@ -155,24 +155,24 @@ class RapidCursor : public MemoryObject {
   int position(row_id_t start_row_id);
 
  private:
-  std::atomic<bool> m_scan_initialized{false};
+  std::atomic<bool> m_inited{false};
 
   // the data source, an IMCS.
   TABLE *m_data_source{nullptr};
 
   // rapid table.
-  RpdTable *m_rpd_table{nullptr}, *m_source_rpd_table{nullptr} /**if it partition rpd, pointer to parent rpd. */;
+  RpdTable *m_rpd_table{nullptr}, *m_src_rpd_table{nullptr} /**if it partition rpd, pointer to parent rpd. */;
 
   // start from where.
-  std::atomic<row_id_t> m_current_row_idx{0};
+  std::atomic<row_id_t> m_curr_row_idx{0};
 
   std::atomic<bool> m_using_batch{true};
 
   size_t m_batch_start{0};  // Current batch boundaries
   size_t m_batch_end{0};
 
-  size_t m_current_imcu_idx{0};               // Which IMCU we're currently scanning
-  size_t m_current_imcu_offset{0};            // Offset within current IMCU
+  size_t m_curr_imcu_idx{0};                  // Which IMCU we're currently scanning
+  size_t m_curr_imcu_offset{0};               // Offset within current IMCU
   std::atomic<bool> m_scan_exhausted{false};  // All IMCUs scanned
 
   // context

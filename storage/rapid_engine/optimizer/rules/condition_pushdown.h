@@ -40,7 +40,7 @@ class Item_cond;
 namespace ShannonBase {
 namespace Optimizer {
 /**
- * Predicate Pushdown Rule
+ * @brief Predicate Pushdown Rule
  *
  * Optimization Strategy:
  * 1. Push filters below joins to reduce join input size
@@ -101,7 +101,7 @@ class PredicatePushDown : public Rule {
 
  private:
   /**
-   * Main pushdown logic - recursively process plan nodes
+   * @brief recursively process plan nodes
    * @param node Current plan node
    * @param pending_filters Filters waiting to be pushed down
    * @return Modified plan node
@@ -109,7 +109,7 @@ class PredicatePushDown : public Rule {
   Plan push_down_recursive(Plan &node, std::vector<Item *> &pending_filters);
 
   /**
-   * Try to push filters below a join
+   * @brief Try to push filters below a join
    * @param join Join node (HashJoin or NestLoopJoin)
    * @param pending_filters Filters to push
    * @return Modified join node
@@ -117,7 +117,7 @@ class PredicatePushDown : public Rule {
   Plan push_below_join(Plan &join, std::vector<Item *> &pending_filters);
 
   /**
-   * Push filters into a scan node
+   * @brief Push filters into a scan node
    * @param scan Scan node
    * @param pending_filters Filters to push
    * @return Modified scan with filters attached
@@ -125,21 +125,21 @@ class PredicatePushDown : public Rule {
   Plan push_into_scan(Plan &scan, std::vector<Item *> &pending_filters);
 
   /**
-   * Split a conjunctive condition (AND) into individual predicates
+   * @brief Split a conjunctive condition (AND) into individual predicates
    * @param condition Input condition
    * @param predicates Output list of individual predicates
    */
   void split_conjunctions(Item *condition, std::vector<Item *> &predicates);
 
   /**
-   * Get all tables referenced by an item
+   * @brief Get all tables referenced by an item
    * @param item Item to analyze
    * @return Set of table aliases/names
    */
   std::unordered_set<std::string> get_referenced_tables(Item *item);
 
   /**
-   * Check if a predicate can be pushed down to a specific subtree
+   * @brief Check if a predicate can be pushed down to a specific subtree
    * @param predicate Predicate to check
    * @param available_tables Tables available in the subtree
    * @return true if pushdown is safe
@@ -147,21 +147,21 @@ class PredicatePushDown : public Rule {
   bool can_push_to_subtree(Item *predicate, const std::unordered_set<std::string> &available_tables);
 
   /**
-   * Get all tables available in a plan subtree
+   * @brief Get all tables available in a plan subtree
    * @param node Plan node
    * @return Set of available table names
    */
   std::unordered_set<std::string> get_available_tables(const Plan &node);
 
   /**
-   * Combine multiple predicates with AND
+   * @brief Combine multiple predicates with AND
    * @param predicates List of predicates
    * @return Combined AND condition, or single predicate if only one
    */
   Item *combine_with_and(const std::vector<Item *> &predicates);
 
   /**
-   * Create a new Filter node
+   * @brief Create a new Filter node
    * @param child Child node
    * @param condition Filter condition
    * @return New Filter plan node
@@ -169,29 +169,29 @@ class PredicatePushDown : public Rule {
   Plan create_filter_node(Plan child, Item *condition);
 
   /**
-   * Check if an item is a simple column reference (can benefit from Storage Index)
+   * @brief Check if an item is a simple column reference (can benefit from Storage Index)
    * @param item Item to check
    * @return true if it's a simple predicate suitable for pushdown
    */
   bool is_simple_predicate(Item *item);
 
   /**
-   * Estimate selectivity of a predicate (for cost-based decisions)
+   * @brief Estimate selectivity of a predicate (for cost-based decisions)
    * @param predicate Predicate to estimate
    * @return Estimated selectivity [0.0, 1.0]
    */
   double estimate_selectivity(Item *predicate);
-
+  double estimate_function_selectivity(Item_func *func);
+  double estimate_equality_selectivity(Item_func *eq_func);
   /**
-   * brief Checks if there are any remaining predicates in pending_filters, and if so, wraps a Filter node above the
+   * @brief Checks if there are any remaining predicates in pending_filters, and if so, wraps a Filter node above the
    * current node.
    * @param node The already-processed plan node
    * @param pending_filters The vector of predicates being passed down
    * @return The wrapped (or unchanged) plan node
    */
-  Plan wrap_if_pending(Plan node, std::vector<Item *> &pending_filters) {
-    if (!node) return nullptr;
-    if (pending_filters.empty()) return node;
+  inline Plan wrap_if_pending(Plan node, std::vector<Item *> &pending_filters) {
+    if (!node || pending_filters.empty()) return node;
 
     Item *combined_cond = combine_with_and(pending_filters);
     pending_filters.clear();
@@ -199,7 +199,7 @@ class PredicatePushDown : public Rule {
   }
 
   /**
-   * brief Checks if the given item contains any aggregate function references.
+   * @brief Checks if the given item contains any aggregate function references.
    * @param item The item to check
    * @return true if the item contains aggregate function references, false otherwise
    */
@@ -216,56 +216,56 @@ class AggregationPushDown : public Rule {
 
  private:
   /**
-   * Recursively push aggregation nodes down the plan tree
+   * @brief Recursively push aggregation nodes down the plan tree
    * @param node Current plan node
    * @return Modified plan node
    */
   Plan push_aggregation_recursive(Plan &node);
 
   /**
-   * Handle pushing aggregation below its child
+   * @brief Handle pushing aggregation below its child
    * @param agg_node Aggregation plan node
    * @return Modified plan node
    */
   Plan handle_aggregation_node(Plan &agg_node);
 
   /**
-   * Handle pushing aggregation through a join
+   * @brief Handle pushing aggregation through a join
    * @param join_node Join plan node
    * @return Modified plan node
    */
   Plan handle_join_with_aggregation(Plan &join_node);
 
   /**
-   * Check if two-phase aggregation can be applied
+   * @brief Check if two-phase aggregation can be applied
    * @param agg Aggregation plan node
    * @return true if two-phase aggregation is applicable
    */
   bool can_apply_two_phase_aggregation(const LocalAgg *agg);
 
   /**
-   * Check if an aggregate function is decomposable
+   * @brief Check if an aggregate function is decomposable
    * @param agg_func Aggregate function item
    * @return true if the aggregate function is decomposable
    */
   bool is_decomposable_aggregate(const Item_func *agg_func);
 
   /**
-   * Create a two-phase aggregation plan
+   * @brief Create a two-phase aggregation plan
    * @param global_agg_node Original aggregation node
    * @return New plan with two-phase aggregation
    */
   Plan create_two_phase_aggregation(Plan global_agg_node);
 
   /**
-   * Try to push aggregation below a join
+   * @brief Try to push aggregation below a join
    * @param agg_node Aggregation plan node
    * @return Modified plan node
    */
   Plan try_push_below_join(Plan agg_node);
 
   /**
-   * Push aggregation to one side of the join
+   * @brief Push aggregation to one side of the join
    * @param agg_node Aggregation plan node
    * @param join Join plan node
    * @param push_to_left true to push to left side, false for right side
@@ -274,14 +274,14 @@ class AggregationPushDown : public Rule {
   Plan push_aggregation_to_join_side(Plan agg_node, Plan &join, bool push_to_left);
 
   /**
-   * Get tables referenced by an item
+   * @brief Get tables referenced by an item
    * @param item Item to analyze
    * @return Set of table aliases/names
    */
   std::unordered_set<std::string> get_item_tables(Item *item);
 
   /**
-   * Get available tables in a plan subtree
+   * @brief Get available tables in a plan subtree
    * @param node Plan node
    * @return Set of available table names
    */
@@ -326,7 +326,7 @@ class TopNPushDown : public Rule {
 
  private:
   /**
-   * Try to push limit/topn down through the plan tree
+   * @brief Try to push limit/topn down through the plan tree
    * @param node Current plan node
    * @param pending_limit Pending limit to push down
    * @param pending_offset Pending offset
@@ -336,7 +336,7 @@ class TopNPushDown : public Rule {
   Plan push_limit_recursive(Plan &node, ha_rows pending_limit, ha_rows pending_offset, ORDER *pending_order);
 
   /**
-   * Check if we can push limit below a join
+   * @brief Check if we can push limit below a join
    * @param join Join node
    * @param has_order_by Whether there's an ORDER BY
    * @return true if safe to push
@@ -344,7 +344,7 @@ class TopNPushDown : public Rule {
   bool can_push_below_join(const Plan &join, bool has_order_by) const;
 
   /**
-   * Create a TopN node (combines LIMIT + ORDER BY)
+   * @brief Create a TopN node (combines LIMIT + ORDER BY)
    * @param child Child node
    * @param limit Limit value
    * @param offset Offset value
@@ -354,7 +354,7 @@ class TopNPushDown : public Rule {
   Plan create_topn_node(Plan child, ha_rows limit, ha_rows offset, ORDER *order);
 
   /**
-   * Create a simple Limit node (no ORDER BY)
+   * @brief Create a simple Limit node (no ORDER BY)
    * @param child Child node
    * @param limit Limit value
    * @param offset Offset value
@@ -363,7 +363,7 @@ class TopNPushDown : public Rule {
   Plan create_limit_node(Plan child, ha_rows limit, ha_rows offset);
 
   /**
-   * Merge two limit operations
+   * @brief Merge two limit operations
    * @param outer_limit Outer limit
    * @param outer_offset Outer offset
    * @param inner_limit Inner limit
@@ -375,7 +375,7 @@ class TopNPushDown : public Rule {
                     ha_rows &result_limit, ha_rows &result_offset);
 
   /**
-   * Check if ORDER BY only references columns from one table
+   * @brief Check if ORDER BY only references columns from one table
    * (useful for pushing TopN to one side of join)
    * @param order ORDER BY clause
    * @param available_tables Tables available in subtree
@@ -384,14 +384,14 @@ class TopNPushDown : public Rule {
   bool order_by_uses_only_tables(ORDER *order, const std::unordered_set<std::string> &available_tables) const;
 
   /**
-   * Get tables referenced by ORDER BY
+   * @brief Get tables referenced by ORDER BY
    * @param order ORDER BY clause
    * @return Set of table names
    */
   std::unordered_set<std::string> get_order_by_tables(ORDER *order) const;
 
   /**
-   * Get available tables in a plan subtree
+   * @brief Get available tables in a plan subtree
    * @param node Plan node
    * @return Set of available table names
    */
