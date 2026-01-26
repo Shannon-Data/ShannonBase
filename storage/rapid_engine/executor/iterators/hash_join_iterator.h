@@ -137,21 +137,17 @@ class VectorizedHashJoinIterator final : public RowIterator {
   };
 
   std::vector<OutputRow> m_output_buffer;
-  size_t m_current_output_pos;
-
+  size_t m_curr_output_pos;
   // Batch processing state
-  size_t m_current_build_size;
-  size_t m_current_probe_size;
-
+  size_t m_curr_build_size;
+  size_t m_curr_probe_size;
   // Extra conditions
   Item *m_extra_condition;
-
   // Buffer for join key construction
   String m_join_key_buffer;
-
   // Hash table generation for optimization
-  uint64_t *m_hash_table_generation;
-  uint64_t m_last_hash_table_generation;
+  uint64_t *m_hash_table_gen;
+  uint64_t m_last_hash_table_gen;
 };
 }  // namespace Executor
 }  // namespace ShannonBase

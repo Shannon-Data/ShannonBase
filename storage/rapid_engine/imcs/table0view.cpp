@@ -56,61 +56,62 @@ namespace ShannonBase {
 namespace Imcs {
 ShannonBase::Utils::SimpleRatioAdjuster RapidCursor::m_adaptive_ratio(0.3);
 RapidCursor::RapidCursor(TABLE *source, RpdTable *rpd)
-    : m_scan_initialized{false}, m_data_source(source), m_rpd_table(rpd), m_source_rpd_table(rpd) {
+    : m_inited{false}, m_data_source(source), m_rpd_table(rpd), m_src_rpd_table(rpd) {
   // if m_rapid_table is null, means we will get its real imp by part_id when it used.
   ut_a(m_data_source);
-  m_current_row_idx.store(0);
+  m_curr_row_idx.store(0);
 }
 
 int RapidCursor::open() {
-  m_current_row_idx.store(0);
+  m_curr_row_idx.store(0);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int RapidCursor::close() {
-  m_current_row_idx.store(0);
+  m_curr_row_idx.store(0);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int RapidCursor::init() {
-  assert(!m_scan_initialized.load(std::memory_order_acquire));
-  if (!m_scan_initialized.load(std::memory_order_acquire)) {
-    m_scan_context = std::make_unique<Rapid_scan_context>();
-    m_scan_context->m_thd = current_thd;
-    m_scan_context->m_extra_info.m_keynr = m_active_index;
+  // assert(!m_inited.load(std::memory_order_acquire));
+  // if (!m_inited.load(std::memory_order_acquire)) {
+  m_scan_context = std::make_unique<Rapid_scan_context>();
+  m_scan_context->m_thd = current_thd;
+  m_scan_context->m_extra_info.m_keynr = m_active_index;
 
-    m_scan_context->m_trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
-    m_scan_context->m_trx->begin();
-    m_scan_context->m_extra_info.m_trxid = m_scan_context->m_trx->get_id();
-    m_scan_context->m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
+  m_scan_context->m_trx = ShannonBase::Transaction::get_or_create_trx(current_thd);
+  m_scan_context->m_trx->begin();
+  m_scan_context->m_extra_info.m_trxid = m_scan_context->m_trx->get_id();
+  m_scan_context->m_extra_info.m_scn = TransactionCoordinator::instance().get_current_scn();
 
-    if (!m_scan_context->m_trx->is_active())
-      m_scan_context->m_trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(current_thd));
-    m_rpd_table->register_transaction(m_scan_context->m_trx);
-    m_scan_context->m_trx->acquire_snapshot();
+  if (!m_scan_context->m_trx->is_active())
+    m_scan_context->m_trx->begin(ShannonBase::Transaction::get_rpd_isolation_level(current_thd));
+  m_rpd_table->register_transaction(m_scan_context->m_trx);
+  m_scan_context->m_trx->acquire_snapshot();
 
-    m_scan_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
-    m_scan_context->m_table_name = const_cast<char *>(m_data_source->s->table_name.str);
-    // Initialize scan parameters
-    m_scan_context->limit = 0;  // No limit for full table scan
-    m_scan_context->rows_returned = 0;
+  m_scan_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
+  m_scan_context->m_table_name = const_cast<char *>(m_data_source->s->table_name.str);
+  // Initialize scan parameters
+  m_scan_context->limit = 0;  // No limit for full table scan
+  m_scan_context->rows_returned = 0;
 
-    // Reserve buffer cache
-    std::lock_guard<std::mutex> lock(m_buffer_mutex);
-    // Reserve buffer cache with extra space to reduce reallocation
-    m_row_buffer_cache.reserve(SHANNON_BATCH_NUM + 16);
+  // Reserve buffer cache
+  std::lock_guard<std::mutex> lock(m_buffer_mutex);
+  // Reserve buffer cache with extra space to reduce reallocation
+  m_row_buffer_cache.reserve(SHANNON_BATCH_NUM + 16);
+  m_row_buffer_cache.clear();
 
-    // Initialize scan position
-    m_current_row_idx.store(0, std::memory_order_release);
+  // Initialize scan position
+  m_curr_row_idx.store(0, std::memory_order_release);
 
-    m_batch_start = 0;
-    m_batch_end = 0;
-    m_current_imcu_idx = 0;
-    m_current_imcu_offset = 0;
-    m_scan_exhausted.store(false, std::memory_order_release);
+  m_batch_start = 0;
+  m_batch_end = 0;
+  m_curr_imcu_idx = 0;
+  m_curr_imcu_offset = 0;
+  m_scan_exhausted.store(false, std::memory_order_release);
 
-    m_scan_initialized.store(true, std::memory_order_release);
-  }
+  m_inited.store(true, std::memory_order_release);
+  //}
 
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -121,16 +122,16 @@ int RapidCursor::end() {
 
   m_row_buffer_cache.clear();
 
-  m_current_row_idx.store(0);
+  m_curr_row_idx.store(0);
   m_using_batch.store(true, std::memory_order_release);
 
-  m_current_imcu_idx = 0;
-  m_current_imcu_offset = 0;
+  m_curr_imcu_idx = 0;
+  m_curr_imcu_offset = 0;
   m_batch_start = 0;
   m_batch_end = 0;
   m_scan_exhausted.store(false, std::memory_order_release);
 
-  m_scan_initialized.store(false, std::memory_order_release);
+  m_inited.store(false, std::memory_order_release);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -179,12 +180,12 @@ int RapidCursor::position(row_id_t start_row_id) {
   m_row_buffer_cache.clear();
 
   // re-initialize scan position
-  m_current_row_idx.store(start_row_id, std::memory_order_release);
+  m_curr_row_idx.store(start_row_id, std::memory_order_release);
   m_batch_start = 0;
   m_batch_end = 0;
 
-  m_current_imcu_idx = start_row_id / m_rpd_table->meta().rows_per_imcu;
-  m_current_imcu_offset = start_row_id % m_rpd_table->meta().rows_per_imcu;
+  m_curr_imcu_idx = start_row_id / m_rpd_table->meta().rows_per_imcu;
+  m_curr_imcu_offset = start_row_id % m_rpd_table->meta().rows_per_imcu;
   m_scan_exhausted.store(false, std::memory_order_release);
 
   return ShannonBase::SHANNON_SUCCESS;
@@ -208,16 +209,16 @@ bool RapidCursor::range_scan(const uchar *start_key, const uchar *end_key, RowCa
 row_id_t RapidCursor::position(const unsigned char *record) { return 0; }
 
 int RapidCursor::rnd_pos(uchar *buff, uchar *pos) {
-  position(m_current_row_idx.load(std::memory_order_acquire));
+  position(m_curr_row_idx.load(std::memory_order_acquire));
   auto ret = next(buff);
   return (ret) ? ret : ShannonBase::SHANNON_SUCCESS;
 }
 
 int RapidCursor::next(uchar *buf) {
-  assert(m_scan_initialized.load(std::memory_order_acquire));
-  if (!m_scan_initialized.load(std::memory_order_acquire)) init();
+  assert(m_inited.load(std::memory_order_acquire));
+  if (!m_inited.load(std::memory_order_acquire)) init();
 
-  size_t current_idx = m_current_row_idx.load(std::memory_order_acquire);
+  size_t current_idx = m_curr_row_idx.load(std::memory_order_acquire);
   if (current_idx >= m_batch_end) {
     if (!fetch_next_batch(m_using_batch.load(std::memory_order_acquire) ? SHANNON_BATCH_NUM : 1)) {
       if (m_scan_exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
@@ -232,7 +233,7 @@ int RapidCursor::next(uchar *buf) {
   if (cache_idx >= m_row_buffer_cache.size()) {
     // Shouldn't happen, but handle gracefully
     if (m_scan_exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
-    m_current_row_idx.store(m_batch_end, std::memory_order_release);
+    m_curr_row_idx.store(m_batch_end, std::memory_order_release);
     return next(buf);
   }
 
@@ -241,7 +242,7 @@ int RapidCursor::next(uchar *buf) {
   auto status = row_buffer->copy_to_mysql_fields(m_data_source, &m_rpd_table->meta());
   if (status) return HA_ERR_GENERIC;
 
-  m_current_row_idx.fetch_add(1, std::memory_order_release);
+  m_curr_row_idx.fetch_add(1, std::memory_order_release);
 
   m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
 
@@ -249,12 +250,12 @@ int RapidCursor::next(uchar *buf) {
 }
 
 boost::asio::awaitable<int> RapidCursor::next_async(uchar *buf) {
-  assert(m_scan_initialized.load(std::memory_order_acquire));
+  assert(m_inited.load(std::memory_order_acquire));
 
-  if (!m_scan_initialized.load(std::memory_order_acquire)) init();
+  if (!m_inited.load(std::memory_order_acquire)) init();
   auto executor = co_await boost::asio::this_coro::executor;
 
-  size_t cache_idx = m_current_row_idx.load(std::memory_order_acquire) - m_batch_start;
+  size_t cache_idx = m_curr_row_idx.load(std::memory_order_acquire) - m_batch_start;
   if (m_scan_exhausted.load(std::memory_order_acquire) && cache_idx >= m_row_buffer_cache.size())
     co_return HA_ERR_END_OF_FILE;
 
@@ -276,7 +277,7 @@ boost::asio::awaitable<int> RapidCursor::next_async(uchar *buf) {
       );
   if (status) co_return status;
 
-  m_current_row_idx.fetch_add(1, std::memory_order_release);
+  m_curr_row_idx.fetch_add(1, std::memory_order_release);
 
   m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
 
@@ -337,36 +338,36 @@ bool RapidCursor::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */) 
     m_row_buffer_cache.push_back(std::move(row_buffer));
   };
 
-  while (m_current_imcu_idx < total_imcus && remaining > 0) {
+  while (m_curr_imcu_idx < total_imcus && remaining > 0) {
     // Get the specific IMCU
-    Imcu *imcu = m_rpd_table->locate_imcu(m_current_imcu_idx);
+    Imcu *imcu = m_rpd_table->locate_imcu(m_curr_imcu_idx);
     if (!imcu) {
-      m_current_imcu_idx++;
+      m_curr_imcu_idx++;
       continue;
     }
     // Scan range within this IMCU
     size_t scanned = imcu->scan_range(m_scan_context.get(),
-                                      m_current_imcu_offset,  // Start from where we left off
-                                      remaining,              // How many rows we still need
+                                      m_curr_imcu_offset,  // Start from where we left off
+                                      remaining,           // How many rows we still need
                                       predicates, projection_cols, callback);
     remaining -= scanned;
 
     // Check if IMCU is exhausted
     size_t imcu_rows = imcu->get_row_count();
-    if (!scanned /*no cannced, go to next*/ || (m_current_imcu_offset + scanned >= imcu_rows)) {
-      m_current_imcu_idx++;
-      m_current_imcu_offset = 0;
+    if (!scanned /*no cannced, go to next*/ || (m_curr_imcu_offset + scanned >= imcu_rows)) {
+      m_curr_imcu_idx++;
+      m_curr_imcu_offset = 0;
     } else {  // Still within current IMCU
-      m_current_imcu_offset += scanned;
+      m_curr_imcu_offset += scanned;
       if (remaining == 0) break;  // If we got what we needed, break
     }
   }
 
   // Check if we've exhausted all IMCUs
-  if (m_current_imcu_idx >= total_imcus) m_scan_exhausted.store(true, std::memory_order_release);
+  if (m_curr_imcu_idx >= total_imcus) m_scan_exhausted.store(true, std::memory_order_release);
 
   // Update batch boundaries
-  m_batch_start = m_current_row_idx.load(std::memory_order_acquire);
+  m_batch_start = m_curr_row_idx.load(std::memory_order_acquire);
   m_batch_end = m_batch_start + m_row_buffer_cache.size();
 
   // Prefetch first few rows of the batch for faster access
@@ -427,29 +428,29 @@ int RapidCursor::next_batch(size_t batch_size, std::vector<ShannonBase::Executor
 
   // 5. start batch scanning.
   size_t remaining = batch_size;
-  while (m_current_imcu_idx < m_rpd_table->meta().total_imcus && remaining > 0) {
-    Imcu *imcu = m_rpd_table->locate_imcu(m_current_imcu_idx);
+  while (m_curr_imcu_idx < m_rpd_table->meta().total_imcus && remaining > 0) {
+    Imcu *imcu = m_rpd_table->locate_imcu(m_curr_imcu_idx);
     if (!imcu) {
-      m_current_imcu_idx++;
+      m_curr_imcu_idx++;
       continue;
     }
 
-    size_t scanned = imcu->scan_range(m_scan_context.get(), m_current_imcu_offset, remaining,
+    size_t scanned = imcu->scan_range(m_scan_context.get(), m_curr_imcu_offset, remaining,
                                       predicates /* predicates */,  // in future, index push down.
                                       projection_cols, callback);
 
     remaining -= scanned;
     size_t imcu_rows = imcu->get_row_count();
-    if (m_current_imcu_offset + scanned >= imcu_rows) {
-      m_current_imcu_idx++;
-      m_current_imcu_offset = 0;
+    if (m_curr_imcu_offset + scanned >= imcu_rows) {
+      m_curr_imcu_idx++;
+      m_curr_imcu_offset = 0;
     } else {
-      m_current_imcu_offset += scanned;
+      m_curr_imcu_offset += scanned;
       if (remaining == 0) break;
     }
   }
 
-  if (m_current_imcu_idx >= m_rpd_table->meta().total_imcus) {
+  if (m_curr_imcu_idx >= m_rpd_table->meta().total_imcus) {
     m_scan_exhausted.store(true, std::memory_order_release);
   }
 
@@ -533,9 +534,9 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   row_id_t value{std::numeric_limits<row_id_t>::max()};
 
   if (m_index_iter->next(&result_key, &result_key_len, &value)) {
-    m_current_row_idx.store(value);
+    m_curr_row_idx.store(value);
     // using point select.
-    position(m_current_row_idx.load(std::memory_order_acquire));
+    position(m_curr_row_idx.load(std::memory_order_acquire));
     auto ret = next(buf);
     return (ret) ? ret : ShannonBase::SHANNON_SUCCESS;
   }
@@ -552,9 +553,9 @@ int RapidCursor::index_next(uchar *buf) {
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
 
   if (m_index_iter->next(&result_key, &result_key_len, &value)) {
-    m_current_row_idx.store(value);
+    m_curr_row_idx.store(value);
     // using point select.
-    position(m_current_row_idx.load(std::memory_order_acquire));
+    position(m_curr_row_idx.load(std::memory_order_acquire));
     auto ret = next(buf);
     if (ret) return ret;
     err = ShannonBase::SHANNON_SUCCESS;

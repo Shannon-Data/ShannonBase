@@ -44,7 +44,6 @@
 #include "sql/table.h"                        //Table
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
-#include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -54,11 +53,10 @@
 #include "storage/rapid_engine/optimizer/rules/prune.h"
 #include "storage/rapid_engine/utils/utils.h"
 
-#include "storage/rapid_engine/optimizer/path/access_path.h"
-#include "storage/rapid_engine/populate/log_commons.h"
-
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/optimizer/path/access_path.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 
 namespace ShannonBase {
 namespace Optimizer {
@@ -76,28 +74,37 @@ std::string Timer::lap_formatted() {
 }
 
 void Optimizer::AddDefaultRules() {
-  // becareful the order of rules. The rules be applied in the order of added.
-  m_optimize_rules.emplace_back(std::make_unique<StorageIndexPrune>());
-  m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
+// becareful the order of rules. The rules be applied in the order of added.
+#if 0
+  // Make predicates available
   m_optimize_rules.emplace_back(std::make_unique<PredicatePushDown>());
+  // Use predicates for IMCU pruning
+  m_optimize_rules.emplace_back(std::make_unique<StorageIndexPrune>());
+  // After predicates clarify needed columns
+  m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
+  // Before aggregation changes structure
   m_optimize_rules.emplace_back(std::make_unique<TopNPushDown>());
+  // aggregation push down to lower level operators
   m_optimize_rules.emplace_back(std::make_unique<AggregationPushDown>());
+  // Re-run after structure changes
+  m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
+  // Final reordering with all optimizations
   m_optimize_rules.emplace_back(std::make_unique<JoinReOrder>());
+#endif
   m_registered.store(true, std::memory_order_relaxed);
 }
 
-void Optimizer::Optimize(OptimizeContext *context, THD *thd, JOIN *join) {
+Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const JOIN *join) {
   if (!m_registered.load()) AddDefaultRules();
+  if (m_optimize_rules.empty()) return nullptr;
 
-  auto *cost_model = CostModelServer::Instance(CostEstimator::Type::RPD_ENG);
   QueryPlan plan;
-  plan.root = get_query_plan(context, thd, join);
+  plan.root = get_query_plan(const_cast<OptimizeContext *>(context), const_cast<THD *>(thd), const_cast<JOIN *>(join));
   for (auto &rule : m_optimize_rules) {
     Timer rule_timer;
     rule->apply(plan.root);
   }
-
-  if (plan.root && cost_model) plan.total_cost = cost_model->cost(plan.root);
+  return std::move(plan.root);
 }
 
 Plan Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join) {
@@ -116,6 +123,7 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
     case AccessPath::INDEX_SCAN:
     case AccessPath::INDEX_RANGE_SCAN: {
       auto scan = std::make_unique<ScanTable>();
+      scan->original_path = path;
       TABLE *table{nullptr};
       if (path->type == AccessPath::INDEX_SCAN) {
         table = path->index_scan().table;
@@ -135,12 +143,14 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
       auto table_id = share ? share->m_tableid : 0;
       scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
                                                 : Imcs::Imcs::instance()->get_rpd_table(table_id);
+      assert(scan->rpd_table);
       scan->estimated_rows = path->num_output_rows();
       scan->source_table = table;
       return scan;
     } break;
     case AccessPath::HASH_JOIN: {
       auto hashjoin_node = std::make_unique<HashJoin>();
+      hashjoin_node->original_path = path;
       auto &param = path->hash_join();
 
       // Recursively convert children
@@ -160,88 +170,123 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
     } break;
     case AccessPath::NESTED_LOOP_JOIN: {
       auto nestloop_node = std::make_unique<NestLoopJoin>();
+      nestloop_node->original_path = path;
       auto &param = path->nested_loop_join();
 
       // Recursively convert children
       nestloop_node->children.push_back(translate_access_path(ctx, thd, param.outer, join));
       nestloop_node->children.push_back(translate_access_path(ctx, thd, param.inner, join));
+      nestloop_node->pfs_batch_mode = param.pfs_batch_mode;
+      nestloop_node->already_expanded_predicates = param.already_expanded_predicates;
       // Extract Join Conditions
+      nestloop_node->source_join_predicate = param.join_predicate;
       if (param.join_predicate) {
         for (auto *cond : param.join_predicate->expr->equijoin_conditions) {
           nestloop_node->join_conditions.push_back(cond);
         }
         // Handle other conditions...
       }
+      nestloop_node->equijoin_predicates = param.equijoin_predicates;
       return nestloop_node;
     } break;
     case AccessPath::AGGREGATE: {
       auto agg = std::make_unique<LocalAgg>();
+      agg->original_path = path;
       auto param = path->aggregate();
 
+      agg->olap = param.olap;
       agg->children.push_back(translate_access_path(ctx, thd, param.child, join));
       fill_aggregate_info(agg.get(), join);
       return agg;
     } break;
     case AccessPath::LIMIT_OFFSET: {
-      auto topn = std::make_unique<Limit>();
+      auto limit = std::make_unique<Limit>();
+      limit->original_path = path;
       auto param = path->limit_offset();
 
-      topn->limit = param.limit;
-      topn->offset = param.offset;
-      topn->children.push_back(translate_access_path(ctx, thd, param.child, join));
-      return topn;
+      limit->limit = param.limit;
+      limit->offset = param.offset;
+      limit->children.push_back(translate_access_path(ctx, thd, param.child, join));
+      return limit;
     } break;
     case AccessPath::FILTER: {
       auto filter = std::make_unique<Filter>();
+      filter->original_path = path;
       auto param = path->filter();
 
       filter->condition = param.condition;
       filter->children.push_back(translate_access_path(ctx, thd, param.child, join));
       filter->predict = Optimizer::convert_item_to_predicate(thd, param.condition);
-      filter->materialize_subqueries = param.materialize_subqueries;
       return filter;
     } break;
     case AccessPath::SORT: {
-      auto topn = std::make_unique<TopN>();
       auto param = path->sort();
-
-      topn->order = param.order;
-      topn->limit = param.limit;
-      topn->children.push_back(translate_access_path(ctx, thd, param.child, join));
-      topn->estimated_rows = topn->children[0]->estimated_rows;
-      return topn;
+      // only it has `limit` clause, can be converted to `TopN`
+      if (param.limit > 0 && param.limit != HA_POS_ERROR) {
+        auto topn = std::make_unique<TopN>();
+        topn->original_path = path;
+        topn->order = param.order;
+        topn->limit = param.limit;
+        topn->filesort = param.filesort;
+        topn->children.push_back(translate_access_path(ctx, thd, param.child, join));
+        topn->estimated_rows = std::min(topn->children[0]->estimated_rows, (ha_rows)param.limit);
+        return topn;
+      } else {
+        // without `LIMIT` clause, keep it as `order by`
+        auto sort = std::make_unique<Sort>();
+        sort->original_path = path;
+        sort->order = param.order;
+        sort->filesort = param.filesort;
+        sort->limit = HA_POS_ERROR;
+        sort->children.push_back(translate_access_path(ctx, thd, param.child, join));
+        sort->estimated_rows = sort->children[0]->estimated_rows;
+        sort->remove_duplicates = param.remove_duplicates;
+        sort->unwrap_rollup = param.unwrap_rollup;
+        sort->force_sort_rowids = param.force_sort_rowids;
+        return sort;
+      }
+      assert(false);
+      return nullptr;
     } break;
     case AccessPath::EQ_REF: {
-      auto scan = std::make_unique<ScanTable>();
       auto param = path->eq_ref();
-
-      scan->source_table = param.table;
-      scan->scan_type = ScanTable::ScanType::EQ_REF_SCAN;
-
       // Check if this is a dynamic join condition (not a constant lookup)
       bool dynamic_lookup{false};
       for (uint i = 0; i < param.ref->key_parts; i++) {
         Item *item = param.ref->items[i];
         if (!item) continue;
-
         // Check if this item references fields from other tables or is a non-constant expression
         if (!item->const_item()) {
           dynamic_lookup = true;
           break;
         }
       }
-      // If this is a dynamic join condition, we cannot convert it to a static Predicate. Return nullptr
-      // to indicate this should be handled as a join condition during execution.
-      // This is a JOIN condition like "c.customer_id = o.customer_id"
-      // It should be handled by the join executor, not converted to a static filter predicate
-      scan->prune_predicate = dynamic_lookup ? nullptr : Optimizer::convert_item_to_predicate(thd, param.ref);
 
-      return scan;
-    } break;
-    case AccessPath::CONST_TABLE: {
-      auto zero_rows = std::make_unique<ZeroRows>();
-      zero_rows->rows_returned = 1;
-      return zero_rows;
+      if (!dynamic_lookup) {
+        auto scan = std::make_unique<ScanTable>();
+        scan->original_path = path;
+        scan->source_table = param.table;
+        scan->scan_type = ScanTable::ScanType::EQ_REF_SCAN;
+        auto share = ShannonBase::shannon_loaded_tables->get(scan->source_table->s->db.str,
+                                                             scan->source_table->s->table_name.str);
+        auto table_id = share ? share->m_tableid : 0;
+        scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
+                                                  : Imcs::Imcs::instance()->get_rpd_table(table_id);
+        assert(scan->rpd_table);
+
+        // If this is a dynamic join condition, we cannot convert it to a static Predicate. Return nullptr
+        // to indicate this should be handled as a join condition during execution.
+        // This is a JOIN condition like "c.customer_id = o.customer_id"
+        // It should be handled by the join executor, not converted to a static filter predicate
+        scan->prune_predicate = Optimizer::convert_item_to_predicate(thd, param.ref);
+        return scan;
+      } else {  // if it's dynamic join condition(such as a.id = b.id), the join condition cannot be pushed down.
+        auto eq_ref = std::make_unique<MySQLNative>();
+        eq_ref->original_path = path;
+        return eq_ref;
+      }
+      assert(false);
+      return nullptr;  // not reach forever.
     } break;
     default: {
       // if Rapid can not handle, then re-encapsulate to a Fallback node
@@ -1143,12 +1188,6 @@ Imcs::PredicateOperator Optimizer::swap_operator(Imcs::PredicateOperator op) {
     default:
       return op;
   }
-}
-
-bool Optimizer::EstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost) {
-  *secondary_engine_cost = join.best_read * 0.8;
-  // using Rapid Engine cost estimatino algorithm.
-  return false;
 }
 
 bool Optimizer::CanPathBeVectorized(AccessPath *path) {

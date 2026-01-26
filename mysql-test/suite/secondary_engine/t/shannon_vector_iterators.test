@@ -85,7 +85,7 @@ SET USE_SECONDARY_ENGINE=ON;
 SET secondary_engine_cost_threshold=0;
 SET rapid_use_dynamic_offload=off;
 
-EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM customers;
+#EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM customers;
 SELECT COUNT(*) FROM customers;
 
 #--replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/

@@ -58,12 +58,12 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
       m_first_input(first_input),
       m_state(State::BUILDING_HASH_TABLE),
       m_hash_table(m_hash_table_size),
-      m_current_output_pos(0),
-      m_current_build_size(0),
-      m_current_probe_size(0),
+      m_curr_output_pos(0),
+      m_curr_build_size(0),
+      m_curr_probe_size(0),
       m_extra_condition(nullptr),
-      m_hash_table_generation(hash_table_generation),
-      m_last_hash_table_generation(0) {
+      m_hash_table_gen(hash_table_generation),
+      m_last_hash_table_gen(0) {
   // Handle extra conditions similar to original implementation
   if (extra_conditions.size() == 1) {
     m_extra_condition = extra_conditions[0];
@@ -87,10 +87,9 @@ bool VectorizedHashJoinIterator::Init() {
   m_build_input->SetNullRowFlag(false);
 
   // Check for hash table reuse optimization
-  if (m_hash_table_generation != nullptr && *m_hash_table_generation == m_last_hash_table_generation &&
-      !m_build_columns.empty()) {
+  if (m_hash_table_gen != nullptr && *m_hash_table_gen == m_last_hash_table_gen && !m_build_columns.empty()) {
     m_state = State::PROBING_HASH_TABLE;
-    m_current_output_pos = 0;
+    m_curr_output_pos = 0;
     m_output_buffer.clear();
     return m_probe_input->Init();
   }
@@ -111,7 +110,7 @@ bool VectorizedHashJoinIterator::Init() {
   }
 
   m_state = State::BUILDING_HASH_TABLE;
-  m_current_output_pos = 0;
+  m_curr_output_pos = 0;
   m_output_buffer.clear();
 
   return false;
@@ -152,13 +151,13 @@ int VectorizedHashJoinIterator::Read() {
         if (ProcessProbeBatch()) return 1;  // Error
         if (!m_output_buffer.empty()) {
           m_state = State::READING_FROM_OUTPUT_BUFFER;
-          m_current_output_pos = 0;
+          m_curr_output_pos = 0;
         }
         continue;
 
       case State::READING_FROM_OUTPUT_BUFFER:
-        if (m_current_output_pos < m_output_buffer.size()) {
-          const OutputRow &output_row = m_output_buffer[m_current_output_pos++];
+        if (m_curr_output_pos < m_output_buffer.size()) {
+          const OutputRow &output_row = m_output_buffer[m_curr_output_pos++];
 
           // Load probe row data
           if (LoadRowFromColumnChunks(m_probe_columns, output_row.probe_row_idx, m_probe_input_tables)) {
@@ -200,12 +199,12 @@ bool VectorizedHashJoinIterator::BuildHashTable() {
     chunk.clear();
   }
 
-  m_current_build_size = 0;
+  m_curr_build_size = 0;
 
   // Read all build input data in batches
   while (ReadBuildBatch()) {
     // Process the batch and add to hash table
-    for (size_t i = 0; i < m_current_build_size; ++i) {
+    for (size_t i = 0; i < m_curr_build_size; ++i) {
       uint64_t hash = ComputeHashFromJoinConditions(m_build_columns, i);
       size_t bucket_idx = hash % m_hash_table_size;
 
@@ -223,15 +222,15 @@ bool VectorizedHashJoinIterator::BuildHashTable() {
     }
   }
 
-  if (m_hash_table_generation != nullptr) {
-    m_last_hash_table_generation = *m_hash_table_generation;
+  if (m_hash_table_gen != nullptr) {
+    m_last_hash_table_gen = *m_hash_table_gen;
   }
 
   return false;
 }
 
 bool VectorizedHashJoinIterator::ReadBuildBatch() {
-  m_current_build_size = 0;
+  m_curr_build_size = 0;
 
   for (size_t i = 0; i < m_batch_size; ++i) {
     int result = m_build_input->Read();
@@ -243,14 +242,14 @@ bool VectorizedHashJoinIterator::ReadBuildBatch() {
       return false;  // Error
     }
 
-    m_current_build_size++;
+    m_curr_build_size++;
   }
 
-  return m_current_build_size > 0;
+  return m_curr_build_size > 0;
 }
 
 bool VectorizedHashJoinIterator::ReadProbeBatch() {
-  m_current_probe_size = 0;
+  m_curr_probe_size = 0;
 
   // Clear probe columns
   for (auto &chunk : m_probe_columns) {
@@ -267,17 +266,17 @@ bool VectorizedHashJoinIterator::ReadProbeBatch() {
       return false;  // Error
     }
 
-    m_current_probe_size++;
+    m_curr_probe_size++;
   }
 
-  return m_current_probe_size > 0;
+  return m_curr_probe_size > 0;
 }
 
 bool VectorizedHashJoinIterator::ProcessProbeBatch() {
   m_output_buffer.clear();
 
   // Process each probe row
-  for (size_t probe_idx = 0; probe_idx < m_current_probe_size; ++probe_idx) {
+  for (size_t probe_idx = 0; probe_idx < m_curr_probe_size; ++probe_idx) {
     uint64_t hash = ComputeHashFromJoinConditions(m_probe_columns, probe_idx);
     size_t bucket_idx = hash % m_hash_table_size;
 

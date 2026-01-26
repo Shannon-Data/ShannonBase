@@ -34,6 +34,7 @@
 
 #include "include/field_types.h"  //enum_field_types
 
+#include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
@@ -92,7 +93,7 @@ class Optimizer : public MemoryObject {
 
   void AddDefaultRules();
 
-  void Optimize(OptimizeContext *context, THD *thd, JOIN *join);
+  Plan Optimize(const OptimizeContext *context, const THD *thd, const JOIN *join);
 
   /**
    * @brief Optimizes and rewrites access paths for secondary engine with custom optimizer
@@ -107,11 +108,18 @@ class Optimizer : public MemoryObject {
    */
   static AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join);
 
-  // Rapid cost calculator, HGO AccessPath estimation.
-  static bool EstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost);
-
   static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Item *item);
   static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Index_lookup *lookup);
+
+  // Rapid cost calculator, HGO AccessPath estimation.
+  static inline bool RapidEstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost) {
+    // using Rapid Engine cost estimation algorithm.
+    auto *cost_model =
+        ShannonBase::Optimizer::CostModelServer::Instance(ShannonBase::Optimizer::CostEstimator::Type::RPD_ENG);
+    if (cost_model) *secondary_engine_cost = cost_model->cost(&join);
+
+    return false;
+  }
 
  private:
   Plan get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join);

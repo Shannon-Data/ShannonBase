@@ -31,8 +31,11 @@
 #include "sql/item_sum.h"
 #include "sql/sql_class.h"
 
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
+#include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
 
@@ -111,9 +114,15 @@ Plan PredicatePushDown::push_down_recursive(Plan &node, std::vector<Item *> &pen
       limit->children[0] = push_down_recursive(limit->children[0], pending_filters);
       return wrap_if_pending(std::move(node), pending_filters);
     } break;
+    case PlanNode::Type::SORT: {
+      auto *sort = static_cast<Sort *>(node.get());
+      // Push filters below SORT/TOP_N
+      sort->children[0] = push_down_recursive(sort->children[0], pending_filters);
+      return std::move(node);
+    } break;
     case PlanNode::Type::TOP_N: {
       auto *topn = static_cast<TopN *>(node.get());
-      // Push filters below TOP_N
+      // Push filters below SORT/TOP_N
       topn->children[0] = push_down_recursive(topn->children[0], pending_filters);
       return std::move(node);
     } break;
@@ -126,12 +135,12 @@ Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending
   bool is_hash_join = (join->type() == PlanNode::Type::HASH_JOIN);
 
   // Get references to children (don't move them yet)
-  Plan *left_child_ptr = &join->children[0];
-  Plan *right_child_ptr = &join->children[1];
+  auto &left_child = join->children[0];
+  auto &right_child = join->children[1];
 
   // Get available tables in each subtree
-  auto left_tables = get_available_tables(*left_child_ptr);
-  auto right_tables = get_available_tables(*right_child_ptr);
+  auto left_tables = get_available_tables(left_child);
+  auto right_tables = get_available_tables(right_child);
   auto all_tables = left_tables;
   all_tables.insert(right_tables.begin(), right_tables.end());
 
@@ -141,7 +150,7 @@ Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending
   std::vector<Item *> join_filters;       // References both sides
   std::vector<Item *> remaining_filters;  // Can't be pushed (e.g., subqueries)
 
-  for (auto *filter : pending_filters) {
+  for (const auto &filter : pending_filters) {
     auto referenced = get_referenced_tables(filter);
     bool all_in_left{true}, all_in_right{true}, has_external{false};
 
@@ -169,20 +178,16 @@ Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending
 
   // in-place processing the remaining filters
   join->children[0] = push_down_recursive(join->children[0], left_filters);
-  if (!left_filters.empty())
-    join->children[0] = create_filter_node(std::move(join->children[0]), combine_with_and(left_filters));
-
+  join->children[0] = wrap_if_pending(std::move(join->children[0]), left_filters);
   join->children[1] = push_down_recursive(join->children[1], right_filters);
-  if (!right_filters.empty()) {
-    join->children[1] = create_filter_node(std::move(join->children[1]), combine_with_and(right_filters));
-  }
+  join->children[1] = wrap_if_pending(std::move(join->children[1]), right_filters);
 
   if (!join_filters.empty()) {
     // only simple cond can be pushed into join conditions (for hash join build)
     // the other complex predicates are kept as remaining filters to be handled
     // at upper apply level or wrapped above the Join
     std::vector<Item *> pushable_to_join;
-    for (auto *jf : join_filters) {
+    for (const auto &jf : join_filters) {
       if (is_simple_predicate(jf))
         pushable_to_join.push_back(jf);
       else
@@ -207,22 +212,21 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
   auto *scan_node = static_cast<ScanTable *>(scan.get());
   if (pending_filters.empty()) return std::move(scan);
   std::string table_key;
-  if (scan_node->source_table) {
-    table_key =
-        std::string(scan_node->source_table->s->db.str) + "." + std::string(scan_node->source_table->s->table_name.str);
-  }
+  assert(scan_node->source_table);
+  table_key =
+      std::string(scan_node->source_table->s->db.str).append(".").append(scan_node->source_table->s->table_name.str);
 
   std::vector<Item *> to_storage_engine;  // simple predicate：push down to (Storage Index)
   std::vector<Item *> to_filter_node;     // complex predicate：to be Filter operator
   std::vector<Item *> remaining_others;   // not belonging to this table
 
-  for (auto *filter : pending_filters) {
+  for (const auto &filter : pending_filters) {
     auto referenced = get_referenced_tables(filter);
     bool belongs_here =
         referenced.empty() || (referenced.size() == 1 && referenced.find(table_key) != referenced.end());
     if (belongs_here) {
       if (is_simple_predicate(filter)) {
-        // simnple predicate,（如 a=1, b>10）：push to storage engine
+        // simple predicate,（such a=1, b>10）：push to storage engine
         to_storage_engine.push_back(filter);
       } else {
         // complex predicate（such ABS(id)=5）：can not pushdown，to be Filter in-place.
@@ -238,27 +242,36 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
   if (!to_storage_engine.empty()) {
     // stores predicate into ScanNode，perform IMCU Skipping.
     auto predicates = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
-    for (auto &f : to_storage_engine) {
+    for (const auto &f : to_storage_engine) {
       auto child_pre = Optimizer::convert_item_to_predicate(current_thd, f);
-      if (!child_pre) continue;
+      if (!child_pre) {
+        to_filter_node.push_back(f);
+        continue;
+      }
       predicates->add_child(std::move(child_pre));
     }
-    scan_node->prune_predicate = std::move(predicates);
-    scan_node->use_storage_index = true;
 
-    // update Cost：due to pushdown.
-    double total_selectivity = 1.0;
-    for (auto &f : to_storage_engine) {
-      total_selectivity *= estimate_selectivity(f);
+    if (predicates->children.empty()) {
+      // all predicates failed to convert, then degrade to filter node
+      to_filter_node.insert(to_filter_node.end(), to_storage_engine.begin(), to_storage_engine.end());
+    } else {
+      scan_node->prune_predicate = std::move(predicates);
+      scan_node->use_storage_index = true;
+
+      // update Cost：due to pushdown.
+      double total_selectivity = 1.0;
+      for (const auto &f : to_storage_engine) {
+        total_selectivity *= estimate_selectivity(f);
+      }
+      scan_node->estimated_rows = static_cast<ha_rows>(scan_node->estimated_rows * total_selectivity);
+      scan_node->cost *= (0.1 + 0.9 * total_selectivity);
     }
-    scan_node->estimated_rows = static_cast<ha_rows>(scan_node->estimated_rows * total_selectivity);
-    scan_node->cost *= (0.1 + 0.9 * total_selectivity);
   }
 
   if (!to_filter_node.empty()) {
     Item *combined_cond = combine_with_and(to_filter_node);
     double filter_selectivity = 1.0;
-    for (auto *f : to_filter_node) {
+    for (const auto &f : to_filter_node) {
       filter_selectivity *= estimate_selectivity(f);
     }
     auto filter_node = create_filter_node(std::move(scan), combined_cond);
@@ -276,7 +289,7 @@ void PredicatePushDown::split_conjunctions(Item *condition, std::vector<Item *> 
     auto *cond = static_cast<Item_cond *>(condition);
     if (cond->functype() == Item_func::COND_AND_FUNC) {
       // Recursively split each argument
-      List_iterator<Item> li(*cond->argument_list());
+      List_iterator<Item> li(*(cond->argument_list()));
       Item *item;
       while ((item = li++)) {
         split_conjunctions(item, predicates);
@@ -284,7 +297,6 @@ void PredicatePushDown::split_conjunctions(Item *condition, std::vector<Item *> 
       return;
     }
   }
-
   // Not an AND - add as-is
   predicates.push_back(condition);
 }
@@ -298,35 +310,34 @@ std::unordered_set<std::string> PredicatePushDown::get_referenced_tables(Item *i
   if (used == 0) return tables;  // Constant expression
 
   // Walk the item tree to find table references
-  std::function<void(Item *)> visit = [&](Item *it) {
+  std::function<void(Item *)> find_table_refs_func = [&](Item *it) {
     if (!it) return;
-
     if (it->type() == Item::FIELD_ITEM) {
       auto *field_item = static_cast<Item_field *>(it);
       if (field_item->field && field_item->field->table) {
         TABLE *table = field_item->field->table;
-        std::string key = std::string(table->s->db.str) + "." + std::string(table->s->table_name.str);
+        std::string key = std::string(table->s->db.str).append(".").append(table->s->table_name.str);
         tables.insert(key);
       }
     } else if (it->type() == Item::FUNC_ITEM || it->type() == Item::SUM_FUNC_ITEM) {
       auto *func = static_cast<Item_func *>(it);
       for (uint i = 0; i < func->argument_count(); i++) {
-        visit(func->arguments()[i]);
+        find_table_refs_func(func->arguments()[i]);
       }
     } else if (it->type() == Item::COND_ITEM) {
       auto *cond = static_cast<Item_cond *>(it);
-      List_iterator<Item> li(*cond->argument_list());
+      List_iterator<Item> li(*(cond->argument_list()));
       Item *arg;
       while ((arg = li++)) {
-        visit(arg);
+        find_table_refs_func(arg);
       }
     } else if (it->type() == Item::REF_ITEM) {
-      auto *ref = static_cast<Item_ref *>(it);
-      if (ref->ref_item()) visit(ref->ref_item());
+      auto ref = static_cast<Item_ref *>(it);
+      if (ref->ref_item()) find_table_refs_func(ref->ref_item());
     }
   };
 
-  visit(item);
+  find_table_refs_func(item);
   return tables;
 }
 
@@ -346,11 +357,10 @@ std::unordered_set<std::string> PredicatePushDown::get_available_tables(const Pl
 
   if (node->type() == PlanNode::Type::SCAN) {
     auto *scan = static_cast<ScanTable *>(node.get());
-    if (scan->source_table) {
-      std::string key =
-          std::string(scan->source_table->s->db.str) + "." + std::string(scan->source_table->s->table_name.str);
-      tables.insert(key);
-    }
+    assert(scan->source_table);
+    std::string key =
+        std::string(scan->source_table->s->db.str).append(".").append(scan->source_table->s->table_name.str);
+    tables.insert(key);
   } else {
     // Recursively collect from children
     for (const auto &child : node->children) {
@@ -417,6 +427,12 @@ bool PredicatePushDown::contains_aggregate_reference(Item *item) {
     }
   }
 
+  if (item->type() == Item::REF_ITEM) {
+    auto *ref = static_cast<Item_ref *>(item);
+    if (ref->ref_item()) {
+      return contains_aggregate_reference(ref->ref_item());
+    }
+  }
   // for `Item_field` or `Item_cache` etc.，does not contain aggregate reference.
   return false;
 }
@@ -424,26 +440,106 @@ bool PredicatePushDown::contains_aggregate_reference(Item *item) {
 double PredicatePushDown::estimate_selectivity(Item *predicate) {
   if (!predicate) return 1.0;
 
-  // Simplified selectivity estimation
-  if (predicate->type() == Item::FUNC_ITEM) {
-    auto *func = static_cast<Item_func *>(predicate);
-    switch (func->functype()) {
-      case Item_func::EQ_FUNC:
-        return 0.1;  // Equality is very selective
-      case Item_func::NE_FUNC:
-        return 0.9;
-      case Item_func::LT_FUNC:
-      case Item_func::LE_FUNC:
-      case Item_func::GT_FUNC:
-      case Item_func::GE_FUNC:
-        return 0.33;  // Range predicates
-      case Item_func::BETWEEN:
-        return 0.25;
-      default:
-        return 0.5;
+  switch (predicate->type()) {
+    case Item::FUNC_ITEM: {
+      auto *func = static_cast<Item_func *>(predicate);
+      return estimate_function_selectivity(func);
+    } break;
+    case Item::COND_ITEM: {
+      auto *cond = static_cast<Item_cond *>(predicate);
+      if (cond->functype() == Item_func::COND_AND_FUNC) {
+        // AND: Under the assumption of independence, the selection rates are multiplied
+        double sel = 1.0;
+        List_iterator<Item> li(*cond->argument_list());
+        Item *item;
+        while ((item = li++)) {
+          sel *= estimate_selectivity(item);
+        }
+        return sel;
+      } else if (cond->functype() == Item_func::COND_OR_FUNC) {
+        // OR: 1 - the probability that none of the items will occur
+        double complement = 1.0;
+        List_iterator<Item> li(*cond->argument_list());
+        Item *item;
+        while ((item = li++)) {
+          complement *= (1.0 - estimate_selectivity(item));
+        }
+        return 1.0 - complement;
+      }
+    } break;
+    case Item::REF_ITEM: {
+      auto *ref = static_cast<Item_ref *>(predicate);
+      return estimate_selectivity(ref->ref_item());
+    } break;
+    default:
+      break;
+  }
+  return 0.5;  // other conditions, using default selectivity.
+}
+
+double PredicatePushDown::estimate_function_selectivity(Item_func *func) {
+  switch (func->functype()) {
+    case Item_func::EQ_FUNC:
+    case Item_func::EQUAL_FUNC:  // <=> operator
+      return estimate_equality_selectivity(func);
+    case Item_func::NE_FUNC:
+      return 1.0 - estimate_equality_selectivity(func);
+    case Item_func::LT_FUNC:
+    case Item_func::GT_FUNC:
+    case Item_func::LE_FUNC:
+    case Item_func::GE_FUNC:
+      return 0.3333;  // Experience value: range query
+    case Item_func::BETWEEN:
+      return 0.1;  // Experience value: BETWEEN is typically stricter than a single range
+    case Item_func::IN_FUNC: {
+      // Rough estimate: (1/NDV) * number of arguments, but capped at 0.5
+      double eq_sel = estimate_equality_selectivity(func);
+      // The first parameter is a column, followed by a list of constants.
+      return std::min(0.5, eq_sel * (func->argument_count() - 1));
+    } break;
+    case Item_func::ISNULL_FUNC:
+      return 0.01;  // Assume the data is compact and has fewer NULLs
+    case Item_func::ISNOTNULL_FUNC:
+      return 0.99;
+    case Item_func::LIKE_FUNC:
+      return 0.2;  // fuzzy query
+    default:
+      return 0.5;
+  }
+}
+
+double PredicatePushDown::estimate_equality_selectivity(Item_func *eq_func) {
+  Item **args = eq_func->arguments();
+  Item_field *field_item = nullptr;
+
+  // 1. Try to find the field (col = const or const = col)
+  if (args[0]->type() == Item::FIELD_ITEM) {
+    field_item = static_cast<Item_field *>(args[0]);
+  } else if (args[1]->type() == Item::FIELD_ITEM) {
+    field_item = static_cast<Item_field *>(args[1]);
+  }
+
+  // 2. try to get NDV (unique values count) from the rapid imcs (column statistics)
+  if (field_item && field_item->field) {
+    // Assume you have an interface to get storage engine statistics
+    uint32_t col_idx = field_item->field->field_index();
+    auto share = ShannonBase::shannon_loaded_tables->get(field_item->field->table->s->db.str,
+                                                         field_item->field->table->s->table_name.str);
+    auto rpd_table = Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+    if (rpd_table) {
+      auto ndv = rpd_table->meta().fields[col_idx].distinct_count;
+      if (ndv > 0) return 1.0 / static_cast<double>(ndv);
+    }
+
+    // If there is no statistics, make heuristic guesses based on whether it's a primary key or unique index
+    if (field_item->field->all_flags() & PRI_KEY_FLAG) {
+      return 0.0001;  // Very high filtering rate
     }
   }
-  return 0.5;  // Default: 50% selectivity
+
+  // 3. Fallback default value
+  // For equality queries, 0.01 (1%) is a better default than 0.1 for modern big data distributions
+  return 0.01;
 }
 
 /**
@@ -493,32 +589,27 @@ Plan AggregationPushDown::push_aggregation_recursive(Plan &node) {
   switch (node->type()) {
     case PlanNode::Type::LOCAL_AGGREGATE: {
       return handle_aggregation_node(node);
-    }
-
+    } break;
     case PlanNode::Type::HASH_JOIN:
     case PlanNode::Type::NESTED_LOOP_JOIN: {
       return handle_join_with_aggregation(node);
-    }
-
+    } break;
     case PlanNode::Type::FILTER: {
       auto *filter = static_cast<Filter *>(node.get());
       filter->children[0] = push_aggregation_recursive(filter->children[0]);
       return std::move(node);
-    }
-
+    } break;
     case PlanNode::Type::LIMIT:
     case PlanNode::Type::TOP_N: {
       // Recursively process child first
       auto *limit = static_cast<Limit *>(node.get());
       limit->children[0] = push_aggregation_recursive(limit->children[0]);
       return std::move(node);
-    }
-
+    } break;
     case PlanNode::Type::SCAN: {
       // Leaf node - no further pushdown possible
       return std::move(node);
-    }
-
+    } break;
     default:
       // For other node types, recursively process children
       for (auto &child : node->children) {
@@ -552,7 +643,6 @@ Plan AggregationPushDown::handle_aggregation_node(Plan &agg_node) {
       agg->children[0]->type() == PlanNode::Type::NESTED_LOOP_JOIN) {
     return try_push_below_join(std::move(agg_node));
   }
-
   return std::move(agg_node);
 }
 
@@ -574,7 +664,6 @@ Plan AggregationPushDown::handle_join_with_aggregation(Plan &join_node) {
     nest_join->children[0] = push_aggregation_recursive(nest_join->children[0]);
     nest_join->children[1] = push_aggregation_recursive(nest_join->children[1]);
   }
-
   return std::move(join_node);
 }
 
@@ -589,9 +678,7 @@ Plan AggregationPushDown::handle_join_with_aggregation(Plan &join_node) {
 bool AggregationPushDown::can_apply_two_phase_aggregation(const LocalAgg *agg) {
   // Check if all aggregate functions are decomposable
   for (auto *agg_func : agg->aggregates) {
-    if (!is_decomposable_aggregate(agg_func)) {
-      return false;
-    }
+    if (!is_decomposable_aggregate(agg_func)) return false;
   }
 
   // Estimate benefit: only worthwhile if we reduce data significantly
@@ -669,7 +756,6 @@ Plan AggregationPushDown::create_two_phase_aggregation(Plan global_agg_node) {
   // Transform aggregate functions for local phase
   for (auto *global_func : global_agg->aggregates) {
     auto *sum_func = static_cast<Item_sum *>(global_func);
-
     switch (sum_func->sum_func()) {
       case Item_sum::SUM_FUNC:
       case Item_sum::MIN_FUNC:
@@ -677,12 +763,10 @@ Plan AggregationPushDown::create_two_phase_aggregation(Plan global_agg_node) {
         // Direct mapping: local_sum -> global_sum
         local_agg->aggregates.push_back(global_func);
         break;
-
       case Item_sum::COUNT_FUNC:
         // local_count -> global_sum(local_count)
         local_agg->aggregates.push_back(global_func);
         break;
-
       case Item_sum::AVG_FUNC:
         // AVG needs decomposition into SUM and COUNT
         // local: SUM(x) as partial_sum, COUNT(x) as partial_count
@@ -690,7 +774,6 @@ Plan AggregationPushDown::create_two_phase_aggregation(Plan global_agg_node) {
         // For now, keep as-is (simplified - production code would transform)
         local_agg->aggregates.push_back(global_func);
         break;
-
       default:
         // Non-decomposable - keep in global only
         break;
@@ -699,15 +782,12 @@ Plan AggregationPushDown::create_two_phase_aggregation(Plan global_agg_node) {
 
   // Connect: LocalAgg -> original child
   local_agg->children.push_back(std::move(global_agg->children[0]));
-
   // Estimate costs
   local_agg->estimated_rows = global_agg->estimated_rows;
   local_agg->cost = local_agg->children[0]->cost * 1.5;  // Local agg overhead
-
   // Connect: GlobalAgg -> LocalAgg
   global_agg->children[0] = std::move(local_agg);
   global_agg->cost = global_agg->children[0]->cost * 1.2;  // Global agg overhead
-
   return global_agg_node;
 }
 
@@ -801,7 +881,6 @@ Plan AggregationPushDown::push_aggregation_to_join_side(Plan agg_node, Plan &joi
   // Update join cost
   join->cost = join->children[0]->cost + join->children[1]->cost;
   join->estimated_rows = agg->estimated_rows;
-
   // Remove the top-level aggregation and return just the join
   return std::move(join);
 }
@@ -864,7 +943,6 @@ std::unordered_set<std::string> AggregationPushDown::get_available_tables(const 
 
 void TopNPushDown::apply(Plan &root) {
   if (!root) return;
-
   // Start recursion with no pending limit
   root = push_limit_recursive(root, 0, 0, nullptr);
 }
@@ -883,7 +961,6 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
   switch (node->type()) {
     case PlanNode::Type::LIMIT: {
       auto *limit_node = static_cast<Limit *>(node.get());
-
       // Merge with pending limit if exists
       ha_rows new_limit = limit_node->limit;
       ha_rows new_offset = limit_node->offset;
@@ -915,11 +992,8 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
       agg->children[0] = push_limit_recursive(agg->children[0], 0, 0, nullptr);
       if (pending_limit > 0) {
         // Wrap with limit node
-        if (pending_order) {
-          return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order);
-        } else {
-          return create_limit_node(std::move(node), pending_limit, pending_offset);
-        }
+        return pending_order ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order)
+                             : create_limit_node(std::move(node), pending_limit, pending_offset);
       }
       return std::move(node);
     } break;
@@ -1043,11 +1117,8 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
         }
 
         if (pending_limit > 0) {
-          if (pending_order) {
-            return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order);
-          } else {
-            return create_limit_node(std::move(node), pending_limit, pending_offset);
-          }
+          return pending_order ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order)
+                               : create_limit_node(std::move(node), pending_limit, pending_offset);
         }
         return std::move(node);
       }
@@ -1062,11 +1133,17 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
     case PlanNode::Type::SCAN: {
       auto scan = static_cast<ScanTable *>(node.get());
       if (pending_limit > 0) {
-        scan->limit = pending_limit;
-        scan->order = pending_order;
-
-        if (scan->limit < scan->estimated_rows) scan->estimated_rows = scan->limit;
-        return std::move(node);
+        if (pending_order) {
+          // Scan can't sort - wrap in TopN
+          scan->limit = pending_limit + pending_offset;  // Scan more to account for offset
+          return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order);
+        } else {
+          // Just limit, no sort
+          scan->limit = pending_limit;
+          scan->offset = pending_offset;
+          scan->estimated_rows = std::min(scan->estimated_rows, pending_limit + pending_offset);
+          return std::move(node);
+        }
       }
       return std::move(node);
     } break;
@@ -1077,8 +1154,8 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
       }
 
       if (pending_limit > 0) {
-        if (pending_order) return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order);
-        return create_limit_node(std::move(node), pending_limit, pending_offset);
+        return pending_order ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order)
+                             : create_limit_node(std::move(node), pending_limit, pending_offset);
       }
       return std::move(node);
     }
@@ -1208,7 +1285,7 @@ std::unordered_set<std::string> TopNPushDown::get_order_by_tables(ORDER *order) 
         auto *field_item = static_cast<Item_field *>(it);
         if (field_item->field && field_item->field->table) {
           TABLE *table = field_item->field->table;
-          std::string key = std::string(table->s->db.str) + "." + std::string(table->s->table_name.str);
+          std::string key = std::string(table->s->db.str).append(".").append(table->s->table_name.str);
           tables.insert(key);
         }
       } else if (it->type() == Item::FUNC_ITEM) {
@@ -1243,7 +1320,7 @@ std::unordered_set<std::string> TopNPushDown::get_available_tables(const Plan &n
     auto *scan = static_cast<ScanTable *>(node.get());
     if (scan->source_table) {
       std::string key =
-          std::string(scan->source_table->s->db.str) + "." + std::string(scan->source_table->s->table_name.str);
+          std::string(scan->source_table->s->db.str).append(".").append(scan->source_table->s->table_name.str);
       tables.insert(key);
     }
   } else {

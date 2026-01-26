@@ -52,19 +52,19 @@ VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_de
       m_state(READING_FIRST_ROW),
       m_seen_eof(false),
       m_save_nullinfo(0),
-      m_last_unchanged_group_item_idx(0),
-      m_current_rollup_position(-1),
+      m_last_unchanged_grp_item_idx(0),
+      m_current_rollup_pos(-1),
       m_output_slice(-1) {
   // Reserve buffers for row save/restore (identical to original)
   const size_t upper_data_length = ComputeRowSizeUpperBound(m_tables);
-  m_first_row_this_group.reserve(upper_data_length);
-  m_first_row_next_group.reserve(upper_data_length);
+  m_first_row_this_grp.reserve(upper_data_length);
+  m_first_row_next_grp.reserve(upper_data_length);
 
   // Calculate optimal batch size based on expected data
   if (expected_rows > 0) {
     // Conservative sizing for aggregation workloads
     size_t est_batch_size = static_cast<size_t>(std::min(expected_rows / 10.0, 2048.0));
-    m_vectorizer.optimal_batch_size = std::clamp(est_batch_size, m_min_batch_size, m_max_batch_size);
+    m_vectorizer.opt_batch_size = std::clamp(est_batch_size, m_min_batch_size, m_max_batch_size);
   }
 
   InitializeVectorization();
@@ -74,13 +74,13 @@ bool VectorizedAggregateIterator::Init() {
   // Identical initialization to original AggregateIterator
   assert(!m_join->tmp_table_param.precomputed_group_by);
 
-  m_current_rollup_position = -1;
+  m_current_rollup_pos = -1;
   SetRollupLevel(INT_MAX);
 
   // Restore table buffers if re-executing
-  if (!m_first_row_next_group.is_empty()) {
-    LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_next_group.ptr()));
-    m_first_row_next_group.length(0);
+  if (!m_first_row_next_grp.is_empty()) {
+    LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_next_grp.ptr()));
+    m_first_row_next_grp.length(0);
   }
 
   if (m_source->Init()) {
@@ -95,7 +95,7 @@ bool VectorizedAggregateIterator::Init() {
   // Initialize state
   m_seen_eof = false;
   m_save_nullinfo = 0;
-  m_last_unchanged_group_item_idx = 0;
+  m_last_unchanged_grp_item_idx = 0;
   m_state = READING_FIRST_ROW;
 
   // Reset vectorization state
@@ -148,12 +148,12 @@ int VectorizedAggregateIterator::Read() {
 
       // Set initial group values
       (void)update_item_cache_if_changed(m_join->group_fields);
-      StoreFromTableBuffers(m_tables, &m_first_row_next_group);
-      m_last_unchanged_group_item_idx = 0;
+      StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+      m_last_unchanged_grp_item_idx = 0;
 
       // Analyze aggregates for vectorization if not done yet
       if (!m_vectorizer.analysis_complete) {
-        m_vectorizer.can_vectorize_current_group = AnalyzeAggregatesForVectorization();
+        m_vectorizer.can_vectorize_curr_grp = AnalyzeAggregatesForVectorization();
         m_vectorizer.analysis_complete = true;
       }
 
@@ -166,13 +166,13 @@ int VectorizedAggregateIterator::Read() {
       SetRollupLevel(m_join->send_group_parts);
 
       // Swap and restore group row (identical to original)
-      swap(m_first_row_this_group, m_first_row_next_group);
-      LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_group.ptr()));
+      swap(m_first_row_this_grp, m_first_row_next_grp);
+      LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
 
       // Reset and initialize aggregates
       for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) {
         if (m_rollup) {
-          if (down_cast<Item_rollup_sum_switcher *>(*item)->reset_and_add_for_rollup(m_last_unchanged_group_item_idx))
+          if (down_cast<Item_rollup_sum_switcher *>(*item)->reset_and_add_for_rollup(m_last_unchanged_grp_item_idx))
             return 1;
         } else {
           if ((*item)->reset_and_add()) return 1;
@@ -181,7 +181,7 @@ int VectorizedAggregateIterator::Read() {
 
       // Choose processing method based on analysis
       int result;
-      if (m_vectorization_enabled && m_vectorizer.can_vectorize_current_group &&
+      if (m_vectorization_enabled && m_vectorizer.can_vectorize_curr_grp &&
           !m_rollup) {  // Don't vectorize rollup initially
         result = ProcessCurrentGroupVectorized();
         if (result != 0) {
@@ -199,12 +199,12 @@ int VectorizedAggregateIterator::Read() {
       // Handle group completion - identical to original logic
       if (m_seen_eof) {
         // End of input - finalize current group
-        StoreFromTableBuffers(m_tables, &m_first_row_next_group);
-        LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_group.ptr()));
+        StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+        LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
 
         if (m_rollup && m_join->send_group_parts > 0) {
           SetRollupLevel(m_join->send_group_parts);
-          m_last_unchanged_group_item_idx = 0;
+          m_last_unchanged_grp_item_idx = 0;
           m_state = OUTPUTTING_ROLLUP_ROWS;
         } else {
           SetRollupLevel(m_join->send_group_parts);
@@ -223,9 +223,9 @@ int VectorizedAggregateIterator::Read() {
 
     case OUTPUTTING_ROLLUP_ROWS: {
       // Identical rollup logic to original
-      SetRollupLevel(m_current_rollup_position - 1);
+      SetRollupLevel(m_current_rollup_pos - 1);
 
-      if (m_current_rollup_position <= m_last_unchanged_group_item_idx) {
+      if (m_current_rollup_pos <= m_last_unchanged_grp_item_idx) {
         if (m_seen_eof) {
           m_state = DONE_OUTPUTTING_ROWS;
         } else {
@@ -276,12 +276,12 @@ int VectorizedAggregateIterator::ProcessCurrentGroupTraditional() {
     int first_changed_idx = update_item_cache_if_changed(m_join->group_fields);
     if (first_changed_idx >= 0) {
       // Group changed - save new row and break
-      StoreFromTableBuffers(m_tables, &m_first_row_next_group);
-      LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_group.ptr()));
+      StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
+      LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
 
       // Handle rollup state
       if (m_rollup) {
-        m_last_unchanged_group_item_idx = first_changed_idx + 1;
+        m_last_unchanged_grp_item_idx = first_changed_idx + 1;
         if (static_cast<unsigned>(first_changed_idx) < m_join->send_group_parts - 1) {
           SetRollupLevel(m_join->send_group_parts);
           m_state = OUTPUTTING_ROLLUP_ROWS;
@@ -290,7 +290,7 @@ int VectorizedAggregateIterator::ProcessCurrentGroupTraditional() {
           m_state = LAST_ROW_STARTED_NEW_GROUP;
         }
       } else {
-        m_last_unchanged_group_item_idx = 0;
+        m_last_unchanged_grp_item_idx = 0;
         m_state = LAST_ROW_STARTED_NEW_GROUP;
       }
       break;
@@ -353,7 +353,7 @@ int VectorizedAggregateIterator::ProcessCurrentGroupVectorized() {
 int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
   m_vectorizer.current_batch.clear();
   size_t rows_read = 0;
-  size_t batch_capacity = m_vectorizer.optimal_batch_size;
+  size_t batch_capacity = m_vectorizer.opt_batch_size;
 
   for (;;) {
     // Don't exceed batch capacity
@@ -371,14 +371,14 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
     if (first_changed_idx >= 0) {
       // Group changed - this row belongs to NEXT group.
       // Save it for next group processing and DON'T add to current batch.
-      StoreFromTableBuffers(m_tables, &m_first_row_next_group);
+      StoreFromTableBuffers(m_tables, &m_first_row_next_grp);
 
       // Restore current group's first row for aggregate finalization
-      LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_group.ptr()));
+      LoadIntoTableBuffers(m_tables, pointer_cast<const uchar *>(m_first_row_this_grp.ptr()));
 
       // Set rollup state
       if (m_rollup) {
-        m_last_unchanged_group_item_idx = first_changed_idx + 1;
+        m_last_unchanged_grp_item_idx = first_changed_idx + 1;
         if (static_cast<unsigned>(first_changed_idx) < m_join->send_group_parts - 1) {
           SetRollupLevel(m_join->send_group_parts);
           m_state = OUTPUTTING_ROLLUP_ROWS;
@@ -387,7 +387,7 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
           m_state = LAST_ROW_STARTED_NEW_GROUP;
         }
       } else {
-        m_last_unchanged_group_item_idx = 0;
+        m_last_unchanged_grp_item_idx = 0;
         m_state = LAST_ROW_STARTED_NEW_GROUP;
       }
       // Break BEFORE adding this row to chunks. This row will be processed as the first row of next group
@@ -702,7 +702,7 @@ void VectorizedAggregateIterator::SetupColumnChunks() {
   }
 
   m_vectorizer.current_batch.column_chunks.clear();
-  m_vectorizer.current_batch.capacity = m_vectorizer.optimal_batch_size;
+  m_vectorizer.current_batch.capacity = m_vectorizer.opt_batch_size;
 
   // Create column chunks for vectorizable aggregates
   for (const auto &info : m_vectorizer.aggregate_infos) {
@@ -733,10 +733,10 @@ void VectorizedAggregateIterator::UpdateBatchSizeFromPerformance(double processi
   if (m_stats.total_batches_processed % 10 == 0 && m_stats.total_batches_processed > 10) {
     if (avg_time > m_target_batch_time_ms * 2.0) {
       // Too slow, reduce batch size
-      m_vectorizer.optimal_batch_size = std::max(m_vectorizer.optimal_batch_size / 2, m_min_batch_size);
-    } else if (avg_time < m_target_batch_time_ms && m_vectorizer.optimal_batch_size < m_max_batch_size) {
+      m_vectorizer.opt_batch_size = std::max(m_vectorizer.opt_batch_size / 2, m_min_batch_size);
+    } else if (avg_time < m_target_batch_time_ms && m_vectorizer.opt_batch_size < m_max_batch_size) {
       // Fast enough, try larger batches
-      m_vectorizer.optimal_batch_size = std::min(m_vectorizer.optimal_batch_size * 2, m_max_batch_size);
+      m_vectorizer.opt_batch_size = std::min(m_vectorizer.opt_batch_size * 2, m_max_batch_size);
     }
   }
 }
@@ -771,8 +771,8 @@ void VectorizedAggregateIterator::UnlockRow() {
 
 void VectorizedAggregateIterator::SetRollupLevel(int level) {
   // Identical to original implementation
-  if (m_rollup && m_current_rollup_position != level) {
-    m_current_rollup_position = level;
+  if (m_rollup && m_current_rollup_pos != level) {
+    m_current_rollup_pos = level;
     for (Item_rollup_group_item *item : m_join->rollup_group_items) {
       item->set_current_rollup_level(level);
     }

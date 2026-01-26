@@ -44,14 +44,14 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table,
     : TableRowIterator(thd, table),
       m_table{table},
       m_batch_size{0},
-      m_optimal_batch_size{0},
-      m_current_batch_size{0},
-      m_current_row_in_batch{0},
+      m_opt_batch_size{0},
+      m_curr_batch_size{0},
+      m_curr_row_in_batch{0},
       m_batch_exhausted{true},
       m_eof_reached{false},
       m_fields_cached{false} {
-  m_optimal_batch_size = CalculateOptimalBatchSize(expected_rows);
-  m_batch_size = m_optimal_batch_size;
+  m_opt_batch_size = CalculateOptimalBatchSize(expected_rows);
+  m_batch_size = m_opt_batch_size;
 
   m_metrics.reset();
 
@@ -154,15 +154,15 @@ void VectorizedTableScanIterator::AdaptBatchSize() {
 
     if (current_avg > 50.0) {  // over 50 ms. reduce the batch size.
       m_batch_size = std::max(m_batch_size / 2, static_cast<size_t>(SHANNON_VECTOR_WIDTH));
-    } else if (current_avg < 10.0 && m_batch_size < m_optimal_batch_size * 2) {
+    } else if (current_avg < 10.0 && m_batch_size < m_opt_batch_size * 2) {
       // less than 10 ms, raise up the batch size.
-      m_batch_size = std::min(m_batch_size * 2, m_optimal_batch_size * 4);
+      m_batch_size = std::min(m_batch_size * 2, m_opt_batch_size * 4);
     }
   }
 }
 
 int VectorizedTableScanIterator::PopulateCurrentRow() {
-  size_t rowid = m_current_row_in_batch;
+  size_t rowid = m_curr_row_in_batch;
 
   for (size_t i = 0; i < m_active_fields.size(); ++i) {
     Field *field = m_active_fields[i];
@@ -189,8 +189,8 @@ bool VectorizedTableScanIterator::Init() {
 
   PreallocateColumnChunks();
 
-  m_current_batch_size = 0;
-  m_current_row_in_batch = 0;
+  m_curr_batch_size = 0;
+  m_curr_row_in_batch = 0;
   m_batch_exhausted = true;
   m_eof_reached = false;
   m_metrics.reset();
@@ -203,12 +203,12 @@ int VectorizedTableScanIterator::Read() {
   if (m_batch_exhausted && !m_eof_reached) {
     result = ReadNextBatch();
     if (result) {
-      if (result == HA_ERR_END_OF_FILE && m_current_batch_size == 0) return HandleError(HA_ERR_END_OF_FILE);
+      if (result == HA_ERR_END_OF_FILE && m_curr_batch_size == 0) return HandleError(HA_ERR_END_OF_FILE);
       if (result != HA_ERR_END_OF_FILE) return HandleError(result);
     }
   }
 
-  if (m_current_row_in_batch >= m_current_batch_size) {
+  if (m_curr_row_in_batch >= m_curr_batch_size) {
     if (m_eof_reached) {
       return HandleError(HA_ERR_END_OF_FILE);
     } else {  // read the next batch.
@@ -222,12 +222,12 @@ int VectorizedTableScanIterator::Read() {
   if (result) return HandleError(result);
 
   // move to the next row.
-  m_current_row_in_batch++;
+  m_curr_row_in_batch++;
   m_metrics.total_rows++;
 
-  if (m_current_row_in_batch >= m_current_batch_size) {
+  if (m_curr_row_in_batch >= m_curr_batch_size) {
     m_batch_exhausted = true;
-    if (!m_eof_reached) m_current_row_in_batch = 0;
+    if (!m_eof_reached) m_curr_row_in_batch = 0;
   }
 
   return result;
@@ -249,8 +249,8 @@ int VectorizedTableScanIterator::ReadNextBatch() {
         m_metrics.total_batches++;
         UpdatePerformanceMetrics(batch_start);
       }
-      m_current_batch_size = read_cnt;
-      m_current_row_in_batch = 0;
+      m_curr_batch_size = read_cnt;
+      m_curr_row_in_batch = 0;
       return HA_ERR_END_OF_FILE;
     }
 
@@ -265,8 +265,8 @@ int VectorizedTableScanIterator::ReadNextBatch() {
     return HA_ERR_END_OF_FILE;
   }
 
-  m_current_batch_size = read_cnt;
-  m_current_row_in_batch = 0;
+  m_curr_batch_size = read_cnt;
+  m_curr_row_in_batch = 0;
   m_batch_exhausted = false;
   m_metrics.total_batches++;
 

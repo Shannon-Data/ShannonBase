@@ -161,7 +161,7 @@ class JoinReOrder : public Rule {
   /**
    * Collect all join nodes and base table scans
    */
-  void collect_join_nodes(PlanNode *node, std::vector<JoinNode> &joins, std::vector<Plan *> &scans);
+  void collect_join_nodes(Plan &plan, std::vector<JoinNode> &joins, std::vector<Plan *> &scans);
 
   /**
    * Build join graph with IMCS re-estimation

@@ -62,7 +62,7 @@ class ColumnStatistics : public MemoryObject {
     // Count statistics
     uint64 row_count{0};       // Total row count
     uint64 null_count{0};      // NULL count
-    uint64 distinct_count{0};  // Unique value count (estimated)
+    uint64 distinct_count{0};  // Unique value count (NDV)(estimated)
 
     // Data characteristics
     double null_fraction{0.0};  // NULL fraction
