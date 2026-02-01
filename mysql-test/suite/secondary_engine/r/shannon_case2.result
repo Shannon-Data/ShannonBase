@@ -30,6 +30,12 @@ count(1)
 select count(*) from tt1;
 count(*)
 7
+select count(1) from tt1 where score > 10;
+count(1)
+2
+select count(*) from tt1 where score > 10;
+count(*)
+2
 select count(score), gender from tt1 group by gender order by gender;
 count(score)	gender
 3	f

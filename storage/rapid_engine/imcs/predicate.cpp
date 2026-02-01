@@ -24,69 +24,26 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/imcs/predicate.h"
+#include "storage/innobase/include/mach0data.ic"
 
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/utils/utils.h"  //bit_array_xxx
 
 namespace ShannonBase {
 namespace Imcs {
-int64 PredicateValue::as_int() const {
-  switch (type) {
-    case PredicateValueType::INT:
-      return int_value;
-    case PredicateValueType::DOUBLE:
-      return static_cast<int64>(double_value);
-    case PredicateValueType::STRING:
-      return std::stoll(string_value);
-    default:
-      return 0;
-  }
-}
-
-double PredicateValue::as_double() const {
-  switch (type) {
-    case PredicateValueType::INT:
-      return static_cast<double>(int_value);
-    case PredicateValueType::DOUBLE:
-      return double_value;
-    case PredicateValueType::STRING:
-      return std::stod(string_value);
-    default:
-      return 0.0;
-  }
-}
-
-std::string PredicateValue::as_string() const {
-  switch (type) {
-    case PredicateValueType::INT:
-      return std::to_string(int_value);
-    case PredicateValueType::DOUBLE:
-      return std::to_string(double_value);
-    case PredicateValueType::STRING:
-      return string_value;
-    default:
-      return "";
-  }
-}
-
 void Predicate::evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
                                bit_array_t &result) const {
   // Default implementation: row-by-row evaluation
   for (size_t i = 0; i < num_rows; i++) {
     bool match = evaluate(&row_data[i * num_columns], num_columns);
-    if (match) {
-      Utils::Util::bit_array_set(&result, i);
-    } else {
-      Utils::Util::bit_array_reset(&result, i);
-    }
+    (match) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
   }
 }
 
-bool Simple_Predicate::evaluate(const unsigned char **row_data, size_t num_columns) const {
+bool Simple_Predicate::evaluate(const unsigned char **row_data, size_t num_columns, bool low_order) const {
   if (column_id >= num_columns) return false;
 
   const unsigned char *col_data = row_data[column_id];
-
   // Handle NULL
   if (!col_data) {
     switch (op) {
@@ -100,58 +57,41 @@ bool Simple_Predicate::evaluate(const unsigned char **row_data, size_t num_colum
   }
 
   // Extract column value
-  PredicateValue col_value = extract_value(col_data);
-
+  PredicateValue col_value = extract_value(col_data, low_order);
   // Evaluate based on operator
   switch (op) {
     case PredicateOperator::EQUAL:
       return col_value == value;
-
     case PredicateOperator::NOT_EQUAL:
       return col_value != value;
-
     case PredicateOperator::LESS_THAN:
       return col_value < value;
-
     case PredicateOperator::LESS_EQUAL:
       return col_value <= value;
-
     case PredicateOperator::GREATER_THAN:
       return col_value > value;
-
     case PredicateOperator::GREATER_EQUAL:
       return col_value >= value;
-
     case PredicateOperator::BETWEEN:
       return col_value >= value && col_value <= value2;
-
     case PredicateOperator::NOT_BETWEEN:
       return col_value < value || col_value > value2;
-
     case PredicateOperator::IN:
       return std::find(value_list.begin(), value_list.end(), col_value) != value_list.end();
-
     case PredicateOperator::NOT_IN:
       return std::find(value_list.begin(), value_list.end(), col_value) == value_list.end();
-
     case PredicateOperator::IS_NULL:
       return false;  // NULL already handled
-
     case PredicateOperator::IS_NOT_NULL:
       return true;
-
     case PredicateOperator::LIKE:
       return evaluate_like(col_value.as_string(), value.as_string());
-
     case PredicateOperator::NOT_LIKE:
       return !evaluate_like(col_value.as_string(), value.as_string());
-
     case PredicateOperator::REGEXP:
       return evaluate_regexp(col_value.as_string(), value.as_string());
-
     case PredicateOperator::NOT_REGEXP:
       return !evaluate_regexp(col_value.as_string(), value.as_string());
-
     default:
       return false;
   }
@@ -169,11 +109,9 @@ void Simple_Predicate::evaluate_batch(const unsigned char **row_data, size_t num
     case PredicateOperator::GREATER_THAN:
       evaluate_comparison_batch(row_data, num_rows, num_columns, result);
       break;
-
     case PredicateOperator::BETWEEN:
       evaluate_between_batch(row_data, num_rows, num_columns, result);
       break;
-
     default:
       // Fall back to base implementation
       Predicate::evaluate_batch(row_data, num_rows, num_columns, result);
@@ -200,28 +138,19 @@ bool Simple_Predicate::can_use_storage_index() const {
 bool Simple_Predicate::apply_storage_index(const StorageIndex *storage_index) const {
   // Note: This is a simplified implementation
   // In real implementation, you would use actual StorageIndex statistics
-  if (!can_use_storage_index() || !storage_index) {
-    return false;
-  }
+  if (!can_use_storage_index() || !storage_index) return false;
 
   // For demonstration, assume StorageIndex has these methods
   // const auto& stats = storage_index->get_column_stats(column_id);
-
   // Simplified logic - in real implementation, use actual statistics
   switch (op) {
-    case PredicateOperator::EQUAL: {
+    case PredicateOperator::EQUAL:
       // If value is outside IMCU range, skip entire IMCU
       return false;  // Simplified return
-    }
-
-    case PredicateOperator::LESS_THAN: {
+    case PredicateOperator::LESS_THAN:
       // If IMCU min >= value, entire IMCU doesn't satisfy
       return false;  // Simplified return
-    }
-
-      // ... other cases
-
-    default:
+    default:         // ... other cases
       return false;
   }
 }
@@ -331,46 +260,25 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
       pred_value = value.as_double();
 
       // Value out of range
-      if (pred_value < min_val || pred_value > max_val) {
-        return 0.0;
-      }
-
+      if (pred_value < min_val || pred_value > max_val) return 0.0;
       // Use distinct count if available
-      if (distinct_count > 0) {
-        return 1.0 / distinct_count;
-      }
-
-      return 0.1;  // Default
-    }
-
+      return (distinct_count > 0) ? 1.0 / distinct_count : 0.1;  // Default
+    } break;
     case PredicateOperator::NOT_EQUAL: {
       pred_value = value.as_double();
 
       // Value out of range - all rows match
-      if (pred_value < min_val || pred_value > max_val) {
-        return 1.0;
-      }
-
-      if (distinct_count > 0) {
-        return (distinct_count - 1.0) / distinct_count;
-      }
-
-      return 0.9;
-    }
-
+      if (pred_value < min_val || pred_value > max_val) return 1.0;
+      return (distinct_count > 0) ? (distinct_count - 1.0) / distinct_count : 0.9;
+    } break;
     case PredicateOperator::LESS_THAN: {
       pred_value = value.as_double();
 
       if (pred_value <= min_val) return 0.0;
       if (pred_value >= max_val) return 1.0;
 
-      if (range > 0) {
-        return (pred_value - min_val) / range;
-      }
-
-      return 0.5;
-    }
-
+      return (range > 0) ? (pred_value - min_val) / range : 0.5;
+    } break;
     case PredicateOperator::LESS_EQUAL: {
       pred_value = value.as_double();
 
@@ -385,26 +293,17 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
         }
         return std::min(1.0, sel);
       }
-
       return 1.0;  // Single value
-    }
-
+    } break;
     case PredicateOperator::GREATER_THAN: {
       pred_value = value.as_double();
 
       if (pred_value >= max_val) return 0.0;
       if (pred_value <= min_val) return 1.0;
-
-      if (range > 0) {
-        return (max_val - pred_value) / range;
-      }
-
-      return 0.5;
-    }
-
+      return (range > 0) ? (max_val - pred_value) / range : 0.5;
+    } break;
     case PredicateOperator::GREATER_EQUAL: {
       pred_value = value.as_double();
-
       if (pred_value > max_val) return 0.0;
       if (pred_value <= min_val) return 1.0;
 
@@ -415,23 +314,16 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
         }
         return std::min(1.0, sel);
       }
-
       return 1.0;
-    }
-
+    } break;
     case PredicateOperator::BETWEEN: {
       double low = value.as_double();
       double high = value2.as_double();
 
       // No overlap
-      if (high < min_val || low > max_val) {
-        return 0.0;
-      }
-
+      if (high < min_val || low > max_val) return 0.0;
       // Full coverage
-      if (low <= min_val && high >= max_val) {
-        return 1.0;
-      }
+      if (low <= min_val && high >= max_val) return 1.0;
 
       // Partial overlap
       if (range > 0) {
@@ -440,10 +332,8 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
         double overlap_range = overlap_max - overlap_min;
         return overlap_range / range;
       }
-
       return 0.5;
-    }
-
+    } break;
     case PredicateOperator::NOT_BETWEEN: {
       // Complement of BETWEEN
       double between_sel = 0.0;
@@ -463,22 +353,16 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
       } else {
         between_sel = 0.5;
       }
-
       return 1.0 - between_sel;
-    }
-
+    } break;
     case PredicateOperator::IN: {
       if (value_list.empty()) return 0.0;
 
-      if (distinct_count > 0) {
-        // Estimate: min(1.0, num_values / distinct_count)
-        return std::min(1.0, static_cast<double>(value_list.size()) / distinct_count);
-      }
-
-      // Heuristic: 10% per value, capped at 1.0
-      return std::min(1.0, 0.1 * value_list.size());
-    }
-
+      return (distinct_count > 0)
+                 ? std::min(1.0, static_cast<double>(value_list.size()) /
+                                     distinct_count)        // Estimate: min(1.0, num_values / distinct_count)
+                 : std::min(1.0, 0.1 * value_list.size());  // Heuristic: 10% per value, capped at 1.0;
+    } break;
     case PredicateOperator::NOT_IN: {
       if (value_list.empty()) return 1.0;
 
@@ -486,82 +370,82 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
         double in_sel = std::min(1.0, static_cast<double>(value_list.size()) / distinct_count);
         return 1.0 - in_sel;
       }
-
       return std::max(0.0, 1.0 - 0.1 * value_list.size());
-    }
-
+    } break;
     case PredicateOperator::IS_NULL: {
       if (!has_null) return 0.0;
-
-      if (estimated_total_rows > 0) {
-        return static_cast<double>(null_count) / estimated_total_rows;
-      }
-
-      return 0.05;
+      return (estimated_total_rows > 0) ? static_cast<double>(null_count) / estimated_total_rows : 0.05;
     }
-
     case PredicateOperator::IS_NOT_NULL: {
       if (!has_null) return 1.0;
-
-      if (estimated_total_rows > 0) {
-        return non_null_rows / estimated_total_rows;
-      }
-
-      return 0.95;
-    }
-
+      return (estimated_total_rows > 0) ? non_null_rows / estimated_total_rows : 0.95;
+    } break;
     case PredicateOperator::LIKE:
     case PredicateOperator::NOT_LIKE: {
       // Pattern analysis could be done here
       // For now, use rough estimate
       double like_sel = 0.2;  // 20% for LIKE
       return (op == PredicateOperator::LIKE) ? like_sel : (1.0 - like_sel);
-    }
-
+    } break;
     case PredicateOperator::REGEXP:
     case PredicateOperator::NOT_REGEXP: {
       double regexp_sel = 0.15;  // 15% for REGEXP
       return (op == PredicateOperator::REGEXP) ? regexp_sel : (1.0 - regexp_sel);
-    }
-
+    } break;
     default:
       return 0.5;
   }
 }
 
-PredicateValue Simple_Predicate::extract_value(const unsigned char *data) const {
-  // Note: This is a simplified implementation
-  // In real implementation, you would properly handle each MySQL type
-
+PredicateValue Simple_Predicate::extract_value(const unsigned char *data, bool low_order) const {
+  assert(field_meta->field_index() == column_id && field_meta->type() == column_type);
   switch (column_type) {
     case MYSQL_TYPE_TINY:
-      return PredicateValue(static_cast<int64>(*reinterpret_cast<const int8_t *>(data)));
-
     case MYSQL_TYPE_SHORT:
-      return PredicateValue(static_cast<int64>(*reinterpret_cast<const int16_t *>(data)));
-
     case MYSQL_TYPE_LONG:
-      return PredicateValue(static_cast<int64>(*reinterpret_cast<const int32_t *>(data)));
-
-    case MYSQL_TYPE_LONGLONG:
-      return PredicateValue(*reinterpret_cast<const int64 *>(data));
-
+    case MYSQL_TYPE_LONGLONG: {
+      auto val = Utils::Util::get_field_numeric<int64_t>(field_meta, data, nullptr, low_order);
+      return PredicateValue(val);
+    } break;
     case MYSQL_TYPE_FLOAT:
-      return PredicateValue(static_cast<double>(*reinterpret_cast<const float *>(data)));
-
     case MYSQL_TYPE_DOUBLE:
-      return PredicateValue(*reinterpret_cast<const double *>(data));
-
+    case MYSQL_TYPE_NEWDECIMAL:
+    case MYSQL_TYPE_DECIMAL: {
+      auto val = Utils::Util::get_field_numeric<double>(field_meta, data, nullptr, low_order);
+      return PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_STRING: {  // padding with ` ` in store formate, so trim the extra space
+      uint32 pred_length = value.as_string().length();
+      auto length = std::min(pred_length, field_meta->pack_length());
+      std::string val(reinterpret_cast<const char *>(data), length);
+      return PredicateValue(val);
+    } break;
     case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VAR_STRING: {
-      // Assume null-terminated string
-      return PredicateValue(reinterpret_cast<const char *>(data));
-    }
-
+      std::string val(reinterpret_cast<const char *>(data));
+      return PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_NEWDATE:
+    case MYSQL_TYPE_TIME:
+    case MYSQL_TYPE_YEAR:
+    case MYSQL_TYPE_TIMESTAMP:
+    case MYSQL_TYPE_TIMESTAMP2: {
+      auto val = Utils::Util::get_field_numeric<int64_t>(field_meta, data, nullptr, low_order);
+      return PredicateValue(val);
+    } break;
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_TINY_BLOB:
+    case MYSQL_TYPE_MEDIUM_BLOB:
+    case MYSQL_TYPE_LONG_BLOB: {
+      // TODO: ref: row0row.cpp: RowBuffer::extract_field_data
+      assert(false);
+    } break;
     default:
       return PredicateValue::null_value();
   }
+  return PredicateValue::null_value();
 }
 
 bool Simple_Predicate::evaluate_like(const std::string &str, const std::string &pattern) const {
@@ -624,27 +508,18 @@ void Simple_Predicate::evaluate_comparison_batch(const unsigned char **row_data,
 
   constexpr size_t UNROLL = 4;
   size_t i = 0;
-
   // Process with loop unrolling
   for (; i + UNROLL <= num_rows; i += UNROLL) {
     for (size_t j = 0; j < UNROLL; j++) {
       bool match = evaluate(&row_data[(i + j) * num_columns], num_columns);
-      if (match) {
-        Utils::Util::bit_array_set(&result, i + j);
-      } else {
-        Utils::Util::bit_array_reset(&result, i + j);
-      }
+      (match) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
     }
   }
 
   // Process remainder
   for (; i < num_rows; i++) {
     bool match = evaluate(&row_data[i * num_columns], num_columns);
-    if (match) {
-      Utils::Util::bit_array_set(&result, i);
-    } else {
-      Utils::Util::bit_array_reset(&result, i);
-    }
+    (match) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
   }
 }
 
@@ -653,43 +528,28 @@ void Simple_Predicate::evaluate_between_batch(const unsigned char **row_data, si
   // Simplified implementation
   for (size_t i = 0; i < num_rows; i++) {
     bool match = evaluate(&row_data[i * num_columns], num_columns);
-    if (match) {
-      Utils::Util::bit_array_set(&result, i);
-    } else {
-      Utils::Util::bit_array_reset(&result, i);
-    }
+    match ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
   }
 }
 
-Compound_Predicate::Compound_Predicate(PredicateOperator op_type) : Predicate(op_type) {}
-
-void Compound_Predicate::add_child(std::unique_ptr<Predicate> child) { children.push_back(std::move(child)); }
-
-bool Compound_Predicate::evaluate(const unsigned char **row_data, size_t num_columns) const {
+bool Compound_Predicate::evaluate(const unsigned char **row_data, size_t num_columns, bool low_order) const {
   switch (op) {
     case PredicateOperator::AND: {
       for (const auto &child : children) {
-        if (!child->evaluate(row_data, num_columns)) {
-          return false;  // Short-circuit evaluation
-        }
+        if (!child->evaluate(row_data, num_columns)) return false;  // Short-circuit evaluation
       }
       return true;
-    }
-
+    } break;
     case PredicateOperator::OR: {
       for (const auto &child : children) {
-        if (child->evaluate(row_data, num_columns)) {
-          return true;  // Short-circuit evaluation
-        }
+        if (child->evaluate(row_data, num_columns)) return true;  // Short-circuit evaluation
       }
       return false;
-    }
-
+    } break;
     case PredicateOperator::NOT: {
       if (children.empty()) return false;
       return !children[0]->evaluate(row_data, num_columns);
-    }
-
+    } break;
     default:
       return false;
   }
@@ -705,13 +565,11 @@ void Compound_Predicate::evaluate_batch(const unsigned char **row_data, size_t n
       for (size_t i = 0; i < num_rows; i++) {
         Utils::Util::bit_array_set(&result, i);
       }
-
       // Evaluate each child predicate and AND with result
       bit_array_t child_result(num_rows);
       for (const auto &child : children) {
         // Reset child result
         child->evaluate_batch(row_data, num_rows, num_columns, child_result);
-
         // result = result AND child_result
         for (size_t i = 0; i < num_rows; i++) {
           if (!Utils::Util::bit_array_get(&child_result, i)) {
@@ -719,10 +577,7 @@ void Compound_Predicate::evaluate_batch(const unsigned char **row_data, size_t n
           }
         }
       }
-
-      break;
-    }
-
+    } break;
     case PredicateOperator::OR: {
       // Initialize to all 0s
       for (size_t i = 0; i < num_rows; i++) {
@@ -734,7 +589,6 @@ void Compound_Predicate::evaluate_batch(const unsigned char **row_data, size_t n
       for (const auto &child : children) {
         // Reset child result
         child->evaluate_batch(row_data, num_rows, num_columns, child_result);
-
         // result = result OR child_result
         for (size_t i = 0; i < num_rows; i++) {
           if (Utils::Util::bit_array_get(&child_result, i)) {
@@ -742,27 +596,19 @@ void Compound_Predicate::evaluate_batch(const unsigned char **row_data, size_t n
           }
         }
       }
-
-      break;
-    }
-
+    } break;
     case PredicateOperator::NOT: {
       if (children.empty()) return;
 
       // Evaluate child predicate
       children[0]->evaluate_batch(row_data, num_rows, num_columns, result);
-
       // Invert
       for (size_t i = 0; i < num_rows; i++) {
-        if (Utils::Util::bit_array_get(&result, i)) {
-          Utils::Util::bit_array_reset(&result, i);
-        } else {
-          Utils::Util::bit_array_set(&result, i);
-        }
+        Utils::Util::bit_array_get(&result, i) ? Utils::Util::bit_array_reset(&result, i)
+                                               : Utils::Util::bit_array_set(&result, i);
       }
       break;
     }
-
     default:
       break;
   }

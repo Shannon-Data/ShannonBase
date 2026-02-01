@@ -77,7 +77,10 @@ namespace Executor {
  */
 class VectorizedTableScanIterator : public TableRowIterator {
  public:
-  VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows);
+  VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows,
+                              std::unique_ptr<Imcs::Predicate> predicate = nullptr,
+                              const std::vector<uint32_t> &projection = {}, ha_rows limit = HA_POS_ERROR,
+                              ha_rows offset = 0, bool use_storage_index = false);
 
   bool Init() override;
 
@@ -181,6 +184,12 @@ class VectorizedTableScanIterator : public TableRowIterator {
 
  private:
   TABLE *m_table;  ///< source MySQL table
+  // these fields came from optimized plan.
+  std::unique_ptr<Imcs::Predicate> m_pushed_predicate{nullptr};
+  std::vector<uint32_t> m_projected_columns;
+  ha_rows m_limit{HA_POS_ERROR};
+  ha_rows m_offset{0};
+  bool m_use_storage_index{false};
 
   std::unique_ptr<ShannonBase::Imcs::RapidCursor> m_cursor;      ///< Underlying columnar data table
   std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing

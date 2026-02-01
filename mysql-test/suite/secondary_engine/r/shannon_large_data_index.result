@@ -66,6 +66,9 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 select * from SUPPLIER where S_NAME ='Supplier#000000005';
 S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
 5	Supplier#000000005	Gcdm2rJRzl5qlTVzc	11	21-151-690-3663	-283.84	. slyly regular pinto bea
+select * from SUPPLIER where S_NAME ='Supplier#000000005 ';
+S_SUPPKEY	S_NAME	S_ADDRESS	S_NATIONKEY	S_PHONE	S_ACCTBAL	S_COMMENT
+5	Supplier#000000005	Gcdm2rJRzl5qlTVzc	11	21-151-690-3663	-283.84	. slyly regular pinto bea
 explain select * from SUPPLIER where S_ACCTBAL = 5755.94;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	SUPPLIER	NULL	ALL	NULL	NULL	NULL	NULL	40000	10.00	Using where; Using secondary engine Rapid

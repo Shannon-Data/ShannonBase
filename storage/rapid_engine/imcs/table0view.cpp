@@ -301,13 +301,11 @@ bool RapidCursor::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */) 
     }
   }
 
-  // Build empty predicate list (no filtering for full scan)
-  std::vector<std::unique_ptr<Predicate>> predicates;
   size_t total_imcus = m_rpd_table->meta().total_imcus;
   size_t remaining = batch_size;
 
   // Callback to collect rows with prefetch optimization
-  auto callback = [&](row_id_t global_row_id, const std::vector<const uchar *> &row_data) {
+  auto scan_range_func = [&](row_id_t global_row_id, const std::vector<const uchar *> &row_data) {
     auto row_buffer = std::make_unique<RowBuffer>(row_data.size());
     row_buffer->set_row_id(global_row_id);
 
@@ -349,7 +347,8 @@ bool RapidCursor::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */) 
     size_t scanned = imcu->scan_range(m_scan_context.get(),
                                       m_curr_imcu_offset,  // Start from where we left off
                                       remaining,           // How many rows we still need
-                                      predicates, projection_cols, callback);
+                                      m_scan_predicates,   // scan predicate, which came from optimized plan.
+                                      projection_cols, scan_range_func);
     remaining -= scanned;
 
     // Check if IMCU is exhausted
@@ -392,11 +391,13 @@ int RapidCursor::next_batch(size_t batch_size, std::vector<ShannonBase::Executor
   read_cnt = 0;
   if (m_scan_exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
 
-  // 1.build projection columns.
+  // 1.build projection columns. //m_projection_columns is a subset of `read_set` ???.
   std::vector<uint32_t> projection_cols;
   for (uint32_t idx = 0; idx < m_data_source->s->fields; ++idx) {
     Field *fld = m_data_source->field[idx];
-    if (bitmap_is_set(m_data_source->read_set, idx) && !fld->is_flag_set(NOT_SECONDARY_FLAG))
+    auto m_projection_columns_idx = std::find(m_projection_columns.begin(), m_projection_columns.end(), idx);
+    if ((bitmap_is_set(m_data_source->read_set, idx) && !fld->is_flag_set(NOT_SECONDARY_FLAG)) ||
+        (m_projection_columns_idx != m_projection_columns.end()))
       projection_cols.push_back(idx);
   }
   if (projection_cols.empty()) return ShannonBase::SHANNON_SUCCESS;
@@ -410,11 +411,30 @@ int RapidCursor::next_batch(size_t batch_size, std::vector<ShannonBase::Executor
   }
 #endif
 
-  // 3. the predicates.
-  std::vector<std::unique_ptr<Predicate>> predicates;
+  size_t effective_batch_size = batch_size;
+  size_t total_scanned = m_curr_row_idx.load(std::memory_order_acquire);
+  if (m_scan_limit != HA_POS_ERROR) {
+    // Skip offset rows
+    if (total_scanned < m_scan_offset) {
+      // size_t to_skip = m_scan_offset - total_scanned;
+      // For now, we'll just scan and discard
+    }
 
-  // 4. fill up the ColumChunk.
-  auto callback = [&](row_id_t global_row_id, const std::vector<const uchar *> &row_data) {
+    // Apply limit
+    if (m_scan_limit != HA_POS_ERROR) {
+      size_t rows_returned = (total_scanned > m_scan_offset) ? (total_scanned - m_scan_offset) : 0;
+      if (rows_returned >= m_scan_limit) {
+        // Already reached limit
+        m_scan_exhausted.store(true, std::memory_order_release);
+        return HA_ERR_END_OF_FILE;
+      }
+      size_t remaining_limit = m_scan_limit - rows_returned;
+      effective_batch_size = std::min(effective_batch_size, remaining_limit);
+    }
+  }
+
+  // 3. fill up the ColumChunk.
+  auto scan_range_func = [&](row_id_t global_row_id, const std::vector<const uchar *> &row_data) {
     for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
       auto col_idx = projection_cols[idx];
       auto &col_chunk = col_chunks[col_idx];
@@ -426,20 +446,42 @@ int RapidCursor::next_batch(size_t batch_size, std::vector<ShannonBase::Executor
     read_cnt++;
   };
 
-  // 5. start batch scanning.
-  size_t remaining = batch_size;
+  // 4. start batch scanning.
+  size_t remaining = effective_batch_size;
   while (m_curr_imcu_idx < m_rpd_table->meta().total_imcus && remaining > 0) {
     Imcu *imcu = m_rpd_table->locate_imcu(m_curr_imcu_idx);
     if (!imcu) {
       m_curr_imcu_idx++;
+      m_curr_imcu_offset = 0;
       continue;
     }
 
-    size_t scanned = imcu->scan_range(m_scan_context.get(), m_curr_imcu_offset, remaining,
-                                      predicates /* predicates */,  // in future, index push down.
-                                      projection_cols, callback);
+    if (m_use_storage_index && !m_scan_predicates.empty()) {
+      std::lock_guard<std::mutex> lock(m_predicate_mutex);
+      // Check if IMCU can be skipped using Storage Index
+      // This checks min/max values against predicates
+      if (imcu->can_skip_imcu(m_scan_predicates)) {  // Entire IMCU doesn't match predicates - skip it!
+        DBUG_PRINT("rapid_cursor", ("Storage Index PRUNED IMCU %zu (min/max check failed)", m_curr_imcu_idx));
+
+        // Move to next IMCU
+        m_curr_imcu_idx++;
+        m_curr_imcu_offset = 0;
+        continue;
+      }
+    }
+
+    // clang-format off
+    size_t scanned = imcu->scan_range(m_scan_context.get(),
+                                      m_curr_imcu_offset,
+                                      remaining,
+                                      m_scan_predicates /* predicates */,
+                                      projection_cols,
+                                      scan_range_func);
+    // clang-format on  
 
     remaining -= scanned;
+    m_curr_row_idx.fetch_add(scanned, std::memory_order_release);
+    
     size_t imcu_rows = imcu->get_row_count();
     if (m_curr_imcu_offset + scanned >= imcu_rows) {
       m_curr_imcu_idx++;

@@ -955,8 +955,8 @@ void TopNPushDown::apply(Plan &root) {
  * @param pending_order ORDER BY for TopN (nullptr if just LIMIT)
  * @return Modified plan node
  */
-Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_rows pending_offset,
-                                        ORDER *pending_order) {
+Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_rows pending_offset, ORDER *pending_order,
+                                        Filesort *pending_filesort) {
   if (!node) return nullptr;
   switch (node->type()) {
     case PlanNode::Type::LIMIT: {
@@ -965,24 +965,41 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
       ha_rows new_limit = limit_node->limit;
       ha_rows new_offset = limit_node->offset;
 
-      if (pending_limit > 0)
+      if (pending_limit > 0 && pending_limit != HA_POS_ERROR)
         merge_limits(pending_limit, pending_offset, limit_node->limit, limit_node->offset, new_limit, new_offset);
 
       // Remove current limit node and continue with child
       Plan child = std::move(limit_node->children[0]);
-      return push_limit_recursive(child, new_limit, new_offset, pending_order);
+      return push_limit_recursive(child, new_limit, new_offset, pending_order, pending_filesort);
     } break;
     case PlanNode::Type::TOP_N: {
       auto *topn = static_cast<TopN *>(node.get());
       ha_rows new_limit = topn->limit;
       ha_rows new_offset = pending_offset;
       ORDER *new_order = topn->order;
+      Filesort *filesort_to_use = topn->filesort ? topn->filesort : pending_filesort;
 
       // If we have a pending limit, merge it
-      if (pending_limit > 0) merge_limits(pending_limit, pending_offset, topn->limit, 0, new_limit, new_offset);
+      if (pending_limit > 0 && pending_limit != HA_POS_ERROR)
+        merge_limits(pending_limit, pending_offset, topn->limit, 0, new_limit, new_offset);
 
       Plan child = std::move(topn->children[0]);
-      return push_limit_recursive(child, new_limit, new_offset, new_order);
+      return push_limit_recursive(child, new_limit, new_offset, new_order, filesort_to_use);
+    } break;
+    case PlanNode::Type::SORT: {
+      auto *sort = static_cast<Sort *>(node.get());
+      ORDER *new_order = sort->order;
+      Filesort *filesort_to_use = sort->filesort ? sort->filesort : pending_filesort;
+
+      // if pending limit，SORT to TOP_N
+      if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
+        Plan child = std::move(sort->children[0]);
+        child = push_limit_recursive(child, 0, 0, nullptr, filesort_to_use);
+        return create_topn_node(std::move(child), pending_limit, pending_offset, new_order, filesort_to_use);
+      }
+
+      sort->children[0] = push_limit_recursive(sort->children[0], 0, 0, nullptr, filesort_to_use);
+      return std::move(node);
     } break;
     case PlanNode::Type::LOCAL_AGGREGATE: {
       auto *agg = static_cast<LocalAgg *>(node.get());
@@ -990,10 +1007,11 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
       // LIMIT can be pushed below GROUP BY in some cases
       // For now, apply limit after aggregation
       agg->children[0] = push_limit_recursive(agg->children[0], 0, 0, nullptr);
-      if (pending_limit > 0) {
+      if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
         // Wrap with limit node
-        return pending_order ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order)
-                             : create_limit_node(std::move(node), pending_limit, pending_offset);
+        return pending_order
+                   ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort)
+                   : create_limit_node(std::move(node), pending_limit, pending_offset);
       }
       return std::move(node);
     } break;
@@ -1034,7 +1052,7 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
        */
       bool has_order_by = (pending_order != nullptr);
       // Check if we can push limit below join
-      if (pending_limit > 0 && can_push_below_join(node, has_order_by)) {
+      if (pending_limit > 0 && pending_limit != HA_POS_ERROR && can_push_below_join(node, has_order_by)) {
         // For joins without ORDER BY, we can sometimes push limit to both sides
         if (!has_order_by) {
           // Push to both children with increased limit (safety margin)
@@ -1101,7 +1119,7 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
               nest_join->children[1] = push_limit_recursive(nest_join->children[1], 0, 0, nullptr);
             }
             // Wrap join with TopN
-            return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order);
+            return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort);
           }
         }
       } else {
@@ -1116,9 +1134,10 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
           nest_join->children[1] = push_limit_recursive(nest_join->children[1], 0, 0, nullptr);
         }
 
-        if (pending_limit > 0) {
-          return pending_order ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order)
-                               : create_limit_node(std::move(node), pending_limit, pending_offset);
+        if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
+          return pending_order
+                     ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort)
+                     : create_limit_node(std::move(node), pending_limit, pending_offset);
         }
         return std::move(node);
       }
@@ -1126,17 +1145,18 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
     case PlanNode::Type::FILTER: {
       auto *filter = static_cast<Filter *>(node.get());
       // Push limit through filter
-      filter->children[0] = push_limit_recursive(filter->children[0], pending_limit, pending_offset, pending_order);
+      filter->children[0] =
+          push_limit_recursive(filter->children[0], pending_limit, pending_offset, pending_order, pending_filesort);
       filter->estimated_rows = std::min(filter->estimated_rows, filter->children[0]->estimated_rows);
       return std::move(node);
     } break;
     case PlanNode::Type::SCAN: {
       auto scan = static_cast<ScanTable *>(node.get());
-      if (pending_limit > 0) {
+      if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
         if (pending_order) {
           // Scan can't sort - wrap in TopN
           scan->limit = pending_limit + pending_offset;  // Scan more to account for offset
-          return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order);
+          return create_topn_node(std::move(node), pending_limit, pending_offset, pending_order, pending_filesort);
         } else {
           // Just limit, no sort
           scan->limit = pending_limit;
@@ -1153,7 +1173,7 @@ Plan TopNPushDown::push_limit_recursive(Plan &node, ha_rows pending_limit, ha_ro
         child = push_limit_recursive(child, 0, 0, nullptr);
       }
 
-      if (pending_limit > 0) {
+      if (pending_limit > 0 && pending_limit != HA_POS_ERROR) {
         return pending_order ? create_topn_node(std::move(node), pending_limit, pending_offset, pending_order)
                              : create_limit_node(std::move(node), pending_limit, pending_offset);
       }
@@ -1195,10 +1215,22 @@ bool TopNPushDown::can_push_below_join(const Plan &join, bool has_order_by) cons
  * @param order ORDER BY structure
  * @return TopN plan node
  */
-Plan TopNPushDown::create_topn_node(Plan child, ha_rows limit, ha_rows offset, ORDER *order) {
+Plan TopNPushDown::create_topn_node(Plan child, ha_rows limit, ha_rows offset, ORDER *order, Filesort *filesort) {
   auto topn = std::make_unique<TopN>();
   topn->limit = limit;
   topn->order = order;
+  if (filesort) {
+    topn->filesort = filesort;
+  } else if (child) {
+    if (child->type() == PlanNode::Type::SORT) {
+      auto *sort_child = static_cast<Sort *>(child.get());
+      topn->filesort = sort_child->filesort;
+    } else if (child->type() == PlanNode::Type::TOP_N) {
+      auto *topn_child = static_cast<TopN *>(child.get());
+      topn->filesort = topn_child->filesort;
+    }
+  }
+
   // Estimate cost
   topn->estimated_rows = std::min(child->estimated_rows, limit);
   topn->cost = child->cost * 1.2;  // TopN has overhead for sorting

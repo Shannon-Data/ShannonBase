@@ -79,6 +79,7 @@ jobs:
           rm -rf ${{ github.workspace }}/cmake_build
       - name: Install x86 dependencies
         run: |
+          sudo apt update -y
           sudo apt install -y libtirpc-dev libboost-all-dev libexpect-perl
       - name: Build and install (x86)
         run: |
@@ -142,6 +143,7 @@ jobs:
           rm -rf ${{ github.workspace }}/cmake_build
       - name: Install ARM dependencies
         run: |
+          sudo apt update -y
           sudo apt install -y libtirpc-dev libboost-all-dev libjson-perl libexpect-perl
       - name: Build and install (ARM)
         run: |

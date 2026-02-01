@@ -118,11 +118,9 @@ class Imcs : public MemoryObject {
   template <typename Func>
   void for_each_table(Func &&func) {
     std::shared_lock<std::shared_mutex> lock(m_table_mutex);
-
     for (const auto &[id, table] : m_rpd_tables) {  // normal tables
       if (table) std::forward<Func>(func)(table.get());
     }
-
     for (const auto &[id, table] : m_rpd_parttables) {  // part tables.
       if (table) std::forward<Func>(func)(table.get());
     }

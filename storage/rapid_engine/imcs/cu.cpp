@@ -249,7 +249,7 @@ bool CU::compress() { return false; }
 bool CU::decompress() { return false; }
 
 void CU::update_statistics(const uchar *data, size_t len) {
-  if (!is_integer_type(m_header.type)) return;
+  if (!is_numeric_type(m_header.type) && !is_temporal_type(m_header.type)) return;
 
   double value = Utils::Util::get_field_numeric<double>(m_header.field_metadata, data, nullptr);
   m_header.sum.fetch_add(value);

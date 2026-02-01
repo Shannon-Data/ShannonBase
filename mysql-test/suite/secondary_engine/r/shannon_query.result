@@ -201,5 +201,25 @@ id	score
 2	2.22
 3	3.3
 drop table tt11;
+create table tt12 (dt datetime, name char(10), id int primary key, gender char(1));
+insert into tt12 values('2022-12-12 01:10:10', 'n1', 1, 'm'), ('2023-11-11 01:10:10', 'n2', 2, 'f'), ('2020-11-11 01:10:10', 'n3', 3, 'm');
+alter table tt12 secondary_engine=rapid;
+alter table tt12 secondary_load;
+select * from tt12 where dt > '2022-11-11 01:10:10';
+dt	name	id	gender
+2022-12-12 01:10:10	n1	1	m
+2023-11-11 01:10:10	n2	2	f
+select * from tt12 where dt < '2024-11-11 01:10:10';
+dt	name	id	gender
+2022-12-12 01:10:10	n1	1	m
+2023-11-11 01:10:10	n2	2	f
+2020-11-11 01:10:10	n3	3	m
+select * from tt12 where dt = '2023-11-11 01:10:10';
+dt	name	id	gender
+2023-11-11 01:10:10	n2	2	f
+select * from tt12 where dt > STR_TO_DATE('2022-11-11 01:10:10', '%Y-%m-%d %H:%i:%s');
+dt	name	id	gender
+2022-12-12 01:10:10	n1	1	m
+2023-11-11 01:10:10	n2	2	f
 set use_secondary_engine=off;
 drop database test_query;

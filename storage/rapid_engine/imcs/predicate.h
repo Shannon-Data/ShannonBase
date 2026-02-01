@@ -95,7 +95,7 @@ enum class PredicateOperator {
 /**
  * Predicate value type
  */
-enum class PredicateValueType { NULL_VALUE, INT, DOUBLE, STRING, BLOB, DATETIME };
+enum class PredicateValueType { NULL_VALUE, INT64, DOUBLE, STRING, BLOB, DATETIME };
 
 // Forward declarations
 class Predicate;
@@ -119,7 +119,7 @@ class PredicateValue {
   std::string string_value;  // Used for strings and BLOBs
 
   PredicateValue() : type(PredicateValueType::NULL_VALUE), ptr_value(nullptr) {}
-  explicit PredicateValue(int64 val) : type(PredicateValueType::INT), int_value(val) {}
+  explicit PredicateValue(int64 val) : type(PredicateValueType::INT64), int_value(val) {}
   explicit PredicateValue(double val) : type(PredicateValueType::DOUBLE), double_value(val) {}
   explicit PredicateValue(const std::string &val) : type(PredicateValueType::STRING), string_value(val) {}
   explicit PredicateValue(const char *val) : type(PredicateValueType::STRING), string_value(val) {}
@@ -130,19 +130,54 @@ class PredicateValue {
     return val;
   }
 
-  bool is_null() const { return type == PredicateValueType::NULL_VALUE; }
+  inline bool is_null() const { return type == PredicateValueType::NULL_VALUE; }
 
-  int64 as_int() const;
-  double as_double() const;
-  std::string as_string() const;
+  inline int64 as_int() const {
+    switch (type) {
+      case PredicateValueType::INT64:
+        return int_value;
+      case PredicateValueType::DOUBLE:
+        return static_cast<int64>(double_value);
+      case PredicateValueType::STRING:
+        return std::stoll(string_value);
+      default:
+        return 0;
+    }
+  }
 
-  bool operator==(const PredicateValue &other) const {
+  inline double as_double() const {
+    switch (type) {
+      case PredicateValueType::INT64:
+        return static_cast<double>(int_value);
+      case PredicateValueType::DOUBLE:
+        return double_value;
+      case PredicateValueType::STRING:
+        return std::stod(string_value);
+      default:
+        return 0.0;
+    }
+  }
+
+  inline std::string as_string() const {
+    switch (type) {
+      case PredicateValueType::INT64:
+        return std::to_string(int_value);
+      case PredicateValueType::DOUBLE:
+        return std::to_string(double_value);
+      case PredicateValueType::STRING:
+        return string_value;
+      default:
+        return "";
+    }
+  }
+
+  inline bool operator==(const PredicateValue &other) const {
     if (type != other.type) return false;
 
     switch (type) {
       case PredicateValueType::NULL_VALUE:
         return true;
-      case PredicateValueType::INT:
+      case PredicateValueType::INT64:
         return int_value == other.int_value;
       case PredicateValueType::DOUBLE:
         return std::abs(double_value - other.double_value) < 1e-9;
@@ -153,11 +188,11 @@ class PredicateValue {
     }
   }
 
-  bool operator<(const PredicateValue &other) const {
+  inline bool operator<(const PredicateValue &other) const {
     if (type != other.type) return false;
 
     switch (type) {
-      case PredicateValueType::INT:
+      case PredicateValueType::INT64:
         return int_value < other.int_value;
       case PredicateValueType::DOUBLE:
         return double_value < other.double_value;
@@ -167,10 +202,11 @@ class PredicateValue {
         return false;
     }
   }
-  bool operator<=(const PredicateValue &other) const { return *this < other || *this == other; }
-  bool operator>(const PredicateValue &other) const { return !(*this <= other); }
-  bool operator>=(const PredicateValue &other) const { return !(*this < other); }
-  bool operator!=(const PredicateValue &other) const { return !(*this == other); }
+
+  inline bool operator<=(const PredicateValue &other) const { return *this < other || *this == other; }
+  inline bool operator>(const PredicateValue &other) const { return !(*this <= other); }
+  inline bool operator>=(const PredicateValue &other) const { return !(*this < other); }
+  inline bool operator!=(const PredicateValue &other) const { return !(*this == other); }
 };
 
 /**
@@ -178,7 +214,7 @@ class PredicateValue {
  */
 class Predicate {
  public:
-  Predicate(PredicateOperator oper) : op(oper) {}
+  Predicate(PredicateOperator oper, bool compound = false) : op(oper), compound_pred(compound) {}
   virtual ~Predicate() = default;
 
   /**
@@ -187,7 +223,7 @@ class Predicate {
    * @param num_columns: Number of columns
    * @return: Predicate result (true/false)
    */
-  virtual bool evaluate(const unsigned char **row_data, size_t num_columns) const = 0;
+  virtual bool evaluate(const unsigned char **row_data, size_t num_columns, bool low_order = false) const = 0;
 
   /**
    * Vectorized evaluation (batch)
@@ -226,6 +262,7 @@ class Predicate {
    */
   virtual std::string to_string() const = 0;
 
+  virtual bool is_compound() const { return compound_pred; }
   /**
    * Estimate selectivity
    * @param storage_index: Storage Index (optional)
@@ -234,6 +271,7 @@ class Predicate {
   virtual double estimate_selectivity(const StorageIndex *storage_index = nullptr) const = 0;
 
   PredicateOperator op;  // AND, OR, NOT
+  bool compound_pred{false};
 };
 
 // Simple Predicate (Single Column Predicate)
@@ -245,22 +283,26 @@ class Simple_Predicate : public Predicate {
  public:
   Simple_Predicate(uint32 col_id, PredicateOperator op_type, const PredicateValue &val,
                    enum_field_types type = MYSQL_TYPE_NULL)
-      : Predicate(op_type), column_id(col_id), value(val), column_type(type) {}
+      : Predicate(op_type, false), column_id(col_id), value(val), column_type(type) {}
 
   // BETWEEN constructor
   Simple_Predicate(uint32 col_id, const PredicateValue &min_val, const PredicateValue &max_val,
                    enum_field_types type = MYSQL_TYPE_NULL)
-      : Predicate(PredicateOperator::BETWEEN), column_id(col_id), value(min_val), value2(max_val), column_type(type) {}
+      : Predicate(PredicateOperator::BETWEEN, false),
+        column_id(col_id),
+        value(min_val),
+        value2(max_val),
+        column_type(type) {}
 
   // IN constructor
   Simple_Predicate(uint32 col_id, const std::vector<PredicateValue> &values, bool is_not_in = false,
                    enum_field_types type = MYSQL_TYPE_NULL)
-      : Predicate(is_not_in ? PredicateOperator::NOT_IN : PredicateOperator::IN),
+      : Predicate(is_not_in ? PredicateOperator::NOT_IN : PredicateOperator::IN, false),
         value_list(values),
         column_type(type) {}
 
   // Evaluation implementation
-  bool evaluate(const unsigned char **row_data, size_t num_columns) const override;
+  bool evaluate(const unsigned char **row_data, size_t num_columns, bool low_oder = false) const override;
   void evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
                       bit_array_t &result) const override;
 
@@ -275,13 +317,14 @@ class Simple_Predicate : public Predicate {
   double estimate_selectivity(const StorageIndex *storage_index = nullptr) const override;
 
  public:
-  uint32 column_id;                        // Column index
-  PredicateValue value;                    // Comparison value
-  PredicateValue value2;                   // Second value (for BETWEEN)
-  std::vector<PredicateValue> value_list;  // Value list (for IN)
-  enum_field_types column_type;            // Column type
+  uint32 column_id;                               // Column index
+  PredicateValue value;                           // Comparison value
+  PredicateValue value2;                          // Second value (for BETWEEN)
+  std::vector<PredicateValue> value_list;         // Value list (for IN)
+  Field *field_meta{nullptr};                     // using the field meta.
+  enum_field_types column_type{MYSQL_TYPE_NULL};  // Column type
  private:
-  PredicateValue extract_value(const unsigned char *data) const;
+  PredicateValue extract_value(const unsigned char *data, bool low_order = false) const;
   bool evaluate_like(const std::string &str, const std::string &pattern) const;
   bool evaluate_regexp(const std::string &str, const std::string &pattern) const;
   void evaluate_comparison_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
@@ -297,15 +340,15 @@ class Simple_Predicate : public Predicate {
  */
 class Compound_Predicate : public Predicate {
  public:
-  Compound_Predicate(PredicateOperator op_type);
+  Compound_Predicate(PredicateOperator op_type) : Predicate(op_type, true) {}
 
   /**
    * Add child predicate
    */
-  void add_child(std::unique_ptr<Predicate> child);
+  inline void add_child(std::unique_ptr<Predicate> child) { children.push_back(std::move(child)); }
 
   // Evaluation implementation
-  bool evaluate(const unsigned char **row_data, size_t num_columns) const override;
+  bool evaluate(const unsigned char **row_data, size_t num_columns, bool low_order = false) const override;
   void evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
                       bit_array_t &result) const override;
 

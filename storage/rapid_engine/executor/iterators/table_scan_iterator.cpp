@@ -34,15 +34,25 @@
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/sql_class.h"
 #include "storage/innobase/include/dict0dd.h"
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase {
 namespace Executor {
 VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows,
-                                                         ha_rows *examined_rows)
+                                                         ha_rows *examined_rows,
+                                                         std::unique_ptr<Imcs::Predicate> predicate,
+                                                         const std::vector<uint32_t> &projection, ha_rows limit,
+                                                         ha_rows offset, bool use_storage_index)
     : TableRowIterator(thd, table),
       m_table{table},
+      m_pushed_predicate{std::move(predicate)},
+      m_projected_columns(projection),
+      m_limit{limit},
+      m_offset{offset},
+      m_use_storage_index{use_storage_index},
       m_batch_size{0},
       m_opt_batch_size{0},
       m_curr_batch_size{0},
@@ -54,25 +64,9 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table,
   m_batch_size = m_opt_batch_size;
 
   m_metrics.reset();
-
-  std::string key(m_table->s->db.str);
-  key.append(".").append(m_table->s->table_name.str);
-
-  const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
-  const dd::Table *table_def = nullptr;
-  if (thd->dd_client()->acquire(m_table->s->db.str, m_table->s->table_name.str, &table_def)) {
-    // Error is reported by the dictionary subsystem.
-    return;
-  }
-  if (table_def == nullptr) return;
-
-  table_id_t table_id = table_def->se_private_id();  // it's table id of dict_table_t
-  if (dd_table_is_partitioned(*table_def)) {
-    m_cursor.reset(
-        new ShannonBase::Imcs::RapidCursor(table, ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(table_id)));
-  } else {
-    m_cursor.reset(new ShannonBase::Imcs::RapidCursor(table, Imcs::Imcs::instance()->get_rpd_table(table_id)));
-  }
+  auto share = shannon_loaded_tables->get(m_table->s->db.str, m_table->s->table_name.str);
+  auto table_id = share ? share->m_tableid : 0;
+  m_cursor.reset(new ShannonBase::Imcs::RapidCursor(table, Imcs::Imcs::instance()->get_rpd_table(table_id)));
 }
 
 size_t VectorizedTableScanIterator::EstimateRowSize() const {
@@ -182,6 +176,11 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
 
 bool VectorizedTableScanIterator::Init() {
   // Initialize similar to ha_rapid::rnd_init()
+  if (m_pushed_predicate) m_cursor->set_scan_predicates(std::move(m_pushed_predicate));
+  if (!m_projected_columns.empty()) m_cursor->set_projection_columns(m_projected_columns);
+  if (m_limit != HA_POS_ERROR) m_cursor->set_scan_limit(m_limit, m_offset);
+  if (m_use_storage_index) m_cursor->enable_storage_index();
+
   if (m_cursor->init()) return true;
 
   // Allocate row buffer for batch processing. to store data in mysql format in column format.
