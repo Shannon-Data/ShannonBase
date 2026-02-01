@@ -30,10 +30,10 @@
 
 namespace ShannonBase {
 namespace Optimizer {
-struct SHANNON_ALIGNAS RapidScanParameters {
+struct RapidScanParameters {
   Imcs::RpdTable *rpd_table{nullptr};
   bool use_storage_index{false};
-  std::shared_ptr<Imcs::Predicate> prune_predicate;
+  std::unique_ptr<Imcs::Predicate> prune_predicate{nullptr};
   std::vector<uint32_t> projected_columns;
   ha_rows limit{HA_POS_ERROR};
   ha_rows offset{0};

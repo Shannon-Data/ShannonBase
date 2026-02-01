@@ -260,14 +260,18 @@ id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered
 SELECT * FROM employees WHERE department <= 'HR' order by id;
 id	name	department	salary
 1001	Alice	HR	6000.00
+1002	Bob	Engineering	8000.00
+1004	David	Engineering	9000.00
 1005	Eve	HR	6500.00
 EXPLAIN SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	employees	NULL	range	idx_dept_salary	idx_dept_salary	403	NULL	4	100.00	Using where; Using filesort; Using secondary engine Rapid
 SELECT * FROM employees WHERE department <= 'HR' AND department >= 'Engineering' order by id;
 id	name	department	salary
+1001	Alice	HR	6000.00
 1002	Bob	Engineering	8000.00
 1004	David	Engineering	9000.00
+1005	Eve	HR	6500.00
 [conn2]
 insert into employees values(1006, 'PPT', 'Sales', 4530.32);
 insert into employees values(1007, 'TPP', 'Sales', 5430.32);

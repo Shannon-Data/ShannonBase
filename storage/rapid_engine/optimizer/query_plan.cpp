@@ -24,6 +24,8 @@
    The fundmental code for imcs optimizer.
 */
 #include "storage/rapid_engine/optimizer/query_plan.h"
+#include "sql/dd/cache/dictionary_client.h"    // Dictionary_client
+#include "storage/innobase/include/dict0dd.h"  //dd_table_is_partitioned
 
 #include "sql/join_optimizer/access_path.h"                         // AccessPath
 #include "sql/sql_lex.h"                                            // query_expression
@@ -33,6 +35,7 @@
 namespace ShannonBase {
 namespace Optimizer {
 AccessPath *ScanTable::ToAccessPath(THD *thd) {
+  assert(this->source_table);
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::TABLE_SCAN;
   path->table_scan().table = this->source_table;
@@ -40,7 +43,19 @@ AccessPath *ScanTable::ToAccessPath(THD *thd) {
 
   path->vectorized = this->vectorized;
 
-  auto rapid_scan_params = new (thd->mem_root) ShannonBase::Optimizer::RapidScanParameters();
+  const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+  const dd::Table *table_def = nullptr;
+  if (thd->dd_client()->acquire(this->source_table->s->db.str, this->source_table->s->table_name.str, &table_def)) {
+    // Error is reported by the dictionary subsystem.
+    path->vectorized = false;
+  }
+  // if table is partition table, we dont use `VectorizedTableScanIterator`
+  if (table_def && dd_table_is_partitioned(*table_def)) {
+    path->vectorized = false;
+  }
+
+  auto rapid_scan_params = new (thd->mem_root) ShannonBase::Optimizer::RapidScanParameters{};
+  rapid_scan_params->prune_predicate = std::move(this->prune_predicate);
   rapid_scan_params->rpd_table = this->rpd_table;
   rapid_scan_params->use_storage_index = this->use_storage_index;
   rapid_scan_params->projected_columns = this->projected_columns;

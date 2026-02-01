@@ -1167,8 +1167,11 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
    *  If enable it, will use aggregate access path to the result of `count(*), min() and max()`.
    */
 
-  lex->add_statement_options(OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION);
-
+  // The hypergraph optimizer does not do const tables, nor does it evaluate subqueries during optimization.
+  auto options = (thd->lex->using_hypergraph_optimizer())
+                     ? OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION
+                     : OPTION_NO_SUBQUERY_DURING_OPTIMIZATION;
+  lex->add_statement_options(options);
   return RapidPrepareEstimateQueryCosts(thd, lex);
 }
 

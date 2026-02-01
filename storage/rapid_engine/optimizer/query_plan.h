@@ -96,6 +96,9 @@ using Plan = std::unique_ptr<PlanNode>;
 // ScanTable represents a table scan operation.
 class ScanTable : public PlanNode {
  public:
+  ScanTable() = default;
+  ~ScanTable() override = default;
+
   TABLE *source_table{nullptr};
   Imcs::RpdTable *rpd_table{nullptr};
 
@@ -139,6 +142,9 @@ class ScanTable : public PlanNode {
 // Filter represents a filtering operation.
 class Filter : public PlanNode {
  public:
+  Filter() = default;
+  ~Filter() override = default;
+
   // the source condition for filtering
   Item *condition{nullptr};
   // predicate condition of converted `condition`, which is used for IMCS converted from `condtion`.
@@ -154,6 +160,9 @@ class Filter : public PlanNode {
 // Hash join represents a hash join operation.
 class HashJoin : public PlanNode {
  public:
+  HashJoin() = default;
+  ~HashJoin() override = default;
+
   // the source join conditions from mysql `JOIN`.
   std::vector<Item *> join_conditions;
   bool allow_spill{false};
@@ -168,6 +177,9 @@ class HashJoin : public PlanNode {
 // Nested loop join represents a nested loop join operation.
 class NestLoopJoin : public PlanNode {
  public:
+  NestLoopJoin() = default;
+  ~NestLoopJoin() override = default;
+
   // the source join conditions in `Item` format from mysql `JOIN`.
   const JoinPredicate *source_join_predicate{nullptr};
   OverflowBitset equijoin_predicates;
@@ -185,6 +197,9 @@ class NestLoopJoin : public PlanNode {
 // LocalAgg represents a local aggregation operation.
 class LocalAgg : public PlanNode {
  public:
+  LocalAgg() = default;
+  ~LocalAgg() override = default;
+
   // the source condtions from mysql `group by` and `order by` and `aggregatiion funcs`.
   std::vector<Item *> group_by;
   std::vector<Item *> order_by;
@@ -201,6 +216,9 @@ class LocalAgg : public PlanNode {
 // GlobalAgg represnets a global aggregation operation.
 class GlobalAgg : public PlanNode {
  public:
+  GlobalAgg() = default;
+  ~GlobalAgg() override = default;
+
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
@@ -211,6 +229,9 @@ class GlobalAgg : public PlanNode {
 // TopN represents a top-N operation.
 class TopN : public PlanNode {
  public:
+  TopN() = default;
+  ~TopN() override = default;
+
   // the source condition item from mysql `order by ... limit`.
   Filesort *filesort{nullptr};
   ORDER *order{nullptr};
@@ -226,6 +247,9 @@ class TopN : public PlanNode {
 // Sort represents a `oder by` operation.
 class Sort : public PlanNode {
  public:
+  Sort() = default;
+  ~Sort() override = default;
+
   Filesort *filesort{nullptr};
   ORDER *order{nullptr};
 
@@ -244,6 +268,9 @@ class Sort : public PlanNode {
 // ZeroRows represents an operation that produces zero row or one row.
 class ZeroRows : public PlanNode {
  public:
+  ZeroRows() = default;
+  ~ZeroRows() override = default;
+
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
@@ -257,6 +284,9 @@ class ZeroRows : public PlanNode {
 // Limit represents a limit operation.
 class Limit : public PlanNode {
  public:
+  Limit() = default;
+  ~Limit() override = default;
+
   ha_rows limit{0};
   ha_rows offset{0};
   bool count_all_rows;
@@ -275,6 +305,9 @@ class Limit : public PlanNode {
  */
 class MySQLNative : public PlanNode {
  public:
+  MySQLNative() = default;
+  ~MySQLNative() override = default;
+
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 

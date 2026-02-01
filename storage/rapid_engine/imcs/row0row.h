@@ -268,28 +268,24 @@ class StorageIndex {
    */
   inline double get_min_value(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return DBL_MAX;
-
     std::shared_lock lock(m_mutex);
     return m_column_stats[col_idx].min_value.load(std::memory_order_acquire);
   }
 
   inline double get_max_value(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return DBL_MIN;
-
     std::shared_lock lock(m_mutex);
     return m_column_stats[col_idx].max_value.load(std::memory_order_acquire);
   }
 
   inline size_t get_null_count(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return 0;
-
     std::shared_lock lock(m_mutex);
     return m_column_stats[col_idx].null_count.load(std::memory_order_acquire);
   }
 
   inline bool get_has_null(uint32 col_idx) const {
     if (col_idx >= m_num_columns) return false;
-
     std::shared_lock lock(m_mutex);
     return m_column_stats[col_idx].has_null.load(std::memory_order_acquire);
   }
@@ -322,6 +318,28 @@ class StorageIndex {
   bool serialize(std::ostream &out) const;
 
   bool deserialize(std::istream &in);
+
+ private:
+  /**
+   * @brief Recursively evaluate a single predicate against Storage Index
+   * @param pred Predicate (Simple or Compound)
+   * @return true if predicate guarantees no rows match (can skip)
+   */
+  bool can_skip_predicate(const Predicate *pred) const;
+
+  /**
+   * @brief Evaluate a simple predicate against Storage Index
+   * @param pred Simple predicate
+   * @return true if simple predicate guarantees no rows match
+   */
+  bool can_skip_simple_predicate(const Simple_Predicate *pred) const;
+
+  /**
+   * @brief Evaluate a compound predicate against Storage Index
+   * @param pred Compound predicate (AND/OR/NOT)
+   * @return true if compound predicate guarantees no rows match
+   */
+  bool can_skip_compound_predicate(const Compound_Predicate *pred) const;
 };
 
 struct TableMetadata;

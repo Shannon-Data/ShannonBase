@@ -50,6 +50,7 @@ select * from SUPPLIER where S_SUPPKEY = 100;
 
 explain select * from SUPPLIER where S_NAME ='Supplier#000000005';
 select * from SUPPLIER where S_NAME ='Supplier#000000005';
+select * from SUPPLIER where S_NAME ='Supplier#000000005 ';
 
 explain select * from SUPPLIER where S_ACCTBAL = 5755.94;
 select * from SUPPLIER where S_ACCTBAL = 5755.94;

@@ -331,9 +331,11 @@ class TopNPushDown : public Rule {
    * @param pending_limit Pending limit to push down
    * @param pending_offset Pending offset
    * @param pending_order ORDER BY for TopN (nullptr if just LIMIT)
+   * @param pending_filesort filersort for TopN(using by order by to do sort)
    * @return Modified plan node
    */
-  Plan push_limit_recursive(Plan &node, ha_rows pending_limit, ha_rows pending_offset, ORDER *pending_order);
+  Plan push_limit_recursive(Plan &node, ha_rows pending_limit, ha_rows pending_offset, ORDER *pending_order,
+                            Filesort *pending_filesort = nullptr);
 
   /**
    * @brief Check if we can push limit below a join
@@ -349,9 +351,10 @@ class TopNPushDown : public Rule {
    * @param limit Limit value
    * @param offset Offset value
    * @param order ORDER BY clause
+   * @param filesort sort agorithm of ORDER BY clause
    * @return New TopN plan node
    */
-  Plan create_topn_node(Plan child, ha_rows limit, ha_rows offset, ORDER *order);
+  Plan create_topn_node(Plan child, ha_rows limit, ha_rows offset, ORDER *order, Filesort *pending_filesort = nullptr);
 
   /**
    * @brief Create a simple Limit node (no ORDER BY)

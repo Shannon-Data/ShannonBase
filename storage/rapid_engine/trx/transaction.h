@@ -255,7 +255,7 @@ class Transaction : public MemoryObject {
   virtual bool is_auto_commit();
   virtual bool is_active();
 
-  void register_imcu_modification(ShannonBase::Imcs::Imcu *imcu);
+  void register_imcu_modification(std::shared_ptr<ShannonBase::Imcs::Imcu> imcu);
 
   uint64_t get_start_scn() const { return m_start_scn; }
   uint64_t get_commit_scn() const { return m_commit_scn; }
@@ -288,10 +288,8 @@ class TransactionCoordinator {
     uint64_t commit_scn{0};
     std::chrono::system_clock::time_point start_time;
     std::chrono::system_clock::time_point commit_time;
-
     enum Status { ACTIVE, PREPARING, COMMITTED, ABORTED } status;
-
-    std::vector<ShannonBase::Imcs::Imcu *> modified_imcus;
+    std::vector<std::shared_ptr<ShannonBase::Imcs::Imcu>> modified_imcus;
   };
 
   struct Statistics {
@@ -380,7 +378,7 @@ class TransactionCoordinator {
   /**
    * Register IMCU modification
    */
-  void register_imcu_modification(Transaction::ID txn_id, ShannonBase::Imcs::Imcu *imcu);
+  void register_imcu_modification(Transaction::ID txn_id, std::shared_ptr<ShannonBase::Imcs::Imcu> imcu);
 
   Transaction::VersionManager::Snapshot create_snapshot();
 
@@ -452,7 +450,7 @@ class TransactionCoordinator {
   }
 
   ~TransactionCoordinator() {
-    m_batch_running = false;
+    m_batch_running.store(false);
     m_batch_commit_cv.notify_all();
     if (m_batch_commit_worker.joinable()) {
       m_batch_commit_worker.join();
@@ -464,72 +462,25 @@ class TransactionCoordinator {
 
   // Snapshot cache
   std::optional<Transaction::VersionManager::Snapshot> get_cached_snapshot(
-      uint64_t scn, const std::vector<Transaction::ID> &active_txns) {
-    std::shared_lock lock(m_snapshot_cache_mutex);
+      uint64_t scn, const std::vector<Transaction::ID> &active_txns);
 
-    for (const auto &cached : m_snapshot_cache) {
-      if (cached.scn == scn && cached.active_txns == active_txns) {
-        return cached;
-      }
-    }
-    return std::nullopt;
-  }
-
-  void cache_snapshot(const Transaction::VersionManager::Snapshot &snapshot) {
-    std::unique_lock lock(m_snapshot_cache_mutex);
-
-    if (m_snapshot_cache.size() >= m_max_snapshot_cache_size) {
-      m_snapshot_cache.erase(m_snapshot_cache.begin());
-    }
-    m_snapshot_cache.push_back(snapshot);
-  }
+  void cache_snapshot(const Transaction::VersionManager::Snapshot &snapshot);
 
   // Visibility cache eviction
-  void evict_visibility_cache_lfu() {
-    auto to_remove = std::min_element(
-        m_visibility_cache.begin(), m_visibility_cache.end(),
-        [](const auto &a, const auto &b) { return a.second.access_count.load() < b.second.access_count.load(); });
-
-    if (to_remove != m_visibility_cache.end()) {
-      m_visibility_cache.erase(to_remove);
-    }
-  }
+  void evict_visibility_cache_lfu();
 
   // Batch commit worker
-  void batch_commit_worker_loop() {
-    while (m_batch_running) {
-      std::vector<BatchCommitRequest> batch;
+  void batch_commit_worker_loop();
 
-      {
-        std::unique_lock lock(m_batch_commit_mutex);
+  void process_batch_commits(std::vector<BatchCommitRequest> &batch);
 
-        m_batch_commit_cv.wait_for(lock, std::chrono::milliseconds(1), [this] {
-          return m_pending_commits.size() >= m_batch_commit_size || !m_batch_running;
-        });
-
-        if (!m_pending_commits.empty()) {
-          batch = std::move(m_pending_commits);
-          m_pending_commits.clear();
-        }
-      }
-
-      if (!batch.empty()) {
-        process_batch_commits(batch);
-      }
-    }
-  }
-
-  void process_batch_commits(std::vector<BatchCommitRequest> &batch) {
-    uint64_t base_scn = Transaction::VersionManager::instance().allocate_scn_batch(batch.size());
-
-    for (size_t i = 0; i < batch.size(); ++i) {
-      auto &req = batch[i];
-      uint64_t commit_scn = base_scn + i;
-
-      commit_transaction(req.trx);
-      req.commit_scn_promise.set_value(commit_scn);
-    }
-  }
+  /**
+   * Internal commit with pre-allocated SCN (used by batch commit)
+   * @param trx Transaction object pointer
+   * @param commit_scn Pre-allocated commit SCN
+   * @return Whether successful
+   */
+  bool commit_transaction_internal(Transaction *trx, uint64_t commit_scn);
 
   // Transaction tracking
   mutable std::shared_mutex m_txns_mutex;
@@ -576,19 +527,13 @@ class TransactionCoordinator {
 class TransactionGuard {
  public:
   explicit TransactionGuard(Transaction *trx) : m_trx(trx) {}
-
   ~TransactionGuard() {
-    if (m_trx && m_trx->is_active()) {
-      m_trx->rollback();
-    }
+    if (m_trx && m_trx->is_active()) m_trx->rollback();
   }
 
   void commit() {
-    if (m_trx) {
-      m_trx->commit();
-    }
+    if (m_trx) m_trx->commit();
   }
-
   Transaction *get() const { return m_trx; }
 
  private:
@@ -598,54 +543,19 @@ class TransactionGuard {
 class TransactionJournal {
  public:
   // Status Enum
-  enum Entry_Status {
+  enum EntryStatus {
     ACTIVE = 0,     // Active (uncommitted)
     COMMITTED = 1,  // Committed
     ABORTED = 2     // Rolled back
   };
 
   TransactionJournal(size_t capacity) : m_capacity(capacity) {}
-
   virtual ~TransactionJournal() { clear(); }
-
-  TransactionJournal(TransactionJournal &&other) noexcept
-      : m_capacity(other.m_capacity),
-        m_entry_count(other.m_entry_count.load()),
-        m_total_size(other.m_total_size.load()) {
-    std::unique_lock lock1(m_mutex, std::defer_lock);
-    std::unique_lock lock2(other.m_mutex, std::defer_lock);
-    std::lock(lock1, lock2);
-
-    m_entries = std::move(other.m_entries);
-    m_txn_entries = std::move(other.m_txn_entries);
-    m_active_txns = std::move(other.m_active_txns);
-
-    other.m_entry_count.store(0);
-    other.m_total_size.store(0);
-  }
-
-  TransactionJournal &operator=(TransactionJournal &&other) noexcept {
-    if (this != &other) {
-      std::unique_lock lock1(m_mutex, std::defer_lock);
-      std::unique_lock lock2(other.m_mutex, std::defer_lock);
-      std::lock(lock1, lock2);
-
-      m_capacity = other.m_capacity;
-      m_entries = std::move(other.m_entries);
-      m_txn_entries = std::move(other.m_txn_entries);
-      m_active_txns = std::move(other.m_active_txns);
-
-      m_entry_count.store(other.m_entry_count.load());
-      m_total_size.store(other.m_total_size.load());
-
-      other.m_entry_count.store(0);
-      other.m_total_size.store(0);
-    }
-    return *this;
-  }
 
   TransactionJournal(const TransactionJournal &) = delete;
   TransactionJournal &operator=(const TransactionJournal &) = delete;
+  TransactionJournal(TransactionJournal &&) = delete;
+  TransactionJournal &operator=(TransactionJournal &&) = delete;
 
   // Log Entry
   struct Entry {
@@ -667,8 +577,14 @@ class TransactionJournal {
     Entry *prev;  // Points to previous version of the same row
 
     Entry() : row_id(0), operation(0), status(0), reserved(0), txn_id(0), scn(0), prev(nullptr) {}
-
-    ~Entry() = default;
+    ~Entry() {
+      Entry *current = prev;
+      while (current) {
+        Entry *to_delete = current;
+        current = current->prev;
+        delete to_delete;
+      }
+    }
   };
 
   // Log Operations
@@ -739,11 +655,9 @@ class TransactionJournal {
    */
   inline void clear() {
     std::unique_lock lock(m_mutex);
-
     m_entries.clear();
     m_txn_entries.clear();
     m_active_txns.clear();
-
     m_entry_count.store(0);
     m_total_size.store(0);
   }
@@ -783,5 +697,7 @@ class TransactionJournal {
   std::atomic<size_t> m_entry_count{0};
   std::atomic<size_t> m_total_size{0};
 };
+static_assert(!std::is_move_constructible_v<TransactionJournal>, "TransactionJournal must not be movable");
+static_assert(!std::is_move_assignable_v<TransactionJournal>, "TransactionJournal must not be move-assignable");
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_TRANSACTION_H__

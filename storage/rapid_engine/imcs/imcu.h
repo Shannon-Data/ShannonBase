@@ -173,107 +173,15 @@ class Imcu : public MemoryObject {
       for (const auto &mask : other.null_masks) {
         null_masks.emplace_back(mask ? std::make_unique<bit_array_t>(*mask) : nullptr);
       }
-      if (other.txn_journal) txn_journal = std::make_unique<TransactionJournal>(std::move(*other.txn_journal));
+      if (other.capacity) txn_journal = std::make_unique<TransactionJournal>(other.capacity);
       if (other.storage_index) storage_index = std::make_unique<StorageIndex>(*other.storage_index);
       if (other.row_directory) row_directory = other.row_directory->clone();
     }
 
-    // Move constructor
-    imcu_header_t(imcu_header_t &&other) noexcept
-        : imcu_id(other.imcu_id),
-          start_row(other.start_row),
-          end_row(other.end_row),
-          capacity(other.capacity),
-          current_rows(other.current_rows.load()),
-          created_at(other.created_at),
-          last_modified(other.last_modified),
-          del_mask(std::move(other.del_mask)),
-          null_masks(std::move(other.null_masks)),
-          txn_journal(std::move(other.txn_journal)),
-          storage_index(std::move(other.storage_index)),
-          row_directory(std::move(other.row_directory)),
-          insert_count(other.insert_count.load()),
-          update_count(other.update_count.load()),
-          delete_count(other.delete_count.load()),
-          avg_row_size(other.avg_row_size.load()),
-          compressed_size(other.compressed_size.load()),
-          uncompressed_size(other.uncompressed_size.load()),
-          min_trx_id(other.min_trx_id),
-          max_trx_id(other.max_trx_id),
-          min_scn(other.min_scn),
-          max_scn(other.max_scn),
-          last_gc_time(other.last_gc_time),
-          version_count(other.version_count),
-          delete_ratio(other.delete_ratio),
-          status(other.status.load()) {}
-
-    imcu_header_t &operator=(imcu_header_t other) noexcept {
-      swap(*this, other);
-      return *this;
-    }
-
-    imcu_header_t &operator=(imcu_header_t &&other) noexcept {
-      if (this != &other) {
-        imcu_id = other.imcu_id;
-        start_row = other.start_row;
-        end_row = other.end_row;
-        capacity = other.capacity;
-        current_rows.store(other.current_rows.load());
-        created_at = other.created_at;
-        last_modified = other.last_modified;
-        del_mask = std::move(other.del_mask);
-        null_masks = std::move(other.null_masks);
-        txn_journal = std::move(other.txn_journal);
-        storage_index = std::move(other.storage_index);
-        row_directory = std::move(other.row_directory);
-        insert_count.store(other.insert_count.load());
-        update_count.store(other.update_count.load());
-        delete_count.store(other.delete_count.load());
-        avg_row_size.store(other.avg_row_size.load());
-        compressed_size.store(other.compressed_size.load());
-        uncompressed_size.store(other.uncompressed_size.load());
-        min_trx_id = other.min_trx_id;
-        max_trx_id = other.max_trx_id;
-        min_scn = other.min_scn;
-        max_scn = other.max_scn;
-        last_gc_time = other.last_gc_time;
-        version_count = other.version_count;
-        delete_ratio = other.delete_ratio;
-        status.store(other.status.load());
-      }
-      return *this;
-    }
-
-    // Swap helper (for copy-and-swap)
-    friend void swap(imcu_header_t &a, imcu_header_t &b) noexcept {
-      using std::swap;
-      swap(a.imcu_id, b.imcu_id);
-      swap(a.start_row, b.start_row);
-      swap(a.end_row, b.end_row);
-      swap(a.capacity, b.capacity);
-      a.current_rows.store(b.current_rows.load());
-      swap(a.created_at, b.created_at);
-      swap(a.last_modified, b.last_modified);
-      swap(a.del_mask, b.del_mask);
-      swap(a.null_masks, b.null_masks);
-      swap(a.txn_journal, b.txn_journal);
-      swap(a.storage_index, b.storage_index);
-      swap(a.row_directory, b.row_directory);
-      a.insert_count.store(b.insert_count.load());
-      a.update_count.store(b.update_count.load());
-      a.delete_count.store(b.delete_count.load());
-      a.avg_row_size.store(b.avg_row_size.load());
-      a.compressed_size.store(b.compressed_size.load());
-      a.uncompressed_size.store(b.uncompressed_size.load());
-      swap(a.min_trx_id, b.min_trx_id);
-      swap(a.max_trx_id, b.max_trx_id);
-      swap(a.min_scn, b.min_scn);
-      swap(a.max_scn, b.max_scn);
-      swap(a.last_gc_time, b.last_gc_time);
-      swap(a.version_count, b.version_count);
-      swap(a.delete_ratio, b.delete_ratio);
-      a.status.store(b.status.load());
-    }
+    // assgin operator, move constructors disabled
+    imcu_header_t &operator=(imcu_header_t other) = delete;
+    imcu_header_t(imcu_header_t &&other) = delete;
+    imcu_header_t &operator=(imcu_header_t &&) = delete;
   };
 
  public:
@@ -281,6 +189,10 @@ class Imcu : public MemoryObject {
        std::shared_ptr<Utils::MemoryPool> mem_pool);
   Imcu() = default;
   virtual ~Imcu() = default;
+
+  Imcu &operator=(Imcu other) = delete;
+  Imcu(Imcu &&other) = delete;
+  Imcu &operator=(Imcu &&) = delete;
 
   inline RpdTable *owner() { return m_owner_table; }
 
@@ -440,32 +352,22 @@ class Imcu : public MemoryObject {
 
   size_t estimate_size() const {
     size_t total_size = 0;
-
     // Header size.
     total_size += sizeof(imcu_header_t);
-
     // delete bit mask.Storage_Index
-    if (m_header.del_mask) {
-      total_size += m_header.capacity / 8;
-    }
-
+    if (m_header.del_mask) total_size += m_header.capacity / 8;
     // NULL bit mask.
     for (const auto &null_mask : m_header.null_masks) {
-      if (null_mask) {
-        total_size += m_header.capacity / 8;
-      }
+      if (null_mask) total_size += m_header.capacity / 8;
     }
-
     // TrxnJ
     if (m_header.txn_journal) {
       total_size += m_header.txn_journal->get_total_size();
     }
-
     // all column data size.
     for (const auto &[col_idx, cu] : m_column_units) {
       total_size += cu->get_data_size();
     }
-
     return total_size;
   }
 
@@ -484,13 +386,18 @@ class Imcu : public MemoryObject {
   inline TransactionJournal *get_transaction_journal() const { return m_header.txn_journal.get(); }
 
   inline StorageIndex *get_storage_index() const { return m_header.storage_index.get(); }
+
+  inline std::vector<std::unique_ptr<bit_array_t>> &get_null_masks() { return m_header.null_masks; }
   // CU Management
   inline CU *get_cu(uint32 col_idx) {
     auto it = m_column_units.find(col_idx);
     return (it != m_column_units.end()) ? it->second.get() : nullptr;
   }
 
-  inline const CU *get_cu(uint32 col_idx) const { return get_cu(col_idx); }
+  inline const CU *get_cu(uint32 col_idx) const {
+    auto it = m_column_units.find(col_idx);
+    return (it != m_column_units.end()) ? it->second.get() : nullptr;
+  }
 
   // Serialization
   /**
@@ -545,6 +452,37 @@ class Imcu : public MemoryObject {
    */
   inline void increment_version() { m_version.fetch_add(1, std::memory_order_release); }
 
+  /**
+   * @brief Evaluate a single predicate against a row
+   *
+   * @param pred Predicate (Simple or Compound)
+   * @param local_row_id Row ID within IMCU
+   * @param row_cache Cache of column values for this row
+   * @return true if row matches predicate
+   */
+  inline bool evaluate_predicate(const Predicate *pred, row_id_t local_row_id,
+                                 std::unordered_map<uint32, const uchar *> &row_cache) const;
+  /**
+   * @brief Evaluate a simple predicate against a row
+   */
+  inline bool evaluate_simple_predicate(const Simple_Predicate *pred, row_id_t local_row_id,
+                                        std::unordered_map<uint32, const uchar *> &row_cache) const;
+  /**
+   * @brief Evaluate a compound predicate against a row
+   */
+  inline bool evaluate_compound_predicate(const Compound_Predicate *pred, row_id_t local_row_id,
+                                          std::unordered_map<uint32, const uchar *> &row_cache) const;
+  /**
+   * @brief Get column value for a row (with caching)
+   *
+   * @param col_id Column index
+   * @param local_row_id Row ID
+   * @param row_cache Cache to store/retrieve values
+   * @return Pointer to column value (nullptr if NULL)
+   */
+  inline const uchar *get_column_value(uint32 col_id, row_id_t local_row_id,
+                                       std::unordered_map<uint32, const uchar *> &row_cache) const;
+
  private:
   // Memory Management
   std::shared_ptr<Utils::MemoryPool> m_memory_pool;
@@ -567,6 +505,58 @@ class Imcu : public MemoryObject {
 
   // Back Reference
   RpdTable *m_owner_table;
+};
+
+/**
+ * @brief Vectorized evaluation for batch of rows
+ *
+ * Instead of evaluating predicates row-by-row, we can evaluate
+ * an entire batch at once for better CPU cache utilization.
+ *
+ * This is useful for very selective predicates where most rows
+ * are filtered out early.
+ */
+/*
+// In scan_range(), replace row-by-row evaluation with:
+// Build list of visible row IDs
+std::vector<row_id_t> visible_rows;
+for (size_t i = 0; i < batch_size; i++) {
+  if (Utils::Util::bit_array_get(&visibility_mask, i)) {
+    visible_rows.push_back(start + i);
+  }
+}
+
+// Vectorized evaluation
+bit_array_t match_mask(visible_rows.size());
+VectorizedPredicateEvaluator::evaluate_batch(
+    predicates[0].get(), this, visible_rows, match_mask);
+
+// Collect matching rows
+std::vector<row_id_t> matching_rows;
+for (size_t i = 0; i < visible_rows.size(); i++) {
+  if (Utils::Util::bit_array_get(&match_mask, i)) {
+    matching_rows.push_back(visible_rows[i]);
+  }
+}
+*/
+class VectorizedPredicateEvaluator {
+ public:
+  /**
+   * @brief Evaluate predicate on a batch of rows
+   *
+   * @param pred Predicate to evaluate
+   * @param imcu IMCU containing the data
+   * @param row_ids Vector of row IDs to evaluate
+   * @param result Bitmap of results (1 = match, 0 = no match)
+   */
+  static void evaluate_batch(const Predicate *pred, const Imcu *imcu, const std::vector<row_id_t> &row_ids,
+                             bit_array_t &result);
+
+ private:
+  static void evaluate_simple_batch(const Simple_Predicate *pred, const Imcu *imcu,
+                                    const std::vector<row_id_t> &row_ids, bit_array_t &result);
+  static void evaluate_compound_batch(const Compound_Predicate *pred, const Imcu *imcu,
+                                      const std::vector<row_id_t> &row_ids, bit_array_t &result);
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

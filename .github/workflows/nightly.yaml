@@ -62,6 +62,7 @@ jobs:
         rm -rf ${{ github.workspace }}/cmake_build
     - name: install_lib
       run: |
+        sudo apt update -y
         sudo apt install -y libtirpc-dev && sudo apt install -y libboost-all-dev libexpect-perl
     - name: build_shannon_and_install
       run: |
@@ -121,6 +122,7 @@ jobs:
           rm -rf ${{ github.workspace }}/cmake_build
       - name: Install ARM dependencies
         run: |
+          sudo apt update -y
           sudo apt install -y libtirpc-dev libboost-all-dev libjson-perl libexpect-perl
       - name: Build and install (ARM)
         run: |

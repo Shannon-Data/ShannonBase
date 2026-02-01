@@ -138,6 +138,21 @@ class RapidCursor : public MemoryObject {
 
   inline void set_end_range(key_range *end_range) { m_end_range = end_range; }
 
+  inline void set_scan_predicates(std::unique_ptr<Predicate> pred) {
+    m_scan_predicates.clear();
+    if (pred) m_scan_predicates.push_back(std::move(pred));
+  }
+
+  inline void set_projection_columns(const std::vector<uint32_t> &cols) { m_projection_columns = cols; }
+
+  // limit Maximum rows to return (HA_POS_ERROR = no limit)
+  inline void set_scan_limit(ha_rows limit, ha_rows offset) {
+    m_scan_limit = limit;
+    m_scan_offset = offset;
+  }
+
+  inline void enable_storage_index() { m_use_storage_index = true; }
+
  private:
   struct IteratorDeleter {
     void operator()(Index::Iterator *p) const {
@@ -200,6 +215,16 @@ class RapidCursor : public MemoryObject {
   // Performance metrics
   std::atomic<uint64_t> m_total_rows_scanned{0};
   std::atomic<uint64_t> m_batch_fetch_count{0};
+
+  // using to filter the scan with predicates.
+  mutable std::mutex m_predicate_mutex;
+  std::vector<std::unique_ptr<Predicate>> m_scan_predicates;
+
+  std::vector<uint32_t> m_projection_columns;
+
+  ha_rows m_scan_limit{HA_POS_ERROR};
+  ha_rows m_scan_offset{0};
+  bool m_use_storage_index{false};
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

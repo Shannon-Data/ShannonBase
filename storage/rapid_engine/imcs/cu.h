@@ -227,6 +227,8 @@ class CU : public MemoryObject {
    */
   ColumnStatistics get_statistics() const;
 
+  inline Field *field() const { return m_header.field_metadata; }
+  inline Compress::Dictionary *dictionary() const { return m_header.local_dict.get(); }
   inline size_t get_data_size() const { return m_header.data_size; }
   inline size_t get_capacity() const { return m_header.capacity; }
   inline enum_field_types get_type() const { return m_header.type; }
@@ -248,7 +250,10 @@ class CU : public MemoryObject {
   /**
    * Check if dictionary encoding is needed
    */
-  inline bool needs_dictionary() const { return true; }
+  inline bool needs_dictionary() const {
+    return (m_header.type == MYSQL_TYPE_VARCHAR || m_header.type == MYSQL_TYPE_STRING ||
+            m_header.type == MYSQL_TYPE_VAR_STRING);
+  }
 
   /**
    * Calculate numeric statistics

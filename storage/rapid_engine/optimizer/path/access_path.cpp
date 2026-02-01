@@ -243,6 +243,52 @@ static RowIterator *FindSingleIteratorOfType(AccessPath *path, AccessPath::Type 
  * but we replace some Iterators with vectorized execution supported iterators. and replace
  * the root iterator tree whith new one, which it is with vectorized iterator, such as vectorized scan table
  * hash join, etc.
+ *
+ * The overall execution flow is as follows:
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │ Optimizer Phase                                                 │
+ * │  ├─ ScanTable::prune_predicate (Predicate tree)                 │
+ * │  ├─ ScanTable::projected_columns (Column IDs)                   │
+ * │  └─ ScanTable::limit/offset                                     │
+ * └─────────────────┬───────────────────────────────────────────────┘
+ *                   │ ToAccessPath()
+ *                   ↓
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │ AccessPath Phase                                                │
+ * │  RapidScanParameters {                                          │
+ * │    prune_predicate: shared_ptr<Predicate>                       │
+ * │    projected_columns: vector<uint32_t>                          │
+ * │    limit/offset: ha_rows                                        │
+ * │  }                                                              │
+ * └─────────────────┬───────────────────────────────────────────────┘
+ *                   │ CreateIteratorFromAccessPath()
+ *                   ↓
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │ Iterator Creation                                               │
+ * │  VectorizedTableScanIterator(                                   │
+ * │    ..., predicate, projection, limit, offset)                   │
+ * └─────────────────┬───────────────────────────────────────────────┘
+ *                   │ Init()
+ *                   ↓
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │ Cursor Configuration                                            │
+ * │  RapidCursor::set_scan_predicates(predicate)                    │
+ * │  RapidCursor::set_projection_columns(projection)                │
+ * │  RapidCursor::set_scan_limit(limit, offset)                     │
+ * └─────────────────┬───────────────────────────────────────────────┘
+ *                   │ next_batch()
+ *                   ↓
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │ Execution Phase                                                 │
+ * │  For each IMCU:                                                 │
+ * │    1. Storage Index Pruning (IMCU level)                        │
+ * │       if (imcu->can_skip_imcu(predicates)) skip;                │
+ * │    2. IMCU::scan_range() with predicates                        │
+ * │       ├─ Visibility check (MVCC)                                │
+ * │       ├─ Predicate evaluation (row-by-row)                      │
+ * │       └─ Column projection (read only needed columns)           │
+ * │    3. Return filtered rows via callback                         │
+ * └─────────────────────────────────────────────────────────────────┘
  */
 unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath(THD *thd, MEM_ROOT *mem_root,
                                                                                  OptimizeContext *context,
@@ -289,14 +335,35 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
     switch (path->type) {
       case AccessPath::TABLE_SCAN: {
         const auto &param = path->table_scan();
+        std::unique_ptr<Imcs::Predicate> predicate{nullptr};
+        std::vector<uint32_t> projection;
+        ha_rows limit{HA_POS_ERROR};
+        ha_rows offset{0};
+        bool use_storage_index{false};
         if (path->secondary_engine_data) {
-          auto rapid_scan_param [[maybe_unused]] = static_cast<RapidScanParameters *>(path->secondary_engine_data);
+          auto rapid_scan_param = static_cast<RapidScanParameters *>(path->secondary_engine_data);
+          predicate = std::move(rapid_scan_param->prune_predicate);
+          projection = std::move(rapid_scan_param->projected_columns);
+          limit = rapid_scan_param->limit;
+          offset = rapid_scan_param->offset;
+          use_storage_index = true;
+          rapid_scan_param->~RapidScanParameters();
+#ifndef NDEBUG
+          if (predicate) {
+            DBUG_PRINT("rapid_optimizer",
+                       ("TABLE_SCAN: Passing predicate to iterator: %s", predicate->to_string().c_str()));
+          }
+          if (!projection.empty()) {
+            DBUG_PRINT("rapid_optimizer", ("TABLE_SCAN: Column projection enabled (%zu columns)", projection.size()));
+          }
+#endif
         }
         if (path->vectorized &&
             param.table->s->table_category ==
                 enum_table_category::TABLE_CATEGORY_USER)  // Here param.table maybe a temp table/in-memory temp table.)
           iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(
-              thd, mem_root, param.table, path->num_output_rows(), examined_rows);
+              thd, mem_root, param.table, path->num_output_rows(), examined_rows, std::move(predicate), projection,
+              limit, offset, use_storage_index);
         else
           iterator = NewIterator<TableScanIterator>(thd, mem_root, param.table, path->num_output_rows(), examined_rows);
         break;

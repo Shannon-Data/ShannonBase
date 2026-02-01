@@ -87,81 +87,49 @@ class Util {
       case MYSQL_TYPE_VARCHAR: {
         data_val = safe_cast(0);
       } break;
-
       case MYSQL_TYPE_TINY: {
         // Field_tiny::val_int() impl
         const int tmp = field->is_unsigned() ? (int)data_ptr[0] : (int)((signed char *)data_ptr)[0];
         data_val = safe_cast((longlong)tmp);
       } break;
-
       case MYSQL_TYPE_SHORT: {
         // Field_short::val_int() impl
-        short j;
-        if (db_low_byte_first)
-          j = sint2korr(data_ptr);
-        else
-          j = shortget(data_ptr);
+        short j = db_low_byte_first ? sint2korr(data_ptr) : shortget(data_ptr);
         longlong value = field->is_unsigned() ? (longlong)(unsigned short)j : (longlong)j;
         data_val = safe_cast(value);
       } break;
-
       case MYSQL_TYPE_INT24: {
         // Field_medium::val_int() impl
         const long j = field->is_unsigned() ? (long)uint3korr(data_ptr) : sint3korr(data_ptr);
         data_val = safe_cast((longlong)j);
       } break;
-
       case MYSQL_TYPE_LONG: {
         // Field_long::val_int() impl
-        int32 j;
-        if (db_low_byte_first)
-          j = sint4korr(data_ptr);
-        else
-          j = longget(data_ptr);
+        int32 j = (db_low_byte_first) ? sint4korr(data_ptr) : longget(data_ptr);
         longlong value = field->is_unsigned() ? (longlong)(uint32)j : (longlong)j;
         data_val = safe_cast(value);
       } break;
-
       case MYSQL_TYPE_LONGLONG: {
         // Field_longlong::val_int() impl
-        longlong value;
-        if (db_low_byte_first)
-          value = sint8korr(data_ptr);
-        else
-          value = longlongget(data_ptr);
-        if (field->is_unsigned()) {
-          data_val = safe_cast(static_cast<double>(static_cast<ulonglong>(value)));
-        } else {
-          data_val = safe_cast(value);
-        }
+        longlong value = (db_low_byte_first) ? sint8korr(data_ptr) : longlongget(data_ptr);
+        data_val =
+            (field->is_unsigned()) ? safe_cast(static_cast<double>(static_cast<ulonglong>(value))) : safe_cast(value);
       } break;
-
       case MYSQL_TYPE_FLOAT: {
         // Field_float::val_real() impl
-        double value;
-        if (db_low_byte_first)
-          value = double{float4get(data_ptr)};
-        else
-          value = double{floatget(data_ptr)};
+        double value = (db_low_byte_first) ? double{float4get(data_ptr)} : double{floatget(data_ptr)};
         data_val = safe_cast(value);
       } break;
-
       case MYSQL_TYPE_DOUBLE: {
         // Field_double::val_real() impl
-        double value;
-        if (db_low_byte_first)
-          value = float8get(data_ptr);
-        else
-          value = doubleget(data_ptr);
+        double value = (db_low_byte_first) ? float8get(data_ptr) : doubleget(data_ptr);
         data_val = safe_cast(value);
       } break;
-
       case MYSQL_TYPE_DECIMAL: {
         double value;
         memcpy(&value, data_ptr, sizeof(value));
         data_val = safe_cast(value);
       } break;
-
       case MYSQL_TYPE_NEWDECIMAL: {
         auto new_field = down_cast<Field_new_decimal *>(field);
         int prec = new_field->precision;
@@ -176,7 +144,6 @@ class Util {
           data_val = safe_cast(0);
         }
       } break;
-
       case MYSQL_TYPE_DATE:
       case MYSQL_TYPE_DATETIME:
       case MYSQL_TYPE_NEWDATE: {
@@ -184,12 +151,20 @@ class Util {
           ulong j = uint3korr(data_ptr);
           j = (j % 32L) + (j / 32L % 16L) * 100L + (j / (16L * 32L)) * 10000L;
           data_val = safe_cast(j);
+        } else if (field->real_type() == MYSQL_TYPE_DATETIME2) {
+          uint8 dec = down_cast<Field_datetimef *>(field)->decimals();
+          longlong packed = my_datetime_packed_from_binary(data_ptr, dec);
+          MYSQL_TIME ltime;
+          TIME_from_longlong_datetime_packed(&ltime, packed);
+          double tmp = TIME_to_double_datetime(ltime);
+          data_val = safe_cast(tmp);
+        } else if (field->real_type() == MYSQL_TYPE_DATETIME) {
+          longlong j = db_low_byte_first ? sint8korr(data_ptr) : longlongget(data_ptr);
+          data_val = safe_cast(j);
         } else {
-          // TODO: impl other datetime type.
           data_val = safe_cast(0);
         }
       } break;
-
       case MYSQL_TYPE_TIME: {
         auto dec = down_cast<Field_timef *>(field)->decimals();
         MYSQL_TIME ltime;
@@ -198,24 +173,29 @@ class Util {
         const double tmp = TIME_to_double_time(ltime);
         data_val = safe_cast(ltime.neg ? -tmp : tmp);
       } break;
-
       case MYSQL_TYPE_YEAR: {
         int tmp = (int)data_ptr[0];
         if (tmp != 0) tmp += 1900;
         data_val = safe_cast((longlong)tmp);
       } break;
-
       case MYSQL_TYPE_TIMESTAMP:
       case MYSQL_TYPE_TIMESTAMP2: {
-        // TODO: timestamp.
-        data_val = safe_cast(0);
+        if (field->real_type() == MYSQL_TYPE_TIMESTAMP2) {
+          uint8 dec = down_cast<Field_timestampf *>(field)->decimals();
+          my_timeval tm;
+          my_timestamp_from_binary(&tm, data_ptr, dec);
+          double res = (double)tm.m_tv_sec + (double)tm.m_tv_usec / 1000000.0;
+          data_val = safe_cast(res);
+        } else {
+          uint32 seconds;
+          seconds = db_low_byte_first ? uint4korr(data_ptr) : longget(data_ptr);
+          data_val = safe_cast((longlong)seconds);
+        }
       } break;
-
       default: {
         data_val = safe_cast(0);
       } break;
     }
-
     return data_val;
   }
 

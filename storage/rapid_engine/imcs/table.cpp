@@ -125,11 +125,9 @@ Table::Table(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(my
 }
 
 Table::~Table() {
-  {
-    std::scoped_lock lk(m_imcu_mtex);
-    m_imcus.clear();
-    m_imcu_index.clear();
-  }
+  std::scoped_lock lk(m_imcu_mtex);
+  m_imcus.clear();
+  m_imcu_index.clear();
   if (m_memory_pool) m_memory_pool.reset();
 }
 
@@ -215,13 +213,13 @@ void Table::encode_row_key(uchar *to_key, uint key_length, const std::vector<Key
         f_length = std::min(f_length, local_char_length);
         /* Key is always stored with 2 bytes */
         int2store(to_key, f_length);
-        memcpy(to_key + HA_KEY_BLOB_LENGTH, pos, f_length);
+        std::memcpy(to_key + HA_KEY_BLOB_LENGTH, pos, f_length);
         if (f_length < length) {
           /*
             Must clear this as we do a memcmp in opt_range.cc to detect
             identical keys
           */
-          memset(to_key + HA_KEY_BLOB_LENGTH + f_length, 0, (length - f_length));
+          std::memset(to_key + HA_KEY_BLOB_LENGTH + f_length, 0, (length - f_length));
         }
       } else if (field->type() == MYSQL_TYPE_BLOB)
         field->get_key_image(to_key, length, Field::itRAW);
@@ -268,7 +266,7 @@ int Table::create_index_memo(const Rapid_load_context *context) {
 
 int Table::register_transaction(Transaction *trx) {
   assert(trx);
-  for (auto &imcu : m_imcus) trx->register_imcu_modification(imcu.get());
+  for (auto &imcu : m_imcus) trx->register_imcu_modification(imcu);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -372,11 +370,6 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
                                                                               context->m_extra_info.m_key_len);
   auto global_row_id = rowid ? *rowid : INVALID_ROW_ID;
   return global_row_id;
-}
-
-uint64 Table::get_row_count(const Rapid_scan_context *context) const {
-  assert(context);
-  return 0;
 }
 
 ColumnStatistics *Table::get_column_stats(uint32 col_idx) const {

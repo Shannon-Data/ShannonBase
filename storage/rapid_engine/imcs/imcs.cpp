@@ -762,26 +762,22 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
 }
 
 int Imcs::unload_innodb(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded) {
+  std::unique_lock lock(m_table_mutex);
   if (m_rpd_tables.find(table_id) == m_rpd_tables.end() && error_if_not_loaded) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
     return HA_ERR_GENERIC;
   }
-
-  std::unique_lock lock(m_table_mutex);
   m_rpd_tables.erase(table_id);
-
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int Imcs::unload_innodbpart(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded) {
+  std::unique_lock lock(m_table_mutex);
   if (m_rpd_parttables.find(table_id) == m_rpd_parttables.end() && error_if_not_loaded) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
     return HA_ERR_GENERIC;
   }
-
-  std::unique_lock lock(m_table_mutex);
   m_rpd_parttables.erase(table_id);
-
   return ShannonBase::SHANNON_SUCCESS;
 }
 

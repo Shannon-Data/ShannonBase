@@ -96,20 +96,56 @@ class Optimizer : public MemoryObject {
   Plan Optimize(const OptimizeContext *context, const THD *thd, const JOIN *join);
 
   /**
-   * @brief Optimizes and rewrites access paths for secondary engine with custom optimizer
+   * @brief Builds customized access paths for secondary engine optimization
    *
-   * This function processes AccessPath trees to create optimized versions for
-   * secondary engine execution, including vectorized table scans, GPU joins, etc.
+   * Creates specialized AccessPath types (Vectorized Table Scan, GPU Join, etc.)
+   * for secondary engine execution. The function examines each AccessPath type
+   * and creates optimized versions when possible.
    *
-   * @param context Optimization context containing vectorization flags and statistics
-   * @param path The AccessPath to optimize and rewrite
-   * @param join The JOIN structure containing query information
-   * @return AccessPath* Newly created optimized AccessPath
+   * Why not use original AccessPath directly?
+   * - Future extensions may require custom AccessPath types (e.g., RapidAccessPath)
+   * - Original AccessPath tree will be freed and replaced with rapid_path
+   * - Enables specialized iterators in PathGenerator::CreateIteratorFromAccessPath
+   *
+   * @param context Optimization context with vectorization capabilities
+   * @param path Input AccessPath to optimize
+   * @param join JOIN structure for query context
+   * @return AccessPath* Optimized AccessPath, or nullptr if no optimization applied
    */
   static AccessPath *OptimizeAndRewriteAccessPath(OptimizeContext *context, AccessPath *path, const JOIN *join);
 
+  /**
+   * Convert MySQL Item to Rapid Predicate
+   *
+   * This function translates MySQL's Item expression tree into our custom
+   * Predicate representation for optimized execution in IMCS.
+   *
+   * @param thd Thread handler
+   * @param item MySQL Item to convert
+   * @return Converted Predicate, or nullptr if not convertible
+   */
   static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Item *item);
-  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Index_lookup *lookup);
+
+  /**
+   * Convert Index_lookup to Predicate
+   *
+   * Index_lookup contains range conditions for index scans.
+   * This function extracts the range conditions and converts them to predicates.
+   *
+   * The items[] array may contain:
+   * 1. Constants lookup(for simple WHERE conditions like "id = 5")
+   * 2. Dynamic lookup Field references from other tables (for JOIN conditions like "t1.id = t2.id")
+   *
+   * For case 2, we CANNOT convert to a simple predicate with a constant value.
+   * Instead, we need to recognize this as a JOIN condition that will be evaluated dynamically during execution.
+   *
+   * @param thd Thread handler
+   * @param lookup Index lookup information
+   * @param table source table object.
+   * @return Converted Predicate representing the index range conditions
+   */
+  static std::unique_ptr<Imcs::Predicate> convert_item_to_predicate(THD *thd, Index_lookup *lookup,
+                                                                    TABLE *table = nullptr);
 
   // Rapid cost calculator, HGO AccessPath estimation.
   static inline bool RapidEstimateJoinCostHGO(THD *thd, const JOIN &join, double *secondary_engine_cost) {
@@ -177,8 +213,30 @@ class Optimizer : public MemoryObject {
   static std::unique_ptr<Imcs::Predicate> convert_isnotnull_to_predicate(THD *thd, Item_func *func);
   static std::unique_ptr<Imcs::Predicate> convert_like_to_predicate(THD *thd, Item_func_like *like_func,
                                                                     bool is_negated);
+  /**
+   * Convert QUICK_RANGE to Predicate
+   *
+   * QUICK_RANGE represents a range scan on an index.
+   * It contains min/max values and flags for each key part.
+   *
+   * @param thd Thread handler
+   * @param range Quick range information
+   * @param key_part Key part information
+   * @return Converted Predicate representing the range
+   */
   static std::unique_ptr<Imcs::Predicate> convert_quick_range_to_predicate(THD *thd, const QUICK_RANGE *range,
                                                                            const KEY_PART_INFO *key_part);
+  /**
+   * Convert SEL_ARG tree to Predicate
+   *
+   * SEL_ARG represents the range tree for index optimization.
+   * It's a red-black tree structure containing range intervals.
+   *
+   * @param thd Thread handler
+   * @param sel_arg Range tree root
+   * @param key_part Key part information
+   * @return Converted Predicate
+   */
   static std::unique_ptr<Imcs::Predicate> convert_sel_arg_to_predicate(THD *thd, const SEL_ARG *sel_arg,
                                                                        const KEY_PART_INFO *key_part);
   static Imcs::PredicateValue extract_value_from_key_part(THD *thd, const uchar *key_ptr, const KEY_PART_INFO *key_part,
@@ -188,7 +246,9 @@ class Optimizer : public MemoryObject {
                                                              enum_field_types field_type);
   static Imcs::PredicateValue extract_value_from_sel_arg_max(THD *thd, const SEL_ARG *sel_arg,
                                                              enum_field_types field_type);
-  static Imcs::PredicateValue extract_value_from_item(THD *thd, Item *item);
+  static Imcs::PredicateValue extract_value_from_item(THD *thd, Item *item,
+                                                      enum_field_types target_type = MYSQL_TYPE_NULL,
+                                                      Field *target_field = nullptr);
   static Imcs::PredicateOperator swap_operator(Imcs::PredicateOperator op);
 
   std::atomic<bool> m_registered{false};

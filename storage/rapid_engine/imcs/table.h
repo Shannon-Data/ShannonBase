@@ -89,7 +89,7 @@ class RpdTable : public MemoryObject {
   RpdTable(const TABLE *&mysql_table, const TableConfig &config);
 
   /** @brief decotor. */
-  virtual ~RpdTable() {}
+  virtual ~RpdTable() = default;
 
   virtual TYPE type() const = 0;
 
@@ -166,11 +166,6 @@ class RpdTable : public MemoryObject {
    * @return: Inserted global row_id, returns INVALID_ROW_ID on failure.
    */
   virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata) = 0;
-
-  /**
-   * Get row count (considering visibility)
-   */
-  virtual uint64 get_row_count(const Rapid_scan_context *context) const = 0;
 
   /**
    * Get column statistics
@@ -280,11 +275,9 @@ class Table : public RpdTable {
   virtual size_t delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &row_ids) override;
 
   virtual int update_row(const Rapid_load_context *context, row_id_t global_row_id,
-                         const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) override;
+                         const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) final;
 
   virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata) override;
-
-  virtual uint64 get_row_count(const Rapid_scan_context *context) const override;
 
   virtual ColumnStatistics *get_column_stats(uint32 col_idx) const override;
 
@@ -461,47 +454,14 @@ class Table : public RpdTable {
 };
 
 // partitioned rapid table.
-class PartTable : public RpdTable {
+class PartTable : public Table {
  public:
-  PartTable(const TABLE *&mysql_table, const TableConfig &config) : RpdTable(mysql_table, config) {}
+  PartTable(const TABLE *&mysql_table, const TableConfig &config) : Table(mysql_table, config) {}
   virtual ~PartTable() { m_partitions.clear(); }
 
   virtual TYPE type() const override { return TYPE::PARTTABLE; }
 
   virtual int register_transaction(Transaction *trx) override;
-
-  virtual int create_index_memo(const Rapid_load_context *context) override { return 0; }
-
-  virtual row_id_t insert_row(const Rapid_load_context *context, uchar *rowdata) override { return INVALID_ROW_ID; }
-
-  virtual int delete_row(const Rapid_load_context *context, row_id_t global_row_id) override { return 0; }
-
-  virtual size_t delete_rows(const Rapid_load_context *context, const std::vector<row_id_t> &row_ids) override {
-    return 0;
-  }
-
-  virtual int update_row(const Rapid_load_context *context, row_id_t global_row_id,
-                         const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) override {
-    return 0;
-  }
-
-  virtual row_id_t locate_row(const Rapid_load_context *context, uchar *rowdata) override { return INVALID_ROW_ID; }
-
-  virtual uint64 get_row_count(const Rapid_scan_context *context) const override { return 0; }
-
-  virtual ColumnStatistics *get_column_stats(uint32 col_idx) const override { return nullptr; }
-
-  virtual void update_statistics(bool force = false) override {}
-
-  virtual size_t garbage_collect(uint64 min_active_scn) override { return 0; }
-
-  virtual size_t compact(double delete_ratio_threshold = 0.5) override { return 0; }
-
-  virtual bool reorganize() override { return false; }
-
-  virtual Imcu *locate_imcu(size_t imcu_id) override { return nullptr; }
-
-  virtual Index::Index<uchar, row_id_t> *get_index(std::string) final { return nullptr; }
 
   virtual int build_partitions(const Rapid_load_context *context);
 
