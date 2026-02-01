@@ -243,7 +243,7 @@ class Imcu : public MemoryObject {
    * @param callback: row callback function
    * @return number of scanned rows
    */
-  size_t scan(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
+  size_t scan(Rapid_scan_context *context, const std::vector<std::shared_ptr<Predicate>> &predicates,
               const std::vector<uint32> &projection, RowCallback callback);
 
   /**
@@ -257,7 +257,7 @@ class Imcu : public MemoryObject {
   @return Actual number of rows scanned and returned
   */
   size_t scan_range(Rapid_scan_context *context, size_t start_offset, size_t limit,
-                    const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
+                    const std::vector<std::shared_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
                     RowCallback callback);
   /**
    * Check row visibility (core: single-row check)
@@ -296,7 +296,7 @@ class Imcu : public MemoryObject {
    * @param predicates: filter conditions
    * @return true if the IMCU can be skipped
    */
-  bool can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const;
+  bool can_skip_imcu(const std::vector<std::shared_ptr<Predicate>> &predicates) const;
 
   /**
    * Update the Storage Index

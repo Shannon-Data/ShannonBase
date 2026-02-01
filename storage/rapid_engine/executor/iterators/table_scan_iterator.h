@@ -78,7 +78,11 @@ namespace Executor {
 class VectorizedTableScanIterator : public TableRowIterator {
  public:
   VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows,
+<<<<<<< HEAD
                               std::unique_ptr<Imcs::Predicate> predicate = nullptr,
+=======
+                              const std::shared_ptr<Imcs::Predicate> &predicate = nullptr,
+>>>>>>> 807d5be12 (feat(rapid):enable new executor impl)
                               const std::vector<uint32_t> &projection = {}, ha_rows limit = HA_POS_ERROR,
                               ha_rows offset = 0, bool use_storage_index = false);
 
@@ -185,7 +189,11 @@ class VectorizedTableScanIterator : public TableRowIterator {
  private:
   TABLE *m_table;  ///< source MySQL table
   // these fields came from optimized plan.
+<<<<<<< HEAD
   std::unique_ptr<Imcs::Predicate> m_pushed_predicate{nullptr};
+=======
+  std::shared_ptr<Imcs::Predicate> m_pushed_predicate;
+>>>>>>> 807d5be12 (feat(rapid):enable new executor impl)
   std::vector<uint32_t> m_projected_columns;
   ha_rows m_limit{HA_POS_ERROR};
   ha_rows m_offset{0};

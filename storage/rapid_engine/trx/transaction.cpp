@@ -303,24 +303,24 @@ bool TransactionCoordinator::commit_transaction_internal(Transaction *trx, uint6
   assert(trx != nullptr);
 
   Transaction::ID txn_id = trx->get_id();
-  std::vector<std::shared_ptr<ShannonBase::Imcs::Imcu>> imcus_to_commit;
+  TransactionInfo info;
   {
-    std::unique_lock<std::shared_mutex> lock(m_txns_mutex);
+    std::unique_lock lock(m_txns_mutex);
     auto it = m_active_txns.find(txn_id);
     if (it == m_active_txns.end()) return false;
 
+    uint64_t commit_scn = Transaction::VersionManager::instance().allocate_scn();
     it->second.commit_scn = commit_scn;
     it->second.status = TransactionInfo::COMMITTED;
     trx->m_commit_scn = commit_scn;
-    imcus_to_commit = it->second.modified_imcus;
+    info = std::move(it->second);
     m_active_txns.erase(it);
     update_min_active_scn();
   }
 
-  for (auto &imcu : imcus_to_commit) {
-    if (imcu == nullptr) continue;
-    auto journal = imcu->get_transaction_journal();
-    if (journal) journal->commit_transaction(txn_id, commit_scn);
+  for (auto *imcu : info.modified_imcus) {
+    auto txn_jr = imcu->get_transaction_journal();
+    if (txn_jr) txn_jr->commit_transaction(txn_id, info.commit_scn);
   }
 
   for (auto &imcu : imcus_to_commit) {
@@ -345,10 +345,8 @@ bool TransactionCoordinator::rollback_transaction(Transaction *trx) {
     m_total_aborted.fetch_add(1, std::memory_order_relaxed);
   }
 
-  for (auto &imcu : imcus_to_rollback) {
-    if (imcu == nullptr) continue;
-    auto journal = imcu->get_transaction_journal();
-    if (journal) journal->abort_transaction(txn_id);
+  for (auto *imcu : modified_imcus) {
+    if (auto *journal = imcu->get_transaction_journal()) journal->abort_transaction(txn_id);
   }
 
   for (auto &imcu : imcus_to_rollback) {
@@ -366,9 +364,8 @@ void TransactionCoordinator::unregister_transaction(Transaction *trx) {
   auto it = m_active_txns.find(txn_id);
   if (it != m_active_txns.end()) {
     // Notify all IMCUs txn aborted
-    for (auto &imcu : it->second.modified_imcus) {
-      auto journal = imcu->get_transaction_journal();
-      if (journal) journal->abort_transaction(txn_id);
+    for (auto *imcu : it->second.modified_imcus) {
+      if (imcu->get_transaction_journal()) imcu->get_transaction_journal()->abort_transaction(txn_id);
     }
     m_active_txns.erase(it);
     update_min_active_scn();
@@ -613,7 +610,7 @@ void TransactionJournal::add_entry(Entry &&entry) {
 }
 
 void TransactionJournal::commit_transaction(Transaction::ID txn_id, uint64_t commit_scn) {
-  std::unique_lock<std::shared_mutex> lock(m_mutex);
+  std::unique_lock lock(m_mutex);
   auto it = m_txn_entries.find(txn_id);
   if (it == m_txn_entries.end()) return;
 
