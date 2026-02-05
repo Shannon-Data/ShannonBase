@@ -243,7 +243,7 @@ class Imcu : public MemoryObject {
    * @param callback: row callback function
    * @return number of scanned rows
    */
-  size_t scan(Rapid_scan_context *context, const std::vector<std::shared_ptr<Predicate>> &predicates,
+  size_t scan(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
               const std::vector<uint32> &projection, RowCallback callback);
 
   /**
@@ -257,7 +257,7 @@ class Imcu : public MemoryObject {
   @return Actual number of rows scanned and returned
   */
   size_t scan_range(Rapid_scan_context *context, size_t start_offset, size_t limit,
-                    const std::vector<std::shared_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
+                    const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
                     RowCallback callback);
   /**
    * Check row visibility (core: single-row check)
@@ -296,10 +296,13 @@ class Imcu : public MemoryObject {
    * @param predicates: filter conditions
    * @return true if the IMCU can be skipped
    */
-  bool can_skip_imcu(const std::vector<std::shared_ptr<Predicate>> &predicates) const;
+  inline bool can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const {
+    std::shared_lock lock(m_header_mutex);
+    return m_header.storage_index->can_skip_imcu(predicates);
+  }
 
   /**
-   * Update the Storage Index
+   * Update the Storage Index, used in after `purge` operation done.
    */
   void update_storage_index();
 
@@ -388,7 +391,7 @@ class Imcu : public MemoryObject {
   inline StorageIndex *get_storage_index() const { return m_header.storage_index.get(); }
 
   inline std::vector<std::unique_ptr<bit_array_t>> &get_null_masks() { return m_header.null_masks; }
-  // CU Management
+
   inline CU *get_cu(uint32 col_idx) {
     auto it = m_column_units.find(col_idx);
     return (it != m_column_units.end()) ? it->second.get() : nullptr;

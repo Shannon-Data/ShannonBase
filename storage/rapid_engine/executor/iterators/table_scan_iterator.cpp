@@ -43,12 +43,12 @@ namespace ShannonBase {
 namespace Executor {
 VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows,
                                                          ha_rows *examined_rows,
-                                                         const std::shared_ptr<Imcs::Predicate> &predicate,
+                                                         std::unique_ptr<Imcs::Predicate> predicate,
                                                          const std::vector<uint32_t> &projection, ha_rows limit,
                                                          ha_rows offset, bool use_storage_index)
     : TableRowIterator(thd, table),
       m_table{table},
-      m_pushed_predicate{predicate},
+      m_pushed_predicate{std::move(predicate)},
       m_projected_columns(projection),
       m_limit{limit},
       m_offset{offset},
@@ -176,7 +176,7 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
 
 bool VectorizedTableScanIterator::Init() {
   // Initialize similar to ha_rapid::rnd_init()
-  if (m_pushed_predicate) m_cursor->set_scan_predicates(m_pushed_predicate);
+  if (m_pushed_predicate) m_cursor->set_scan_predicates(std::move(m_pushed_predicate));
   if (!m_projected_columns.empty()) m_cursor->set_projection_columns(m_projected_columns);
   if (m_limit != HA_POS_ERROR) m_cursor->set_scan_limit(m_limit, m_offset);
   if (m_use_storage_index) m_cursor->enable_storage_index();

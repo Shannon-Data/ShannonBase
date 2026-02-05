@@ -84,7 +84,7 @@ const StorageIndex::ColumnStats *StorageIndex::get_column_stats_snapshot(uint32 
   return &m_column_stats[col_idx];
 }
 
-bool StorageIndex::can_skip_imcu(const std::vector<std::shared_ptr<Predicate>> &predicates) const {
+bool StorageIndex::can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const {
   if (predicates.empty()) return false;  // No predicates, cannot skip
 
   // Top-level predicates are implicitly ANDed together

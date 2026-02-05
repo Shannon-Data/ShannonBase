@@ -58,40 +58,25 @@ class CU : public MemoryObject {
   // CU Header
   struct SHANNON_ALIGNAS CU_header {
     // Basic Information
-    Imcu *owner_imcu{nullptr};         // Back reference to IMCU
-    std::atomic<uint32> column_id{0};  // Column index
+    Imcu *owner_imcu{nullptr};  // Back reference to IMCU
+    uint32 column_id{0};        // Column index
 
-    Field *field_metadata{nullptr};            // Field metadata
-    enum_field_types type{MYSQL_TYPE_NULL};    // Data type
-    std::atomic<size_t> pack_length{0};        // Original length
-    std::atomic<size_t> normalized_length{0};  // Normalized length
+    Field *field_metadata{nullptr};          // Field metadata
+    enum_field_types type{MYSQL_TYPE_NULL};  // Data type
+    size_t pack_length{0};                   // Original length
+    size_t normalized_length{0};             // Normalized length
     const CHARSET_INFO *charset{nullptr};
 
     // Encoding and Compression
     Compress::ENCODING_TYPE encoding{Compress::ENCODING_TYPE::NONE};
     Compress::COMPRESS_LEVEL compression_level{Compress::COMPRESS_LEVEL::DEFAULT};
-
-    // Local dictionary (for string encoding)
     std::shared_ptr<Compress::Dictionary> local_dict{nullptr};
 
-    // Column-Level Statistics (within IMCU)
+    // Column-Level Statistics (for Zone Maps / Storage Index optimization)
+    // These are essential for query optimization (predicate pushdown, IMCU pruning)
     std::atomic<double> min_value{DBL_MAX};
     std::atomic<double> max_value{DBL_MIN};
     std::atomic<double> sum{0};
-    std::atomic<double> avg{0};
-
-    std::atomic<size_t> total_count{0};
-    std::atomic<size_t> null_count{0};
-    std::atomic<size_t> distinct_count{0};  // Estimated value
-
-    // Data Layout
-    std::atomic<size_t> capacity{0};         // Capacity (number of rows)
-    std::atomic<size_t> data_size{0};        // Actual data size
-    std::atomic<size_t> compressed_size{0};  // Compressed size
-
-    // Version Information
-    std::atomic<size_t> version_count{0};      // Number of versions
-    std::atomic<size_t> version_data_size{0};  // Version data size
   };
 
  public:
@@ -122,60 +107,12 @@ class CU : public MemoryObject {
   int update(const Rapid_context *context, row_id_t local_row_id, const uchar *new_data, size_t len);
 
   /**
-   * Batch write (optimized version, for initial loading)
-   * @param start_row: Starting row
-   * @param data_array: Data array
-   * @param count: Number of rows
-   */
-  bool write_batch(const Rapid_context *context, row_id_t start_row, const std::vector<uchar *> &data_array,
-                   size_t count);
-
-  /**
    * Read value (returns current value, does not consider versions)
    * @param local_row_id: Local row ID
    * @param buffer: Output buffer
    * @return: Data length, returns UNIV_SQL_NULL for NULL
    */
   size_t read(const Rapid_context *context, row_id_t local_row_id, uchar *buffer) const;
-
-  /**
-   * Read value (specified SCN version)
-   * @param local_row_id: Local row ID
-   * @param target_scn: Target SCN
-   * @param buffer: Output buffer
-   * @return: Data length
-   */
-  size_t read(const Rapid_context *context, row_id_t local_row_id, uint64_t target_scn, uchar *buffer) const;
-
-  /**
-   * Get value pointer (zero-copy, for scanning)
-   * @param local_row_id: Local row ID
-   * @return: Data pointer (directly points to internal buffer)
-   */
-  const uchar *read(const Rapid_context *context, row_id_t local_row_id);
-
-  /**
-   * Batch read (vectorized)
-   * @param row_ids: List of row IDs to read
-   * @param output: Output buffer (pre-allocated)
-   * @return: Number of rows read
-   */
-  size_t read_batch(const Rapid_context *context, const std::vector<row_id_t> &row_ids, uchar *output) const;
-
-  /**
-   * Scan column (continuous read)
-   * @param start_row: Starting row
-   * @param count: Number of rows
-   * @param output: Output buffer
-   */
-  size_t scan_range(const Rapid_context *context, row_id_t start_row, size_t count, uchar *output) const;
-
-  /**
-   * Create version (called during UPDATE)
-   * @param local_row_id: Local row ID
-   * @param context: Context
-   */
-  void create_version(const Rapid_context *context, row_id_t local_row_id);
 
   /**
    * Get version count
@@ -189,48 +126,19 @@ class CU : public MemoryObject {
    */
   size_t purge_versions(const Rapid_context *context, uint64_t min_active_scn);
 
-  /**
-   * Dictionary encoding (for strings)
-   * @param data: Original data
-   * @param len: Length
-   * @param encoded: Encoded value (dictionary ID)
-   * @return: Returns true if successful
-   */
-  bool encode_value(const Rapid_context *context, const uchar *data, size_t len, uint32 &encoded);
-
-  /**
-   * Dictionary decoding
-   * @param encoded: Dictionary ID
-   * @param buffer: Output buffer
-   * @param len: Output length
-   * @return: Returns true if successful
-   */
-  bool decode_value(const Rapid_context *context, uint32 encoded, uchar *buffer, size_t &len) const;
-
-  /**
-   * Compress column data (background compression)
-   */
   bool compress();
 
-  /**
-   * Decompress column data
-   */
   bool decompress();
 
   /**
-   * Update statistics
+   * Update statistics (min/max/sum for Zone Maps)
    */
   void update_statistics(const uchar *data, size_t len);
 
-  /**
-   * Get column statistics
-   */
   ColumnStatistics get_statistics() const;
 
   inline Field *field() const { return m_header.field_metadata; }
   inline Compress::Dictionary *dictionary() const { return m_header.local_dict.get(); }
-  inline size_t get_data_size() const { return m_header.data_size; }
-  inline size_t get_capacity() const { return m_header.capacity; }
   inline enum_field_types get_type() const { return m_header.type; }
   inline size_t get_normalized_length() const { return m_header.normalized_length; }
   inline Field *get_source_field() const { return m_header.field_metadata; }
@@ -238,27 +146,15 @@ class CU : public MemoryObject {
   bool serialize(std::ostream &out) const;
   bool deserialize(std::istream &in);
 
-  /**
-   * Get data address
-   */
-  inline const uchar *get_data_address(row_id_t local_row_id) const {
-    if (local_row_id >= m_header.capacity) return nullptr;
-    return (m_data.get() + local_row_id * m_header.normalized_length);
-  }
+  const uchar *get_data_address(row_id_t local_row_id) const;
+
+  size_t get_data_size() const;
 
  private:
-  /**
-   * Check if dictionary encoding is needed
-   */
   inline bool needs_dictionary() const {
     return (m_header.type == MYSQL_TYPE_VARCHAR || m_header.type == MYSQL_TYPE_STRING ||
             m_header.type == MYSQL_TYPE_VAR_STRING);
   }
-
-  /**
-   * Calculate numeric statistics
-   */
-  double get_numeric_value(const Rapid_context *context, const uchar *data, size_t len) const;
 
  private:
   const char *m_magic = "SHANNON_CU";
