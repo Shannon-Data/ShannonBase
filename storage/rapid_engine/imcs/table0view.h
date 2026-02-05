@@ -51,8 +51,9 @@ class Cu;
 class RapidTable;
 class RpdTable;
 class RowBuffer;
-struct Row_Result {};
+struct Row_Result;
 class Predicate;
+
 class RapidCursor : public MemoryObject {
  public:
   RapidCursor(TABLE *source_table, RpdTable *rpd);
@@ -138,15 +139,9 @@ class RapidCursor : public MemoryObject {
 
   inline void set_end_range(key_range *end_range) { m_end_range = end_range; }
 
-<<<<<<< HEAD
   inline void set_scan_predicates(std::unique_ptr<Predicate> pred) {
     m_scan_predicates.clear();
     if (pred) m_scan_predicates.push_back(std::move(pred));
-=======
-  inline void set_scan_predicates(std::shared_ptr<Predicate> &pred) {
-    m_scan_predicates.clear();
-    if (pred) m_scan_predicates.push_back(pred);
->>>>>>> 807d5be12 (feat(rapid):enable new executor impl)
   }
 
   inline void set_projection_columns(const std::vector<uint32_t> &cols) { m_projection_columns = cols; }
@@ -224,11 +219,7 @@ class RapidCursor : public MemoryObject {
 
   // using to filter the scan with predicates.
   mutable std::mutex m_predicate_mutex;
-<<<<<<< HEAD
   std::vector<std::unique_ptr<Predicate>> m_scan_predicates;
-=======
-  std::vector<std::shared_ptr<Predicate>> m_scan_predicates;
->>>>>>> 807d5be12 (feat(rapid):enable new executor impl)
 
   std::vector<uint32_t> m_projection_columns;
 

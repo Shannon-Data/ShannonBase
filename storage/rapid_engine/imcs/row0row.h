@@ -295,7 +295,7 @@ class StorageIndex {
    * @param predicates: List of predicates
    * @return: Returns true if can be skipped
    */
-  bool can_skip_imcu(const std::vector<std::shared_ptr<Predicate>> &predicates) const;
+  bool can_skip_imcu(const std::vector<std::unique_ptr<Predicate>> &predicates) const;
 
   /**
    * Estimate selectivity

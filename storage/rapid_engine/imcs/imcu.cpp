@@ -297,13 +297,13 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-size_t Imcu::scan(Rapid_scan_context *context, const std::vector<std::shared_ptr<Predicate>> &predicates,
+size_t Imcu::scan(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
                   const std::vector<uint32> &projection, RowCallback callback) {
   return scan_range(context, 0, SHANNON_BATCH_NUM, predicates, projection, callback);
 }
 
 size_t Imcu::scan_range(Rapid_scan_context *context, size_t start_offset, size_t limit,
-                        const std::vector<std::shared_ptr<Predicate>> &predicates,
+                        const std::vector<std::unique_ptr<Predicate>> &predicates,
                         const std::vector<uint32> &projection, RowCallback callback) {
   size_t num_rows = m_header.current_rows.load();
   if (start_offset >= num_rows) return 0;
@@ -494,11 +494,6 @@ void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_ro
 bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const std::vector<uint32> &col_indices,
                     RowBuffer &output) {
   return 0;
-}
-
-bool Imcu::can_skip_imcu(const std::vector<std::shared_ptr<Predicate>> &predicates) const {
-  std::shared_lock lock(m_header_mutex);
-  return m_header.storage_index->can_skip_imcu(predicates);
 }
 
 void Imcu::update_storage_index() {

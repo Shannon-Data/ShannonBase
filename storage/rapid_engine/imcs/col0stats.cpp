@@ -30,6 +30,7 @@
 
 #include <limits.h>
 #include <iostream>
+#include <random>
 
 #include "sql/field.h"                    //Field
 #include "sql/field_common_properties.h"  // is_numeric_type
@@ -206,7 +207,9 @@ void ColumnStatistics::ReservoirSampler::add(double value) {
     m_samples.push_back(value);
   } else {
     // Random replacement
-    size_t idx = rand() % m_seen_count;
+    static std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<size_t> dist(0, m_seen_count - 1);
+    size_t idx = dist(rng);
     if (idx < m_sample_size) {
       m_samples[idx] = value;
     }

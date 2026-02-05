@@ -335,18 +335,19 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
     switch (path->type) {
       case AccessPath::TABLE_SCAN: {
         const auto &param = path->table_scan();
-        std::shared_ptr<Imcs::Predicate> predicate{nullptr};
+        std::unique_ptr<Imcs::Predicate> predicate{nullptr};
         std::vector<uint32_t> projection;
         ha_rows limit{HA_POS_ERROR};
         ha_rows offset{0};
         bool use_storage_index{false};
         if (path->secondary_engine_data) {
           auto rapid_scan_param = static_cast<RapidScanParameters *>(path->secondary_engine_data);
-          predicate = rapid_scan_param->prune_predicate;
-          projection = rapid_scan_param->projected_columns;
+          predicate = std::move(rapid_scan_param->prune_predicate);
+          projection = std::move(rapid_scan_param->projected_columns);
           limit = rapid_scan_param->limit;
           offset = rapid_scan_param->offset;
           use_storage_index = true;
+          rapid_scan_param->~RapidScanParameters();
 #ifndef NDEBUG
           if (predicate) {
             DBUG_PRINT("rapid_optimizer",
