@@ -31,21 +31,9 @@
 
 namespace ShannonBase {
 namespace Imcs {
-void Predicate::evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                               bit_array_t &result) const {
-  // Default implementation: row-by-row evaluation
-  for (size_t i = 0; i < num_rows; i++) {
-    bool match = evaluate(&row_data[i * num_columns], num_columns);
-    (match) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
-  }
-}
-
-bool Simple_Predicate::evaluate(const unsigned char **row_data, size_t num_columns, bool low_order) const {
-  if (column_id >= num_columns) return false;
-
-  const unsigned char *col_data = row_data[column_id];
+bool Simple_Predicate::evaluate(const uchar *&input_value, bool low_order) const {
   // Handle NULL
-  if (!col_data) {
+  if (!input_value) {
     switch (op) {
       case PredicateOperator::IS_NULL:
         return true;
@@ -57,7 +45,7 @@ bool Simple_Predicate::evaluate(const unsigned char **row_data, size_t num_colum
   }
 
   // Extract column value
-  PredicateValue col_value = extract_value(col_data, low_order);
+  PredicateValue col_value = extract_value(input_value, low_order);
   // Evaluate based on operator
   switch (op) {
     case PredicateOperator::EQUAL:
@@ -97,67 +85,26 @@ bool Simple_Predicate::evaluate(const unsigned char **row_data, size_t num_colum
   }
 }
 
-void Simple_Predicate::evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                                      bit_array_t &result) const {
-  if (column_id >= num_columns) return;
+void Simple_Predicate::evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                                      size_t batch_num) const {
+  size_t i = 0;
+  auto values_sz = input_values.size();
+  // Process with loop unrolling
+  for (; i + batch_num <= values_sz; i += batch_num) {
+    for (size_t j = 0; j < batch_num; j++) {
+      auto input_value = input_values[i + j];
+      bool match = evaluate(input_value);
+      (match) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
+    }
+  }
 
-  // SIMD optimization for common operators (simplified version)
-  switch (op) {
-    case PredicateOperator::EQUAL:
-    case PredicateOperator::NOT_EQUAL:
-    case PredicateOperator::LESS_THAN:
-    case PredicateOperator::GREATER_THAN:
-      evaluate_comparison_batch(row_data, num_rows, num_columns, result);
-      break;
-    case PredicateOperator::BETWEEN:
-      evaluate_between_batch(row_data, num_rows, num_columns, result);
-      break;
-    default:
-      // Fall back to base implementation
-      Predicate::evaluate_batch(row_data, num_rows, num_columns, result);
-      break;
+  // Process remainder
+  for (; i < values_sz; i++) {
+    auto input_value = input_values[i];
+    bool match = evaluate(input_value);
+    (match) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
   }
 }
-
-bool Simple_Predicate::can_use_storage_index() const {
-  // Only comparison and range operators can use Storage Index
-  switch (op) {
-    case PredicateOperator::EQUAL:
-    case PredicateOperator::LESS_THAN:
-    case PredicateOperator::LESS_EQUAL:
-    case PredicateOperator::GREATER_THAN:
-    case PredicateOperator::GREATER_EQUAL:
-    case PredicateOperator::BETWEEN:
-    case PredicateOperator::IS_NULL:
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool Simple_Predicate::apply_storage_index(const StorageIndex *storage_index) const {
-  // Note: This is a simplified implementation
-  // In real implementation, you would use actual StorageIndex statistics
-  if (!can_use_storage_index() || !storage_index) return false;
-
-  // For demonstration, assume StorageIndex has these methods
-  // const auto& stats = storage_index->get_column_stats(column_id);
-  // Simplified logic - in real implementation, use actual statistics
-  switch (op) {
-    case PredicateOperator::EQUAL:
-      // If value is outside IMCU range, skip entire IMCU
-      return false;  // Simplified return
-    case PredicateOperator::LESS_THAN:
-      // If IMCU min >= value, entire IMCU doesn't satisfy
-      return false;  // Simplified return
-    default:         // ... other cases
-      return false;
-  }
-}
-
-std::vector<uint32> Simple_Predicate::get_columns() const { return {column_id}; }
-
-std::unique_ptr<Predicate> Simple_Predicate::clone() const { return std::make_unique<Simple_Predicate>(*this); }
 
 std::string Simple_Predicate::to_string() const {
   std::ostringstream oss;
@@ -397,7 +344,7 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
   }
 }
 
-PredicateValue Simple_Predicate::extract_value(const unsigned char *data, bool low_order) const {
+PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order) const {
   assert(field_meta->field_index() == column_id && field_meta->type() == column_type);
   switch (column_type) {
     case MYSQL_TYPE_TINY:
@@ -501,77 +448,47 @@ bool Simple_Predicate::evaluate_regexp(const std::string &str, const std::string
   }
 }
 
-void Simple_Predicate::evaluate_comparison_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                                                 bit_array_t &result) const {
-  // Here SIMD instructions could be used for optimization
-  // Simplified version: loop unrolling
-
-  constexpr size_t UNROLL = 4;
-  size_t i = 0;
-  // Process with loop unrolling
-  for (; i + UNROLL <= num_rows; i += UNROLL) {
-    for (size_t j = 0; j < UNROLL; j++) {
-      bool match = evaluate(&row_data[(i + j) * num_columns], num_columns);
-      (match) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-    }
-  }
-
-  // Process remainder
-  for (; i < num_rows; i++) {
-    bool match = evaluate(&row_data[i * num_columns], num_columns);
-    (match) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
-  }
-}
-
-void Simple_Predicate::evaluate_between_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                                              bit_array_t &result) const {
-  // Simplified implementation
-  for (size_t i = 0; i < num_rows; i++) {
-    bool match = evaluate(&row_data[i * num_columns], num_columns);
-    match ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
-  }
-}
-
-bool Compound_Predicate::evaluate(const unsigned char **row_data, size_t num_columns, bool low_order) const {
+bool Compound_Predicate::evaluate(const uchar *&input_value, bool low_order) const {
   switch (op) {
     case PredicateOperator::AND: {
       for (const auto &child : children) {
-        if (!child->evaluate(row_data, num_columns)) return false;  // Short-circuit evaluation
+        if (!child->evaluate(input_value)) return false;  // Short-circuit evaluation
       }
       return true;
     } break;
     case PredicateOperator::OR: {
       for (const auto &child : children) {
-        if (child->evaluate(row_data, num_columns)) return true;  // Short-circuit evaluation
+        if (child->evaluate(input_value)) return true;  // Short-circuit evaluation
       }
       return false;
     } break;
     case PredicateOperator::NOT: {
       if (children.empty()) return false;
-      return !children[0]->evaluate(row_data, num_columns);
+      return !children[0]->evaluate(input_value);
     } break;
     default:
       return false;
   }
 }
 
-void Compound_Predicate::evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                                        bit_array_t &result) const {
+void Compound_Predicate::evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                                        size_t batch_num) const {
   if (children.empty()) return;
 
+  auto input_sz = input_values.size();
   switch (op) {
     case PredicateOperator::AND: {
       // Initialize to all 1s
-      for (size_t i = 0; i < num_rows; i++) {
+      for (size_t i = 0; i < input_sz; i++) {
         Utils::Util::bit_array_set(&result, i);
       }
       // Evaluate each child predicate and AND with result
-      bit_array_t child_result(num_rows);
+      bit_array_t child_result(input_sz);
       for (const auto &child : children) {
         // Reset child result
-        child->evaluate_batch(row_data, num_rows, num_columns, child_result);
+        child->evaluate_batch(input_values, child_result, batch_num);
         // result = result AND child_result
-        for (size_t i = 0; i < num_rows; i++) {
+        for (size_t i = 0; i < input_sz; i++) {
           if (!Utils::Util::bit_array_get(&child_result, i)) {
             Utils::Util::bit_array_reset(&result, i);
           }
@@ -580,17 +497,16 @@ void Compound_Predicate::evaluate_batch(const unsigned char **row_data, size_t n
     } break;
     case PredicateOperator::OR: {
       // Initialize to all 0s
-      for (size_t i = 0; i < num_rows; i++) {
+      for (size_t i = 0; i < input_sz; i++) {
         Utils::Util::bit_array_reset(&result, i);
       }
-
       // Evaluate each child predicate and OR with result
-      bit_array_t child_result(num_rows);
+      bit_array_t child_result(input_sz);
       for (const auto &child : children) {
         // Reset child result
-        child->evaluate_batch(row_data, num_rows, num_columns, child_result);
+        child->evaluate_batch(input_values, child_result, batch_num);
         // result = result OR child_result
-        for (size_t i = 0; i < num_rows; i++) {
+        for (size_t i = 0; i < input_sz; i++) {
           if (Utils::Util::bit_array_get(&child_result, i)) {
             Utils::Util::bit_array_set(&result, i);
           }
@@ -599,70 +515,21 @@ void Compound_Predicate::evaluate_batch(const unsigned char **row_data, size_t n
     } break;
     case PredicateOperator::NOT: {
       if (children.empty()) return;
-
       // Evaluate child predicate
-      children[0]->evaluate_batch(row_data, num_rows, num_columns, result);
+      children[0]->evaluate_batch(input_values, result, batch_num);
       // Invert
-      for (size_t i = 0; i < num_rows; i++) {
+      for (size_t i = 0; i < input_sz; i++) {
         Utils::Util::bit_array_get(&result, i) ? Utils::Util::bit_array_reset(&result, i)
                                                : Utils::Util::bit_array_set(&result, i);
       }
-      break;
-    }
+    } break;
     default:
       break;
-  }
-}
-
-bool Compound_Predicate::can_use_storage_index() const {
-  // Only AND can effectively use Storage Index
-  if (op == PredicateOperator::AND) {
-    for (const auto &child : children) {
-      if (child->can_use_storage_index()) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-bool Compound_Predicate::apply_storage_index(const StorageIndex *storage_index) const {
-  if (!storage_index) return false;
-
-  switch (op) {
-    case PredicateOperator::AND: {
-      // AND: If any child predicate can skip, entire IMCU can be skipped
-      for (const auto &child : children) {
-        if (child->apply_storage_index(storage_index)) {
-          return true;  // Can skip
-        }
-      }
-      return false;
-    }
-
-    case PredicateOperator::OR: {
-      // OR: Only if all child predicates can skip, then can skip
-      for (const auto &child : children) {
-        if (!child->apply_storage_index(storage_index)) {
-          return false;  // Cannot skip
-        }
-      }
-      return !children.empty();
-    }
-
-    case PredicateOperator::NOT: {
-      // NOT: Not suitable for Storage Index filtering
-      return false;
-    }
-
-    default:
-      return false;
   }
 }
 
 std::vector<uint32> Compound_Predicate::get_columns() const {
   std::vector<uint32> columns;
-
   for (const auto &child : children) {
     auto child_cols = child->get_columns();
     columns.insert(columns.end(), child_cols.begin(), child_cols.end());
@@ -671,17 +538,14 @@ std::vector<uint32> Compound_Predicate::get_columns() const {
   // Remove duplicates
   std::sort(columns.begin(), columns.end());
   columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
-
   return columns;
 }
 
 std::unique_ptr<Predicate> Compound_Predicate::clone() const {
   auto cloned = std::make_unique<Compound_Predicate>(op);
-
   for (const auto &child : children) {
     cloned->add_child(child->clone());
   }
-
   return cloned;
 }
 
@@ -689,7 +553,6 @@ std::string Compound_Predicate::to_string() const {
   if (children.empty()) return "()";
 
   std::ostringstream oss;
-
   switch (op) {
     case PredicateOperator::AND:
       oss << "(";
@@ -699,7 +562,6 @@ std::string Compound_Predicate::to_string() const {
       }
       oss << ")";
       break;
-
     case PredicateOperator::OR:
       oss << "(";
       for (size_t i = 0; i < children.size(); i++) {
@@ -708,11 +570,9 @@ std::string Compound_Predicate::to_string() const {
       }
       oss << ")";
       break;
-
     case PredicateOperator::NOT:
       oss << "NOT (" << children[0]->to_string() << ")";
       break;
-
     default:
       oss << "(?)";
       break;
@@ -732,8 +592,7 @@ double Compound_Predicate::estimate_selectivity(const StorageIndex *storage_inde
         selectivity *= child->estimate_selectivity(storage_index);
       }
       return selectivity;
-    }
-
+    } break;
     case PredicateOperator::OR: {
       // OR: 1 - (1-s1) * (1-s2) * ...
       double prob_none = 1.0;
@@ -742,13 +601,11 @@ double Compound_Predicate::estimate_selectivity(const StorageIndex *storage_inde
         prob_none *= (1.0 - s);
       }
       return 1.0 - prob_none;
-    }
-
+    } break;
     case PredicateOperator::NOT: {
       double s = children[0]->estimate_selectivity(storage_index);
       return 1.0 - s;
-    }
-
+    } break;
     default:
       return 0.5;
   }
@@ -772,21 +629,17 @@ std::unique_ptr<Simple_Predicate> Predicate_Builder::create_in(uint32 col_id, co
 
 std::unique_ptr<Compound_Predicate> Predicate_Builder::create_and(std::vector<std::unique_ptr<Predicate>> predicates) {
   auto compound = std::make_unique<Compound_Predicate>(PredicateOperator::AND);
-
   for (auto &pred : predicates) {
     compound->add_child(std::move(pred));
   }
-
   return compound;
 }
 
 std::unique_ptr<Compound_Predicate> Predicate_Builder::create_or(std::vector<std::unique_ptr<Predicate>> predicates) {
   auto compound = std::make_unique<Compound_Predicate>(PredicateOperator::OR);
-
   for (auto &pred : predicates) {
     compound->add_child(std::move(pred));
   }
-
   return compound;
 }
 
@@ -794,105 +647,6 @@ std::unique_ptr<Compound_Predicate> Predicate_Builder::create_not(std::unique_pt
   auto compound = std::make_unique<Compound_Predicate>(PredicateOperator::NOT);
   compound->add_child(std::move(predicate));
   return compound;
-}
-
-std::unique_ptr<Predicate> Predicate_Optimizer::optimize(std::unique_ptr<Predicate> predicate) {
-  if (!predicate) return nullptr;
-
-  // 1. Constant folding
-  predicate = fold_constants(std::move(predicate));
-
-  // 2. Predicate pushdown (extract pushable simple predicates)
-  predicate = push_down_predicates(std::move(predicate));
-
-  // 3. Predicate reordering (low selectivity first)
-  predicate = reorder_predicates(std::move(predicate));
-
-  return predicate;
-}
-
-std::pair<std::vector<Predicate *>, std::vector<Predicate *>> Predicate_Optimizer::separate_index_predicates(
-    Predicate *root) {
-  std::vector<Predicate *> index_preds;
-  std::vector<Predicate *> non_index_preds;
-
-  if (!root) return {index_preds, non_index_preds};
-
-  // Recursive separation
-  separate_recursive(root, index_preds, non_index_preds);
-
-  return {index_preds, non_index_preds};
-}
-
-std::unique_ptr<Predicate> Predicate_Optimizer::fold_constants(std::unique_ptr<Predicate> pred) {
-  // Simplified implementation: detect always-true/always-false predicates
-
-  // Example: age > 10 AND age > 5 => age > 10
-  // Here only simple examples
-
-  return pred;
-}
-
-std::unique_ptr<Predicate> Predicate_Optimizer::push_down_predicates(std::unique_ptr<Predicate> pred) {
-  // Simplified implementation
-  return pred;
-}
-
-std::unique_ptr<Predicate> Predicate_Optimizer::reorder_predicates(std::unique_ptr<Predicate> pred) {
-  auto *compound = dynamic_cast<Compound_Predicate *>(pred.get());
-
-  if (!compound || compound->op != PredicateOperator::AND) {
-    return pred;
-  }
-
-  // Sort by selectivity
-  std::sort(compound->children.begin(), compound->children.end(),
-            [](const std::unique_ptr<Predicate> &a, const std::unique_ptr<Predicate> &b) {
-              return a->estimate_selectivity() < b->estimate_selectivity();
-            });
-
-  return pred;
-}
-
-void Predicate_Optimizer::separate_recursive(Predicate *pred, std::vector<Predicate *> &index_preds,
-                                             std::vector<Predicate *> &non_index_preds) {
-  if (pred->can_use_storage_index()) {
-    index_preds.push_back(pred);
-  } else {
-    non_index_preds.push_back(pred);
-  }
-
-  // Recursively process compound predicates
-  auto *compound = dynamic_cast<Compound_Predicate *>(pred);
-  if (compound) {
-    for (auto &child : compound->children) {
-      separate_recursive(child.get(), index_preds, non_index_preds);
-    }
-  }
-}
-
-bool Predicate_Executor::execute(const Predicate *predicate, const unsigned char **row_data, size_t num_columns) {
-  if (!predicate) return true;
-  return predicate->evaluate(row_data, num_columns);
-}
-
-void Predicate_Executor::execute_batch(const Predicate *predicate, const unsigned char **row_data, size_t num_rows,
-                                       size_t num_columns, bit_array_t &result) {
-  if (!predicate) {
-    // No predicate, all rows match
-    for (size_t i = 0; i < num_rows; i++) {
-      Utils::Util::bit_array_set(&result, i);
-    }
-    return;
-  }
-
-  predicate->evaluate_batch(row_data, num_rows, num_columns, result);
-}
-
-bool Predicate_Executor::apply_storage_index(const Predicate *predicate, const StorageIndex *storage_index) {
-  if (!predicate || !storage_index) return false;
-
-  return predicate->apply_storage_index(storage_index);
 }
 }  // namespace Imcs
 }  // namespace ShannonBase

@@ -99,9 +99,7 @@ void ColumnChunk::swap(ColumnChunk &other) {
 }
 
 void ColumnChunk::initialize_buffers() {
-  if (m_chunk_size == 0 || m_field_width == 0) {
-    return;
-  }
+  if (m_chunk_size == 0 || m_field_width == 0) return;
 
   size_t buffer_size = m_chunk_size * m_field_width;
   m_cols_buffer = std::make_unique<uchar[]>(buffer_size);
@@ -131,14 +129,10 @@ void ColumnChunk::copy_from(const ColumnChunk &other) {
 }
 
 bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
-  if (!data && !null) {
-    return false;
-  }
+  if (!data && !null) return false;
 
   size_t current_idx = m_current_size.load(std::memory_order_relaxed);
-  if (current_idx >= m_chunk_size) {
-    return false;
-  }
+  if (current_idx >= m_chunk_size) return false;
 
   size_t actual_idx = m_current_size.fetch_add(1, std::memory_order_acq_rel);
   if (actual_idx >= m_chunk_size) {
@@ -151,14 +145,8 @@ bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
   } else {
     const size_t copy_len = std::min(length, m_field_width);
     uchar *dest = m_cols_buffer.get() + (actual_idx * m_field_width);
-
-    if (copy_len > 0) {
-      std::memcpy(dest, data, copy_len);
-    }
-
-    if (copy_len < m_field_width) {
-      std::memset(dest + copy_len, 0, m_field_width - copy_len);
-    }
+    if (copy_len > 0) std::memcpy(dest, data, copy_len);
+    if (copy_len < m_field_width) std::memset(dest + copy_len, 0, m_field_width - copy_len);
   }
 
   return true;
@@ -166,19 +154,13 @@ bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
 
 bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> &data_batch,
                             const std::vector<bool> &null_flags) {
-  if (data_batch.size() != null_flags.size()) {
-    return false;
-  }
+  if (data_batch.size() != null_flags.size()) return false;
 
   size_t batch_size = data_batch.size();
-  if (batch_size == 0) {
-    return true;
-  }
+  if (batch_size == 0) return true;
 
   size_t current_idx = m_current_size.load(std::memory_order_relaxed);
-  if (current_idx + batch_size > m_chunk_size) {
-    return false;
-  }
+  if (current_idx + batch_size > m_chunk_size) return false;
 
   size_t start_idx = m_current_size.fetch_add(batch_size, std::memory_order_acq_rel);
   if (start_idx + batch_size > m_chunk_size) {
@@ -194,7 +176,6 @@ bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> 
     } else {
       const uchar *src_data = data_batch[i].first;
       size_t src_length = data_batch[i].second;
-
       if (!src_data) {
         m_current_size.store(start_idx, std::memory_order_release);
         return false;
@@ -202,13 +183,8 @@ bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> 
 
       const size_t copy_len = std::min(src_length, m_field_width);
       uchar *dest = m_cols_buffer.get() + (idx * m_field_width);
-
-      if (copy_len > 0) {
-        std::memcpy(dest, src_data, copy_len);
-      }
-      if (copy_len < m_field_width) {
-        std::memset(dest + copy_len, 0, m_field_width - copy_len);
-      }
+      if (copy_len > 0) std::memcpy(dest, src_data, copy_len);
+      if (copy_len < m_field_width) std::memset(dest + copy_len, 0, m_field_width - copy_len);
     }
   }
 
@@ -216,9 +192,7 @@ bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> 
 }
 
 size_t ColumnChunk::compact() {
-  if (!m_cols_buffer || !m_null_mask) {
-    return 0;
-  }
+  if (!m_cols_buffer || !m_null_mask) return 0;
 
   size_t current_size = m_current_size.load(std::memory_order_relaxed);
   size_t write_idx = 0;
@@ -268,9 +242,7 @@ static int64_t get_scale_factor(uint scale) {
       1000000000000000000LL,  // 10^18
   };
 
-  if (scale < sizeof(scale_factors) / sizeof(scale_factors[0])) {
-    return scale_factors[scale];
-  }
+  if (scale < sizeof(scale_factors) / sizeof(scale_factors[0])) return scale_factors[scale];
 
   // If scale is too large, fallback to loop calculation
   int64_t factor = 1;
@@ -308,9 +280,7 @@ static uint get_decimal_precision(Field *field) {
  *       which corresponds to approximately 18-19 decimal digits
  */
 static bool can_use_int64_for_decimal(Field *field) {
-  if (!field || field->type() != MYSQL_TYPE_NEWDECIMAL) {
-    return false;
-  }
+  if (!field || field->type() != MYSQL_TYPE_NEWDECIMAL) return false;
 
   uint precision = get_decimal_precision(field);
   // Conservative estimate: precision <= 18 can safely use int64_t
@@ -352,9 +322,7 @@ static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_c
   data_buffer.clear();
 
   Field *source_field = chunk.source_field();
-  if (!can_use_int64_for_decimal(source_field)) {
-    return false;
-  }
+  if (!can_use_int64_for_decimal(source_field)) return false;
 
   data_buffer.resize(row_count, 0);
   uint scale = get_decimal_scale(source_field);
@@ -378,9 +346,7 @@ static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_c
     if (scale == 0) {
       // Direct conversion
       int ret = decimal2longlong(&dec, &result_val);
-      if (ret > E_DEC_TRUNCATED) {
-        return false;  // Overflow or fatal error, fallback to scalar
-      }
+      if (ret > E_DEC_TRUNCATED) return false;  // Overflow or fatal error, fallback to scalar
       data_buffer[i] = static_cast<int64_t>(result_val);
     } else {
       // Scale and convert
@@ -390,15 +356,10 @@ static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_c
       longlong2decimal(scale_factor, &scale_factor_dec);
 
       int mul_ret = decimal_mul(&dec, &scale_factor_dec, &scaled_dec);
-      if (mul_ret > E_DEC_TRUNCATED) {
-        return false;  // Overflow detected
-      }
+      if (mul_ret > E_DEC_TRUNCATED) return false;  // Overflow detected
 
       int conv_ret = decimal2longlong(&scaled_dec, &result_val);
-      if (conv_ret > E_DEC_TRUNCATED) {
-        return false;  // Conversion error
-      }
-
+      if (conv_ret > E_DEC_TRUNCATED) return false;  // Conversion error
       data_buffer[i] = static_cast<int64_t>(result_val);
     }
   }

@@ -240,8 +240,22 @@ void CU::update_statistics(const uchar *data, size_t len) {
   m_header.max_value.store(std::max(m_header.max_value.load(std::memory_order_relaxed), value));
 }
 
-bool CU::serialize(std::ostream &out) const { return false; }
+bool CU::serialize(std::ostream &out) const {
+  // Need to serialize:
+  // 1. Header metadata (type, capacity, statistics)
+  // 2. Main data buffer (m_data)
+  // 3. Dictionary (if exists)
+  // 4. Version chains (optional, or persist to separate journal)
+  return false;
+}
 
-bool CU::deserialize(std::istream &in) { return false; }
+bool CU::deserialize(std::istream &in) {
+  // Need to deserialize and reconstruct:
+  // 1. Header metadata
+  // 2. Main data buffer
+  // 3. Dictionary
+  // 4. Version chains
+  return false;
+}
 }  // namespace Imcs
 }  // namespace ShannonBase

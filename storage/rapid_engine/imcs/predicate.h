@@ -54,6 +54,7 @@
 #include "include/field_types.h"  // enum_field_types
 #include "my_inttypes.h"
 
+#include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 
 namespace ShannonBase {
@@ -214,38 +215,31 @@ class PredicateValue {
  */
 class Predicate {
  public:
+  struct SHANNON_ALIGNAS ColumnBatch {
+    std::vector<const uchar *> column_ptrs;  // Starting addr for each column
+    std::vector<size_t> column_strides;      // Stride (in bytes) for each column
+    std::vector<bool> column_nulls;          // Whether each column contains NULLs
+    size_t num_rows;                         // Batch size
+  };
+
   Predicate(PredicateOperator oper, bool compound = false) : op(oper), compound_pred(compound) {}
   virtual ~Predicate() = default;
 
   /**
-   * Evaluate (single row)
-   * @param row_data: Row data (array of column pointers)
-   * @param num_columns: Number of columns
+   * Evaluate the (col_id)th of data whether matchs the predicate.
+   * @param input_value: column[col_id]
    * @return: Predicate result (true/false)
    */
-  virtual bool evaluate(const unsigned char **row_data, size_t num_columns, bool low_order = false) const = 0;
+  virtual bool evaluate(const uchar *&input_value, bool low_order = false) const = 0;
 
   /**
-   * Vectorized evaluation (batch)
-   * @param row_data: Array of row data (row-major)
-   * @param num_rows: Number of rows
-   * @param num_columns: Number of columns
+   * batch evaluation (batch)
+   * @param input_values: Array of col datas
+   * @param batch_num the batch size
    * @param result: Output result bitmap
    */
-  virtual void evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                              bit_array_t &result) const;
-
-  /**
-   * Check if can be used for Storage Index filtering
-   */
-  virtual bool can_use_storage_index() const = 0;
-
-  /**
-   * Apply Storage Index filtering
-   * @param storage_index: Storage Index
-   * @return: true indicates entire IMCU can be skipped
-   */
-  virtual bool apply_storage_index(const StorageIndex *storage_index) const = 0;
+  virtual void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                              size_t batch_num = 8) const = 0;
 
   /**
    * Get involved columns
@@ -302,17 +296,12 @@ class Simple_Predicate : public Predicate {
         column_type(type) {}
 
   // Evaluation implementation
-  bool evaluate(const unsigned char **row_data, size_t num_columns, bool low_oder = false) const override;
-  void evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                      bit_array_t &result) const override;
-
-  // Storage Index support
-  bool can_use_storage_index() const override;
-  bool apply_storage_index(const StorageIndex *storage_index) const override;
-
+  bool evaluate(const uchar *&input_value, bool low_oder = false) const override;
+  void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                      size_t batch_num = 8) const override;
   // Helper methods
-  std::vector<uint32> get_columns() const override;
-  std::unique_ptr<Predicate> clone() const override;
+  std::vector<uint32> get_columns() const override { return {column_id}; }
+  std::unique_ptr<Predicate> clone() const override { return std::make_unique<Simple_Predicate>(*this); }
   std::string to_string() const override;
   double estimate_selectivity(const StorageIndex *storage_index = nullptr) const override;
 
@@ -324,13 +313,9 @@ class Simple_Predicate : public Predicate {
   Field *field_meta{nullptr};                     // using the field meta.
   enum_field_types column_type{MYSQL_TYPE_NULL};  // Column type
  private:
-  PredicateValue extract_value(const unsigned char *data, bool low_order = false) const;
+  PredicateValue extract_value(const uchar *data, bool low_order = false) const;
   bool evaluate_like(const std::string &str, const std::string &pattern) const;
   bool evaluate_regexp(const std::string &str, const std::string &pattern) const;
-  void evaluate_comparison_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                                 bit_array_t &result) const;
-  void evaluate_between_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                              bit_array_t &result) const;
 };
 
 // Compound Predicate
@@ -348,14 +333,9 @@ class Compound_Predicate : public Predicate {
   inline void add_child(std::unique_ptr<Predicate> child) { children.push_back(std::move(child)); }
 
   // Evaluation implementation
-  bool evaluate(const unsigned char **row_data, size_t num_columns, bool low_order = false) const override;
-  void evaluate_batch(const unsigned char **row_data, size_t num_rows, size_t num_columns,
-                      bit_array_t &result) const override;
-
-  // Storage Index support
-  bool can_use_storage_index() const override;
-  bool apply_storage_index(const StorageIndex *storage_index) const override;
-
+  bool evaluate(const uchar *&input_value, bool low_order = false) const override;
+  void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                      size_t batch_num = 8) const override;
   // Helper methods
   std::vector<uint32> get_columns() const override;
   std::unique_ptr<Predicate> clone() const override;
@@ -387,43 +367,6 @@ class Predicate_Builder {
   static std::unique_ptr<Compound_Predicate> create_or(std::vector<std::unique_ptr<Predicate>> predicates);
 
   static std::unique_ptr<Compound_Predicate> create_not(std::unique_ptr<Predicate> predicate);
-};
-
-// Predicate Optimizer
-/**
- * Predicate Optimizer
- * - Predicate pushdown
- * - Constant folding
- * - Predicate reordering
- */
-class Predicate_Optimizer {
- public:
-  static std::unique_ptr<Predicate> optimize(std::unique_ptr<Predicate> predicate);
-
-  static std::pair<std::vector<Predicate *>, std::vector<Predicate *>> separate_index_predicates(Predicate *root);
-
- private:
-  static std::unique_ptr<Predicate> fold_constants(std::unique_ptr<Predicate> pred);
-  static std::unique_ptr<Predicate> push_down_predicates(std::unique_ptr<Predicate> pred);
-  static std::unique_ptr<Predicate> reorder_predicates(std::unique_ptr<Predicate> pred);
-  static void separate_recursive(Predicate *pred, std::vector<Predicate *> &index_preds,
-                                 std::vector<Predicate *> &non_index_preds);
-};
-
-// Predicate Executor
-/**
- * Predicate Executor
- * - Vectorized execution
- * - Batch processing
- */
-class Predicate_Executor {
- public:
-  static bool execute(const Predicate *predicate, const unsigned char **row_data, size_t num_columns);
-
-  static void execute_batch(const Predicate *predicate, const unsigned char **row_data, size_t num_rows,
-                            size_t num_columns, bit_array_t &result);
-
-  static bool apply_storage_index(const Predicate *predicate, const StorageIndex *storage_index);
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

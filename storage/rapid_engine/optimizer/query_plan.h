@@ -257,6 +257,7 @@ class Sort : public PlanNode {
   bool remove_duplicates{false};
   bool unwrap_rollup{false};
   bool force_sort_rowids{false};
+  table_map tables_to_get_rowid_for;
 
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;

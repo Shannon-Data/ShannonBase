@@ -241,6 +241,7 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
         sort->remove_duplicates = param.remove_duplicates;
         sort->unwrap_rollup = param.unwrap_rollup;
         sort->force_sort_rowids = param.force_sort_rowids;
+        sort->tables_to_get_rowid_for = param.tables_to_get_rowid_for;
         return sort;
       }
       assert(false);

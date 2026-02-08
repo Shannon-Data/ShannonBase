@@ -72,6 +72,7 @@ SET(SHANNON_IMCS_SOURCES
    imcs/index/art/art.cpp
    imcs/index/encoder.cpp
    imcs/row0row.cpp
+   imcs/storage0index.cpp
    utils/utils.cpp
    utils/SIMD.cpp
    utils/memory_pool.cpp

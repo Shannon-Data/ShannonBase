@@ -238,7 +238,7 @@ int VectorizedTableScanIterator::ReadNextBatch() {
   ClearBatchData();
 
   size_t read_cnt = 0;
-  int result = m_cursor->next_batch(m_batch_size, m_col_chunks, read_cnt);
+  int result = m_cursor->next(m_batch_size, m_col_chunks, read_cnt);
 
   if (result != 0) {
     if (result == HA_ERR_END_OF_FILE) {

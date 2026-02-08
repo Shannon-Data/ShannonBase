@@ -194,7 +194,7 @@ AccessPath *Sort::ToAccessPath(THD *thd) {
   path->sort().remove_duplicates = this->remove_duplicates;
   path->sort().unwrap_rollup = this->unwrap_rollup;
   path->sort().force_sort_rowids = this->force_sort_rowids;
-
+  path->sort().tables_to_get_rowid_for = this->tables_to_get_rowid_for;
   path->secondary_engine_data = nullptr;
   return path;
 }
