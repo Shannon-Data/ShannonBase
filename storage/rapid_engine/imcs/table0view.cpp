@@ -88,24 +88,34 @@ int RapidCursor::init() {
   // Build columnar chunk buffers based on the current read_set
   init_col_chunks();
 
+  // Initialize scan position
   m_scan_state.reset();
-  m_rows_skipped = 0;
-  m_rows_returned = 0;
-  m_last_returned_rowid = INVALID_ROW_ID;
-
   m_inited.store(true, std::memory_order_release);
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+std::vector<uint32_t> RapidCursor::projection_columns() const {
+  std::vector<uint32_t> cols;
+  cols.reserve(m_data_source->s->fields);
+
+  for (uint32_t idx = 0; idx < m_data_source->s->fields; ++idx) {
+    Field *fld = m_data_source->field[idx];
+    bool in_read_set = bitmap_is_set(m_data_source->read_set, idx) && !fld->is_flag_set(NOT_SECONDARY_FLAG);
+    bool in_projection =
+        std::find(m_projection_columns.begin(), m_projection_columns.end(), idx) != m_projection_columns.end();
+
+    if (in_read_set || in_projection) cols.push_back(idx);
+  }
+  return cols;
 }
 
 int RapidCursor::end() {
   m_scan_context->m_trx->release_snapshot();
   m_scan_context->m_trx->commit();
 
+  m_row_buffer_cache.clear();
+  m_using_batch.store(true, std::memory_order_release);
   m_scan_state.reset();
-  m_rows_skipped = 0;
-  m_rows_returned = 0;
-  m_last_returned_rowid = INVALID_ROW_ID;
-
   m_inited.store(false, std::memory_order_release);
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -376,6 +386,215 @@ void RapidCursor::encode_key_parts(uchar *encoded_key, const uchar *original_key
   }
 }
 
+int RapidCursor::position(row_id_t start_row_id) {
+  // Reserve buffer cache with extra space to reduce reallocation
+  m_using_batch.store(false, std::memory_order_release);
+  m_row_buffer_cache.resize(1);
+  m_row_buffer_cache.clear();
+
+  // re-initialize scan position
+  m_scan_state.seek(start_row_id, m_rpd_table->meta().rows_per_imcu);
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int RapidCursor::scan_table(const std::vector<std::unique_ptr<Predicate>> &predicates,
+                            const std::vector<uint32_t> &projection, RowCallback &callback) {
+  return false;
+}
+
+size_t RapidCursor::scan_table(row_id_t start_offset, size_t limit,
+                               const std::vector<std::unique_ptr<Predicate>> &predicates,
+                               const std::vector<uint32_t> &projection, RowCallback &callback) {
+  return false;
+}
+
+bool RapidCursor::read(const uchar *key_value, Row_Result &result) { return false; }
+
+bool RapidCursor::range_scan(const uchar *start_key, const uchar *end_key, RowCallback &cb) { return false; }
+
+row_id_t RapidCursor::position(const unsigned char *record) { return 0; }
+
+int RapidCursor::rnd_pos(uchar *buff, uchar *pos) {
+  position(m_scan_state.curr_row_idx.load(std::memory_order_acquire));
+  auto ret = next(buff);
+  return (ret) ? ret : ShannonBase::SHANNON_SUCCESS;
+}
+
+int RapidCursor::next(uchar *buf) {
+  assert(m_inited.load(std::memory_order_acquire));
+  if (!m_inited.load(std::memory_order_acquire)) init();
+
+  size_t current_idx = m_scan_state.curr_row_idx.load(std::memory_order_acquire);
+  if (current_idx >= m_scan_state.batch_end) {
+    if (!fetch_next_batch(m_using_batch.load(std::memory_order_acquire) ? SHANNON_BATCH_NUM : 1)) {
+      if (m_scan_state.exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
+      // Empty batch but not exhausted (all rows filtered), try again
+      return next(buf);
+    }
+    // Reset to beginning of new batch
+    current_idx = m_scan_state.batch_start;
+    ;
+  }
+
+  size_t cache_idx = current_idx - m_scan_state.batch_start;
+  ;
+  if (cache_idx >= m_row_buffer_cache.size()) {
+    // Shouldn't happen, but handle gracefully
+    if (m_scan_state.exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
+    m_scan_state.curr_row_idx.store(m_scan_state.batch_end, std::memory_order_release);
+    return next(buf);
+  }
+
+  const RowBuffer *row_buffer = m_row_buffer_cache[cache_idx].get();
+  if (!row_buffer) return HA_ERR_GENERIC;
+  auto status = row_buffer->copy_to_mysql_fields(m_data_source, &m_rpd_table->meta());
+  if (status) return HA_ERR_GENERIC;
+
+  m_scan_state.curr_row_idx.fetch_add(1, std::memory_order_release);
+  m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
+
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+boost::asio::awaitable<int> RapidCursor::next_async(uchar *buf) {
+  assert(m_inited.load(std::memory_order_acquire));
+
+  if (!m_inited.load(std::memory_order_acquire)) init();
+  auto executor = co_await boost::asio::this_coro::executor;
+
+  size_t cache_idx = m_scan_state.curr_row_idx.load(std::memory_order_acquire) - m_scan_state.batch_start;
+  if (m_scan_state.exhausted.load(std::memory_order_acquire) && cache_idx >= m_row_buffer_cache.size())
+    co_return HA_ERR_END_OF_FILE;
+
+  // Check if we need to fetch next batch
+  if (cache_idx >= m_row_buffer_cache.size()) {
+    if (!fetch_next_batch(m_using_batch.load(std::memory_order_acquire) ? SHANNON_BATCH_NUM : 1))
+      co_return HA_ERR_END_OF_FILE;
+    cache_idx = 0;
+  }
+
+  const RowBuffer *row_buffer = m_row_buffer_cache[cache_idx].get();
+  if (!row_buffer) co_return HA_ERR_GENERIC;
+
+  auto status = co_await row_buffer->copy_to_mysql_fields_async(m_data_source, &m_rpd_table->meta(), executor,
+                                                                m_adaptive_ratio.getMaxBatchSize());
+  if (status) co_return status;
+
+  m_scan_state.curr_row_idx.fetch_add(1, std::memory_order_release);
+  m_total_rows_scanned.fetch_add(1, std::memory_order_relaxed);
+
+  co_return ShannonBase::SHANNON_SUCCESS;
+}
+
+int RapidCursor::next(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
+                      size_t &read_cnt) {
+  if (m_scan_state.exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
+
+  std::vector<uint32_t> projection_cols = projection_columns();
+#ifndef NDEBUG
+  if (col_chunks.size() != projection_cols.size()) {
+    for (uint32_t col_id : projection_cols) {
+      assert(col_chunks[col_id].valid());
+    }
+  }
+#endif
+  size_t effective_batch_size = batch_size;
+  size_t total_scanned = m_scan_state.curr_row_idx.load(std::memory_order_acquire);
+  if (m_scan_limit != HA_POS_ERROR) {
+    if (total_scanned < m_scan_offset) {
+      // Skip offset rows - will be handled in scan_batch_core
+    }
+
+    size_t remaining_rows = m_scan_limit - (total_scanned - m_scan_offset);
+    effective_batch_size = std::min(effective_batch_size, remaining_rows);
+    if (effective_batch_size == 0) return HA_ERR_END_OF_FILE;
+  }
+
+  ColumnChunkRecv receiver{this, projection_cols, col_chunks, read_cnt};
+  scan_batch_core(batch_size, projection_cols, receiver);
+  if (m_scan_state.exhausted.load(std::memory_order_acquire)) {
+    return read_cnt > 0 ? ShannonBase::SHANNON_SUCCESS : HA_ERR_END_OF_FILE;
+  }
+  return read_cnt > 0 ? ShannonBase::SHANNON_SUCCESS : HA_ERR_END_OF_FILE;
+}
+
+bool RapidCursor::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */) {
+  std::lock_guard<std::mutex> lock(m_buffer_mutex);
+  if (m_scan_state.exhausted.load(std::memory_order_acquire)) return false;
+
+  // Use scan_batch_core template with RowBufferRecv
+  RowBufferRecv receiver{this, m_row_buffer_cache};
+  std::vector<uint32_t> projection_cols = projection_columns();
+  scan_batch_core(batch_size, projection_cols, receiver);
+  m_scan_state.batch_start = m_scan_state.curr_row_idx.load(std::memory_order_acquire);
+  m_scan_state.batch_end = m_scan_state.batch_start + m_row_buffer_cache.size();
+
+  // Prefetch first few rows
+  constexpr size_t PREFETCH_ROWS = 8;
+  size_t prefetch_count = std::min(PREFETCH_ROWS, m_row_buffer_cache.size());
+  for (size_t i = 0; i < prefetch_count; i++) {
+    if (m_row_buffer_cache[i]) {
+      SHANNON_PREFETCH_R(m_row_buffer_cache[i].get());
+      const auto *col_data = m_row_buffer_cache[i]->get_column_data(0);
+      if (col_data) SHANNON_PREFETCH_R(col_data);
+    }
+  }
+
+  m_batch_fetch_count.fetch_add(1, std::memory_order_relaxed);
+  return !m_row_buffer_cache.empty();
+}
+
+template <typename Reciever>
+size_t RapidCursor::scan_batch_core(size_t batch_size, const std::vector<uint32_t> &projection_cols, Reciever &recv) {
+  auto &st = m_scan_state;
+  size_t remaining = batch_size;
+
+  recv.on_batch_begin();
+
+  while (st.curr_imcu_idx < m_rpd_table->meta().total_imcus && remaining > 0 && recv.accept_more()) {
+    Imcu *imcu = m_rpd_table->locate_imcu(st.curr_imcu_idx);
+    if (!imcu) {
+      st.curr_imcu_idx++;
+      st.curr_imcu_offset = 0;
+      continue;
+    }
+
+    // Storage Index pruning
+    if (m_use_storage_index && !m_scan_predicates.empty()) {
+      std::lock_guard<std::mutex> lock(m_predicate_mutex);
+      if (imcu->can_skip_imcu(m_scan_predicates)) {
+        st.curr_imcu_idx++;
+        st.curr_imcu_offset = 0;
+        continue;
+      }
+    }
+
+    auto collector_func = [&](row_id_t rowid, const std::vector<const uchar *> &row_data) {
+      recv.on_row(rowid, row_data);
+    };
+    size_t scanned = imcu->scan_range(m_scan_context.get(), st.curr_imcu_offset, remaining, m_scan_predicates,
+                                      projection_cols, collector_func);
+
+    remaining -= scanned;
+    st.curr_row_idx.fetch_add(scanned, std::memory_order_release);
+
+    size_t imcu_rows = imcu->get_row_count();
+    if (st.curr_imcu_offset + scanned >= imcu_rows) {
+      st.curr_imcu_idx++;
+      st.curr_imcu_offset = 0;
+    } else {
+      st.curr_imcu_offset += scanned;
+    }
+  }
+
+  if (st.curr_imcu_idx >= m_rpd_table->meta().total_imcus) {
+    st.exhausted.store(true, std::memory_order_release);
+  }
+
+  recv.on_batch_end();
+  return batch_size - remaining;
+}
+
 int RapidCursor::index_init(uint keynr, bool sorted) {
   init();
   m_active_index = keynr;
@@ -454,7 +673,7 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
 
   if (m_index_iter->next(&result_key, &result_key_len, &value)) {
     m_scan_state.curr_row_idx.store(value);
-    position(value);
+    position(m_scan_state.curr_row_idx.load(std::memory_order_acquire));
     auto ret = next(buf);
     return ret ? ret : ShannonBase::SHANNON_SUCCESS;
   }
@@ -469,7 +688,8 @@ int RapidCursor::index_next(uchar *buf) {
   row_id_t value{std::numeric_limits<row_id_t>::max()};
 
   if (m_index_iter->next(&result_key, &result_key_len, &value)) {
-    position(value);
+    m_scan_state.curr_row_idx.store(value);
+    position(m_scan_state.curr_row_idx.load(std::memory_order_acquire));
     auto ret = next(buf);
     return ret ? ret : ShannonBase::SHANNON_SUCCESS;
   }
@@ -483,65 +703,29 @@ row_id_t RapidCursor::find(uchar *buf) {
   return rowid;
 }
 
-template <typename Reciever>
-size_t RapidCursor::scan_batch_internal(size_t batch_size, const std::vector<uint32_t> &projection_cols,
-                                        Reciever &recv) {
-  auto &st = m_scan_state;
-  size_t remaining = batch_size;
+void RowBufferRecv::on_row(row_id_t rowid, const std::vector<const uchar *> &row_data) {
+  auto row = std::make_unique<RowBuffer>(row_data.size());
+  row->set_row_id(rowid);
 
-  recv.on_batch_begin();
-
-  while (st.curr_imcu_idx < m_rpd_table->meta().total_imcus && remaining > 0 && recv.accept_more()) {
-    Imcu *imcu = m_rpd_table->locate_imcu(st.curr_imcu_idx);
-    if (!imcu) {
-      st.curr_imcu_idx++;
-      st.curr_imcu_offset = 0;
-      continue;
-    }
-
-    // Storage Index pruning
-    if (m_use_storage_index && !m_scan_predicates.empty()) {
-      std::lock_guard<std::mutex> lock(m_predicate_mutex);
-      if (imcu->can_skip_imcu(m_scan_predicates)) {
-        st.curr_imcu_idx++;
-        st.curr_imcu_offset = 0;
-        continue;
-      }
-    }
-
-    auto collector_func = [&](row_id_t rowid, const std::vector<const uchar *> &row_data) {
-      recv.on_row(rowid, row_data);
-    };
-    size_t scanned = imcu->scan_range(m_scan_context.get(), st.curr_imcu_offset, remaining, m_scan_predicates,
-                                      projection_cols, collector_func);
-
-    remaining -= scanned;
-    st.curr_row_idx.fetch_add(scanned, std::memory_order_release);
-
-    size_t imcu_rows = imcu->get_row_count();
-    if (st.curr_imcu_offset + scanned >= imcu_rows) {
-      st.curr_imcu_idx++;
-      st.curr_imcu_offset = 0;
+  for (size_t i = 0; i < row_data.size(); ++i) {
+    if (!row_data[i]) {
+      row->set_column_null(i);
     } else {
-      st.curr_imcu_offset += scanned;
-      if (remaining == 0) break;  // If we got what we needed, break
+      Field *fld = cursor->source()->field[i];
+      row->set_column_zero_copy(i, row_data[i], fld->pack_length(), fld->type());
     }
   }
-
-  if (st.curr_imcu_idx >= m_rpd_table->meta().total_imcus) {
-    st.exhausted.store(true, std::memory_order_release);
-  }
-
-  recv.on_batch_end();
-  return batch_size - remaining;
+  cache.push_back(std::move(row));
 }
 
 void ColumnChunkRecv::on_row(row_id_t, const std::vector<const uchar *> &row_data) {
-  for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
-    auto col_idx = projection_cols[idx];
-    auto &chunk = chunks[col_idx];
-    auto normal_len = cursor->table()->meta().fields[col_idx].normalized_length;
-    chunk.add(row_data[idx], normal_len, row_data[idx] == nullptr);
+  for (size_t i = 0; i < projection_cols.size(); ++i) {
+    uint32_t col = projection_cols[i];
+    auto &chunk = chunks[col];
+    const uchar *ptr = row_data[i];
+    bool is_null = (ptr == nullptr);
+    size_t len = cursor->table()->meta().fields[col].normalized_length;
+    chunk.add(ptr, len, is_null);
   }
   ++read_cnt;
 }

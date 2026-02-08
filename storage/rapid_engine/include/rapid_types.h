@@ -204,7 +204,6 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     return true;
 #endif
   }
-
   bool is_all_true() const {
     for (size_t i = 0; i < size; ++i) {
       if (data[i] != 0xFF) return false;

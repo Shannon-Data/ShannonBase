@@ -605,7 +605,13 @@ const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,
 }
 
 void Imcu::evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
-                                          size_t num_rows, bit_array_t &result) {}
+                                          size_t num_rows, bit_array_t &result) {
+  if (predicates.empty()) {
+    std::memset(result.data, 0xFF, result.size);
+    return;
+  }
+  // TODO: imipl the vectoried evaluation.
+}
 
 bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Transaction::ID reader_txn_id,
                           uint64 reader_scn) const {
