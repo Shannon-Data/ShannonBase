@@ -387,7 +387,7 @@ bool RapidCursor::fetch_next_batch(size_t batch_size /* = SHANNON_BATCH_NUM */) 
 }
 
 int RapidCursor::next(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &col_chunks,
-                      size_t &read_cnt) {
+                            size_t &read_cnt) {
   read_cnt = 0;
   if (m_scan_exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
 
