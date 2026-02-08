@@ -61,22 +61,26 @@ struct RecieverBase {
   inline bool accept_more() const { return true; }
 };
 
+struct RowBufferRecv : RecieverBase {
+  RowBufferRecv(RapidCursor *c, std::vector<std::unique_ptr<RowBuffer>> &buf) : cursor(c), cache(buf) {}
+  RapidCursor *cursor{nullptr};
+  std::vector<std::unique_ptr<RowBuffer>> &cache;
+
+  void on_batch_begin() { cache.clear(); }
+  void on_row(row_id_t rowid, const std::vector<const uchar *> &row_data);
+};
+
 struct ColumnChunkRecv : RecieverBase {
   ColumnChunkRecv(RapidCursor *c, const std::vector<uint32_t> &proj, std::vector<Executor::ColumnChunk> &ch,
-                  std::vector<row_id_t> &ids, size_t &cnt)
-      : cursor(c), projection_cols(proj), chunks(ch), row_ids(ids), read_cnt(cnt) {}
-
+                  size_t &cnt)
+      : cursor(c), projection_cols(proj), chunks(ch), read_cnt(cnt) {}
   RapidCursor *cursor{nullptr};
   const std::vector<uint32_t> &projection_cols;
   std::vector<Executor::ColumnChunk> &chunks;
-  std::vector<row_id_t> &row_ids;
   size_t &read_cnt;
 
-  void on_batch_begin() {
-    read_cnt = 0;
-    row_ids.clear();
-  }
-  void on_row(row_id_t rowid, const std::vector<const uchar *> &row_data);
+  void on_batch_begin() { read_cnt = 0; }
+  void on_row(row_id_t, const std::vector<const uchar *> &row_data);
 };
 
 class RapidCursor : public MemoryObject {
@@ -85,53 +89,25 @@ class RapidCursor : public MemoryObject {
     size_t curr_imcu_idx{0};
     size_t curr_imcu_offset{0};
     std::atomic<size_t> curr_row_idx{0};
+    size_t batch_start{0};
+    size_t batch_end{0};
     std::atomic<bool> exhausted{false};
-
-    size_t batch_size{0};    ///< #rows in the current batch
-    size_t row_in_batch{0};  ///< index of the next row to serve
-
-    inline bool is_exhausted() const noexcept { return row_in_batch >= batch_size; }
-    inline void commit_batch(size_t n) noexcept {
-      batch_size = n;
-      row_in_batch = 0;
-    }
-    inline void advance_row() noexcept { ++row_in_batch; }
-
-    // Link to the cursor's columnar buffers.  Called once by init_col_chunks().
-    inline void bind(std::vector<Executor::ColumnChunk> *chunks, std::vector<row_id_t> *ids) noexcept {
-      m_col_chunks = chunks;
-      m_row_ids = ids;
-    }
-
-    void reset() noexcept {
+    void reset() {
       curr_imcu_idx = 0;
       curr_imcu_offset = 0;
       curr_row_idx.store(0, std::memory_order_release);
+      batch_start = 0;
+      batch_end = 0;
       exhausted.store(false, std::memory_order_release);
-      invalidate_batch();
     }
-
-    // Jump to an arbitrary row_id (index scan / rnd_pos).
-    void seek(row_id_t row_id, size_t rows_per_imcu) noexcept {
+    void seek(row_id_t row_id, size_t rows_per_imcu) {
       curr_row_idx.store(row_id, std::memory_order_release);
       curr_imcu_idx = row_id / rows_per_imcu;
       curr_imcu_offset = row_id % rows_per_imcu;
+      batch_start = 0;
+      batch_end = 0;
       exhausted.store(false, std::memory_order_release);
-      invalidate_batch();
     }
-
-   private:
-    void invalidate_batch() noexcept {
-      batch_size = 0;
-      row_in_batch = 0;
-      if (m_col_chunks) {
-        for (auto &chunk : *m_col_chunks) chunk.clear();
-      }
-      if (m_row_ids) m_row_ids->clear();
-    }
-
-    std::vector<Executor::ColumnChunk> *m_col_chunks{nullptr};
-    std::vector<row_id_t> *m_row_ids{nullptr};
   };
 
   RapidCursor(TABLE *source_table, RpdTable *rpd);
@@ -146,7 +122,14 @@ class RapidCursor : public MemoryObject {
   // to reset to a new rpd table source. Used in Partition Table case.
   inline void active_table(RpdTable *rpd_table) {
     m_rpd_table = rpd_table;
+
+    // Reserve buffer cache with extra space to reduce reallocation
+    m_row_buffer_cache.clear();
+    m_row_buffer_cache.reserve(SHANNON_BATCH_NUM + 16);
+
+    // Initialize scan position
     m_scan_state.reset();
+    m_scan_state.curr_row_idx.store(0, std::memory_order_release);
   }
 
   inline TABLE *source() const { return m_data_source; }
@@ -160,13 +143,18 @@ class RapidCursor : public MemoryObject {
 
   // to the next rows.
   int next(uchar *buf);
+
   boost::asio::awaitable<int> next_async(uchar *buf);
 
-  // read the data in data in batch mode. Vectorised / batch scan
+  // read the data in data in batch mode.
   int next(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
   // Random-access / position
   int rnd_pos(uchar *buff, uchar *pos);
+  row_id_t position(const unsigned char *record);
+
+  int rnd_pos(uchar *buff, uchar *pos);
+
   row_id_t position(const unsigned char *record);
 
   // get the data pos.
@@ -210,6 +198,8 @@ class RapidCursor : public MemoryObject {
   // Rebuilt lazily when m_proj_cols_dirty is true.
   std::vector<uint32_t> projection_columns() const;
 
+  std::vector<uint32_t> projection_columns() const;
+
   // Helper method to encode key parts for ART storage
   void encode_key_parts(uchar *encoded_key, const uchar *original_key, uint key_len, KEY *key_info);
 
@@ -220,6 +210,9 @@ class RapidCursor : public MemoryObject {
   // (Re)initialise m_col_chunks based on the current table read_set.
   // Must be called after init() has set up m_data_source and m_rpd_table.
   void init_col_chunks();
+
+  template <typename Reciever>
+  size_t scan_batch_core(size_t batch_size, const std::vector<uint32_t> &projection_cols, Reciever &sink);
 
   int position(row_id_t start_row_id);
 
@@ -232,6 +225,15 @@ class RapidCursor : public MemoryObject {
   RpdTable *m_rpd_table{nullptr};      ///< active partition (or full table)
   RpdTable *m_src_rpd_table{nullptr};  ///< root/parent table
 
+  // rapid table.
+  RpdTable *m_rpd_table{nullptr}, *m_src_rpd_table{nullptr} /**if it partition rpd, pointer to parent rpd. */;
+
+  CursorState m_scan_state;
+
+  // Batch mode flag
+  std::atomic<bool> m_using_batch{true};
+
+  // context
   std::unique_ptr<Rapid_scan_context> m_scan_context{nullptr};
 
   CursorState m_scan_state;
