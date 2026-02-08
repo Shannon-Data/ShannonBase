@@ -114,7 +114,7 @@ class RapidCursor : public MemoryObject {
   boost::asio::awaitable<int> next_async(uchar *buf);
 
   // read the data in data in batch mode.
-  int next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
+  int next(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
   // end of scan.
   int end();

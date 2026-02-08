@@ -64,6 +64,7 @@
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/imcs/row0row.h"
+#include "storage/rapid_engine/imcs/storage0index.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/trx/transaction.h"  // Transaction_Journal
@@ -259,6 +260,10 @@ class Imcu : public MemoryObject {
   size_t scan_range(Rapid_scan_context *context, size_t start_offset, size_t limit,
                     const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
                     RowCallback callback);
+
+  size_t scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
+                               const std::vector<std::unique_ptr<Predicate>> &predicates,
+                               const std::vector<uint32> &projection, RowCallback callback);
   /**
    * Check row visibility (core: single-row check)
    * @param context: read scan context
@@ -320,7 +325,6 @@ class Imcu : public MemoryObject {
    */
   Imcu *compact();
 
-  bool prune(const Predicate *pred) const;
   /**
    * Check if compaction is required
    */
@@ -419,6 +423,25 @@ class Imcu : public MemoryObject {
   void update_statistics() {}
 
  private:
+  inline bool can_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates) {
+    auto has_vect_ip{false}, has_numeric_predicates{false};
+#if defined(SHANNON_AVX_VECT_SUPPORTED) || defined(SHANNON_SSE_VECT_SUPPORTED) || defined(SHANNON_ARM_VECT_SUPPORTED)
+    has_vect_ip = true;
+#endif
+
+    for (const auto &pred : predicates) {
+      if (!pred->is_compound()) {
+        auto sp = static_cast<const Simple_Predicate *>(pred.get());
+        if (sp->value.type == PredicateValueType::INT64 || sp->value.type == PredicateValueType::DOUBLE) {
+          has_numeric_predicates = true;
+          break;
+        }
+      }
+    }
+
+    return has_vect_ip && !predicates.empty() && has_numeric_predicates;
+  }
+
   /**
    * Initialize the header
    */
@@ -463,18 +486,38 @@ class Imcu : public MemoryObject {
    * @param row_cache Cache of column values for this row
    * @return true if row matches predicate
    */
-  inline bool evaluate_predicate(const Predicate *pred, row_id_t local_row_id,
-                                 std::unordered_map<uint32, const uchar *> &row_cache) const;
+  bool evaluate_predicate(const Predicate *pred, row_id_t local_row_id,
+                          std::unordered_map<uint32, const uchar *> &row_cache) const;
+
+  /**
+   * @brief Evaluate predicate on a batch of rows
+   *
+   * @param pred Predicate to evaluate
+   * @param row_ids Vector of row IDs to evaluate
+   * @param result Bitmap of results (1 = match, 0 = no match)
+   */
+  void evaluate_predicate_batch(const Predicate *pred, const std::vector<row_id_t> &row_ids, bit_array_t &result);
+
+  void evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
+                                      size_t num_rows, bit_array_t &result);
   /**
    * @brief Evaluate a simple predicate against a row
    */
-  inline bool evaluate_simple_predicate(const Simple_Predicate *pred, row_id_t local_row_id,
-                                        std::unordered_map<uint32, const uchar *> &row_cache) const;
+  bool evaluate_simple_predicate(const Simple_Predicate *pred, row_id_t local_row_id,
+                                 std::unordered_map<uint32, const uchar *> &row_cache) const;
+
+  void evaluate_simple_predicate_batch(const Simple_Predicate *pred, const std::vector<row_id_t> &row_ids,
+                                       bit_array_t &result);
+
   /**
    * @brief Evaluate a compound predicate against a row
    */
-  inline bool evaluate_compound_predicate(const Compound_Predicate *pred, row_id_t local_row_id,
-                                          std::unordered_map<uint32, const uchar *> &row_cache) const;
+  bool evaluate_compound_predicate(const Compound_Predicate *pred, row_id_t local_row_id,
+                                   std::unordered_map<uint32, const uchar *> &row_cache) const;
+
+  void evaluate_compound_predicate_batch(const Compound_Predicate *pred, const std::vector<row_id_t> &row_ids,
+                                         bit_array_t &result);
+
   /**
    * @brief Get column value for a row (with caching)
    *
@@ -483,8 +526,8 @@ class Imcu : public MemoryObject {
    * @param row_cache Cache to store/retrieve values
    * @return Pointer to column value (nullptr if NULL)
    */
-  inline const uchar *get_column_value(uint32 col_id, row_id_t local_row_id,
-                                       std::unordered_map<uint32, const uchar *> &row_cache) const;
+  const uchar *get_column_value(uint32 col_id, row_id_t local_row_id,
+                                std::unordered_map<uint32, const uchar *> &row_cache) const;
 
  private:
   // Memory Management
@@ -508,58 +551,6 @@ class Imcu : public MemoryObject {
 
   // Back Reference
   RpdTable *m_owner_table;
-};
-
-/**
- * @brief Vectorized evaluation for batch of rows
- *
- * Instead of evaluating predicates row-by-row, we can evaluate
- * an entire batch at once for better CPU cache utilization.
- *
- * This is useful for very selective predicates where most rows
- * are filtered out early.
- */
-/*
-// In scan_range(), replace row-by-row evaluation with:
-// Build list of visible row IDs
-std::vector<row_id_t> visible_rows;
-for (size_t i = 0; i < batch_size; i++) {
-  if (Utils::Util::bit_array_get(&visibility_mask, i)) {
-    visible_rows.push_back(start + i);
-  }
-}
-
-// Vectorized evaluation
-bit_array_t match_mask(visible_rows.size());
-VectorizedPredicateEvaluator::evaluate_batch(
-    predicates[0].get(), this, visible_rows, match_mask);
-
-// Collect matching rows
-std::vector<row_id_t> matching_rows;
-for (size_t i = 0; i < visible_rows.size(); i++) {
-  if (Utils::Util::bit_array_get(&match_mask, i)) {
-    matching_rows.push_back(visible_rows[i]);
-  }
-}
-*/
-class VectorizedPredicateEvaluator {
- public:
-  /**
-   * @brief Evaluate predicate on a batch of rows
-   *
-   * @param pred Predicate to evaluate
-   * @param imcu IMCU containing the data
-   * @param row_ids Vector of row IDs to evaluate
-   * @param result Bitmap of results (1 = match, 0 = no match)
-   */
-  static void evaluate_batch(const Predicate *pred, const Imcu *imcu, const std::vector<row_id_t> &row_ids,
-                             bit_array_t &result);
-
- private:
-  static void evaluate_simple_batch(const Simple_Predicate *pred, const Imcu *imcu,
-                                    const std::vector<row_id_t> &row_ids, bit_array_t &result);
-  static void evaluate_compound_batch(const Compound_Predicate *pred, const Imcu *imcu,
-                                      const std::vector<row_id_t> &row_ids, bit_array_t &result);
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

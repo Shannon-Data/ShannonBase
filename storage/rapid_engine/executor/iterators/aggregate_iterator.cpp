@@ -83,9 +83,7 @@ bool VectorizedAggregateIterator::Init() {
     m_first_row_next_grp.length(0);
   }
 
-  if (m_source->Init()) {
-    return true;
-  }
+  if (m_source->Init()) return true;
 
   // Set output slice for HAVING evaluation
   if (!(m_join->implicit_grouping || m_join->group_optimized_away) && !thd()->lex->using_hypergraph_optimizer()) {
@@ -129,9 +127,7 @@ int VectorizedAggregateIterator::Read() {
             }
           }
 
-          if (m_join->clear_fields(&m_save_nullinfo)) {
-            return 1;
-          }
+          if (m_join->clear_fields(&m_save_nullinfo)) return 1;
 
           for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) {
             (*item)->clear();
@@ -226,11 +222,7 @@ int VectorizedAggregateIterator::Read() {
       SetRollupLevel(m_current_rollup_pos - 1);
 
       if (m_current_rollup_pos <= m_last_unchanged_grp_item_idx) {
-        if (m_seen_eof) {
-          m_state = DONE_OUTPUTTING_ROWS;
-        } else {
-          m_state = LAST_ROW_STARTED_NEW_GROUP;
-        }
+        m_state = (m_seen_eof) ? DONE_OUTPUTTING_ROWS : LAST_ROW_STARTED_NEW_GROUP;
       }
 
       if (m_output_slice != -1) {
@@ -329,9 +321,7 @@ int VectorizedAggregateIterator::ProcessCurrentGroupVectorized() {
 
   // Process vectorized aggregates
   int agg_result = ProcessVectorizedAggregates();
-  if (agg_result != 0) {
-    return agg_result;
-  }
+  if (agg_result != 0) return agg_result;
 
   // Update performance metrics
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -407,10 +397,8 @@ int VectorizedAggregateIterator::ReadRowsIntoCurrentBatch() {
       }
     }
 
-    if (!all_chunks_can_add) {
-      // Chunks are full - process current batch. Current row stays buffered in table and will be re-read
-      break;
-    }
+    // Chunks are full - process current batch. Current row stays buffered in table and will be re-read
+    if (!all_chunks_can_add) break;
 
     // Add row to all column chunks atomically
     bool row_stored_successfully = true;
@@ -482,9 +470,7 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates() {
         for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
           // Restore row and process traditionally
           RestoreRowFromBatch(row, i);
-          if (info.item->aggregator_add()) {
-            return 1;
-          }
+          if (info.item->aggregator_add()) return 1;
         }
         break;
     }
@@ -578,9 +564,7 @@ int VectorizedAggregateIterator::ProcessSumAggregates(const std::vector<size_t> 
         // Fall back to row-by-row for complex types
         for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
           RestoreRowFromBatch(row, idx);
-          if (info.item->aggregator_add()) {
-            return 1;
-          }
+          if (info.item->aggregator_add()) return 1;
         }
         break;
     }
@@ -598,9 +582,7 @@ int VectorizedAggregateIterator::ProcessMinMaxAggregates(const std::vector<size_
     for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
       if (!chunk.nullable(row)) {
         RestoreRowFromBatch(row, idx);
-        if (info.item->aggregator_add()) {
-          return 1;
-        }
+        if (info.item->aggregator_add()) return 1;
       }
     }
   }
@@ -613,12 +595,9 @@ int VectorizedAggregateIterator::ProcessAvgAggregates(const std::vector<size_t> 
   // For now, fall back to traditional processing
   for (size_t idx : avg_indices) {
     const auto &info = m_vectorizer.aggregate_infos[idx];
-
     for (size_t row = 0; row < m_vectorizer.current_batch.row_count; ++row) {
       RestoreRowFromBatch(row, idx);
-      if (info.item->aggregator_add()) {
-        return 1;
-      }
+      if (info.item->aggregator_add()) return 1;
     }
   }
 
@@ -626,13 +605,10 @@ int VectorizedAggregateIterator::ProcessAvgAggregates(const std::vector<size_t> 
 }
 
 void VectorizedAggregateIterator::RestoreRowFromBatch(size_t row_idx, size_t agg_idx) {
-  if (agg_idx >= m_vectorizer.aggregate_infos.size() || row_idx >= m_vectorizer.current_batch.row_count) {
-    return;
-  }
+  if (agg_idx >= m_vectorizer.aggregate_infos.size() || row_idx >= m_vectorizer.current_batch.row_count) return;
 
   const auto &info = m_vectorizer.aggregate_infos[agg_idx];
   auto &chunk = m_vectorizer.current_batch.column_chunks[agg_idx];
-
   if (chunk.nullable(row_idx)) {
     info.source_field->set_null();
   } else {
@@ -649,7 +625,6 @@ bool VectorizedAggregateIterator::AnalyzeAggregatesForVectorization() {
   m_vectorizer.aggregate_infos.clear();
 
   bool any_vectorizable = false;
-
   for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) {
     VectorizedGroupProcessor::AggregateInfo info;
     info.item = *item;
@@ -689,17 +664,13 @@ Field *VectorizedAggregateIterator::GetPrimaryFieldForAggregate(Item_sum *item) 
   // Extract the primary field used by this aggregate function
   if (item->arg_count > 0) {
     Item *arg = item->get_arg(0);
-    if (arg->type() == Item::FIELD_ITEM) {
-      return down_cast<Item_field *>(arg)->field;
-    }
+    if (arg->type() == Item::FIELD_ITEM) return down_cast<Item_field *>(arg)->field;
   }
   return nullptr;
 }
 
 void VectorizedAggregateIterator::SetupColumnChunks() {
-  if (m_vectorizer.current_batch.initialized) {
-    return;
-  }
+  if (m_vectorizer.current_batch.initialized) return;
 
   m_vectorizer.current_batch.column_chunks.clear();
   m_vectorizer.current_batch.capacity = m_vectorizer.opt_batch_size;

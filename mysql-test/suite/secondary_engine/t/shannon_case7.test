@@ -89,7 +89,9 @@ CREATE TABLE test_string_types (
 INSERT INTO test_string_types VALUES
 (1, 'char', 'varchar text', REPEAT('text ', 10), 'tiny', REPEAT('medium ', 100), REPEAT('long ', 1000), 'medium'),
 (2, 'test', 'another varchar', 'text content', 'tiny2', REPEAT('x', 1000), REPEAT('y', 10000), 'large'),
-(3, '', '', '', '', '', '', 'small');
+(3, '', '', '', '', '', '', 'small'),
+(5, 'as', 'we', 'fs', '', '', 'sddd', 'small'),
+(4, 'new', 'ad', '', '', 'ws', '', 'small');
 
 ALTER TABLE test_string_types SECONDARY_LOAD;
 EXPLAIN SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
