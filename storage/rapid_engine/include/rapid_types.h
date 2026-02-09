@@ -96,107 +96,150 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     return *this;
   }
 
+  inline void set() {
+    if (!data || !size) return;
+    std::memset(data, 0xFF, size);
+  }
+
+  inline void reset() {
+    if (!data || !size) return;
+    std::memset(data, 0x0, size);
+  }
+
+  void not_inplace() {
+    if (!data || !size) return;
+#ifdef SHANNON_AVX_VECT_SUPPORTED
+    // AVX2: XOR with all-ones flips every bit.
+    const __m256i all_ones = _mm256_set1_epi8(static_cast<char>(0xFF));
+    const size_t simd_width = 256 / 8;  // 32 bytes per register
+    size_t i = 0;
+    for (; i + simd_width <= size; i += simd_width) {
+      __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(data + i), _mm256_xor_si256(chunk, all_ones));
+    }
+    for (; i < size; ++i) data[i] ^= 0xFF;
+
+#elif defined(SHANNON_ARM_VECT_SUPPORTED)
+    // NEON: vmvnq_u8 performs bitwise NOT on 16 bytes at once.
+    const size_t simd_width = 128 / 8;  // 16 bytes per register
+    size_t i = 0;
+    for (; i + simd_width <= size; i += simd_width) {
+      uint8x16_t chunk = vld1q_u8(data + i);
+      vst1q_u8(data + i, vmvnq_u8(chunk));
+    }
+    for (; i < size; ++i) data[i] ^= 0xFF;
+
+#else
+    for (size_t i = 0; i < size; ++i) data[i] ^= 0xFF;
+#endif
+  }
+
   void and_with(const BitArray &other) {
     assert(size == other.size);
 #ifdef SHANNON_AVX_VECT_SUPPORTED
-    const size_t simd_width = 256 / 8;  // 32 bytes at a time
+    const size_t simd_width = 256 / 8;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
-      __m256i a = _mm256_loadu_si256((__m256i *)(data + i));
-      __m256i b = _mm256_loadu_si256((__m256i *)(other.data + i));
-      __m256i result = _mm256_and_si256(a, b);
-      _mm256_storeu_si256((__m256i *)(data + i), result);
+      __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
+      __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(other.data + i));
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(data + i), _mm256_and_si256(a, b));
     }
-    // Handle remaining elements
-    for (; i < size; ++i) {
-      data[i] &= other.data[i];
-    }
+    for (; i < size; ++i) data[i] &= other.data[i];
 #elif defined(SHANNON_ARM_VECT_SUPPORTED)
-    const size_t simd_width = 128 / 8;  // 16 bytes at a time (NEON)
+    const size_t simd_width = 128 / 8;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
-      // vld1q_u8: Load 128 bits (16 bytes) from memory into register
       uint8x16_t a = vld1q_u8(data + i);
       uint8x16_t b = vld1q_u8(other.data + i);
-      // vandq_u8: Perform bitwise AND operation
-      uint8x16_t result = vandq_u8(a, b);
-      // vst1q_u8: Store result back to memory
-      vst1q_u8(data + i, result);
+      vst1q_u8(data + i, vandq_u8(a, b));
     }
-    // Handle remaining elements
-    for (; i < size; ++i) {
-      data[i] &= other.data[i];
-    }
+    for (; i < size; ++i) data[i] &= other.data[i];
+
 #else
-    for (size_t i = 0; i < size; ++i) {
-      data[i] &= other.data[i];
-    }
+    for (size_t i = 0; i < size; ++i) data[i] &= other.data[i];
 #endif
   }
 
   void or_with(const BitArray &other) {
     assert(size == other.size);
 #ifdef SHANNON_AVX_VECT_SUPPORTED
-    const size_t simd_width = 256 / 8;  // 32 bytes at a time
+    const size_t simd_width = 256 / 8;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
-      __m256i a = _mm256_loadu_si256((__m256i *)(data + i));
-      __m256i b = _mm256_loadu_si256((__m256i *)(other.data + i));
-      __m256i result = _mm256_or_si256(a, b);
-      _mm256_storeu_si256((__m256i *)(data + i), result);
+      __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
+      __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(other.data + i));
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(data + i), _mm256_or_si256(a, b));
     }
-    // Handle remaining elements
-    for (; i < size; ++i) {
-      data[i] |= other.data[i];
-    }
+    for (; i < size; ++i) data[i] |= other.data[i];
+
 #elif defined(SHANNON_ARM_VECT_SUPPORTED)
-    const size_t simd_width = 128 / 8;  // 16 bytes at a time (NEON)
+    const size_t simd_width = 128 / 8;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
       uint8x16_t a = vld1q_u8(data + i);
       uint8x16_t b = vld1q_u8(other.data + i);
-      uint8x16_t result = vorrq_u8(a, b);  // Perform bitwise OR
-      vst1q_u8(data + i, result);
+      vst1q_u8(data + i, vorrq_u8(a, b));
     }
-    // Handle remaining elements
-    for (; i < size; ++i) {
-      data[i] |= other.data[i];
-    }
+    for (; i < size; ++i) data[i] |= other.data[i];
+
 #else
-    for (size_t i = 0; i < size; ++i) {
-      data[i] |= other.data[i];
+    for (size_t i = 0; i < size; ++i) data[i] |= other.data[i];
+#endif
+  }
+
+  void xor_with(const BitArray &other) {
+    assert(size == other.size);
+#ifdef SHANNON_AVX_VECT_SUPPORTED
+    const size_t simd_width = 256 / 8;
+    size_t i = 0;
+    for (; i + simd_width <= size; i += simd_width) {
+      __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
+      __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(other.data + i));
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(data + i), _mm256_xor_si256(a, b));
     }
+    for (; i < size; ++i) data[i] ^= other.data[i];
+
+#elif defined(SHANNON_ARM_VECT_SUPPORTED)
+    const size_t simd_width = 128 / 8;
+    size_t i = 0;
+    for (; i + simd_width <= size; i += simd_width) {
+      uint8x16_t a = vld1q_u8(data + i);
+      uint8x16_t b = vld1q_u8(other.data + i);
+      vst1q_u8(data + i, veorq_u8(a, b));  // veorq_u8: bitwise XOR
+    }
+    for (; i < size; ++i) data[i] ^= other.data[i];
+
+#else
+    for (size_t i = 0; i < size; ++i) data[i] ^= other.data[i];
 #endif
   }
 
   bool is_all_false() const {
+    if (!data || !size) return true;
 #ifdef SHANNON_AVX_VECT_SUPPORTED
-    const size_t simd_width = 256 / 8;  // 32 bytes at a time
+    const size_t simd_width = 256 / 8;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
-      __m256i chunk = _mm256_loadu_si256((__m256i *)(data + i));
-      // Check if all bits in the chunk are zero
+      __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
       if (!_mm256_testz_si256(chunk, chunk)) return false;
     }
-    // Handle remaining elements
     for (; i < size; ++i) {
       if (data[i] != 0) return false;
     }
     return true;
+
 #elif defined(SHANNON_ARM_VECT_SUPPORTED)
-    const size_t simd_width = 128 / 8;  // 16 bytes at a time (NEON)
+    const size_t simd_width = 128 / 8;
     size_t i = 0;
     for (; i + simd_width <= size; i += simd_width) {
       uint8x16_t chunk = vld1q_u8(data + i);
-      // Check if any byte in the vector is non-zero
-      // vmaxvq_u8 returns the maximum value across all lanes
       if (vmaxvq_u8(chunk) != 0) return false;
     }
-    // Handle remaining elements
     for (; i < size; ++i) {
       if (data[i] != 0) return false;
     }
     return true;
+
 #else
     for (size_t i = 0; i < size; ++i) {
       if (data[i] != 0) return false;
@@ -204,11 +247,45 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     return true;
 #endif
   }
+
   bool is_all_true() const {
+    if (!data || !size) return true;
+#ifdef SHANNON_AVX_VECT_SUPPORTED
+    const __m256i all_ones = _mm256_set1_epi8(static_cast<char>(0xFF));
+    const size_t simd_width = 256 / 8;
+    size_t i = 0;
+    for (; i + simd_width <= size; i += simd_width) {
+      __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
+      // _mm256_testz_si256(~chunk, ~chunk) == 0  iff all bits are 1.
+      // Simpler: XOR with all_ones gives 0 only when chunk == all_ones.
+      __m256i flipped = _mm256_xor_si256(chunk, all_ones);
+      if (!_mm256_testz_si256(flipped, flipped)) return false;
+    }
+    for (; i < size; ++i) {
+      if (data[i] != 0xFF) return false;
+    }
+    return true;
+
+#elif defined(SHANNON_ARM_VECT_SUPPORTED)
+    const size_t simd_width = 128 / 8;
+    size_t i = 0;
+    for (; i + simd_width <= size; i += simd_width) {
+      uint8x16_t chunk = vld1q_u8(data + i);
+      // vminvq_u8: horizontal minimum across all lanes.
+      // If all bytes are 0xFF the minimum is also 0xFF.
+      if (vminvq_u8(chunk) != 0xFF) return false;
+    }
+    for (; i < size; ++i) {
+      if (data[i] != 0xFF) return false;
+    }
+    return true;
+
+#else
     for (size_t i = 0; i < size; ++i) {
       if (data[i] != 0xFF) return false;
     }
     return true;
+#endif
   }
 
   size_t count_ones() const {
@@ -219,25 +296,21 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     size_t i = 0;
 
 #if defined(SHANNON_AVX_VECT_SUPPORTED)
-    // Process 64-bit chunks for AVX platforms (using built-in popcount)
     const uint64_t *data64 = reinterpret_cast<const uint64_t *>(data);
     size_t num_qwords = full_bytes / 8;
     for (size_t q = 0; q < num_qwords; ++q) {
       count += __builtin_popcountll(data64[q]);
     }
-    i = num_qwords * 8;  // Convert back to byte index for remaining processing
+    i = num_qwords * 8;
 #elif defined(SHANNON_ARM_VECT_SUPPORTED)
-    const size_t simd_width = 16;  // 16 bytes at a time (128-bit NEON)
+    const size_t simd_width = 16;
     for (; i + simd_width <= full_bytes; i += simd_width) {
       uint8x16_t v = vld1q_u8(data + i);
-      // vcntq_u8: Count bits set in each byte independently
       uint8x16_t counts = vcntq_u8(v);
-      // vaddlvq_u8: Sum all 8-bit elements in the vector into a 16-bit result
       count += vaddlvq_u8(counts);
     }
 #endif
 
-    // Process remaining bytes
     for (; i < full_bytes; ++i) {
       count += __builtin_popcount(data[i]);
     }
