@@ -31,7 +31,687 @@
 
 namespace ShannonBase {
 namespace Imcs {
-bool Simple_Predicate::evaluate(const uchar *&input_value, bool low_order) const {
+// NEON has no movemask equivalent. This helper extracts a 4-bit integer from
+// a uint32x4_t mask (each lane is either 0x00000000 or 0xFFFFFFFF) so the
+// result can be tested with a simple bit-and, mirroring the AVX2 movemask
+// pattern used in the x86 paths.
+//
+//  shrn:   narrow each 32-bit lane to 8 bits by taking bits [15:8]
+//          (the highest bit of each 0xFFFF word becomes the sign bit).
+//  vget_lane_u32: extract the 4 condensed bytes as a single uint32.
+//  Result bit layout:  bit0=lane0, bit8=lane1, bit16=lane2, bit24=lane3.
+//  We normalise to a dense 4-bit mask via the table lookup below.
+#ifdef SHANNON_ARM_VECT_SUPPORTED
+static inline uint8_t neon_mask4_from_u32x4(uint32x4_t m) {
+  // Narrow 32→16, then 16→8, keeping MSB of each original lane.
+  uint16x4_t narrow16 = vmovn_u32(m);  // 4 x uint16, lane[i] = 0x0000 or 0xFFFF
+  uint8x8_t narrow8 = vmovn_u16(vcombine_u16(narrow16, vdup_n_u16(0)));
+  // narrow8[0..3] is 0x00 or 0xFF per original lane.
+  // Build a 4-bit scalar mask.
+  uint32_t raw = vget_lane_u32(vreinterpret_u32_u8(narrow8), 0);
+  // Each byte is 0x00 or 0xFF → compress to single bits.
+  return static_cast<uint8_t>(((raw & 0x000000FF) ? 1u : 0u) | ((raw & 0x0000FF00) ? 2u : 0u) |
+                              ((raw & 0x00FF0000) ? 4u : 0u) | ((raw & 0xFF000000) ? 8u : 0u));
+}
+
+// Same for uint64x2_t (2 lanes).
+static inline uint8_t neon_mask2_from_u64x2(uint64x2_t m) {
+  uint32x2_t narrow = vmovn_u64(m);  // 2 x uint32, lane[i] = 0x00000000 or 0xFFFFFFFF
+  uint32_t lo = vget_lane_u32(narrow, 0);
+  uint32_t hi = vget_lane_u32(narrow, 1);
+  return static_cast<uint8_t>((lo ? 1u : 0u) | (hi ? 2u : 0u));
+}
+
+// float64x2_t variant (AArch64 only).
+#if defined(__aarch64__)
+static inline uint8_t neon_mask2_from_f64x2(uint64x2_t m) { return neon_mask2_from_u64x2(m); }
+#endif  // __aarch64__
+#endif  // SHANNON_ARM_VECT_SUPPORTED
+
+void Simple_Predicate::evaluate_vecotrized(const std::vector<const uchar *> &col_data, size_t num_rows,
+                                           bit_array_t &result) {
+  if (col_data.empty()) return;
+  auto vector_instr{false};
+#if defined(SHANNON_SSE_VECT_SUPPORTED)
+  vector_instr = true;
+#endif
+  if (vector_instr) {
+    switch (column_type) {
+      case MYSQL_TYPE_LONG:
+        evaluate_int32_vectorized(col_data, num_rows, result);
+        return;
+      case MYSQL_TYPE_LONGLONG:
+        evaluate_int64_vectorized(col_data, num_rows, result);
+        return;
+      case MYSQL_TYPE_DOUBLE:
+      case MYSQL_TYPE_FLOAT:
+        evaluate_double_vectorized(col_data, num_rows, result);
+        return;
+      case MYSQL_TYPE_NEWDECIMAL:
+      case MYSQL_TYPE_DECIMAL:
+        evaluate_decimal_vectorized(col_data, num_rows, result);
+        return;
+      default:
+        // Unsupported type, fall back to scalar
+        break;
+    }
+  }
+  // Scalar fallback
+  evaluate_batch(col_data, result, num_rows);
+}
+
+void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
+                                                 bit_array_t &result) {
+#if defined(SHANNON_AVX_VECT_SUPPORTED)
+  const int32_t target = static_cast<int32_t>(value.as_int());
+  const size_t simd_width = 8;  // AVX2: 8 x int32
+  __m256i target_vec = _mm256_set1_epi32(target);
+
+  size_t i = 0;
+  for (; i + simd_width <= num_rows; i += simd_width) {
+    alignas(32) int32_t values[8];
+    for (size_t j = 0; j < 8; ++j) {
+      values[j] = col_data[i + j] ? *reinterpret_cast<const int32_t *>(col_data[i + j]) : 0;
+    }
+
+    __m256i vdata = _mm256_load_si256(reinterpret_cast<const __m256i *>(values));
+    __m256i mask;
+
+    switch (op) {
+      case PredicateOperator::EQUAL:
+        mask = _mm256_cmpeq_epi32(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_THAN:
+        mask = _mm256_cmpgt_epi32(vdata, target_vec);
+        break;
+      case PredicateOperator::LESS_THAN:
+        mask = _mm256_cmpgt_epi32(target_vec, vdata);
+        break;
+      case PredicateOperator::GREATER_EQUAL: {
+        __m256i gt = _mm256_cmpgt_epi32(vdata, target_vec);
+        __m256i eq = _mm256_cmpeq_epi32(vdata, target_vec);
+        mask = _mm256_or_si256(gt, eq);
+        break;
+      }
+      case PredicateOperator::LESS_EQUAL: {
+        __m256i lt = _mm256_cmpgt_epi32(target_vec, vdata);
+        __m256i eq = _mm256_cmpeq_epi32(vdata, target_vec);
+        mask = _mm256_or_si256(lt, eq);
+        break;
+      }
+      case PredicateOperator::NOT_EQUAL: {
+        __m256i eq = _mm256_cmpeq_epi32(vdata, target_vec);
+        mask = _mm256_xor_si256(eq, _mm256_set1_epi32(-1));
+        break;
+      }
+      default:
+        mask = _mm256_setzero_si256();
+        break;
+    }
+
+    for (size_t j = 0; j < 8; ++j) {
+      if (!col_data[i + j]) {
+        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
+                                           : Utils::Util::bit_array_reset(&result, i + j);
+      } else {
+        reinterpret_cast<int32_t *>(&mask)[j] ? Utils::Util::bit_array_set(&result, i + j)
+                                              : Utils::Util::bit_array_reset(&result, i + j);
+      }
+    }
+  }
+
+  for (; i < num_rows; ++i) {
+    const uchar *v = col_data[i];
+    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+
+#elif defined(SHANNON_ARM_VECT_SUPPORTED)
+  // NEON processes 4 x int32 per 128-bit register.
+  const int32_t target = static_cast<int32_t>(value.as_int());
+  const size_t simd_width = 4;  // NEON: 4 x int32
+  const int32x4_t target_vec = vdupq_n_s32(target);
+  // All-ones constant for NOT_EQUAL inversion.
+  const uint32x4_t all_ones = vdupq_n_u32(0xFFFFFFFFu);
+
+  size_t i = 0;
+  for (; i + simd_width <= num_rows; i += simd_width) {
+    // Gather 4 values; replace NULL slots with 0 (NULL handled separately).
+    alignas(16) int32_t values[4];
+    for (size_t j = 0; j < 4; ++j) {
+      values[j] = col_data[i + j] ? *reinterpret_cast<const int32_t *>(col_data[i + j]) : 0;
+    }
+
+    int32x4_t vdata = vld1q_s32(values);
+    uint32x4_t mask;
+
+    switch (op) {
+      case PredicateOperator::EQUAL:
+        // vceqq_s32: lane = 0xFFFFFFFF if equal, else 0x00000000
+        mask = vceqq_s32(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_THAN:
+        // vcgtq_s32: lane = 0xFFFFFFFF if vdata > target
+        mask = vcgtq_s32(vdata, target_vec);
+        break;
+      case PredicateOperator::LESS_THAN:
+        mask = vcltq_s32(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_EQUAL:
+        mask = vcgeq_s32(vdata, target_vec);
+        break;
+      case PredicateOperator::LESS_EQUAL:
+        mask = vcleq_s32(vdata, target_vec);
+        break;
+      case PredicateOperator::NOT_EQUAL:
+        // Invert equality mask with XOR.
+        mask = veorq_u32(vceqq_s32(vdata, target_vec), all_ones);
+        break;
+      default:
+        mask = vdupq_n_u32(0);
+        break;
+    }
+
+    // Extract 4-bit result and update bit_array.
+    uint8_t bits = neon_mask4_from_u32x4(mask);
+    for (size_t j = 0; j < 4; ++j) {
+      if (!col_data[i + j]) {
+        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
+                                           : Utils::Util::bit_array_reset(&result, i + j);
+      } else {
+        (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
+      }
+    }
+  }
+
+  for (; i < num_rows; ++i) {
+    const uchar *v = col_data[i];
+    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+
+#else
+  evaluate_batch(col_data, result);
+#endif
+}
+
+void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
+                                                 bit_array_t &result) {
+#if defined(SHANNON_AVX_VECT_SUPPORTED)
+  const int64_t target = value.as_int();
+  const size_t simd_width = 4;  // AVX2: 4 x int64
+  __m256i target_vec = _mm256_set1_epi64x(target);
+
+  size_t i = 0;
+  for (; i + simd_width <= num_rows; i += simd_width) {
+    alignas(32) int64_t values[4];
+    for (size_t j = 0; j < 4; ++j) {
+      values[j] = col_data[i + j] ? *reinterpret_cast<const int64_t *>(col_data[i + j]) : 0;
+    }
+
+    __m256i vdata = _mm256_load_si256(reinterpret_cast<const __m256i *>(values));
+    __m256i mask;
+
+    switch (op) {
+      case PredicateOperator::EQUAL:
+        mask = _mm256_cmpeq_epi64(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_THAN:
+        mask = _mm256_cmpgt_epi64(vdata, target_vec);
+        break;
+      case PredicateOperator::LESS_THAN:
+        mask = _mm256_cmpgt_epi64(target_vec, vdata);
+        break;
+      case PredicateOperator::GREATER_EQUAL: {
+        __m256i gt = _mm256_cmpgt_epi64(vdata, target_vec);
+        __m256i eq = _mm256_cmpeq_epi64(vdata, target_vec);
+        mask = _mm256_or_si256(gt, eq);
+        break;
+      }
+      case PredicateOperator::LESS_EQUAL: {
+        __m256i lt = _mm256_cmpgt_epi64(target_vec, vdata);
+        __m256i eq = _mm256_cmpeq_epi64(vdata, target_vec);
+        mask = _mm256_or_si256(lt, eq);
+        break;
+      }
+      case PredicateOperator::NOT_EQUAL: {
+        __m256i eq = _mm256_cmpeq_epi64(vdata, target_vec);
+        mask = _mm256_xor_si256(eq, _mm256_set1_epi64x(-1LL));
+        break;
+      }
+      default:
+        mask = _mm256_setzero_si256();
+        break;
+    }
+
+    for (size_t j = 0; j < 4; ++j) {
+      if (!col_data[i + j]) {
+        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
+                                           : Utils::Util::bit_array_reset(&result, i + j);
+      } else {
+        reinterpret_cast<int64_t *>(&mask)[j] ? Utils::Util::bit_array_set(&result, i + j)
+                                              : Utils::Util::bit_array_reset(&result, i + j);
+      }
+    }
+  }
+
+  for (; i < num_rows; ++i) {
+    const uchar *v = col_data[i];
+    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+
+#elif defined(SHANNON_ARM_VECT_SUPPORTED)
+  //
+  // NEON 128-bit register holds 2 x int64 (int64x2_t).
+  //
+  // AArch64 (64-bit ARM): full signed 64-bit comparison intrinsics exist:
+  //   vceqq_s64, vcgtq_s64, vcgeq_s64, vcltq_s64, vcleq_s64
+  //
+  // AArch32 (32-bit ARM): only vceqq_s64 is available. GT/GE/LT/LE are not
+  // natively supported and must be emulated via a sign-bit trick:
+  //   a > b  ⟺  (a - b) has a negative sign when no overflow, but overflow
+  //               detection is complex for 64-bit. It's safer to fall back to
+  //               scalar for those operators on AArch32.
+  //
+  const int64_t target = value.as_int();
+  const size_t simd_width = 2;  // NEON: 2 x int64
+  const int64x2_t target_vec = vdupq_n_s64(target);
+  const uint64x2_t all_ones64 = vdupq_n_u64(0xFFFFFFFFFFFFFFFFull);
+
+  size_t i = 0;
+
+#if defined(__aarch64__)
+  // AArch64: full signed compare intrinsics available
+  for (; i + simd_width <= num_rows; i += simd_width) {
+    alignas(16) int64_t values[2];
+    for (size_t j = 0; j < 2; ++j) {
+      values[j] = col_data[i + j] ? *reinterpret_cast<const int64_t *>(col_data[i + j]) : 0LL;
+    }
+
+    int64x2_t vdata = vld1q_s64(values);
+    uint64x2_t mask;
+
+    switch (op) {
+      case PredicateOperator::EQUAL:
+        // vceqq_s64: lane = 0xFFFFFFFFFFFFFFFF if equal
+        mask = vceqq_s64(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_THAN:
+        // vcgtq_s64: AArch64 only
+        mask = vcgtq_s64(vdata, target_vec);
+        break;
+      case PredicateOperator::LESS_THAN:
+        mask = vcltq_s64(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_EQUAL:
+        mask = vcgeq_s64(vdata, target_vec);
+        break;
+      case PredicateOperator::LESS_EQUAL:
+        mask = vcleq_s64(vdata, target_vec);
+        break;
+      case PredicateOperator::NOT_EQUAL:
+        mask = veorq_u64(vceqq_s64(vdata, target_vec), all_ones64);
+        break;
+      default:
+        mask = vdupq_n_u64(0);
+        break;
+    }
+
+    uint8_t bits = neon_mask2_from_u64x2(mask);
+    for (size_t j = 0; j < 2; ++j) {
+      if (!col_data[i + j]) {
+        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
+                                           : Utils::Util::bit_array_reset(&result, i + j);
+      } else {
+        (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
+      }
+    }
+  }
+
+#else   // AArch32: only EQUAL and NOT_EQUAL have direct NEON support
+  // For EQUAL / NOT_EQUAL we use NEON; for ordering operators we fall through
+  // to the scalar tail immediately (i stays at 0).
+  if (op == PredicateOperator::EQUAL || op == PredicateOperator::NOT_EQUAL) {
+    for (; i + simd_width <= num_rows; i += simd_width) {
+      alignas(16) int64_t values[2];
+      for (size_t j = 0; j < 2; ++j) {
+        values[j] = col_data[i + j] ? *reinterpret_cast<const int64_t *>(col_data[i + j]) : 0LL;
+      }
+
+      int64x2_t vdata = vld1q_s64(values);
+      uint64x2_t eq_mask = vceqq_s64(vdata, target_vec);  // always available
+      uint64x2_t mask = (op == PredicateOperator::NOT_EQUAL) ? veorq_u64(eq_mask, all_ones64) : eq_mask;
+
+      uint8_t bits = neon_mask2_from_u64x2(mask);
+      for (size_t j = 0; j < 2; ++j) {
+        if (!col_data[i + j]) {
+          (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
+                                             : Utils::Util::bit_array_reset(&result, i + j);
+        } else {
+          (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j)
+                             : Utils::Util::bit_array_reset(&result, i + j);
+        }
+      }
+    }
+  }
+  // GT / GE / LT / LE on AArch32: fall through to scalar tail below.
+#endif  // __aarch64__
+  // Scalar tail (remaining rows after SIMD, or all rows for unsupported ops
+  // on AArch32).
+  for (; i < num_rows; ++i) {
+    const uchar *v = col_data[i];
+    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+#else
+  evaluate_batch(col_data, result);
+#endif
+}
+
+void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
+                                                  bit_array_t &result) {
+#if defined(SHANNON_AVX_VECT_SUPPORTED)
+  // x86 AVX2 path
+  const double target = value.as_double();
+  const size_t simd_width = 4;  // AVX2: 4 x double
+  __m256d target_vec = _mm256_set1_pd(target);
+
+  size_t i = 0;
+  for (; i + simd_width <= num_rows; i += simd_width) {
+    alignas(32) double values[4];
+    for (size_t j = 0; j < 4; ++j) {
+      values[j] = col_data[i + j] ? *reinterpret_cast<const double *>(col_data[i + j]) : 0.0;
+    }
+
+    __m256d vdata = _mm256_load_pd(values);
+    __m256d mask;
+
+    switch (op) {
+      case PredicateOperator::EQUAL:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_EQ_OQ);
+        break;
+      case PredicateOperator::GREATER_THAN:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_GT_OQ);
+        break;
+      case PredicateOperator::LESS_THAN:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_LT_OQ);
+        break;
+      case PredicateOperator::GREATER_EQUAL:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_GE_OQ);
+        break;
+      case PredicateOperator::LESS_EQUAL:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_LE_OQ);
+        break;
+      case PredicateOperator::NOT_EQUAL:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_NEQ_OQ);
+        break;
+      default:
+        mask = _mm256_setzero_pd();
+        break;
+    }
+
+    // _mm256_movemask_pd returns a 4-bit mask, one bit per lane
+    int result_bits = _mm256_movemask_pd(mask);
+    for (size_t j = 0; j < 4; ++j) {
+      if (!col_data[i + j]) {
+        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
+                                           : Utils::Util::bit_array_reset(&result, i + j);
+      } else {
+        (result_bits & (1 << j)) ? Utils::Util::bit_array_set(&result, i + j)
+                                 : Utils::Util::bit_array_reset(&result, i + j);
+      }
+    }
+  }
+
+  for (; i < num_rows; ++i) {
+    const uchar *v = col_data[i];
+    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+
+#elif defined(SHANNON_ARM_VECT_SUPPORTED) && defined(__aarch64__)
+  // float64x2_t and vcgtq_f64 / vcltq_f64 etc. are AArch64-only.
+  // 32-bit ARM NEON has no double SIMD; those builds fall to scalar below.
+  const double target = value.as_double();
+  const size_t simd_width = 2;  // NEON AArch64: 2 x double
+  const float64x2_t target_vec = vdupq_n_f64(target);
+  const uint64x2_t all_ones64 = vdupq_n_u64(0xFFFFFFFFFFFFFFFFull);
+
+  size_t i = 0;
+  for (; i + simd_width <= num_rows; i += simd_width) {
+    alignas(16) double values[2];
+    for (size_t j = 0; j < 2; ++j) {
+      values[j] = col_data[i + j] ? *reinterpret_cast<const double *>(col_data[i + j]) : 0.0;
+    }
+
+    float64x2_t vdata = vld1q_f64(values);
+    uint64x2_t mask;
+
+    switch (op) {
+      case PredicateOperator::EQUAL:
+        mask = vceqq_f64(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_THAN:
+        mask = vcgtq_f64(vdata, target_vec);
+        break;
+      case PredicateOperator::LESS_THAN:
+        mask = vcltq_f64(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_EQUAL:
+        mask = vcgeq_f64(vdata, target_vec);
+        break;
+      case PredicateOperator::LESS_EQUAL:
+        mask = vcleq_f64(vdata, target_vec);
+        break;
+      case PredicateOperator::NOT_EQUAL:
+        // NOT(EQ): NaN → EQ=false → NOT=true, consistent with IEEE unordered.
+        mask = veorq_u64(vceqq_f64(vdata, target_vec), all_ones64);
+        break;
+      default:
+        mask = vdupq_n_u64(0);
+        break;
+    }
+
+    uint8_t bits = neon_mask2_from_u64x2(mask);
+    for (size_t j = 0; j < 2; ++j) {
+      if (!col_data[i + j]) {
+        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
+                                           : Utils::Util::bit_array_reset(&result, i + j);
+      } else {
+        (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
+      }
+    }
+  }
+
+  for (; i < num_rows; ++i) {
+    const uchar *v = col_data[i];
+    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+#else
+  // AArch32 or no SIMD support: scalar fallback.
+  evaluate_batch(col_data, result);
+#endif
+}
+
+/**
+ * DECIMAL is stored in MySQL's compact binary format (decimal_t / my_decimal).
+ * No SIMD instruction can compare this format natively, so we decode each value
+ * to double first via get_field_numeric<double>(), then reuse the AVX2 / NEON
+ * double comparison path.
+ *
+ * Precision note: double has 53-bit mantissa (~15–16 significant decimal
+ * digits).  MySQL DECIMAL supports up to 65 digits, so for very high-precision
+ * values there may be rounding.  This is acceptable for the IMCS analytics
+ * use-case.  Exact arithmetic would require scalar fallback for those columns.
+ */
+void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
+                                                   bit_array_t &result) {
+  // Operators expressible as a single SIMD floating-point comparison.
+  auto is_simd_comparable = [](PredicateOperator o) -> bool {
+    switch (o) {
+      case PredicateOperator::EQUAL:
+      case PredicateOperator::NOT_EQUAL:
+      case PredicateOperator::LESS_THAN:
+      case PredicateOperator::LESS_EQUAL:
+      case PredicateOperator::GREATER_THAN:
+      case PredicateOperator::GREATER_EQUAL:
+        return true;
+      default:
+        return false;  // BETWEEN, IN, LIKE, IS_NULL, etc. → scalar
+    }
+  };
+
+  if (!is_simd_comparable(op)) {
+    evaluate_batch(col_data, result, num_rows);
+    return;
+  }
+
+  const double target [[maybe_unused]] = value.as_double();
+#if defined(SHANNON_AVX_VECT_SUPPORTED)
+  // x86 AVX2: 4 x double per iteration
+  const size_t simd_width = 4;
+  const __m256d target_vec = _mm256_set1_pd(target);
+
+  size_t i = 0;
+  for (; i + simd_width <= num_rows; i += simd_width) {
+    // Step 1: decode DECIMAL → double (4 lanes).
+    alignas(32) double decoded[4];
+    for (size_t j = 0; j < simd_width; ++j) {
+      decoded[j] = col_data[i + j]
+                       ? Utils::Util::get_field_numeric<double>(field_meta, col_data[i + j], nullptr, low_order)
+                       : std::numeric_limits<double>::quiet_NaN();  // NULL → NaN, handled below
+    }
+
+    // Step 2: AVX2 double comparison.
+    __m256d vdata = _mm256_load_pd(decoded);
+    __m256d mask;
+    switch (op) {
+      case PredicateOperator::EQUAL:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_EQ_OQ);
+        break;
+      case PredicateOperator::NOT_EQUAL:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_NEQ_OQ);
+        break;
+      case PredicateOperator::LESS_THAN:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_LT_OQ);
+        break;
+      case PredicateOperator::LESS_EQUAL:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_LE_OQ);
+        break;
+      case PredicateOperator::GREATER_THAN:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_GT_OQ);
+        break;
+      case PredicateOperator::GREATER_EQUAL:
+        mask = _mm256_cmp_pd(vdata, target_vec, _CMP_GE_OQ);
+        break;
+      default:
+        mask = _mm256_setzero_pd();
+        break;
+    }
+
+    // Step 3: extract results and handle NULLs.
+    int cmp_bits = _mm256_movemask_pd(mask);
+    for (size_t j = 0; j < simd_width; ++j) {
+      if (!col_data[i + j]) {
+        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
+                                           : Utils::Util::bit_array_reset(&result, i + j);
+      } else {
+        (cmp_bits & (1 << j)) ? Utils::Util::bit_array_set(&result, i + j)
+                              : Utils::Util::bit_array_reset(&result, i + j);
+      }
+    }
+  }
+
+  for (; i < num_rows; ++i) {
+    const uchar *v = col_data[i];
+    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+
+#elif defined(SHANNON_ARM_VECT_SUPPORTED) && defined(__aarch64__)
+  // ARM NEON AArch64: 2 x double per iteration
+  // float64x2_t intrinsics require AArch64. 32-bit ARM falls through to scalar.
+  const size_t simd_width = 2;
+  const float64x2_t target_vec = vdupq_n_f64(target);
+  const uint64x2_t all_ones64 = vdupq_n_u64(0xFFFFFFFFFFFFFFFFull);
+
+  size_t i = 0;
+  for (; i + simd_width <= num_rows; i += simd_width) {
+    // Step 1: decode DECIMAL → double (2 lanes).
+    alignas(16) double decoded[2];
+    for (size_t j = 0; j < simd_width; ++j) {
+      decoded[j] = col_data[i + j]
+                       ? Utils::Util::get_field_numeric<double>(field_meta, col_data[i + j], nullptr, low_order)
+                       : std::numeric_limits<double>::quiet_NaN();
+    }
+
+    // Step 2: NEON double comparison.
+    float64x2_t vdata = vld1q_f64(decoded);
+    uint64x2_t mask;
+    switch (op) {
+      case PredicateOperator::EQUAL:
+        mask = vceqq_f64(vdata, target_vec);
+        break;
+      case PredicateOperator::NOT_EQUAL:
+        mask = veorq_u64(vceqq_f64(vdata, target_vec), all_ones64);
+        break;
+      case PredicateOperator::LESS_THAN:
+        mask = vcltq_f64(vdata, target_vec);
+        break;
+      case PredicateOperator::LESS_EQUAL:
+        mask = vcleq_f64(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_THAN:
+        mask = vcgtq_f64(vdata, target_vec);
+        break;
+      case PredicateOperator::GREATER_EQUAL:
+        mask = vcgeq_f64(vdata, target_vec);
+        break;
+      default:
+        mask = vdupq_n_u64(0);
+        break;
+    }
+
+    // Step 3: extract results and handle NULLs.
+    uint8_t bits = neon_mask2_from_u64x2(mask);
+    for (size_t j = 0; j < simd_width; ++j) {
+      if (!col_data[i + j]) {
+        (op == PredicateOperator::IS_NULL) ? Utils::Util::bit_array_set(&result, i + j)
+                                           : Utils::Util::bit_array_reset(&result, i + j);
+      } else {
+        (bits & (1u << j)) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
+      }
+    }
+  }
+
+  for (; i < num_rows; ++i) {
+    const uchar *v = col_data[i];
+    evaluate(v) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+
+#else
+  // AArch32 or no SIMD: pure scalar.
+  evaluate_batch(col_data, result, num_rows);
+#endif
+}
+
+void Simple_Predicate::evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
+                                      size_t batch_num) const {
+  size_t i = 0;
+  auto values_sz = input_values.size();
+  // Process with loop unrolling
+  for (; i + batch_num <= values_sz; i += batch_num) {
+    for (size_t j = 0; j < batch_num; j++) {
+      auto input_value = input_values[i + j];
+      bool match = evaluate(input_value);
+      (match) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
+    }
+  }
+
+  // Process remainder
+  for (; i < values_sz; i++) {
+    auto input_value = input_values[i];
+    bool match = evaluate(input_value);
+    (match) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+  }
+}
+
+bool Simple_Predicate::evaluate(const uchar *&input_value) const {
   // Handle NULL
   if (!input_value) {
     switch (op) {
@@ -82,27 +762,6 @@ bool Simple_Predicate::evaluate(const uchar *&input_value, bool low_order) const
       return !evaluate_regexp(col_value.as_string(), value.as_string());
     default:
       return false;
-  }
-}
-
-void Simple_Predicate::evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
-                                      size_t batch_num) const {
-  size_t i = 0;
-  auto values_sz = input_values.size();
-  // Process with loop unrolling
-  for (; i + batch_num <= values_sz; i += batch_num) {
-    for (size_t j = 0; j < batch_num; j++) {
-      auto input_value = input_values[i + j];
-      bool match = evaluate(input_value);
-      (match) ? Utils::Util::bit_array_set(&result, i + j) : Utils::Util::bit_array_reset(&result, i + j);
-    }
-  }
-
-  // Process remainder
-  for (; i < values_sz; i++) {
-    auto input_value = input_values[i];
-    bool match = evaluate(input_value);
-    (match) ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
   }
 }
 
@@ -448,7 +1107,7 @@ bool Simple_Predicate::evaluate_regexp(const std::string &str, const std::string
   }
 }
 
-bool Compound_Predicate::evaluate(const uchar *&input_value, bool low_order) const {
+bool Compound_Predicate::evaluate(const uchar *&input_value) const {
   switch (op) {
     case PredicateOperator::AND: {
       for (const auto &child : children) {

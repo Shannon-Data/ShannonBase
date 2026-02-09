@@ -230,7 +230,7 @@ class Predicate {
    * @param input_value: column[col_id]
    * @return: Predicate result (true/false)
    */
-  virtual bool evaluate(const uchar *&input_value, bool low_order = false) const = 0;
+  virtual bool evaluate(const uchar *&input_value) const = 0;
 
   /**
    * batch evaluation (batch)
@@ -296,9 +296,11 @@ class Simple_Predicate : public Predicate {
         column_type(type) {}
 
   // Evaluation implementation
-  bool evaluate(const uchar *&input_value, bool low_oder = false) const override;
+  bool evaluate(const uchar *&input_value) const override;
   void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
                       size_t batch_num = 8) const override;
+  void evaluate_vecotrized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+
   // Helper methods
   std::vector<uint32> get_columns() const override { return {column_id}; }
   std::unique_ptr<Predicate> clone() const override { return std::make_unique<Simple_Predicate>(*this); }
@@ -311,11 +313,17 @@ class Simple_Predicate : public Predicate {
   PredicateValue value2;                          // Second value (for BETWEEN)
   std::vector<PredicateValue> value_list;         // Value list (for IN)
   Field *field_meta{nullptr};                     // using the field meta.
+  bool low_order{false};                          // low order.
   enum_field_types column_type{MYSQL_TYPE_NULL};  // Column type
  private:
   PredicateValue extract_value(const uchar *data, bool low_order = false) const;
   bool evaluate_like(const std::string &str, const std::string &pattern) const;
   bool evaluate_regexp(const std::string &str, const std::string &pattern) const;
+
+  void evaluate_int32_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+  void evaluate_int64_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+  void evaluate_double_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+  void evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
 };
 
 // Compound Predicate
@@ -333,7 +341,7 @@ class Compound_Predicate : public Predicate {
   inline void add_child(std::unique_ptr<Predicate> child) { children.push_back(std::move(child)); }
 
   // Evaluation implementation
-  bool evaluate(const uchar *&input_value, bool low_order = false) const override;
+  bool evaluate(const uchar *&input_value) const override;
   void evaluate_batch(const std::vector<const uchar *> &input_values, bit_array_t &result,
                       size_t batch_num = 8) const override;
   // Helper methods

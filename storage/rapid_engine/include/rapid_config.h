@@ -92,6 +92,8 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   size_t stats_update_interval_seconds{300};  // Statistics update interval (seconds)
   bool auto_update_stats{true};               // Auto-update statistics
 
+  bool enable_vectorized{true};  // enable vecotrized feature.
+
   // Debug Configuration
   bool enable_detailed_logging{false};
   bool enable_performance_counters{true};

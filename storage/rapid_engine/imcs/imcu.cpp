@@ -297,90 +297,15 @@ int Imcu::update_row(const Rapid_load_context *context, row_id_t local_row_id,
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-size_t Imcu::scan(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
-                  const std::vector<uint32> &projection, RowCallback callback) {
-  return scan_range(context, 0, SHANNON_BATCH_NUM, predicates, projection, callback);
-}
-
-size_t Imcu::scan_range(Rapid_scan_context *context, size_t start_offset, size_t limit,
-                        const std::vector<std::unique_ptr<Predicate>> &predicates,
-                        const std::vector<uint32> &projection, RowCallback callback) {
-  size_t num_rows = m_header.current_rows.load();
-  if (start_offset >= num_rows) return 0;
-
-  size_t scanned = 0;
-  std::vector<const uchar *> row_buffer(projection.size());
-  const size_t batch_unit = std::min({limit > 0 ? limit : static_cast<size_t>(SHANNON_BATCH_NUM),
-                                      static_cast<size_t>(SHANNON_BATCH_NUM), num_rows - start_offset});
-  // visibility mask.
-  bit_array_t visibility_mask(batch_unit);
-  // batch vector process.
-  for (size_t start = start_offset; start < num_rows && scanned < limit; start += batch_unit) {
-    size_t end = std::min(start + batch_unit, num_rows);
-    size_t batch_size = end - start;
-
-    // 1. Batch Visibility Check (Core: One-time determination benefits all columns)
-    check_visibility_batch(context, static_cast<row_id_t>(start), batch_size, visibility_mask);
-
-    // 2. Apply predicate filtering on visible rows
-    std::vector<row_id_t> matching_rows;
-    matching_rows.reserve(batch_size);
-
-    for (size_t i = 0; i < batch_size; i++) {
-      scanned++;
-      if (!Utils::Util::bit_array_get(&visibility_mask, i)) continue;  // invisible，skip.
-
-      row_id_t local_row_id = start + i;
-
-      // apply prediction.
-      bool match = true;
-      if (!predicates.empty()) {
-        // Row-level cache to avoid repeated column reads
-        std::unordered_map<uint32, const uchar *> row_cache;
-        for (const auto &pred_ptr : predicates) {
-          if (!pred_ptr) continue;  // Skip null predicates
-          // Evaluate predicate (handles Simple and Compound)
-          if (!evaluate_predicate(pred_ptr.get(), local_row_id, row_cache)) {
-            match = false;
-            break;  // Short-circuit: one failed predicate → row rejected
-          }
-        }
-      }
-      if (match) matching_rows.push_back(local_row_id);
-      if (scanned >= limit) break;
-    }
-
-    // 3. Read projection columns of matched rows
-    for (row_id_t local_row_id : matching_rows) {
-      // read the loaded CUs.
-      for (size_t i = 0; i < projection.size(); i++) {
-        uint32 col_idx = projection[i];
-        if (Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
-          row_buffer[i] = nullptr;
-        } else {
-          CU *cu = get_cu(col_idx);
-          row_buffer[i] = cu->get_data_address(local_row_id);  // return data addr directly, no data cpy.
-        }
-      }
-
-      // 4. extra callback.
-      row_id_t global_row_id = m_header.start_row + local_row_id;
-      callback(global_row_id, row_buffer);
-      context->rows_returned++;
-      // check the LIMIT options.
-      if (context->limit > 0 && context->rows_returned >= context->limit) return scanned;
-    }
-  }
-  return scanned;
-}
-
 size_t Imcu::scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
                                    const std::vector<std::unique_ptr<Predicate>> &predicates,
                                    const std::vector<uint32> &projection, RowCallback callback) {
   size_t num_rows = m_header.current_rows.load();
   if (start_offset >= num_rows) return 0;
+
   size_t scanned = 0;
   std::vector<const uchar *> row_buffer(projection.size());
+
   for (size_t start = start_offset; start < num_rows && scanned < limit; start += SHANNON_VECTOR_WIDTH) {
     size_t end = std::min(start + SHANNON_VECTOR_WIDTH, num_rows);
     size_t batch_size = end - start;
@@ -425,164 +350,115 @@ size_t Imcu::scan_range_vectorized(Rapid_scan_context *context, size_t start_off
   return scanned;
 }
 
-bool Imcu::evaluate_predicate(const Predicate *pred, row_id_t local_row_id,
-                              std::unordered_map<uint32, const uchar *> &row_cache) const {
-  if (!pred) return true;  // No predicate → always matches
+void Imcu::evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
+                                          size_t num_rows, bit_array_t &result) {
+  for (const auto &predicate : predicates) {
+    const auto *pred = predicate.get();
+    if (!pred) continue;
 
-  // Dispatch based on predicate type
-  return (pred->is_compound())
-             ? evaluate_compound_predicate(static_cast<const Compound_Predicate *>(pred), local_row_id, row_cache)
-             : evaluate_simple_predicate(static_cast<const Simple_Predicate *>(pred), local_row_id, row_cache);
+    if (pred->is_compound()) {
+      evaluate_compound_predicate_vectorized(static_cast<const Compound_Predicate *>(pred), start_row, num_rows,
+                                             result);
+    } else {
+      evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(pred), start_row, num_rows, result);
+    }
+  }
 }
 
-bool Imcu::evaluate_compound_predicate(const Compound_Predicate *pred, row_id_t local_row_id,
-                                       std::unordered_map<uint32, const uchar *> &row_cache) const {
-  if (!pred || pred->children.empty()) return true;
+void Imcu::evaluate_compound_predicate_vectorized(const Compound_Predicate *pred, const row_id_t start_row,
+                                                  size_t num_rows, bit_array_t &result) {
+  if (!pred || pred->children.empty()) {
+    result.reset();
+    return;
+  }
 
   switch (pred->op) {
     case PredicateOperator::AND: {
-      // Logical AND: ALL children must match
+      result.set();
+      bit_array_t child_result(num_rows);
       for (const auto &child : pred->children) {
-        if (!evaluate_predicate(child.get(), local_row_id, row_cache)) return false;  // Short-circuit
+        if (!child) continue;
+        child_result.reset();  // clear before each child evaluation
+        child->is_compound()
+            ? evaluate_compound_predicate_vectorized(static_cast<const Compound_Predicate *>(child.get()), start_row,
+                                                     num_rows, child_result)
+            : evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(child.get()), start_row,
+                                                   num_rows, child_result);
+        result.and_with(child_result);
       }
-      return true;  // All children matched
     } break;
     case PredicateOperator::OR: {
-      // Logical OR: ANY child can match
+      result.reset();
+      bit_array_t child_result(num_rows);
       for (const auto &child : pred->children) {
-        if (evaluate_predicate(child.get(), local_row_id, row_cache)) return true;
+        if (!child) continue;
+        child_result.reset();
+        child->is_compound()
+            ? evaluate_compound_predicate_vectorized(static_cast<const Compound_Predicate *>(child.get()), start_row,
+                                                     num_rows, child_result)
+            : evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(child.get()), start_row,
+                                                   num_rows, child_result);
+        result.or_with(child_result);
       }
-      return false;  // No children matched
     } break;
     case PredicateOperator::NOT: {
-      // Logical NOT: inverse of child
+      // evaluate_predicates_vectorized; NOT has exactly one operand.
       if (pred->children.size() != 1) {
         DBUG_PRINT("imcu_scan", ("NOT predicate has %zu children (expected 1)", pred->children.size()));
-        return false;
+        result.reset();
+        break;
       }
-      bool child_result = evaluate_predicate(pred->children[0].get(), local_row_id, row_cache);
-      return !child_result;
+      const auto &only_child = pred->children[0];
+      if (!only_child) {
+        result.reset();
+        break;
+      }
+      result.reset();
+      only_child->is_compound()
+          ? evaluate_compound_predicate_vectorized(static_cast<const Compound_Predicate *>(only_child.get()), start_row,
+                                                   num_rows, result)
+          : evaluate_simple_predicate_vectorized(static_cast<const Simple_Predicate *>(only_child.get()), start_row,
+                                                 num_rows, result);
+      result.not_inplace();
     } break;
     default:
-      return false;
-  }
-}
-
-bool Imcu::evaluate_simple_predicate(const Simple_Predicate *pred, row_id_t local_row_id,
-                                     std::unordered_map<uint32, const uchar *> &row_cache) const {
-  if (!pred) return true;
-  uint32 col_id = pred->column_id;
-  auto cu = get_cu(col_id);
-  assert(cu);
-  // Get column value (with caching to avoid repeated access)
-  const uchar *value = get_column_value(col_id, local_row_id, row_cache);
-  std::string str_val;
-  if (cu->dictionary() && value) {  // means string type.
-    auto str_id = *reinterpret_cast<const uint32 *>(value);
-    str_val = cu->dictionary()->get(str_id);
-    value = reinterpret_cast<const uchar *>(str_val.c_str());
-  }
-  // Use Predicate's evaluate() method.
-  const_cast<Simple_Predicate *>(pred)->field_meta = cu->field();
-  auto is_low_order = m_owner_table->meta().db_low_byte_first;
-  try {
-    return pred->evaluate(value, is_low_order);
-  } catch (const std::exception &e) {
-    DBUG_PRINT("imcu_scan", ("Predicate evaluation error: %s", e.what()));
-    return false;  // Conservative: reject on error
-  }
-}
-
-void Imcu::evaluate_predicate_batch(const Predicate *pred, const std::vector<row_id_t> &row_ids, bit_array_t &result) {
-  if (!pred || row_ids.empty()) return;
-
-  if (pred->is_compound()) {
-    evaluate_compound_predicate_batch(static_cast<const Compound_Predicate *>(pred), row_ids, result);
-  } else {
-    evaluate_simple_predicate_batch(static_cast<const Simple_Predicate *>(pred), row_ids, result);
-  }
-}
-
-void Imcu::evaluate_compound_predicate_batch(const Compound_Predicate *pred, const std::vector<row_id_t> &row_ids,
-                                             bit_array_t &result) {
-  switch (pred->op) {
-    case PredicateOperator::AND: {
-      // Start with all true
-      for (size_t i = 0; i < row_ids.size(); i++) {
-        Utils::Util::bit_array_set(&result, i);
-      }
-
-      // AND each child's results
-      bit_array_t child_result(row_ids.size());
-      for (const auto &child : pred->children) {
-        evaluate_predicate_batch(child.get(), row_ids, child_result);
-        // Bitwise AND
-        for (size_t i = 0; i < row_ids.size(); i++) {
-          if (!Utils::Util::bit_array_get(&child_result, i)) Utils::Util::bit_array_reset(&result, i);
-        }
-      }
-    } break;
-    case PredicateOperator::OR: {
-      // Start with all false
-      for (size_t i = 0; i < row_ids.size(); i++) {
-        Utils::Util::bit_array_reset(&result, i);
-      }
-
-      // OR each child's results
-      bit_array_t child_result(row_ids.size());
-      for (const auto &child : pred->children) {
-        evaluate_predicate_batch(child.get(), row_ids, child_result);
-        // Bitwise OR
-        for (size_t i = 0; i < row_ids.size(); i++) {
-          if (Utils::Util::bit_array_get(&child_result, i)) Utils::Util::bit_array_set(&result, i);
-        }
-      }
-    } break;
-    case PredicateOperator::NOT: {
-      if (!pred->children.empty()) {
-        evaluate_predicate_batch(pred->children[0].get(), row_ids, result);
-        // Bitwise NOT
-        for (size_t i = 0; i < row_ids.size(); i++) {
-          (Utils::Util::bit_array_get(&result, i)) ? Utils::Util::bit_array_reset(&result, i)
-                                                   : Utils::Util::bit_array_set(&result, i);
-        }
-      }
-    } break;
-    default:
-      // Unknown operator → all false
-      for (size_t i = 0; i < row_ids.size(); i++) {
-        Utils::Util::bit_array_reset(&result, i);
-      }
+      result.reset();
       break;
   }
 }
 
-void Imcu::evaluate_simple_predicate_batch(const Simple_Predicate *pred, const std::vector<row_id_t> &row_ids,
-                                           bit_array_t &result) {
-  uint32 col_id = pred->column_id;
-  auto *cu = get_cu(col_id);
+void Imcu::evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, row_id_t start_row, size_t num_rows,
+                                                bit_array_t &result) {
+  const uint32 col_id = pred->column_id;
+  const CU *cu = get_cu(col_id);
   if (!cu) {
-    // No CU → all rows fail
-    for (size_t i = 0; i < row_ids.size(); i++) {
-      Utils::Util::bit_array_reset(&result, i);
-    }
+    result.reset();  // no column unit → all rows fail
     return;
   }
 
-  // Build array of pointers for batch evaluation
-  std::vector<const uchar *> values(row_ids.size());
-  for (size_t i = 0; i < row_ids.size(); i++) {
-    row_id_t local_row_id = row_ids[i];
-    if (Utils::Util::bit_array_get(get_null_masks()[col_id].get(), local_row_id)) {
-      values[i] = nullptr;
-    } else {
-      values[i] = cu->get_data_address(local_row_id);
-    }
-  }
+  auto *simple_pred = const_cast<Simple_Predicate *>(pred);
+  simple_pred->field_meta = cu->field();
+  simple_pred->low_order = m_owner_table->meta().db_low_byte_first;
+  simple_pred->column_type = cu->get_type();
 
-  constexpr size_t stride = 8;
-  // Use Predicate's vectorized evaluate_batch() method
-  pred->evaluate_batch(values, result, stride);
+  // Build the column-value pointer array for this row range.
+  // NULL slots stay as nullptr; evaluate_vecotrized() handles them per-lane.
+  auto dict = cu->dictionary();
+  std::vector<std::string> str_storage;
+  if (dict) str_storage.resize(num_rows);
+
+  std::vector<const uchar *> values(num_rows);
+  for (size_t i = 0; i < num_rows; ++i) {
+    const row_id_t local_row_id = start_row + i;
+    auto data_ptr = cu->get_data_address(local_row_id);
+    if (dict) {
+      auto str_id = *reinterpret_cast<const uint32 *>(data_ptr);
+      str_storage[i] = dict->get(str_id);
+      data_ptr = reinterpret_cast<const uchar *>(str_storage[i].c_str());
+    }
+    values[i] = Utils::Util::bit_array_get(m_header.null_masks[col_id].get(), local_row_id) ? nullptr : data_ptr;
+  }
+  simple_pred->evaluate_vecotrized(values, num_rows, result);
 }
 
 const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,
@@ -602,15 +478,6 @@ const uchar *Imcu::get_column_value(uint32 col_id, row_id_t local_row_id,
   const uchar *value = cu->get_data_address(local_row_id);
   row_cache[col_id] = value;
   return value;
-}
-
-void Imcu::evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
-                                          size_t num_rows, bit_array_t &result) {
-  if (predicates.empty()) {
-    std::memset(result.data, 0xFF, result.size);
-    return;
-  }
-  // TODO: imipl the vectoried evaluation.
 }
 
 bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Transaction::ID reader_txn_id,

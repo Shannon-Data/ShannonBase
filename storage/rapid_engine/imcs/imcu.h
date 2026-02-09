@@ -65,6 +65,7 @@
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/imcs/row0row.h"
 #include "storage/rapid_engine/imcs/storage0index.h"
+#include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/trx/transaction.h"  // Transaction_Journal
@@ -237,33 +238,20 @@ class Imcu : public MemoryObject {
                  const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates);
 
   /**
-   * Scan the IMCU (vectorized)
    * @param context: scan context
+   * @param offset : where start from
+   * @param limit : how many rows fetched.
    * @param predicates: filter conditions
    * @param projection: list of projected columns
    * @param callback: row callback function
    * @return number of scanned rows
    */
-  size_t scan(Rapid_scan_context *context, const std::vector<std::unique_ptr<Predicate>> &predicates,
-              const std::vector<uint32> &projection, RowCallback callback);
+  inline size_t scan(Rapid_scan_context *context, size_t offset, size_t limit,
+                     const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
+                     RowCallback callback) {
+    return scan_range_vectorized(context, offset, limit, predicates, projection, callback);
+  }
 
-  /**
-  Imcu::scan_range - Scan a specified range within the IMCU
-  @param context - Scan context (transaction ID, SCN, etc.)
-  @param start_offset - Starting row offset (internal IMCU offset)
-  @param limit - Maximum number of rows to return
-  @param predicates - Filter conditions
-  @param projection - Columns to read
-  @param callback - Callback function (invoked for each matching row)
-  @return Actual number of rows scanned and returned
-  */
-  size_t scan_range(Rapid_scan_context *context, size_t start_offset, size_t limit,
-                    const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
-                    RowCallback callback);
-
-  size_t scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
-                               const std::vector<std::unique_ptr<Predicate>> &predicates,
-                               const std::vector<uint32> &projection, RowCallback callback);
   /**
    * Check row visibility (core: single-row check)
    * @param context: read scan context
@@ -423,24 +411,19 @@ class Imcu : public MemoryObject {
   void update_statistics() {}
 
  private:
-  inline bool can_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates) {
-    auto has_vect_ip{false}, has_numeric_predicates{false};
-#if defined(SHANNON_AVX_VECT_SUPPORTED) || defined(SHANNON_SSE_VECT_SUPPORTED) || defined(SHANNON_ARM_VECT_SUPPORTED)
-    has_vect_ip = true;
-#endif
-
-    for (const auto &pred : predicates) {
-      if (!pred->is_compound()) {
-        auto sp = static_cast<const Simple_Predicate *>(pred.get());
-        if (sp->value.type == PredicateValueType::INT64 || sp->value.type == PredicateValueType::DOUBLE) {
-          has_numeric_predicates = true;
-          break;
-        }
-      }
-    }
-
-    return has_vect_ip && !predicates.empty() && has_numeric_predicates;
-  }
+  /**
+  Imcu::scan_range - Scan a specified range within the IMCU
+  @param context - Scan context (transaction ID, SCN, etc.)
+  @param start_offset - Starting row offset (internal IMCU offset)
+  @param limit - Maximum number of rows to return
+  @param predicates - Filter conditions
+  @param projection - Columns to read
+  @param callback - Callback function (invoked for each matching row)
+  @return Actual number of rows scanned and returned
+  */
+  size_t scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
+                               const std::vector<std::unique_ptr<Predicate>> &predicates,
+                               const std::vector<uint32> &projection, RowCallback callback);
 
   /**
    * Initialize the header
@@ -479,44 +462,23 @@ class Imcu : public MemoryObject {
   inline void increment_version() { m_version.fetch_add(1, std::memory_order_release); }
 
   /**
-   * @brief Evaluate a single predicate against a row
+   * Entry point: evaluate a list of top-level predicates over a contiguous
+   * row range [start_row, start_row + num_rows).
    *
-   * @param pred Predicate (Simple or Compound)
-   * @param local_row_id Row ID within IMCU
-   * @param row_cache Cache of column values for this row
-   * @return true if row matches predicate
+   * Semantics: the predicates in the list are treated as an implicit AND
+   * (each one individually writes its result into `result`; callers that need
+   * the combined AND must initialise `result` to all-true before calling and
+   * intersect afterwards — this function is intentionally a thin dispatcher,
+   * not an aggregator).
    */
-  bool evaluate_predicate(const Predicate *pred, row_id_t local_row_id,
-                          std::unordered_map<uint32, const uchar *> &row_cache) const;
-
-  /**
-   * @brief Evaluate predicate on a batch of rows
-   *
-   * @param pred Predicate to evaluate
-   * @param row_ids Vector of row IDs to evaluate
-   * @param result Bitmap of results (1 = match, 0 = no match)
-   */
-  void evaluate_predicate_batch(const Predicate *pred, const std::vector<row_id_t> &row_ids, bit_array_t &result);
-
   void evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Predicate>> &predicates, row_id_t start_row,
                                       size_t num_rows, bit_array_t &result);
-  /**
-   * @brief Evaluate a simple predicate against a row
-   */
-  bool evaluate_simple_predicate(const Simple_Predicate *pred, row_id_t local_row_id,
-                                 std::unordered_map<uint32, const uchar *> &row_cache) const;
 
-  void evaluate_simple_predicate_batch(const Simple_Predicate *pred, const std::vector<row_id_t> &row_ids,
-                                       bit_array_t &result);
+  void evaluate_simple_predicate_vectorized(const Simple_Predicate *pred, row_id_t start_row, size_t num_rows,
+                                            bit_array_t &result);
 
-  /**
-   * @brief Evaluate a compound predicate against a row
-   */
-  bool evaluate_compound_predicate(const Compound_Predicate *pred, row_id_t local_row_id,
-                                   std::unordered_map<uint32, const uchar *> &row_cache) const;
-
-  void evaluate_compound_predicate_batch(const Compound_Predicate *pred, const std::vector<row_id_t> &row_ids,
-                                         bit_array_t &result);
+  void evaluate_compound_predicate_vectorized(const Compound_Predicate *pred, row_id_t start_row, size_t num_rows,
+                                              bit_array_t &result);
 
   /**
    * @brief Get column value for a row (with caching)
