@@ -50,6 +50,32 @@ SET secondary_engine_cost_threshold=10;
 SET rapid_use_dynamic_offload=off;
 ALTER TABLE customers SECONDARY_LOAD;
 ALTER TABLE orders SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT order_id, total_amount, product_category FROM orders order by order_id LIMIT 10;
+order_id	total_amount	product_category
+1	805.90	Sports
+2	602.37	Food
+3	215.31	Home
+4	502.46	Food
+5	323.98	Food
+6	925.77	Beauty
+7	337.81	Books
+8	631.52	Electronics
+9	536.87	Food
+10	442.09	Clothing
+SELECT customer_id, customer_name, credit_score FROM customers order by customer_id LIMIT 10;
+customer_id	customer_name	credit_score
+1	Customer_1	925
+2	Customer_2	537
+3	Customer_3	337
+4	Customer_4	414
+5	Customer_5	751
+6	Customer_6	416
+7	Customer_7	948
+8	Customer_8	762
+9	Customer_9	875
+10	Customer_10	992
+SET USE_SECONDARY_ENGINE=ON;
 ############### No.1 Testing Vectorized Count ###########################
 explain format=tree SELECT 
 c.country,

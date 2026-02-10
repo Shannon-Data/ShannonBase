@@ -3,9 +3,9 @@
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
-#multi-times runs
 create database sh_test2;
 use sh_test2;
+--disable_warnings
 
 set use_secondary_engine=forced;
 
@@ -23,8 +23,25 @@ select count(1) from tt1;
 select count(*) from tt1;
 select count(1) from tt1 where score > 10;
 select count(*) from tt1 where score > 10;
+
+explain select count(score), gender from tt1 group by gender order by gender;
 select count(score), gender from tt1 group by gender order by gender;
+
+explain select sum(score), gender from tt1 group by gender order by gender;
 select sum(score), gender from tt1 group by gender order by gender;
+
+explain select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 
+set use_secondary_engine=off;
+explain select count(score), gender from tt1 group by gender order by gender;
+select count(score), gender from tt1 group by gender order by gender;
+
+explain select sum(score), gender from tt1 group by gender order by gender;
+select sum(score), gender from tt1 group by gender order by gender;
+
+explain select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
+select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
+
+--enable_warnings
 drop database sh_test2;

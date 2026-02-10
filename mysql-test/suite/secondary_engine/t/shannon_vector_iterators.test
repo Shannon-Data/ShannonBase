@@ -55,6 +55,11 @@ SET rapid_use_dynamic_offload=off;
 ALTER TABLE customers SECONDARY_LOAD;
 ALTER TABLE orders SECONDARY_LOAD;
 
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT order_id, total_amount, product_category FROM orders order by order_id LIMIT 10;
+SELECT customer_id, customer_name, credit_score FROM customers order by customer_id LIMIT 10;
+SET USE_SECONDARY_ENGINE=ON;
+
 --echo ############### No.1 Testing Vectorized Count ###########################
 --replace_regex /\(cost=[0-9.]+/\(cost=X/ /rows=[0-9]+/rows=X/ /\(rows=[0-9]+\)/\(rows=X\)/
 explain format=tree SELECT 

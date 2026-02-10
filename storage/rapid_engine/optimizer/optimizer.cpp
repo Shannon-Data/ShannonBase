@@ -202,8 +202,11 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
       limit->original_path = path;
       auto param = path->limit_offset();
 
-      limit->limit = param.limit;
+      limit->limit = (param.limit - param.offset);  // mysql limit is (sql limit + sql offset)
       limit->offset = param.offset;
+      limit->count_all_rows = param.count_all_rows;
+      limit->reject_multiple_rows = param.reject_multiple_rows;
+      limit->send_records_override = (param.send_records_override) ? *param.send_records_override : 0;
       limit->children.push_back(translate_access_path(ctx, thd, param.child, join));
       return limit;
     } break;
@@ -219,7 +222,7 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
     } break;
     case AccessPath::SORT: {
       auto param = path->sort();
-      // only it has `limit` clause, can be converted to `TopN`
+      // only it has `limit` clause, can be converted to `TopN`, such as `select xxx from xxx order by xx limit xx`.
       if (param.limit > 0 && param.limit != HA_POS_ERROR) {
         auto topn = std::make_unique<TopN>();
         topn->original_path = path;
