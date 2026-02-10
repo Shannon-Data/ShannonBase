@@ -36,14 +36,44 @@ count(1)
 select count(*) from tt1 where score > 10;
 count(*)
 2
+explain select count(score), gender from tt1 group by gender order by gender;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt1	NULL	ALL	NULL	NULL	NULL	NULL	7	100.00	Using temporary; Using filesort; Using secondary engine Rapid
 select count(score), gender from tt1 group by gender order by gender;
 count(score)	gender
 3	f
 4	m
+explain select sum(score), gender from tt1 group by gender order by gender;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt1	NULL	ALL	NULL	NULL	NULL	NULL	7	100.00	Using temporary; Using filesort; Using secondary engine Rapid
 select sum(score), gender from tt1 group by gender order by gender;
 sum(score)	gender
 26	f
 44	m
+explain select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt1	NULL	ALL	NULL	NULL	NULL	NULL	7	100.00	Using temporary; Using filesort; Using secondary engine Rapid
+select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
+sum(score)	gender
+44	m
+set use_secondary_engine=off;
+explain select count(score), gender from tt1 group by gender order by gender;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt1	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using temporary; Using filesort
+select count(score), gender from tt1 group by gender order by gender;
+count(score)	gender
+3	f
+4	m
+explain select sum(score), gender from tt1 group by gender order by gender;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt1	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using temporary; Using filesort
+select sum(score), gender from tt1 group by gender order by gender;
+sum(score)	gender
+26	f
+44	m
+explain select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	tt1	NULL	ALL	NULL	NULL	NULL	NULL	3	100.00	Using temporary; Using filesort
 select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
 sum(score)	gender
 44	m

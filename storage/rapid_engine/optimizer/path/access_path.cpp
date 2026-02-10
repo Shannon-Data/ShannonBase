@@ -358,13 +358,13 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           }
 #endif
         }
-        if (path->vectorized &&
-            param.table->s->table_category ==
-                enum_table_category::TABLE_CATEGORY_USER)  // Here param.table maybe a temp table/in-memory temp table.)
+        // Here param.table maybe a temp table/in-memory temp table.)
+        if (path->vectorized && param.table->s->table_category == enum_table_category::TABLE_CATEGORY_USER) {
+          assert(param.table->s->is_secondary_engine());
           iterator = NewIterator<ShannonBase::Executor::VectorizedTableScanIterator>(
               thd, mem_root, param.table, path->num_output_rows(), examined_rows, std::move(predicate), projection,
               limit, offset, use_storage_index);
-        else
+        } else
           iterator = NewIterator<TableScanIterator>(thd, mem_root, param.table, path->num_output_rows(), examined_rows);
         break;
       }

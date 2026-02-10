@@ -609,7 +609,21 @@ void Imcu::evaluate_predicates_vectorized(const std::vector<std::unique_ptr<Pred
 
 bool Imcu::is_row_visible(Rapid_scan_context *context, row_id_t local_row_id, Transaction::ID reader_txn_id,
                           uint64 reader_scn) const {
-  return 0;
+  assert(context);
+  context->m_extra_info.m_trxid = reader_txn_id;
+  context->m_extra_info.m_scn = reader_scn;
+
+  const size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
+  if (local_row_id >= num_rows) return false;
+
+  {
+    bit_array_t visibility_mask(1);
+    check_visibility_batch(context, local_row_id, 1, visibility_mask);
+    if (!Utils::Util::bit_array_get(&visibility_mask, 0))
+      return false;  // row is invisible (uncommitted insert, or committed delete)
+  }
+
+  return true;
 }
 
 void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_row, size_t count,
@@ -638,6 +652,35 @@ void Imcu::check_visibility_batch(Rapid_scan_context *context, row_id_t start_ro
 
 bool Imcu::read_row(Rapid_scan_context *context, row_id_t local_row_id, const std::vector<uint32> &col_indices,
                     RowBuffer &output) {
+  const size_t num_rows = m_header.current_rows.load(std::memory_order_acquire);
+  if (local_row_id >= num_rows) return false;
+
+  {
+    bit_array_t visibility_mask(1);
+    check_visibility_batch(context, local_row_id, 1, visibility_mask);
+    if (!Utils::Util::bit_array_get(&visibility_mask, 0))
+      return false;  // row is invisible (uncommitted insert, or committed delete)
+  }
+
+  output.set_row_id(m_header.start_row + local_row_id);
+  for (uint32 col_idx : col_indices) {
+    CU *cu = get_cu(col_idx);
+    assert(cu);
+    if (col_idx < m_header.null_masks.size() && m_header.null_masks[col_idx] &&
+        Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), local_row_id)) {
+      output.set_column_null(col_idx);
+      continue;
+    }
+    const uchar *data_ptr = cu->get_data_address(local_row_id);
+    if (!data_ptr) {
+      // Defensive: sparse IMCU or CU not yet flushed for this row slot.
+      output.set_column_null(col_idx);
+      continue;
+    }
+    Field *src_fld = cu->get_source_field();
+    const size_t data_len = src_fld ? static_cast<size_t>(src_fld->pack_length()) : 0;
+    output.set_column_zero_copy(col_idx, data_ptr, data_len, cu->get_type());
+  }
   return 0;
 }
 

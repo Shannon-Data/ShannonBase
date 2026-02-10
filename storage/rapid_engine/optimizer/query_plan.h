@@ -292,6 +292,7 @@ class Limit : public PlanNode {
   ha_rows offset{0};
   bool count_all_rows;
   bool reject_multiple_rows;
+  ha_rows send_records_override{0};
 
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
