@@ -43,7 +43,6 @@
 class Json_wrapper;
 namespace ShannonBase {
 namespace ML {
-
 class ML_RAG : public ML_algorithm {
  public:
   struct Citation {
@@ -222,7 +221,6 @@ class ML_RAG_table : public ML_RAG {
     return false;
   }
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ML_RAG_H__

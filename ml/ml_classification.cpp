@@ -50,7 +50,6 @@
 
 namespace ShannonBase {
 namespace ML {
-
 // clang-format off
 std::map<std::string, ML_classification::SCORE_METRIC_T> ML_classification::score_metrics =
 {

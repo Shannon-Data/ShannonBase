@@ -51,7 +51,6 @@ extern char mysql_home[FN_REFLEN];
 extern char mysql_llm_home[FN_REFLEN];
 namespace ShannonBase {
 namespace ML {
-
 ML_embedding_row::ML_embedding_row() {}
 
 ML_embedding::EmbeddingVector ML_embedding_row::GenerateEmbedding(std::string &text, Json_wrapper &option) {
@@ -113,6 +112,5 @@ ML_embedding::EmbeddingVector ML_embedding_table::GenerateEmbedding(std::string 
 }
 
 int ML_embedding_table::GenerateTableEmbedding(std::string &, std::string &, Json_wrapper &) { return 0; }
-
 }  // namespace ML
 }  // namespace ShannonBase

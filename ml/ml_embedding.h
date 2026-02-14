@@ -40,7 +40,6 @@
 class Json_wrapper;
 namespace ShannonBase {
 namespace ML {
-
 class ML_embedding : public ML_algorithm {
  public:
   using EmbeddingVector = SentenceTransform::MiniLMEmbedding::EmbeddingVector;

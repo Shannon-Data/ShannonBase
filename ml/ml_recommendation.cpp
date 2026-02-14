@@ -39,7 +39,6 @@
 
 namespace ShannonBase {
 namespace ML {
-
 // clang-format off
 std::map<std::string, ML_recommendation::SCORE_METRIC_T> ML_recommendation::score_metrics = {
   {"HIT_RATIO_AT_K", ML_recommendation::SCORE_METRIC_T::HIT_RATIO_AT_K},
@@ -397,6 +396,5 @@ int ML_recommendation::predict_table(THD *thd [[maybe_unused]], std::string &sch
                                      Json_wrapper &options [[maybe_unused]]) {
   return 0;
 }
-
 }  // namespace ML
 }  // namespace ShannonBase

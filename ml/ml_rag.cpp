@@ -89,6 +89,5 @@ std::string ML_RAG_table::ProcessRAG(const std::string &, const Json_wrapper &) 
 
   return result;
 }
-
 }  // namespace ML
 }  // namespace ShannonBase

@@ -40,7 +40,6 @@
 namespace ShannonBase {
 namespace ML {
 namespace tokenizers {
-
 struct ChatMessage {
   std::string role;
   std::string content;
@@ -644,11 +643,8 @@ inline std::vector<ChatMessage> make_conversation(const std::string &user_msg, c
   messages.emplace_back("user", user_msg);
   return messages;
 }
-
 }  // namespace TokenizerUtils
-
 }  // namespace tokenizers
 }  // namespace ML
 }  // namespace ShannonBase
-
 #endif  // __SHANNONBASE_RAPID_FFI_TOKENIZE_H__

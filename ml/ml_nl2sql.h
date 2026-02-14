@@ -47,7 +47,6 @@
 class Json_wrapper;
 namespace ShannonBase {
 namespace ML {
-
 class ML_chat : public ML_algorithm {
  public:
   ML_chat() = default;
@@ -61,7 +60,6 @@ class ML_nl2sql : public ML_algorithm {
   virtual ~ML_nl2sql() override = default;
   virtual void Generate();
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ML_NL2SQL_H__

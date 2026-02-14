@@ -30,8 +30,6 @@
 #include <string>
 #include <vector>
 
-#include "sql-common/json_dom.h"  //Json_wrapper.
-
 #include "ml_algorithm.h"
 
 namespace LightGBM {
@@ -43,10 +41,9 @@ class Metric;
 class Config;
 }  // namespace LightGBM
 
-class Json_wrapper;
+class THD;
 namespace ShannonBase {
 namespace ML {
-
 using Traing_data_t = std::vector<std::vector<double>>;
 class ML_regression : public ML_algorithm {
  public:
@@ -100,7 +97,6 @@ class ML_regression : public ML_algorithm {
 
   void *m_handler{nullptr};
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ML_REGRESSION_H__

@@ -231,7 +231,6 @@ class TableGuard {
  private:
   TABLE *m_table;
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  // __SHANNONBASE_ML_REGRESSION_H__

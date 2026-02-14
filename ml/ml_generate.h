@@ -40,7 +40,6 @@
 class Json_wrapper;
 namespace ShannonBase {
 namespace ML {
-
 class ML_generate : public ML_algorithm {
  public:
   ML_generate() = default;
@@ -124,7 +123,6 @@ class ML_generate_table : public ML_generate {
     return false;
   }
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ML_GENERATE_H__

@@ -37,7 +37,6 @@
 
 namespace ShannonBase {
 namespace ML {
-
 class Auto_ML {
  public:
   Auto_ML(std::string schema, std::string table_name, std::string target_name, Json_wrapper options,
@@ -132,7 +131,6 @@ class Auto_ML {
 
   std::unique_ptr<ML_algorithm> m_ml_task{nullptr};
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_AUTO_ML_H__

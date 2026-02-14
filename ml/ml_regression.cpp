@@ -40,17 +40,12 @@
 #include "sql/table.h"
 
 #include "ml_info.h"
-#include "ml_utils.h"                         //ml utils
-#include "storage/innobase/include/ut0dbg.h"  //for ut_a
-
-//#include "extra/lightgbm/LightGBM/include/LightGBM/c_api.h"
+#include "ml_utils.h"                                   //ml utils
+#include "storage/innobase/include/ut0dbg.h"            //for ut_a
 #include "storage/rapid_engine/include/rapid_config.h"  //loaded table.
 
-// clang-format off
-// clang-format on
 namespace ShannonBase {
 namespace ML {
-
 // clang-format off
 std::map<std::string, ML_regression::SCORE_METRIC_T> ML_regression::score_metrics = {
   {"NEG_MEAN_ABSOLUTE_ERROR", ML_regression::SCORE_METRIC_T::NEG_MEAN_ABSOLUTE_ERROR},
@@ -593,7 +588,6 @@ int ML_regression::predict_table(THD *, std::string &sch_tb_name, std::string &m
 
   return (error_rows > 0) ? HA_ERR_GENERIC : 0;
 }
-
 ML_TASK_TYPE_T ML_regression::type() { return ML_TASK_TYPE_T::REGRESSION; }
 }  // namespace ML
 }  // namespace ShannonBase
