@@ -38,7 +38,6 @@
 namespace ShannonBase {
 namespace ML {
 namespace LLM_Generate {
-
 // CPUDetector Implementation
 std::string CPUDetector::getCPUInfo() const {
   std::string info = "CPU Features: ";

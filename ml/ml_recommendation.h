@@ -97,7 +97,6 @@ class ML_recommendation : public ML_algorithm {
 
   void *m_handler{nullptr};
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ML_RECOMMENDATION_H__

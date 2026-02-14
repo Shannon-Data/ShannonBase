@@ -643,7 +643,6 @@ class TextGenerator {
   std::vector<std::vector<float>> m_stepFloatBuffers;
   std::vector<std::vector<int64_t>> m_stepInt64Buffers;
 };
-
 }  // namespace LLM_Generate
 }  // namespace ML
 }  // namespace ShannonBase

@@ -29,9 +29,10 @@
 #include <string>
 #include "ml_info.h"
 
+#include "sql-common/json_dom.h"  //Json_wrapper.
+class THD;
 namespace ShannonBase {
 namespace ML {
-
 enum class MODEL_CATALOG_FIELD_INDEX : int {
   MODEL_ID = 0,        // Auto-increment primary key
   MODEL_HANDLE,        // Unique model handle (string)
@@ -80,7 +81,6 @@ class ML_algorithm {
                             std::string &out_sch_tb_name, Json_wrapper &options) = 0;
   virtual ML_TASK_TYPE_T type() = 0;
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_ML_ALGORITHM_H__

@@ -37,7 +37,6 @@
 
 namespace ShannonBase {
 namespace ML {
-
 // clang-format off
 std::map<std::string, ML_forecasting::SCORE_METRIC_T> ML_forecasting::score_metrics = {
   {"NEG_MAX_ABSOLUTE_ERROR", ML_forecasting::SCORE_METRIC_T::NEG_MAX_ABSOLUTE_ERROR},

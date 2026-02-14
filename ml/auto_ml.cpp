@@ -48,7 +48,6 @@
 
 namespace ShannonBase {
 namespace ML {
-
 std::mutex models_mutex;
 std::map<std::string, std::string> Loaded_models;
 

@@ -182,6 +182,5 @@ std::string ML_generate_table::Generate(std::string &, Json_wrapper &) {
   std::string result;
   return result;
 }
-
 }  // namespace ML
 }  // namespace ShannonBase

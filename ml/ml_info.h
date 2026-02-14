@@ -35,7 +35,6 @@
 
 namespace ShannonBase {
 namespace ML {
-
 #define CHECK_CALL(x)      \
   if ((x) != 0) {          \
     RETURN HA_ERR_GENERIC; \

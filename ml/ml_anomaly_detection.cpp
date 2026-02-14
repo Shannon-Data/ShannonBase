@@ -34,7 +34,6 @@
 
 namespace ShannonBase {
 namespace ML {
-
 // clang-format off
 std::map<std::string, ML_anomaly_detection::SCORE_METRIC_T> ML_anomaly_detection::score_metrics = {
   {"ACCURACY", ML_anomaly_detection::SCORE_METRIC_T::ACCURACY},
@@ -408,6 +407,5 @@ int ML_anomaly_detection::predict_table(THD *thd [[maybe_unused]], std::string &
 }
 
 ML_TASK_TYPE_T ML_anomaly_detection::type() { return ML_TASK_TYPE_T::ANOMALY_DETECTION; }
-
 }  // namespace ML
 }  // namespace ShannonBase

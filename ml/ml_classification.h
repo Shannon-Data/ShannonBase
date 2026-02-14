@@ -49,7 +49,6 @@ class Json_wrapper;
 
 namespace ShannonBase {
 namespace ML {
-
 class ML_classification : public ML_algorithm {
  public:
   ML_classification();
@@ -127,7 +126,6 @@ class ML_classification : public ML_algorithm {
 
   void *m_handler{nullptr};
 };
-
 }  // namespace ML
 }  // namespace ShannonBase
 

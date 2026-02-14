@@ -49,7 +49,6 @@
 
 namespace ShannonBase {
 namespace ML {
-
 // clang-format off
 std::map<std::string_view, ML_TASK_TYPE_T, std::less<>> OPT_TASKS_MAP = {
     {"", ML_TASK_TYPE_T::UNKNOWN},
