@@ -175,7 +175,7 @@ class RapidCursor : public MemoryObject {
   // Index scan
   int index_init(uint keynr, bool sorted);
   int index_end();
-  int index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag);
+  int index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag, bool navigation = false);
   int index_next(uchar *buf);
   int index_prev(uchar *buf);
 
@@ -199,6 +199,8 @@ class RapidCursor : public MemoryObject {
 
   inline void enable_storage_index() { m_use_storage_index = true; }
 
+  inline void set_active_index(int8_t aci) { m_active_index = aci; }
+
  private:
   struct IteratorDeleter {
     void operator()(Index::Iterator *p) const {
@@ -221,7 +223,7 @@ class RapidCursor : public MemoryObject {
   // Must be called after init() has set up m_data_source and m_rpd_table.
   void init_col_chunks();
 
-  int position(row_id_t start_row_id);
+  int locate(row_id_t start_row_id);
 
   template <typename Reciever>
   size_t scan_batch_internal(size_t batch_size, const std::vector<uint32_t> &projection_cols, Reciever &sink);

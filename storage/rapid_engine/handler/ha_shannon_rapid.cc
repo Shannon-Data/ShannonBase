@@ -522,7 +522,6 @@ void ha_rapid::position(const unsigned char *record) {
 
 int ha_rapid::rnd_pos(unsigned char *buff, unsigned char *pos) {
   int error{HA_ERR_KEY_NOT_FOUND};
-
   if (inited == handler::RND && m_cursor) error = m_cursor->rnd_pos(buff, pos);
   return error;
 }
