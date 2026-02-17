@@ -111,6 +111,24 @@ id	col_char	col_varchar	text_preview	longtext_length	col_enum
 3				0	small
 4	new	ad		0	small
 5	as	we	fs	4	small
+INSERT INTO test_string_types VALUES (6, 'new', 'ads', 'sa', 'mysql', 'ws', 'longtext_test_long test', 'small');
+EXPLAIN SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
+LENGTH(col_longtext) as longtext_length, col_enum
+FROM test_string_types ORDER BY id;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	test_string_types	NULL	ALL	NULL	NULL	NULL	NULL	6	100.00	Using filesort; Using secondary engine Rapid
+Warnings:
+Note	1003	/* select#1 */ select `sh_test7`.`test_string_types`.`id` AS `id`,`sh_test7`.`test_string_types`.`col_char` AS `col_char`,`sh_test7`.`test_string_types`.`col_varchar` AS `col_varchar`,left(`sh_test7`.`test_string_types`.`col_text`,20) AS `text_preview`,length(`sh_test7`.`test_string_types`.`col_longtext`) AS `longtext_length`,`sh_test7`.`test_string_types`.`col_enum` AS `col_enum` from `sh_test7`.`test_string_types` order by `sh_test7`.`test_string_types`.`id`
+SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
+LENGTH(col_longtext) as longtext_length, col_enum
+FROM test_string_types ORDER BY id;
+id	col_char	col_varchar	text_preview	longtext_length	col_enum
+1	char	varchar text	text text text text 	5000	medium
+2	test	another varchar	text content	10000	large
+3				0	small
+4	new	ad		0	small
+5	as	we	fs	4	small
+6	new	ads	sa	23	small
 SELECT 
 CONCAT(col_char, '-', col_varchar) as concatenated,
 UPPER(col_enum) as enum_upper,

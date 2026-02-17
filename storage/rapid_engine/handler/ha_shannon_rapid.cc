@@ -917,42 +917,23 @@ void NotifyDropTable(Table_ref *tab) {
  */
 static void read_off_page_data(TABLE *table,
                                ShannonBase::Populate::change_record_buff_t::off_page_data_t &off_page_data) {
-  const uint field_count = table->s->fields;
-  Field **fields = table->field;
-  for (uint idx = 0; idx < field_count; idx++) {
-    Field *fld = fields[idx];
-    uchar *base_ptr = fld->field_ptr();
+  for (uint idx = 0; idx < table->s->fields; idx++) {
+    Field *fld = *(table->field + idx);
+    if (!bitmap_is_set(table->read_set, idx) || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+
     if (likely(((fld->type() != MYSQL_TYPE_BLOB) && (fld->type() != MYSQL_TYPE_TINY_BLOB) &&
                 (fld->type() != MYSQL_TYPE_MEDIUM_BLOB) && (fld->type() != MYSQL_TYPE_LONG_BLOB))))
       continue;
+    if (fld->is_null()) continue;
 
     auto bfld = down_cast<Field_blob *>(fld);
-    uint pack_len = bfld->pack_length_no_ptr();
-    size_t data_len = 0;
-    switch (pack_len) {
-      case 1:
-        data_len = *base_ptr;
-        break;
-      case 2:
-        data_len = uint2korr(base_ptr);
-        break;
-      case 3:
-        data_len = uint3korr(base_ptr);
-        break;
-      case 4:
-        data_len = uint4korr(base_ptr);
-        break;
-      default:
-        continue;
-    }
-    uchar *blob_data_ptr = base_ptr + pack_len;
-    uchar *actual_blob_data = nullptr;
-    memcpy(&actual_blob_data, blob_data_ptr, sizeof(uchar *));
-    if (actual_blob_data && data_len > 0) {
-      std::shared_ptr<uchar[]> blob_copy(new uchar[data_len]);
-      std::memcpy(blob_copy.get(), actual_blob_data, data_len);
-      off_page_data.emplace(idx, std::make_pair(data_len, std::move(blob_copy)));
-    }
+    const size_t data_len = bfld->get_length();
+    const uchar *actual_blob_data = bfld->get_blob_data();
+    if (actual_blob_data == nullptr) continue;
+
+    std::shared_ptr<uchar[]> blob_copy(new uchar[data_len ? data_len : 1]);
+    std::memcpy(blob_copy.get(), actual_blob_data, data_len);
+    off_page_data.emplace(idx, std::make_pair(data_len, std::move(blob_copy)));
   }
 }
 

@@ -102,6 +102,15 @@ SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
        LENGTH(col_longtext) as longtext_length, col_enum
 FROM test_string_types ORDER BY id;
 
+INSERT INTO test_string_types VALUES (6, 'new', 'ads', 'sa', 'mysql', 'ws', 'longtext_test_long test', 'small');
+EXPLAIN SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
+       LENGTH(col_longtext) as longtext_length, col_enum
+FROM test_string_types ORDER BY id;
+
+SELECT id, col_char, col_varchar, LEFT(col_text, 20) as text_preview,
+       LENGTH(col_longtext) as longtext_length, col_enum
+FROM test_string_types ORDER BY id;
+
 SELECT 
     CONCAT(col_char, '-', col_varchar) as concatenated,
     UPPER(col_enum) as enum_upper,

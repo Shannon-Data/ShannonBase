@@ -298,27 +298,10 @@ RowBuffer::FieldDataInfo RowBuffer::extract_field_data(const Rapid_load_context 
         info.data_ptr = it->second.second.get();
       } else {  // parsed from record[0],record[1] by `load` operation.
         auto bfld = down_cast<Field_blob *>(fld);
-        uint pack_len = bfld->pack_length_no_ptr();
-        switch (pack_len) {
-          case 1:
-            info.data_len = *base_ptr;
-            break;
-          case 2:
-            info.data_len = uint2korr(base_ptr);
-            break;
-          case 3:
-            info.data_len = uint3korr(base_ptr);
-            break;
-          case 4:
-            info.data_len = uint4korr(base_ptr);
-            break;
-        }
-        // Advance past length prefix
-        base_ptr += pack_len;
-        // BLOB data maybe not in the page. stores off the page. Dereference blob pointer
-        uchar *blob_ptr = nullptr;
-        memcpy(&blob_ptr, base_ptr, sizeof(uchar *));
-        info.data_ptr = blob_ptr;
+        const size_t data_len = bfld->get_length();
+        auto *actual_blob_data = bfld->get_blob_data();
+        info.data_ptr = actual_blob_data;
+        info.data_len = data_len;
       }
       break;
     }
