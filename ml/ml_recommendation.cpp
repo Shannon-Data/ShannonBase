@@ -31,6 +31,7 @@
 #include <string>
 
 #include "include/my_base.h"
+#include "include/mysqld_error.h"
 #include "mysqld_error.h"
 #include "sql/field.h"  //Field
 #include "sql/table.h"  //Table

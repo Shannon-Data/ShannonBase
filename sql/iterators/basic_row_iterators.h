@@ -55,7 +55,7 @@ struct TABLE;
   This is the most basic access method of a table using rnd_init,
   ha_rnd_next and rnd_end. No indexes are used.
 */
-class TableScanIterator : public TableRowIterator {
+class TableScanIterator final : public TableRowIterator {
  public:
   /**
     @param thd     session context
@@ -76,6 +76,7 @@ class TableScanIterator : public TableRowIterator {
   bool Init() override;
   int Read() override;
 
+ private:
   uchar *const m_record;
   const double m_expected_rows;
   ha_rows *const m_examined_rows;

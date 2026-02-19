@@ -59,6 +59,8 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   // rapid async parsing column number threshold, to accelerate large column number table scan.
   int async_column_threshold{ShannonBase::DEFAULT_N_FIELD_PARALLEL};
 
+  bool dynamic_offloads{true};
+
   // self-load related parameters.
   bool self_load_enabled{false};
   ulonglong self_load_interval_sec{SHANNON_DEFAULT_SELF_LOAD_INTERVAL};  // 24hurs

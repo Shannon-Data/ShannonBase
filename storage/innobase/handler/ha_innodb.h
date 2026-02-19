@@ -514,7 +514,7 @@ class ha_innobase : public handler {
   uint64_t get_table_id() const override { 
     ut_ad(m_prebuilt != nullptr && m_prebuilt->table != nullptr);
     return m_prebuilt->table->id; 
-  }
+  }                                  
  private:
   /** @name Multi Range Read interface
   @{ */

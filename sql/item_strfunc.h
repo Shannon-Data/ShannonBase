@@ -1247,6 +1247,7 @@ class Item_func_to_vector final : public Item_str_func {
   const char *func_name() const override { return "to_vector"; }
   String *val_str(String *str) override;
 };
+
 class Item_func_from_vector final : public Item_str_func {
   static const uint32 per_value_chars = 16;
   static const uint32 max_output_bytes =

@@ -83,7 +83,7 @@ class RowIterator {
  public:
   // NOTE: Iterators should typically be instantiated using NewIterator,
   // in sql/iterators/timing_iterator.h.
-  explicit RowIterator(THD *thd) : m_thd(thd){}
+  explicit RowIterator(THD *thd) : m_thd(thd) {}
   virtual ~RowIterator() = default;
 
   RowIterator(const RowIterator &) = delete;

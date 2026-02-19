@@ -2269,7 +2269,7 @@ bool Item_func_format::resolve_type(THD *thd) {
     locale = args[2]->basic_const_item() ? get_locale(args[2]) : nullptr;
   else
     locale = &my_locale_en_US; /* Two arguments */
-  return reject_geometry_args();
+  return reject_geometry_args(arg_count, args, this);
 }
 
 /**
@@ -3012,7 +3012,7 @@ bool Item_func_conv::resolve_type(THD *thd) {
   if (reject_vector_args()) return true;
   set_data_type_string(CONV_MAX_LENGTH, default_charset());
   set_nullable(true);
-  return reject_geometry_args();
+  return reject_geometry_args(arg_count, args, this);
 }
 
 String *Item_func_conv::val_str(String *str) {
@@ -4171,7 +4171,7 @@ bool Item_func_to_vector::resolve_type(THD *thd) {
     my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
     return true;
   }
-  if (reject_geometry_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
   set_data_type_vector(static_cast<ulonglong>(
       Field_vector::dimension_bytes(Field_vector::max_dimensions)));
   return false;
@@ -4267,7 +4267,7 @@ bool Item_func_ml_embed_row::resolve_type(THD* thd) {
     }
   }
 
-  if (reject_geometry_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
   set_data_type_vector(static_cast<ulonglong>(
       Field_vector::dimension_bytes(Field_vector::max_dimensions)));
   return false;
@@ -4337,7 +4337,7 @@ bool Item_func_ml_embed_table::resolve_type(THD* thd) {
     }
   }
 
-  if (reject_geometry_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
   set_data_type_string(MAX_BLOB_WIDTH, default_charset());
   return false;
 }
@@ -4394,7 +4394,7 @@ bool Item_func_ml_generate::resolve_type(THD* thd) {
     }
   }
 
-  if (reject_geometry_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
   set_data_type_string(MAX_BLOB_WIDTH, default_charset());
   set_nullable(false);
   return false;
@@ -4453,7 +4453,7 @@ bool Item_func_ml_rag::resolve_type(THD* thd) {
     }
   }
 
-  if (reject_geometry_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
   // Set return type as JSON string
   set_data_type_string(MAX_BLOB_WIDTH, default_charset());
   return false;
@@ -4517,7 +4517,7 @@ bool Item_func_ml_chat::resolve_type(THD *thd)  {
     my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
     return true;
   }
-  if (reject_geometry_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
 
   set_data_type_string(65535U); // LONGTEXT
   set_nullable(true);

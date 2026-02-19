@@ -27,6 +27,7 @@
 #include "ml_anomaly_detection.h"
 
 #include "include/my_base.h"
+#include "include/mysqld_error.h"
 #include "sql/current_thd.h"
 #include "sql/sql_class.h"
 

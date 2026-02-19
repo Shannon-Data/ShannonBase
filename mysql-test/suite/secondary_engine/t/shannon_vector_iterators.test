@@ -50,7 +50,7 @@ ORDER BY total_orders DESC;
 --echo ############### GETS THE RESULT FROM RAPID VIA VECTORIZED  EXECUTION ###########################
 SET USE_SECONDARY_ENGINE=ON;
 SET secondary_engine_cost_threshold=10;
-SET rapid_use_dynamic_offload=off;
+SET GLOBAL rapid_use_dynamic_offload=off;
 
 ALTER TABLE customers SECONDARY_LOAD;
 ALTER TABLE orders SECONDARY_LOAD;
@@ -88,7 +88,7 @@ ORDER BY total_orders DESC;
 
 SET USE_SECONDARY_ENGINE=ON;
 SET secondary_engine_cost_threshold=0;
-SET rapid_use_dynamic_offload=off;
+SET GLOBAL rapid_use_dynamic_offload=off;
 
 #EXPLAIN FORMAT=TREE SELECT COUNT(*) FROM customers;
 SELECT COUNT(*) FROM customers;

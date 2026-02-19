@@ -98,14 +98,14 @@ SHOW VARIABLES LIKE "%rapid_self_load_skip_quiet_check%";
 SET GLOBAL rapid_self_load_skip_quiet_check=0;
 SHOW VARIABLES LIKE "%rapid_self_load_skip_quiet_check%";
 
-SET rapid_use_dynamic_offload=ON;
+SET GLOBAL rapid_use_dynamic_offload=ON;
 SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
-SET rapid_use_dynamic_offload=1;
+SET GLOBAL rapid_use_dynamic_offload=1;
 SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
 
-SET rapid_use_dynamic_offload=OFF;
+SET GLOBAL rapid_use_dynamic_offload=OFF;
 SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
-SET rapid_use_dynamic_offload=0;
+SET GLOBAL rapid_use_dynamic_offload=0;
 SHOW VARIABLES LIKE "%rapid_use_dynamic_offload%";
 
 SET GLOBAL rapid_propagation_mode=0;

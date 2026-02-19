@@ -746,7 +746,9 @@ bool Item_bool_func2::resolve_type(THD *thd) {
   // Both arguments are needed for type resolving
   assert(args[0] && args[1]);
 
-  Item_bool_func::resolve_type(thd);
+  if (Item_bool_func::resolve_type(thd)) {
+    return true;
+  }
   /*
     See agg_item_charsets() in item.cc for comments
     on character set and collation aggregation.
@@ -780,7 +782,7 @@ bool Item_bool_func2::resolve_type(THD *thd) {
 
   if ((func_type == LT_FUNC || func_type == LE_FUNC || func_type == GE_FUNC ||
        func_type == GT_FUNC || func_type == FT_FUNC) &&
-       (reject_geometry_args() || reject_vector_args()))
+      reject_geometry_args(arg_count, args, this))
     return true;
 
   // Make a special case of compare with fields to get nicer DATE comparisons
@@ -820,7 +822,7 @@ bool Item_func_like::resolve_type(THD *thd) {
     }
   }
 
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
 
   // LIKE is always carried out as a string operation
   args[0]->cmp_context = STRING_RESULT;
@@ -2582,11 +2584,6 @@ longlong Item_func_eq::val_int() {
 
 bool Item_func_equal::resolve_type(THD *thd) {
   if (Item_bool_func2::resolve_type(thd)) return true;
-  uint nvector_args = num_vector_args();
-  if (nvector_args != 0 && nvector_args != arg_count) {
-    my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
-    return true;
-  }
   set_nullable(false);
   null_value = false;
   return false;
@@ -3149,7 +3146,7 @@ bool Item_func_between::resolve_type(THD *thd) {
     See comments for the code block doing similar checks in
     Item_bool_func2::resolve_type().
   */
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this)) return true;
 
   /*
     JSON values will be compared as strings, and not with the JSON
@@ -4885,11 +4882,16 @@ bool cmp_item_row::allocate_template_comparators(THD *thd, Item *item) {
 void cmp_item_row::store_value(Item *item) {
   DBUG_TRACE;
   assert(comparators != nullptr);
-  item->bring_value();
   item->null_value = false;
-  for (uint i = 0; i < n; i++) {
-    comparators[i]->store_value(item->element_index(i));
-    item->null_value |= item->element_index(i)->null_value;
+  item->bring_value();
+  if (item->null_value) {
+    set_null_value(/*nv=*/true);
+  } else {
+    item->null_value = false;
+    for (uint i = 0; i < n; i++) {
+      comparators[i]->store_value(item->element_index(i));
+      item->null_value |= item->element_index(i)->null_value;
+    }
   }
 }
 
@@ -4915,12 +4917,17 @@ bool cmp_item_row::allocate_value_comparators(MEM_ROOT *mem_root,
 
 void cmp_item_row::store_value_by_template(cmp_item *t, Item *item) {
   cmp_item_row *tmpl = (cmp_item_row *)t;
-  item->bring_value();
   item->null_value = false;
-  for (uint i = 0; i < n; i++) {
-    comparators[i]->store_value_by_template(tmpl->comparators[i],
-                                            item->element_index(i));
-    item->null_value |= item->element_index(i)->null_value;
+  item->bring_value();
+  if (item->null_value) {
+    set_null_value(/*nv=*/true);
+  } else {
+    item->null_value = false;
+    for (uint i = 0; i < n; i++) {
+      comparators[i]->store_value_by_template(tmpl->comparators[i],
+                                              item->element_index(i));
+      item->null_value |= item->element_index(i)->null_value;
+    }
   }
 }
 

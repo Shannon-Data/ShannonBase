@@ -102,6 +102,7 @@ rapid_self_load_interval_seconds
 rapid_self_load_skip_quiet_check
 rapid_self_load_skip_quiet_check
 rapid_use_dynamic_offload
+rapid_use_dynamic_offload
 regexp_stack_limit
 regexp_stack_limit
 regexp_time_limit

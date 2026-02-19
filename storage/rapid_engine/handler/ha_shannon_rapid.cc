@@ -1183,10 +1183,10 @@ static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
 bool SecondaryEnginePrePrepareHook(THD *thd) {
   RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
 
-  if (unlikely(!thd->variables.rapid_use_dynamic_offload || is_very_fast_query(thd))) {
+  if (unlikely(!ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads || is_very_fast_query(thd))) {
     // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
     return ShannonBase::Utils::Util::standard_cost_threshold_classifier(thd);
-  } else if (likely(thd->variables.rapid_use_dynamic_offload && !is_very_fast_query(thd))) {
+  } else if (likely(ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads && !is_very_fast_query(thd))) {
     // 1: static sceanrio.
     if (likely(!ShannonBase::Populate::Populator::active() ||
                (ShannonBase::Populate::Populator::active() && ShannonBase::Populate::shannon_pop_buff.empty()))) {
@@ -1395,6 +1395,9 @@ static SHOW_VAR rapid_status_variables[] = {
      SHOW_SCOPE_GLOBAL},
     /*the max column number of used to aysnc reading or parsing log*/
     {"rapid_async_column_threshold", (char *)&ShannonBase::shannon_rpd_engine_cfg.async_column_threshold, SHOW_INT,
+     SHOW_SCOPE_GLOBAL},
+    /*to enable dynamic off load or disable*/
+    {"rapid_use_dynamic_offload", (char *)&ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads, SHOW_BOOL,
      SHOW_SCOPE_GLOBAL},
     /*to enable self load or disable*/
     {"rapid_self_load_enabled", (char *)&ShannonBase::shannon_rpd_engine_cfg.self_load_enabled, SHOW_BOOL,
@@ -1698,6 +1701,14 @@ static TYPELIB rapid_sync_mode_typelib = {array_elements(ShannonBase::Populate::
                                           "rapid_sync_mode_typelib", ShannonBase::Populate::propagation_mode_names,
                                           nullptr};
 
+static void update_use_dynmaic_offload_enabled(THD *, SYS_VAR *, void *var_ptr, const void *save) {
+  if (*static_cast<bool *>(var_ptr) == *static_cast<const bool *>(save)) return;
+
+  bool new_value = *static_cast<const bool *>(save);
+  *static_cast<bool *>(var_ptr) = new_value;
+  ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads = *static_cast<const bool *>(save);
+}
+
 static void update_self_load_enabled(THD *, SYS_VAR *, void *var_ptr, const void *save) {
   if (*static_cast<bool *>(var_ptr) == *static_cast<const bool *>(save)) return;
 
@@ -1976,6 +1987,21 @@ static MYSQL_SYSVAR_INT(async_column_threshold,
                         ShannonBase::MAX_N_FIELD_PARALLEL,
                         0);
 
+static MYSQL_SYSVAR_BOOL(use_dynamic_offload,
+                         ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads,
+                         PLUGIN_VAR_OPCMDARG,
+                        "When system variable rapid_use_dynamic_offload is 0/false , then we "
+                        "fall back to normal cost threshold classifier, which also implies that "
+                        "when use secondary engine is set to forced, eligible queries will go to "
+                        "secondary engine, regardless of cost threshold or this classifier. "
+                        "When rapid_use_dynamic_offload is 1/true, then we proceed with looking "
+                        "for optimal execution engine for this queries, if secondary engine is "
+                        "found more optimal, then query is offloaded, otherwise it is sent back "
+                        "to mysql. default value: on",
+                         nullptr,
+                         update_use_dynmaic_offload_enabled,
+                         true);
+
 static MYSQL_SYSVAR_BOOL(self_load_enabled, 
                          ShannonBase::shannon_rpd_engine_cfg.self_load_enabled,
                          PLUGIN_VAR_OPCMDARG,
@@ -2091,6 +2117,7 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(parallel_part_load_threshold),
     MYSQL_SYSVAR(propagation_mode),
     MYSQL_SYSVAR(async_column_threshold),
+    MYSQL_SYSVAR(use_dynamic_offload),
     MYSQL_SYSVAR(self_load_enabled),
     MYSQL_SYSVAR(self_load_interval_seconds),
     MYSQL_SYSVAR(self_load_skip_quiet_check),

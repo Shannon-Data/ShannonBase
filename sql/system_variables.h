@@ -95,12 +95,6 @@ enum use_secondary_engine {
   SECONDARY_ENGINE_FORCED = 2
 };
 
-/** Values for rapid_use_dynamic_offload sysvar. */
-enum rapid_use_dynamic_offload {
-  DYNAMIC_OFFLOAD_OFF = 0,
-  DYNAMIC_OFFLOAD_ON = 1
-};
-
 /**
   Values for explain_format sysvar.
 
@@ -382,10 +376,6 @@ struct System_variables {
 
   /** Used for controlling preparation of queries against secondary engine. */
   ulong use_secondary_engine;
-
-  /** Used for controlling preparation of queries against secondary engine. */
-  ulong rapid_use_dynamic_offload;
-
 
   /**
     Used for controlling which statements to execute in a secondary

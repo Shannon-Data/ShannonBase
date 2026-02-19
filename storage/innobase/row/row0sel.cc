@@ -317,7 +317,12 @@ static dberr_t row_sel_sec_rec_is_for_clust_rec(
                          reinterpret_cast<double *>(&tmp_mbr), nullptr);
       rtr_read_mbr(sec_field, &sec_mbr);
 
-      if (!mbr_equal_cmp(sec_index->rtr_srs.get(), &sec_mbr, &tmp_mbr)) {
+      /* We use mbr_equal_physically() here because during UPDATE we have
+      skipped updating Spatial Index only when existing MBR was matching
+      physically to MBR of updated geometry.
+      Checking for logical equality here will result in duplicate results
+      if the MBR was logically equal but physically different. */
+      if (!mbr_equal_physically(&sec_mbr, &tmp_mbr)) {
         is_equal = false;
         goto func_exit;
       }
@@ -2500,18 +2505,15 @@ mysql_col_len, mbminlen, mbmaxlen
                                 range comparison. */
 void row_sel_field_store_in_mysql_format_func(
     byte *dest, const mysql_row_templ_t *templ, const dict_index_t *index,
-    ulint field_no, const byte *data,
-    ulint len, ulint sec_field) {
+    IF_DEBUG(ulint field_no, ) const byte *data,
+    ulint len IF_DEBUG(, ulint sec_field)) {
   byte *ptr;
-//#ifdef UNIV_DEBUG
+#ifdef UNIV_DEBUG
   const dict_field_t *field =
       templ->is_virtual ? nullptr : index->get_field(field_no);
 
-  ulint prtype {DATA_ROW_ID};
-  prtype = (templ->type != DATA_SYS && field) ? field->col->prtype : DATA_TRX_ID;
-
-  bool clust_templ_for_sec [[maybe_unused]] = (sec_field != ULINT_UNDEFINED);
-//#endif /* UNIV_DEBUG */
+  bool clust_templ_for_sec = (sec_field != ULINT_UNDEFINED);
+#endif /* UNIV_DEBUG */
 
   if (templ->is_multi_val) {
     ib::fatal(UT_LOCATION_HERE, ER_CONVERT_MULTI_VALUE)
@@ -2668,22 +2670,15 @@ void row_sel_field_store_in_mysql_format_func(
         memset(dest + len, 0x20, mysql_col_len - len);
       }
       break;
-    case DATA_SYS_CHILD:
-    case DATA_SYS:
-      /* These column types should never be shipped to MySQL. But, in Shannon,
-         we will retrieve trx id to MySQL. */
-      switch (prtype & DATA_SYS_PRTYPE_MASK) {
-         case DATA_TRX_ID:
-             memcpy(dest, data, DATA_TRX_ID_LEN);
-             break;
-         case DATA_ROW_ID:
-         case DATA_ROLL_PTR:
-           assert(0);
-           break;
-      }
-      break;
+
     default:
 #ifdef UNIV_DEBUG
+    case DATA_SYS_CHILD:
+    case DATA_SYS:
+      /* These column types should never be shipped to MySQL. */
+      ut_d(ut_error);
+      [[fallthrough]];
+
     case DATA_CHAR:
     case DATA_FIXBINARY:
     case DATA_FLOAT:
@@ -5568,7 +5563,14 @@ rec_loop:
                                       UT_LOCATION_HERE, &heap);
       rtr_get_mbr_from_rec(rec, index_offsets, &index_mbr);
 
-      if (mbr_equal_cmp(index->rtr_srs.get(), &clust_mbr, &index_mbr)) {
+      /* We use mbr_equal_physically() because we are comparing
+      MBR between Clustured Index & Spatial Index to identify duplicates.
+      As during UPDATE we check for MBR being physically equal, check
+      for duplicate should also happen physically.*/
+      if (mbr_equal_physically(&clust_mbr, &index_mbr)) {
+        ut_ad(!rec_get_deleted_flag(clust_rec, comp));
+        /* Duplicate because it has the same MBR as the record in PK,
+        but the record in PK is not delete marked, while ours is. */
         *is_dup_rec = true;
       }
     }

@@ -577,6 +577,7 @@ Param_mysql_functions documentation_mysql_functions_param[] = {
     {"TO_SECONDS", PASS},
     {"TO_VECTOR", PASS},
     {"STRING_TO_VECTOR", PASS},
+    {"DISTANCE", PASS},
     {"FROM_VECTOR", PASS},
     {"VECTOR_TO_STRING", PASS},
     {"VECTOR_DIM", PASS},

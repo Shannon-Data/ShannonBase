@@ -1126,6 +1126,18 @@ The following options may be given as the first argument:
  an incoming user load, some self-loaded tables will have
  to be unloaded to make room for the newly user-loaded
  table. 
+ --rapid-use-dynamic-offload 
+ When system variable rapid_use_dynamic_offload is 0/false
+ , then we fall back to normal cost threshold classifier,
+ which also implies that when use secondary engine is set
+ to forced, eligible queries will go to secondary engine,
+ regardless of cost threshold or this classifier. When
+ rapid_use_dynamic_offload is 1/true, then we proceed with
+ looking for optimal execution engine for this queries, if
+ secondary engine is found more optimal, then query is
+ offloaded, otherwise it is sent back to mysql. default
+ value: on
+ (Defaults to on; use --skip-rapid-use-dynamic-offload to disable.)
  --read-buffer-size=# 
  Each thread that does a sequential scan allocates a
  buffer of this size for each table it scans. If you do
@@ -1969,6 +1981,7 @@ rapid-self-load-base-relation-fill-percentage 70
 rapid-self-load-enabled FALSE
 rapid-self-load-interval-seconds 86400
 rapid-self-load-skip-quiet-check FALSE
+rapid-use-dynamic-offload TRUE
 read-buffer-size 131072
 read-only FALSE
 read-rnd-buffer-size 262144

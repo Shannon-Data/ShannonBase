@@ -1164,6 +1164,7 @@ static COMMANDS commands[] = {
     {"TRIM", 0, nullptr, false, ""},
     {"TO_VECTOR", 0, nullptr, false, ""},
     {"STRING_TO_VECTOR", 0, nullptr, false, ""},
+    {"DISTANCE", 0, nullptr, false, ""},
     {"FROM_VECTOR", 0, nullptr, false, ""},
     {"VECTOR_TO_STRING", 0, nullptr, false, ""},
     {"VECTOR_DIM", 0, nullptr, false, ""},
