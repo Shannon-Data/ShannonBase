@@ -93,7 +93,7 @@ Warnings:
 Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
 set use_secondary_engine=1;
 set secondary_engine_cost_threshold =1.5;
-set rapid_use_dynamic_offload=1;
+set global rapid_use_dynamic_offload=1;
 SET optimizer_trace = 'enabled=on';
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 drop database test_partition;

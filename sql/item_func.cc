@@ -1610,7 +1610,7 @@ bool Item_func::reject_vector_args() {
   Reject geometry arguments, should be called in resolve_type() for
   SQL functions/operators where geometries are not suitable as operands.
  */
-bool Item_func::reject_geometry_args() {
+bool reject_geometry_args(uint arg_count, Item **args, Item_result_field *me) {
   /*
     We want to make sure the operands are not GEOMETRY strings because
     it's meaningless for them to participate in arithmetic and/or numerical
@@ -1626,7 +1626,7 @@ bool Item_func::reject_geometry_args() {
   for (uint i = 0; i < arg_count; i++) {
     if (args[i]->result_type() != ROW_RESULT &&
         args[i]->data_type() == MYSQL_TYPE_GEOMETRY) {
-      my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+      my_error(ER_WRONG_ARGUMENTS, MYF(0), me->func_name());
       return true;
     }
   }
@@ -1681,8 +1681,7 @@ bool Item_func_numhybrid::resolve_type(THD *thd) {
     }
   }
   if (resolve_type_inner(thd)) return true;
-  if (reject_geometry_args() || reject_vector_args()) return true;
-  return false;
+  return reject_geometry_args(arg_count, args, this) || reject_vector_args();
 }
 
 bool Item_func_numhybrid::resolve_type_inner(THD *) {
@@ -1899,7 +1898,7 @@ void Item_typecast_signed::print(const THD *thd, String *str,
 }
 
 bool Item_typecast_signed::resolve_type(THD *thd) {
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this) || reject_vector_args()) return true;
   return args[0]->propagate_type(thd, MYSQL_TYPE_LONGLONG, false, true);
 }
 
@@ -1957,7 +1956,7 @@ void Item_typecast_unsigned::print(const THD *thd, String *str,
 }
 
 bool Item_typecast_unsigned::resolve_type(THD *thd) {
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this) || reject_vector_args()) return true;
   return args[0]->propagate_type(thd, MYSQL_TYPE_LONGLONG, false, true);
 }
 
@@ -2826,8 +2825,7 @@ bool Item_dec_func::resolve_type(THD *thd) {
   decimals = DECIMAL_NOT_SPECIFIED;
   max_length = float_length(decimals);
   set_nullable(true);
-  if (reject_geometry_args() || reject_vector_args()) return true;
-  return false;
+  return reject_geometry_args(arg_count, args, this) || reject_vector_args();
 }
 
 /** Gateway to natural LOG function. */
@@ -3007,9 +3005,7 @@ bool Item_func_bit::resolve_type(THD *thd) {
     set_data_type_longlong();
     unsigned_flag = true;
   }
-
-  if (reject_vector_args()) return true;
-  return reject_geometry_args();
+  return reject_geometry_args(arg_count, args, this) || reject_vector_args();
 }
 
 longlong Item_func_bit::val_int() {
@@ -3320,7 +3316,7 @@ bool Item_func_int_val::resolve_type_inner(THD *) {
   DBUG_PRINT("info", ("name %s", func_name()));
   assert(args[0]->data_type() != MYSQL_TYPE_INVALID);
 
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this) || reject_vector_args()) return true;
 
   switch (args[0]->result_type()) {
     case STRING_RESULT:
@@ -3451,7 +3447,7 @@ bool Item_func_round::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_NEWDECIMAL)) return true;
   if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_LONGLONG)) return true;
 
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this) || reject_vector_args()) return true;
 
   switch (args[0]->result_type()) {
     case INT_RESULT:
@@ -3680,8 +3676,7 @@ void Item_func_rand::seed_random(Item *arg) {
 bool Item_func_rand::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_DOUBLE)) return true;
   if (Item_real_func::resolve_type(thd)) return true;
-  if (reject_geometry_args() || reject_vector_args()) return true;
-  return false;
+  return reject_geometry_args(arg_count, args, this) || reject_vector_args();
 }
 
 bool Item_func_rand::fix_fields(THD *thd, Item **ref) {
@@ -3750,8 +3745,7 @@ double Item_func_rand::val_real() {
 bool Item_func_sign::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DOUBLE)) return true;
   if (Item_int_func::resolve_type(thd)) return true;
-  if (reject_geometry_args() || reject_vector_args()) return true;
-  return false;
+  return reject_geometry_args(arg_count, args, this) || reject_vector_args();
 }
 
 longlong Item_func_sign::val_int() {
@@ -3765,8 +3759,7 @@ bool Item_func_units::resolve_type(THD *thd) {
   if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_DOUBLE)) return true;
   decimals = DECIMAL_NOT_SPECIFIED;
   max_length = float_length(decimals);
-  if (reject_geometry_args() || reject_vector_args()) return true;
-  return false;
+  return reject_geometry_args(arg_count, args, this) || reject_vector_args();
 }
 
 double Item_func_units::val_real() {
@@ -3783,8 +3776,7 @@ bool Item_func_min_max::resolve_type(THD *thd) {
     return false;
 
   if (resolve_type_inner(thd)) return true;
-  if (reject_geometry_args() || reject_vector_args()) return true;
-  return false;
+  return reject_geometry_args(arg_count, args, this) || reject_vector_args();
 }
 
 TYPELIB *Item_func_min_max::get_typelib() const {

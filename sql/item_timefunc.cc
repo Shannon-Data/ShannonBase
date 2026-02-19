@@ -1536,7 +1536,7 @@ longlong Item_func_year::val_int() {
 }
 
 bool Item_typecast_year::resolve_type(THD *thd) {
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this) || reject_vector_args()) return true;
   if (args[0]->propagate_type(thd, MYSQL_TYPE_YEAR, false, true)) return true;
   assert(decimal_precision() == 4);
   set_nullable(true);
@@ -2488,7 +2488,7 @@ void Item_func_convert_tz::cleanup() {
 }
 
 bool Item_date_add_interval::resolve_type(THD *thd) {
-  if (reject_geometry_args() || reject_vector_args()) return true;
+  if (reject_geometry_args(arg_count, args, this) || reject_vector_args()) return true;
   set_nullable(true);
 
   /*

@@ -182,7 +182,6 @@ class TimingIterator final : public RowIterator {
     m_iterator.SetNullRowFlag(is_null_row);
   }
   void UnlockRow() override { m_iterator.UnlockRow(); }
-
   void StartPSIBatchMode() override { m_iterator.StartPSIBatchMode(); }
   void EndPSIBatchModeIfStarted() override {
     m_iterator.EndPSIBatchModeIfStarted();

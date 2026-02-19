@@ -1152,7 +1152,6 @@ class Item_sum_count : public Item_sum_int {
   void update_field() override;
   const char *func_name() const override { return "count"; }
   Item *copy_or_same(THD *thd) override;
-
   void add_value(longlong extra) {
     count += extra;
     null_value =false;

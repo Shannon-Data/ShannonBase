@@ -78,6 +78,8 @@ class List;
 
 /* Function items used by mysql */
 
+extern bool reject_geometry_args(uint arg_count, Item **args,
+                                 Item_result_field *me);
 void unsupported_json_comparison(size_t arg_count, Item **args,
                                  const char *msg);
 
@@ -134,7 +136,6 @@ class Item_func : public Item_result_field {
   }
   bool reject_vector_args();
   uint num_vector_args();
-  bool reject_geometry_args();
  protected:
   /*
     These decide of types of arguments which are prepared-statement

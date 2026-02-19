@@ -576,12 +576,6 @@ type_conversion_status Item::save_str_value_in_field(Field *field,
 }
 
 /**
-  Returns a string for a mysql field type.
-  @param type the type of the field.
-*/
-const char *fieldtype2str(enum enum_field_types type);
-
-/**
   Aggregates data types from array of items into current item
 
   @param name   name of function that performs type aggregation
@@ -626,14 +620,7 @@ bool Item::aggregate_type(const char *name, Item **items, uint count) {
     // Do not aggregate items with NULL type
     if (items[itemno]->data_type() == MYSQL_TYPE_NULL) continue;
     assert(items[itemno]->result_type() != ROW_RESULT);
-    auto left_type = new_type;
-    auto right_type = real_data_type(items[itemno]);
-    new_type = Field::field_type_merge(left_type, right_type);
-    if (new_type == MYSQL_TYPE_INVALID) {
-      my_error(ER_INCOMPATIBLE_TYPE_AGG, MYF(0), fieldtype2str(left_type),
-               fieldtype2str(right_type));
-      return true;
-    }
+    new_type = Field::field_type_merge(new_type, real_data_type(items[itemno]));
     mixed_signs |= (new_unsigned != items[itemno]->unsigned_flag);
     new_length = max<uint32>(new_length, items[itemno]->max_length);
   }
@@ -742,7 +729,6 @@ bool Item::aggregate_type(const char *name, Item **items, uint count) {
       set_data_type_json();
       break;
 
-    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_TINY_BLOB:
@@ -1870,8 +1856,7 @@ bool Item::is_blob_field() const {
   assert(fixed);
 
   const enum_field_types type = data_type();
-  return (type == MYSQL_TYPE_BLOB || type == MYSQL_TYPE_VECTOR ||
-          type == MYSQL_TYPE_GEOMETRY ||
+  return (type == MYSQL_TYPE_BLOB || type == MYSQL_TYPE_GEOMETRY ||
           // Char length, not the byte one, should be taken into account
           max_length / collation.collation->mbmaxlen >
               CONVERT_IF_BIGGER_TO_BLOB);
@@ -8030,9 +8015,7 @@ bool Item::aggregate_string_properties(enum_field_types type, const char *name,
       decimals = DECIMAL_NOT_SPECIFIED;
       fix_char_length(char_width);
       break;
-    case MYSQL_TYPE_VECTOR:
-      set_data_type_vector(char_width);
-      break;
+
     default:
       assert(false);
       set_data_type(type);

@@ -59,7 +59,7 @@
 #include "sql/sql_error.h"  // Sql_condition
 #include "sql/table.h"
 #include "sql/vector_conversion.h"  // get_dimensions
-#include "sql_string.h"             // String
+#include "sql_string.h"  // String
 #include "template_utils.h"
 
 class Create_field;
@@ -150,7 +150,6 @@ Field (abstract)
 |  |     +--Field_geom
 |  |     +--Field_json
 |  |        +--Field_typed_array
-|  |     +--Field_vector
 |  |
 |  +--Field_null
 |  +--Field_enum

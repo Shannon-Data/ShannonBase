@@ -126,8 +126,6 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0crc32.h"
 #include "ut0new.h"
 
-#include "storage/rapid_engine/populate/log_commons.h"
-
 /** fil_space_t::flags for hard-coded tablespaces */
 extern uint32_t predefined_flags;
 

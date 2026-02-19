@@ -33,6 +33,7 @@
 
 #include "include/field_types.h"  //MYSQL_TYPE_VECTOR
 #include "include/my_inttypes.h"
+#include "include/mysqld_error.h"
 #include "include/thr_lock.h"  //TL_READ
 #include "sql/current_thd.h"
 #include "sql/derror.h"  //ER_TH
