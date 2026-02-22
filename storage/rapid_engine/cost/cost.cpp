@@ -29,18 +29,21 @@
 #include <mutex>
 #include <unordered_map>
 
-#include "sql/item.h"                        //Item
-#include "sql/item_cmpfunc.h"                //Item_cmpfunc
-#include "sql/item_func.h"                   //Item_func
-#include "sql/join_optimizer/access_path.h"  //AccessPath
-#include "sql/sql_optimizer.h"               //JOIN
-#include "sql/table.h"                       //TABLE
+#include "sql/item.h"                                 //Item
+#include "sql/item_cmpfunc.h"                         //Item_cmpfunc
+#include "sql/item_func.h"                            //Item_func
+#include "sql/join_optimizer/access_path.h"           //AccessPath
+#include "sql/join_optimizer/make_join_hypergraph.h"  //HyperGraph
+#include "sql/sql_optimizer.h"                        //JOIN
+#include "sql/table.h"                                //TABLE
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
+#include "storage/rapid_engine/imcs/col0stats.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_config.h"
+#include "storage/rapid_engine/optimizer/utils.h"
 
 namespace ShannonBase {
 namespace Optimizer {
@@ -136,6 +139,267 @@ CostEstimator *CostModelServer::Instance(CostEstimator::Type type) {
   return nullptr;
 }
 
+double SelectivityEstimator::estimate_selectivity(const TABLE *table, const Item *condition) {
+  bool dummy{false};
+  return SelectivityEstimator::estimate_predicate_selectivity_internal(table, condition, &dummy);
+}
+
+double SelectivityEstimator::estimate_selectivity(const JoinHypergraph &graph, AccessPath *path) {
+  if (!path) return 1.0;
+
+  switch (path->type) {
+    case AccessPath::FILTER:
+      return estimate_filter_selectivity(graph, path);
+    case AccessPath::AGGREGATE:
+      return estimate_aggregate_selectivity(graph, path);
+    case AccessPath::HASH_JOIN:
+    case AccessPath::NESTED_LOOP_JOIN:
+      return estimate_join_selectivity(graph, path);
+    default:
+      return 1.0;
+  }
+
+  return 1.0;
+}
+
+static Imcs::RpdTable *get_rpd_table(TABLE *table) {
+  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+  if (!share) return nullptr;
+  ShannonBase::Imcs::RpdTable *rpd_table{nullptr};
+  rpd_table = share->is_partitioned ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                    : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+  return rpd_table;
+}
+
+double SelectivityEstimator::estimate_filter_selectivity(const JoinHypergraph &graph, AccessPath *path) {
+  if (path->type != AccessPath::FILTER) return 1.0;
+
+  auto &f = path->filter();
+  if (!f.condition) return 1.0;
+
+  table_map covered_tables = Utils::get_tablescovered(f.child);
+  std::vector<TABLE *> tables = get_tables_from_tablemap(covered_tables, graph);
+  if (tables.empty()) return 1.0;
+
+  double combined_selectivity = 1.0;
+  bool has_any_estimate = false;
+
+  auto *est = CostModelServer::Instance(CostEstimator::Type::RPD_ENG);
+  if (!est) return 0.5;
+
+  for (TABLE *table : tables) {
+    double table_selectivity = SelectivityEstimator::estimate_selectivity(table, f.condition);
+    if (table_selectivity < 1.0) {
+      combined_selectivity *= table_selectivity;
+      has_any_estimate = true;
+    }
+  }
+
+  if (!has_any_estimate) combined_selectivity = 0.3;
+  return std::max(0.0001, std::min(1.0, combined_selectivity));
+}
+
+double SelectivityEstimator::estimate_aggregate_selectivity(const JoinHypergraph &graph, AccessPath *path) {
+  if (path->type != AccessPath::AGGREGATE) return 1.0;
+
+  auto &agg = path->aggregate();
+  if (!agg.child) return 1.0;
+
+  double input_rows = agg.child->num_output_rows();
+  if (input_rows <= 1.0) return 1.0;
+
+  table_map covered = ShannonBase::Optimizer::Utils::get_tablescovered(path);
+  std::vector<TABLE *> tables = get_tables_from_tablemap(covered, graph);
+
+  if (tables.empty()) return std::sqrt(input_rows) / input_rows;
+
+  TABLE *primary_table = tables[0];
+  auto *rpd_table = get_rpd_table(primary_table);
+
+  if (!rpd_table) return std::sqrt(input_rows) / input_rows;
+
+  const auto &table_meta = rpd_table->meta();
+  std::vector<uint64_t> ndv_values;
+  for (const auto &field : table_meta.fields) {
+    if (field.statistics) {
+      const auto &basic = field.statistics->get_basic_stats();
+      if (basic.distinct_count > 0) {
+        ndv_values.push_back(basic.distinct_count);
+      }
+    }
+  }
+
+  if (ndv_values.empty()) return std::sqrt(input_rows) / input_rows;
+
+  std::sort(ndv_values.begin(), ndv_values.end(), std::greater<uint64_t>());
+
+  uint64_t estimated_ndv = 0;
+  if (ndv_values.size() == 1) {
+    estimated_ndv = ndv_values[0];
+  } else {
+    estimated_ndv = estimate_multicolumnNDV(ndv_values, input_rows);
+  }
+
+  double output_rows = std::min(static_cast<double>(estimated_ndv), input_rows);
+  output_rows = std::max(output_rows, std::sqrt(input_rows));
+  return output_rows / input_rows;
+}
+
+double SelectivityEstimator::estimate_join_selectivity(const JoinHypergraph &graph, AccessPath *path) {
+  // Simplified implementation: returns a conservative estimate
+  // Full implementation requires analyzing the column cardinality
+  // of the join predicate (e.g., based on NDV statistics)
+  return 0.1;
+}
+
+std::vector<TABLE *> SelectivityEstimator::get_tables_from_tablemap(table_map tmap, const JoinHypergraph &graph) {
+  std::vector<TABLE *> tables;
+
+  for (size_t node_idx = 0; node_idx < graph.nodes.size(); ++node_idx) {
+    TABLE *table = graph.nodes[node_idx].table();
+    if (!table) continue;
+
+    table_map table_bit = table->pos_in_table_list->map();
+    if (tmap & table_bit) {
+      tables.push_back(table);
+    }
+  }
+
+  return tables;
+}
+
+uint64_t SelectivityEstimator::estimate_singlecolumnNDV(TABLE *table, Item *group_item, double input_rows) {
+  if (!table || !group_item) return 0;
+
+  if (group_item->type() != Item::FIELD_ITEM) return static_cast<uint64_t>(std::sqrt(input_rows));
+
+  auto *field_item = static_cast<Item_field *>(group_item);
+  if (field_item->field->table != table) return 0;
+
+  uint32_t col_idx = field_item->field->field_index();
+  auto *col_stats = SelectivityEstimator::get_column_statistics(table, col_idx);
+
+  if (!col_stats) return static_cast<uint64_t>(std::sqrt(input_rows));
+
+  const auto &basic = col_stats->get_basic_stats();
+  uint64_t ndv = basic.distinct_count;
+  return std::min(ndv, static_cast<uint64_t>(input_rows));
+}
+
+uint64_t SelectivityEstimator::estimate_multicolumnNDV(const std::vector<uint64_t> &column_ndvs, double input_rows) {
+  if (column_ndvs.empty()) return 0;
+  if (column_ndvs.size() == 1) return column_ndvs[0];
+
+  uint64_t ndv1 = column_ndvs[0];
+  uint64_t ndv2 = column_ndvs[1];
+
+  double geometric_mean = std::sqrt(static_cast<double>(ndv1) * static_cast<double>(ndv2));
+
+  constexpr double correlation_factor = 1.5;
+  uint64_t combined_ndv = static_cast<uint64_t>(geometric_mean * correlation_factor);
+
+  if (column_ndvs.size() > 2) {
+    for (size_t i = 2; i < column_ndvs.size(); ++i) {
+      double growth_factor = 1.0 + 0.5 / i;
+      combined_ndv = static_cast<uint64_t>(combined_ndv * growth_factor);
+    }
+  }
+
+  combined_ndv = std::min(combined_ndv, static_cast<uint64_t>(input_rows));
+  combined_ndv = std::max(combined_ndv, ndv1);
+
+  return combined_ndv;
+}
+
+Imcs::ColumnStatistics *SelectivityEstimator::get_column_statistics(TABLE *table, uint32_t col_idx) {
+  if (!table) return nullptr;
+
+  auto *rpd_table = get_rpd_table(table);
+  if (!rpd_table) return nullptr;
+
+  const auto &table_meta = rpd_table->meta();
+  if (col_idx >= table_meta.fields.size()) return nullptr;
+
+  return table_meta.fields[col_idx].statistics.get();
+}
+
+double SelectivityEstimator::estimate_predicate_selectivity_internal(const TABLE *table, const Item *condition,
+                                                                     bool *can_use_storage_index) {
+  if (!condition) return 1.0;
+  *can_use_storage_index = false;
+  auto get_rapid_table = [&](const TABLE *table) -> Imcs::RpdTable * {
+    if (!table || !table->file) return nullptr;
+    auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+    if (!share) return nullptr;
+    Imcs::RpdTable *rpd_table = (share->is_partitioned)
+                                    ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                    : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+    return rpd_table;
+  };
+
+  // Get Rapid table for statistics
+  auto *rpd_table = get_rapid_table(table);
+  if (!rpd_table) {
+    return SelectivityEstimator::estimate_selectivity_fallback(condition);
+  }
+
+  // Parse Item tree to extract predicates
+  PredicateAnalyzer analyzer(table, rpd_table);
+  double selectivity = analyzer.analyze(condition, can_use_storage_index);
+  return selectivity;
+}
+
+double SelectivityEstimator::estimate_selectivity_fallback(const Item *condition) {
+  if (!condition) return 1.0;
+
+  // Simple heuristics based on Item type
+  switch (condition->type()) {
+    case Item::FUNC_ITEM: {
+      Item_func *func = static_cast<Item_func *>(const_cast<Item *>(condition));
+      switch (func->functype()) {
+        case Item_func::EQ_FUNC:
+          return 0.1;  // Equality: 10%
+        case Item_func::LT_FUNC:
+        case Item_func::LE_FUNC:
+        case Item_func::GT_FUNC:
+        case Item_func::GE_FUNC:
+          return 0.33;  // Range: 33%
+        case Item_func::BETWEEN:
+          return 0.25;  // Between: 25%
+        case Item_func::IN_FUNC:
+          return 0.2;  // IN: 20%
+        default:
+          return 0.5;  // Unknown: 50%
+      }
+    } break;
+    case Item::COND_ITEM: {
+      Item_cond *cond = static_cast<Item_cond *>(const_cast<Item *>(condition));
+      if (cond->functype() == Item_func::COND_AND_FUNC) {
+        // AND: multiply selectivities
+        double sel = 1.0;
+        List_iterator<Item> li(*cond->argument_list());
+        Item *arg;
+        while ((arg = li++)) {
+          sel *= SelectivityEstimator::estimate_selectivity_fallback(arg);
+        }
+        return sel;
+      } else if (cond->functype() == Item_func::COND_OR_FUNC) {
+        // OR: 1 - product of (1 - selectivity)
+        double prob_none = 1.0;
+        List_iterator<Item> li(*cond->argument_list());
+        Item *arg;
+        while ((arg = li++)) {
+          double s = SelectivityEstimator::estimate_selectivity_fallback(arg);
+          prob_none *= (1.0 - s);
+        }
+        return 1.0 - prob_none;
+      }
+      return 0.5;
+    } break;
+    default:
+      return 0.5;  // Unknown: 50%
+  }
+}
 /**
  * for fast estimation under without tree structure (only metadata) situations.
  */
@@ -161,6 +425,39 @@ double RpdCostEstimator::estimate_scan_cost(ha_rows rows, size_t num_imcus) {
   return (num_imcus * m_io_factor) + (rows * m_cpu_factor * 0.001);
 }
 
+double RpdCostEstimator::estimate_scan_cost(THD *thd, Imcs::RpdTable *rpd_table, AccessPath *path) {
+  ha_rows total_rows = rpd_table->meta().total_rows.load(std::memory_order_relaxed);
+  size_t total_imcus = rpd_table->meta().total_imcus.load(std::memory_order_relaxed);
+
+  double imcu_skip_ratio = 0.0;
+  double row_selectivity = 1.0;
+
+  Item *filter_cond = nullptr;
+  if (path->type == AccessPath::FILTER) {
+    filter_cond = path->filter().condition;
+  }
+
+  if (filter_cond) {
+    ShannonBase::Imcs::ImcuPruningAnalyzer analyzer(rpd_table);
+    imcu_skip_ratio = analyzer.estimate_skip_ratio(filter_cond);
+    row_selectivity = analyzer.estimate_row_selectivity(filter_cond);
+  }
+
+  size_t effective_imcus = static_cast<size_t>(total_imcus * (1.0 - imcu_skip_ratio));
+  ha_rows effective_rows = static_cast<ha_rows>(total_rows * row_selectivity);
+
+  double imcu_read_cost = effective_imcus * RapidCostConstants::kImcuReadCost;
+  size_t projected_cols = rpd_table->meta().fields.size();  // TODO: estimate_projected_columns(path, table);
+  double decomp_cost = effective_rows * projected_cols * RapidCostConstants::kVectorDecompCostPerCell;
+
+  double filter_cost = filter_cond ? effective_rows * RpdCostEstimator::VECTOR_CPU_FACTOR : 0.0;
+
+  double null_check_cost = effective_rows * RapidCostConstants::kNullBitmapCheckCost;
+
+  double total_cost = imcu_read_cost + decomp_cost + filter_cost + null_check_cost;
+
+  return total_cost;
+}
 /**
  * Calculate the cost of executing a JOIN using the Rapid engine
  *
@@ -187,7 +484,8 @@ double RpdCostEstimator::cost(const JOIN *join) {
     double selectivity{1.0};
     bool can_use_storage_index{false};
     if (table_condition) {
-      selectivity = estimate_predicate_selectivity(table, table_condition, &can_use_storage_index);
+      selectivity =
+          SelectivityEstimator::estimate_predicate_selectivity_internal(table, table_condition, &can_use_storage_index);
       selectivity = std::max(0.001, std::min(1.0, selectivity));
     }
     double scan_cost = calculate_scan_cost_detailed(table, base_rows, selectivity, can_use_storage_index, tab);
@@ -227,7 +525,7 @@ double RpdCostEstimator::calculate_scan_cost_detailed(TABLE *table, ha_rows tota
   auto rpd_table = get_rapid_table(table);  // Helper function to get RpdTable
   if (!rpd_table) {
     // Fallback to basic calculation if Rapid metadata unavailable
-    return CalculateVectorizedScanCost(table, filter_selectivity, can_use_storage_index);
+    return calculate_vectorized_scan_cost(table, filter_selectivity, can_use_storage_index);
   }
 
   const auto &metadata = rpd_table->meta();
@@ -282,7 +580,7 @@ double RpdCostEstimator::calculate_scan_cost_detailed(TABLE *table, ha_rows tota
   return cost;
 }
 
-double RpdCostEstimator::CalculateVectorizedScanCost(TABLE *table, double selectivity, bool pruned) {
+double RpdCostEstimator::calculate_vectorized_scan_cost(TABLE *table, double selectivity, bool pruned) {
   if (!table || !table->file) return 0.0;
 
   // Get table statistics
@@ -651,92 +949,22 @@ double RpdCostEstimator::calculate_hash_join_cost_detailed(double probe_rows, do
 }
 
 /**
- * Enhanced predicate selectivity estimation
- */
-double RpdCostEstimator::estimate_predicate_selectivity(TABLE *table, Item *condition, bool *can_use_storage_index) {
-  if (!condition) return 1.0;
-  *can_use_storage_index = false;
-  // Get Rapid table for statistics
-  auto *rpd_table = get_rapid_table(table);
-  if (!rpd_table) {
-    return estimate_selectivity_fallback(condition);
-  }
-
-  // Parse Item tree to extract predicates
-  PredicateAnalyzer analyzer(table, rpd_table);
-  double selectivity = analyzer.analyze(condition, can_use_storage_index);
-  return selectivity;
-}
-
-/**
- * Fallback selectivity estimation (when statistics unavailable)
- */
-double RpdCostEstimator::estimate_selectivity_fallback(Item *condition) {
-  if (!condition) return 1.0;
-
-  // Simple heuristics based on Item type
-  switch (condition->type()) {
-    case Item::FUNC_ITEM: {
-      Item_func *func = static_cast<Item_func *>(condition);
-      switch (func->functype()) {
-        case Item_func::EQ_FUNC:
-          return 0.1;  // Equality: 10%
-        case Item_func::LT_FUNC:
-        case Item_func::LE_FUNC:
-        case Item_func::GT_FUNC:
-        case Item_func::GE_FUNC:
-          return 0.33;  // Range: 33%
-        case Item_func::BETWEEN:
-          return 0.25;  // Between: 25%
-        case Item_func::IN_FUNC:
-          return 0.2;  // IN: 20%
-        default:
-          return 0.5;  // Unknown: 50%
-      }
-    } break;
-    case Item::COND_ITEM: {
-      Item_cond *cond = static_cast<Item_cond *>(condition);
-      if (cond->functype() == Item_func::COND_AND_FUNC) {
-        // AND: multiply selectivities
-        double sel = 1.0;
-        List_iterator<Item> li(*cond->argument_list());
-        Item *arg;
-        while ((arg = li++)) {
-          sel *= estimate_selectivity_fallback(arg);
-        }
-        return sel;
-      } else if (cond->functype() == Item_func::COND_OR_FUNC) {
-        // OR: 1 - product of (1 - selectivity)
-        double prob_none = 1.0;
-        List_iterator<Item> li(*cond->argument_list());
-        Item *arg;
-        while ((arg = li++)) {
-          double s = estimate_selectivity_fallback(arg);
-          prob_none *= (1.0 - s);
-        }
-        return 1.0 - prob_none;
-      }
-      return 0.5;
-    } break;
-    default:
-      return 0.5;  // Unknown: 50%
-  }
-}
-/**
  * Helper function to get RpdTable from TABLE
  */
 Imcs::RpdTable *RpdCostEstimator::get_rapid_table(TABLE *table) {
   if (!table || !table->file) return nullptr;
   auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
   if (!share) return nullptr;
-  Imcs::RpdTable *rpd_table = ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+  Imcs::RpdTable *rpd_table = (share->is_partitioned)
+                                  ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                  : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   return rpd_table;
 }
 
-double PredicateAnalyzer::analyze(Item *condition, bool *can_use_si) {
+double PredicateAnalyzer::analyze(const Item *condition, bool *can_use_si) {
   if (!condition) return 1.0;
   bool can_prune = false;
-  double selectivity = analyze_recursive(condition, &can_prune);
+  double selectivity = analyze_recursive(const_cast<Item *>(condition), &can_prune);
   if (can_use_si) {
     *can_use_si = can_prune;
   }

@@ -75,15 +75,49 @@ class Rapid_statement_context : public Secondary_engine_statement_context {
 */
 class Rapid_execution_context : public Secondary_engine_execution_context {
  public:
-  Rapid_execution_context() : m_data(std::make_unique<char[]>(10)) {}
+  struct TableImcsCostInfo {
+    double cost;
+    double effective_rows;
+    double imcu_skip_ratio;
+    bool can_use_si;
+  };
+
+  Rapid_execution_context() {}
   /**
     Checks if the specified cost is the lowest cost seen so far for executing
     the given JOIN.
   */
   bool BestPlanSoFar(const JOIN &join, double cost);
 
+  inline void RegisterTableImcsCost(TABLE *table, double cost, double rows, double skip_ratio,
+                                    bool can_use_si = false) {
+    m_table_costs[table] = {cost, rows, skip_ratio, can_use_si};
+  }
+
+  inline void UpdateTableSICost(TABLE *table, double new_cost) {
+    auto it = m_table_costs.find(table);
+    if (it != m_table_costs.end()) {
+      it->second.cost = new_cost;
+      it->second.can_use_si = true;
+    }
+  }
+
+  inline const TableImcsCostInfo *GetTableCost(TABLE *table) const {
+    auto it = m_table_costs.find(table);
+    return (it != m_table_costs.end()) ? &it->second : nullptr;
+  }
+
+  inline bool IsHypergraphMode() const { return m_hypergraph_mode; }
+  inline void SetHypergraphMode(bool v) { m_hypergraph_mode = v; }
+
+  inline void IncrementRejectedCount() { ++m_rejected_path_count; }
+  inline int RejectedPathCount() const { return m_rejected_path_count; }
+
  private:
-  std::unique_ptr<char[]> m_data;
+  std::unordered_map<TABLE *, TableImcsCostInfo> m_table_costs;
+  bool m_hypergraph_mode{false};
+  int m_rejected_path_count{0};
+
   /// The JOIN currently being optimized.
   const JOIN *m_current_join{nullptr};
   /// The cost of the best plan seen so far for the current JOIN.

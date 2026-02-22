@@ -733,5 +733,502 @@ Imcu *Imcu::compact() {
 
 bool Imcu::serialize(std::ostream &out) const { return false; }
 bool Imcu::deserialize(std::istream &in) { return false; }
+
+double ImcuPruningAnalyzer::estimate_skip_ratio(Item *condition) {
+  if (!condition || !m_rpd_table) return 0.0;
+
+  std::vector<RangeCondition> ranges;
+  extract_range_conditions(condition, ranges);
+
+  if (ranges.empty()) return 0.0;
+
+  // Get total number of IMCUs for the table
+  const auto &table_meta = m_rpd_table->meta();
+  size_t total_imcus = table_meta.total_imcus.load(std::memory_order_relaxed);
+
+  if (total_imcus == 0) return 0.0;
+
+  // For each range condition, estimate the number of skippable IMCUs
+  // Take the maximum across multiple conditions (optimistic estimate)
+  size_t max_skippable = 0;
+
+  for (const auto &rc : ranges) {
+    // Get column statistics
+    if (rc.col_idx >= table_meta.fields.size()) continue;
+
+    const auto &field_meta = table_meta.fields[rc.col_idx];
+    const auto *col_stats = field_meta.statistics.get();
+
+    size_t skippable = estimate_skippable_imcus(col_stats, rc, total_imcus);
+    max_skippable = std::max(max_skippable, skippable);
+  }
+
+  return static_cast<double>(max_skippable) / total_imcus;
+}
+
+double ImcuPruningAnalyzer::estimate_row_selectivity(Item *condition) {
+  if (!condition || !m_rpd_table) return 1.0;
+
+  std::vector<RangeCondition> ranges;
+  extract_range_conditions(condition, ranges);
+
+  if (ranges.empty()) return 1.0;
+
+  const auto &table_meta = m_rpd_table->meta();
+
+  // Multiply selectivities of multiple conditions (assuming independence)
+  double selectivity = 1.0;
+
+  for (const auto &rc : ranges) {
+    if (rc.col_idx >= table_meta.fields.size()) continue;
+
+    const auto &field_meta = table_meta.fields[rc.col_idx];
+    const auto *col_stats = field_meta.statistics.get();
+
+    double sel = estimate_row_selectivity_from_range(col_stats, rc);
+    selectivity *= sel;
+  }
+
+  return std::max(0.0, std::min(1.0, selectivity));
+}
+
+void ImcuPruningAnalyzer::extract_range_conditions(Item *item, std::vector<RangeCondition> &out) {
+  if (!item) return;
+
+  if (item->type() == Item::COND_ITEM) {
+    auto *cond = static_cast<Item_cond *>(item);
+
+    // AND: recursively extract all subconditions
+    if (cond->functype() == Item_func::COND_AND_FUNC) {
+      List_iterator<Item> it(*cond->argument_list());
+      Item *child;
+      while ((child = it++)) {
+        extract_range_conditions(child, out);
+      }
+      return;
+    }
+
+    // OR: not handled (conservative estimate)
+    if (cond->functype() == Item_func::COND_OR_FUNC) {
+      return;
+    }
+  }
+
+  if (item->type() == Item::FUNC_ITEM) {
+    auto *func = static_cast<Item_func *>(item);
+    RangeCondition range;
+
+    // BETWEEN
+    if (func->functype() == Item_func::BETWEEN) {
+      if (extract_between_range(static_cast<Item_func_between *>(func), range)) {
+        out.push_back(range);
+      }
+      return;
+    }
+
+    // IN
+    if (func->functype() == Item_func::IN_FUNC) {
+      if (extract_in_range(static_cast<Item_func_in *>(func), range)) {
+        out.push_back(range);
+      }
+      return;
+    }
+
+    // IS NULL / IS NOT NULL
+    if (func->functype() == Item_func::ISNULL_FUNC || func->functype() == Item_func::ISNOTNULL_FUNC) {
+      if (extract_null_range(func, range)) {
+        out.push_back(range);
+      }
+      return;
+    }
+
+    // Simple comparisons (=, !=, <, <=, >, >=)
+    if (extract_simple_range(func, range)) {
+      out.push_back(range);
+    }
+  }
+}
+
+bool ImcuPruningAnalyzer::extract_simple_range(Item_func *func, RangeCondition &range) {
+  if (func->argument_count() != 2) return false;
+
+  Item *left = func->arguments()[0];
+  Item *right = func->arguments()[1];
+
+  Item *col_item{nullptr}, *val_item{nullptr};
+  bool reversed = false;
+
+  if (left->type() == Item::FIELD_ITEM && right->const_item()) {
+    col_item = left;
+    val_item = right;
+    reversed = false;
+  } else if (right->type() == Item::FIELD_ITEM && left->const_item()) {
+    col_item = right;
+    val_item = left;
+    reversed = true;
+  } else {
+    return false;  // Not in col op const form
+  }
+
+  if (!get_column_index(col_item, &range.col_idx, &range.col_type)) {
+    return false;
+  }
+
+  double value;
+  if (!extract_numeric_value(val_item, &value)) {
+    std::string str_value;
+    if (!extract_string_value(val_item, &str_value)) {
+      return false;
+    }
+    range.is_string_range = true;
+    range.str_lower = str_value;
+    range.str_upper = str_value;
+  }
+
+  Item_func::Functype op = func->functype();
+  if (reversed) {
+    // Reverse operator (value op col → col op' value)
+    switch (op) {
+      case Item_func::LT_FUNC:
+        op = Item_func::GT_FUNC;
+        break;
+      case Item_func::LE_FUNC:
+        op = Item_func::GE_FUNC;
+        break;
+      case Item_func::GT_FUNC:
+        op = Item_func::LT_FUNC;
+        break;
+      case Item_func::GE_FUNC:
+        op = Item_func::LE_FUNC;
+        break;
+      default:
+        break;
+    }
+  }
+
+  switch (op) {
+    case Item_func::EQ_FUNC:
+      // col = value
+      range.is_equality = true;
+      range.equality_value = value;
+      range.lower_bound = value;
+      range.upper_bound = value;
+      range.lower_inclusive = true;
+      range.upper_inclusive = true;
+      break;
+
+    case Item_func::NE_FUNC:
+      // col != value (does not generate a range, cannot be used for IMCU pruning)
+      return false;
+
+    case Item_func::LT_FUNC:
+      // col < value
+      range.upper_bound = value;
+      range.upper_inclusive = false;
+      break;
+
+    case Item_func::LE_FUNC:
+      // col <= value
+      range.upper_bound = value;
+      range.upper_inclusive = true;
+      break;
+
+    case Item_func::GT_FUNC:
+      // col > value
+      range.lower_bound = value;
+      range.lower_inclusive = false;
+      break;
+
+    case Item_func::GE_FUNC:
+      // col >= value
+      range.lower_bound = value;
+      range.lower_inclusive = true;
+      break;
+
+    default:
+      return false;
+  }
+
+  return true;
+}
+
+bool ImcuPruningAnalyzer::extract_between_range(Item_func_between *between, RangeCondition &range) {
+  if (between->argument_count() != 3) return false;
+
+  Item *col_item = between->arguments()[0];
+  Item *min_item = between->arguments()[1];
+  Item *max_item = between->arguments()[2];
+
+  // Check column
+  if (col_item->type() != Item::FIELD_ITEM) return false;
+  if (!get_column_index(col_item, &range.col_idx, &range.col_type)) {
+    return false;
+  }
+
+  // Check constants
+  if (!min_item->const_item() || !max_item->const_item()) {
+    return false;
+  }
+
+  // Extract boundary values
+  double min_val, max_val;
+  if (!extract_numeric_value(min_item, &min_val) || !extract_numeric_value(max_item, &max_val)) {
+    return false;
+  }
+
+  // col BETWEEN min AND max
+  range.lower_bound = min_val;
+  range.upper_bound = max_val;
+  range.lower_inclusive = true;
+  range.upper_inclusive = true;
+
+  return true;
+}
+
+bool ImcuPruningAnalyzer::extract_in_range(Item_func_in *in_func, RangeCondition &range) {
+  if (in_func->argument_count() < 2) return false;
+
+  Item *col_item = in_func->arguments()[0];
+
+  // Check column
+  if (col_item->type() != Item::FIELD_ITEM) return false;
+  if (!get_column_index(col_item, &range.col_idx, &range.col_type)) {
+    return false;
+  }
+
+  // Extract all values, find min and max
+  double min_val = std::numeric_limits<double>::max();
+  double max_val = std::numeric_limits<double>::lowest();
+  bool found_any = false;
+
+  for (uint i = 1; i < in_func->argument_count(); ++i) {
+    Item *val_item = in_func->arguments()[i];
+    if (!val_item->const_item()) continue;
+
+    double value;
+    if (extract_numeric_value(val_item, &value)) {
+      min_val = std::min(min_val, value);
+      max_val = std::max(max_val, value);
+      found_any = true;
+    }
+  }
+
+  if (!found_any) return false;
+
+  // col IN (v1, v2, v3) → col BETWEEN min(v1,v2,v3) AND max(v1,v2,v3)
+  range.lower_bound = min_val;
+  range.upper_bound = max_val;
+  range.lower_inclusive = true;
+  range.upper_inclusive = true;
+
+  return true;
+}
+
+bool ImcuPruningAnalyzer::extract_null_range(Item_func *func, RangeCondition &range) {
+  if (func->argument_count() != 1) return false;
+
+  Item *col_item = func->arguments()[0];
+  if (col_item->type() != Item::FIELD_ITEM) return false;
+
+  if (!get_column_index(col_item, &range.col_idx, &range.col_type)) {
+    return false;
+  }
+
+  // IS NULL / IS NOT NULL use special markers
+  // No numeric range generated here, return false
+  // Let StorageIndex handle NULL statistics directly
+  return false;
+}
+
+size_t ImcuPruningAnalyzer::estimate_skippable_imcus(const ColumnStatistics *col_stats, const RangeCondition &rc,
+                                                     size_t total_imcus) {
+  if (total_imcus == 0) return 0;
+
+  // Prefer using histogram
+  if (col_stats && col_stats->get_histogram()) {
+    return estimate_skippable_imcus_from_histogram(col_stats, rc, total_imcus);
+  }
+
+  // Fall back to global min/max
+  if (col_stats) {
+    const auto &basic = col_stats->get_basic_stats();
+    return estimate_skippable_imcus_from_minmax(basic.min_value, basic.max_value, rc, total_imcus);
+  }
+
+  // No statistics available
+  return 0;
+}
+
+size_t ImcuPruningAnalyzer::estimate_skippable_imcus_from_minmax(double global_min, double global_max,
+                                                                 const RangeCondition &rc, size_t total_imcus) {
+  // Query range
+  double query_min = rc.lower_bound;
+  double query_max = rc.upper_bound;
+
+  // Global range
+  if (global_max <= global_min) return 0;  // Invalid range
+
+  // Check overlap
+  if (!has_overlap(query_min, query_max, global_min, global_max)) {
+    // No overlap → all IMCUs are skippable
+    return total_imcus;
+  }
+
+  // Calculate overlap ratio
+  double overlap_ratio = calculate_overlap_ratio(query_min, query_max, global_min, global_max);
+
+  // Skip ratio = 1 - overlap ratio
+  double skip_ratio = 1.0 - overlap_ratio;
+
+  return static_cast<size_t>(total_imcus * skip_ratio);
+}
+
+size_t ImcuPruningAnalyzer::estimate_skippable_imcus_from_histogram(const ColumnStatistics *col_stats,
+                                                                    const RangeCondition &rc, size_t total_imcus) {
+  const auto *histogram = col_stats->get_histogram();
+  if (!histogram) return 0;
+
+  // ★ Estimate selectivity using histogram
+  double selectivity = histogram->estimate_selectivity(rc.lower_bound, rc.upper_bound);
+
+  // Assumption: queries with low selectivity can skip more IMCUs
+  // Skip ratio ≈ 1 - selectivity
+  double skip_ratio = 1.0 - selectivity;
+
+  // Conservative estimate: reduce by half
+  skip_ratio *= 0.5;
+
+  return static_cast<size_t>(total_imcus * skip_ratio);
+}
+
+double ImcuPruningAnalyzer::estimate_row_selectivity_from_range(const ColumnStatistics *col_stats,
+                                                                const RangeCondition &rc) {
+  if (!col_stats) {
+    // No statistics, default to 10%
+    return 0.1;
+  }
+
+  if (rc.is_equality) {
+    const auto *histogram = col_stats->get_histogram();
+    if (histogram) {
+      return histogram->estimate_equality_selectivity(rc.equality_value);
+    }
+
+    // Fall back: 1 / NDV
+    const auto &basic = col_stats->get_basic_stats();
+    if (basic.distinct_count > 0) {
+      return 1.0 / basic.distinct_count;
+    }
+
+    return 0.1;
+  }
+
+  const auto *histogram = col_stats->get_histogram();
+  if (histogram) {
+    return histogram->estimate_selectivity(rc.lower_bound, rc.upper_bound);
+  }
+
+  // Fall back: based on global min/max
+  const auto &basic = col_stats->get_basic_stats();
+  if (basic.max_value <= basic.min_value) {
+    return 0.0;
+  }
+
+  double global_range = basic.max_value - basic.min_value;
+  double query_range = rc.upper_bound - rc.lower_bound;
+
+  if (query_range <= 0) return 0.0;
+
+  return std::min(1.0, query_range / global_range);
+}
+
+bool ImcuPruningAnalyzer::extract_numeric_value(Item *item, double *value) {
+  if (!item || !value) return false;
+
+  if (item->is_null()) return false;
+
+  switch (item->result_type()) {
+    case INT_RESULT: {
+      longlong int_val = item->val_int();
+      *value = static_cast<double>(int_val);
+      return true;
+    }
+    case REAL_RESULT:
+    case DECIMAL_RESULT: {
+      *value = item->val_real();
+      return true;
+    }
+    case STRING_RESULT: {
+      // Try to convert string to number
+      String str_val;
+      String *str = item->val_str(&str_val);
+      if (str) {
+        char *end;
+        *value = std::strtod(str->c_ptr(), &end);
+        return (end != str->c_ptr());  // Conversion successful
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
+bool ImcuPruningAnalyzer::extract_string_value(Item *item, std::string *value) {
+  if (!item || !value) return false;
+
+  if (item->is_null()) return false;
+
+  if (item->result_type() == STRING_RESULT) {
+    String str_val;
+    String *str = item->val_str(&str_val);
+    if (str) {
+      value->assign(str->ptr(), str->length());
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool ImcuPruningAnalyzer::get_column_index(Item *item, uint32_t *col_idx, enum_field_types *col_type) {
+  if (!item || item->type() != Item::FIELD_ITEM) {
+    return false;
+  }
+
+  auto *field_item = static_cast<Item_field *>(item);
+  Field *field = field_item->field;
+
+  if (!field) return false;
+
+  *col_idx = field->field_index();
+  if (col_type) {
+    *col_type = field->type();
+  }
+
+  return true;
+}
+
+bool ImcuPruningAnalyzer::has_overlap(double min1, double max1, double min2, double max2) {
+  // Check if [min1, max1] and [min2, max2] overlap
+  return !(max1 < min2 || max2 < min1);
+}
+
+double ImcuPruningAnalyzer::calculate_overlap_ratio(double min1, double max1, double min2, double max2) {
+  if (!has_overlap(min1, max1, min2, max2)) {
+    return 0.0;
+  }
+
+  // Overlap interval
+  double overlap_min = std::max(min1, min2);
+  double overlap_max = std::min(max1, max2);
+  double overlap_range = overlap_max - overlap_min;
+
+  // Query range
+  double query_range = max1 - min1;
+  if (query_range <= 0) return 0.0;
+
+  return overlap_range / query_range;
+}
 }  // namespace Imcs
 }  // namespace ShannonBase
