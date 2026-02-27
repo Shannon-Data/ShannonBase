@@ -1,4 +1,4 @@
-# Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2019, 2025, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -107,6 +107,7 @@ SET(harness_source
   log_reopen_component.cc
   dynamic_config.cc
   section_config_exposer.cc
+  auto_cleaner.cc
   )
 
 IF(WIN32)

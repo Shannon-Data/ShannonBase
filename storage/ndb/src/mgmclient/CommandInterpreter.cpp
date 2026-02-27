@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -24,6 +24,7 @@
 */
 
 #include <atomic>
+#include <ctime>
 
 #include <ndb_global.h>
 
@@ -250,7 +251,6 @@ int Ndb_mgmclient::test_tls() { return m_cmd->test_tls(); }
 #include <portlib/NdbThread.h>
 
 #include <debugger/EventLogger.hpp>
-#include <signaldata/SetLogLevelOrd.hpp>
 
 /*****************************************************************************
  * HELP
@@ -791,6 +791,7 @@ void CommandInterpreter::printError() {
  */
 #define make_uint64(a, b) (((Uint64)(a)) + (((Uint64)(b)) << 32))
 #define Q64(a) make_uint64(event->EVENT.a##_lo, event->EVENT.a##_hi)
+#define Q64_B(a) make_uint64(event->EVENT.a, event->EVENT.a##_hi)
 #define R event->source_nodeid
 #define Q(a) event->EVENT.a
 #define QVERSION \
@@ -832,10 +833,11 @@ static void printLogEvent(struct ndb_logevent *event) {
       ndbout_c(
           "Node %u: Backup %u started from node %u completed\n"
           " StartGCP: %u StopGCP: %u\n"
-          " #Records: %u #LogRecords: %u\n"
-          " Data: %u bytes Log: %u bytes",
+          " #Records: %llu #LogRecords: %llu\n"
+          " Data: %llu bytes Log: %llu bytes",
           R, Q(backup_id), Q(starting_node), Q(start_gci), Q(stop_gci),
-          Q(n_records), Q(n_log_records), Q(n_bytes), Q(n_log_bytes));
+          Q64_B(n_records), Q64_B(n_log_records), Q64_B(n_bytes),
+          Q64_B(n_log_bytes));
       break;
 #undef EVENT
 #define EVENT BackupAborted
@@ -2552,8 +2554,8 @@ static void report_events(const ndb_logevent &event) {
         event.SavedEvent.len);
 
   char timestamp_str[64];
-  Logger::format_timestamp(event.SavedEvent.time, timestamp_str,
-                           sizeof(timestamp_str));
+  std::timespec t = {event.SavedEvent.time, 0};
+  Logger::format_timestamp(&t, timestamp_str, sizeof(timestamp_str));
 
   ndbout_c("%s %s", timestamp_str, out);
 }

@@ -1,4 +1,4 @@
-# Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2006, 2025, Oracle and/or its affiliates.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -92,6 +92,15 @@ IF(MY_COMPILER_IS_GNU)
     myisamlog.cc
     myisampack.cc
     COMPILE_FLAGS "-Wno-class-memaccess")
+ENDIF()
+
+# Same thing as above, but for clang, disable warnings for memset().
+MY_CHECK_CXX_COMPILER_WARNING("-Wnontrivial-memcall" HAS_WARN_FLAG)
+IF(HAS_WARN_FLAG)
+  ADD_COMPILE_FLAGS(
+    ${MYISAM_SOURCES}
+    myisamchk.cc
+    COMPILE_FLAGS "${HAS_WARN_FLAG}")
 ENDIF()
 
 MY_CHECK_CXX_COMPILER_WARNING("-Wcast-function-type" HAS_WARN_FLAG)

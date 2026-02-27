@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2024, Oracle and/or its affiliates.
+Copyright (c) 1996, 2025, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 Copyright (c) 2009, Percona Inc.
 
@@ -171,6 +171,7 @@ static char *srv_monitor_file_name;
 #ifdef UNIV_PFS_THREAD
 mysql_pfs_key_t log_archiver_thread_key;
 mysql_pfs_key_t page_archiver_thread_key;
+mysql_pfs_key_t buf_pool_create_thread_key;
 mysql_pfs_key_t buf_dump_thread_key;
 mysql_pfs_key_t buf_resize_thread_key;
 mysql_pfs_key_t clone_ddl_thread_key;
@@ -2882,7 +2883,7 @@ static lsn_t srv_shutdown_log() {
 
   /* No redo log might be generated since now. */
   log_background_threads_inactive_validate();
-  buf_must_be_all_freed();
+  buf_assert_all_are_replaceable();
 
   const lsn_t lsn = log_get_lsn(*log_sys);
 
@@ -2908,7 +2909,7 @@ static lsn_t srv_shutdown_log() {
     ut_a(err == DB_SUCCESS);
   }
 
-  buf_must_be_all_freed();
+  buf_assert_all_are_replaceable();
   ut_a(lsn == log_get_lsn(*log_sys));
 
   if (srv_downgrade_logs) {

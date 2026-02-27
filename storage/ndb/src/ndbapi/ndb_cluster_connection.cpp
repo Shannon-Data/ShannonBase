@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2004, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2004, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -22,6 +22,8 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 */
+
+#include <ctime>
 
 #include <ndb_global.h>
 #include "util/require.h"
@@ -421,8 +423,8 @@ class NdbApiInternalLogHandler : public LogHandler {
       : m_defaultHandler(defaultHandler), m_userConsumer(nullptr) {
     m_consumer_mutex = NdbMutex_Create();
     m_handler_mutex = NdbMutex_Create();
-    Logger::LoggerTest::setHandlerPointerAdress(*g_eventLogger,
-                                                &m_defaultHandler);
+    Logger::LoggerTest::setHandlerPointerAddress(*g_eventLogger,
+                                                 &m_defaultHandler);
   }
 
  public:
@@ -434,8 +436,8 @@ class NdbApiInternalLogHandler : public LogHandler {
     g_api_internal_log_handler = nullptr;
   }
 
-  virtual void append(const char *pCategory, Logger::LoggerLevel level,
-                      const char *pMsg, time_t now) override {
+  void append(const char *pCategory, Logger::LoggerLevel level,
+              const char *pMsg, const std::timespec *now) override {
     {
       if (m_userConsumer) {
         Guard g(m_consumer_mutex);
@@ -469,11 +471,10 @@ class NdbApiInternalLogHandler : public LogHandler {
     return true;
   }
   bool checkParams() override { return true; }
-  void writeHeader(const char *, Logger::LoggerLevel, time_t) override {
-    return;
-  }
-  void writeMessage(const char *) override { return; }
-  void writeFooter() override { return; }
+  void writeHeader(const char *, Logger::LoggerLevel,
+                   const std::timespec *) override {}
+  void writeMessage(const char *) override {}
+  void writeFooter() override {}
   void setRepeatFrequency(unsigned val) override {
     m_defaultHandler->setRepeatFrequency(val);
   }
@@ -506,6 +507,13 @@ Ndb_cluster_connection_impl::Ndb_cluster_connection_impl(
 
   NdbMutex_Lock(g_ndb_connection_mutex);
   if (g_ndb_connection_count++ == 0) {
+    if (g_eventLogger == nullptr) {
+      [[maybe_unused]] int ret = fprintf(stderr,
+                                         "ERROR: g_eventLogger object is "
+                                         "null. ndb_init() not called?\n");
+      require(g_eventLogger != nullptr);
+    }
+
     NdbColumnImpl::create_pseudo_columns();
     /* Setup singleton InternalLogHandler if needed */
     NdbApiInternalLogHandler::getLogHandlerInstance();

@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -363,8 +363,6 @@ bool Index_impl::is_candidate_key() const {
     if (idx_elem_obj->column().type() == enum_column_types::GEOMETRY)
       return false;
 
-    if (idx_elem_obj->column().type() == enum_column_types::VECTOR)
-      return false;
     /*
       Probably we should adjust is_prefix() to take these two scenarios
       into account. But this also means that we probably need avoid

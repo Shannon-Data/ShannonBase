@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -2406,7 +2406,7 @@ static void fprintf_string(char *row, ulong row_len, char quote,
     pbuffer = (char *)my_malloc(PSI_NOT_INSTRUMENTED, curr_row_size, MYF(0));
 
   // Put the sanitized row in the buffer.
-  mysql_real_escape_string_quote(mysql, pbuffer, row, row_len, '\'');
+  mysql_real_escape_string_quote(mysql, pbuffer, row, row_len, quote);
 
   // Opening quote
   fputc(quote, md_result_file);
@@ -4589,7 +4589,7 @@ static int dump_tablespaces(char *ts_where) {
     mysql_free_result(tableres);
     mysql_query_with_error_report(
         mysql, &tableres,
-        "SELECT 'TN; /*' AS TABLESPACE_NAME, 'FN' AS FILE_NAME, 'LGN' AS "
+        "SELECT 'T`N; /*' AS TABLESPACE_NAME, 'FN' AS FILE_NAME, 'LGN' AS "
         "LOGFILE_GROUP_NAME, 77 AS EXTENT_SIZE, 88 AS INITIAL_SIZE, "
         "'*/\nsystem touch foo;\n' AS ENGINE");
   });
@@ -5713,7 +5713,8 @@ static char *primary_key_fields(const char *table_name) {
               table_name, table_name);
       continue;
     }
-    if (atoi(row[3]) < 1) break;
+    /* break if the index is not unique */
+    if (row[1] && *row[1] && atoi(row[1]) > 0) break;
     if (row[4] && *row[4]) order_by_part = quote_name(row[4], buff, false);
 #ifdef USABLE_EXPR_IN_SHOW_INDEX_BUG35273994
     else if (mysql_num_fields(res) > 14 && row[14] &&
@@ -5749,7 +5750,8 @@ static char *primary_key_fields(const char *table_name) {
     while (nullptr != (row = mysql_fetch_row(res))) {
       unsigned braces_length = 0;
       if (!row[3] || !*row[3]) continue;
-      if (atoi(row[3]) < 1) break;
+      /* break if the index is not unique */
+      if (row[1] && *row[1] && atoi(row[1]) > 0) break;
       if (row[4] && *row[4]) order_by_part = quote_name(row[4], buff, false);
 #ifdef USABLE_EXPR_IN_SHOW_INDEX_BUG35273994
       else if (mysql_num_fields(res) > 14 && row[14] && *row[14]) {
@@ -6065,6 +6067,8 @@ static bool get_view_structure(char *table, char *db) {
   char *result_table, *opt_quoted_table;
   char table_buff[NAME_LEN * 2 + 3];
   char table_buff2[NAME_LEN * 2 + 3];
+  char table_string_buff[NAME_LEN * 2 + 3];
+  char db_string_buff[NAME_LEN * 2 + 3];
   char query[QUERY_LENGTH];
   FILE *sql_file = md_result_file;
   DBUG_TRACE;
@@ -6076,6 +6080,15 @@ static bool get_view_structure(char *table, char *db) {
 
   result_table = quote_name(table, table_buff, true);
   opt_quoted_table = quote_name(table, table_buff2, false);
+  if (((ulong)-1 == mysql_real_escape_string_quote(mysql, table_string_buff,
+                                                   table, strlen(table),
+                                                   '\'')) ||
+      ((ulong)-1 == mysql_real_escape_string_quote(mysql, db_string_buff, db,
+                                                   strlen(db), '\''))) {
+    DB_error(mysql,
+             "when trying to quote table and db names when dumping views.");
+    return true;
+  }
 
   if (switch_character_set_results(mysql, "binary")) return true;
 
@@ -6118,8 +6131,8 @@ static bool get_view_structure(char *table, char *db) {
            "SELECT CHECK_OPTION, DEFINER, SECURITY_TYPE, "
            "       CHARACTER_SET_CLIENT, COLLATION_CONNECTION "
            "FROM information_schema.views "
-           "WHERE table_name=\"%s\" AND table_schema=\"%s\"",
-           table, db);
+           "WHERE table_name='%s' AND table_schema='%s'",
+           table_string_buff, db_string_buff);
 
   if (mysql_query(mysql, query)) {
     /*

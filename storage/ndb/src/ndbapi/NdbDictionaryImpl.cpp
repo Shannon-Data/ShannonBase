@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -5374,12 +5374,14 @@ int NdbDictInterface::createEvent(NdbEventImpl &evnt, int getFlag) {
   DBUG_RETURN(0);
 }
 
-int NdbDictionaryImpl::executeSubscribeEvent(NdbEventOperationImpl &ev_op) {
+int NdbDictionaryImpl::executeSubscribeEvent(NdbEventOperationImpl &ev_op,
+                                             Uint64 &setup_epoch) {
   // NdbDictInterface m_receiver;
-  return m_receiver.executeSubscribeEvent(ev_op);
+  return m_receiver.executeSubscribeEvent(ev_op, setup_epoch);
 }
 
-int NdbDictInterface::executeSubscribeEvent(NdbEventOperationImpl &ev_op) {
+int NdbDictInterface::executeSubscribeEvent(NdbEventOperationImpl &ev_op,
+                                            Uint64 &setup_epoch) {
   DBUG_ENTER("NdbDictInterface::executeSubscribeEvent");
   NdbApiSignal tSignal(m_reference);
   tSignal.theReceiversBlockNumber = DBDICT;
@@ -5405,6 +5407,12 @@ int NdbDictInterface::executeSubscribeEvent(NdbEventOperationImpl &ev_op) {
   int ret = dictSignal(&tSignal, nullptr, 0, 0 /*use masternode id*/,
                        WAIT_CREATE_INDX_REQ /*WAIT_CREATE_EVNT_REQ*/,
                        DICT_LONG_WAITFOR_TIMEOUT, 100, errCodes, -1);
+
+  if (ret == 0) {
+    /* Extract received startGCI */
+    const auto *data = (const Uint32 *)m_buffer.get_data();
+    setup_epoch = (Uint64(data[0]) << 32) | data[1];
+  }
 
   DBUG_RETURN(ret);
 }
@@ -5604,8 +5612,11 @@ NdbEventImpl *NdbDictionaryImpl::getEvent(const char *eventName,
     DBUG_PRINT("error", ("Unexpected number of blob events "
                          "present Expect : %d Actual : %d",
                          blob_count, blob_event_count));
-    m_error.code = 241; /* Invalid schema object version */
-    DBUG_RETURN(nullptr);
+    if (ndb_dictionary_is_mysqld) {
+      m_error.code = 241; /* Invalid schema object version */
+      DBUG_RETURN(nullptr);
+    }
+    DBUG_PRINT("error", ("Blob event mismatch, but not MySQLD so ignoring"));
   }
 
   // Return the successfully created event
@@ -5747,6 +5758,20 @@ void NdbDictInterface::execSUB_START_CONF(const NdbApiSignal *signal) {
              ("subscriptionId=%d,subscriptionKey=%d,subscriberData=%d",
               subStartConf->subscriptionId, subStartConf->subscriptionKey,
               subStartConf->subscriberData));
+
+  Uint32 gci_hi = subStartConf->firstGCIhi;
+  Uint32 gci_lo = 0;
+
+  if (sigLen >= SubStartConf::SignalLength) {
+    gci_lo = subStartConf->firstGCIlo;
+  }
+
+  /* Return received startGCI to client via buffer */
+  m_buffer.grow(4 * 2);  // 2 words
+  auto *data = (Uint32 *)m_buffer.get_data();
+  data[0] = gci_hi;
+  data[1] = gci_lo;
+
   /*
    * If this is the first subscription NdbEventBuffer needs to be
    * notified.  NdbEventBuffer will start listen to Suma signals
@@ -7923,6 +7948,9 @@ int NdbDictInterface::create_filegroup(const NdbFilegroupImpl &group,
           fg.TS_LogfileGroupVersion = tmp.m_version;
         } else  // error set by get filegroup
         {
+          DBUG_PRINT("info",
+                     ("Remapping error 723 on create Tablespace to 789"));
+          m_error.code = 789; /* Logfile group not found */
           DBUG_RETURN(-1);
         }
       }

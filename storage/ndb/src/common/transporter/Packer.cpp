@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -277,9 +277,7 @@ Uint32 TransporterRegistry::unpack(TransporterReceiveHandle &recvHandle,
                       ptr, errorCode)) {
       loop_count++;
 
-      Uint32 rBlockNum = signalHeader.theReceiversBlockNumber;
-
-      if (rBlockNum == QMGR) {  // QMGR==252
+      if (TransporterRegistry::is_permitted_halt_signal(&signalHeader)) {
         Uint32 sBlockNum = signalHeader.theSendersBlockRef;
         sBlockNum = numberToRef(sBlockNum, remoteNodeId);
         signalHeader.theSendersBlockRef = sBlockNum;
@@ -288,7 +286,9 @@ Uint32 TransporterRegistry::unpack(TransporterReceiveHandle &recvHandle,
                                                     errorCode, signalData, ptr);
       } else {
         DEBUG("prepareReceive(...) - Discarding message to block: "
-              << rBlockNum << " from Node: " << remoteNodeId);
+              << signalHeader.theReceiversBlockNumber
+              << " from BlockNumber :" << signalHeader.theSendersBlockRef
+              << " on Node: " << remoteNodeId);
       }  // if
     }    // while
   }      // if
@@ -356,9 +356,7 @@ Uint32 *TransporterRegistry::unpack(TransporterReceiveHandle &recvHandle,
                       ptr, errorCode)) {
       loop_count++;
 
-      Uint32 rBlockNum = signalHeader.theReceiversBlockNumber;
-
-      if (rBlockNum == QMGR) {  // QMGR==252
+      if (TransporterRegistry::is_permitted_halt_signal(&signalHeader)) {
         Uint32 sBlockNum = signalHeader.theSendersBlockRef;
         sBlockNum = numberToRef(sBlockNum, remoteNodeId);
         signalHeader.theSendersBlockRef = sBlockNum;
@@ -367,7 +365,9 @@ Uint32 *TransporterRegistry::unpack(TransporterReceiveHandle &recvHandle,
                                                     errorCode, signalData, ptr);
       } else {
         DEBUG("prepareReceive(...) - Discarding message to block: "
-              << rBlockNum << " from Node: " << remoteNodeId);
+              << signalHeader.theReceiversBlockNumber
+              << " from BlockNumber :" << signalHeader.theSendersBlockRef
+              << " on Node: " << remoteNodeId);
       }  // if
     }    // while
   }      // if

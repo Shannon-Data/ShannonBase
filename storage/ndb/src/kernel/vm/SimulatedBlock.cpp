@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -434,15 +434,12 @@ void SimulatedBlock::handle_send_failed(SendStatus ss, Signal25 *signal,
           signal->theData[0] == DumpStateOrd::CmvmiDummySignal) {
         jam();
         const Uint32 num_secs = signal->getNoOfSections();
-        char msg[24 * 4];
-        snprintf(msg, sizeof(msg),
-                 "Failed sending CmvmiDummySignal"
-                 " (size %u+%u+%u+%u+%u) from %u to %u.",
-                 signal->getLength(), num_secs, (num_secs > 0) ? ptr[0].sz : 0,
-                 (num_secs > 1) ? ptr[1].sz : 0, (num_secs > 2) ? ptr[2].sz : 0,
-                 signal->theData[2], recNode);
-        g_eventLogger->info("%s", msg);
-        infoEvent("%s", msg);
+        infoEvent(
+            "Failed sending CmvmiDummySignal"
+            " (size %u+%u+%u+%u+%u) from %u to %u.",
+            signal->getLength(), num_secs, (num_secs > 0) ? ptr[0].sz : 0,
+            (num_secs > 1) ? ptr[1].sz : 0, (num_secs > 2) ? ptr[2].sz : 0,
+            signal->theData[2], recNode);
         return;
       }
       ErrorReporter::handleError(NDBD_EXIT_NDBREQUIRE,
@@ -4963,6 +4960,8 @@ void ErrorReporter::prepare_to_crash(bool first_phase,
                                      bool error_insert_crash) {
   (void)first_phase;
   (void)error_insert_crash;
+
+  globalData.incrementWatchDogCounter(22);  // Handling node stop
 
   static bool crash_handling_started = false;
   if (!first_phase) {

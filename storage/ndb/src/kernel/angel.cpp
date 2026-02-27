@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2009, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -233,7 +233,10 @@ static void reportShutdown(const ndb_mgm_configuration *config, NodeId nodeid,
   }
 
   // Log event locally
-  g_eventLogger->log(rep->getEventType(), theData, length, rep->getNodeId(), 0);
+  LogLevel ll;
+  // llStartUp are log category for NDB_LE_NDBStopXXX event types [sic!]
+  ll.setLogLevel(LogLevel::llStartUp, 15);
+  g_eventLogger->log(rep->getEventType(), theData, length, 0, &ll);
 
   // Log event to cluster log
   ndb_mgm_configuration_iterator iter(config, CFG_SECTION_NODE);
@@ -671,6 +674,12 @@ void angel_run(const char *progname, const Vector<BaseString> &original_args,
 
     one_arg.assfmt("--angel-pid=%d", getpid());
     args.push_back(one_arg);
+
+    if (opt_ndb_log_timestamps < std::size(NdbStdOpt::timestamps_names) - 1) {
+      one_arg.assfmt("--ndb-log-timestamps=%s",
+                     NdbStdOpt::timestamps_names[opt_ndb_log_timestamps]);
+      args.push_back(one_arg);
+    }
 
     if (have_password_option) {
       /**

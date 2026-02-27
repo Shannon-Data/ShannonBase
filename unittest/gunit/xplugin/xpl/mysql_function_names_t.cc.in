@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2025, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
@@ -575,12 +575,6 @@ Param_mysql_functions documentation_mysql_functions_param[] = {
     {"TO_BASE64", PASS},
     {"TO_DAYS", PASS},
     {"TO_SECONDS", PASS},
-    {"TO_VECTOR", PASS},
-    {"STRING_TO_VECTOR", PASS},
-    {"DISTANCE", PASS},
-    {"FROM_VECTOR", PASS},
-    {"VECTOR_TO_STRING", PASS},
-    {"VECTOR_DIM", PASS},
     {"TRIM", PASS},
     {"TRUNCATE", PASS},
     {"UCASE", PASS},

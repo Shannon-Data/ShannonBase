@@ -1,4 +1,4 @@
-# Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2013, 2025, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -57,11 +57,6 @@ SET(TESTS
   ut0rnd
 )
 
-ADD_COMPILE_FLAGS(
-  ut0rnd-t.cc
-  COMPILE_FLAGS -I${CMAKE_SOURCE_DIR}/extra/lz4 -I${BUNDLED_LZ4_PATH}
-  )
-
 # Treat warnings as errors on MSVC for InnoDB's unittests
 IF(MSVC AND NOT WIN32_CLANG)
   ADD_COMPILE_OPTIONS("/WX")
@@ -75,14 +70,13 @@ IF(MSVC)
     )
 ENDIF()
 
-SET(ALL_INNODB_TESTS)
-FOREACH(test ${TESTS})
-  LIST(APPEND ALL_INNODB_TESTS ${test}-t.cc)
-ENDFOREACH()
+LIST(TRANSFORM TESTS APPEND "-t.cc" OUTPUT_VARIABLE ALL_INNODB_TESTS)
 
 MYSQL_ADD_EXECUTABLE(merge_innodb_tests-t ${ALL_INNODB_TESTS}
+  DEPENDENCIES GenError
   ENABLE_EXPORTS
   ADD_TEST merge_innodb_tests-t
+  EXCLUDE_FROM_GCOV
   LINK_LIBRARIES gunit_large server_unittest_library
   )
 
@@ -92,16 +86,14 @@ MYSQL_ADD_EXECUTABLE(merge_innodb_tests-t ${ALL_INNODB_TESTS}
 #TARGET_LINK_LIBRARIES(merge_innodb_tests-t tbb -L${TBB_LIBDIR} -Wl,-rpath=${TBB_LIBDIR})
 #INCLUDE_DIRECTORIES(${TBB_INCDIR})
 
-ADD_DEPENDENCIES(merge_innodb_tests-t GenError)
-
 FOREACH(test ${TESTS})
-  SET(SRC_FILES ${test}-t.cc)
-  MYSQL_ADD_EXECUTABLE(${test}-t ${SRC_FILES}
+  MYSQL_ADD_EXECUTABLE(${test}-t ${test}-t.cc
     ENABLE_EXPORTS
     EXCLUDE_FROM_ALL
     SKIP_INSTALL
     LINK_LIBRARIES gunit_large server_unittest_library
     DEPENDENCIES GenError
+    ADD_GCOV_TEST ${test}
     )
 ENDFOREACH()
 

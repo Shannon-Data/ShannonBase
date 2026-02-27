@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -49,6 +49,7 @@
 #define NDB_RESTORE_ERROR_INSERT_SKIP_ROWS 2
 #define NDB_RESTORE_ERROR_INSERT_FAIL_REPLAY_LOG 3
 #define NDB_RESTORE_ERROR_INSERT_FAIL_RESTORE_TUPLE 4
+#define NDB_RESTORE_ERROR_INSERT_FAIL_LOG_CONSTRAINT 5
 
 #endif
 
@@ -404,7 +405,8 @@ class BackupFile {
 
   void setName(const char *path, const char *name);
 
-  BackupFile(void (*free_data_callback)(void *) = 0, void *ctx = 0);
+  BackupFile(void (*free_data_callback)(void *) = nullptr, void *ctx = nullptr,
+             Uint32 bufferSz = DEFAULT_BUFFER_SIZE);
   virtual ~BackupFile();
 
  public:
@@ -432,7 +434,7 @@ class BackupFile {
 #ifdef ERROR_INSERT
   void error_insert(unsigned int code);
 #endif
-  static const Uint32 BUFFER_SIZE = 128 * 1024;
+  static const Uint32 DEFAULT_BUFFER_SIZE = 128 * 1024;
 
  private:
   void twiddle_atribute(const AttributeDesc *const attr_desc,
@@ -493,7 +495,8 @@ class RestoreDataIterator : public BackupFile {
  public:
   // Constructor
   RestoreDataIterator(const RestoreMetaData &,
-                      void (*free_data_callback)(void *), void *);
+                      void (*free_data_callback)(void *), void *,
+                      Uint32 bufferSz);
   ~RestoreDataIterator() override;
 
   // Read data file fragment header
@@ -575,7 +578,7 @@ class RestoreLogIterator : public BackupFile {
    * not including log entry header.
    * No harm in require space for a few extra words to header too.
    */
-  static_assert(BackupFile::BUFFER_SIZE >=
+  static_assert(BackupFile::DEFAULT_BUFFER_SIZE >=
                 BackupFormat::LogFile::LogEntry::MAX_SIZE);
 
  private:

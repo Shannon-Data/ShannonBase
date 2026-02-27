@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -1947,6 +1947,7 @@ static dberr_t row_update_inplace_for_intrinsic(const upd_node_t *node) {
       row_upd_changes_field_size_or_external(index, offsets, node->update);
 
   if (size_changes) {
+    pcur.close();
     mtr_commit(&mtr);
     return (DB_FAIL);
   }
@@ -1957,6 +1958,7 @@ static dberr_t row_update_inplace_for_intrinsic(const upd_node_t *node) {
   evicted from the buffer pool it is flushed and we don't lose
   the changes */
   mtr.set_modified();
+  pcur.close();
   mtr_commit(&mtr);
 
   return (DB_SUCCESS);
@@ -2943,6 +2945,11 @@ dberr_t row_create_index_for_mysql(
     err = dict_index_add_to_cache_w_vcol(table, index, nullptr, FIL_NULL,
                                          trx_is_strict(trx));
 
+    if (err == DB_TOO_BIG_RECORD) {
+      ib::error() << "Cannot create the table " << table->name
+                  << " because the record size will exceed the maximum allowed "
+                     "size for a record.";
+    }
     if (err != DB_SUCCESS) {
       goto error_handling;
     }

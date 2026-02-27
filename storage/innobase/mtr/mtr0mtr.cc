@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2024, Oracle and/or its affiliates.
+Copyright (c) 1995, 2025, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
@@ -981,48 +981,19 @@ void mtr_t::Command::execute() {
   ulint len = prepare_write();
 
   if (len > 0) {
+    mtr_write_log_t write_log;
+
+    write_log.m_left_to_write = len;
+
     auto handle = log_buffer_reserve(*log_sys, len);
 
-    bool need_propagate = (srv_shutdown_state.load() == SRV_SHUTDOWN_NONE &&
-                          ShannonBase::Populate::Populator::active() &&
-                          !recv_recovery_is_on() &&
-                          (ShannonBase::Populate::shannon_propagation_mode.load() ==
-                            ShannonBase::Populate::PropagateMode::REDO_LOG_PARSE ||
-                           ShannonBase::Populate::shannon_propagation_mode.load() ==
-                            ShannonBase::Populate::PropagateMode::HYBRID) &&
-                          mtr_touches_rapid_tables());
-    if (need_propagate) {
-      //after each of block copied to log.buf without holes, then cpy to pop.
-      mtr_write_and_populate_log_t write_log;
+    write_log.m_handle = handle;
+    write_log.m_lsn = handle.start_lsn;
 
-      write_log.m_handle = handle;
-      write_log.m_lsn = handle.start_lsn;
-      write_log.m_left_to_write = len;
+    m_impl->m_log.for_each_block(write_log);
 
-      ShannonBase::Populate::change_record_buff_t redo_mlogs(
-          ShannonBase::Populate::Source::REDO_LOG, len);
-      write_log.m_populate_buffer = redo_mlogs.m_buff0.get();
-      write_log.m_populate_offset = 0;
-
-      m_impl->m_log.for_each_block(write_log);
-
-      ut_ad(write_log.m_left_to_write == 0);
-      ut_ad(write_log.m_lsn == handle.end_lsn);
-      ut_ad(write_log.m_populate_offset == len);
-      ShannonBase::Populate::Populator::write(nullptr, handle.start_lsn, &redo_mlogs);
-    } else {
-      mtr_write_log_t write_log;
-
-      write_log.m_left_to_write = len;
-
-      write_log.m_handle = handle;
-      write_log.m_lsn = handle.start_lsn;
-
-      m_impl->m_log.for_each_block(write_log);
-
-      ut_ad(write_log.m_left_to_write == 0);
-      ut_ad(write_log.m_lsn == handle.end_lsn);
-    }
+    ut_ad(write_log.m_left_to_write == 0);
+    ut_ad(write_log.m_lsn == handle.end_lsn);
 
     log_wait_for_space_in_log_recent_closed(*log_sys, handle.start_lsn);
 
@@ -1145,7 +1116,8 @@ int mtr_t::Logging::disable(THD *) {
     ut_ad(srv_is_being_started);
   }
 
-  ib::warn(ER_IB_WRN_REDO_DISABLED);
+  ulonglong current_lsn = log_get_lsn(*log_sys);
+  ib::warn(ER_IB_WRN_REDO_DISABLED_INFO, current_lsn);
   m_state.store(DISABLED);
 
   return 0;

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -555,6 +555,8 @@ class TransporterRegistry {
   Uint64 get_bytes_received(TrpId trpId) const;
 
   Multi_Transporter *get_node_multi_transporter(NodeId node_id) const;
+
+  static bool is_permitted_halt_signal(const SignalHeader *signalHeader);
 
  private:
   TransporterCallback *const callbackObj;

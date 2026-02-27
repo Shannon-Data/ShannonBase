@@ -1,7 +1,7 @@
 #ifndef LEX_INCLUDED
 #define LEX_INCLUDED
 
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -22,9 +22,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates.*/
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /* This file includes all reserved words and functions */
 
@@ -358,7 +356,6 @@ static const SYMBOL symbols[] = {
     {SYM("ITERATE", ITERATE_SYM)},
     {SYM("INVISIBLE", INVISIBLE_SYM)},
     {SYM("INVOKER", INVOKER_SYM)},
-    {SYM("JAVASCRIPT", JAVASCRIPT_SYM)},
     {SYM("JOIN", JOIN_SYM)},
     {SYM("JSON", JSON_SYM)},
     {SYM("JSON_TABLE", JSON_TABLE_SYM)},
@@ -782,8 +779,8 @@ static const SYMBOL symbols[] = {
     {SYM("VARCHARACTER", VARCHAR_SYM)},
     {SYM("VARIABLES", VARIABLES)},
     {SYM("VARYING", VARYING)},
-    {SYM("VECTOR", VECTOR_SYM)},
     {SYM("WAIT", WAIT_SYM)},
+    {SYM("VECTOR", VECTOR_SYM)},
     {SYM("WARNINGS", WARNINGS)},
     {SYM("WEEK", WEEK_SYM)},
     {SYM("WEIGHT_STRING", WEIGHT_STRING_SYM)},

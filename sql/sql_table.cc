@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -2754,12 +2754,7 @@ static bool secondary_engine_load_table(THD *thd, const TABLE &table,
 
   // Load table from primary into secondary engine and add to change
   // propagation if that is enabled.
-  if (handler->ha_load_table(table, skip_metadata_update)){
-    my_error(ER_SECONDARY_ENGINE, MYF(0),
-             "secondary storage engine load table failed");
-    return true;
-  }
-  return false;
+  return handler->ha_load_table(table, skip_metadata_update) != 0;
 }
 
 /**
@@ -2830,10 +2825,7 @@ static bool secondary_engine_unload_table(THD *thd, const char *db_name,
   if (handler == nullptr) return true;
 
   // Unload table from secondary engine.
-  if (handler->ha_unload_table(db_name, table_name, error_if_not_loaded))
-    return true;
-
-  return false;
+  return handler->ha_unload_table(db_name, table_name, error_if_not_loaded) > 0;
 }
 
 /**
@@ -3981,6 +3973,8 @@ namespace {
 
 struct sort_keys {
   bool operator()(const KEY &a, const KEY &b) const {
+    // std::sort may compare an element to itself:
+    if (&a == &b) return false;
     // Sort UNIQUE before not UNIQUE.
     if ((a.flags ^ b.flags) & HA_NOSAME) return a.flags & HA_NOSAME;
 
@@ -4682,7 +4676,7 @@ bool prepare_create_field(THD *thd, const char *error_schema_name,
 
   if (!(sql_field->flags & NOT_NULL_FLAG)) create_info->null_bits++;
 
-  if (check_column_name(sql_field->field_name)) {
+  if (check_column_name(to_lex_cstring(sql_field->field_name))) {
     my_error(ER_WRONG_COLUMN_NAME, MYF(0), sql_field->field_name);
     return true;
   }
@@ -7479,7 +7473,7 @@ static bool prepare_key(
     return true;
   }
 
-  if (!key_info->name || check_column_name(key_info->name)) {
+  if (!key_info->name || check_column_name(to_lex_cstring(key_info->name))) {
     my_error(ER_WRONG_NAME_FOR_INDEX, MYF(0), key_info->name);
     return true;
   }
@@ -7774,10 +7768,6 @@ bool Item_field::replace_field_processor(uchar *arg) {
   if (create_field) {
     field = new (targ->thd()->mem_root) Create_field_wrapper(create_field);
     switch (create_field->sql_type) {
-      case MYSQL_TYPE_VECTOR:
-        my_error(ER_INCORRECT_TYPE, MYF(0), create_field->field_name,
-        "GENERATED COLUMN");
-        return true;
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_LONG_BLOB:
@@ -8104,6 +8094,12 @@ static Create_field *add_functional_index_to_create_list(
 
   if (is_blob(cr->sql_type)) {
     my_error(ER_FUNCTIONAL_INDEX_ON_LOB, MYF(0));
+    return nullptr;
+  }
+
+  // Don't even bother trying to create a non-conformant table.
+  if (alter_info->create_list.is_empty()) {
+    my_error(ER_TABLE_MUST_HAVE_A_VISIBLE_COLUMN, MYF(0));
     return nullptr;
   }
 
@@ -8580,6 +8576,20 @@ bool mysql_prepare_create_table(
     }
   }
 
+  // Check that we have at least one visible column.
+  bool has_visible_column = false;
+  it.rewind();
+  while ((sql_field = it++)) {
+    if (sql_field->hidden == dd::Column::enum_hidden_type::HT_VISIBLE) {
+      has_visible_column = true;
+      break;
+    }
+  }
+  if (!has_visible_column) {
+    my_error(ER_TABLE_MUST_HAVE_A_VISIBLE_COLUMN, MYF(0));
+    return true;
+  }
+
   /* If fixed row records, we need one bit to check for deleted rows */
   if (!(create_info->table_options & HA_OPTION_PACK_RECORD))
     create_info->null_bits++;
@@ -8965,19 +8975,6 @@ static bool create_table_impl(
   DBUG_TRACE;
   DBUG_PRINT("enter", ("db: '%s'  table: '%s'  tmp: %d", db, table_name,
                        internal_tmp_table));
-
-  // Check that we have at least one visible column.
-  bool has_visible_column = false;
-  for (const Create_field &create_field : alter_info->create_list) {
-    if (create_field.hidden == dd::Column::enum_hidden_type::HT_VISIBLE) {
-      has_visible_column = true;
-      break;
-    }
-  }
-  if (!has_visible_column) {
-    my_error(ER_TABLE_MUST_HAVE_A_VISIBLE_COLUMN, MYF(0));
-    return true;
-  }
 
   if (check_engine(db, table_name, create_info)) return true;
 
@@ -11841,7 +11838,6 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
                "Simulated failure of secondary_unload()");
       return true;
     }
-
     se_operation_start = std::chrono::steady_clock::now();
     auto retval = secondary_engine_unload_table(
         thd, table_list->db, table_list->table_name, *table_def, true);
@@ -11964,7 +11960,7 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
 
   if (cleanup()) return true;
 
-  my_ok(thd, thd->get_sent_row_count());
+  my_ok(thd);
   return false;
 }
 

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -650,6 +650,9 @@ int NdbOperation::setAnyValue(Uint32 any_value) {
     setErrorCodeAbort(4515);
     return -1;
   }
+
+  /* Save the value to use for subsequent operations derived from this one */
+  m_any_value = any_value;
 
   const NdbColumnImpl *impl =
       &NdbColumnImpl::getImpl(*NdbDictionary::Column::ANY_VALUE);

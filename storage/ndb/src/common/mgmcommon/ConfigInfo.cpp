@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -804,11 +804,11 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
 
     {CFG_LOGLEVEL_STARTUP, "LogLevelStartup", DB_TOKEN,
      "Node startup info printed on stdout", ConfigInfo::CI_USED, false,
-     ConfigInfo::CI_INT, "1", "0", "15"},
+     ConfigInfo::CI_INT, "8", "0", "15"},
 
     {CFG_LOGLEVEL_SHUTDOWN, "LogLevelShutdown", DB_TOKEN,
      "Node shutdown info printed on stdout", ConfigInfo::CI_USED, false,
-     ConfigInfo::CI_INT, "0", "0", "15"},
+     ConfigInfo::CI_INT, "8", "0", "15"},
 
     {CFG_LOGLEVEL_STATISTICS, "LogLevelStatistic", DB_TOKEN,
      "Transaction, operation, transporter info printed on stdout",
@@ -820,11 +820,11 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
 
     {CFG_LOGLEVEL_NODERESTART, "LogLevelNodeRestart", DB_TOKEN,
      "Node restart, node failure info printed on stdout", ConfigInfo::CI_USED,
-     false, ConfigInfo::CI_INT, "0", "0", "15"},
+     false, ConfigInfo::CI_INT, "8", "0", "15"},
 
     {CFG_LOGLEVEL_CONNECTION, "LogLevelConnection", DB_TOKEN,
      "Node connect/disconnect info printed on stdout", ConfigInfo::CI_USED,
-     false, ConfigInfo::CI_INT, "0", "0", "15"},
+     false, ConfigInfo::CI_INT, "8", "0", "15"},
 
     {CFG_LOGLEVEL_CONGESTION, "LogLevelCongestion", DB_TOKEN,
      "Congestion info printed on stdout", ConfigInfo::CI_USED, false,
@@ -832,10 +832,18 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
 
     {CFG_LOGLEVEL_ERROR, "LogLevelError", DB_TOKEN,
      "Transporter, heartbeat errors printed on stdout", ConfigInfo::CI_USED,
-     false, ConfigInfo::CI_INT, "0", "0", "15"},
+     false, ConfigInfo::CI_INT, "8", "0", "15"},
 
     {CFG_LOGLEVEL_INFO, "LogLevelInfo", DB_TOKEN,
      "Heartbeat and log info printed on stdout", ConfigInfo::CI_USED, false,
+     ConfigInfo::CI_INT, "0", "0", "15"},
+
+    {CFG_LOGLEVEL_BACKUP, "LogLevelBackup", DB_TOKEN,
+     "Backup info printed on stdout", ConfigInfo::CI_USED, false,
+     ConfigInfo::CI_INT, "0", "0", "15"},
+
+    {CFG_LOGLEVEL_SCHEMA, "LogLevelSchema", DB_TOKEN,
+     "Schema changes info printed on stdout", ConfigInfo::CI_USED, false,
      ConfigInfo::CI_INT, "0", "0", "15"},
 
     /**
@@ -1383,6 +1391,13 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
      "each " DB_TOKEN_PRINT " node",
      ConfigInfo::CI_USED, false, ConfigInfo::CI_INT,
      "0",  // "256K",
+     "0", STR_VALUE(MAX_INT_RNIL)},
+
+    {CFG_DB_API_FAILURE_HANDLING_TIMEOUT, "ApiFailureHandlingTimeout", DB_TOKEN,
+     "Maximum allowed duration of Api failure handling before escalating "
+     "handling.  0 implies no time limit, minimum usable value is 10.",
+     ConfigInfo::CI_USED, false, ConfigInfo::CI_INT,
+     "600",  // 10 minutes
      "0", STR_VALUE(MAX_INT_RNIL)},
 
     /***************************************************************************

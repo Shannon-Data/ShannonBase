@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -24,6 +24,7 @@
 */
 
 #include <algorithm>
+#include <ctime>
 #include "util/require.h"
 
 #include <NdbTCP.h>
@@ -44,6 +45,7 @@
 #include "../src/kernel/vm/Emulator.hpp"
 #include "kernel/signaldata/FsOpenReq.hpp"
 #include "portlib/NdbMem.h"
+#include "portlib/NdbTimestamp.h"
 #include "portlib/ndb_file.h"
 #include "restore_tables.h"
 #include "util/ndb_opts.h"
@@ -395,7 +397,7 @@ Uint32 RestoreMetaData::readMetaTableList() {
   if (m_error_insert == NDB_RESTORE_ERROR_INSERT_SMALL_BUFFER) {
     // clear error insert
     m_error_insert = 0;
-    m_buffer_sz = BUFFER_SIZE;
+    m_buffer_sz = DEFAULT_BUFFER_SIZE;
   }
 #endif
   return tabCount;
@@ -837,8 +839,8 @@ bool RestoreMetaData::parseTableDescriptor(const Uint32 *data, Uint32 len) {
 // Constructor
 RestoreDataIterator::RestoreDataIterator(const RestoreMetaData &md,
                                          void (*_free_data_callback)(void *),
-                                         void *ctx)
-    : BackupFile(_free_data_callback, ctx),
+                                         void *ctx, Uint32 bufferSz)
+    : BackupFile(_free_data_callback, ctx, bufferSz),
       m_metaData(md),
       m_current_table_has_transforms(false) {
   restoreLogger.log_debug("RestoreDataIterator constructor");
@@ -1392,12 +1394,13 @@ int RestoreDataIterator::readVarData_drop6(Uint32 *buf_ptr, Uint32 *ptr,
   return 0;
 }
 
-BackupFile::BackupFile(void (*_free_data_callback)(void *), void *ctx)
+BackupFile::BackupFile(void (*_free_data_callback)(void *), void *ctx,
+                       Uint32 bufferSz)
     : free_data_callback(_free_data_callback), m_ctx(ctx) {
   m_path[0] = 0;
   m_fileName[0] = 0;
 
-  m_buffer_sz = BUFFER_SIZE;
+  m_buffer_sz = MAX(bufferSz, DEFAULT_BUFFER_SIZE);
   m_buffer = malloc(m_buffer_sz);
   m_buffer_ptr = m_buffer;
   m_buffer_data_left = 0;
@@ -1861,6 +1864,7 @@ void BackupFile::error_insert(unsigned int code) {
     // Reduce size of buffer to test buffer overflow
     // handling. The buffer must still be large enough to
     // accommodate the file header.
+    require(m_buffer_sz == DEFAULT_BUFFER_SIZE);
     m_buffer_sz = 256;
   }
 }
@@ -2435,7 +2439,8 @@ void RestoreLogger::log_error(const char *fmt, ...) {
 
   NdbMutex_Lock(m_mutex);
   if (print_timestamp) {
-    Logger::format_timestamp(time(NULL), timestamp, sizeof(timestamp));
+    std::timespec now = NdbTimestamp_GetCurrentTime();
+    Logger::format_timestamp(&now, timestamp, sizeof(timestamp));
     err << timestamp << " ";
   }
 
@@ -2452,7 +2457,8 @@ void RestoreLogger::log_info(const char *fmt, ...) {
 
   NdbMutex_Lock(m_mutex);
   if (print_timestamp) {
-    Logger::format_timestamp(time(NULL), timestamp, sizeof(timestamp));
+    std::timespec now = NdbTimestamp_GetCurrentTime();
+    Logger::format_timestamp(&now, timestamp, sizeof(timestamp));
     info << timestamp << " ";
   }
 
@@ -2469,7 +2475,8 @@ void RestoreLogger::log_debug(const char *fmt, ...) {
 
   NdbMutex_Lock(m_mutex);
   if (print_timestamp) {
-    Logger::format_timestamp(time(NULL), timestamp, sizeof(timestamp));
+    std::timespec now = NdbTimestamp_GetCurrentTime();
+    Logger::format_timestamp(&now, timestamp, sizeof(timestamp));
     debug << timestamp << " ";
   }
 

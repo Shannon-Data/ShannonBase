@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1383,6 +1383,7 @@ uchar Protocol_classic::get_error() { return m_thd->net.error; }
 
 void Protocol_classic::wipe_net() {
   memset(&m_thd->net, 0, sizeof(m_thd->net));
+  m_thd->store_cached_properties(THD::cached_properties::RW_STATUS);
 }
 
 void Protocol_classic::set_max_packet_size(ulong max_packet_size) {
@@ -3325,7 +3326,6 @@ bool Protocol_classic::store_string(const char *from, size_t length,
          field_types[field_pos] == MYSQL_TYPE_NEWDECIMAL ||
          field_types[field_pos] == MYSQL_TYPE_NEWDATE ||
          field_types[field_pos] == MYSQL_TYPE_JSON ||
-         field_types[field_pos] == MYSQL_TYPE_VECTOR ||
          (field_types[field_pos] >= MYSQL_TYPE_ENUM &&
           field_types[field_pos] <= MYSQL_TYPE_GEOMETRY));
   field_pos++;

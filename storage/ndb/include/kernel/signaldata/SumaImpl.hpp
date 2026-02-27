@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -164,17 +164,19 @@ struct SubStartConf {
    */
 
   friend bool printSUB_START_CONF(FILE *, const Uint32 *, Uint32, Uint16);
-  static constexpr Uint32 SignalLength = 9;
+  static constexpr Uint32 SignalLength_v9_4_0 = 9;  // Without firstGCIlo
+  static constexpr Uint32 SignalLength = 10;
 
   Uint32 senderRef;
   Uint32 senderData;
   Uint32 subscriptionId;
   Uint32 subscriptionKey;
-  Uint32 firstGCI;
+  Uint32 firstGCIhi;
   Uint32 part;  // SubscriptionData::Part
   Uint32 subscriberData;
   Uint32 bucketCount;
   Uint32 nodegroup;
+  Uint32 firstGCIlo;
 };
 
 struct SubStopReq {

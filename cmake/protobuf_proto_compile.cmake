@@ -1,4 +1,4 @@
-# Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2025, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -342,9 +342,9 @@ FUNCTION(MYSQL_PROTOBUF_GENERATE_PY GENERATED_SOURCE)
     GET_FILENAME_COMPONENT(WITHOUT_DIR_AND_EXT ${PROTO_FILE} NAME_WE)
 
     SET(GENERATED_GRPC_FILE
-      "${GENERATE_OUTPUT_DIRECTORY}/${WITHOUT_DIR_AND_EXT}_grpc.py")
+      "${GENERATE_OUTPUT_DIRECTORY}/${WITHOUT_DIR_AND_EXT}_pb2_grpc.py")
     SET(GENERATED_PY_FILE
-      "${GENERATE_OUTPUT_DIRECTORY}/${WITHOUT_DIR_AND_EXT}.py")
+      "${GENERATE_OUTPUT_DIRECTORY}/${WITHOUT_DIR_AND_EXT}_pb2.py")
 
     ADD_CUSTOM_COMMAND(
       OUTPUT "${GENERATED_GRPC_FILE}"

@@ -1,4 +1,4 @@
-# Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2025, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -5781,8 +5781,8 @@ ER_IB_MSG_81
 ER_IB_MSG_82
   eng "%s"
 
-ER_IB_MSG_83
-  eng "%s"
+ER_IB_ERR_PAGE_DIRTY_AT_SHUTDOWN
+  eng "Page still fixed or dirty at shutdown. %s"
 
 ER_IB_MSG_84
   eng "%s"
@@ -10873,7 +10873,7 @@ ER_IB_ERR_RECOVERY_REDO_DISABLED
 ER_IB_WRN_FAST_SHUTDOWN_REDO_DISABLED
   eng "InnoDB cannot do cold shutdown 'innodb_fast_shutdown = 2' and is forcing 'innodb_fast_shutdown = 1' as redo logging is disabled. InnoDB would flush all dirty pages to ensure physical data consistency."
 
-ER_IB_WRN_REDO_DISABLED
+OBSOLETE_ER_IB_WRN_REDO_DISABLED
   eng "InnoDB redo logging is disabled. All data could be lost in case of a server crash."
 
 ER_IB_WRN_REDO_ENABLED
@@ -11672,7 +11672,7 @@ ER_IB_MSG_LOG_FILES_CREATED_BY_CLONE_AND_READ_ONLY_MODE
 ER_IB_MSG_LOG_WRITER_WRITE_FAILED
   eng "Error %d encountered when writing to the redo log file: %s."
 
-ER_IB_MSG_LOG_WRITER_WAIT_ON_NEW_LOG_FILE
+OBSOLETE_ER_IB_MSG_LOG_WRITER_WAIT_ON_NEW_LOG_FILE
   eng "Redo log writer is waiting for a new redo log file. Consider increasing innodb_redo_log_capacity."
 
 ER_IB_MSG_RECOVERY_CHECKPOINT_OUTSIDE_LOG_FILE
@@ -12324,6 +12324,42 @@ OBSOLETE_ER_RPL_KILL_OLD_DUMP_THREAD_ENCOUNTERED
 OBSOLETE_ER_RPL_MTA_ALLOW_COMMIT_OUT_OF_ORDER
   eng "The transaction '%-.192s' will commit out of order with respect to its source to follow the group global order."
 
+ER_CHECK_TABLE_FUNCTIONS
+  eng "Can not open table `%s`.`%s`; functions in constraints, partitions, or virtual columns may have failed."
+
+ER_CHECK_TABLE_FUNCTIONS_DETAIL
+  eng "%s"
+
+ER_GRP_RPL_CERT_BROADCAST_THREAD_CREATE_FAILED
+  eng "Failed to create the Group Replication certifier broadcast thread (THD_certifier_broadcast)."
+
+ER_GRP_RPL_CERT_BROADCAST_THREAD_STARTED
+  eng "The Group Replication certifier broadcast thread (THD_certifier_broadcast) started."
+
+ER_GRP_RPL_CERT_BROADCAST_THREAD_STOPPED
+  eng "The Group Replication certifier broadcast thread (THD_certifier_broadcast) stopped."
+
+ER_GRP_RPL_APPLIER_THD_KILLED_BY_SQL_KILL
+   eng "The group replication applier thread has received KILL request."
+
+ER_IB_MSG_WAITING_ON_LAGGING_REDO_LOG_CONSUMER
+  eng "Threads are unable to reserve space in redo log which can't be reclaimed due to the '%s' consumer still lagging behind at LSN = %llu. Consider increasing innodb_redo_log_capacity."
+
+ER_IB_MSG_ABORTING_LOG_ARCHIVER
+  eng "The redo log archiver is aborted as it was lagging behind at LSN = %llu and unable to advance for more than 2 seconds. Consider increasing the innodb_redo_log_capacity."
+
+ER_IB_INSTANT_ADD_DROP_COLUMN_NOT_ALLOWED
+  eng "Trying to add or drop column(s) in table '%s' for which the current record size is %zu which is more than the maximum allowed size (%zu) for a record. Therefore ADD or DROP column with ALGORITHM = INSTANT is not allowed."
+
+ER_IB_INSTANT_ADD_NOT_POSSIBLE
+  eng "Cannot add %zu field(s) in table '%s' because after adding it, the record size would be %zu which is more than the maximum allowed size (%zu) for a record."
+
+ER_IB_WRN_REDO_DISABLED_INFO
+  eng "InnoDB redo logging is disabled. All data could be lost in case of a server crash. Current lsn is %llu."
+
+ER_IB_MSG_LOG_WRITER_WAIT_ON_NEW_LOG_FILE_INFO
+  eng "Redo log writer is waiting for a new redo log file. Consider increasing innodb_redo_log_capacity. The current log capacity is %llu bytes. The log capacity used is %llu bytes."
+
 #
 # End of 8.0 error messages intended to be written to the server error log.
 #
@@ -12777,6 +12813,12 @@ ER_RPL_KILL_OLD_DUMP_THREAD_ENCOUNTERED
 
 ER_RPL_MTA_ALLOW_COMMIT_OUT_OF_ORDER
   eng "The transaction '%-.192s' will commit out of order with respect to its source to follow the group global order."
+
+ER_TEMPTABLE_ENGINE_ERROR
+  eng "Temptable: %s"
+
+ER_AUTH_INITIAL_PLUGIN_OVERRIDE
+  eng "Plugin '%s' from authentication policy cannot be used for initial handshake, using '%s' default instead"
 
 # DO NOT add server-to-client messages here;
 # they go in messages_to_clients.txt

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2016, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2025, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -35,7 +35,7 @@
 #include <string>
 #include <vector>
 
-#include "auto_cleaner.h"
+#include "mysql/harness/auto_cleaner.h"
 #include "mysql/harness/filesystem.h"
 #include "mysqlrouter/cluster_metadata.h"
 #include "mysqlrouter/datatypes.h"
@@ -181,6 +181,7 @@ class ConfigGenerator {
       const std::string &owner) const;  // throws std::runtime_error
 
  private:
+  using AutoCleaner = mysql_harness::AutoCleaner;
   /**
    * init() calls this to read and validate several command-line options;
    * results are stored in member fields.
