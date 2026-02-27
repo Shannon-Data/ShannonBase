@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2019, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2025, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -45,7 +45,7 @@ bool ARMetadataCache::refresh(bool needs_writable_node) {
         res.error() !=
             metadata_cache::metadata_errc::no_metadata_read_successful;
 
-    on_refresh_failed(terminated_, md_servers_reachable);
+    on_refresh_failed(md_servers_reachable);
     return false;
   }
 

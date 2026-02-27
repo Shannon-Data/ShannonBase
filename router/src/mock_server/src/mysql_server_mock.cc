@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2017, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2025, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -112,7 +112,8 @@ class Acceptor {
                                              uint16_t port) {
     net::ip::tcp::resolver resolver(io_ctx_);
 
-    auto resolve_res = resolver.resolve(address, std::to_string(port));
+    auto resolve_res = resolver.resolve(address, std::to_string(port),
+                                        net::ip::resolver_base::passive);
     if (!resolve_res) return stdx::unexpected(resolve_res.error());
 
     for (auto ainfo : resolve_res.value()) {

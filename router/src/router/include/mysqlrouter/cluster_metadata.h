@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2025, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -148,9 +148,12 @@ enum class ClusterType {
   RS_V2  /* ReplicaSet (metadata 2.x) */
 };
 
-ClusterType ROUTER_CLUSTER_EXPORT
+ClusterType ROUTER_CLUSTER_EXPORT get_cluster_type(
+    const MetadataSchemaVersion &schema_version, MySQLSession *mysql);
+
+stdx::expected<ClusterType, std::string> ROUTER_CLUSTER_EXPORT
 get_cluster_type(const MetadataSchemaVersion &schema_version,
-                 MySQLSession *mysql, unsigned int router_id = 0);
+                 MySQLSession *mysql, unsigned int router_id);
 
 std::string ROUTER_CLUSTER_EXPORT to_string(const ClusterType cluster_type);
 

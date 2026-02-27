@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -34,6 +34,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <dirent.h>
+#include <sys/types.h>
 
 #include "decimal.h"
 #include "field_types.h"  // enum_field_types

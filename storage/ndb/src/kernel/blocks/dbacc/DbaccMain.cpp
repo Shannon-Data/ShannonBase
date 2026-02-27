@@ -1,4 +1,4 @@
-/* Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1127,10 +1127,11 @@ void Dbacc::execACCKEYREQ(Signal *signal, Uint32 opPtrI,
     OperationrecPtr lockOpPtr;
     ndbassert(!m_is_query_block);
     lockOpPtr.i = req->lockConnectPtr;
-    bool is_valid = oprec_pool.getValidPtr(lockOpPtr);
-    if (lockOwnerPtr.i == RNIL ||
-        !(lockOwnerPtr.i == lockOpPtr.i || !is_valid ||
+    const bool is_valid = oprec_pool.getValidPtr(lockOpPtr);
+    if (!is_valid || lockOwnerPtr.i == RNIL ||
+        !(lockOwnerPtr.i == lockOpPtr.i ||
           lockOwnerPtr.i == lockOpPtr.p->m_lock_owner_ptr_i)) {
+      jam();
       signal->theData[0] = Uint32(-1);
       signal->theData[1] = ZTO_OP_STATE_ERROR;
       operationRecPtr.p->m_op_bits = Operationrec::OP_INITIAL;

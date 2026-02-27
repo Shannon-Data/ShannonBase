@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -4423,6 +4423,13 @@ static bool build_equal_items_for_cond(THD *thd, Item *cond, Item **retcond,
     }
 
     if (do_inherit) {
+      // Range optimizer expects the LHS of an IN predicate to be columns
+      // from a table. Doing constant propagation for these columns would
+      // skip the range analysis leading to less performant queries.
+      // So we disable constant propagation for this case.
+      if (is_function_of_type(cond, Item_func::IN_FUNC)) {
+        down_cast<Item_func_in *>(cond)->set_no_constant_propagation();
+      }
       /*
         For each field reference in cond, not from equal item predicates,
         set a pointer to the multiple equality it belongs to (if there is any)
@@ -5630,6 +5637,31 @@ bool JOIN::propagate_dependencies() {
 }
 
 /**
+ * Check if a table can be safely marked as const during optimization.
+ *
+ * For regular base tables, always safe.
+ * For views and derived tables:
+ *   - If merged: check if it has stored programs in EXPLAIN mode
+ *   - If materialized: delegates to materializable_is_const() which checks
+ *     estimated row count, optimization flags, and stored programs in EXPLAIN
+ *
+ * @param thd   Thread handler
+ * @param tr    Table reference to check
+ * @return true if safe to mark as const, false otherwise
+ */
+static inline bool is_const_optimizable(THD *thd, Table_ref *tr) {
+  if (!tr->is_view_or_derived()) return true;
+
+  // For merged views/derived tables, check EXPLAIN mode + stored programs
+  if (!tr->uses_materialization()) {
+    return !(thd->lex->is_explain() && tr->has_stored_program());
+  }
+
+  // For materialized derived tables, use the comprehensive check
+  return tr->materializable_is_const(thd);
+}
+
+/**
   Extract const tables based on row counts.
 
   @returns false if success, true if error
@@ -5686,7 +5718,7 @@ bool JOIN::extract_const_tables() {
       case extract_empty_table:
         // Extract tables with zero rows, but only if statistics are exact
         if ((table->file->stats.records == 0 || all_partitions_pruned_away) &&
-            (table->file->ha_table_flags() & HA_STATS_RECORDS_IS_EXACT))
+            (table->file->ha_table_flags() & HA_STATS_RECORDS_IS_EXACT) != 0u)
           mark_const_table(tab, nullptr);
         break;
 
@@ -5695,13 +5727,18 @@ bool JOIN::extract_const_tables() {
           Extract tables with zero or one rows, but do not extract tables that
            1. are dependent upon other tables, or
            2. have no exact statistics, or
-           3. are full-text searched
+           3. are full-text searched, or
+           4. a derived table that cannot be safely treated as const
+              (e.g., materialized table with >1 row, or with stored programs
+              in EXPLAIN mode)
         */
         if ((table->s->system || table->file->stats.records <= 1 ||
              all_partitions_pruned_away) &&
-            !tab->dependent &&                                              // 1
-            (table->file->ha_table_flags() & HA_STATS_RECORDS_IS_EXACT) &&  // 2
-            !tl->is_fulltext_searched())                                    // 3
+            !tab->dependent &&  // 1
+            (table->file->ha_table_flags() & HA_STATS_RECORDS_IS_EXACT) !=
+                0u &&                       // 2
+            !tl->is_fulltext_searched() &&  // 3
+            is_const_optimizable(thd, tl))  // 4
           mark_const_table(tab, nullptr);
         break;
     }
@@ -5806,12 +5843,15 @@ bool JOIN::extract_func_dependent_tables() {
               has a real row or a null-extended row in the optimizer phase.
               We have no possibility to evaluate its join condition at
               execution time, when it is marked as a system table.
+           4. a derived table that can be safely treated as const
         */
         if (table->file->stats.records <= 1L &&                             // 1
             (table->file->ha_table_flags() & HA_STATS_RECORDS_IS_EXACT) &&  // 1
             !tl->outer_join_nest() &&                                       // 2
-            !(tab->join_cond() && tab->join_cond()->cost().IsExpensive()))  // 3
-        {  // system table
+            !(tab->join_cond() != nullptr &&
+              tab->join_cond()->cost().IsExpensive()) &&  // 3
+            is_const_optimizable(thd, tl))                // 4
+        {                                                 // system table
           mark_const_table(tab, nullptr);
           const int status =
               join_read_const_table(tab, positions + const_tables - 1);
@@ -5850,20 +5890,27 @@ bool JOIN::extract_func_dependent_tables() {
              1. are full-text searched, or
              2. are part of nested outer join, or
              3. are part of semi-join, or
-             4. have an expensive outer join condition.
-             5. are blocked by handler for const table optimize.
+             4. have an expensive outer join condition, or
+             5. are blocked by handler for const table optimize, or
              6. are not going to be used, typically because they are streamed
                 instead of materialized
-                (see Query_expression::can_materialize_directly_into_result()).
+                (see Query_expression::can_materialize_directly_into_result()),
+            or
+             7. key evaluated in stored program in EXPLAIN mode, or
+             8. a derived table that cannot be safely treated as const
           */
+
           if (eq_part.is_prefix(table->key_info[key].user_defined_key_parts) &&
               !tl->is_fulltext_searched() &&                            // 1
               !tl->outer_join_nest() &&                                 // 2
               !(tl->embedding && tl->embedding->is_sj_or_aj_nest()) &&  // 3
-              !(tab->join_cond() &&
+              !(tab->join_cond() != nullptr &&
                 tab->join_cond()->cost().IsExpensive()) &&                // 4
               !(table->file->ha_table_flags() & HA_BLOCK_CONST_TABLE) &&  // 5
-              table->is_created()) {                                      // 6
+              table->is_created() &&                                      // 6
+              !(thd->lex->is_explain() &&
+                start_keyuse->val->has_stored_program()) &&  // 7
+              is_const_optimizable(thd, tl)) {               // 8
             if (table->key_info[key].flags & HA_NOSAME) {
               if (const_ref == eq_part) {  // Found everything for ref.
                 ref_changed = true;
@@ -6296,7 +6343,7 @@ static ha_rows get_quick_record_count(THD *thd, JOIN_TAB *tab, ha_rows limit,
       return 0;
     }
     DBUG_PRINT("warning", ("Couldn't use record count on const keypart"));
-  } else if (tl->is_table_function() || tl->materializable_is_const()) {
+  } else if (tl->is_table_function() || tl->materializable_is_const(thd)) {
     tl->fetch_number_of_rows();
     return tl->table->file->stats.records;
   }
@@ -11488,8 +11535,8 @@ static uint32 get_key_length_tmp_table(Item *item) {
 
   // references KEY_PART_INFO::init_from_field()
   const enum_field_types type = item->data_type();
-  if (type == MYSQL_TYPE_BLOB || type == MYSQL_TYPE_VARCHAR ||
-      type == MYSQL_TYPE_GEOMETRY || type == MYSQL_TYPE_GEOMETRY)
+  if (type == MYSQL_TYPE_BLOB || type == MYSQL_TYPE_VECTOR ||
+      type == MYSQL_TYPE_VARCHAR || type == MYSQL_TYPE_GEOMETRY)
     len += HA_KEY_BLOB_LENGTH;
 
   return len;
@@ -11510,6 +11557,13 @@ bool evaluate_during_optimization(const Item *item, const Query_block *select) {
 
   // If the Item does not access any tables, it can always be evaluated.
   if (item->const_item()) return true;
+
+  // Do not evaluate stored procedure in EXPLAIN
+  if (current_thd->lex->is_explain() &&
+      WalkItem(item, enum_walk::PREFIX, [](const Item *curitem) {
+        return curitem->has_stored_program();
+      }))
+    return false;
 
   return !item->has_subquery() || (select->active_options() &
                                    OPTION_NO_SUBQUERY_DURING_OPTIMIZATION) == 0;
@@ -11630,8 +11684,15 @@ static double EstimateRowAccessesInItem(Item *item, double num_evaluations) {
       } else {
         path = qe->item->root_access_path();
       }
-      rows += EstimateRowAccesses(
-          path, query_block->is_cacheable() ? 1.0 : num_evaluations, kNoLimit);
+      // In some cases, for old optimizer, when subtitem is a
+      // Item_singlerow_subselect, its Query_expression::root_access_path has
+      // not been set, and Item_singlerow_subselect::root_access_path() always
+      // returns nullptr, so we need to check:
+      if (path != nullptr) {
+        rows += EstimateRowAccesses(
+            path, query_block->is_cacheable() ? 1.0 : num_evaluations,
+            kNoLimit);
+      }
     }
     return false;
   });

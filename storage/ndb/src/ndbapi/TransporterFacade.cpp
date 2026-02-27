@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -99,7 +99,8 @@ void TransporterFacade::reportError(NodeId nodeId, TransporterError errorCode,
         "Node %u disconnecting from node %u due to transporter error %u %s",
         ownId(), nodeId, errorCode, info ? info : "");
     if (nodeId == ownId()) {
-      g_eventLogger->info("Error on loopback transporter is fatal.");
+      g_eventLogger->info("Node %u loopback transporter: error is fatal",
+                          ownId());
       abort();
     }
     DEBUG_FPRINTF((stderr, "(%u)FAC:reportError(%u, %d, %s)\n", ownId(), nodeId,
@@ -441,10 +442,6 @@ int TransporterFacade::start_instance(NodeId nodeId,
   assert(theOwnId == 0);
   theOwnId = nodeId;
   DEBUG_FPRINTF((stderr, "(%u)FAC:start_instance\n", ownId()));
-
-#if defined SIGPIPE && !defined _WIN32
-  (void)signal(SIGPIPE, SIG_IGN);
-#endif
 
   theTransporterRegistry = new TransporterRegistry(this, this);
   if (theTransporterRegistry == nullptr) {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2009, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -1195,6 +1195,12 @@ class binlog_cache_mngr {
   std::string m_incident;
 
  public:
+#ifndef NDEBUG
+  /// The number of times that the incident status has been set due to the
+  /// debug symbol binlog_inject_incident.
+  int m_injected_incident_count{0};
+#endif
+
   binlog_cache_mngr(ulong *ptr_binlog_stmt_cache_use_arg,
                     ulong *ptr_binlog_stmt_cache_disk_use_arg,
                     ulong *ptr_binlog_cache_use_arg,
@@ -1561,6 +1567,17 @@ int binlog_cache_data::write_event(Log_event *ev) {
   DBUG_TRACE;
 
   if (ev != nullptr) {
+    DBUG_EXECUTE_IF("binlog_inject_incident", {
+      // Set the incident status only once per session. Without this limitation,
+      // it usually gets sets first for the transaction cache and then, when
+      // writing the Incident_log_event, set again from the statement cache.
+      // When an incident occurs while writing an incident, it results in
+      // binlog_error_action, which is not our intention here.
+      if (m_cache_mngr.m_injected_incident_count == 0) {
+        set_incident();
+        ++m_cache_mngr.m_injected_incident_count;
+      }
+    });
     DBUG_EXECUTE_IF("simulate_disk_full_at_flush_pending",
                     { DBUG_SET("+d,simulate_file_write_error"); });
 
@@ -6603,6 +6620,15 @@ void MYSQL_BIN_LOG::dec_prep_xids(THD *thd) {
   }
 }
 
+void MYSQL_BIN_LOG::wait_for_prep_xids() {
+  DBUG_TRACE;
+  mysql_mutex_lock(&LOCK_xids);
+  while (get_prep_xids() > 0) {
+    mysql_cond_wait(&m_prep_xids_cond, &LOCK_xids);
+  }
+  mysql_mutex_unlock(&LOCK_xids);
+}
+
 /*
   Wrappers around new_file_impl to avoid using argument
   to control locking. The argument 1) less readable 2) breaks
@@ -6665,7 +6691,6 @@ int MYSQL_BIN_LOG::new_file_impl(
     mysql_mutex_assert_owner(&LOCK_log);
   DBUG_EXECUTE_IF("semi_sync_3-way_deadlock",
                   DEBUG_SYNC(current_thd, "before_rotate_binlog"););
-  mysql_mutex_lock(&LOCK_xids);
   /*
     We need to ensure that the number of prepared XIDs are 0.
 
@@ -6674,10 +6699,7 @@ int MYSQL_BIN_LOG::new_file_impl(
     - We keep the LOCK_log to block new transactions from being
       written to the binary log.
    */
-  while (get_prep_xids() > 0) {
-    mysql_cond_wait(&m_prep_xids_cond, &LOCK_xids);
-  }
-  mysql_mutex_unlock(&LOCK_xids);
+  wait_for_prep_xids();
 
   mysql_mutex_lock(&LOCK_index);
 

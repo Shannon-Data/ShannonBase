@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2022, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2025, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -27,6 +27,8 @@
 
 #include <gtest/gtest.h>
 
+#include <iomanip>
+
 #include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/stdx/expected_ostream.h"
 #include "mysqlrouter/utils.h"  // copy_file
@@ -49,7 +51,7 @@ static void copy_tree(const mysql_harness::Directory &from_dir,
       mysql_harness::mkdir(to.str(), mysql_harness::kStrictDirectoryPerm);
       copy_tree(from, to);
     } else {
-      mysqlrouter::copy_file(from.str(), to.str());
+      mysql_harness::copy_file(from.str(), to.str());
     }
   }
 }

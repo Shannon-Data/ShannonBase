@@ -43,21 +43,21 @@ WHERE routine_name = "foo" //
 SELECT foo(2)//
 DROP FUNCTION foo//
 
-CREATE FUNCTION JAVASC(x INTEGER) RETURNS INTEGER DETERMINISTIC
+CREATE FUNCTION JAVASCRIPT(x INTEGER) RETURNS INTEGER DETERMINISTIC
 LANGUAGE JAVASCRIPT
 AS $$
   return x-1;
 $$
 //
-SHOW CREATE FUNCTION JAVASC//
+SHOW CREATE FUNCTION JAVASCRIPT//
 --replace_column 6 <modified> 7 <created>
-SHOW FUNCTION STATUS WHERE Name = 'JAVASC'//
+SHOW FUNCTION STATUS WHERE Name = 'JAVASCRIPT'//
 SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
-SELECT JAVASC(2)//
-DROP FUNCTION JAVASC//
+SELECT JAVASCRIPT(2)//
+DROP FUNCTION JAVASCRIPT//
 
 CREATE FUNCTION foo(x INTEGER) RETURNS INTEGER DETERMINISTIC LANGUAGE PYTHON
 AS $$
@@ -542,19 +542,19 @@ WHERE routine_name = "bar" //
 CALL bar(2)//
 DROP PROCEDURE bar//
 
-CREATE PROCEDURE JAVASC(a INTEGER) DETERMINISTIC
+CREATE PROCEDURE JAVASCRIPT(a INTEGER) DETERMINISTIC
 LANGUAGE JAVASCRIPT
 AS $$ let b = a; $$ //
-SHOW CREATE procedure JAVASC//
+SHOW CREATE procedure JAVASCRIPT//
 --replace_column 6 <modified> 7 <created>
-SHOW PROCEDURE STATUS WHERE Name = 'JAVASC'//
+SHOW PROCEDURE STATUS WHERE Name = 'JAVASCRIPT'//
 SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
 --error ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
-CALL JAVASC(2)//
-DROP procedure JAVASC//
+CALL JAVASCRIPT(2)//
+DROP procedure JAVASCRIPT//
 
 CREATE PROCEDURE bar(a INTEGER) DETERMINISTIC LANGUAGE PYTHON
 AS $$ let b = a; $$ //
@@ -1569,7 +1569,7 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error 4089
+--error ER_DEFINITION_CONTAINS_INVALID_STRING
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1741,7 +1741,7 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error 4089
+--error ER_DEFINITION_CONTAINS_INVALID_STRING
 SELECT foo(2)//
 DROP FUNCTION foo//
 
@@ -1760,7 +1760,7 @@ SELECT routine_name, routine_type, data_type, routine_body,
        external_name, external_language, parameter_style, routine_definition
 FROM information_schema.routines
 WHERE routine_schema = "test" //
---error 4089
+--error ER_DEFINITION_CONTAINS_INVALID_STRING
 SELECT foo(2)//
 DROP FUNCTION foo//
 

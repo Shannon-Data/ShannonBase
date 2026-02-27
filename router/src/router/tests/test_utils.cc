@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2025, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -77,8 +77,8 @@ TEST_F(UtilsTests, copy_file) {
   for (int i = 0; i < 2000; i++) dataf << "somedata\n";
   dataf.close();
 
-  mysqlrouter::copy_file("empty.tf", "empty.tf2");
-  mysqlrouter::copy_file("data.tf", "data.tf2");
+  mysql_harness::copy_file("empty.tf", "empty.tf2");
+  mysql_harness::copy_file("data.tf", "data.tf2");
 
   try {
     EXPECT_TRUE(files_equal("empty.tf", "empty.tf2"));

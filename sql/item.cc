@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -6352,11 +6352,16 @@ Item *Item_field::replace_item_field(uchar *arg) {
 
     // The field is an outer reference, so we cannot reuse transformed query
     // block's Item_field; make a new one for this query block
+    if (info->m_outer_field != nullptr)  // have made one already, reuse it
+      return info->m_outer_field;
+
     THD *const thd = current_thd;
     Item_field *outer_field = new (thd->mem_root) Item_field(thd, info->m_item);
     if (outer_field == nullptr) return nullptr; /* purecov: inspected */
     outer_field->depended_from = info->m_trans_block;
     outer_field->context = &info->m_curr_block->context;
+    outer_field->hidden = hidden;
+    info->m_outer_field = outer_field;  // for reuse
     return outer_field;
   }
 
@@ -7661,6 +7666,10 @@ bool Item::update_null_value() {
   @param buffer Buffer, in case item needs a large one
 
   @returns false if success, true if error
+
+  If evaluation results in a NULL value, the NULL
+  value indicator is set for the item and return value is false (as for
+  a successful execution).
 */
 
 bool Item::evaluate(THD *thd, String *buffer) {
@@ -7727,10 +7736,7 @@ bool Item::evaluate(THD *thd, String *buffer) {
       break;
     }
   }
-  const bool result = thd->is_error();
-  // Convention: set NULL value indicator on error
-  if (result) null_value = true;
-  return result;
+  return thd->is_error();
 }
 
 /**
@@ -9061,23 +9067,18 @@ bool Item_view_ref::collect_item_field_or_view_ref_processor(uchar *arg) {
   if (info->is_stopped(this)) return false;
   // We collect this view ref
   // (1) If its qualifying table is in the transformed query block
-  // (2) If its underlying field's qualifying table is in the transformed
-  // query block
-  // (3) If this view ref is an outer reference dependent on the
+  // (2) If this view ref is an outer reference dependent on the
   // transformed query block
   Item *item = nullptr;
   item = (context->query_block == info->m_transformed_block)  // 1
              ? this
-             : ((real_item()->type() == Item::FIELD_ITEM &&
-                 (down_cast<Item_field *>(real_item())->context->query_block ==
-                  info->m_transformed_block))  // 2
-                    ? this->real_item()
-                    : ((depended_from == info->m_transformed_block)  // 3
-                           ? this
-                           : nullptr));
+             : ((depended_from == info->m_transformed_block)  // 2
+                    ? this
+                    : nullptr);
   bool error = false;
-  if (item != nullptr)
+  if (item != nullptr) {
     error = info->m_item_fields_or_view_refs->push_back(item);
+  }
   if (error) return true;
   info->stop_at(this);
   return false;
@@ -9106,8 +9107,12 @@ Item *Item_view_ref::replace_item_view_ref(uchar *arg) {
 
     // The is an outer reference, so we cannot reuse transformed query
     // block's Item_field; make a new one for this query block
+    if (info->m_outer_field != nullptr)  // have made one already, reuse it
+      return info->m_outer_field;
     new_field->depended_from = info->m_trans_block;
     new_field->context = &info->m_curr_block->context;
+    new_field->hidden = hidden;
+    info->m_outer_field = new_field;
     return new_field;
   }
   return this;

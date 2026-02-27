@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2024, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2025, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
@@ -88,7 +88,6 @@ const char *const native_mysql_functions[] = {
     "FROM_BASE64",
     "FROM_DAYS",
     "FROM_UNIXTIME",
-    "FROM_VECTOR",
     "GET_LOCK",
     "GREATEST",
     "GTID_SUBSET",
@@ -180,7 +179,6 @@ const char *const native_mysql_functions[] = {
     "STATEMENT_DIGEST",
     "STATEMENT_DIGEST_TEXT",
     "STRCMP",
-    "STRING_TO_VECTOR",
     "STR_TO_DATE",
     "ST_AREA",
     "ST_ASBINARY",
@@ -281,7 +279,6 @@ const char *const native_mysql_functions[] = {
     "TO_BASE64",
     "TO_DAYS",
     "TO_SECONDS",
-    "TO_VECTOR",
     "UCASE",
     "UNCOMPRESS",
     "UNCOMPRESSED_LENGTH",
@@ -293,8 +290,6 @@ const char *const native_mysql_functions[] = {
     "UUID_SHORT",
     "UUID_TO_BIN",
     "VALIDATE_PASSWORD_STRENGTH",
-    "VECTOR_DIM",
-    "VECTOR_TO_STRING",
     "VERSION",
     "WAIT_FOR_EXECUTED_GTID_SET",
     "WEEKDAY",

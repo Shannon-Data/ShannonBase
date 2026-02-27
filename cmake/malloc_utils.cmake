@@ -1,4 +1,4 @@
-# Copyright (c) 2020, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2020, 2025, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -42,10 +42,6 @@ ENDFUNCTION()
 FUNCTION(FIND_MALLOC_LIBRARY library_name)
   # Skip system tcmalloc, and build the bundled version instead.
   IF(WITH_TCMALLOC STREQUAL "bundled")
-    RETURN()
-  ENDIF()
-  # Skip JEMALLOC and build the bunlded version from bundled source code.
-  IF(WITH_JEMALLOC STREQUAL "bundled")
     RETURN()
   ENDIF()
   FIND_LIBRARY(MALLOC_LIBRARY ${library_name})

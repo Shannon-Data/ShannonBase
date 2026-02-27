@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2003, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -300,7 +300,10 @@ bool SHM_Transporter::connect_server_impl(NdbSocket &&sockfd) {
       DEBUG_FPRINTF((stderr, "(%u)setupBuffers(%u) Line:%d\n", localNodeId,
                      remoteNodeId, __LINE__));
       if (setupBuffers()) {
-        g_eventLogger->info("Shared memory not supported on this platform");
+        g_eventLogger->info(
+            "Node %u transporter to node %u: SHM not supported on this "
+            "platform; disconnecting",
+            localNodeId, remoteNodeId);
         detach_shm(false);
         break;
       }
@@ -454,7 +457,10 @@ bool SHM_Transporter::connect_client_impl(NdbSocket &&sockfd) {
       DEBUG_FPRINTF((stderr, "(%u)setupBuffers(%u) Line:%d\n", localNodeId,
                      remoteNodeId, __LINE__));
       if (setupBuffers()) {
-        g_eventLogger->info("Shared memory not supported on this platform");
+        g_eventLogger->info(
+            "Node %u transporter to node %u: SHM not supported on this "
+            "platform; disconnecting",
+            localNodeId, remoteNodeId);
         detach_shm(false);
         break;
       }

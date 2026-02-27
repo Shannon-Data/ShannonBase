@@ -1226,7 +1226,7 @@ byte *LogParser::parse_cur_update_in_place_and_apply(Rapid_load_context *context
 
   heap = mem_heap_create(256, UT_LOCATION_HERE);
 
-  ptr = row_upd_index_parse(ptr, end_ptr, heap, &update);
+  ptr = row_upd_index_parse(ptr, end_ptr, heap, &update, const_cast<dict_index_t *>(tb_index));
   if (!ptr || !page) {
     goto func_exit;
   }

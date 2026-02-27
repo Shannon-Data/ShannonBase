@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2004, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2004, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -493,6 +493,8 @@ class NdbBlob {
   int theNullFlag;
   Uint64 theLength;
   Uint64 thePos;
+  // additional properties for the operations
+  Uint32 theAnyValue;
   // errors
   // Allow update error from const methods.
   mutable NdbError theError;
@@ -555,6 +557,7 @@ class NdbBlob {
   int setHeadInlineValue(NdbOperation *anOp);
   void setHeadPartitionId(NdbOperation *anOp);
   void setPartPartitionId(NdbOperation *anOp);
+  int setAnyValue(NdbOperation *anOp) const;
 
   // Blob async tasks
   int initBlobTask(NdbTransaction::ExecType anExecType);

@@ -1,4 +1,4 @@
-/* Copyright (c) 1999, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 1999, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -19,9 +19,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
-
-   Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/sql_parse.h"
 
@@ -2460,15 +2458,17 @@ done:
 
   thd->rpl_thd_ctx.session_gtids_ctx().notify_after_response_packet(thd);
 
-  if (!thd->is_error() && !thd->killed)
-    mysql_event_tracking_general_notify(
-        thd, AUDIT_EVENT(EVENT_TRACKING_GENERAL_RESULT), 0, nullptr, 0);
-
   const std::string &cn = Command_names::str_global(command);
-  mysql_event_tracking_general_notify(
-      thd, AUDIT_EVENT(EVENT_TRACKING_GENERAL_STATUS),
-      thd->get_stmt_da()->is_error() ? thd->get_stmt_da()->mysql_errno() : 0,
-      cn.c_str(), cn.length());
+  if (command != COM_STMT_EXECUTE) {
+    if (!thd->is_error() && !thd->killed)
+      mysql_event_tracking_general_notify(
+          thd, AUDIT_EVENT(EVENT_TRACKING_GENERAL_RESULT), 0, nullptr, 0);
+
+    mysql_event_tracking_general_notify(
+        thd, AUDIT_EVENT(EVENT_TRACKING_GENERAL_STATUS),
+        thd->get_stmt_da()->is_error() ? thd->get_stmt_da()->mysql_errno() : 0,
+        cn.c_str(), cn.length());
+  }
 
   /* command_end is informational only. The plugin cannot abort
      execution of the command at this point. */
@@ -4954,6 +4954,18 @@ finish:
       thd->killed = THD::NOT_KILLED;
       thd->reset_query_for_display();
     }
+  }
+
+  if (thd->get_command() == COM_STMT_EXECUTE) {
+    if (!thd->is_error() && !thd->killed)
+      mysql_event_tracking_general_notify(
+          thd, AUDIT_EVENT(EVENT_TRACKING_GENERAL_RESULT), 0, nullptr, 0);
+
+    const std::string &cn = Command_names::str_global(thd->get_command());
+    mysql_event_tracking_general_notify(
+        thd, AUDIT_EVENT(EVENT_TRACKING_GENERAL_STATUS),
+        thd->get_stmt_da()->is_error() ? thd->get_stmt_da()->mysql_errno() : 0,
+        cn.c_str(), cn.length());
   }
 
   lex->cleanup(true);

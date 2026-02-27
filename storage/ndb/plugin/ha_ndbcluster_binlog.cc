@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2006, 2024, Oracle and/or its affiliates.
+  Copyright (c) 2006, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -125,6 +125,9 @@ void ndb_index_stat_restart();
 
 extern Ndb_cluster_connection *g_ndb_cluster_connection;
 
+/* Number of schema distribution protocol participants */
+static std::atomic_int g_subscriber_count{0};
+
 /*
   Timeout for syncing schema events between
   mysql servers, and between mysql server and the binlog
@@ -224,6 +227,10 @@ static int ndbcluster_binlog_inited = 0;
 static ulonglong ndb_latest_applied_binlog_epoch = 0;
 static ulonglong ndb_latest_handled_binlog_epoch = 0;
 static ulonglong ndb_latest_received_binlog_epoch = 0;
+
+#ifndef NDEBUG
+static std::unordered_map<std::string, bool> dbg_table_map_tables;
+#endif
 
 /*
   @brief Wait until the last committed epoch from the session enters the
@@ -359,8 +366,9 @@ static void ndbcluster_binlog_index_purge_wait(THD *thd) {
   assert(!ndb_thd_is_binlog_thread(thd));
 
   // Wait until purger has removed all files requested by this session
-  ndb_log_info("Waiting for purge to complete");
+  ndb_log_info("Waiting for purge");
   ndb_binlog_purger.wait_purge_completed_for_session(thd);
+  ndb_log_info("Done waiting for purge");
 }
 
 /*
@@ -1323,6 +1331,16 @@ class Ndb_schema_dist_data {
     return subscriber_bitmap;
   }
 
+  void publish_subscriber_count(int count) const {
+    g_subscriber_count.store(count);
+  }
+
+  void publish_subscriber_count() const {
+    std::unordered_set<uint32> subscribers;
+    get_subscriber_list(subscribers);
+    publish_subscriber_count(subscribers.size());
+  }
+
   // Holds the new key for a table to be renamed
   struct NDB_SHARE_KEY *m_prepared_rename_key;
 
@@ -1361,6 +1379,7 @@ class Ndb_schema_dist_data {
       delete subscriber_bitmap;
     }
     m_subscriber_bitmaps.clear();
+    publish_subscriber_count(0);
 
     // Release the prepared rename key, it's very unlikely
     // that the key is still around here, but just in case
@@ -1388,6 +1407,7 @@ class Ndb_schema_dist_data {
 
       ndb_log_verbose(19, "Subscribers[%d]: %s", data_node_id,
                       subscribers->to_string().c_str());
+      publish_subscriber_count();
     }
   }
 
@@ -1402,6 +1422,7 @@ class Ndb_schema_dist_data {
 
       ndb_log_verbose(19, "Subscribers[%d]: %s", data_node_id,
                       subscribers->to_string().c_str());
+      publish_subscriber_count();
     }
   }
 
@@ -1416,6 +1437,7 @@ class Ndb_schema_dist_data {
 
       ndb_log_verbose(19, "Subscribers[%d]: %s", data_node_id,
                       subscribers->to_string().c_str());
+      publish_subscriber_count();
     }
   }
 
@@ -1425,6 +1447,7 @@ class Ndb_schema_dist_data {
       Node_subscribers *subscribers = it.second;
       subscribers->clear_all();
     }
+    publish_subscriber_count(0);
   }
 
   /**
@@ -2317,6 +2340,13 @@ class Ndb_schema_event_handler {
       return false;
     }
     dd_client.commit();
+
+    /**
+     * table_share may cache old schema, clear it out with atomicity
+     * wrt DD changes via MDL Exclusive lock
+     */
+    ndb_tdc_close_cached_table(m_thd, schema_name, table_name);
+
     return true;
   }
 
@@ -6184,8 +6214,9 @@ int Ndb_binlog_thread::handle_data_event(const NdbEventOperation *pOp,
       read_op = true;
       anyValue = 0;
     } else {
-      log_warning("unknown value for binlog signalling 0x%X, event not logged",
-                  anyValue);
+      log_warning(
+          "unknown value for binlog signalling 0x%X (%u), event not logged",
+          anyValue, anyValue);
       return 0;
     }
   }
@@ -6397,6 +6428,14 @@ int Ndb_binlog_thread::handle_data_event(const NdbEventOperation *pOp,
           log_error("Could not log write row, error: %d", error);
           return -1;
         }
+
+        DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+          // Mark table in table maps as having a row, crash if table not found
+          // as this indicates row without table map
+          std::string fullname(std::string(table->s->db.str) + "." +
+                               table->s->table_name.str);
+          dbg_table_map_tables.at(fullname) = true;
+        });
       }
       break;
     case NDBEVENT::TE_DELETE:
@@ -6442,6 +6481,14 @@ int Ndb_binlog_thread::handle_data_event(const NdbEventOperation *pOp,
           log_error("Could not log delete row, error: %d", error);
           return -1;
         }
+
+        DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+          // Mark table in table maps as having a row, crash if table not
+          // found as this indicates row without table map
+          std::string fullname(std::string(table->s->db.str) + "." +
+                               table->s->table_name.str);
+          dbg_table_map_tables.at(fullname) = true;
+        });
       }
       break;
     case NDBEVENT::TE_UPDATE:
@@ -6519,6 +6566,14 @@ int Ndb_binlog_thread::handle_data_event(const NdbEventOperation *pOp,
             return -1;
           }
         }
+
+        DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+          // Mark table in table maps as having a row, crash if table not
+          // found as this indicates row without table map
+          std::string fullname(std::string(table->s->db.str) + "." +
+                               table->s->table_name.str);
+          dbg_table_map_tables.at(fullname) = true;
+        });
       }
       break;
     default:
@@ -6747,6 +6802,17 @@ bool Ndb_binlog_thread::handle_events_for_epoch(THD *thd, injector *inj,
     i_pOp = i_ndb->nextEvent2();
   } while (i_pOp && i_pOp->getEpoch() == current_epoch);
 
+  DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+    // Make sure that all tables in table maps have got rows
+    for (const auto &el : dbg_table_map_tables) {
+      if (el.second == false) {
+        ndb_log_error("Found table in table_maps without row data!, name: %s ",
+                      el.first.c_str());
+        ndbcluster::ndbrequire(el.second == true);
+      }
+    }
+  });
+
   /*
     NOTE: i_pOp is now referring to an event in the next epoch
     or is == NULL
@@ -6927,6 +6993,13 @@ bool Ndb_binlog_thread::inject_apply_status_write(injector_transaction &trans,
 
   assert(ret == 0);
 
+  DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+    // Directly mark table in table maps and having a row
+    const std::string fullname(std::string(apply_status_table->s->db.str) +
+                               "." + apply_status_table->s->table_name.str);
+    dbg_table_map_tables[fullname] = true;
+  });
+
   memcpy(apply_status_table->record[0], sav_buf, sav_len);
   return true;
 }
@@ -7094,6 +7167,10 @@ void Ndb_binlog_thread::commit_trans(injector_transaction &trans, THD *thd,
 void Ndb_binlog_thread::inject_table_map(injector_transaction &trans,
                                          Ndb *ndb) const {
   DBUG_TRACE;
+
+  DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps",
+                  { dbg_table_map_tables.clear(); });
+
   Uint32 iter = 0;
   const NdbEventOperation *gci_op = nullptr;
   Uint32 event_types = 0;
@@ -7154,6 +7231,13 @@ void Ndb_binlog_thread::inject_table_map(injector_transaction &trans,
     injector::transaction::table tbl(table, true);
     int ret = trans.use_table(::server_id, tbl);
     ndbcluster::ndbrequire(ret == 0);
+
+    DBUG_EXECUTE_IF("ndb_binlog_verify_table_maps", {
+      // Mark table as being in table map, haven't seen any row(s) yet
+      const std::string name(std::string(table->s->db.str) + "." +
+                             table->s->table_name.str);
+      dbg_table_map_tables[name] = false;
+    });
   }
 }
 
@@ -7719,6 +7803,9 @@ restart_cluster_failure:
 
     release_thd_resources(thd);
 
+    // Check that "microsecond timestamps used in query" has been reset
+    assert(thd->query_start_usec_used == false);
+
     if (current_epoch > ndb_latest_handled_binlog_epoch) {
       Mutex_guard injector_mutex_g(injector_data_mutex);
       ndb_latest_handled_binlog_epoch = current_epoch;
@@ -7852,6 +7939,14 @@ err:
   log_info("Stopped");
 
   DBUG_PRINT("exit", ("ndb_binlog_thread"));
+}
+
+int ndbcluster_binlog_get_schema_participant_count(THD *, SHOW_VAR *var,
+                                                   char *buf) {
+  var->type = SHOW_INT;
+  var->value = buf;
+  *(pointer_cast<int *>(buf)) = g_subscriber_count.load();
+  return 0;
 }
 
 /*

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 Copyright (c) 2008, 2009 Google Inc.
 Copyright (c) 2009, Percona Inc.
 Copyright (c) 2012, Facebook Inc.
@@ -818,6 +818,8 @@ static PSI_thread_info all_innodb_threads[] = {
                    PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(page_archiver_thread, "ib_page_arch", PSI_FLAG_SINGLETON, 0,
                    PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(buf_pool_create_thread, "ib_buf_create", PSI_FLAG_SINGLETON,
+                   0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(buf_dump_thread, "ib_buf_dump", PSI_FLAG_SINGLETON, 0,
                    PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(clone_ddl_thread, "ib_clone_ddl", PSI_FLAG_SINGLETON, 0,
@@ -5102,6 +5104,7 @@ constexpr PSI_metric_info_v1 simple(const char *name, const char *unit,
 // description of the matching counters in srv/srv0mon.cc
 
 // clang-format off
+#ifdef HAVE_PSI_METRICS_INTERFACE
 static PSI_metric_info_v1 inno_metrics[] = {
     simple("dblwr_pages_written",
      "",
@@ -5403,6 +5406,7 @@ static PSI_meter_info_v1 inno_meter[] = {
      buffer_metrics, std::size(buffer_metrics)},
     {"mysql.inno.data", "MySql InnoDB data metrics", 10, 0, 0, data_metrics,
      std::size(data_metrics)}};
+#endif /* HAVE_PSI_METRICS_INTERFACE */
 
 /** Initialize the InnoDB storage engine plugin.
 @param[in,out]  p       InnoDB handlerton
@@ -5674,16 +5678,18 @@ static int innodb_init(void *p) {
       Encryption::check_keyring() == false) {
     return innodb_init_abort();
   }
-
+#ifdef HAVE_PSI_METRICS_INTERFACE
   mysql_meter_register(inno_meter, std::size(inno_meter));
-
+#endif /* HAVE_PSI_METRICS_INTERFACE */
   return 0;
 }
 
 /** De initialize the InnoDB storage engine plugin. */
 static int innodb_deinit(MYSQL_PLUGIN plugin_info [[maybe_unused]]) {
   release_plugin_services();
+#ifdef HAVE_PSI_METRICS_INTERFACE
   mysql_meter_unregister(inno_meter, std::size(inno_meter));
+#endif /* HAVE_PSI_METRICS_INTERFACE */
   return 0;
 }
 
@@ -9553,10 +9559,11 @@ static void innobase_get_multi_value_and_diff(
 }
 
 /** Checks which fields have changed in a row and stores information
- of them to an update vector.
+ of them to an update vector for the table's clustered index.
  @return DB_SUCCESS or error code */
 static dberr_t calc_row_difference(
-    upd_t *uvect,             /*!< in/out: update vector */
+    upd_t *uvect,             /*!< in/out: update vector for the
+                              clustered index */
     const uchar *old_row,     /*!< in: old row in MySQL format */
     uchar *new_row,           /*!< in: new row in MySQL format */
     TABLE *table,             /*!< in: table in MySQL data
@@ -9939,7 +9946,7 @@ static dberr_t calc_row_difference(
       if (changes_fts_column && !changes_fts_doc_col) {
         ib::warn(ER_IB_MSG_559) << "A new Doc ID must be supplied"
                                    " while updating FTS indexed columns.";
-        return (DB_FTS_INVALID_DOCID);
+        return DB_FTS_INVALID_DOCID;
       }
 
       /* Doc ID must monotonically increase */
@@ -9949,7 +9956,7 @@ static dberr_t calc_row_difference(
                                 << innodb_table->fts->cache->next_doc_id - 1
                                 << " for table " << innodb_table->name;
 
-        return (DB_FTS_INVALID_DOCID);
+        return DB_FTS_INVALID_DOCID;
       } else if ((doc_id - prebuilt->table->fts->cache->next_doc_id) >=
                  FTS_DOC_ID_MAX_STEP) {
         ib::warn(ER_IB_MSG_561)
@@ -9988,8 +9995,8 @@ static dberr_t calc_row_difference(
 
   ut_a(buf <= (byte *)original_upd_buff + buff_len);
 
-  ut_ad(uvect->validate());
-  return (DB_SUCCESS);
+  ut_d(uvect->validate_for_index(clust_index));
+  return DB_SUCCESS;
 }
 
 /**
@@ -14540,22 +14547,28 @@ int innobase_basic_ddl::delete_impl(THD *thd, const char *name,
 
       file_per_table = dict_table_is_file_per_table(tab);
       dd_table_close(tab, thd, nullptr, false);
+    } else if (err == 4) {
+      /* Could not open existing table. Definition may contain bad SQL. */
+      error = DB_ERROR;
     }
   }
 
-  error = row_drop_table_for_mysql(norm_name, trx, true, handler);
+  /* Don't drop what we can't open; otherwise, we'll hit asserts later. */
+  if ((error == DB_SUCCESS) &&
+      ((error = row_drop_table_for_mysql(norm_name, trx, true, handler)) ==
+       DB_SUCCESS)) {
+    if (handler != nullptr) {
+      priv->unregister_table_handler(norm_name);
+    }
 
-  if (handler != nullptr && error == DB_SUCCESS) {
-    priv->unregister_table_handler(norm_name);
-  }
+    if (file_per_table) {
+      dd::Object_id dd_space_id = dd_first_index(dd_tab)->tablespace_id();
+      dd::cache::Dictionary_client *client = dd::get_dd_client(thd);
+      dd::cache::Dictionary_client::Auto_releaser releaser(client);
 
-  if (error == DB_SUCCESS && file_per_table) {
-    dd::Object_id dd_space_id = dd_first_index(dd_tab)->tablespace_id();
-    dd::cache::Dictionary_client *client = dd::get_dd_client(thd);
-    dd::cache::Dictionary_client::Auto_releaser releaser(client);
-
-    if (dd_drop_tablespace(client, dd_space_id)) {
-      error = DB_ERROR;
+      if (dd_drop_tablespace(client, dd_space_id)) {
+        error = DB_ERROR;
+      }
     }
   }
 
@@ -18515,6 +18528,16 @@ int ha_innobase::check(THD *thd,                /*!< in: user thread handle */
     /* Scan this index. */
     if (dict_index_is_spatial(index)) {
       ret = row_count_rtree_recs(m_prebuilt, &n_rows, &n_dups);
+      if ((check_opt->flags & T_EXTEND) && (ret == DB_SUCCESS) &&
+          !(n_rows < n_rows_in_table || n_dups < n_rows - n_rows_in_table)) {
+        /* For CHECK TABLE EXTENDED; we also want to make sure that MBR stored
+        in SPATIAL Index is matching the MBR of geometry stored in Clustered
+        record. */
+        m_prebuilt->need_to_access_clustered = true;
+        n_rows = 0;
+        n_dups = 0;
+        ret = row_count_rtree_recs(m_prebuilt, &n_rows, &n_dups);
+      }
     } else {
       ret = row_scan_index_for_mysql(m_prebuilt, index, max_threads, true,
                                      &n_rows);
@@ -20799,11 +20822,10 @@ in status code only if no other resize is in progress */
 
     if (innodb_buffer_pool_size_validate(thd, requested_buffer_pool_size,
                                          aligned_buffer_pool_size)) {
-      os_event_set(srv_buf_resize_event);
-
       ib::info(ER_IB_MSG_573)
           << export_vars.innodb_buffer_pool_resize_status
           << " (new size: " << aligned_buffer_pool_size << " bytes)";
+      os_event_set(srv_buf_resize_event);
 
       *static_cast<longlong *>(var_ptr) = aligned_buffer_pool_size;
     } else {
@@ -23212,7 +23234,8 @@ static MYSQL_SYSVAR_ENUM(
 #if defined UNIV_DEBUG || defined UNIV_IBUF_DEBUG
 static MYSQL_SYSVAR_UINT(
     change_buffering_debug, ibuf_debug, PLUGIN_VAR_RQCMDARG,
-    "Debug flags for InnoDB change buffering (0=none, 2=crash at merge)",
+    "Debug flags for InnoDB change buffering (0=none, 1= evict the blocks from "
+    "the buffer pool as much possible,  2=crash at merge)",
     nullptr, nullptr, 0, 0, 2, 0);
 
 static MYSQL_SYSVAR_BOOL(disable_background_merge,
@@ -23793,53 +23816,25 @@ void innobase_rename_vc_templ(dict_table_t *table) {
   table->vc_templ->tb_name.assign(table_name);
 }
 
-dfield_t *innobase_get_field_from_update_vector(dict_foreign_t *foreign,
-                                                upd_t *update,
-                                                uint32_t col_no) {
-  dict_table_t *parent_table = foreign->referenced_table;
-  dict_index_t *parent_index = foreign->referenced_index;
-  uint32_t parent_field_no;
-  uint32_t parent_col_no;
-  uint32_t child_col_no;
-
-  for (uint32_t i = 0; i < foreign->n_fields; i++) {
-    child_col_no = foreign->foreign_index->get_col_no(i);
-    if (child_col_no != col_no) {
-      continue;
-    }
-    parent_col_no = parent_index->get_col_no(i);
-    parent_field_no = dict_table_get_nth_col_pos(parent_table, parent_col_no);
-    for (uint32_t j = 0; j < update->n_fields; j++) {
-      upd_field_t *parent_ufield = &update->fields[j];
-      if (parent_ufield->field_no == parent_field_no) {
-        return (&parent_ufield->new_val);
-      }
-    }
-  }
-
-  return (nullptr);
+/** Get the updated field value from an update vector for the given column
+number.
+@param[in]      update   the update vector for the table's clustered index
+@param[in]      col_no   the number of the non-virtual column in the table
+@return the field's new value if it's updated, otherwise nullptr */
+static const dfield_t *innobase_get_field_from_update_vector(
+    const upd_t *update, uint32_t col_no) {
+  const dict_index_t *const clustered_index = update->table->first_index();
+  const auto index_field_pos = clustered_index->get_col_pos(col_no);
+  const upd_field_t *const upd_field =
+      upd_get_field_by_field_no(update, index_field_pos, false);
+  return upd_field ? &upd_field->new_val : nullptr;
 }
 
-/** Get the computed value by supplying the base column values.
-@param[in,out]  row             the data row
-@param[in]      col             virtual column
-@param[in]      index           index on the virtual column
-@param[in,out]  local_heap      heap memory for processing large data etc.
-@param[in,out]  heap            memory heap that copies the actual index row
-@param[in]      ifield          index field
-@param[in]      thd             MySQL thread handle
-@param[in,out]  mysql_table     mysql table object
-@param[in]      old_table       during ALTER TABLE, this is the old table
-                                or NULL.
-@param[in]      parent_update   update vector for the parent row
-@param[in]      foreign         foreign key information
-@return the field filled with computed value, or NULL if just want
-to store the value in passed in "my_rec" */
 dfield_t *innobase_get_computed_value(
-    const dtuple_t *row, const dict_v_col_t *col, const dict_index_t *index,
-    mem_heap_t **local_heap, mem_heap_t *heap, const dict_field_t *ifield,
-    THD *thd, TABLE *mysql_table, const dict_table_t *old_table,
-    upd_t *parent_update, dict_foreign_t *foreign) {
+    const dtuple_t *row, const dict_v_col_t *col, const dict_table_t *table,
+    mem_heap_t **local_heap, mem_heap_t *heap, THD *thd, TABLE *mysql_table,
+    const dict_field_t *ifield, const dict_table_t *old_table,
+    upd_t *row_update) {
   byte rec_buf1[REC_VERSION_56_MAX_INDEX_COL_LEN];
   byte rec_buf2[REC_VERSION_56_MAX_INDEX_COL_LEN];
   byte *mysql_rec;
@@ -23849,36 +23844,27 @@ dfield_t *innobase_get_computed_value(
   ulong mv_length = 0;
   const char *mv_data_ptr = nullptr;
 
-  const page_size_t page_size = (old_table == nullptr)
-                                    ? dict_table_page_size(index->table)
-                                    : dict_table_page_size(old_table);
-
-  const dict_index_t *clust_index = nullptr;
-  if (old_table == nullptr) {
-    clust_index = index->table->first_index();
-  } else {
-    clust_index = old_table->first_index();
-  }
+  /* table definition to use for externally stored fields */
+  const dict_table_t *const ext_src_table = (old_table ? old_table : table);
+  const page_size_t page_size = dict_table_page_size(ext_src_table);
 
   ulint ret = 0;
 
-  ut_ad(index->table->vc_templ);
+  ut_ad(table->vc_templ);
   ut_ad(thd != nullptr);
 
   const mysql_row_templ_t *vctempl =
-      index->table->vc_templ
-          ->vtempl[index->table->vc_templ->n_col + col->v_pos];
+      table->vc_templ->vtempl[table->vc_templ->n_col + col->v_pos];
 
-  if (!heap ||
-      index->table->vc_templ->rec_len >= REC_VERSION_56_MAX_INDEX_COL_LEN) {
+  if (!heap || table->vc_templ->rec_len >= REC_VERSION_56_MAX_INDEX_COL_LEN) {
     if (*local_heap == nullptr) {
       *local_heap = mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE);
     }
 
     mysql_rec = static_cast<byte *>(
-        mem_heap_alloc(*local_heap, index->table->vc_templ->rec_len));
+        mem_heap_alloc(*local_heap, table->vc_templ->rec_len));
     buf = static_cast<byte *>(
-        mem_heap_alloc(*local_heap, index->table->vc_templ->rec_len));
+        mem_heap_alloc(*local_heap, table->vc_templ->rec_len));
   } else {
     mysql_rec = rec_buf1;
     buf = rec_buf2;
@@ -23888,12 +23874,11 @@ dfield_t *innobase_get_computed_value(
     dict_col_t *base_col = col->base_col[i];
     const dfield_t *row_field = nullptr;
     uint32_t col_no = base_col->ind;
-    const mysql_row_templ_t *templ = index->table->vc_templ->vtempl[col_no];
+    const mysql_row_templ_t *const templ = table->vc_templ->vtempl[col_no];
     const byte *data;
 
-    if (parent_update != nullptr) {
-      row_field =
-          innobase_get_field_from_update_vector(foreign, parent_update, col_no);
+    if (row_update != nullptr) {
+      row_field = innobase_get_field_from_update_vector(row_update, col_no);
     }
 
     if (row_field == nullptr) {
@@ -23909,20 +23894,20 @@ dfield_t *innobase_get_computed_value(
       }
 
       data = lob::btr_copy_externally_stored_field(
-          thd_to_trx(thd), clust_index, &len, nullptr, data, page_size,
-          dfield_get_len(row_field), false, *local_heap);
+          thd_to_trx(thd), ext_src_table->first_index(), &len, nullptr, data,
+          page_size, dfield_get_len(row_field), false, *local_heap);
     }
 
     if (len == UNIV_SQL_NULL) {
       mysql_rec[templ->mysql_null_byte_offset] |=
           (byte)templ->mysql_null_bit_mask;
       memcpy(mysql_rec + templ->mysql_col_offset,
-             static_cast<const byte *>(index->table->vc_templ->default_rec +
+             static_cast<const byte *>(table->vc_templ->default_rec +
                                        templ->mysql_col_offset),
              templ->mysql_col_len);
     } else {
       row_sel_field_store_in_mysql_format(
-          mysql_rec + templ->mysql_col_offset, templ, index,
+          mysql_rec + templ->mysql_col_offset, templ, table->first_index(),
           templ->clust_rec_field_no, (const byte *)data, len, ULINT_UNDEFINED);
 
       if (templ->mysql_null_bit_mask) {
@@ -23957,7 +23942,7 @@ dfield_t *innobase_get_computed_value(
         only 1 byte, other BLOBs won't be affected */
         max_len = 255;
       } else {
-        max_len = DICT_MAX_FIELD_LEN_BY_FORMAT(index->table) + 1;
+        max_len = DICT_MAX_FIELD_LEN_BY_FORMAT(table) + 1;
       }
 
       byte *blob_mem = static_cast<byte *>(mem_heap_alloc(heap, max_len));
@@ -23967,8 +23952,8 @@ dfield_t *innobase_get_computed_value(
     }
 
     /* open a temporary table handle */
-    mysql_table = tblhdl.open(thd, index->table->vc_templ->db_name.c_str(),
-                              index->table->vc_templ->tb_name.c_str());
+    mysql_table = tblhdl.open(thd, table->vc_templ->db_name.c_str(),
+                              table->vc_templ->tb_name.c_str());
   }
   if (mysql_table) {
     ret = handler::my_eval_gcolumn_expr(
@@ -24005,8 +23990,8 @@ dfield_t *innobase_get_computed_value(
     json_binary::Value v(json_binary::parse_binary(mv_data_ptr, mv_length));
     multi_value_data *value = nullptr;
 
-    bool succ = innobase_store_multi_value(
-        v, value, fld, field, dict_table_is_comp(index->table), heap);
+    bool succ = innobase_store_multi_value(v, value, fld, field,
+                                           dict_table_is_comp(table), heap);
     if (!succ) {
       ut_error;
     }
@@ -24015,7 +24000,7 @@ dfield_t *innobase_get_computed_value(
   } else {
     row_mysql_store_col_in_innobase_format(
         field, buf, true, mysql_rec + vctempl->mysql_col_offset,
-        vctempl->mysql_col_len, dict_table_is_comp(index->table));
+        vctempl->mysql_col_len, dict_table_is_comp(table));
   }
   field->type.prtype |= DATA_VIRTUAL;
 

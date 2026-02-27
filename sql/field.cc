@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -85,7 +85,7 @@
 #include "sql/system_variables.h"
 #include "sql/transaction_info.h"
 #include "sql/tztime.h"  // Time_zone
-#include "sql/vector_conversion.h"  // get_dimension
+#include "sql_string.h"  // convert_to_printable
 #include "string_with_len.h"
 #include "template_utils.h"  // pointer_cast
 #include "typelib.h"
@@ -123,7 +123,6 @@ uchar Field::dummy_null_buffer = ' ';
 #define FIELDTYPE_TEAR_FROM (MYSQL_TYPE_BIT + 1)
 #define FIELDTYPE_TEAR_TO (242 - 1)
 #define FIELDTYPE_NUM (FIELDTYPE_TEAR_FROM + (255 - FIELDTYPE_TEAR_TO))
-static_assert(FIELDTYPE_NUM == 31, "FIELDTYPE_NUM expected as 31");
 
 namespace {
 /**
@@ -2409,7 +2408,7 @@ type_conversion_status Field_decimal::store(const char *from_arg, size_t len,
   if (cs->mbmaxlen > 1) {
     uint dummy_errors;
     tmp.copy(from_arg, len, cs, &my_charset_bin, &dummy_errors);
-    from = (uchar *)tmp.ptr();
+    from = pointer_cast<uchar *>(tmp.ptr());
     len = tmp.length();
   }
 
@@ -7308,10 +7307,12 @@ type_conversion_status Field_vector::store(const char *from, size_t length,
     my_error(ER_DATA_INCOMPATIBLE_WITH_VECTOR, MYF(0), "string", length);
     return TYPE_ERR_BAD_VALUE;
   }
+
   if (dimensions > get_max_dimensions()) {
     set_warning(Sql_condition::SL_WARNING, ER_DATA_TOO_LONG, 1);
     return TYPE_WARN_TRUNCATED;
   }
+
   /* Check for NAN or INF value in the vector. */
   for (uint32 i = 0; i < dimensions; i++) {
     float to_store = 0;
@@ -7321,6 +7322,7 @@ type_conversion_status Field_vector::store(const char *from, size_t length,
       return TYPE_ERR_BAD_VALUE;
     }
   }
+
 #ifdef WORDS_BIGENDIAN
   if (value.alloc(length)) {
     reset();
@@ -7333,11 +7335,13 @@ type_conversion_status Field_vector::store(const char *from, size_t length,
   }
   from = value.ptr();
 #endif
+
   return Field_blob::store(from, length, cs);
 }
 
 String *Field_vector::val_str(String *, String *val_ptr) const {
   ASSERT_COLUMN_MARKED_FOR_READ;
+
   const char *blob = pointer_cast<const char *>(get_blob_data());
   if (blob == nullptr) {
     val_ptr->set("", 0, charset());  // A bit safer than ->length(0)
@@ -7346,9 +7350,10 @@ String *Field_vector::val_str(String *, String *val_ptr) const {
 #ifdef WORDS_BIGENDIAN
     val_ptr->alloc(length);
     uint32 dimensions = get_dimensions(length, Field_vector::precision);
-    float *to_store = (float *)(val_ptr->ptr());
+    float *to_store = pointer_cast<float *>(val_ptr->ptr());
     for (uint32 i = 0; i < dimensions; i++) {
-      to_store[i] = float4get((const uchar *)(blob + i * sizeof(float)));
+      to_store[i] =
+          float4get(pointer_cast<const uchar *>(blob + i * sizeof(float)));
     }
     val_ptr->length(length);
 #else

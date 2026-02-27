@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2025, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -44,6 +44,9 @@
 #include <sys/types.h>
 #include <atomic>
 #include <bitset>
+#include <concepts>    // invocable
+#include <functional>  // function
+#include <list>        // list
 #include <memory>
 #include <new>
 #include <stack>
@@ -85,6 +88,7 @@
 #include "mysqld_error.h"
 #include "pfs_thread_provider.h"
 #include "prealloced_array.h"
+#include "scope_guard.h"                // Scope_guard
 #include "sql/auth/sql_security_ctx.h"  // Security_context
 #include "sql/current_thd.h"
 #include "sql/dd/string_type.h"      // dd::string_type
@@ -1111,6 +1115,17 @@ class THD : public MDL_context_owner,
       m_secondary_engine_statement_context;
 
  public:
+  /* Store a thread safe copy of protocol properties. */
+  enum class cached_properties : int {
+    NONE = 0,         // No properties
+    IS_ALIVE = 1,     // protocol->is_connection_alive()
+    RW_STATUS = 2,    // protocol->get_rw_status()
+    LAST = 4,         // Next unused power of 2.
+    ALL = (LAST - 1)  // Mask selecting all properties.
+  };
+  void store_cached_properties(
+      cached_properties prop_mask = cached_properties::ALL);
+
   /* Used to execute base64 coded binlog events in MySQL server */
   Relay_log_info *rli_fake;
   /* Slave applier execution context */
@@ -1325,12 +1340,13 @@ class THD : public MDL_context_owner,
   mysql_mutex_t LOCK_query_plan;
 
   /**
-    Keep a cached value saying whether the connection is alive. Update when
+    Keep cached values of "connection alive" and "rw status". Update when
     pushing, popping or getting the protocol. Used by
     information_schema.processlist to avoid locking mutexes that might
     affect performance.
   */
   std::atomic<bool> m_cached_is_connection_alive;
+  std::atomic<uint> m_cached_rw_status;
 
  public:
   /// Locks the query plan of this THD
@@ -3316,6 +3332,9 @@ class THD : public MDL_context_owner,
   /** Return false if connection to client is broken. */
   bool is_connected(bool use_cached_connection_alive = false) final;
 
+  /** Return the cached protocol rw status. */
+  uint get_protocol_rw_status();
+
   /**
     Mark the current error as fatal. Warning: this does not
     set any error, it sets a property of the error, so must be
@@ -3974,6 +3993,32 @@ class THD : public MDL_context_owner,
     server). When this flag is set, a call to gtid_rollback() will do nothing.
   */
   bool skip_gtid_rollback;
+
+ private:
+  /// Callback functions that determine if GTID rollback shall be skipped.
+  std::list<std::function<bool(const THD &)>> m_skip_gtid_rollback_checkers;
+
+ public:
+  /// Invoke the callback functions that determine if GTID rollback shall be
+  /// skipped, and return true as soon as one of them returns true; otherwise
+  /// return false.
+  bool shall_skip_gtid_rollback() const {
+    for (const auto &func : m_skip_gtid_rollback_checkers)
+      if (func(*this)) return true;
+    return false;
+  }
+
+  /// Register a callback function that will determine if a subsequent GTID
+  /// rollback shall be skipped. Returns a (moveable, but not copyable) object
+  /// whose destructor will will unregister the callback.
+  [[nodiscard]] auto register_skip_gtid_rollback_checker(
+      const std::invocable<const THD &> auto &shall_skip) {
+    m_skip_gtid_rollback_checkers.emplace_back(shall_skip);
+    auto it = std::prev(m_skip_gtid_rollback_checkers.end());
+    return Scope_guard{
+        [this, it] { this->m_skip_gtid_rollback_checkers.erase(it); }};
+  }
+
   /*
     There are some statements (like DROP DATABASE that fails on rmdir
     and gets rewritten to multiple DROP TABLE statements) that may
@@ -4877,6 +4922,31 @@ class THD : public MDL_context_owner,
   /// Flag indicating whether this session incremented the number of sessions
   /// with GTID_NEXT set to AUTOMATIC:tag
   bool has_incremented_gtid_automatic_count;
+
+  /// Increment the owned temptable counter. This is used to find leaked
+  /// temptable handles during close_connection calls
+  void increment_temptable_count() { ++m_opened_temptable_count; }
+  /// Decrement the owned temptable counter.
+  void decrement_temptable_count() { --m_opened_temptable_count; }
+  /// Return currently owned temptable count.
+  size_t get_temptable_count() const { return m_opened_temptable_count; }
+
+ private:
+  /** Each THD can open multiple temptables, we create these temptable objects
+    in the temptable engine. These objects have their lifetime controlled with
+    create and delete_table calls in the temptable handler. The sql layer is
+    responsible for calling the create and delete_table functions. We increment
+    this counter in create, and decrement it in delete_table. This allows us to
+    detect any situation where we call close_connection which releases the
+    underlying memory in the temptable engine, before all temptable objects
+    have been deleted. This way we can react and clean up any temptable objects
+    before we free the underlying memory. So we can think of the THD as owning
+    multiple temptable objects in the temptable engine, and we tie the lifetime
+    of these objects to the lifetime of the THD. In normal operation they
+    should be deleted before the close_connection call but this enforces
+    defined behaviour when they aren't.
+  */
+  size_t m_opened_temptable_count{};
 };
 
 /**

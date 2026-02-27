@@ -1,4 +1,4 @@
-# Copyright (c) 2018, 2024, Oracle and/or its affiliates.
+# Copyright (c) 2018, 2025, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
@@ -204,7 +204,6 @@ MYSQL_ADD_EXECUTABLE(mysqlrouter_passwd
   router_utils
   http_auth_backend_lib
   )
-ADD_INSTALL_RPATH(mysqlrouter_passwd "${ROUTER_INSTALL_RPATH}")
 
 INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR}/src/harness/include/)
 INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR}/src/router/include/)
