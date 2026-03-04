@@ -150,22 +150,6 @@ std::string LocalAgg::ToString(int indent) const {
   return pad + "→ Local Aggregate";
 }
 
-AccessPath *GlobalAgg::ToAccessPath(THD *thd) {
-  auto *path = new (thd->mem_root) AccessPath();
-  path->type = AccessPath::AGGREGATE;
-
-  path->aggregate().child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
-  path->aggregate().olap = this->olap;
-
-  path->secondary_engine_data = nullptr;
-  return path;
-}
-
-std::string GlobalAgg::ToString(int indent) const {
-  std::string pad(indent, ' ');
-  return pad + "→ Global Aggregate";
-}
-
 AccessPath *TopN::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::SORT;
@@ -238,7 +222,7 @@ AccessPath *ZeroRows::ToAccessPath(THD *thd) {
 
 std::string ZeroRows::ToString(int indent) const { return "→ Zero Rows"; }
 
-AccessPath *Union::ToAccessPath(THD *thd) { return nullptr; }
+AccessPath *Union::ToAccessPath(THD *thd) { return original_path; }
 
 std::string Union::ToString(int indent) const {
   return std::string(indent, ' ') + (is_distinct ? "→ Union Distinct" : "→ Union All");
@@ -267,7 +251,10 @@ std::string MaterializeCTE::ToString(int indent) const {
   return result;
 }
 
-AccessPath *MaterializeDerived::ToAccessPath(THD *thd) { return original_path; }
+AccessPath *MaterializeDerived::ToAccessPath(THD *thd) {
+  if (has_union) return original_path;
+  return original_path;
+}
 
 std::string MaterializeDerived::ToString(int indent) const {
   std::string pad(indent, ' ');

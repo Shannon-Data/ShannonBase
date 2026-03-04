@@ -87,6 +87,11 @@ inline bool contains_subquery(Item *item) {
   return item->has_subquery();
 }
 
+inline bool contains_correlated_subquery(Item *item) {
+  if (!item) return false;
+  return (item->used_tables() & OUTER_REF_TABLE_BIT) ? true : false;
+}
+
 table_map get_tablescovered(const AccessPath *path);
 table_map get_tablescovered_from_hypergraph(const AccessPath *path, const JoinHypergraph &graph);
 }  // namespace Utils

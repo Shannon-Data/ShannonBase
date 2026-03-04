@@ -250,6 +250,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
       }
       predicates->add_child(std::move(child_pre));
     }
+    if (scan_node->prune_predicate) predicates->add_child(std::move(scan_node->prune_predicate));
 
     if (predicates->children.empty()) {
       // all predicates failed to convert, then degrade to filter node
