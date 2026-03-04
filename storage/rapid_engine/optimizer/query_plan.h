@@ -67,6 +67,11 @@ class PlanNode : public MemoryObject {
     TOP_N,
     LIMIT,
     ZERO_ROWS,
+    UNION,
+    INTERSECT,
+    EXCEPT,
+    MATERIALIZE_CTE,
+    MATERIALIZE_DERIVED,
     MYSQL_NATIVE
   };
 
@@ -219,6 +224,8 @@ class GlobalAgg : public PlanNode {
   GlobalAgg() = default;
   ~GlobalAgg() override = default;
 
+  olap_type olap;
+
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
@@ -298,6 +305,49 @@ class Limit : public PlanNode {
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::LIMIT; }
+  std::string ToString(int indent) const override;
+};
+
+class Union : public PlanNode {
+ public:
+  bool is_distinct{false};
+  Type type() const override { return Type::UNION; }
+  AccessPath *ToAccessPath(THD *thd) override;
+  std::string ToString(int indent) const override;
+};
+
+class MaterializeCTE : public PlanNode {
+ public:
+  MaterializeCTE() = default;
+  ~MaterializeCTE() override = default;
+
+  std::string cte_name;
+  TABLE *tmp_table{nullptr};
+  std::vector<std::unique_ptr<PlanNode>> inner_plans;
+
+  bool is_recursive{false};     // is recurisve CTE
+  ha_rows limit{HA_POS_ERROR};  // LIMIT push down
+
+  Type type() const override { return Type::MATERIALIZE_CTE; }
+
+  AccessPath *ToAccessPath(THD *thd) override;
+  std::string ToString(int indent) const override;
+};
+
+class MaterializeDerived : public PlanNode {
+ public:
+  MaterializeDerived() = default;
+  ~MaterializeDerived() override = default;
+
+  TABLE *tmp_table{nullptr};
+  std::vector<std::unique_ptr<PlanNode>> inner_plans;  // UNION
+
+  bool has_union{false};          // is UNION
+  bool is_union_distinct{false};  // UNION vs UNION ALL
+
+  Type type() const override { return Type::MATERIALIZE_DERIVED; }
+
+  AccessPath *ToAccessPath(THD *thd) override;
   std::string ToString(int indent) const override;
 };
 

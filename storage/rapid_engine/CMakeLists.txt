@@ -163,6 +163,7 @@ SET(SHANNON_ITERATOR_SOURCES
 SET(SHANNON_OPTIMIZE
     optimizer/optimizer.cpp
     optimizer/query_plan.cpp
+    optimizer/utils.cpp
     optimizer/path/access_path.cpp
     optimizer/rules/condition_pushdown.cpp
     optimizer/rules/join_reorder.cpp

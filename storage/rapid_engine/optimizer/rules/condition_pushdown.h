@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "storage/rapid_engine/optimizer/rules/rule.h"
+#include "storage/rapid_engine/optimizer/utils.h"
 
 class Item;
 class Item_func;
@@ -154,13 +155,6 @@ class PredicatePushDown : public Rule {
   std::unordered_set<std::string> get_available_tables(const Plan &node);
 
   /**
-   * @brief Combine multiple predicates with AND
-   * @param predicates List of predicates
-   * @return Combined AND condition, or single predicate if only one
-   */
-  Item *combine_with_and(const std::vector<Item *> &predicates);
-
-  /**
    * @brief Create a new Filter node
    * @param child Child node
    * @param condition Filter condition
@@ -193,7 +187,7 @@ class PredicatePushDown : public Rule {
   inline Plan wrap_if_pending(Plan node, std::vector<Item *> &pending_filters) {
     if (!node || pending_filters.empty()) return node;
 
-    Item *combined_cond = combine_with_and(pending_filters);
+    Item *combined_cond = ShannonBase::Optimizer::Utils::combine_with_and(pending_filters);
     pending_filters.clear();
     return create_filter_node(std::move(node), combined_cond);
   }
