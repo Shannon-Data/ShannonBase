@@ -1259,9 +1259,6 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
 
   JOIN *join = lex->unit->first_query_block()->join;
   if (!join) return false;
-  if (lex->using_hypergraph_optimizer() && lex->unit->root_access_path()) {
-    assert(false);  // purecov: deadcode
-  }
 
   ShannonBase::Optimizer::Optimizer rpd_optimizer;
   auto plan = rpd_optimizer.Optimize(context, thd, join);
@@ -1395,6 +1392,7 @@ static bool ModifyMaterializeCost(THD *, const JoinHypergraph &, AccessPath *, S
  * @return false=accept, true=reject
  */
 static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, AccessPath *path) {
+  ut_a(thd->lex->using_hypergraph_optimizer());
   ut_a(!thd->is_error());
   ut_a(hypergraph.query_block()->join == hypergraph.join());
   AssertSupportedPath(path);
@@ -1524,6 +1522,7 @@ static bool ModifyTableScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
   if (imcu_skip_ratio > 0) scan_cost *= (1.0 - imcu_skip_ratio);
 
   path->set_cost(scan_cost);
+  path->set_cost_before_filter(scan_cost);
   path->set_init_cost(0.0);
 
   rapid_ctx->RegisterTableImcsCost(table, scan_cost, effective_rows, imcu_skip_ratio, can_use_si);
@@ -1654,7 +1653,7 @@ static bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPat
     }
   }
   path->set_cost(index_cost);
-  path->set_cost_before_filter(path->cost());
+  path->set_cost_before_filter(index_cost);
   path->set_init_cost(0.0);
   return false;
 }
@@ -1849,11 +1848,8 @@ static bool ModifyAggregateCost(THD *thd, const JoinHypergraph &graph, AccessPat
   double child_cost = agg.child->cost();
 
   double agg_cost = child_rows * ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow * 2.0;
-  double output_rows = child_rows * ShannonBase::Optimizer::SelectivityEstimator::estimate_selectivity(graph, path);
-
   path->set_cost(child_cost + agg_cost);
   path->set_init_cost(child_cost);
-  path->set_num_output_rows(output_rows);
   return false;
 }
 
@@ -1884,11 +1880,34 @@ static bool ModifySortCost(THD *thd, const JoinHypergraph &graph, AccessPath *pa
 
 static bool ModifyLimitCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
                             ShannonBase::Rapid_execution_context *rapid_ctx) {
+  auto &lo = path->limit_offset();
+  double child_rows = lo.child->num_output_rows();
+  double child_cost = lo.child->cost();
+
+  double effective_rows =
+      (lo.limit == HA_POS_ERROR) ? child_rows : std::min(child_rows, (double)(lo.limit + lo.offset));
+  double ratio = (child_rows > 0) ? effective_rows / child_rows : 1.0;
+
+  path->set_cost(child_cost * ratio);
+  path->set_init_cost(0);
   return false;
 }
 
 static bool ModifyMaterializeCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
                                   ShannonBase::Rapid_execution_context *rapid_ctx) {
+  auto &mat = path->materialize();
+  double child_rows = 0;
+  double child_cost = 0;
+  for (auto &op : mat.param->m_operands) {
+    if (op.subquery_path) {
+      child_rows += op.subquery_path->num_output_rows();
+      child_cost += op.subquery_path->cost();
+    }
+  }
+  double write_cost = child_rows * ShannonBase::Optimizer::RapidCostConstants::kHashBuildPerRow;
+  double scan_cost = child_rows * ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow;
+  path->set_cost(child_cost + write_cost + scan_cost);
+  path->set_init_cost(child_cost);
   return false;
 }
 

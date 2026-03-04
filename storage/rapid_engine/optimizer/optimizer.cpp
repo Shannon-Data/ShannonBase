@@ -121,7 +121,8 @@ void Optimizer::AddDefaultRules() {
   m_optimize_rules.emplace_back(std::make_unique<AggregationPushDown>());
   // Re-run after structure changes
   m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
-  // Final reordering with all optimizations
+  // Final reordering with all optimizations, maybe we should not using the rules to change the optimized order
+  // caution: we should use this rules with cares.
   m_optimize_rules.emplace_back(std::make_unique<JoinReOrder>());
   m_registered.store(true, std::memory_order_relaxed);
 }
@@ -169,6 +170,20 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         if (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr)
           table = irs.used_key_part[0].field->table;
         scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
+        if (irs.ranges != nullptr && irs.num_ranges > 0) {
+          std::vector<std::unique_ptr<Imcs::Predicate>> all_predicates;
+          for (unsigned i = 0; i < irs.num_ranges; ++i) {
+            QUICK_RANGE *qr = irs.ranges[i];
+            if (!qr) continue;
+            auto range_pred = Optimizer::convert_range_to_predicate(qr, table, irs.index);
+            if (range_pred) all_predicates.push_back(std::move(range_pred));
+          }
+
+          if (!all_predicates.empty())
+            scan->prune_predicate = (all_predicates.size() == 1)
+                                        ? std::move(all_predicates[0])
+                                        : Imcs::Predicate_Builder::create_or(std::move(all_predicates));
+        }
       } else {
         table = path->table_scan().table;
         scan->scan_type = ScanTable::ScanType::FULL_TABLE_SCAN;
@@ -282,7 +297,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     } break;
     case AccessPath::FILTER: {
       auto &f = path->filter();
-      if (ShannonBase::Optimizer::Utils::contains_subquery(f.condition)) {
+      if (ShannonBase::Optimizer::Utils::contains_correlated_subquery(f.condition)) {
         // if filter contains subquery cannot offload
         auto native = std::make_unique<MySQLNative>();
         native->original_path = path;
@@ -294,6 +309,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 
       std::vector<Item *> required;
       ProjectionExtractor::ExtractRequired(f.condition, child_state.state_map, required);
+      state->required_items.insert(state->required_items.end(), required.begin(), required.end());
 
       auto node = std::make_unique<Filter>();
       node->condition = f.condition;
@@ -307,54 +323,64 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     case AccessPath::AGGREGATE: {
       auto &agg_ap = path->aggregate();
       TranslateState child_state;
-      if (translate_access_path(&child_state, thd, agg_ap.child, join)) {
-        return true;
-      }
+      if (translate_access_path(&child_state, thd, agg_ap.child, join)) return true;
 
       bool is_rollup = (agg_ap.olap == ROLLUP_TYPE);
       bool has_grouping = join && join->grouped;
-      if (has_grouping || is_rollup) {
-        // Local Aggregation
-        auto node = std::make_unique<LocalAgg>();
-        node->original_path = path;
-        node->olap = agg_ap.olap;
 
-        // extract GROUP BY expression
-        if (join && !join->group_list.empty()) {
-          for (ORDER *group = join->group_list.order; group; group = group->next) {
-            Item *item = *group->item;
-            if ((item->used_tables() & child_state.state_map) != 0) {
-              node->group_by.push_back(item);
-              ProjectionExtractor::Extract(item, child_state.state_map, state->projection_items);
-            }
+      auto node = std::make_unique<LocalAgg>();
+      node->original_path = path;
+      node->olap = agg_ap.olap;
+      node->is_global = !(has_grouping || is_rollup);
+
+      if (join && !join->group_list.empty()) {
+        for (ORDER *group = join->group_list.order; group; group = group->next) {
+          if (!group->item || !*group->item) continue;
+          Item *item = *group->item;
+
+          Item *unwrapped = item;
+          if (is_rollup) {
+            if (auto *rgi = dynamic_cast<Item_rollup_group_item *>(item)) unwrapped = rgi->inner_item();
+          }
+
+          node->group_by.push_back(item);
+          ProjectionExtractor::ExtractRequired(unwrapped, child_state.state_map, child_state.projection_items);
+          ProjectionExtractor::Extract(unwrapped, child_state.state_map, state->projection_items,
+                                       /*include_constants=*/true);
+        }
+      }
+
+      if (join && join->sum_funcs) {
+        for (Item_sum **func_ptr = join->sum_funcs; *func_ptr; ++func_ptr) {
+          Item_sum *sum_func = *func_ptr;
+          if (!sum_func) continue;
+
+          node->aggregates.push_back(sum_func);
+          state->projection_items.push_back(sum_func);
+
+          for (uint i = 0; i < sum_func->argument_count(); ++i) {
+            Item *arg = sum_func->get_arg(i);
+            if (!arg || arg->const_item()) continue;
+            ProjectionExtractor::Extract(arg, child_state.state_map, child_state.projection_items,
+                                         /*include_constants=*/false);
           }
         }
+      }
 
-        // extract aggregation functions
-        if (join && join->sum_funcs) {
-          for (Item_sum **func_ptr = join->sum_funcs; *func_ptr; ++func_ptr) {
-            Item_sum *sum_func = *func_ptr;
-            node->aggregates.push_back(sum_func);
-            for (uint i = 0; i < sum_func->argument_count(); ++i) {
-              Item *arg = sum_func->get_arg(i);
-              ProjectionExtractor::Extract(arg, child_state.state_map, child_state.projection_items);
-            }
-          }
-        }
+      // is_global == true: return 1 rows , is_global == false: by MySQL optimizer
+      node->estimated_rows = node->is_global ? 1 : static_cast<ha_rows>(path->num_output_rows());
+      node->children.push_back(std::move(child_state.plan_node));
+      node->cost = path->cost();
 
-        node->children.push_back(std::move(child_state.plan_node));
-        node->cost = path->cost();
-        node->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
-
-        state->plan_node = std::move(node);
+      // HAVING（greedy optimization
+      if (!thd->lex->using_hypergraph_optimizer() && join && join->having_cond) {
+        auto having_filter = std::make_unique<Filter>();
+        having_filter->condition = join->having_cond;
+        having_filter->cost = path->cost();
+        having_filter->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        having_filter->children.push_back(std::move(node));
+        state->plan_node = std::move(having_filter);
       } else {
-        // Global Aggregation（without GROUP BY，but has aggregation functions）
-        auto node = std::make_unique<GlobalAgg>();
-        node->original_path = path;
-        node->olap = agg_ap.olap;
-        node->children.push_back(std::move(child_state.plan_node));
-        node->cost = path->cost();
-        node->estimated_rows = 1;  // global aggre returns 1 row.
         state->plan_node = std::move(node);
       }
 
@@ -1401,6 +1427,113 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_like_to_predicate(THD *thd, 
   Imcs::PredicateValue pattern = extract_value_from_item(thd, pattern_arg, field_type, field);
   Imcs::PredicateOperator op = is_negated ? Imcs::PredicateOperator::NOT_LIKE : Imcs::PredicateOperator::LIKE;
   return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, pattern, field_type);
+}
+
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(QUICK_RANGE *qr, TABLE *table, int index_no) {
+  KEY *key_info = &table->key_info[index_no];
+  std::vector<std::unique_ptr<Imcs::Predicate>> predicates;
+
+  const uchar *min_ptr = qr->min_key;
+  const uchar *max_ptr = qr->max_key;
+  uint current_offset = 0;
+
+  for (unsigned part_idx = 0; part_idx < key_info->user_defined_key_parts; ++part_idx) {
+    KEY_PART_INFO *key_part = &key_info->key_part[part_idx];
+    Field *field = key_part->field;
+    uint store_length = key_part->store_length;
+
+    bool has_min = (!(qr->flag & NO_MIN_RANGE) && (current_offset < qr->min_length));
+    bool has_max = (!(qr->flag & NO_MAX_RANGE) && (current_offset < qr->max_length));
+    if (!has_min && !has_max) break;
+
+    bool is_eq = (has_min && has_max && ((qr->flag & EQ_RANGE) || memcmp(min_ptr, max_ptr, store_length) == 0));
+    if (is_eq) {
+      const uchar *ptr = min_ptr;
+      if (field->is_nullable()) {
+        if (*ptr) goto next_part;
+        ptr++;
+      }
+      Imcs::PredicateValue val;
+      if (decode_key_value(ptr, field, val)) {
+        predicates.push_back(Imcs::Predicate_Builder::create_simple(
+            field->field_index(), Imcs::PredicateOperator::EQUAL, val, field->type()));
+      }
+    } else {
+      if (has_min) {
+        const uchar *ptr = min_ptr;
+        if (field->is_nullable()) {
+          if (*ptr) goto skip_min;
+          ptr++;
+        }
+        Imcs::PredicateValue min_val;
+        if (decode_key_value(ptr, field, min_val)) {
+          // NEAR_MIN is only valid if this column is the "first range column"
+          Imcs::PredicateOperator op =
+              (qr->flag & NEAR_MIN) ? Imcs::PredicateOperator::GREATER_THAN : Imcs::PredicateOperator::GREATER_EQUAL;
+          predicates.push_back(
+              Imcs::Predicate_Builder::create_simple(field->field_index(), op, min_val, field->type()));
+        }
+      }
+    skip_min:
+      if (has_max) {
+        const uchar *ptr = max_ptr;
+        if (field->is_nullable()) {
+          if (*ptr) goto skip_max;
+          ptr++;
+        }
+        Imcs::PredicateValue max_val;
+        if (decode_key_value(ptr, field, max_val)) {
+          Imcs::PredicateOperator op =
+              (qr->flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL;
+          predicates.push_back(
+              Imcs::Predicate_Builder::create_simple(field->field_index(), op, max_val, field->type()));
+        }
+      }
+    skip_max:
+      break;
+    }
+  next_part:
+    min_ptr += store_length;
+    max_ptr += store_length;
+    current_offset += store_length;
+  }
+  if (predicates.empty()) return nullptr;
+  return (predicates.size() == 1) ? std::move(predicates[0])
+                                  : Imcs::Predicate_Builder::create_and(std::move(predicates));
+}
+
+bool Optimizer::decode_key_value(const uchar *key_ptr, Field *field, Imcs::PredicateValue &out_value) {
+  auto field_type = field->type();
+
+  if (field_type == MYSQL_TYPE_NEWDECIMAL) {
+    auto new_field = down_cast<Field_new_decimal *>(field);
+    my_decimal dec_val;
+    if (binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, key_ptr, &dec_val, new_field->precision,
+                          new_field->decimals(), true) != E_DEC_OK) {
+      return false;
+    }
+
+    double d_val;
+    if (decimal2double(&dec_val, &d_val) != E_DEC_OK) return false;
+    out_value = Imcs::PredicateValue(d_val);
+    return true;
+  }
+
+  uchar *old_ptr = field->field_ptr();
+  field->set_field_ptr(const_cast<uchar *>(key_ptr));
+
+  if (is_integer_type(field_type) || is_temporal_type(field_type)) {
+    out_value = Imcs::PredicateValue(static_cast<int64_t>(field->val_int()));
+  } else if (is_numeric_type(field_type)) {
+    out_value = Imcs::PredicateValue(static_cast<double>(field->val_real()));
+  } else if (is_string_type(field_type)) {
+    String str_val;
+    String *str = field->val_str(&str_val);
+    if (str) out_value = Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+  }
+
+  field->set_field_ptr(old_ptr);
+  return true;
 }
 
 /**

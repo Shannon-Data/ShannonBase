@@ -261,6 +261,8 @@ class Optimizer : public MemoryObject {
   static std::unique_ptr<Imcs::Predicate> convert_isnotnull_to_predicate(THD *thd, Item_func *func);
   static std::unique_ptr<Imcs::Predicate> convert_like_to_predicate(THD *thd, Item_func_like *like_func,
                                                                     bool is_negated);
+  static std::unique_ptr<Imcs::Predicate> convert_range_to_predicate(QUICK_RANGE *qr, TABLE *table, int index_no);
+  static bool decode_key_value(const uchar *key_ptr, Field *field, Imcs::PredicateValue &out_value);
 
   void extract_join_conditions(const RelationalExpression *expr, std::vector<Item *> &out_conditions);
   void extract_post_join_filters(const JoinPredicate *pred, table_map covered_tables, std::vector<Item *> &out_filters);

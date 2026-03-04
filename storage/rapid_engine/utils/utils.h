@@ -51,7 +51,6 @@ namespace Compress {
 class Dictionary;
 }
 namespace Utils {
-
 class Util {
  public:
   // open a table via schema name and table name.
@@ -306,7 +305,6 @@ class ColumnMapGuard {
   my_bitmap_map *old_rmap{nullptr};
   my_bitmap_map *old_wmap{nullptr};
 };
-
 }  // namespace Utils
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_UTILS_H__

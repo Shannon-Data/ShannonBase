@@ -111,7 +111,7 @@ class ScanTable : public PlanNode {
   bool use_storage_index{false};
 
   // Optional predicate for pruning.
-  std::unique_ptr<Imcs::Predicate> prune_predicate;
+  std::unique_ptr<Imcs::Predicate> prune_predicate{nullptr};
 
   // list of column indices to read. Empty means read all columns
   // Then during execution, only read these columns from CUs
@@ -205,31 +205,17 @@ class LocalAgg : public PlanNode {
   LocalAgg() = default;
   ~LocalAgg() override = default;
 
-  // the source condtions from mysql `group by` and `order by` and `aggregatiion funcs`.
-  std::vector<Item *> group_by;
+  std::vector<Item *> group_by;  // empty means is GlobalAgg.
   std::vector<Item *> order_by;
   std::vector<Item_func *> aggregates;
-  olap_type olap;
+  olap_type olap{olap_type::UNSPECIFIED_OLAP_TYPE};
+
+  bool is_global{false};
 
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::LOCAL_AGGREGATE; }
-  std::string ToString(int indent) const override;
-};
-
-// GlobalAgg represnets a global aggregation operation.
-class GlobalAgg : public PlanNode {
- public:
-  GlobalAgg() = default;
-  ~GlobalAgg() override = default;
-
-  olap_type olap;
-
-  // Convert to AccessPath for execution.
-  AccessPath *ToAccessPath(THD *thd) override;
-
-  Type type() const override { return Type::GLOBAL_AGGREGATE; }
   std::string ToString(int indent) const override;
 };
 
