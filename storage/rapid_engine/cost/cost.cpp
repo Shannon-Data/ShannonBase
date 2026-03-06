@@ -161,14 +161,80 @@ double SelectivityEstimator::estimate_selectivity(const JoinHypergraph &graph, A
 
   return 1.0;
 }
+double SelectivityEstimator::estimate_join_selectivity(const Item_field *left_field, const Item_field *right_field) {
+  if (!left_field || !left_field->field || !left_field->field->table || !right_field || !right_field->field ||
+      !right_field->field->table)
+    return SelectivityEstimator::kDefaultJoinSelectivity;
 
-static Imcs::RpdTable *get_rpd_table(TABLE *table) {
-  auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
-  if (!share) return nullptr;
-  ShannonBase::Imcs::RpdTable *rpd_table{nullptr};
-  rpd_table = share->is_partitioned ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
-                                    : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
-  return rpd_table;
+  Imcs::RpdTable *left_rpd = Utils::rpd_lookup_func()(left_field->field->table);
+  Imcs::RpdTable *right_rpd = Utils::rpd_lookup_func()(right_field->field->table);
+
+  if (!left_rpd || !right_rpd) return SelectivityEstimator::kDefaultJoinSelectivity;
+
+  //  using NDV
+  uint32_t left_col_idx = left_field->field->field_index();
+  uint32_t right_col_idx = right_field->field->field_index();
+
+  size_t left_ndv = 0;
+  size_t right_ndv = 0;
+  if (auto *left_stats = left_rpd->get_column_stats(left_col_idx))
+    left_ndv = left_stats->get_basic_stats().distinct_count;
+
+  if (auto *right_stats = right_rpd->get_column_stats(right_col_idx)) {
+    right_ndv = right_stats->get_basic_stats().distinct_count;
+  }
+
+  if (left_ndv == 0 || right_ndv == 0) return SelectivityEstimator::kDefaultJoinSelectivity;
+
+  // calc: 1 / max(NDV_L, NDV_R)
+  double sel = 1.0 / static_cast<double>(std::max(left_ndv, right_ndv));
+  return std::max(SelectivityEstimator::kMinJoinSelectivity, std::min(SelectivityEstimator::kMaxJoinSelectivity, sel));
+}
+
+double SelectivityEstimator::estimate_join_selectivity(const std::vector<Item *> &join_conditions) {
+  if (join_conditions.empty()) return SelectivityEstimator::kDefaultJoinSelectivity;
+
+  double combined{1.0};
+  int eq_count{0};
+
+  for (const Item *cond : join_conditions) {
+    if (!cond) continue;
+
+    double sel = estimate_join_item_selectivity(cond);
+    if (sel < SelectivityEstimator::kDefaultJoinSelectivity + 1e-9 &&
+        sel > SelectivityEstimator::kDefaultJoinSelectivity - 1e-9) {
+      if (!cond || cond->type() != Item::FUNC_ITEM) continue;
+      const auto *f = static_cast<const Item_func *>(cond);
+      if (f->functype() != Item_func::EQ_FUNC) continue;
+      if (f->argument_count() != 2) continue;
+    }
+
+    combined *= sel;
+    ++eq_count;
+  }
+  if (eq_count == 0) return SelectivityEstimator::kDefaultJoinSelectivity;
+
+  return std::max(SelectivityEstimator::kMinJoinSelectivity,
+                  std::min(SelectivityEstimator::kMaxJoinSelectivity, combined));
+}
+
+double SelectivityEstimator::estimate_join_item_selectivity(const Item *condition) {
+  if (!condition || condition->type() != Item::FUNC_ITEM) return SelectivityEstimator::kDefaultJoinSelectivity;
+
+  const auto *func = static_cast<const Item_func *>(condition);
+
+  // only deal with `EQ_FUNC ( t1.a = t2.b )`
+  if (func->functype() != Item_func::EQ_FUNC || func->argument_count() != 2)
+    return SelectivityEstimator::kDefaultJoinSelectivity;
+
+  const Item *lhs = func->arguments()[0];
+  const Item *rhs = func->arguments()[1];
+
+  if (lhs->type() != Item::FIELD_ITEM || rhs->type() != Item::FIELD_ITEM)
+    return SelectivityEstimator::kDefaultJoinSelectivity;
+
+  return SelectivityEstimator::estimate_join_selectivity(static_cast<const Item_field *>(lhs),
+                                                         static_cast<const Item_field *>(rhs));
 }
 
 double SelectivityEstimator::estimate_filter_selectivity(const JoinHypergraph &graph, AccessPath *path) {
@@ -214,7 +280,7 @@ double SelectivityEstimator::estimate_aggregate_selectivity(const JoinHypergraph
   if (tables.empty()) return std::sqrt(input_rows) / input_rows;
 
   TABLE *primary_table = tables[0];
-  auto *rpd_table = get_rpd_table(primary_table);
+  auto *rpd_table = Utils::rpd_lookup_func()(primary_table);
 
   if (!rpd_table) return std::sqrt(input_rows) / input_rows;
 
@@ -314,7 +380,7 @@ uint64_t SelectivityEstimator::estimate_multicolumnNDV(const std::vector<uint64_
 Imcs::ColumnStatistics *SelectivityEstimator::get_column_statistics(TABLE *table, uint32_t col_idx) {
   if (!table) return nullptr;
 
-  auto *rpd_table = get_rpd_table(table);
+  auto *rpd_table = Utils::rpd_lookup_func()(table);
   if (!rpd_table) return nullptr;
 
   const auto &table_meta = rpd_table->meta();
