@@ -57,6 +57,7 @@
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/recovery/load_persist.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
 namespace ShannonBase {
@@ -192,6 +193,39 @@ int Imcs::deinitialize() {
     m_inited.store(0, std::memory_order_release);
   }
   return ShannonBase::SHANNON_SUCCESS;
+}
+
+bool Imcs::is_global_state_empty() const {
+  std::shared_lock lk(const_cast<std::shared_mutex &>(m_table_mutex));
+  return m_rpd_tables.empty() && m_rpd_parttables.empty();
+}
+
+int Imcs::set_secondary_load_flag(const Rapid_load_context *context) {
+  ut_a(context && context->m_thd);
+
+  int ret = ShannonBase::Recovery::LoadFlagManager::instance().set_flag(context->m_thd, context->m_schema_name,
+                                                                        context->m_table_name, /*loaded=*/true);
+
+  if (ret != 0) {
+    // Non-fatal: log but do not fail the load itself.
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::set_secondary_load_flag: failed to persist flag for %s.%s (err=%d)",
+           context->m_schema_name.c_str(), context->m_table_name.c_str(), ret);
+  }
+  return 0;  // Always return success so the load path is not interrupted.
+}
+
+int Imcs::clear_secondary_load_flag(const Rapid_load_context *context, const std::string &schema_name,
+                                    const std::string &table_name) {
+  ut_a(context && context->m_thd);
+
+  int ret = ShannonBase::Recovery::LoadFlagManager::instance().set_flag(context->m_thd, schema_name, table_name,
+                                                                        /*loaded=*/false);
+
+  if (ret != 0) {
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::clear_secondary_load_flag: failed to clear flag for %s.%s (err=%d)",
+           schema_name.c_str(), table_name.c_str(), ret);
+  }
+  return 0;
 }
 
 int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
@@ -720,8 +754,10 @@ int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
                       !context->m_table->s->is_missing_primary_key())
                          ? true
                          : false;
-  return !parall_scan ? load_innodb(context, dynamic_cast<ha_innobase *>(source->file))
-                      : load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file));
+  int load_ret = !parall_scan ? load_innodb(context, dynamic_cast<ha_innobase *>(source->file))
+                              : load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file));
+  if (load_ret == ShannonBase::SHANNON_SUCCESS) set_secondary_load_flag(context);
+  return load_ret;
 }
 
 int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
@@ -758,6 +794,8 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
     my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
     return HA_ERR_GENERIC;
   }
+
+  set_secondary_load_flag(context);
   return ret;
 }
 
@@ -799,6 +837,7 @@ int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, c
     unload_innodbpart(context, table_id, error_if_not_loaded);
   else
     unload_innodb(context, table_id, error_if_not_loaded);
+  if (ret == SHANNON_SUCCESS) clear_secondary_load_flag(context, db_name, table_name);
   return ret;
 }
 
@@ -811,6 +850,7 @@ int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &tabl
     unload_innodbpart(context, table_id, error_if_not_loaded);
   else
     unload_innodb(context, table_id, error_if_not_loaded);
+  if (ret == SHANNON_SUCCESS) clear_secondary_load_flag(context, context->m_schema_name, context->m_table_name);
   return ret;
 }
 }  // namespace Imcs

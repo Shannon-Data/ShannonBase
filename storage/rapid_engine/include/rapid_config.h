@@ -34,6 +34,17 @@
 
 namespace ShannonBase {
 struct SHANNON_ALIGNAS RpdEngineConfig {
+  /*Controls whether tables are automatically reloaded into ShannonBase IMCS after a mysqld or plugin restart
+   * When ON, the RecoveryFramework will:
+   *   1. Query the Data Dictionary for tables flagged with secondary_load=1.
+   *   2. Enqueue a RecoveryJob for each such table.
+   *   3. Reload them from InnoDB into IMCS.
+   *
+   * When OFF, only the external Global State (if any) is applied; the DD is not
+   * queried and no automatic reload is performed.
+   */
+  bool reload_on_restart{false};
+
   // IMCU Configuration
   size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};  // Number of rows per IMCU
 

@@ -76,12 +76,12 @@
 #include "storage/rapid_engine/optimizer/utils.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/populate/log_populate.h"
+#include "storage/rapid_engine/recovery/recovery.h"  // rapid_recovery_startup, rapid_recovery_shutdown
 #include "storage/rapid_engine/statistics/statistics.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
-
 #include "template_utils.h"
 #include "thr_lock.h"
 
@@ -1976,6 +1976,8 @@ static SHOW_VAR rapid_status_variables[] = {
      SHOW_DOUBLE, SHOW_SCOPE_GLOBAL},
     /*the interval scn of GC*/
     {"rapid_gc_interval_scn", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn, SHOW_LONG,
+     SHOW_SCOPE_GLOBAL},
+    {"rapid_reload_on_restart", (char *)&ShannonBase::shannon_rpd_engine_cfg.reload_on_restart, SHOW_BOOL,
      SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
@@ -2664,6 +2666,12 @@ static MYSQL_SYSVAR_ULONGLONG(gc_interval_scn,
                               ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN,  // min
                               ULLONG_MAX, // max
                               0);
+static MYSQL_SYSVAR_BOOL(reload_on_restart,
+                            ShannonBase::shannon_rpd_engine_cfg.reload_on_restart,
+                            PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
+                            "Reload IMCS tables automatically after mysqld restart",
+                            nullptr, nullptr, false  // default OFF
+);
 // clang-format on
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
@@ -2682,6 +2690,7 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(min_versions_for_purge),
     MYSQL_SYSVAR(purge_efficiency_threshold),
     MYSQL_SYSVAR(gc_interval_scn),
+    MYSQL_SYSVAR(reload_on_restart),
     nullptr,
 };
 
@@ -2696,6 +2705,8 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_rpd_memory_pool = std::make_shared<ShannonBase::Utils::MemoryPool>(config);
   ShannonBase::shannon_rpd_cost_est_instances =
       ShannonBase::Optimizer::CostModelServer::Instance(ShannonBase::Optimizer::CostEstimator::Type::RPD_ENG);
+
+  ShannonBase::Recovery::rapid_recovery_startup();
 
   handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);
   ShannonBase::shannon_rapid_hton_ptr = shannon_rapid_hton;
@@ -2757,6 +2768,8 @@ static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
     delete ShannonBase::shannon_loaded_tables;
     ShannonBase::shannon_loaded_tables = nullptr;
   }
+
+  ShannonBase::Recovery::rapid_recovery_shutdown();
 
   auto instance_ = ShannonBase::Imcs::Imcs::instance();
   return instance_->deinitialize();
