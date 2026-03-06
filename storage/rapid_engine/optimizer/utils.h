@@ -34,9 +34,17 @@
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/relational_expression.h"
 
+class TABLE;
 namespace ShannonBase {
+namespace Imcs {
+class RpdTable;
+}
 namespace Optimizer {
 namespace Utils {
+
+using RpdTableLookup = std::function<Imcs::RpdTable *(TABLE *)>;
+RpdTableLookup rpd_lookup_func();
+
 inline bool is_simple_equijoin(Item *item) {
   if (item->type() != Item::FUNC_ITEM) return false;
 
@@ -88,8 +96,34 @@ inline bool contains_subquery(Item *item) {
 }
 
 inline bool contains_correlated_subquery(Item *item) {
-  if (!item) return false;
-  return (item->used_tables() & OUTER_REF_TABLE_BIT) ? true : false;
+  // return (item->used_tables() & OUTER_REF_TABLE_BIT) ? true : false;
+
+  if (!item || !item->has_subquery()) return false;
+  bool found = false;
+  WalkItem(item, enum_walk::POSTFIX, [&](Item *it) -> bool {
+    if (it->type() == Item::SUBQUERY_ITEM) {
+      auto *sub = static_cast<Item_subselect *>(it);
+      Query_expression *qexpr = sub->query_expr();
+      if (qexpr) {
+        for (Query_block *qb = qexpr->first_query_block(); qb; qb = qb->next_query_block()) {
+          if (qb->where_cond()) {
+            WalkItem(qb->where_cond(), enum_walk::POSTFIX, [&](Item *inner) -> bool {
+              if (inner->type() == Item::FIELD_ITEM) {
+                if (static_cast<Item_field *>(inner)->depended_from != nullptr) {
+                  found = true;
+                  return true;
+                }
+              }
+              return false;
+            });
+          }
+          if (found) return true;
+        }
+      }
+    }
+    return found;
+  });
+  return found;
 }
 
 table_map get_tablescovered(const AccessPath *path);

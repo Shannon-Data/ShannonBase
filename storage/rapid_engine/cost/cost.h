@@ -99,8 +99,34 @@ struct RapidCostConstants {
 class RpdCostEstimator;
 class SelectivityEstimator : public MemoryObject {
  public:
+  /**
+   * Estimate selectivity of a predicate condition on a table, using column statistics if available.
+   * This is used to adjust cost estimates based on expected output size.
+   * @param table: TABLE being accessed
+   * @param condition: Predicate condition (WHERE clause) to estimate selectivity for
+   * @return: Estimated selectivity (0.0 - 1.0)
+   */
   static double estimate_selectivity(const TABLE *table, const Item *condition);
+
+  /**
+   * Estimate selectivity of an access path, including filter, join, and aggregate selectivity, etc.
+   * This is used to adjust cost estimates based on expected output size.
+   * @param graph: Join hypergraph containing table and join information
+   * @param path: AccessPath for which to estimate selectivity
+   * @return: Estimated selectivity (0.0 - 1.0)
+   */
   static double estimate_selectivity(const JoinHypergraph &graph, AccessPath *path);
+
+  /**
+   * Estimate selectivity of an equijoin condition between two columns, using column statistics if available.
+   * This is used to adjust join cost estimates based on expected output size.
+   * @param left_field: Left column in the equijoin condition
+   * @param right_field: Right column in the equijoin condition
+   * @return: Estimated selectivity (0.0 - 1.0)
+   */
+  static double estimate_join_selectivity(const Item_field *left_field, const Item_field *right_field);
+  static double estimate_join_selectivity(const std::vector<Item *> &join_conditions);
+  static constexpr double kDefaultJoinSelectivity = 0.1;
 
  private:
   static double estimate_predicate_selectivity_internal(const TABLE *table, const Item *condition,
@@ -110,7 +136,10 @@ class SelectivityEstimator : public MemoryObject {
   static double estimate_filter_selectivity(const JoinHypergraph &graph, AccessPath *path);
 
   static double estimate_aggregate_selectivity(const JoinHypergraph &graph, AccessPath *path);
+
   static double estimate_join_selectivity(const JoinHypergraph &graph, AccessPath *path);
+
+  static double estimate_join_item_selectivity(const Item *condition);
 
   static std::vector<TABLE *> get_tables_from_tablemap(table_map tmap, const JoinHypergraph &graph);
 
@@ -120,6 +149,9 @@ class SelectivityEstimator : public MemoryObject {
   static uint64_t estimate_multicolumnNDV(const std::vector<uint64_t> &column_ndvs, double input_rows);
 
   static Imcs::ColumnStatistics *get_column_statistics(TABLE *table, uint32_t col_idx);
+
+  static constexpr double kMinJoinSelectivity = 0.001;
+  static constexpr double kMaxJoinSelectivity = 1.0;
   friend class RpdCostEstimator;
 };
 

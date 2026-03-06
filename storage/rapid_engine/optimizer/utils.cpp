@@ -28,9 +28,26 @@
 #include "sql/join_optimizer/join_optimizer.h"
 #include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/range_optimizer/range_optimizer.h"
+
+#include "storage/rapid_engine/handler/ha_shannon_rapid.h"
+#include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/include/rapid_config.h"
+
 namespace ShannonBase {
 namespace Optimizer {
 namespace Utils {
+RpdTableLookup rpd_lookup_func() {
+  return [](TABLE *table) -> Imcs::RpdTable * {
+    if (!table || !table->s) return nullptr;
+
+    auto *share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+    if (!share) return nullptr;
+
+    return share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                 : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+  };
+}
+
 table_map get_tablescovered(const AccessPath *path) {
   if (!path) return 0;
 

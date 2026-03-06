@@ -1706,11 +1706,17 @@ static bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath
   double join_cost = ShannonBase::shannon_rpd_cost_est_instances->estimate_join_cost(static_cast<ha_rows>(outer_rows),
                                                                                      static_cast<ha_rows>(inner_rows));
 
-  double join_sel{0.1};
+  double join_sel = ShannonBase::Optimizer::SelectivityEstimator::kDefaultJoinSelectivity;
   if (hj.join_predicate && hj.join_predicate->expr) {
-    // TODO: More precise join selectivity estimation
-    // Can be based on column statistics such as NDV (Number of Distinct Values)
-    // and data distribution information
+    std::vector<Item *> join_conds;
+    const RelationalExpression *expr = hj.join_predicate->expr;
+
+    for (Item *cond : expr->join_conditions) {
+      if (cond) join_conds.push_back(cond);
+    }
+
+    if (!join_conds.empty())
+      join_sel = ShannonBase::Optimizer::SelectivityEstimator::estimate_join_selectivity(join_conds);
   }
 
   double output_rows = outer_rows * inner_rows * join_sel;
