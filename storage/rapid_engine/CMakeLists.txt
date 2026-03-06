@@ -78,7 +78,7 @@ SET(SHANNON_IMCS_SOURCES
    utils/memory_pool.cpp
    autopilot/loader.cpp
    recovery/recovery.cpp
-   recovery/load_persist.cpp
+   recovery/recovery_load.cpp
 )
 
 SET(SHANNON_POPULATE_SOURCES

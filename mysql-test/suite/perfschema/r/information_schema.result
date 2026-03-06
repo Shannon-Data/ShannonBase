@@ -333,10 +333,10 @@ replication_group_member_stats	10	Dynamic
 replication_group_members	10	Fixed
 rpd_column_id	10	Fixed
 rpd_columns	10	Fixed
-rpd_mirror	10	Fixed
+rpd_mirror	10	Dynamic
 rpd_preload_stats	10	Fixed
 rpd_table_id	10	Fixed
-rpd_tables	10	Fixed
+rpd_tables	10	Dynamic
 rwlock_instances	10	Dynamic
 session_account_connect_attrs	10	Dynamic
 session_connect_attrs	10	Dynamic

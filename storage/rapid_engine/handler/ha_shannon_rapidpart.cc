@@ -235,24 +235,14 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
     }
   }
 
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context.m_sch_tb_name]->meta_info;
-  meta_ref.logical_part_loaded_at_scn = std::move(part_tb_infos);
-  meta_ref.snapshot_scn = context.m_extra_info.m_scn;
-  ha_rows num_rows{0};
-  table.file->ha_records(&num_rows);
-  meta_ref.nrows = num_rows;
-  meta_ref.size_bytes = meta_ref.nrows * table.s->rec_buff_length;
-  meta_ref.load_start_stamp = std::chrono::system_clock::now();
-  meta_ref.loading_progress = 0.1;
-
+  Utils::Util::update_rpd_meta_info(&context, &table, Utils::Util::STAGE::BEGIN);
   if (Imcs::Imcs::instance()->load_parttable(&context, const_cast<TABLE *>(&table))) {
     my_error(ER_SECONDARY_ENGINE, MYF(0), table.s->db.str, table.s->table_name.str);
     context.m_trx->rollback_stmt();
     return HA_ERR_GENERIC;
   }
-  meta_ref.load_end_stamp = std::chrono::system_clock::now();
-  meta_ref.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
-  meta_ref.loading_progress = 1.0;
+  Utils::Util::update_rpd_meta_info(&context, &table, Utils::Util::STAGE::END);
+  context.m_trx->commit();
 
   m_share = new RapidPartShare(table);
   m_share->m_source_table = &table;
@@ -265,38 +255,6 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
     my_error(ER_NO_SUCH_TABLE, MYF(0), table.s->db.str, table.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
   }
-
-  for (auto index = 0u; index < table.s->fields; index++) {
-    auto field_ptr = *(table.field + index);
-    // Skip columns marked as NOT SECONDARY.
-    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-    ShannonBase::rpd_column_info_t row_rpd_columns;
-    strncpy(row_rpd_columns.schema_name, table.s->db.str, table.s->db.length);
-    row_rpd_columns.table_id = context.m_table_id;
-    row_rpd_columns.column_id = field_ptr->field_index();
-    strncpy(row_rpd_columns.column_name, field_ptr->field_name, sizeof(row_rpd_columns.column_name) - 1);
-    strncpy(row_rpd_columns.table_name, table.s->table_name.str, sizeof(row_rpd_columns.table_name) - 1);
-    auto key_name =
-        ShannonBase::Utils::Util::get_key_name(table.s->db.str, table.s->table_name.str, field_ptr->field_name);
-
-    std::string comment(field_ptr->comment.str);
-    memset(row_rpd_columns.encoding, 0x0, NAME_LEN);
-    if (comment.find("SORTED") != std::string::npos)
-      strncpy(row_rpd_columns.encoding, "SORTED", strlen("SORTED") + 1);
-    else if (comment.find("VARLEN") != std::string::npos)
-      strncpy(row_rpd_columns.encoding, "VARLEN", strlen("VARLEN") + 1);
-    else
-      strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
-    row_rpd_columns.ndv = 0;
-    row_rpd_columns.avg_byte_width_inc_null = field_ptr->pack_length();
-    ShannonBase::shannon_rpd_columns_info.push_back(row_rpd_columns);
-  }
-
-  auto self_load_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
-  if (self_load_inst)
-    self_load_inst->add_table(context.m_table_id, context.m_schema_name, context.m_table_name, "", true);
-
   // start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();
   return ShannonBase::SHANNON_SUCCESS;
