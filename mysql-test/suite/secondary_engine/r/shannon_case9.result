@@ -1,3 +1,4 @@
+# restart
 create database sh_test9;
 use sh_test9;
 set use_secondary_engine=forced;

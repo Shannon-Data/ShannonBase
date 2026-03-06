@@ -95,15 +95,15 @@ IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00
 IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	168	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
 IGNORE	IGNORE	0	SNAPSHOT	0	3	AVAIL_RPDGSTABSTATE	100	192	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
 IGNORE	IGNORE	0	SNAPSHOT	0	0	AVAIL_RPDGSTABSTATE	100	0	0	0	0000-00-00 00:00:00	IGNORE	IGNORE	OBJECTSTORAGE	0000-00-00 00:00:00	0000-00-00 00:00:00	USER	IGNORE	[]	0
-select * from performance_schema.rpd_table_id;
+select * from performance_schema.rpd_table_id order by ID,NAME;
 ID	NAME	SCHEMA_NAME	TABLE_NAME
+IGNORE	sh_load_meta_tables_db\tt	sh_load_meta_tables_db	tt
+IGNORE	sh_load_meta_tables_db\tt1	sh_load_meta_tables_db	tt1
+IGNORE	sh_load_meta_tables_db\tt2	sh_load_meta_tables_db	tt2
+IGNORE	sh_load_meta_tables_db\tt3	sh_load_meta_tables_db	tt3
+IGNORE	sh_load_meta_tables_db\tt4	sh_load_meta_tables_db	tt4
 IGNORE	sh_load_meta_tables_db\LINEITEM4	sh_load_meta_tables_db	LINEITEM4
-IGNORE	sh_load_meta_tables_db\ttNEITEM4	sh_load_meta_tables_db	ttNEITEM4
-IGNORE	sh_load_meta_tables_db\tt1EITEM4	sh_load_meta_tables_db	tt1EITEM4
-IGNORE	sh_load_meta_tables_db\tt2EITEM4	sh_load_meta_tables_db	tt2EITEM4
-IGNORE	sh_load_meta_tables_db\tt3EITEM4	sh_load_meta_tables_db	tt3EITEM4
-IGNORE	sh_load_meta_tables_db\tt4EITEM4	sh_load_meta_tables_db	tt4EITEM4
-select * from performance_schema.rpd_columns;
+select * from performance_schema.rpd_columns order by TABLE_ID,COLUMN_ID;
 TABLE_ID	COLUMN_ID	NDV	ENCODING	DATA_PLACEMENT_INDEX	DICT_SIZE_BTYES
 IGNORE	IGNORE	0	N/A	0	0
 IGNORE	IGNORE	0	N/A	0	0
@@ -141,31 +141,31 @@ IGNORE	IGNORE	0	N/A	0	0
 IGNORE	IGNORE	0	SORTED	0	0
 IGNORE	IGNORE	0	SORTED	0	0
 IGNORE	IGNORE	0	SORTED	0	0
-select * from performance_schema.rpd_column_id;
+select * from performance_schema.rpd_column_id order by ID,TABLE_ID;
 ID	TABLE_ID	COLUMN_NAME
 IGNORE	IGNORE	score
-IGNORE	IGNORE	name
-IGNORE	IGNORE	id
-IGNORE	IGNORE	gender
 IGNORE	IGNORE	score
-IGNORE	IGNORE	name
-IGNORE	IGNORE	id
-IGNORE	IGNORE	gender
 IGNORE	IGNORE	score
-IGNORE	IGNORE	name
-IGNORE	IGNORE	id
-IGNORE	IGNORE	gender
 IGNORE	IGNORE	score
-IGNORE	IGNORE	name
-IGNORE	IGNORE	id
-IGNORE	IGNORE	gender
 IGNORE	IGNORE	score
-IGNORE	IGNORE	name
-IGNORE	IGNORE	id
-IGNORE	IGNORE	gender
 IGNORE	IGNORE	L_ORDERKEY
+IGNORE	IGNORE	name
+IGNORE	IGNORE	name
+IGNORE	IGNORE	name
+IGNORE	IGNORE	name
+IGNORE	IGNORE	name
 IGNORE	IGNORE	L_PARTKEY
+IGNORE	IGNORE	id
+IGNORE	IGNORE	id
+IGNORE	IGNORE	id
+IGNORE	IGNORE	id
+IGNORE	IGNORE	id
 IGNORE	IGNORE	L_SUPPKEY
+IGNORE	IGNORE	gender
+IGNORE	IGNORE	gender
+IGNORE	IGNORE	gender
+IGNORE	IGNORE	gender
+IGNORE	IGNORE	gender
 IGNORE	IGNORE	L_LINENUMBER
 IGNORE	IGNORE	L_QUANTITY
 IGNORE	IGNORE	L_EXTENDEDPRICE
@@ -179,28 +179,9 @@ IGNORE	IGNORE	L_RECEIPTDATE
 IGNORE	IGNORE	L_SHIPINSTRUCT
 IGNORE	IGNORE	L_SHIPMODE
 IGNORE	IGNORE	L_COMMENT
-select * from performance_schema.rpd_preload_stats;
+select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME;
 TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	AVG_BYTE_WIDTH_INC_NULL
-sh_load_meta_tables_db	tt	score	4
-sh_load_meta_tables_db	tt	name	40
-sh_load_meta_tables_db	tt	id	4
-sh_load_meta_tables_db	tt	gender	4
-sh_load_meta_tables_db	tt1	score	4
-sh_load_meta_tables_db	tt1	name	40
-sh_load_meta_tables_db	tt1	id	4
-sh_load_meta_tables_db	tt1	gender	4
-sh_load_meta_tables_db	tt2	score	4
-sh_load_meta_tables_db	tt2	name	40
-sh_load_meta_tables_db	tt2	id	4
-sh_load_meta_tables_db	tt2	gender	4
-sh_load_meta_tables_db	tt3	score	4
-sh_load_meta_tables_db	tt3	name	40
-sh_load_meta_tables_db	tt3	id	4
-sh_load_meta_tables_db	tt3	gender	4
-sh_load_meta_tables_db	tt4	score	8
-sh_load_meta_tables_db	tt4	name	40
-sh_load_meta_tables_db	tt4	id	4
-sh_load_meta_tables_db	tt4	gender	4
+sh_load_meta_tables_db	LINEITEM4	L_RETURNFLAG	4
 sh_load_meta_tables_db	LINEITEM4	L_ORDERKEY	8
 sh_load_meta_tables_db	LINEITEM4	L_PARTKEY	4
 sh_load_meta_tables_db	LINEITEM4	L_SUPPKEY	4
@@ -209,7 +190,6 @@ sh_load_meta_tables_db	LINEITEM4	L_QUANTITY	7
 sh_load_meta_tables_db	LINEITEM4	L_EXTENDEDPRICE	7
 sh_load_meta_tables_db	LINEITEM4	L_DISCOUNT	7
 sh_load_meta_tables_db	LINEITEM4	L_TAX	7
-sh_load_meta_tables_db	LINEITEM4	L_RETURNFLAG	4
 sh_load_meta_tables_db	LINEITEM4	L_LINESTATUS	4
 sh_load_meta_tables_db	LINEITEM4	L_SHIPDATE	3
 sh_load_meta_tables_db	LINEITEM4	L_COMMITDATE	3
@@ -217,4 +197,24 @@ sh_load_meta_tables_db	LINEITEM4	L_RECEIPTDATE	3
 sh_load_meta_tables_db	LINEITEM4	L_SHIPINSTRUCT	100
 sh_load_meta_tables_db	LINEITEM4	L_SHIPMODE	40
 sh_load_meta_tables_db	LINEITEM4	L_COMMENT	177
+sh_load_meta_tables_db	tt	name	40
+sh_load_meta_tables_db	tt	score	4
+sh_load_meta_tables_db	tt	id	4
+sh_load_meta_tables_db	tt	gender	4
+sh_load_meta_tables_db	tt1	score	4
+sh_load_meta_tables_db	tt1	name	40
+sh_load_meta_tables_db	tt1	id	4
+sh_load_meta_tables_db	tt1	gender	4
+sh_load_meta_tables_db	tt2	id	4
+sh_load_meta_tables_db	tt2	score	4
+sh_load_meta_tables_db	tt2	name	40
+sh_load_meta_tables_db	tt2	gender	4
+sh_load_meta_tables_db	tt3	score	4
+sh_load_meta_tables_db	tt3	name	40
+sh_load_meta_tables_db	tt3	id	4
+sh_load_meta_tables_db	tt3	gender	4
+sh_load_meta_tables_db	tt4	name	40
+sh_load_meta_tables_db	tt4	score	8
+sh_load_meta_tables_db	tt4	gender	4
+sh_load_meta_tables_db	tt4	id	4
 drop database sh_load_meta_tables_db;

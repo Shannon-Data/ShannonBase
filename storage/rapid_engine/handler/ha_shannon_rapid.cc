@@ -357,24 +357,14 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   // at loading step, to set SCN to non-zero, it means it committed after inserted with explicit begin/commit.
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
 
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context.m_sch_tb_name]->meta_info;
-  meta_ref.snapshot_scn = context.m_extra_info.m_scn;
-  ha_rows num_rows{0};
-  table_arg.file->ha_records(&num_rows);
-  meta_ref.nrows = num_rows;
-  meta_ref.size_bytes = meta_ref.nrows * table_arg.s->rec_buff_length;
-  meta_ref.load_start_stamp = std::chrono::system_clock::now();
-  meta_ref.loading_progress = 0.1;
-
+  Utils::Util::update_rpd_meta_info(&context, &table_arg, Utils::Util::STAGE::BEGIN);
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
     std::string err;
     err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" load failed");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
     return HA_ERR_GENERIC;
   }
-  meta_ref.load_end_stamp = std::chrono::system_clock::now();
-  meta_ref.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
-  meta_ref.loading_progress = 1.0;
+  Utils::Util::update_rpd_meta_info(&context, &table_arg, Utils::Util::STAGE::END);
 
   guard.commit();
   m_share = new RapidShare(table_arg);
@@ -388,38 +378,6 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
   }
-
-  // add the mete info into 'rpd_column_id' and 'rpd_columns tables', etc.
-  // to check whether it has been loaded or not. here, we dont use field_ptr != nullptr
-  // because the ghost column.
-  for (auto index = 0u; index < table_arg.s->fields; index++) {
-    auto field_ptr = *(table_arg.field + index);
-    // Skip columns marked as NOT SECONDARY.
-    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-    ShannonBase::rpd_column_info_t row_rpd_columns;
-    strncpy(row_rpd_columns.schema_name, table_arg.s->db.str, table_arg.s->db.length);
-    row_rpd_columns.table_id = context.m_table_id;
-    row_rpd_columns.column_id = field_ptr->field_index();
-    strncpy(row_rpd_columns.column_name, field_ptr->field_name, sizeof(row_rpd_columns.column_name) - 1);
-    strncpy(row_rpd_columns.table_name, table_arg.s->table_name.str, sizeof(row_rpd_columns.table_name) - 1);
-    auto key_name =
-        ShannonBase::Utils::Util::get_key_name(table_arg.s->db.str, table_arg.s->table_name.str, field_ptr->field_name);
-    std::string comment(field_ptr->comment.str);
-    memset(row_rpd_columns.encoding, 0x0, NAME_LEN);
-    if (comment.find("SORTED") != std::string::npos)
-      strncpy(row_rpd_columns.encoding, "SORTED", strlen("SORTED") + 1);
-    else if (comment.find("VARLEN") != std::string::npos)
-      strncpy(row_rpd_columns.encoding, "VARLEN", strlen("VARLEN") + 1);
-    else
-      strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
-    row_rpd_columns.ndv = 0;
-    row_rpd_columns.avg_byte_width_inc_null = field_ptr->pack_length();
-    ShannonBase::shannon_rpd_columns_info.push_back(row_rpd_columns);
-  }
-
-  if (shannon_self_load_mgr_inst)
-    shannon_self_load_mgr_inst->add_table(context.m_table_id, context.m_schema_name, context.m_table_name, "", false);
 
   // start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();
@@ -2706,8 +2664,6 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   ShannonBase::shannon_rpd_cost_est_instances =
       ShannonBase::Optimizer::CostModelServer::Instance(ShannonBase::Optimizer::CostEstimator::Type::RPD_ENG);
 
-  ShannonBase::Recovery::rapid_recovery_startup();
-
   handlerton *shannon_rapid_hton = static_cast<handlerton *>(p);
   ShannonBase::shannon_rapid_hton_ptr = shannon_rapid_hton;
   shannon_rapid_hton->create = rapid_create_handler;
@@ -2751,10 +2707,14 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   auto ret = instance_->initialize();
   ShannonBase::shannon_self_load_mgr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+
+  ShannonBase::Recovery::rapid_recovery_startup();
   return ret;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
+  ShannonBase::Recovery::rapid_recovery_shutdown();
+
   if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
     ShannonBase::shannon_self_load_mgr_inst->shutdown();
 
@@ -2768,8 +2728,6 @@ static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
     delete ShannonBase::shannon_loaded_tables;
     ShannonBase::shannon_loaded_tables = nullptr;
   }
-
-  ShannonBase::Recovery::rapid_recovery_shutdown();
 
   auto instance_ = ShannonBase::Imcs::Imcs::instance();
   return instance_->deinitialize();

@@ -83,14 +83,14 @@ alter table LINEITEM4 secondary_load;
 select * from performance_schema.rpd_tables;
 
 --replace_column 1 IGNORE
-select * from performance_schema.rpd_table_id;
+select * from performance_schema.rpd_table_id order by ID,NAME;
 
 --replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_columns;
+select * from performance_schema.rpd_columns order by TABLE_ID,COLUMN_ID;
 
 --replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_column_id;
+select * from performance_schema.rpd_column_id order by ID,TABLE_ID;
 
-select * from performance_schema.rpd_preload_stats;
+select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME;
 
 drop database sh_load_meta_tables_db;

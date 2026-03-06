@@ -27,6 +27,7 @@
 
 #include "include/decimal.h"  //my_decimal
 #include "include/my_bitmap.h"
+#include "sql/mysqld.h"  // mysqld_server_started
 #include "sql/sql_base.h"
 
 #include "sql/dd/cache/dictionary_client.h"
@@ -43,6 +44,7 @@
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/ml/ml.h"
@@ -85,72 +87,192 @@ TABLE *Util::open_table_by_name(THD *thd, std::string schema_name, std::string t
    *    close_thread_tables(thd);
    */
 
-  /*
-  TABLE *table{nullptr};
-  for (table = thd->open_tables; table; table = table->next) {
-    auto db_flag = !strncmp(schema_name.c_str(), table->s->db.str, table->s->db.length);
-    auto tb_flag = !strncmp(table_name.c_str(), table->s->table_name.str, table->s->table_name.length);
-    if (table->s && table->file && (table->file->inited != handler::NONE) && db_flag && tb_flag) {
-      return table;
-    }
-  }
+  /**
+   *   TABLE *table{nullptr};
+   *   for (table = thd->open_tables; table; table = table->next) {
+   *     auto db_flag = !strncmp(schema_name.c_str(), table->s->db.str, table->s->db.length);
+   *     auto tb_flag = !strncmp(table_name.c_str(), table->s->table_name.str, table->s->table_name.length);
+   *     if (table->s && table->file && (table->file->inited != handler::NONE) && db_flag && tb_flag) {
+   *       return table;
+   *     }
+   *   }
+   *
+   *   auto old_mode = thd->locked_tables_mode;
+   *   if (thd->locked_tables_mode == LTM_PRELOCKED) {
+   *     thd->locked_tables_mode = LTM_NONE;
+   *   }
+   *
+   *   Open_table_context table_ref_context(thd, MYSQL_OPEN_IGNORE_GLOBAL_READ_LOCK);
+   *
+   *   Table_ref table_ref(schema_name.c_str(), table_name.c_str(), lk_mode);
+   *   table_ref.open_strategy = Table_ref::OPEN_NORMAL;
+   *
+   *   if (open_table(thd, &table_ref, &table_ref_context) || !table_ref.table->file) {
+   *     sql_print_warning("Failed to open table %s.%s", schema_name, table_name);
+   *     return nullptr;
+   *   }
+   *
+   *   auto table_ptr = table_ref.table;
+   *   if (!table_ptr->next_number_field)  // in case.
+   *     table_ptr->next_number_field = table_ptr->found_next_number_field;
+   *   thd->locked_tables_mode = old_mode;
+   *
+   *   if (!table_ptr->file) return nullptr;
+   *   if (table_ptr->file->ha_external_lock(thd, F_WRLCK)) {
+   *     return nullptr;
+   *   }
+   */
+  /**
+   * Three things must be derived from the caller's requested lk_mode:
+   *
+   *   1. table_list.set_lock  – the MySQL thr_lock_type sent to the handler's
+   *      store_lock().  Was hardcoded to TL_READ; write callers (set_flag)
+   *      got wrong lock type.
+   *
+   *   2. MDL request type – must match the thr-lock intent.  MDL_SHARED_READ
+   *      is insufficient for a write; InnoDB would see an inconsistent state
+   *      and crash in close_thread_tables / ha_update_row.
+   *
+   *   3. ha_external_lock – MUST always be F_WRLCK regardless of whether the
+   *      open is logically a read or write.  Reason: open_table_by_name is
+   *      only ever called from inside server-internal DDL / recovery code that
+   *      runs within an existing write transaction context (ALTER TABLE,
+   *      DROP TABLE, plugin init).  In those contexts InnoDB's store_lock
+   *      (called by open_tables) sets select_lock_type = LOCK_X even for
+   *      TL_READ_WITH_SHARED_LOCKS.  Calling ha_external_lock(F_RDLCK=0) when
+   *      select_lock_type is already LOCK_X fires the InnoDB assertion:
+   *        !(lock_type == 0 && m_prebuilt->select_lock_type == LOCK_X)
+   *      F_WRLCK is always safe here; it is "more exclusive than needed" for
+   *      pure reads but does not violate any InnoDB invariant.
+   */
+  const bool is_write = (lk_mode >= TL_WRITE_ALLOW_WRITE);
+  const enum_mdl_type mdl_type = is_write ? MDL_SHARED_WRITE : MDL_SHARED_READ;
 
-  auto old_mode = thd->locked_tables_mode;
-  if (thd->locked_tables_mode == LTM_PRELOCKED) {
-    thd->locked_tables_mode = LTM_NONE;
-  }
+  const char *schema_str = strmake_root(thd->mem_root, schema_name.c_str(), schema_name.size());
+  const char *table_str = strmake_root(thd->mem_root, table_name.c_str(), table_name.size());
+  auto table_list = new (thd->mem_root) Table_ref(schema_str, table_str, lk_mode);
+  table_list->set_lock({lk_mode, THR_DEFAULT});
+  MDL_REQUEST_INIT(&table_list->mdl_request,
+                   MDL_key::TABLE,    // namespace
+                   schema_str,        // db
+                   table_str,         // name
+                   mdl_type,          // derived from lk_mode; was hardcoded MDL_SHARED_READ
+                   MDL_TRANSACTION);  // duration
 
-  Open_table_context table_ref_context(thd, MYSQL_OPEN_IGNORE_GLOBAL_READ_LOCK);
-
-  Table_ref table_ref(schema_name.c_str(), table_name.c_str(), lk_mode);
-  table_ref.open_strategy = Table_ref::OPEN_NORMAL;
-
-  if (open_table(thd, &table_ref, &table_ref_context) || !table_ref.table->file) {
-    sql_print_warning("Failed to open table %s.%s", schema_name, table_name);
-    return nullptr;
-  }
-
-  auto table_ptr = table_ref.table;
-  if (!table_ptr->next_number_field)  // in case.
-    table_ptr->next_number_field = table_ptr->found_next_number_field;
-  thd->locked_tables_mode = old_mode;
-
-  if (!table_ptr->file) return nullptr;
-  if (table_ptr->file->ha_external_lock(thd, F_WRLCK)) {
-    return nullptr;
-  }
-*/
-  Table_ref table_list;
-  table_list.db = schema_name.c_str();
-  table_list.db_length = schema_name.length();
-  table_list.table_name = table_name.c_str();
-  table_list.table_name_length = table_name.length();
-  table_list.alias = table_name.c_str();
-  table_list.set_lock({TL_READ, THR_DEFAULT});
-  MDL_REQUEST_INIT(&table_list.mdl_request,
-                   MDL_key::TABLE,       // namespace
-                   schema_name.c_str(),  // db
-                   table_name.c_str(),   // name
-                   MDL_SHARED_READ,      // type
-                   MDL_TRANSACTION);     // duration
-
-  Table_ref *table_list_ptr = &table_list;
   uint counter{0};
   uint flags = MYSQL_OPEN_GET_NEW_TABLE | MYSQL_OPEN_IGNORE_FLUSH;
-  if (open_tables(thd, &table_list_ptr, &counter, flags)) return nullptr;
-  if (table_list.table->file->ha_external_lock(thd, F_WRLCK)) return nullptr;
+  if (open_tables(thd, &table_list, &counter, flags)) return nullptr;
 
-  return table_list.table;
+  // Always F_WRLCK – see explanation above.
+  if (table_list->table->file->ha_external_lock(thd, F_WRLCK)) return nullptr;
+
+  return table_list->table;
 }
 
 int Util::close_table(THD *thd, TABLE *table) {
+  if (!table) return false;
   // it will close in close_thread_tables(). so here do nothing.
   if (table) table->file->ha_external_lock(thd, F_UNLCK);
 
   // Transaction will be open in openning stage implicitly.
-  if (thd->get_transaction()->is_active(Transaction_ctx::STMT)) trans_commit_stmt(thd);
+  // Only commit stmt transaction outside of LOCK TABLES mode.
+  // Under LTM_LOCK_TABLES the transaction is managed by UNLOCK TABLES.
+  if (thd->locked_tables_mode == LTM_NONE && thd->get_transaction()->is_active(Transaction_ctx::STMT)) {
+    trans_commit_stmt(thd);
+  }
 
   return SHANNON_SUCCESS;
+}
+
+bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, const TABLE *table, Util::STAGE stage) {
+  // add the mete info into 'rpd_column_id' and 'rpd_columns tables', etc.
+  // to check whether it has been loaded or not. here, we dont use field_ptr != nullptr
+  // because the ghost column.
+  // Add meta info into 'rpd_column_id' and 'rpd_columns' tables, etc.
+  // To check whether it has been loaded or not. Here we don't use field_ptr != nullptr
+  // because of ghost columns.
+
+  if (!context || !table) {
+    return true;  // Return error for invalid inputs
+  }
+
+  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
+
+  if (stage == Util::STAGE::BEGIN) {
+    // BEGIN stage: initialize metadata for load start
+    meta_ref.snapshot_scn = context->m_extra_info.m_scn;
+
+    ha_rows num_rows{0};
+    if (table->file && table->file->ha_records(&num_rows) == 0) {
+      meta_ref.nrows = num_rows;
+      meta_ref.size_bytes = num_rows * table->s->rec_buff_length;
+    }
+
+    meta_ref.load_start_stamp = std::chrono::system_clock::now();
+    meta_ref.loading_progress = 0.1;
+  } else {
+    // END stage: populate column metadata and finalize
+    const auto &db_name = table->s->db;
+    const auto &tb_name = table->s->table_name;
+
+    // Pre-reserve space for efficiency if possible
+    ShannonBase::shannon_rpd_columns_info.reserve(ShannonBase::shannon_rpd_columns_info.size() + table->s->fields);
+    for (uint index = 0; index < table->s->fields; ++index) {
+      auto field_ptr = table->field[index];
+
+      // Skip columns marked as NOT SECONDARY
+      if (!field_ptr || field_ptr->is_flag_set(NOT_SECONDARY_FLAG)) {
+        continue;
+      }
+
+      ShannonBase::rpd_column_info_t row_rpd_columns = {};
+
+      // Copy schema name with bounds checking
+      strncpy(row_rpd_columns.schema_name, db_name.str,
+              std::min(db_name.length, sizeof(row_rpd_columns.schema_name) - 1));
+
+      // Copy table name with bounds checking
+      strncpy(row_rpd_columns.table_name, tb_name.str,
+              std::min(tb_name.length, sizeof(row_rpd_columns.table_name) - 1));
+
+      row_rpd_columns.table_id = context->m_table_id;
+      row_rpd_columns.column_id = field_ptr->field_index();
+
+      // Copy column name with bounds checking
+      strncpy(row_rpd_columns.column_name, field_ptr->field_name, sizeof(row_rpd_columns.column_name) - 1);
+
+      // Determine encoding based on column comment
+      const std::string comment(field_ptr->comment.str, field_ptr->comment.length);
+      memset(row_rpd_columns.encoding, 0, NAME_LEN);
+
+      if (comment.find("SORTED") != std::string::npos)
+        strncpy(row_rpd_columns.encoding, "SORTED", strlen("SORTED") + 1);
+      else if (comment.find("VARLEN") != std::string::npos)
+        strncpy(row_rpd_columns.encoding, "VARLEN", strlen("VARLEN") + 1);
+      else
+        strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
+
+      row_rpd_columns.ndv = 0;
+      row_rpd_columns.avg_byte_width_inc_null = field_ptr->pack_length();
+      static std::mutex s_rpd_meta_mutex;
+      {
+        std::lock_guard<std::mutex> lk(s_rpd_meta_mutex);
+        ShannonBase::shannon_rpd_columns_info.push_back(row_rpd_columns);
+      }
+    }
+
+    // Add table to self-load manager if available
+    if (ShannonBase::shannon_self_load_mgr_inst) {
+      ShannonBase::shannon_self_load_mgr_inst->add_table(context->m_table_id, context->m_schema_name,
+                                                         context->m_table_name, "", false);
+    }
+
+    // Finalize metadata
+    meta_ref.load_end_stamp = std::chrono::system_clock::now();
+    meta_ref.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
+    meta_ref.loading_progress = 1.0;
+  }
+  return false;  // Success
 }
 
 std::map<std::string, std::unique_ptr<Compress::Dictionary>> loaded_dictionaries;
@@ -418,6 +540,26 @@ uint Util::normalized_length(const Field *field) {
           Utils::Util::is_string(field->type()))
              ? ((field->real_type() == MYSQL_TYPE_ENUM) ? field->pack_length() : sizeof(uint32))
              : field->pack_length();
+}
+
+bool Util::wait_for_server_bootup(int timeout_seconds) {
+  DBUG_TRACE;
+
+  using namespace std::chrono;
+  auto deadline = steady_clock::now() + seconds(timeout_seconds);
+  while (!mysqld_server_started) {
+    if (steady_clock::now() >= deadline) {
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Recovery: timed out waiting for server bootup after %d seconds",
+             timeout_seconds);
+      return false;
+    }
+
+    // Poll every 200ms to avoid busy-waiting
+    std::this_thread::sleep_for(milliseconds(200));
+  }
+
+  DBUG_PRINT("recovery", ("wait_for_server_bootup: server bootup complete"));
+  return true;
 }
 
 ColumnMapGuard::ColumnMapGuard(TABLE *t, TYPE type) : bit_type(type), table(t) {

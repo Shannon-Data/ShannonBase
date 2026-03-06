@@ -35,7 +35,7 @@
 #include <vector>
 
 #include "my_inttypes.h"
-#include "storage/rapid_engine/recovery/load_persist.h"
+#include "storage/rapid_engine/recovery/recovery_load.h"
 
 class THD;
 
@@ -53,13 +53,6 @@ namespace Recovery {
  *   3. Stores the THD as the thread global via store_globals().
  *   4. On destruction, restores prior globals, detaches, and cleans up.
  *
- * Usage:
- *   void my_background_func() {
- *     RecoveryAdminSession session;
- *     if (!session.is_valid()) return;
- *     session.thd()->set_query(…);
- *     // use session.thd() for SQL execution …
- *   }
  */
 class RecoveryAdminSession {
  public:
@@ -81,44 +74,6 @@ class RecoveryAdminSession {
 };
 
 /**
- * @class DD_KillImmunizer
- * @brief RAII guard that prevents MySQL from killing a THD's query while the
- *        recovery DD worker is executing queries.
- *
- * Problem (Bug#33752387):
- *   A MySQL shutdown sends kill signals to all active connections. If the DD
- *   Worker's query is killed mid-execution, the Ed_connection may be left in
- *   an inconsistent state and crash.
- *
- * Solution:
- *   Before issuing any query, wrap the call with DD_KillImmunizer. This sets
- *   THD::killed = NOT_KILLED for the duration and restores the original value
- *   on destruction.
- *
- * Usage:
- *   {
- *     DD_KillImmunizer guard(thd);
- *     // queries here cannot be killed by MySQL shutdown
- *   } // restores original killed state
- */
-class DD_KillImmunizer {
- public:
-  explicit DD_KillImmunizer(THD *thd);
-  ~DD_KillImmunizer();
-
-  DD_KillImmunizer(const DD_KillImmunizer &) = delete;
-  DD_KillImmunizer &operator=(const DD_KillImmunizer &) = delete;
-
- private:
-  THD *m_thd{nullptr};
-  int m_saved_killed{0};  // stores THD::killed value on entry
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// RecoveryJob – single-table reload unit
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
  * @class RecoveryJob
  * @brief Encapsulates a single-table reload task performed during restart
  *        recovery.
@@ -131,7 +86,6 @@ class DD_KillImmunizer {
  *      FAILED (because OOM or other transient errors during restart reload
  *      should not block other tables – see Bug#34197659).
  *
- * Patch #5 note:
  *   Before loading, RecoveryJob checks whether the table is already present
  *   in the in-memory Global State (Imcs::get_rpd_table). If it is, the job
  *   is skipped so that a table loaded by a concurrent user request before the
@@ -173,10 +127,6 @@ class RecoveryJob {
    */
   bool reload_partitioned_table(THD *thd);
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DDWorker – Data Dictionary worker thread (Patch #2)
-// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * @class DDWorker
@@ -229,9 +179,6 @@ class DDWorker {
  private:
   void run();  // thread body
 
-  /** @brief Wait for MySQL server bootup to complete. */
-  bool wait_for_server_bootup(int timeout_seconds = 300);
-
   std::thread m_thread;
   std::mutex m_mutex;
   std::condition_variable m_cv;
@@ -241,10 +188,6 @@ class DDWorker {
 
   std::vector<SecondaryLoadedTable> m_found_tables;
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// RecoveryFramework – top-level orchestrator (Patches #2 / #4)
-// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * @class RecoveryFramework
@@ -260,11 +203,6 @@ class DDWorker {
  *      (if any) so stale metadata does not confuse query planning.
  *   5. Provide a clean shutdown path that stops the DDWorker and waits for all
  *      in-flight jobs to complete.
- *
- * Patch #5:
- *   Before dispatching a RecoveryJob, check whether the table is already
- *   present in the in-memory IMCS state (loaded by a concurrent user request).
- *   If so, skip the job.
  *
  * Usage (called from plugin init):
  *   RecoveryFramework::instance().startup();
@@ -343,7 +281,7 @@ class RecoveryFramework {
    */
   void invalidate_external_global_state();
 
-  // ── State ──────────────────────────────────────────────────────────────────
+  std::thread m_monitoring_thread;
 
   /** True if Global State was empty when startup() was called. */
   std::atomic<bool> m_global_state_empty{false};
@@ -364,11 +302,10 @@ class RecoveryFramework {
 
   /** Set to true once shutdown() has been called. */
   std::atomic<bool> m_stopped{false};
-};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Free helper – called from ha_shannon_rapid.cc plugin init / deinit
-// ─────────────────────────────────────────────────────────────────────────────
+  std::vector<std::thread> m_job_threads;
+  std::mutex m_job_threads_mutex;
+};
 
 /**
  * @brief Entry point called from the ShannonBase plugin init function.

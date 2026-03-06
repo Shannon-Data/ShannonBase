@@ -31,6 +31,7 @@ rapid_pop_buffer_size_max	268435456
 rapid_propagation_mode	DIRECT_NOTIFICATION
 rapid_purge_batch_size	64
 rapid_purge_efficiency_threshold	0.100000
+rapid_reload_on_restart	OFF
 rapid_self_load_base_relation_fill_percentage	70
 rapid_self_load_enabled	OFF
 rapid_self_load_interval_seconds	86400

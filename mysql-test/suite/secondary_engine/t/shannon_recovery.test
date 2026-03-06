@@ -1,0 +1,98 @@
+# Tests for the SECONDARY_ENGINE table option.
+# Most DDLs are allowed on tables with SECONDARY_ENGINE when
+# the corresponding SECONDARY_ENGINE plugin is not installed.
+# Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
+
+create database sh_test11 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+use sh_test11;
+--disable_warnings
+
+show variables like "rapid_reload_on_restart";
+set persist rapid_reload_on_restart =on;
+show variables like "rapid_reload_on_restart";
+
+CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci SECONDARY_ENGINE=RAPID;
+
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
+insert into tt1 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm'), (40,'n4',4,'f');
+
+alter table tt1 secondary_load;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+
+select * from tt1 where score >=1  and id < 3 order by id;
+select * from tt1 where score >=1  and score < 3 order by id;
+select * from tt1 where id >=1  and id < 3 order by id;
+select score from tt1 where id > 2  and score = 30 order by id;
+
+select * from tt1 where score >=1  or id < 3 order by id;
+select * from tt1 where score >=1  or score < 3 order by id;
+select * from tt1 where id >=1  or id < 3  order by id;
+select score from tt1 where id > 2  and score = 30 or score = 40 order by id;
+
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+create table tt8 (score float primary key, name char(10) , id int, gender char(1)) secondary_engine=rapid;
+insert into tt8 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
+alter table tt8 secondary_load;
+select * from tt8 where score >= 2.5;
+
+select count(1) from tt1;
+select count(*) from tt1;
+select count(1) from tt1 where score > 10;
+select count(*) from tt1 where score > 10;
+select count(score), gender from tt1 group by gender order by gender;
+select sum(score), gender from tt1 group by gender order by gender;
+select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
+
+SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
+
+alter table tt1 secondary_unload;
+alter table tt8 secondary_unload;
+
+SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
+
+alter table tt1 secondary_load;
+alter table tt8 secondary_load;
+
+--replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
+select * from performance_schema.rpd_tables;
+
+--replace_column 1 IGNORE
+select * from performance_schema.rpd_table_id;
+
+--replace_column 1 IGNORE 2 IGNORE
+select * from performance_schema.rpd_columns;
+
+--replace_column 1 IGNORE 2 IGNORE
+select * from performance_schema.rpd_column_id;
+
+select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME;
+
+--echo "restart mysqld"
+--source include/restart_mysqld.inc
+
+--sleep 5
+SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
+
+show variables like "rapid_reload_on_restart";
+
+--replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
+select * from performance_schema.rpd_tables;
+
+--replace_column 1 IGNORE
+select * from performance_schema.rpd_table_id;
+
+--replace_column 1 IGNORE 2 IGNORE
+select * from performance_schema.rpd_columns;
+
+--replace_column 1 IGNORE 2 IGNORE
+select * from performance_schema.rpd_column_id;
+
+select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME;
+set persist rapid_reload_on_restart =off;
+
+--enable_warnings
+drop database sh_test11;
