@@ -76,6 +76,7 @@ namespace ShannonBase {
 namespace Imcs {
 class RpdTable;
 class Imcu;
+class ColumnStatistics;
 /**
  * Storage Index, Every IMCU header automatically creates and manages In-Memory Storage Indexes (IM storage indexes) for
  * its CUs. An IM storage index stores the minimum and maximum for all columns within the IMCU.
@@ -513,6 +514,77 @@ class Imcu : public MemoryObject {
 
   // Back Reference
   RpdTable *m_owner_table;
+};
+
+/**
+ * Extract range predicates from WHERE condition
+ * Estimate IMCU skip ratio based on column statistics (min/max/histogram)
+ * Estimate row-level selectivity
+ */
+class ImcuPruningAnalyzer {
+ public:
+  explicit ImcuPruningAnalyzer(RpdTable *rpd_table) : m_rpd_table(rpd_table) {}
+  /**
+   * @param condition WHERE condition
+   * @return Skip ratio [0.0, 1.0]
+   */
+  double estimate_skip_ratio(Item *condition);
+
+  /**
+   *@param condition WHERE condition
+   * @return Selectivity [0.0, 1.0]
+   */
+  double estimate_row_selectivity(Item *condition);
+
+ private:
+  struct RangeCondition {
+    uint32_t col_idx{0};                                        // Column index
+    double lower_bound{std::numeric_limits<double>::lowest()};  // Lower bound
+    double upper_bound{std::numeric_limits<double>::max()};     // Upper bound
+    bool lower_inclusive{true};                                 // Whether lower bound is inclusive
+    bool upper_inclusive{true};                                 // Whether upper bound is inclusive
+    bool is_equality{false};                                    // Whether it's an equality query
+    double equality_value{0.0};                                 // Value for equality query
+
+    enum_field_types col_type{MYSQL_TYPE_NULL};  // Column type
+
+    // String range (for string types)
+    std::string str_lower;
+    std::string str_upper;
+    bool is_string_range{false};
+  };
+
+  void extract_range_conditions(Item *item, std::vector<RangeCondition> &out);
+  bool extract_simple_range(Item_func *func, RangeCondition &range);
+  bool extract_between_range(Item_func_between *between, RangeCondition &range);
+
+  /**
+  Extract range from IN (col IN (v1, v2, v3))
+  Convert to [min(v1,v2,v3), max(v1,v2,v3)]
+  */
+  bool extract_in_range(Item_func_in *in_func, RangeCondition &range);
+  bool extract_null_range(Item_func *func, RangeCondition &range);
+
+  /**
+   * @param col_stats Column statistics (including histogram)
+   * @param rc Range condition
+   * @param total_imcus Total number of IMCUs
+   * @return Number of skippable IMCUs
+   */
+  size_t estimate_skippable_imcus(const ColumnStatistics *col_stats, const RangeCondition &rc, size_t total_imcus);
+  size_t estimate_skippable_imcus_from_minmax(double global_min, double global_max, const RangeCondition &rc,
+                                              size_t total_imcus);
+
+  size_t estimate_skippable_imcus_from_histogram(const ColumnStatistics *col_stats, const RangeCondition &rc,
+                                                 size_t total_imcus);
+  double estimate_row_selectivity_from_range(const ColumnStatistics *col_stats, const RangeCondition &rc);
+
+  bool extract_numeric_value(Item *item, double *value);
+  bool extract_string_value(Item *item, std::string *value);
+  bool get_column_index(Item *item, uint32_t *col_idx, enum_field_types *col_type);
+  bool has_overlap(double min1, double max1, double min2, double max2);
+  double calculate_overlap_ratio(double min1, double max1, double min2, double max2);
+  RpdTable *m_rpd_table;
 };
 }  // namespace Imcs
 }  // namespace ShannonBase

@@ -39,6 +39,7 @@
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
 #include "storage/rapid_engine/optimizer/rules/rule.h"
+#include "storage/rapid_engine/optimizer/utils.h"
 
 class THD;
 class Query_expression;
@@ -52,6 +53,7 @@ class Item_func_like;
 struct Index_lookup;
 class SEL_ARG;
 class QUICK_RANGE;
+class RelationalExpression;
 
 namespace ShannonBase {
 namespace Optimizer {
@@ -70,6 +72,52 @@ typedef struct OptimizeContext {
 class Rule;
 class CostEstimator;
 class CardinalityEstimator;
+
+struct TranslateState {
+  // Set of tables covered by the current AccessPath node
+  table_map state_map{0};
+
+  // List of expressions for external output
+  std::vector<Item *> projection_items;
+
+  // Expressions required by parent node
+  std::vector<Item *> required_items;
+
+  // Filter information
+  struct {
+    Item *condition{nullptr};
+    table_map zero_row_state_map{0};
+  } filter;
+
+  std::unique_ptr<PlanNode> plan_node;
+
+  // Join semantic flags
+  bool has_from_inner{false};
+  bool has_from_outer{false};
+  bool is_outer_join{false};
+  bool is_semi_join{false};
+
+  inline bool covers_table(table_map tmap) const { return (state_map & tmap) == tmap; }
+
+  inline void merge_projection(const TranslateState &other) {
+    for (auto *item : other.projection_items) {
+      if (!IsProjected(item)) projection_items.push_back(item);
+    }
+  }
+
+ private:
+  inline bool IsProjected(Item *item) const {
+    return std::any_of(projection_items.begin(), projection_items.end(), [item](Item *i) { return i == item; });
+  }
+};
+
+class ProjectionExtractor {
+ public:
+  // Extract expressions within the scope of state_map from Item
+  static void Extract(Item *item, table_map state_map, std::vector<Item *> &proj_items, bool include_constants = false);
+  // Extract required_items from Filter condition (excluding constants)
+  static void ExtractRequired(Item *condition, table_map state_map, std::vector<Item *> &required);
+};
 
 /**
  * @brief Main optimizer class for query optimization
@@ -195,7 +243,7 @@ class Optimizer : public MemoryObject {
    */
   static bool CheckChildVectorization(AccessPath *child_path);
 
-  Plan translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath *path, const JOIN *join);
+  bool translate_access_path(TranslateState *state, THD *thd, AccessPath *path, const JOIN *join);
 
   void fill_aggregate_info(LocalAgg *node, const JOIN *join);
 
@@ -213,6 +261,23 @@ class Optimizer : public MemoryObject {
   static std::unique_ptr<Imcs::Predicate> convert_isnotnull_to_predicate(THD *thd, Item_func *func);
   static std::unique_ptr<Imcs::Predicate> convert_like_to_predicate(THD *thd, Item_func_like *like_func,
                                                                     bool is_negated);
+  static std::unique_ptr<Imcs::Predicate> convert_range_to_predicate(QUICK_RANGE *qr, TABLE *table, int index_no);
+  static bool decode_key_value(const uchar *key_ptr, Field *field, Imcs::PredicateValue &out_value);
+
+  void extract_join_conditions(const RelationalExpression *expr, std::vector<Item *> &out_conditions);
+  void extract_post_join_filters(const JoinPredicate *pred, table_map covered_tables, std::vector<Item *> &out_filters);
+  void walk_relational_expression(const RelationalExpression *expr,
+                                  std::function<bool(const RelationalExpression *)> func);
+
+  bool hanle_outerjoin_zerorows(TranslateState *parent_state, THD *thd, AccessPath *path, const JOIN *join,
+                                TranslateState &inner_state);
+
+  inline void make_native_plan(TranslateState *parent_state, AccessPath *path) {
+    auto native = std::make_unique<MySQLNative>();
+    native->original_path = path;
+    parent_state->plan_node = std::move(native);
+    parent_state->state_map = ShannonBase::Optimizer::Utils::get_tablescovered(path);
+  }
   /**
    * Convert QUICK_RANGE to Predicate
    *

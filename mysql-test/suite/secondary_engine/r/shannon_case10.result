@@ -1,0 +1,108 @@
+create database sh_test10;
+use sh_test10;
+SET @old_debug = @@GLOBAL.debug;
+create table tt1 (score int, name char(10), id int, gender char(1), primary key(id, score)) secondary_engine=rapid;
+insert into tt1 values(10, 'n1', 1, 'm'), (20, 'n2', 2, 'f'), (30, 'n3', 3, 'm');
+insert into tt1 values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm'), (40,'n4',4,'f');
+alter table tt1 secondary_load;
+SET GLOBAL debug = 'd,secondary_engine_prepare_to_rpd';
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+select * from tt1 where score >=1  and id < 3 order by id;
+score	name	id	gender
+1	n1	1	m
+10	n1	1	m
+2	n2	2	f
+20	n2	2	f
+select * from tt1 where score >=1  and score < 3 order by id;
+score	name	id	gender
+1	n1	1	m
+2	n2	2	f
+select * from tt1 where id >=1  and id < 3 order by id;
+score	name	id	gender
+1	n1	1	m
+10	n1	1	m
+2	n2	2	f
+20	n2	2	f
+select score from tt1 where id > 2  and score = 30 order by id;
+score
+30
+select * from tt1 where score >=1  or id < 3 order by id;
+score	name	id	gender
+1	n1	1	m
+10	n1	1	m
+2	n2	2	f
+20	n2	2	f
+3	n3	3	m
+30	n3	3	m
+40	n4	4	f
+select * from tt1 where score >=1  or score < 3 order by id;
+score	name	id	gender
+1	n1	1	m
+10	n1	1	m
+2	n2	2	f
+20	n2	2	f
+3	n3	3	m
+30	n3	3	m
+40	n4	4	f
+select * from tt1 where id >=1  or id < 3  order by id;
+score	name	id	gender
+1	n1	1	m
+10	n1	1	m
+2	n2	2	f
+20	n2	2	f
+3	n3	3	m
+30	n3	3	m
+40	n4	4	f
+select score from tt1 where id > 2  and score = 30 or score = 40 order by id;
+score
+30
+40
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+create table tt8 (score float primary key, name char(10) , id int, gender char(1)) secondary_engine=rapid;
+insert into tt8 values(1.1, 'n1', 1, 'm'), (2.2, 'n2', 2, 'f'), (3.3, 'n3', 3, 'm');
+alter table tt8 secondary_load;
+select * from tt8 where score >= 2.5;
+score	name	id	gender
+3.3	n3	3	m
+select count(1) from tt1;
+count(1)
+7
+select count(*) from tt1;
+count(*)
+7
+select count(1) from tt1 where score > 10;
+count(1)
+3
+select count(*) from tt1 where score > 10;
+count(*)
+3
+select count(score), gender from tt1 group by gender order by gender;
+count(score)	gender
+3	f
+4	m
+select sum(score), gender from tt1 group by gender order by gender;
+sum(score)	gender
+62	f
+44	m
+select sum(score), gender from tt1 group by gender having sum(score) > 30 order by gender;
+sum(score)	gender
+62	f
+44	m
+CREATE TABLE t(x INT primary key, b BLOB) secondary_engine=rapid;
+INSERT INTO t VALUES (0, 'zero'), (1, 'one'), (2, 'two');
+SET GLOBAL debug = 'd,secondary_engine_prepare_to_rpd';
+alter table t secondary_load;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SELECT t3.b
+FROM
+t AS t1,
+t AS t2,
+LATERAL (SELECT DISTINCT * FROM t WHERE t2.x <> 0) AS t3
+WHERE t1.x = t2.x AND t2.x = t3.x ORDER BY t3.x;
+b
+one
+two
+SET GLOBAL debug=@old_debug;
+drop database sh_test10;

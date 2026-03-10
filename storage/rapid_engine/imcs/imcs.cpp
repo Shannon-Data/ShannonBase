@@ -57,6 +57,7 @@
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
+#include "storage/rapid_engine/recovery/recovery_load.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
 namespace ShannonBase {
@@ -194,6 +195,37 @@ int Imcs::deinitialize() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+bool Imcs::is_global_state_empty() const {
+  std::shared_lock lk(const_cast<std::shared_mutex &>(m_table_mutex));
+  return m_rpd_tables.empty() && m_rpd_parttables.empty();
+}
+
+int Imcs::set_secondary_load_flag(const Rapid_load_context *context) {
+  ut_a(context && context->m_thd);
+
+  int ret = ShannonBase::Recovery::LoadFlagManager::instance().set_flag(context->m_thd, context->m_schema_name,
+                                                                        context->m_table_name, /*loaded=*/true);
+  if (ret != 0) {
+    // Non-fatal: log but do not fail the load itself.
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::set_secondary_load_flag: failed to persist flag for %s.%s (err=%d)",
+           context->m_schema_name.c_str(), context->m_table_name.c_str(), ret);
+  }
+  return 0;  // Always return success so the load path is not interrupted.
+}
+
+int Imcs::clear_secondary_load_flag(const Rapid_load_context *context, const std::string &schema_name,
+                                    const std::string &table_name) {
+  ut_a(context && context->m_thd);
+
+  int ret = ShannonBase::Recovery::LoadFlagManager::instance().set_flag(context->m_thd, schema_name, table_name,
+                                                                        /*loaded=*/false);
+  if (ret != 0) {
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::clear_secondary_load_flag: failed to clear flag for %s.%s (err=%d)",
+           schema_name.c_str(), table_name.c_str(), ret);
+  }
+  return 0;
+}
+
 int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *source) {
   ut_a(source);
   auto ret{ShannonBase::SHANNON_SUCCESS};
@@ -246,6 +278,32 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
 void Imcs::cleanup(const table_id_t &table_id) {
   if (!m_rpd_tables.size() || m_rpd_tables.find(table_id) == m_rpd_tables.end()) return;
   m_rpd_tables.erase(table_id);
+}
+
+int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
+  if (create_table_memo(context, source)) {
+    std::string errmsg;
+    cleanup(context->m_table_id);
+
+    errmsg.append("create table memo for ")
+        .append(source->s->db.str)
+        .append(".")
+        .append(source->s->table_name.str)
+        .append(" failed.");
+    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  // if the rec count is more than threshold and has primary key, it can be use parallel load, otherwise not.
+  auto parall_scan = (dynamic_cast<ha_innobase *>(source->file)->stats.records >
+                          ShannonBase::shannon_rpd_engine_cfg.para_load_threshold &&
+                      !context->m_table->s->is_missing_primary_key())
+                         ? true
+                         : false;
+  int load_ret = !parall_scan ? load_innodb(context, dynamic_cast<ha_innobase *>(source->file))
+                              : load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file));
+  if (load_ret == ShannonBase::SHANNON_SUCCESS) set_secondary_load_flag(context);
+  return load_ret;
 }
 
 int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
@@ -700,30 +758,6 @@ int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopar
   return ShannonBase::SHANNON_SUCCESS;
 }
 
-int Imcs::load_table(const Rapid_load_context *context, const TABLE *source) {
-  if (create_table_memo(context, source)) {
-    std::string errmsg;
-    cleanup(context->m_table_id);
-
-    errmsg.append("create table memo for ")
-        .append(source->s->db.str)
-        .append(".")
-        .append(source->s->table_name.str)
-        .append(" failed.");
-    my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
-    return HA_ERR_GENERIC;
-  }
-
-  // if the rec count is more than threshold and has primary key, it can be use parallel load, otherwise not.
-  auto parall_scan = (dynamic_cast<ha_innobase *>(source->file)->stats.records >
-                          ShannonBase::shannon_rpd_engine_cfg.para_load_threshold &&
-                      !context->m_table->s->is_missing_primary_key())
-                         ? true
-                         : false;
-  return !parall_scan ? load_innodb(context, dynamic_cast<ha_innobase *>(source->file))
-                      : load_innodb_parallel(context, dynamic_cast<ha_innobase *>(source->file));
-}
-
 int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source) {
   auto table_id = context->m_table_id;
   if (create_parttable_memo(context, source)) {
@@ -758,6 +792,39 @@ int Imcs::load_parttable(const Rapid_load_context *context, const TABLE *source)
     my_error(ER_SECONDARY_ENGINE, MYF(0), errmsg.c_str());
     return HA_ERR_GENERIC;
   }
+
+  set_secondary_load_flag(context);
+  return ret;
+}
+
+int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
+                       bool error_if_not_loaded, bool is_partition) {
+  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
+   *  removed*/
+  RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
+  if (error_if_not_loaded && !share) {
+    std::string err(db_name);
+    err.append(".").append(table_name).append(" table is not loaded into rapid yet");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
+    return HA_ERR_GENERIC;
+  }
+
+  auto table_id = context->m_table_id;
+  int ret{ShannonBase::SHANNON_SUCCESS};
+  ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
+                      : unload_innodb(context, table_id, error_if_not_loaded));
+  if (ret == SHANNON_SUCCESS) clear_secondary_load_flag(context, db_name, table_name);
+  return ret;
+}
+
+int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded,
+                       bool is_partition) {
+  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
+   *  removed*/
+  int ret{ShannonBase::SHANNON_SUCCESS};
+  ret = (is_partition ? unload_innodbpart(context, table_id, error_if_not_loaded)
+                      : unload_innodb(context, table_id, error_if_not_loaded));
+  if (ret == SHANNON_SUCCESS) clear_secondary_load_flag(context, context->m_schema_name, context->m_table_name);
   return ret;
 }
 
@@ -779,39 +846,6 @@ int Imcs::unload_innodbpart(const Rapid_load_context *context, const table_id_t 
   }
   m_rpd_parttables.erase(table_id);
   return ShannonBase::SHANNON_SUCCESS;
-}
-
-int Imcs::unload_table(const Rapid_load_context *context, const char *db_name, const char *table_name,
-                       bool error_if_not_loaded, bool is_partition) {
-  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
-   *  removed*/
-  RapidShare *share = shannon_loaded_tables->get(db_name, table_name);
-  if (error_if_not_loaded && !share) {
-    std::string err(db_name);
-    err.append(".").append(table_name).append(" table is not loaded into rapid yet");
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
-    return HA_ERR_GENERIC;
-  }
-
-  auto table_id = context->m_table_id;
-  int ret{ShannonBase::SHANNON_SUCCESS};
-  if (is_partition)
-    unload_innodbpart(context, table_id, error_if_not_loaded);
-  else
-    unload_innodb(context, table_id, error_if_not_loaded);
-  return ret;
-}
-
-int Imcs::unload_table(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded,
-                       bool is_partition) {
-  /** the key format: "db_name:table_name:field_name", all the ghost columns also should be
-   *  removed*/
-  int ret{ShannonBase::SHANNON_SUCCESS};
-  if (is_partition)
-    unload_innodbpart(context, table_id, error_if_not_loaded);
-  else
-    unload_innodb(context, table_id, error_if_not_loaded);
-  return ret;
 }
 }  // namespace Imcs
 }  // namespace ShannonBase

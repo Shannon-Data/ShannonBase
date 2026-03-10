@@ -34,14 +34,17 @@
 #include "sql/opt_costmodel.h"
 #include "storage/rapid_engine/optimizer/query_plan.h"
 
+class THD;
 class Item;
 class Item_cond;
 class Item_func;
 class JOIN;
+class AccessPath;
 namespace ShannonBase {
 namespace Imcs {
 class RpdTable;
 class Predicate;
+class ColumnStatistics;
 }  // namespace Imcs
 namespace Optimizer {
 /**
@@ -65,6 +68,93 @@ struct MySQLCostConstants {
   static constexpr double DISK_SEEK_COST = 2.0;      // Cost of disk seek operation
 };
 
+struct RapidCostConstants {
+  // IMCU memory read (DRAM ~50GB/s, each IMCU ~4MB)
+  // vs MySQL IO_BLOCK_READ=1.0 (disk I/O)
+  static constexpr double kImcuReadCost = 0.01;
+
+  // Vectorized CPU cost per row (AVX2, 8 doubles/cycle)
+  // vs MySQL ROW_EVALUATE_COST=0.1
+  static constexpr double kVectorCpuPerRow = 0.002;
+
+  // Columnar decompression cost per cell
+  static constexpr double kVectorDecompCostPerCell = 0.0005;
+
+  // NULL bitmap check (SIMD bit operations)
+  static constexpr double kNullBitmapCheckCost = 0.0001;
+
+  // Hash Build per row
+  static constexpr double kHashBuildPerRow = 0.003;
+
+  // Hash Probe per row
+  static constexpr double kHashProbePerRow = 0.002;
+
+  // Memory write (materialization)
+  static constexpr double kMemoryWritePerRow = 0.001;
+
+  // Minimum rows for offload (small tables not worth offloading)
+  static constexpr ha_rows kMinRowsForOffload = 1000;
+};
+
+class RpdCostEstimator;
+class SelectivityEstimator : public MemoryObject {
+ public:
+  /**
+   * Estimate selectivity of a predicate condition on a table, using column statistics if available.
+   * This is used to adjust cost estimates based on expected output size.
+   * @param table: TABLE being accessed
+   * @param condition: Predicate condition (WHERE clause) to estimate selectivity for
+   * @return: Estimated selectivity (0.0 - 1.0)
+   */
+  static double estimate_selectivity(const TABLE *table, const Item *condition);
+
+  /**
+   * Estimate selectivity of an access path, including filter, join, and aggregate selectivity, etc.
+   * This is used to adjust cost estimates based on expected output size.
+   * @param graph: Join hypergraph containing table and join information
+   * @param path: AccessPath for which to estimate selectivity
+   * @return: Estimated selectivity (0.0 - 1.0)
+   */
+  static double estimate_selectivity(const JoinHypergraph &graph, AccessPath *path);
+
+  /**
+   * Estimate selectivity of an equijoin condition between two columns, using column statistics if available.
+   * This is used to adjust join cost estimates based on expected output size.
+   * @param left_field: Left column in the equijoin condition
+   * @param right_field: Right column in the equijoin condition
+   * @return: Estimated selectivity (0.0 - 1.0)
+   */
+  static double estimate_join_selectivity(const Item_field *left_field, const Item_field *right_field);
+  static double estimate_join_selectivity(const std::vector<Item *> &join_conditions);
+  static constexpr double kDefaultJoinSelectivity = 0.1;
+
+ private:
+  static double estimate_predicate_selectivity_internal(const TABLE *table, const Item *condition,
+                                                        bool *can_use_storage_index);
+  static double estimate_selectivity_fallback(const Item *condition);
+
+  static double estimate_filter_selectivity(const JoinHypergraph &graph, AccessPath *path);
+
+  static double estimate_aggregate_selectivity(const JoinHypergraph &graph, AccessPath *path);
+
+  static double estimate_join_selectivity(const JoinHypergraph &graph, AccessPath *path);
+
+  static double estimate_join_item_selectivity(const Item *condition);
+
+  static std::vector<TABLE *> get_tables_from_tablemap(table_map tmap, const JoinHypergraph &graph);
+
+  // static double estimate_item_selectivity(Item *item, TABLE *table, const JoinHypergraph &graph);
+
+  static uint64_t estimate_singlecolumnNDV(TABLE *table, Item *group_item, double input_rows);
+  static uint64_t estimate_multicolumnNDV(const std::vector<uint64_t> &column_ndvs, double input_rows);
+
+  static Imcs::ColumnStatistics *get_column_statistics(TABLE *table, uint32_t col_idx);
+
+  static constexpr double kMinJoinSelectivity = 0.001;
+  static constexpr double kMaxJoinSelectivity = 1.0;
+  friend class RpdCostEstimator;
+};
+
 /**
  * Cost Estimator Base Class
  */
@@ -79,8 +169,10 @@ class CostEstimator : public MemoryObject {
 
   // estimate join cost between two relations.
   virtual double estimate_join_cost(ha_rows left_card, ha_rows right_card) = 0;
+
   // estimate scan cost given rows and number of imcus.
   virtual double estimate_scan_cost(ha_rows rows, size_t num_imcus) = 0;
+  virtual double estimate_scan_cost(THD *, Imcs::RpdTable *, AccessPath *) = 0;
 
   virtual inline double cpu_factor() const { return m_cpu_factor; }
   virtual inline double memory_factor() const { return m_memory_factor; }
@@ -131,22 +223,18 @@ class RpdCostEstimator : public CostEstimator {
    * estimate join cost between two relations. part of a query plan.
    */
   virtual double estimate_join_cost(ha_rows left_card, ha_rows right_card) override;
+
   /**
    * estimate scan cost given rows and number of imcus. part of a query plan.
    */
   virtual double estimate_scan_cost(ha_rows rows, size_t num_imcus) override;
+  virtual double estimate_scan_cost(THD *, Imcs::RpdTable *, AccessPath *) override;
 
  private:
   Imcs::RpdTable *get_rapid_table(TABLE *table);
-
   double calculate_scan_cost_detailed(TABLE *table, ha_rows total_rows, double filter_selectivity,
                                       bool can_use_storage_index, JOIN_TAB *tab);
-
   double calculate_hash_join_cost_detailed(double probe_rows, double build_rows, JOIN_TAB *tab);
-
-  double estimate_predicate_selectivity(TABLE *table, Item *condition, bool *can_use_storage_index);
-
-  double estimate_selectivity_fallback(Item *condition);
 
   /**
    * Calculate the cost of a vectorized scan operation on a columnar table
@@ -156,7 +244,7 @@ class RpdCostEstimator : public CostEstimator {
    * @param pruned: Whether storage index pruning can be applied
    * @return: Estimated total scan cost
    */
-  double CalculateVectorizedScanCost(TABLE *table, double selectivity, bool pruned);
+  double calculate_vectorized_scan_cost(TABLE *table, double selectivity, bool pruned);
 
   /**
    * Calculate IMCU-level I/O cost
@@ -250,7 +338,7 @@ class RpdCostEstimator : public CostEstimator {
  */
 class PredicateAnalyzer {
  public:
-  PredicateAnalyzer(TABLE *table, Imcs::RpdTable *rpd_table) : m_table(table), m_rpd_table(rpd_table) {}
+  PredicateAnalyzer(const TABLE *table, Imcs::RpdTable *rpd_table) : m_table(table), m_rpd_table(rpd_table) {}
   virtual ~PredicateAnalyzer() = default;
   /**
    * Analyze the predicate condition to estimate selectivity and whether
@@ -260,7 +348,7 @@ class PredicateAnalyzer {
    * @param can_use_si Output parameter indicating if storage index can be used.
    * @return Estimated selectivity of the predicate (between 0.0 and 1.0).
    */
-  double analyze(Item *condition, bool *can_use_si);
+  double analyze(const Item *condition, bool *can_use_si);
 
  private:
   double analyze_recursive(Item *item, bool *can_prune);
@@ -269,7 +357,7 @@ class PredicateAnalyzer {
   double estimate_without_stats(Item_func *func);
   double extract_numeric_value(Item *item);
 
-  TABLE *m_table;
+  const TABLE *m_table;
   Imcs::RpdTable *m_rpd_table;
 };
 

@@ -136,8 +136,11 @@ int table_rpd_table_id::make_row(uint index [[maybe_unused]]) {
     ShannonBase::shannon_loaded_tables->table_infos(index, tableid, schema, table);
     m_row.table_id = tableid;
     full_name = schema + "\\" + table;
+    memset(m_row.full_table_name, 0x0, NAME_LEN);
     strncpy(m_row.full_table_name, full_name.c_str(), full_name.length());
+    memset(m_row.schema_name, 0x0, NAME_LEN);
     strncpy(m_row.schema_name, schema.c_str(), schema.length());
+    memset(m_row.table_name, 0x0, NAME_LEN);
     strncpy(m_row.table_name, table.c_str(), table.length());
   }
   return 0;

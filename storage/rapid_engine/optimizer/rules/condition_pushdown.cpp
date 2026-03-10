@@ -49,7 +49,7 @@ void PredicatePushDown::apply(Plan &root) {
 
   // If there are still pending filters at the top, wrap in a Filter node
   if (root && !pending_filters.empty()) {
-    Item *combined = combine_with_and(pending_filters);
+    Item *combined = ShannonBase::Optimizer::Utils::combine_with_and(pending_filters);
     root = create_filter_node(std::move(root), combined);
   }
 }
@@ -250,6 +250,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
       }
       predicates->add_child(std::move(child_pre));
     }
+    if (scan_node->prune_predicate) predicates->add_child(std::move(scan_node->prune_predicate));
 
     if (predicates->children.empty()) {
       // all predicates failed to convert, then degrade to filter node
@@ -269,7 +270,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
   }
 
   if (!to_filter_node.empty()) {
-    Item *combined_cond = combine_with_and(to_filter_node);
+    Item *combined_cond = ShannonBase::Optimizer::Utils::combine_with_and(to_filter_node);
     double filter_selectivity = 1.0;
     for (const auto &f : to_filter_node) {
       filter_selectivity *= estimate_selectivity(f);
@@ -369,18 +370,6 @@ std::unordered_set<std::string> PredicatePushDown::get_available_tables(const Pl
     }
   }
   return tables;
-}
-
-Item *PredicatePushDown::combine_with_and(const std::vector<Item *> &predicates) {
-  if (predicates.empty()) return nullptr;
-  if (predicates.size() == 1) return predicates[0];
-
-  // Create an AND condition
-  Item_cond_and *and_cond = new (current_thd->mem_root) Item_cond_and();
-  for (auto *pred : predicates) {
-    and_cond->add(pred);
-  }
-  return and_cond;
 }
 
 Plan PredicatePushDown::create_filter_node(Plan child, Item *condition) {

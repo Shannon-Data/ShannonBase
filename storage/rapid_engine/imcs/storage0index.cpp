@@ -239,7 +239,7 @@ bool StorageIndex::can_skip_compound_predicate(const Compound_Predicate *pred) c
         DBUG_PRINT("storage_index", ("NOT: expected 1 child, got %zu, cannot evaluate", pred->children.size()));
         return false;
       }
-      bool child_allows_skip = can_skip_predicate(pred->children[0].get());
+      bool child_allows_skip [[maybe_unused]] = can_skip_predicate(pred->children[0].get());
       // If child says "can skip" (no matches), then NOT(child) has ALL matches
       // If child says "cannot skip" (has matches), then NOT(child) might skip
       // This is complex - be conservative

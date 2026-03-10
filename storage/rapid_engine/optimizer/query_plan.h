@@ -67,6 +67,11 @@ class PlanNode : public MemoryObject {
     TOP_N,
     LIMIT,
     ZERO_ROWS,
+    UNION,
+    INTERSECT,
+    EXCEPT,
+    MATERIALIZE_CTE,
+    MATERIALIZE_DERIVED,
     MYSQL_NATIVE
   };
 
@@ -106,7 +111,7 @@ class ScanTable : public PlanNode {
   bool use_storage_index{false};
 
   // Optional predicate for pruning.
-  std::unique_ptr<Imcs::Predicate> prune_predicate;
+  std::unique_ptr<Imcs::Predicate> prune_predicate{nullptr};
 
   // list of column indices to read. Empty means read all columns
   // Then during execution, only read these columns from CUs
@@ -200,29 +205,17 @@ class LocalAgg : public PlanNode {
   LocalAgg() = default;
   ~LocalAgg() override = default;
 
-  // the source condtions from mysql `group by` and `order by` and `aggregatiion funcs`.
-  std::vector<Item *> group_by;
+  std::vector<Item *> group_by;  // empty means is GlobalAgg.
   std::vector<Item *> order_by;
   std::vector<Item_func *> aggregates;
-  olap_type olap;
+  olap_type olap{olap_type::UNSPECIFIED_OLAP_TYPE};
+
+  bool is_global{false};
 
   // Convert to AccessPath for execution.
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::LOCAL_AGGREGATE; }
-  std::string ToString(int indent) const override;
-};
-
-// GlobalAgg represnets a global aggregation operation.
-class GlobalAgg : public PlanNode {
- public:
-  GlobalAgg() = default;
-  ~GlobalAgg() override = default;
-
-  // Convert to AccessPath for execution.
-  AccessPath *ToAccessPath(THD *thd) override;
-
-  Type type() const override { return Type::GLOBAL_AGGREGATE; }
   std::string ToString(int indent) const override;
 };
 
@@ -298,6 +291,49 @@ class Limit : public PlanNode {
   AccessPath *ToAccessPath(THD *thd) override;
 
   Type type() const override { return Type::LIMIT; }
+  std::string ToString(int indent) const override;
+};
+
+class Union : public PlanNode {
+ public:
+  bool is_distinct{false};
+  Type type() const override { return Type::UNION; }
+  AccessPath *ToAccessPath(THD *thd) override;
+  std::string ToString(int indent) const override;
+};
+
+class MaterializeCTE : public PlanNode {
+ public:
+  MaterializeCTE() = default;
+  ~MaterializeCTE() override = default;
+
+  std::string cte_name;
+  TABLE *tmp_table{nullptr};
+  std::vector<std::unique_ptr<PlanNode>> inner_plans;
+
+  bool is_recursive{false};     // is recurisve CTE
+  ha_rows limit{HA_POS_ERROR};  // LIMIT push down
+
+  Type type() const override { return Type::MATERIALIZE_CTE; }
+
+  AccessPath *ToAccessPath(THD *thd) override;
+  std::string ToString(int indent) const override;
+};
+
+class MaterializeDerived : public PlanNode {
+ public:
+  MaterializeDerived() = default;
+  ~MaterializeDerived() override = default;
+
+  TABLE *tmp_table{nullptr};
+  std::vector<std::unique_ptr<PlanNode>> inner_plans;  // UNION
+
+  bool has_union{false};          // is UNION
+  bool is_union_distinct{false};  // UNION vs UNION ALL
+
+  Type type() const override { return Type::MATERIALIZE_DERIVED; }
+
+  AccessPath *ToAccessPath(THD *thd) override;
   std::string ToString(int indent) const override;
 };
 

@@ -59,12 +59,13 @@
 #include "log0log.h" /* log_get_lsn */
 
 #include "storage/innobase/handler/ha_innodb.h"  //thd_to_trx
-#include "storage/innobase/include/dict0dd.h"    //dd_is_partitioned
+#include "storage/innobase/include/dict0dd.h"    //dd_table_is_partitioned
 
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapidpart.h"
-#include "storage/rapid_engine/imcs/imcs.h"        // IMCS
+#include "storage/rapid_engine/imcs/imcs.h"  // IMCS
+#include "storage/rapid_engine/imcs/index/index.h"
 #include "storage/rapid_engine/imcs/table0view.h"  //RapidCursor
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"  //RpdEngineConfig
@@ -72,14 +73,15 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
+#include "storage/rapid_engine/optimizer/utils.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/populate/log_populate.h"
+#include "storage/rapid_engine/recovery/recovery.h"  // rapid_recovery_startup, rapid_recovery_shutdown
 #include "storage/rapid_engine/statistics/statistics.h"
 #include "storage/rapid_engine/trx/transaction.h"  //transaction
 #include "storage/rapid_engine/utils/concurrent.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
-
 #include "template_utils.h"
 #include "thr_lock.h"
 
@@ -355,24 +357,14 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   // at loading step, to set SCN to non-zero, it means it committed after inserted with explicit begin/commit.
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
 
-  auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context.m_sch_tb_name]->meta_info;
-  meta_ref.snapshot_scn = context.m_extra_info.m_scn;
-  ha_rows num_rows{0};
-  table_arg.file->ha_records(&num_rows);
-  meta_ref.nrows = num_rows;
-  meta_ref.size_bytes = meta_ref.nrows * table_arg.s->rec_buff_length;
-  meta_ref.load_start_stamp = std::chrono::system_clock::now();
-  meta_ref.loading_progress = 0.1;
-
+  Utils::Util::update_rpd_meta_info(&context, &table_arg, Utils::Util::STAGE::BEGIN);
   if (Imcs::Imcs::instance()->load_table(&context, const_cast<TABLE *>(&table_arg))) {
     std::string err;
     err.append(table_arg.s->db.str).append(".").append(table_arg.s->table_name.str).append(" load failed");
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err.c_str());
     return HA_ERR_GENERIC;
   }
-  meta_ref.load_end_stamp = std::chrono::system_clock::now();
-  meta_ref.load_status = load_status_t::AVAIL_RPDGSTABSTATE;
-  meta_ref.loading_progress = 1.0;
+  Utils::Util::update_rpd_meta_info(&context, &table_arg, Utils::Util::STAGE::END);
 
   guard.commit();
   m_share = new RapidShare(table_arg);
@@ -386,38 +378,6 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     my_error(ER_NO_SUCH_TABLE, MYF(0), table_arg.s->db.str, table_arg.s->table_name.str);
     return HA_ERR_KEY_NOT_FOUND;
   }
-
-  // add the mete info into 'rpd_column_id' and 'rpd_columns tables', etc.
-  // to check whether it has been loaded or not. here, we dont use field_ptr != nullptr
-  // because the ghost column.
-  for (auto index = 0u; index < table_arg.s->fields; index++) {
-    auto field_ptr = *(table_arg.field + index);
-    // Skip columns marked as NOT SECONDARY.
-    if ((field_ptr)->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-    ShannonBase::rpd_column_info_t row_rpd_columns;
-    strncpy(row_rpd_columns.schema_name, table_arg.s->db.str, table_arg.s->db.length);
-    row_rpd_columns.table_id = context.m_table_id;
-    row_rpd_columns.column_id = field_ptr->field_index();
-    strncpy(row_rpd_columns.column_name, field_ptr->field_name, sizeof(row_rpd_columns.column_name) - 1);
-    strncpy(row_rpd_columns.table_name, table_arg.s->table_name.str, sizeof(row_rpd_columns.table_name) - 1);
-    auto key_name =
-        ShannonBase::Utils::Util::get_key_name(table_arg.s->db.str, table_arg.s->table_name.str, field_ptr->field_name);
-    std::string comment(field_ptr->comment.str);
-    memset(row_rpd_columns.encoding, 0x0, NAME_LEN);
-    if (comment.find("SORTED") != std::string::npos)
-      strncpy(row_rpd_columns.encoding, "SORTED", strlen("SORTED") + 1);
-    else if (comment.find("VARLEN") != std::string::npos)
-      strncpy(row_rpd_columns.encoding, "VARLEN", strlen("VARLEN") + 1);
-    else
-      strncpy(row_rpd_columns.encoding, "N/A", strlen("N/A") + 1);
-    row_rpd_columns.ndv = 0;
-    row_rpd_columns.avg_byte_width_inc_null = field_ptr->pack_length();
-    ShannonBase::shannon_rpd_columns_info.push_back(row_rpd_columns);
-  }
-
-  if (shannon_self_load_mgr_inst)
-    shannon_self_load_mgr_inst->add_table(context.m_table_id, context.m_schema_name, context.m_table_name, "", false);
 
   // start population thread if table loaded successfully.
   ShannonBase::Populate::Populator::start();
@@ -1183,6 +1143,8 @@ static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
 bool SecondaryEnginePrePrepareHook(THD *thd) {
   RapidCachePrimaryInfoAtPrimaryTentativelyStep(thd);
 
+  DBUG_EXECUTE_IF("secondary_engine_prepare_to_rpd", { return true; });
+
   if (unlikely(!ShannonBase::shannon_rpd_engine_cfg.dynamic_offloads || is_very_fast_query(thd))) {
     // invokes standary mysql cost threshold classifier, which decides if query needs further RAPID optimisation.
     return ShannonBase::Utils::Util::standard_cost_threshold_classifier(thd);
@@ -1202,7 +1164,7 @@ bool SecondaryEnginePrePrepareHook(THD *thd) {
   return false;
 }
 
-static void AssertSupportedPath(const AccessPath *path) {
+static bool AssertSupportedPath(const AccessPath *path) {
   switch (path->type) {
     // The only supported join type is hash join. Other join types are disabled
     // in handlerton::secondary_engine_flags.
@@ -1227,6 +1189,7 @@ static void AssertSupportedPath(const AccessPath *path) {
     default:
       break;
   }
+  return true;
 }
 
 //  In this function, Dynamic offload retrieves info from rapid_statement_context and
@@ -1254,9 +1217,6 @@ static bool RapidOptimize(ShannonBase::Optimizer::OptimizeContext *context, THD 
 
   JOIN *join = lex->unit->first_query_block()->join;
   if (!join) return false;
-  if (lex->using_hypergraph_optimizer() && lex->unit->root_access_path()) {
-    assert(false);  // purecov: deadcode
-  }
 
   ShannonBase::Optimizer::Optimizer rpd_optimizer;
   auto plan = rpd_optimizer.Optimize(context, thd, join);
@@ -1289,11 +1249,18 @@ static bool OptimizeSecondaryEngine(THD *thd [[maybe_unused]], LEX *lex) {
   DEBUG_SYNC(thd, "before_rapid_optimize");
 
   if (lex->using_hypergraph_optimizer()) {
+    bool has_unsupported = false;
     WalkAccessPaths(lex->unit->root_access_path(), nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
-                    [](AccessPath *path, const JOIN *) {
-                      AssertSupportedPath(path);
+                    [&](AccessPath *path, const JOIN *) {
+                      if (!AssertSupportedPath(path)) {
+                        has_unsupported = true;
+                      }
                       return false;
                     });
+    if (has_unsupported) {
+      SetSecondaryEngineOffloadFailedReason(thd, "Unsupported AccessPath type for IMCS");
+      return true;
+    }
   }
 
   auto optimizer_context = std::make_unique<ShannonBase::Optimizer::OptimizeContext>();
@@ -1335,30 +1302,576 @@ static bool CompareJoinCost(THD *thd, const JOIN &join, double optimizer_cost, b
     *secondary_engine_cost = cost;
   });
 
-  bool estimation_error = ShannonBase::Optimizer::Optimizer::RapidEstimateJoinCostHGO(thd, join, secondary_engine_cost);
-  if (estimation_error) {
-    SetSecondaryEngineOffloadFailedReason(thd, "Calc Rapid Estimated Join Cost failed");
-    return true;
+  // Hypergraph mode: Cost has already been set by ModifyAccessPathCost during enumeration
+  // Directly read root_path->cost, no need to recalculate using JOIN structure
+  if (thd->lex->using_hypergraph_optimizer()) {
+    AccessPath *root = join.query_block->join->root_access_path();
+    *secondary_engine_cost = (root && root->cost() > 0.0) ? root->cost() : optimizer_cost;
+  } else {  // Greedy mode.
+    *secondary_engine_cost = optimizer_cost;
+    bool estimation_error =
+        ShannonBase::Optimizer::Optimizer::RapidEstimateJoinCostHGO(thd, join, secondary_engine_cost);
+    if (estimation_error) {
+      SetSecondaryEngineOffloadFailedReason(thd, "Calc Rapid Estimated Join Cost failed");
+      return true;
+    }
   }
 
-  double primary_engine_best_cost = join.best_read;
-  if (primary_engine_best_cost <= 0.0) {
-    primary_engine_best_cost = optimizer_cost;
-  }
-
-  // Check if the calculated cost is cheaper than the best cost seen so far.
+  double primary_best = (join.best_read > 0.0) ? join.best_read : optimizer_cost;
   *cheaper = rapid_ctx->BestPlanSoFar(join, *secondary_engine_cost);
-  if (*secondary_engine_cost < primary_engine_best_cost) {
-    *use_best_so_far = true;
+  *use_best_so_far = (*secondary_engine_cost < primary_best);
+  return false;
+}
+
+static bool ModifyTableScanCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
+static bool ModifyIndexScanCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
+static bool ModifyFilterCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
+static bool ModifyHashJoinCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
+static bool ModifyNestedLoopJoinCost(THD *, const JoinHypergraph &, AccessPath *,
+                                     ShannonBase::Rapid_execution_context *);
+static bool ModifyAggregateCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
+static bool ModifySortCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
+static bool ModifyLimitCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
+static bool ModifyMaterializeCost(THD *, const JoinHypergraph &, AccessPath *, ShannonBase::Rapid_execution_context *);
+/**
+ * Hook for modifying the cost of partial plans in the Hypergraph optimizer
+ * Invocation timing: When Hypergraph enumerates each AccessPath (including partial plans)
+ * Goal: Replace MySQL's cost based on InnoDB statistics with IMCS precise cost
+ *
+ * Hypergraph invocation timing (MySQL internal inference): Called each time when costing an AccessPath node
+ * path->cost has been set by MySQL, hook can modify it
+ *
+ * false = Accept path (can modify path->cost/num_output_rows)
+ * true = Reject path (permanently remove from candidate set, may eventually lead to offload failure)
+ *
+ * @param thd Current thread
+ * @param hypergraph Hypergraph structure (contains predicates, nodes, etc.)
+ * @param path Currently proposed AccessPath (cost can be modified)
+ * @return false=accept, true=reject
+ */
+static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, AccessPath *path) {
+  ut_a(thd->lex->using_hypergraph_optimizer());
+  ut_a(!thd->is_error());
+  ut_a(hypergraph.query_block()->join == hypergraph.join());
+  AssertSupportedPath(path);
+  ut_a(path != nullptr);
+
+  // fast check
+  switch (path->type) {
+    case AccessPath::ZERO_ROWS:
+    case AccessPath::ZERO_ROWS_AGGREGATED:
+    case AccessPath::FAKE_SINGLE_ROW:
+    case AccessPath::TABLE_VALUE_CONSTRUCTOR:
+      path->set_cost(0.0);
+      path->set_init_cost(0.0);
+      path->set_init_once_cost(0.0);
+      return false;
+    default:
+      break;
+  }
+
+  auto *rapid_ctx = down_cast<ShannonBase::Rapid_execution_context *>(thd->lex->secondary_engine_execution_context());
+  if (!rapid_ctx) return false;
+  // shannon_rpd_cost_est_instances
+
+  switch (path->type) {
+    case AccessPath::TABLE_SCAN:
+      return ModifyTableScanCost(thd, hypergraph, path, rapid_ctx);
+    case AccessPath::INDEX_SCAN:
+    case AccessPath::REF:
+    case AccessPath::EQ_REF:
+    case AccessPath::INDEX_RANGE_SCAN:
+      return ModifyIndexScanCost(thd, hypergraph, path, rapid_ctx);
+    case AccessPath::FILTER:
+      return ModifyFilterCost(thd, hypergraph, path, rapid_ctx);
+    case AccessPath::HASH_JOIN:
+      return ModifyHashJoinCost(thd, hypergraph, path, rapid_ctx);
+    case AccessPath::NESTED_LOOP_JOIN:
+    case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
+      return ModifyNestedLoopJoinCost(thd, hypergraph, path, rapid_ctx);
+    case AccessPath::AGGREGATE:
+      return ModifyAggregateCost(thd, hypergraph, path, rapid_ctx);
+    case AccessPath::SORT:
+      return ModifySortCost(thd, hypergraph, path, rapid_ctx);
+    case AccessPath::LIMIT_OFFSET:
+      return ModifyLimitCost(thd, hypergraph, path, rapid_ctx);
+    case AccessPath::MATERIALIZE:
+      return ModifyMaterializeCost(thd, hypergraph, path, rapid_ctx);
+    default:
+      return false;  // keep MySQL cost
   }
   return false;
 }
 
-static bool ModifyAccessPathCost(THD *thd [[maybe_unused]], const JoinHypergraph &hypergraph [[maybe_unused]],
-                                 AccessPath *path) {
-  ut_a(!thd->is_error());
-  ut_a(hypergraph.query_block()->join == hypergraph.join());
-  AssertSupportedPath(path);
+static bool ModifyTableScanCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                                ShannonBase::Rapid_execution_context *rapid_ctx) {
+  TABLE *table = path->table_scan().table;
+  if (!table) return false;
+  auto get_rpd_table = [&](TABLE *table) -> ShannonBase::Imcs::RpdTable * {
+    auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+    if (!share) return nullptr;
+    ShannonBase::Imcs::RpdTable *rpd_table{nullptr};
+    rpd_table = share->is_partitioned ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                      : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+    return rpd_table;
+  };
+
+  auto *rpd_table = get_rpd_table(table);
+  if (!rpd_table) {
+    SetSecondaryEngineOffloadFailedReason(thd, "Table not loaded in IMCS");
+    return true;  // refuse to offload
+  }
+
+  const auto &table_meta = rpd_table->meta();
+  ha_rows total_rows = table_meta.total_rows.load(std::memory_order_relaxed);
+  size_t total_imcus = table_meta.total_imcus.load(std::memory_order_relaxed);
+  if (total_rows == 0 || total_imcus == 0) {
+    path->set_cost(0.0);
+    return false;
+  }
+
+  // from graph.predicates to get predicates
+  table_map tmap = table->pos_in_table_list->map();
+  std::vector<Item *> applicable_predicates;
+
+  for (size_t i = 0; i < graph.predicates.size(); ++i) {
+    const auto &pred = graph.predicates[i];
+    // Extract only single-table predicates (can be pushed down to scan)
+    if ((pred.total_eligibility_set & ~tmap) == 0) {
+      applicable_predicates.push_back(pred.condition);
+    }
+  }
+
+  // using PredicateAnalyzer estimate selectivity and Storage Index
+  bool can_use_si = false;
+  double row_selectivity = 1.0;
+  if (!applicable_predicates.empty()) {
+    Item *combined = ShannonBase::Optimizer::Utils::combine_with_and(applicable_predicates, thd);
+    ShannonBase::Optimizer::PredicateAnalyzer analyzer(table, rpd_table);
+    row_selectivity = analyzer.analyze(combined, &can_use_si);
+  }
+
+  double imcu_skip_ratio = 0.0;
+  if (can_use_si && !applicable_predicates.empty()) {
+    std::vector<std::unique_ptr<ShannonBase::Imcs::Predicate>> imcs_predicates;
+    for (Item *item : applicable_predicates) {
+      auto pred = ShannonBase::Optimizer::Optimizer::convert_item_to_predicate(thd, item);
+      if (pred) imcs_predicates.push_back(std::move(pred));
+    }
+
+    size_t skippable_imcus = 0;
+    for (size_t imcu_idx = 0; imcu_idx < total_imcus; ++imcu_idx) {
+      auto *imcu = rpd_table->locate_imcu(imcu_idx);
+      if (!imcu) continue;
+
+      const auto *si = imcu->get_storage_index();
+      if (!si) continue;
+
+      if (si->can_skip_imcu(imcs_predicates)) skippable_imcus++;
+    }
+
+    imcu_skip_ratio = static_cast<double>(skippable_imcus) / total_imcus;
+  }
+
+  double effective_rows = total_rows * row_selectivity;
+  double effective_imcus [[maybe_unused]] = total_imcus * (1.0 - imcu_skip_ratio);
+
+  double scan_cost = ShannonBase::shannon_rpd_cost_est_instances->estimate_scan_cost(thd, rpd_table, path);
+  if (imcu_skip_ratio > 0) scan_cost *= (1.0 - imcu_skip_ratio);
+
+  path->set_cost(scan_cost);
+  path->set_cost_before_filter(scan_cost);
+  path->set_init_cost(0.0);
+
+  rapid_ctx->RegisterTableImcsCost(table, scan_cost, effective_rows, imcu_skip_ratio, can_use_si);
+  return false;
+}
+
+static bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                                ShannonBase::Rapid_execution_context *rapid_ctx) {
+  TABLE *table{nullptr};
+  KEY *key_info{nullptr};
+  uint key_idx{MAX_KEY};
+
+  // get index info.
+  switch (path->type) {
+    case AccessPath::INDEX_SCAN: {
+      auto &idx = path->index_scan();
+      table = idx.table;
+      key_idx = idx.idx;
+      if (table && key_idx < table->s->keys) {
+        key_info = &table->key_info[key_idx];
+      }
+      break;
+    }
+    case AccessPath::REF: {
+      auto &ref = path->ref();
+      table = ref.table;
+      key_idx = ref.ref->key;
+      if (table && key_idx < table->s->keys) {
+        key_info = &table->key_info[key_idx];
+      }
+      break;
+    }
+    case AccessPath::EQ_REF: {
+      auto &eq_ref = path->eq_ref();
+      table = eq_ref.table;
+      key_idx = eq_ref.ref->key;
+      if (table && key_idx < table->s->keys) {
+        key_info = &table->key_info[key_idx];
+      }
+      break;
+    }
+    case AccessPath::INDEX_RANGE_SCAN: {
+      auto &range = path->index_range_scan();
+      table = range.used_key_part[0].field->table;
+      // key info of INDEX_RANGE_SCAN in used_key_part.
+      break;
+    }
+    default:
+      return false;
+  }
+  if (!table) return false;
+  auto get_rpd_table = [&](TABLE *table) -> ShannonBase::Imcs::RpdTable * {
+    auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
+    if (!share) return nullptr;
+    ShannonBase::Imcs::RpdTable *rpd_table{nullptr};
+    rpd_table = share->is_partitioned ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
+                                      : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+    return rpd_table;
+  };
+  auto *rpd_table = get_rpd_table(table);
+  if (!rpd_table) {
+    SetSecondaryEngineOffloadFailedReason(thd, "Table not loaded in IMCS");
+    return true;
+  }
+
+  ShannonBase::Imcs::Index::Index<uchar, row_id_t> *index{nullptr};
+  if (key_info) index = rpd_table->get_index(key_info->name);
+  const auto &table_meta = rpd_table->meta();
+  ha_rows total_rows = table_meta.total_rows.load(std::memory_order_relaxed);
+  size_t total_imcus = table_meta.total_imcus.load(std::memory_order_relaxed);
+  if (total_rows == 0) {
+    path->set_cost(0.0);
+    return false;
+  }
+
+  double estimated_rows = 0.0;
+  double index_cost = 0.0;
+
+  if (path->type == AccessPath::EQ_REF) {
+    estimated_rows = 1.0;
+    double index_lookup_cost = 0.001;
+    double rowid_fetch_cost = ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow * 2.0;
+    index_cost = index_lookup_cost + rowid_fetch_cost;
+  } else if (path->type == AccessPath::REF) {
+    double index_cardinality = 1.0;
+    if (key_info && key_info->actual_key_parts > 0) {
+      // from the first key col gets NDV
+      uint col_idx = key_info->key_part[0].fieldnr - 1;
+      auto *col_stats = table_meta.fields[col_idx].statistics.get();
+      if (col_stats) {
+        const auto &basic = col_stats->get_basic_stats();
+        if (basic.distinct_count > 0) {
+          index_cardinality = basic.distinct_count;
+        }
+      }
+    }
+
+    estimated_rows = total_rows / index_cardinality;
+    estimated_rows = std::max(1.0, std::min(estimated_rows, total_rows * 0.1));
+    double art_range_cost = 0.01 + estimated_rows * 0.0001;
+    double batch_fetch_cost = estimated_rows * ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow * 1.5;
+    index_cost = art_range_cost + batch_fetch_cost;
+  } else {  // INDEX_SCAN / INDEX_RANGE_SCAN
+    table_map tmap = table->pos_in_table_list->map();
+    std::vector<Item *> predicates;
+    for (const auto &pred : graph.predicates) {
+      if ((pred.total_eligibility_set & ~tmap) == 0) predicates.push_back(pred.condition);
+    }
+
+    double selectivity = 0.1;
+    if (!predicates.empty()) {
+      Item *combined = ShannonBase::Optimizer::Utils::combine_with_and(predicates, thd);
+      selectivity = ShannonBase::Optimizer::SelectivityEstimator::estimate_selectivity(table, combined);
+    }
+    estimated_rows = total_rows * selectivity;
+
+    if (index && selectivity < 0.5) {
+      double art_scan_cost = estimated_rows * 0.0005;
+      double batch_fetch_cost = estimated_rows * ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow * 1.5;
+      index_cost = art_scan_cost + batch_fetch_cost;
+    } else {
+      double imcu_skip_ratio = 1.0 - selectivity;
+      imcu_skip_ratio *= 0.7;
+
+      size_t effective_imcus = static_cast<size_t>(total_imcus * (1.0 - imcu_skip_ratio));
+      index_cost = ShannonBase::shannon_rpd_cost_est_instances->estimate_scan_cost(static_cast<ha_rows>(estimated_rows),
+                                                                                   effective_imcus);
+    }
+  }
+  path->set_cost(index_cost);
+  path->set_cost_before_filter(index_cost);
+  path->set_init_cost(0.0);
+  return false;
+}
+
+static bool ModifyFilterCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                             ShannonBase::Rapid_execution_context *rapid_ctx) {
+  auto &f = path->filter();
+  double child_rows = f.child->num_output_rows();
+  double child_cost = f.child->cost();
+
+  double filter_cost = child_rows * ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow;
+
+  auto covered_tables = ShannonBase::Optimizer::Utils::get_tablescovered(path);
+  hypergraph::NodeMap node_map = GetNodeMapFromTableMap(covered_tables, graph.table_num_to_node_num);
+
+  double combined_selectivity{1.0};
+  bool has_any_estimate{false};
+  for (size_t node_idx = 0; node_idx < graph.nodes.size(); ++node_idx) {
+    if (!(node_map & (1ULL << node_idx))) continue;
+    TABLE *table = graph.nodes[node_idx].table();
+    if (!table) continue;
+
+    double table_selectivity = ShannonBase::Optimizer::SelectivityEstimator::estimate_selectivity(table, f.condition);
+    if (table_selectivity < 1.0) {
+      combined_selectivity *= table_selectivity;
+      has_any_estimate = true;
+    }
+  }
+  if (!has_any_estimate) combined_selectivity = 0.3;
+
+  combined_selectivity = std::max(0.0001, std::min(1.0, combined_selectivity));
+  double output_rows = child_rows * combined_selectivity;
+
+  path->set_num_output_rows(output_rows);
+  path->set_init_cost(f.child->init_cost());
+  path->set_cost(child_cost + filter_cost);
+  path->set_cost_before_filter(path->cost());
+  return false;
+}
+
+static bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                               ShannonBase::Rapid_execution_context *rapid_ctx) {
+  auto &hj = path->hash_join();
+
+  double outer_rows = hj.outer->num_output_rows();
+  double inner_rows = hj.inner->num_output_rows();
+  double outer_cost = hj.outer->cost();
+  double inner_cost = hj.inner->cost();
+
+  double join_cost = ShannonBase::shannon_rpd_cost_est_instances->estimate_join_cost(static_cast<ha_rows>(outer_rows),
+                                                                                     static_cast<ha_rows>(inner_rows));
+
+  double join_sel = ShannonBase::Optimizer::SelectivityEstimator::kDefaultJoinSelectivity;
+  if (hj.join_predicate && hj.join_predicate->expr) {
+    std::vector<Item *> join_conds;
+    const RelationalExpression *expr = hj.join_predicate->expr;
+
+    for (Item *cond : expr->join_conditions) {
+      if (cond) join_conds.push_back(cond);
+    }
+
+    if (!join_conds.empty())
+      join_sel = ShannonBase::Optimizer::SelectivityEstimator::estimate_join_selectivity(join_conds);
+  }
+
+  double output_rows = outer_rows * inner_rows * join_sel;
+  output_rows = std::min(output_rows, std::max(outer_rows, inner_rows));
+  double total_cost = outer_cost + inner_cost + join_cost;
+  path->set_cost(total_cost);
+  path->set_cost_before_filter(total_cost);
+  path->set_init_cost(0.0 /*outer_init_cost*/ +
+                      inner_rows * ShannonBase::Optimizer::RapidCostConstants::kHashBuildPerRow /**build cost */);
+  path->set_init_once_cost(0.0);
+  // path->set_num_output_rows(output_rows);
+  return false;
+}
+
+static bool HasCorrelation(const AccessPath *path, const JoinHypergraph &graph, table_map outer_tables) {
+  if (!path) return false;
+
+  switch (path->type) {
+    case AccessPath::FILTER: {
+      auto &f = path->filter();
+      if (f.condition) {
+        table_map used = f.condition->used_tables();
+        if (used & outer_tables) return true;  // ref outer table.
+      }
+      return HasCorrelation(f.child, graph, outer_tables);
+    } break;
+    case AccessPath::TABLE_SCAN:
+    case AccessPath::INDEX_SCAN: {  // check filter_predicates
+      if (IsEmpty(path->filter_predicates)) return false;
+      for (size_t i = 0; i < graph.predicates.size(); ++i) {
+        if (IsBitSet(i, path->filter_predicates)) {
+          const auto &pred = graph.predicates[i];
+          if (pred.condition) {
+            table_map used = pred.condition->used_tables();
+            if (used & outer_tables) return true;  // LATERAL：filter ref outer table.
+          }
+        }
+      }
+      return false;
+    } break;
+    case AccessPath::HASH_JOIN:
+    case AccessPath::NESTED_LOOP_JOIN: {
+      auto get_join_paths = [&](const AccessPath *p) -> std::pair<const AccessPath *, const AccessPath *> {
+        if (p->type == AccessPath::HASH_JOIN) {
+          auto &hj = p->hash_join();
+          return {hj.outer, hj.inner};
+        } else {
+          auto &nlj = p->nested_loop_join();
+          return {nlj.outer, nlj.inner};
+        }
+      };
+
+      auto [outer, inner] = get_join_paths(path);
+      return HasCorrelation(outer, graph, outer_tables) || HasCorrelation(inner, graph, outer_tables);
+    } break;
+    case AccessPath::MATERIALIZE: {  // MATERIALIZE maybe contains subquery.
+      auto &mat = path->materialize();
+      for (size_t i = 0; i < mat.param->m_operands.size(); ++i) {
+        const auto &operand = mat.param->m_operands[i];
+        if (!operand.subquery_path) continue;
+        if (HasCorrelation(operand.subquery_path, graph, outer_tables)) return true;
+      }
+      return false;
+    } break;
+    default:
+      return false;
+  }
+}
+
+static bool CanConvertToHashJoin(const AccessPath *path, const JoinHypergraph &graph) {
+  if (path->type != AccessPath::NESTED_LOOP_JOIN) return false;
+
+  const auto &nlj = path->nested_loop_join();
+  if (!nlj.join_predicate) return false;
+
+  // check whether has eq condition.
+  const RelationalExpression *expr = nlj.join_predicate->expr;
+  for (Item *cond : expr->join_conditions) {
+    if (!cond) continue;
+
+    if (cond->type() == Item::FUNC_ITEM) {
+      auto *func = static_cast<Item_func *>(cond);
+      if (func->functype() == Item_func::EQ_FUNC) {
+        auto **args = func->arguments();
+        if (args[0]->type() == Item::FIELD_ITEM && args[1]->type() == Item::FIELD_ITEM) {
+          // eq-condtion join, then check correlation?
+          auto outer_tables = ShannonBase::Optimizer::Utils::get_tablescovered(nlj.outer);
+          if (!HasCorrelation(nlj.inner, graph, outer_tables)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+static bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                                     ShannonBase::Rapid_execution_context *rapid_ctx) {
+  auto &nlj = path->nested_loop_join();
+
+  double outer_rows = nlj.outer->num_output_rows();
+  double inner_rows = nlj.inner->num_output_rows();
+  double outer_cost = nlj.outer->cost();
+  double inner_cost = nlj.inner->cost();
+
+  if (CanConvertToHashJoin(path, graph)) {
+    double hash_build = inner_rows * ShannonBase::Optimizer::RapidCostConstants::kHashBuildPerRow;
+    double hash_probe = outer_rows * ShannonBase::Optimizer::RapidCostConstants::kHashProbePerRow;
+    double total_cost = outer_cost + inner_cost + hash_build + hash_probe;
+
+    path->set_cost(total_cost);
+    path->set_cost_before_filter(total_cost);
+    path->set_init_cost(outer_cost + inner_cost + hash_build);
+    // rapid_ctx->MarkConvertToHashJoin(path);
+    return false;
+  }
+
+  table_map outer_tables = ShannonBase::Optimizer::Utils::get_tablescovered(path);
+  if (HasCorrelation(nlj.inner, graph, outer_tables)) {  // LATERAL subquery → refuse offload
+    SetSecondaryEngineOffloadFailedReason(thd, "Correlated subquery (LATERAL) not supported in IMCS");
+    return true;  // refuse
+  }
+  double nlj_cost = outer_cost + (outer_rows * inner_cost);
+  nlj_cost *= 0.6;  // IMCS factor.
+
+  path->set_cost(nlj_cost);
+  path->set_cost_before_filter(nlj_cost);
+  path->set_init_cost(outer_cost * 0.6);
+  return false;
+}
+
+static bool ModifyAggregateCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                                ShannonBase::Rapid_execution_context *rapid_ctx) {
+  auto &agg = path->aggregate();
+  double child_rows = agg.child->num_output_rows();
+  double child_cost = agg.child->cost();
+
+  double agg_cost = child_rows * ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow * 2.0;
+  path->set_cost(child_cost + agg_cost);
+  path->set_init_cost(child_cost);
+  return false;
+}
+
+static bool ModifySortCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                           ShannonBase::Rapid_execution_context *rapid_ctx) {
+  auto &s = path->sort();
+  double child_rows = s.child->num_output_rows();
+  double child_cost = s.child->cost();
+
+  ha_rows limit = s.limit;
+  bool is_topn = (limit != HA_POS_ERROR);
+
+  double sort_cost;
+  if (is_topn) {
+    // TOP-N：O(n * log(k))
+    double log_limit = std::log2(std::max(1.0, (double)limit));
+    sort_cost = child_rows * log_limit * ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow;
+  } else {
+    // full sort：O(n * log(n))
+    double log_rows = std::log2(std::max(1.0, child_rows));
+    sort_cost = child_rows * log_rows * ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow;
+  }
+
+  path->set_cost(child_cost + sort_cost);
+  path->set_init_cost(child_cost + sort_cost);
+  return false;
+}
+
+static bool ModifyLimitCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                            ShannonBase::Rapid_execution_context *rapid_ctx) {
+  auto &lo = path->limit_offset();
+  double child_rows = lo.child->num_output_rows();
+  double child_cost = lo.child->cost();
+
+  double effective_rows =
+      (lo.limit == HA_POS_ERROR) ? child_rows : std::min(child_rows, (double)(lo.limit + lo.offset));
+  double ratio = (child_rows > 0) ? effective_rows / child_rows : 1.0;
+
+  path->set_cost(child_cost * ratio);
+  path->set_init_cost(0);
+  return false;
+}
+
+static bool ModifyMaterializeCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
+                                  ShannonBase::Rapid_execution_context *rapid_ctx) {
+  auto &mat = path->materialize();
+  double child_rows = 0;
+  double child_cost = 0;
+  for (auto &op : mat.param->m_operands) {
+    if (op.subquery_path) {
+      child_rows += op.subquery_path->num_output_rows();
+      child_cost += op.subquery_path->cost();
+    }
+  }
+  double write_cost = child_rows * ShannonBase::Optimizer::RapidCostConstants::kHashBuildPerRow;
+  double scan_cost = child_rows * ShannonBase::Optimizer::RapidCostConstants::kVectorCpuPerRow;
+  path->set_cost(child_cost + write_cost + scan_cost);
+  path->set_init_cost(child_cost);
   return false;
 }
 
@@ -1421,6 +1934,8 @@ static SHOW_VAR rapid_status_variables[] = {
      SHOW_DOUBLE, SHOW_SCOPE_GLOBAL},
     /*the interval scn of GC*/
     {"rapid_gc_interval_scn", (char *)&ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn, SHOW_LONG,
+     SHOW_SCOPE_GLOBAL},
+    {"rapid_reload_on_restart", (char *)&ShannonBase::shannon_rpd_engine_cfg.reload_on_restart, SHOW_BOOL,
      SHOW_SCOPE_GLOBAL}};
 
 /** Callback function for accessing the Rapid variables from MySQL:  SHOW
@@ -2109,6 +2624,12 @@ static MYSQL_SYSVAR_ULONGLONG(gc_interval_scn,
                               ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN,  // min
                               ULLONG_MAX, // max
                               0);
+static MYSQL_SYSVAR_BOOL(reload_on_restart,
+                            ShannonBase::shannon_rpd_engine_cfg.reload_on_restart,
+                            PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
+                            "Reload IMCS tables automatically after mysqld restart",
+                            nullptr, nullptr, false  // default OFF
+);
 // clang-format on
 static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(memory_size_max),
@@ -2127,6 +2648,7 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(min_versions_for_purge),
     MYSQL_SYSVAR(purge_efficiency_threshold),
     MYSQL_SYSVAR(gc_interval_scn),
+    MYSQL_SYSVAR(reload_on_restart),
     nullptr,
 };
 
@@ -2153,17 +2675,18 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
   shannon_rapid_hton->notify_after_insert = NotifyAfterInsert;
   shannon_rapid_hton->notify_after_update = NotifyAfterUpdate;
   shannon_rapid_hton->notify_after_delete = NotifyAfterDelete;
+  shannon_rapid_hton->notify_after_select = NotifyAfterSelect;
 
   shannon_rapid_hton->prepare_secondary_engine = PrepareSecondaryEngine;
   shannon_rapid_hton->secondary_engine_pre_prepare_hook = SecondaryEnginePrePrepareHook;
   shannon_rapid_hton->optimize_secondary_engine = OptimizeSecondaryEngine;
   shannon_rapid_hton->compare_secondary_engine_cost = CompareJoinCost;
-  shannon_rapid_hton->secondary_engine_flags = MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN);
+  shannon_rapid_hton->secondary_engine_flags =
+      MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN, SecondaryEngineFlag::SUPPORTS_NESTED_LOOP_JOIN);
   shannon_rapid_hton->secondary_engine_modify_access_path_cost = ModifyAccessPathCost;
   shannon_rapid_hton->get_secondary_engine_offload_or_exec_fail_reason = GetSecondaryEngineOffloadorExecFailedReason;
   shannon_rapid_hton->set_secondary_engine_offload_fail_reason = SetSecondaryEngineOffloadFailedReason;
   shannon_rapid_hton->secondary_engine_check_optimizer_request = SecondaryEngineCheckOptimizerRequest;
-  shannon_rapid_hton->notify_after_select = NotifyAfterSelect;
 
   shannon_rapid_hton->commit = rapid_commit;
   shannon_rapid_hton->rollback = rapid_rollback;
@@ -2184,10 +2707,14 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   auto ret = instance_->initialize();
   ShannonBase::shannon_self_load_mgr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
+
+  ShannonBase::Recovery::rapid_recovery_startup();
   return ret;
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
+  ShannonBase::Recovery::rapid_recovery_shutdown();
+
   if (ShannonBase::shannon_self_load_mgr_inst && ShannonBase::shannon_self_load_mgr_inst->initialized())
     ShannonBase::shannon_self_load_mgr_inst->shutdown();
 

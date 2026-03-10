@@ -36,7 +36,9 @@
 #include "include/field_types.h"
 #include "include/my_inttypes.h"
 #include "sql-common/my_decimal.h"
-#include "sql/field.h"                                            //Field
+#include "sql/field.h"  //Field
+#include "sql/sql_base.h"
+#include "sql/sql_class.h"                                        // THD
 #include "sql/tztime.h"                                           //timzone
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
 #include "storage/rapid_engine/include/rapid_types.h"             // bit_array_t
@@ -47,11 +49,11 @@ class Field;
 class key_range;
 class CHARSET_INFO;
 namespace ShannonBase {
+class Rapid_load_context;
 namespace Compress {
 class Dictionary;
 }
 namespace Utils {
-
 class Util {
  public:
   // open a table via schema name and table name.
@@ -62,6 +64,10 @@ class Util {
 
   // to check whether this type is supported or not.
   static bool is_support_type(enum_field_types type);
+
+  enum class STAGE { BEGIN, END };
+  static bool update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, const TABLE *table,
+                                   Util::STAGE stage = Util::STAGE::BEGIN);
 
   template <typename T>
   static T get_field_numeric(Field *field, const uchar *data_ptr, const Compress::Dictionary *dict,
@@ -289,6 +295,22 @@ class Util {
     oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << "." << std::setfill('0') << std::setw(3) << now_ms.count();
     return oss.str();
   }
+  static bool wait_for_server_bootup(int timeout_seconds = 300);
+};
+
+class Table_closer {
+ public:
+  explicit Table_closer(THD *thd) : m_thd(thd) {}
+  ~Table_closer() {
+    if (!m_thd) return;
+    if (m_thd && m_thd->is_system_thread()) close_thread_tables(m_thd);
+  }
+
+  Table_closer(const Table_closer &) = delete;
+  Table_closer &operator=(const Table_closer &) = delete;
+
+ private:
+  THD *m_thd{nullptr};
 };
 
 class ColumnMapGuard {
@@ -306,7 +328,6 @@ class ColumnMapGuard {
   my_bitmap_map *old_rmap{nullptr};
   my_bitmap_map *old_wmap{nullptr};
 };
-
 }  // namespace Utils
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_UTILS_H__

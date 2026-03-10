@@ -370,39 +370,7 @@ double JoinReOrder::estimate_storage_index_selectivity(ScanTable *scan) {
  */
 double JoinReOrder::estimate_join_selectivity(Item_field *left_field, Item_field *right_field,
                                               const std::vector<Plan *> &scans) {
-  // Default selectivity (1/max(NDV1, NDV2))
-  double default_selectivity = 0.1;
-
-  // Try to get actual statistics from IMCS
-  int left_table = find_table_for_field(left_field, scans);
-  int right_table = find_table_for_field(right_field, scans);
-
-  if (left_table < 0 || right_table < 0) return default_selectivity;
-
-  auto *left_scan = static_cast<ScanTable *>((*scans[left_table]).get());
-  auto *right_scan = static_cast<ScanTable *>((*scans[right_table]).get());
-
-  if (!left_scan->rpd_table || !right_scan->rpd_table) return default_selectivity;
-
-  // Get column statistics
-  uint32 left_col = left_field->field->field_index();
-  uint32 right_col = right_field->field->field_index();
-
-  auto *left_stats = left_scan->rpd_table->get_column_stats(left_col);
-  auto *right_stats = right_scan->rpd_table->get_column_stats(right_col);
-
-  if (!left_stats || !right_stats) return default_selectivity;
-
-  // Estimate using distinct value counts
-  size_t left_ndv = left_stats->get_basic_stats().distinct_count;
-  size_t right_ndv = right_stats->get_basic_stats().distinct_count;
-
-  if (left_ndv == 0 || right_ndv == 0) return default_selectivity;
-
-  // Selectivity = 1 / max(NDV_left, NDV_right)
-  double selectivity = 1.0 / std::max(left_ndv, right_ndv);
-  // Clamp to reasonable range
-  return std::max(0.001, std::min(1.0, selectivity));
+  return SelectivityEstimator::estimate_join_selectivity(left_field, right_field);
 }
 
 /**
@@ -705,12 +673,22 @@ double JoinReOrder::calculate_hash_join_cost(ha_rows left_card, ha_rows right_ca
  */
 ha_rows JoinReOrder::estimate_join_cardinality(const DPState &left, const DPState &right, const JoinGraph &graph) {
   // Default selectivity if no statistics available
-  double selectivity = 0.1;
-  // Try to find actual join selectivity from graph edges
-  ha_rows result = static_cast<ha_rows>(left.cardinality * right.cardinality * selectivity);
+  double selectivity = SelectivityEstimator::kDefaultJoinSelectivity;
 
-  // Clamp to reasonable range
-  return std::max(static_cast<ha_rows>(1), result);
+  for (size_t i = 0; i < graph.num_tables; ++i) {
+    if (!(left.left_subset & (1ULL << i)) && !(left.right_subset & (1ULL << i))) continue;
+    for (const auto &edge : graph.edges[i]) {
+      bool connects = (right.left_subset | right.right_subset) & (1ULL << edge.right_table);
+      if (connects && edge.selectivity < 1.0) {
+        selectivity *= edge.selectivity;
+      }
+    }
+  }
+
+  selectivity = std::max(0.001, std::min(1.0, selectivity));
+  double result = left.cardinality * right.cardinality * selectivity;
+  return std::max(static_cast<ha_rows>(1),
+                  std::min(static_cast<ha_rows>(result), std::max(left.cardinality, right.cardinality)));
 }
 
 /**

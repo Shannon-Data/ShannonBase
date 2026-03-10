@@ -1,6 +1,9 @@
 # COPYRIGHTS BY SHANNON DATA AI.
 # USED FOR rapid pallel secondary_load.
 
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
 create database sh_para_load;
 use sh_para_load;
 --disable_warnings

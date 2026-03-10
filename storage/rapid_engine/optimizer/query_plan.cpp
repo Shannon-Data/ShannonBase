@@ -150,18 +150,6 @@ std::string LocalAgg::ToString(int indent) const {
   return pad + "→ Local Aggregate";
 }
 
-AccessPath *GlobalAgg::ToAccessPath(THD *thd) {
-  auto *path = new (thd->mem_root) AccessPath();
-  path->type = AccessPath::AGGREGATE;
-  path->secondary_engine_data = nullptr;
-  return path;
-}
-
-std::string GlobalAgg::ToString(int indent) const {
-  std::string pad(indent, ' ');
-  return pad + "→ Global Aggregate";
-}
-
 AccessPath *TopN::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::SORT;
@@ -227,12 +215,64 @@ std::string Limit::ToString(int indent) const {
 
 AccessPath *ZeroRows::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
-  path->type = AccessPath::ZERO_ROWS;
+  path->type = this->rows_returned ? AccessPath::FAKE_SINGLE_ROW : AccessPath::ZERO_ROWS;
   path->secondary_engine_data = nullptr;
   return path;
 }
 
 std::string ZeroRows::ToString(int indent) const { return "→ Zero Rows"; }
+
+AccessPath *Union::ToAccessPath(THD *thd) { return original_path; }
+
+std::string Union::ToString(int indent) const {
+  return std::string(indent, ' ') + (is_distinct ? "→ Union Distinct" : "→ Union All");
+}
+
+AccessPath *MaterializeCTE::ToAccessPath(THD *thd) { return original_path; }
+
+std::string MaterializeCTE::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  std::string result = pad + "→ Materialize CTE (" + cte_name + ")";
+
+  if (is_recursive) {
+    result += " [RECURSIVE]";
+  }
+  if (limit != HA_POS_ERROR) {
+    result += " LIMIT " + std::to_string(limit);
+  }
+  result += "\n";
+
+  for (size_t i = 0; i < inner_plans.size(); ++i) {
+    result += pad + "  Query Branch " + std::to_string(i) + ":\n";
+    if (inner_plans[i]) {
+      result += inner_plans[i]->ToString(indent + 4);
+    }
+  }
+  return result;
+}
+
+AccessPath *MaterializeDerived::ToAccessPath(THD *thd) {
+  if (has_union) return original_path;
+  return original_path;
+}
+
+std::string MaterializeDerived::ToString(int indent) const {
+  std::string pad(indent, ' ');
+  std::string result = pad + "→ Materialize Derived Table";
+
+  if (has_union) {
+    result += is_union_distinct ? " [UNION DISTINCT]" : " [UNION ALL]";
+  }
+  result += "\n";
+
+  for (size_t i = 0; i < inner_plans.size(); ++i) {
+    result += pad + "  Branch " + std::to_string(i) + ":\n";
+    if (inner_plans[i]) {
+      result += inner_plans[i]->ToString(indent + 4);
+    }
+  }
+  return result;
+}
 
 AccessPath *MySQLNative::ToAccessPath(THD *thd) { return original_path; }
 

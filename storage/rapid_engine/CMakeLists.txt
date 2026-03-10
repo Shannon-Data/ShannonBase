@@ -77,6 +77,8 @@ SET(SHANNON_IMCS_SOURCES
    utils/SIMD.cpp
    utils/memory_pool.cpp
    autopilot/loader.cpp
+   recovery/recovery.cpp
+   recovery/recovery_load.cpp
 )
 
 SET(SHANNON_POPULATE_SOURCES
@@ -163,6 +165,7 @@ SET(SHANNON_ITERATOR_SOURCES
 SET(SHANNON_OPTIMIZE
     optimizer/optimizer.cpp
     optimizer/query_plan.cpp
+    optimizer/utils.cpp
     optimizer/path/access_path.cpp
     optimizer/rules/condition_pushdown.cpp
     optimizer/rules/join_reorder.cpp

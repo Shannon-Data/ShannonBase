@@ -25,18 +25,15 @@
 */
 #include "storage/rapid_engine/optimizer/optimizer.h"
 
+#include "include/my_dbug.h"  //DBUG_PRINT
 #include "sql/field.h"
-#include "sql/item.h"
-#include "sql/item_cmpfunc.h"
-#include "sql/item_func.h"
-#include "sql/item_sum.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/hash_join_iterator.h"  //HashJoinIterator
 #include "sql/iterators/timing_iterator.h"
-#include "sql/join_optimizer/access_path.h"
+
 #include "sql/join_optimizer/cost_model.h"
-#include "sql/range_optimizer/range_optimizer.h"  //KEY_PART,QUICK_RANGE
-#include "sql/range_optimizer/tree.h"             //SEL_ARG
+//#include "sql/range_optimizer/range_optimizer.h"  //KEY_PART,QUICK_RANGE
+#include "sql/range_optimizer/tree.h"  //SEL_ARG
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"                      //Query_expression
 #include "sql/sql_opt_exec_shared.h"          //Index_lookup
@@ -73,6 +70,43 @@ std::string Timer::lap_formatted() {
   return stream.str();
 }
 
+void ProjectionExtractor::Extract(Item *item, table_map state_map, std::vector<Item *> &proj_items,
+                                  bool include_constants) {
+  if (!item) return;
+  table_map used = item->used_tables();
+
+  // case 1：const var
+  if (used == 0) {
+    if (include_constants) proj_items.push_back(item);
+    return;
+  }
+
+  // case 2：all in state_map
+  if ((used & ~state_map) == 0) {
+    proj_items.push_back(item);
+    return;
+  }
+
+  // case 3：complex expr
+  if (item->type() == Item::FUNC_ITEM || item->type() == Item::COND_ITEM) {
+    Item_func *func_item = static_cast<Item_func *>(item);
+    for (uint i = 0; i < func_item->argument_count(); ++i) {
+      Extract(func_item->arguments()[i], state_map, proj_items, include_constants);
+    }
+  }
+}
+
+void ProjectionExtractor::ExtractRequired(Item *condition, table_map state_map, std::vector<Item *> &required) {
+  if (!condition) return;
+  WalkItem(condition, enum_walk::POSTFIX, [&](Item *item) -> bool {
+    if (item->type() == Item::FIELD_ITEM) {
+      auto *f = static_cast<Item_field *>(item);
+      if (f->table_ref && (f->table_ref->map() & state_map)) required.push_back(item);
+    }
+    return false;
+  });
+}
+
 void Optimizer::AddDefaultRules() {
   // becareful the order of rules. The rules be applied in the order of added.
   // Make predicates available
@@ -87,7 +121,8 @@ void Optimizer::AddDefaultRules() {
   m_optimize_rules.emplace_back(std::make_unique<AggregationPushDown>());
   // Re-run after structure changes
   m_optimize_rules.emplace_back(std::make_unique<ProjectionPruning>());
-  // Final reordering with all optimizations
+  // Final reordering with all optimizations, maybe we should not using the rules to change the optimized order
+  // caution: we should use this rules with cares.
   m_optimize_rules.emplace_back(std::make_unique<JoinReOrder>());
   m_registered.store(true, std::memory_order_relaxed);
 }
@@ -101,20 +136,24 @@ Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const J
   for (auto &rule : m_optimize_rules) {
     Timer rule_timer;
     rule->apply(plan.root);
+    DBUG_PRINT("optimizer", ("Rule %s took %s", rule->name().c_str(), rule_timer.lap_formatted().c_str()));
   }
   return std::move(plan.root);
 }
 
 Plan Optimizer::get_query_plan(OptimizeContext *context, THD *thd, const JOIN *join) {
+  ut_a(context && thd);
   if (!join || !join->query_expression()->root_access_path()) return std::make_unique<ZeroRows>();
 
-  Plan plan_root = translate_access_path(context, thd, join->query_expression()->root_access_path(), join);
-  if (!plan_root) return std::make_unique<ZeroRows>();
-  return plan_root;
+  TranslateState root_state;
+  if (translate_access_path(&root_state, thd, join->query_expression()->root_access_path(), join)) return nullptr;
+
+  if (!root_state.plan_node) return std::make_unique<ZeroRows>();
+  return std::move(root_state.plan_node);
 }
 
-Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath *path, const JOIN *join) {
-  if (!path) return nullptr;
+bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPath *path, const JOIN *join) {
+  if (!path) return true;
 
   switch (path->type) {
     case AccessPath::TABLE_SCAN:
@@ -131,6 +170,20 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
         if (irs.used_key_part != nullptr && irs.num_used_key_parts > 0 && irs.used_key_part[0].field != nullptr)
           table = irs.used_key_part[0].field->table;
         scan->scan_type = ScanTable::ScanType::INDEX_SCAN;
+        if (irs.ranges != nullptr && irs.num_ranges > 0) {
+          std::vector<std::unique_ptr<Imcs::Predicate>> all_predicates;
+          for (unsigned i = 0; i < irs.num_ranges; ++i) {
+            QUICK_RANGE *qr = irs.ranges[i];
+            if (!qr) continue;
+            auto range_pred = Optimizer::convert_range_to_predicate(qr, table, irs.index);
+            if (range_pred) all_predicates.push_back(std::move(range_pred));
+          }
+
+          if (!all_predicates.empty())
+            scan->prune_predicate = (all_predicates.size() == 1)
+                                        ? std::move(all_predicates[0])
+                                        : Imcs::Predicate_Builder::create_or(std::move(all_predicates));
+        }
       } else {
         table = path->table_scan().table;
         scan->scan_type = ScanTable::ScanType::FULL_TABLE_SCAN;
@@ -142,163 +195,489 @@ Plan Optimizer::translate_access_path(OptimizeContext *ctx, THD *thd, AccessPath
       scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
                                                 : Imcs::Imcs::instance()->get_rpd_table(table_id);
       assert(scan->rpd_table);
-      scan->estimated_rows = path->num_output_rows();
+      scan->cost = path->cost();
+      scan->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
       scan->source_table = table;
-      return scan;
+
+      state->state_map = table->pos_in_table_list->map();
+      // ProjectionPruning will prune.
+      for (Field **field_ptr = table->field; *field_ptr; ++field_ptr) {
+        Field *field = *field_ptr;
+        Item_field *item = new (thd->mem_root) Item_field(field);
+        if (item) {
+          state->projection_items.push_back(item);
+        }
+      }
+
+      auto *rapid_ctx = down_cast<Rapid_execution_context *>(thd->lex->secondary_engine_execution_context());
+      if (rapid_ctx) {
+        auto *cost_info = rapid_ctx->GetTableCost(table);
+        if (cost_info && cost_info->can_use_si) {
+          scan->use_storage_index = true;
+        }
+      }
+      state->plan_node = std::move(scan);
+      return false;
     } break;
     case AccessPath::HASH_JOIN: {
-      auto hashjoin_node = std::make_unique<HashJoin>();
-      hashjoin_node->original_path = path;
-      auto &param = path->hash_join();
+      auto &hj = path->hash_join();
 
-      // Recursively convert children
-      hashjoin_node->children.push_back(translate_access_path(ctx, thd, param.outer, join));
-      hashjoin_node->children.push_back(translate_access_path(ctx, thd, param.inner, join));
-      // Extract Join Conditions
-      if (param.join_predicate) {
-        for (auto *cond : param.join_predicate->expr->equijoin_conditions) {
-          hashjoin_node->join_conditions.push_back(cond);
-        }
-        // Handle other conditions...
+      TranslateState outer_state, inner_state;
+      if (translate_access_path(&outer_state, thd, hj.outer, join)) return true;
+      if (translate_access_path(&inner_state, thd, hj.inner, join)) return true;
+
+      auto node = std::make_unique<HashJoin>();
+      node->original_path = path;
+      // 1: extra join condition.
+      if (hj.join_predicate) {
+        extract_join_conditions(hj.join_predicate->expr, node->join_conditions);
       }
 
-      hashjoin_node->allow_spill = param.allow_spill_to_disk;
-      hashjoin_node->estimated_rows = path->num_output_rows();
-      return hashjoin_node;
-    } break;
-    case AccessPath::NESTED_LOOP_JOIN: {
-      auto nestloop_node = std::make_unique<NestLoopJoin>();
-      nestloop_node->original_path = path;
-      auto &param = path->nested_loop_join();
-
-      // Recursively convert children
-      nestloop_node->children.push_back(translate_access_path(ctx, thd, param.outer, join));
-      nestloop_node->children.push_back(translate_access_path(ctx, thd, param.inner, join));
-      nestloop_node->pfs_batch_mode = param.pfs_batch_mode;
-      nestloop_node->already_expanded_predicates = param.already_expanded_predicates;
-      // Extract Join Conditions
-      nestloop_node->source_join_predicate = param.join_predicate;
-      if (param.join_predicate) {
-        for (auto *cond : param.join_predicate->expr->equijoin_conditions) {
-          nestloop_node->join_conditions.push_back(cond);
-        }
-        // Handle other conditions...
+      // 2: extra post-join filter（extra predicates）
+      std::vector<Item *> post_join_filters;
+      if (hj.join_predicate) {
+        extract_post_join_filters(hj.join_predicate, Utils::get_tablescovered(path), post_join_filters);
       }
-      nestloop_node->equijoin_predicates = param.equijoin_predicates;
-      return nestloop_node;
-    } break;
-    case AccessPath::AGGREGATE: {
-      auto agg = std::make_unique<LocalAgg>();
-      agg->original_path = path;
-      auto param = path->aggregate();
 
-      agg->olap = param.olap;
-      agg->children.push_back(translate_access_path(ctx, thd, param.child, join));
-      fill_aggregate_info(agg.get(), join);
-      return agg;
+      if (ShannonBase::Optimizer::Utils::is_outerjoin(hj.join_predicate) &&
+          ShannonBase::Optimizer::Utils::is_zerorows(hj.inner)) {
+        return hanle_outerjoin_zerorows(state, thd, path, join, inner_state);
+      }
+
+      node->children.push_back(std::move(outer_state.plan_node));
+      node->children.push_back(std::move(inner_state.plan_node));
+
+      if (!post_join_filters.empty()) {
+        for (auto *filter_item : post_join_filters) {
+          ProjectionExtractor::Extract(filter_item, Utils::get_tablescovered(path), state->projection_items);
+        }
+
+        auto filter = std::make_unique<Filter>();
+        filter->condition = ShannonBase::Optimizer::Utils::combine_with_and(post_join_filters);
+        filter->children.push_back(std::move(node));
+        state->plan_node = std::move(filter);
+      } else {
+        state->plan_node = std::move(node);
+      }
+
+      state->state_map = Utils::get_tablescovered(path);
+      return false;
     } break;
     case AccessPath::LIMIT_OFFSET: {
-      auto limit = std::make_unique<Limit>();
-      limit->original_path = path;
-      auto param = path->limit_offset();
+      auto &limit_ap = path->limit_offset();
 
-      limit->limit = (param.limit - param.offset);  // mysql limit is (sql limit + sql offset)
-      limit->offset = param.offset;
-      limit->count_all_rows = param.count_all_rows;
-      limit->reject_multiple_rows = param.reject_multiple_rows;
-      limit->send_records_override = (param.send_records_override) ? *param.send_records_override : 0;
-      limit->children.push_back(translate_access_path(ctx, thd, param.child, join));
-      return limit;
+      TranslateState child_state;
+      if (translate_access_path(&child_state, thd, limit_ap.child, join)) {
+        return true;
+      }
+
+      double child_rows = child_state.plan_node->estimated_rows;
+
+      auto node = std::make_unique<Limit>();
+      node->original_path = path;
+      node->limit = limit_ap.limit;
+      node->offset = limit_ap.offset;
+      node->count_all_rows = limit_ap.count_all_rows;
+      node->reject_multiple_rows = limit_ap.reject_multiple_rows;
+      node->children.push_back(std::move(child_state.plan_node));
+      node->cost = path->cost();
+
+      if (limit_ap.offset > 0) {
+        child_rows = std::max(0.0, child_rows - limit_ap.offset);
+      }
+      if (limit_ap.limit != HA_POS_ERROR) {
+        child_rows = std::min(child_rows, static_cast<double>(limit_ap.limit));
+      }
+      node->estimated_rows = static_cast<ha_rows>(child_rows);
+
+      state->projection_items = child_state.projection_items;
+      state->plan_node = std::move(node);
+      state->state_map = child_state.state_map;
+      return false;
     } break;
     case AccessPath::FILTER: {
-      auto filter = std::make_unique<Filter>();
-      filter->original_path = path;
-      auto param = path->filter();
-
-      filter->condition = param.condition;
-      filter->children.push_back(translate_access_path(ctx, thd, param.child, join));
-      filter->predict = Optimizer::convert_item_to_predicate(thd, param.condition);
-      return filter;
-    } break;
-    case AccessPath::SORT: {
-      auto param = path->sort();
-      // only it has `limit` clause, can be converted to `TopN`, such as `select xxx from xxx order by xx limit xx`.
-      if (param.limit > 0 && param.limit != HA_POS_ERROR) {
-        auto topn = std::make_unique<TopN>();
-        topn->original_path = path;
-        topn->order = param.order;
-        topn->limit = param.limit;
-        topn->filesort = param.filesort;
-        topn->children.push_back(translate_access_path(ctx, thd, param.child, join));
-        topn->estimated_rows = std::min(topn->children[0]->estimated_rows, (ha_rows)param.limit);
-        return topn;
-      } else {
-        // without `LIMIT` clause, keep it as `order by`
-        auto sort = std::make_unique<Sort>();
-        sort->original_path = path;
-        sort->order = param.order;
-        sort->filesort = param.filesort;
-        sort->limit = HA_POS_ERROR;
-        sort->children.push_back(translate_access_path(ctx, thd, param.child, join));
-        sort->estimated_rows = sort->children[0]->estimated_rows;
-        sort->remove_duplicates = param.remove_duplicates;
-        sort->unwrap_rollup = param.unwrap_rollup;
-        sort->force_sort_rowids = param.force_sort_rowids;
-        sort->tables_to_get_rowid_for = param.tables_to_get_rowid_for;
-        return sort;
+      auto &f = path->filter();
+      if (ShannonBase::Optimizer::Utils::contains_correlated_subquery(f.condition)) {
+        // if filter contains subquery cannot offload
+        auto native = std::make_unique<MySQLNative>();
+        native->original_path = path;
+        state->plan_node = std::move(native);
+        return false;
       }
-      assert(false);
-      return nullptr;
+      TranslateState child_state;
+      if (translate_access_path(&child_state, thd, f.child, join)) return true;
+
+      std::vector<Item *> required;
+      ProjectionExtractor::ExtractRequired(f.condition, child_state.state_map, required);
+      state->required_items.insert(state->required_items.end(), required.begin(), required.end());
+
+      auto node = std::make_unique<Filter>();
+      node->condition = f.condition;
+      node->original_path = path;
+      node->children.push_back(std::move(child_state.plan_node));
+
+      state->plan_node = std::move(node);
+      state->state_map = child_state.state_map;
+      return false;
     } break;
-    case AccessPath::EQ_REF: {
-      auto param = path->eq_ref();
-      // Check if this is a dynamic join condition (not a constant lookup)
-      bool dynamic_lookup{false};
-      for (uint i = 0; i < param.ref->key_parts; i++) {
-        Item *item = param.ref->items[i];
-        if (!item) continue;
-        // Check if this item references fields from other tables or is a non-constant expression
-        if (!item->const_item()) {
-          dynamic_lookup = true;
-          break;
+    case AccessPath::AGGREGATE: {
+      auto &agg_ap = path->aggregate();
+      TranslateState child_state;
+      if (translate_access_path(&child_state, thd, agg_ap.child, join)) return true;
+
+      bool is_rollup = (agg_ap.olap == ROLLUP_TYPE);
+      bool has_grouping = join && join->grouped;
+
+      auto node = std::make_unique<LocalAgg>();
+      node->original_path = path;
+      node->olap = agg_ap.olap;
+      node->is_global = !(has_grouping || is_rollup);
+
+      if (join && !join->group_list.empty()) {
+        for (ORDER *group = join->group_list.order; group; group = group->next) {
+          if (!group->item || !*group->item) continue;
+          Item *item = *group->item;
+
+          Item *unwrapped = item;
+          if (is_rollup) {
+            if (auto *rgi = dynamic_cast<Item_rollup_group_item *>(item)) unwrapped = rgi->inner_item();
+          }
+
+          node->group_by.push_back(item);
+          ProjectionExtractor::ExtractRequired(unwrapped, child_state.state_map, child_state.projection_items);
+          ProjectionExtractor::Extract(unwrapped, child_state.state_map, state->projection_items,
+                                       /*include_constants=*/true);
         }
       }
 
-      if (!dynamic_lookup) {
-        auto scan = std::make_unique<ScanTable>();
-        scan->original_path = path;
-        scan->source_table = param.table;
-        scan->scan_type = ScanTable::ScanType::EQ_REF_SCAN;
-        auto share = ShannonBase::shannon_loaded_tables->get(scan->source_table->s->db.str,
-                                                             scan->source_table->s->table_name.str);
-        auto table_id = share ? share->m_tableid : 0;
-        scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
-                                                  : Imcs::Imcs::instance()->get_rpd_table(table_id);
-        assert(scan->rpd_table);
+      if (join && join->sum_funcs) {
+        for (Item_sum **func_ptr = join->sum_funcs; *func_ptr; ++func_ptr) {
+          Item_sum *sum_func = *func_ptr;
+          if (!sum_func) continue;
 
-        // If this is a dynamic join condition, we cannot convert it to a static Predicate. Return nullptr
-        // to indicate this should be handled as a join condition during execution.
-        // This is a JOIN condition like "c.customer_id = o.customer_id"
-        // It should be handled by the join executor, not converted to a static filter predicate
-        scan->prune_predicate = Optimizer::convert_item_to_predicate(thd, param.ref, param.table);
-        return scan;
-      } else {  // if it's dynamic join condition(such as a.id = b.id), the join condition cannot be pushed down.
-        auto eq_ref = std::make_unique<MySQLNative>();
-        eq_ref->original_path = path;
-        return eq_ref;
+          node->aggregates.push_back(sum_func);
+          state->projection_items.push_back(sum_func);
+
+          for (uint i = 0; i < sum_func->argument_count(); ++i) {
+            Item *arg = sum_func->get_arg(i);
+            if (!arg || arg->const_item()) continue;
+            ProjectionExtractor::Extract(arg, child_state.state_map, child_state.projection_items,
+                                         /*include_constants=*/false);
+          }
+        }
       }
-      assert(false);
-      return nullptr;  // not reach forever.
+
+      // is_global == true: return 1 rows , is_global == false: by MySQL optimizer
+      node->estimated_rows = node->is_global ? 1 : static_cast<ha_rows>(path->num_output_rows());
+      node->children.push_back(std::move(child_state.plan_node));
+      node->cost = path->cost();
+
+      // HAVING（greedy optimization
+      if (!thd->lex->using_hypergraph_optimizer() && join && join->having_cond) {
+        auto having_filter = std::make_unique<Filter>();
+        having_filter->condition = join->having_cond;
+        having_filter->cost = path->cost();
+        having_filter->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        having_filter->children.push_back(std::move(node));
+        state->plan_node = std::move(having_filter);
+      } else {
+        state->plan_node = std::move(node);
+      }
+
+      state->state_map = child_state.state_map;
+      return false;
+    } break;
+    case AccessPath::SORT: {
+      auto &sort_ap = path->sort();
+
+      TranslateState child_state;
+      if (translate_access_path(&child_state, thd, sort_ap.child, join)) {
+        return true;
+      }
+      ha_rows limit = sort_ap.limit;
+      bool is_topn = (limit != HA_POS_ERROR);
+      if (is_topn) {
+        auto node = std::make_unique<TopN>();
+        node->original_path = path;
+        node->filesort = sort_ap.filesort;
+        node->order = sort_ap.order;
+        node->limit = limit;
+        if (sort_ap.order) {
+          for (ORDER *ord = sort_ap.order; ord; ord = ord->next) {
+            Item *item = *ord->item;
+            ProjectionExtractor::Extract(item, child_state.state_map, state->projection_items);
+          }
+        }
+
+        node->children.push_back(std::move(child_state.plan_node));
+        node->cost = path->cost();
+        node->estimated_rows = std::min(static_cast<ha_rows>(path->num_output_rows()), limit);
+
+        state->plan_node = std::move(node);
+      } else {
+        auto node = std::make_unique<Sort>();
+        node->original_path = path;
+        node->filesort = sort_ap.filesort;
+        node->order = sort_ap.order;
+        node->limit = HA_POS_ERROR;
+        node->remove_duplicates = sort_ap.remove_duplicates;
+        node->unwrap_rollup = sort_ap.unwrap_rollup;
+        node->force_sort_rowids = sort_ap.force_sort_rowids;
+        node->tables_to_get_rowid_for = sort_ap.tables_to_get_rowid_for;
+        if (sort_ap.order) {
+          for (ORDER *ord = sort_ap.order; ord; ord = ord->next) {
+            Item *item = *ord->item;
+            ProjectionExtractor::Extract(item, child_state.state_map, state->projection_items);
+          }
+        }
+
+        node->children.push_back(std::move(child_state.plan_node));
+        node->cost = path->cost();
+        node->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        state->plan_node = std::move(node);
+      }
+      state->state_map = child_state.state_map;
+      return false;
+    } break;
+    case AccessPath::EQ_REF: {
+      return false;  // not reach forever.
+    } break;
+    case AccessPath::ZERO_ROWS:
+    case AccessPath::ZERO_ROWS_AGGREGATED:
+    case AccessPath::FAKE_SINGLE_ROW: {
+      auto node = std::make_unique<ZeroRows>();
+      node->original_path = path;
+      node->rows_returned = (path->type == AccessPath::FAKE_SINGLE_ROW) ? 1 : 0;
+
+      state->filter.zero_row_state_map = Utils::get_tablescovered(path);
+      state->plan_node = std::move(node);
+      state->state_map = Utils::get_tablescovered(path);
+    } break;
+
+    case AccessPath::MATERIALIZE: {
+      // Materialize can be：
+      // 1. Derived table / CTE
+      // 2. Subquery materialization
+      // 3. Window function materialization
+      auto &mat = path->materialize();
+      bool is_cte = (mat.param->cte != nullptr);
+      bool is_derived = (!is_cte && mat.param->unit != nullptr);
+      if (is_cte) {
+        Common_table_expr *cte = mat.param->cte;
+        TABLE *tmp_table = mat.param->table;
+        if (!tmp_table) {
+          make_native_plan(state, path);
+          return false;
+        }
+        for (Field **field_ptr = tmp_table->field; *field_ptr; ++field_ptr) {
+          Field *field = *field_ptr;
+          if (field->is_hidden_by_system() || field->is_hidden_by_user()) continue;
+        }
+
+        std::vector<std::unique_ptr<PlanNode>> inner_plans;
+        for (size_t i = 0; i < mat.param->m_operands.size(); ++i) {
+          const auto &operand = mat.param->m_operands[i];
+          if (!operand.subquery_path) continue;
+
+          TranslateState operand_state;
+          if (translate_access_path(&operand_state, thd, operand.subquery_path, operand.join)) continue;
+          inner_plans.push_back(std::move(operand_state.plan_node));
+        }
+
+        auto cte_node = std::make_unique<MaterializeCTE>();
+        cte_node->original_path = path;
+        cte_node->cte_name = cte ? std::string(cte->name.str, cte->name.length) : "unnamed_cte";
+        cte_node->tmp_table = tmp_table;
+        for (auto &plan : inner_plans) {
+          cte_node->inner_plans.push_back(std::move(plan));
+        }
+
+        cte_node->cost = path->cost();
+        cte_node->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+        cte_node->is_recursive = (cte && cte->recursive);
+
+        if (mat.param->limit_rows != HA_POS_ERROR) cte_node->limit = mat.param->limit_rows;
+
+        state->plan_node = std::move(cte_node);
+        state->state_map = Utils::get_tablescovered(path);
+
+        for (Field **field_ptr = tmp_table->field; *field_ptr; ++field_ptr) {
+          Field *field = *field_ptr;
+          if (field->is_hidden_by_system() || field->is_hidden_by_user()) continue;
+          Item_field *item = new (thd->mem_root) Item_field(field);
+          if (item) state->projection_items.push_back(item);
+        }
+        return false;
+      } else if (is_derived) {
+        Query_expression *unit = mat.param->unit;
+        TABLE *tmp_table = mat.param->table;
+        if (!unit || !tmp_table) {
+          make_native_plan(state, path);
+          return false;
+        }
+
+        std::vector<std::unique_ptr<PlanNode>> inner_plans;
+        for (size_t i = 0; i < mat.param->m_operands.size(); ++i) {
+          const auto &operand = mat.param->m_operands[i];
+          if (!operand.subquery_path) continue;
+
+          TranslateState operand_state;
+          if (translate_access_path(&operand_state, thd, operand.subquery_path, operand.join)) continue;
+          inner_plans.push_back(std::move(operand_state.plan_node));
+        }
+
+        auto derived_node = std::make_unique<MaterializeDerived>();
+        derived_node->original_path = path;
+        derived_node->tmp_table = tmp_table;
+
+        for (auto &plan : inner_plans) {
+          derived_node->inner_plans.push_back(std::move(plan));
+        }
+
+        derived_node->cost = path->cost();
+        derived_node->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+
+        // UNION
+        derived_node->has_union = (mat.param->m_operands.size() > 1);
+        derived_node->is_union_distinct =
+            (mat.param->m_operands.size() > 0 && !mat.param->m_operands[0].disable_deduplication_by_hash_field);
+
+        state->plan_node = std::move(derived_node);
+        state->state_map = Utils::get_tablescovered(path);
+
+        // proj set.
+        for (Field **field_ptr = tmp_table->field; *field_ptr; ++field_ptr) {
+          Field *field = *field_ptr;
+          if (field->is_hidden_by_system() || field->is_hidden_by_user()) continue;
+
+          Item_field *item = new (thd->mem_root) Item_field(field);
+          if (item) state->projection_items.push_back(item);
+        }
+        return false;
+      } else {
+        auto native = std::make_unique<MySQLNative>();
+        native->original_path = path;
+        native->cost = path->cost();
+        native->estimated_rows = static_cast<ha_rows>(path->num_output_rows());
+
+        state->plan_node = std::move(native);
+        state->state_map = Utils::get_tablescovered(path);
+        return false;
+      }
+      return false;
     } break;
     default: {
       // if Rapid can not handle, then re-encapsulate to a Fallback node
       auto original = std::make_unique<MySQLNative>();
       original->original_path = path;
       original->estimated_rows = path->num_output_rows();
+      state->plan_node = std::move(original);
       // no need to transalte anymore, because it's a MySQL AccessPath.
-      return original;
+      return false;
     }
   }
+
+  return false;
+}
+
+void Optimizer::extract_join_conditions(const RelationalExpression *expr, std::vector<Item *> &out_conditions) {
+  if (!expr) return;
+
+  switch (expr->type) {
+    case RelationalExpression::TABLE:
+      break;
+
+    case RelationalExpression::INNER_JOIN:
+    case RelationalExpression::LEFT_JOIN:
+    case RelationalExpression::SEMIJOIN:
+    case RelationalExpression::ANTIJOIN:
+    case RelationalExpression::MULTI_INNER_JOIN: {
+      if (expr->type != RelationalExpression::MULTI_INNER_JOIN) {
+        extract_join_conditions(expr->left, out_conditions);
+        extract_join_conditions(expr->right, out_conditions);
+      } else {
+        for (const RelationalExpression *child : expr->multi_children) {
+          extract_join_conditions(child, out_conditions);
+        }
+      }
+
+      for (Item *item : expr->join_conditions) {
+        if (item && !item->has_subquery()) {
+          out_conditions.push_back(item);
+        }
+      }
+    } break;
+
+    default:
+      break;
+  }
+}
+
+void Optimizer::extract_post_join_filters(const JoinPredicate *pred, table_map covered_tables,
+                                          std::vector<Item *> &out_filters) {
+  if (!pred || !pred->expr) return;
+  walk_relational_expression(pred->expr, [&](const RelationalExpression *expr) {
+    for (Item *item : expr->join_conditions) {
+      if (!item) continue;
+
+      table_map used = item->used_tables();
+      if ((used & covered_tables) == used) {
+        if (!ShannonBase::Optimizer::Utils::is_simple_equijoin(item)) out_filters.push_back(item);
+      }
+    }
+    return false;
+  });
+}
+
+void Optimizer::walk_relational_expression(const RelationalExpression *expr,
+                                           std::function<bool(const RelationalExpression *)> func) {
+  if (!expr) return;
+  if (func(expr)) return;
+
+  switch (expr->type) {
+    case RelationalExpression::TABLE:
+      break;
+    case RelationalExpression::INNER_JOIN:
+    case RelationalExpression::LEFT_JOIN:
+    case RelationalExpression::SEMIJOIN:
+    case RelationalExpression::ANTIJOIN:
+      walk_relational_expression(expr->left, func);
+      walk_relational_expression(expr->right, func);
+      break;
+    case RelationalExpression::MULTI_INNER_JOIN:
+      for (const RelationalExpression *child : expr->multi_children) {
+        walk_relational_expression(child, func);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+bool Optimizer::hanle_outerjoin_zerorows(TranslateState *parent_state, THD *thd, AccessPath *path, const JOIN *join,
+                                         TranslateState &inner_state) {
+  // When the inner side of an Outer Join produces ZERO_ROWS:
+  // Special handling required to preserve the outer side rows
+  auto &hj = path->hash_join();
+
+  auto filter = std::make_unique<Filter>();
+  filter->condition = new (thd->mem_root) Item_func_false();
+
+  parent_state->filter.zero_row_state_map = inner_state.filter.zero_row_state_map;
+
+  TranslateState outer_state;
+  if (translate_access_path(&outer_state, thd, hj.outer, join)) return true;
+
+  // Build Join (structure preserved even though inner side is empty)
+  auto node = std::make_unique<HashJoin>();
+  node->original_path = path;
+  node->children.push_back(std::move(outer_state.plan_node));
+  node->children.push_back(std::move(inner_state.plan_node));
+
+  filter->children.push_back(std::move(node));
+  parent_state->plan_node = std::move(filter);
+  parent_state->state_map = Utils::get_tablescovered(path);
+  return false;
 }
 
 void Optimizer::fill_aggregate_info(LocalAgg *node, const JOIN *join) {
@@ -1050,6 +1429,113 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_like_to_predicate(THD *thd, 
   return std::make_unique<Imcs::Simple_Predicate>(col_idx, op, pattern, field_type);
 }
 
+std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(QUICK_RANGE *qr, TABLE *table, int index_no) {
+  KEY *key_info = &table->key_info[index_no];
+  std::vector<std::unique_ptr<Imcs::Predicate>> predicates;
+
+  const uchar *min_ptr = qr->min_key;
+  const uchar *max_ptr = qr->max_key;
+  uint current_offset = 0;
+
+  for (unsigned part_idx = 0; part_idx < key_info->user_defined_key_parts; ++part_idx) {
+    KEY_PART_INFO *key_part = &key_info->key_part[part_idx];
+    Field *field = key_part->field;
+    uint store_length = key_part->store_length;
+
+    bool has_min = (!(qr->flag & NO_MIN_RANGE) && (current_offset < qr->min_length));
+    bool has_max = (!(qr->flag & NO_MAX_RANGE) && (current_offset < qr->max_length));
+    if (!has_min && !has_max) break;
+
+    bool is_eq = (has_min && has_max && ((qr->flag & EQ_RANGE) || memcmp(min_ptr, max_ptr, store_length) == 0));
+    if (is_eq) {
+      const uchar *ptr = min_ptr;
+      if (field->is_nullable()) {
+        if (*ptr) goto next_part;
+        ptr++;
+      }
+      Imcs::PredicateValue val;
+      if (decode_key_value(ptr, field, val)) {
+        predicates.push_back(Imcs::Predicate_Builder::create_simple(
+            field->field_index(), Imcs::PredicateOperator::EQUAL, val, field->type()));
+      }
+    } else {
+      if (has_min) {
+        const uchar *ptr = min_ptr;
+        if (field->is_nullable()) {
+          if (*ptr) goto skip_min;
+          ptr++;
+        }
+        Imcs::PredicateValue min_val;
+        if (decode_key_value(ptr, field, min_val)) {
+          // NEAR_MIN is only valid if this column is the "first range column"
+          Imcs::PredicateOperator op =
+              (qr->flag & NEAR_MIN) ? Imcs::PredicateOperator::GREATER_THAN : Imcs::PredicateOperator::GREATER_EQUAL;
+          predicates.push_back(
+              Imcs::Predicate_Builder::create_simple(field->field_index(), op, min_val, field->type()));
+        }
+      }
+    skip_min:
+      if (has_max) {
+        const uchar *ptr = max_ptr;
+        if (field->is_nullable()) {
+          if (*ptr) goto skip_max;
+          ptr++;
+        }
+        Imcs::PredicateValue max_val;
+        if (decode_key_value(ptr, field, max_val)) {
+          Imcs::PredicateOperator op =
+              (qr->flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL;
+          predicates.push_back(
+              Imcs::Predicate_Builder::create_simple(field->field_index(), op, max_val, field->type()));
+        }
+      }
+    skip_max:
+      break;
+    }
+  next_part:
+    min_ptr += store_length;
+    max_ptr += store_length;
+    current_offset += store_length;
+  }
+  if (predicates.empty()) return nullptr;
+  return (predicates.size() == 1) ? std::move(predicates[0])
+                                  : Imcs::Predicate_Builder::create_and(std::move(predicates));
+}
+
+bool Optimizer::decode_key_value(const uchar *key_ptr, Field *field, Imcs::PredicateValue &out_value) {
+  auto field_type = field->type();
+
+  if (field_type == MYSQL_TYPE_NEWDECIMAL) {
+    auto new_field = down_cast<Field_new_decimal *>(field);
+    my_decimal dec_val;
+    if (binary2my_decimal(E_DEC_FATAL_ERROR & ~E_DEC_OVERFLOW, key_ptr, &dec_val, new_field->precision,
+                          new_field->decimals(), true) != E_DEC_OK) {
+      return false;
+    }
+
+    double d_val;
+    if (decimal2double(&dec_val, &d_val) != E_DEC_OK) return false;
+    out_value = Imcs::PredicateValue(d_val);
+    return true;
+  }
+
+  uchar *old_ptr = field->field_ptr();
+  field->set_field_ptr(const_cast<uchar *>(key_ptr));
+
+  if (is_integer_type(field_type) || is_temporal_type(field_type)) {
+    out_value = Imcs::PredicateValue(static_cast<int64_t>(field->val_int()));
+  } else if (is_numeric_type(field_type)) {
+    out_value = Imcs::PredicateValue(static_cast<double>(field->val_real()));
+  } else if (is_string_type(field_type)) {
+    String str_val;
+    String *str = field->val_str(&str_val);
+    if (str) out_value = Imcs::PredicateValue(std::string(str->ptr(), str->length()));
+  }
+
+  field->set_field_ptr(old_ptr);
+  return true;
+}
+
 /**
  * Extract value from Item
  */
@@ -1084,24 +1570,24 @@ Imcs::PredicateValue Optimizer::extract_value_from_item(THD *thd, Item *item, en
         case INT_RESULT: {
           longlong int_val = item->val_int();
           bool is_unsigned = item->unsigned_flag;
-          ShannonBase::Utils::ColumnMapGuard cg(target_field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+          ShannonBase::Utils::ColumnMapGuard cg(target_field->table, ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
           store_result = target_field->store(int_val, is_unsigned);
         } break;
         case REAL_RESULT: {
           double real_val = item->val_real();
-          ShannonBase::Utils::ColumnMapGuard cg(target_field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+          ShannonBase::Utils::ColumnMapGuard cg(target_field->table, ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
           store_result = target_field->store(real_val);
         } break;
         case STRING_RESULT: {
           String str_buf;
           String *str = item->val_str(&str_buf);
-          ShannonBase::Utils::ColumnMapGuard cg(target_field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+          ShannonBase::Utils::ColumnMapGuard cg(target_field->table, ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
           if (str) store_result = target_field->store(str->ptr(), str->length(), str->charset());
         } break;
         case DECIMAL_RESULT: {
           my_decimal decimal_buf;
           my_decimal *dec = item->val_decimal(&decimal_buf);
-          ShannonBase::Utils::ColumnMapGuard cg(target_field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+          ShannonBase::Utils::ColumnMapGuard cg(target_field->table, ShannonBase::Utils::ColumnMapGuard::TYPE::WRITE);
           if (dec) store_result = target_field->store_decimal(dec);
         } break;
         default:

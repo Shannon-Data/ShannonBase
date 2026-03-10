@@ -1109,6 +1109,8 @@ The following options may be given as the first argument:
  --rapid-purge-efficiency-threshold=# 
  Purge efficiency threshold, only purge if >10% can be
  cleaned
+ --rapid-reload-on-restart 
+ Reload IMCS tables automatically after mysqld restart
  --rapid-self-load-base-relation-fill-percentage[=#] 
  Percentage of base memory quota above which the self-load
  thread rpdserver and rpdmaster. Default value: 70%.
@@ -1984,6 +1986,7 @@ rapid-pop-buffer-size-max 268435456
 rapid-propagation-mode DIRECT_NOTIFICATION
 rapid-purge-batch-size 64
 rapid-purge-efficiency-threshold 0.1
+rapid-reload-on-restart FALSE
 rapid-self-load-base-relation-fill-percentage 70
 rapid-self-load-enabled FALSE
 rapid-self-load-interval-seconds 86400
