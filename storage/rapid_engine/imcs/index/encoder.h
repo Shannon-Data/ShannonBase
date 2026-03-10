@@ -29,14 +29,12 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-
 template <typename T>
 class Encoder {
  public:
   static void Encode(T value, unsigned char *key);
   static T Decode(const unsigned char *key);
 };
-
 }  // namespace Index
 }  // namespace Imcs
 }  // namespace ShannonBase
