@@ -241,7 +241,11 @@ int Imcs::create_table_memo(const Rapid_load_context *context, const TABLE *sour
   rpd_table.get()->set_load_type(load_type_t::USER);
 
   // step3 : add to rpd_table cahce.
-  m_rpd_tables.emplace(rpd_table->meta().table_id, std::move(rpd_table));
+  {
+    std::unique_lock lock(m_table_mutex);
+    m_rpd_tables.emplace(rpd_table->meta().table_id, std::move(rpd_table));
+  }
+
   return ShannonBase::SHANNON_SUCCESS;
   /* in secondary load phase, the table not loaded into imcs. therefore, it can be seen
      by any transactions. If this table has been loaded into imcs. A new data such as
@@ -271,11 +275,15 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
     return HA_ERR_GENERIC;
   }
 
-  m_rpd_parttables.emplace(rpd_part_table->meta().table_id, std::move(rpd_part_table));
+  {
+    std::unique_lock lock(m_table_mutex);
+    m_rpd_parttables.emplace(rpd_part_table->meta().table_id, std::move(rpd_part_table));
+  }
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 void Imcs::cleanup(const table_id_t &table_id) {
+  std::unique_lock lock(m_table_mutex);
   if (!m_rpd_tables.size() || m_rpd_tables.find(table_id) == m_rpd_tables.end()) return;
   m_rpd_tables.erase(table_id);
 }
@@ -318,9 +326,18 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
 
   int tmp{HA_ERR_GENERIC};
   m_thd->set_sent_row_count(0);
-
   auto table_id = context->m_table_id;
-  ut_a(m_rpd_tables.find(table_id) != m_rpd_tables.end());
+  RpdTable *rpd_table_ptr = nullptr;
+  {
+    std::shared_lock lock(m_table_mutex);
+    auto rpd_table_it = m_rpd_tables.find(table_id);
+    if (rpd_table_it == m_rpd_tables.end()) {
+      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, "Imcs::load_innodb: table_id %llu not found in m_rpd_tables for %s.%s",
+             table_id, context->m_schema_name.c_str(), context->m_table_name.c_str());
+      return HA_ERR_GENERIC;
+    }
+    rpd_table_ptr = rpd_table_it->second.get();
+  }
 
   auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
   while ((tmp = shannon_file->ha_rnd_next(context->m_table->record[0])) != HA_ERR_END_OF_FILE) {
@@ -339,7 +356,7 @@ int Imcs::load_innodb(const Rapid_load_context *context, ha_innobase *file) {
         0.1 + ((m_thd->get_sent_row_count() * 1.0) / (meta_ref.nrows ? meta_ref.nrows : 1)) * 0.7;  // up to 80%
 
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
-    if ((m_rpd_tables[table_id].get()->insert_row(context, context->m_table->record[0])) == INVALID_ROW_ID) {
+    if ((rpd_table_ptr->insert_row(context, context->m_table->record[0])) == INVALID_ROW_ID) {
       std::string errmsg;
       errmsg.append("load data from ")
           .append(context->m_schema_name.c_str())
@@ -514,9 +531,14 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
 
 int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) {
   auto table_id = context->m_table_id;
-  if (m_rpd_parttables.find(table_id) == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
-  auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[table_id].get());
-  assert(part_tb_ptr);
+  PartTable *part_tb_ptr = nullptr;
+  {
+    std::shared_lock lock(m_table_mutex);
+    auto part_table_it = m_rpd_parttables.find(table_id);
+    if (part_table_it == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
+    part_tb_ptr = down_cast<PartTable *>(part_table_it->second.get());
+    assert(part_tb_ptr);
+  }
 
   auto &meta_ref = ShannonBase::Autopilot::SelfLoadManager::tables()[context->m_sch_tb_name]->meta_info;
   context->m_thd->set_sent_row_count(0);
@@ -528,7 +550,7 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
     Rapid_load_context::extra_info_t::m_active_part_key = partkey;
     // should be RC isolation level. set_tx_isolation(m_thd, ISO_READ_COMMITTED, true);
     if (file->inited == handler::NONE && file->rnd_init_in_part(part_id, true)) {
-      my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name, context->m_table_name);
+      my_error(ER_NO_SUCH_TABLE, MYF(0), context->m_schema_name.c_str(), context->m_table_name.c_str());
       return HA_ERR_GENERIC;
     }
 
@@ -576,9 +598,14 @@ int Imcs::load_innodbpart(const Rapid_load_context *context, ha_innopart *file) 
 
 int Imcs::load_innodbpart_parallel(const Rapid_load_context *context, ha_innopart *file) {
   auto table_id = context->m_table_id;
-  if (m_rpd_parttables.find(table_id) == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
-  auto part_tb_ptr = down_cast<PartTable *>(m_rpd_parttables[table_id].get());
-  assert(part_tb_ptr);
+  PartTable *part_tb_ptr = nullptr;
+  {
+    std::shared_lock lock(m_table_mutex);
+    auto part_table_it = m_rpd_parttables.find(table_id);
+    if (part_table_it == m_rpd_parttables.end()) return ShannonBase::SHANNON_SUCCESS;
+    part_tb_ptr = down_cast<PartTable *>(part_table_it->second.get());
+    assert(part_tb_ptr);
+  }
 
   context->m_thd->set_sent_row_count(0);
 
