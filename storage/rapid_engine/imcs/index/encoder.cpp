@@ -52,7 +52,6 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-
 template <>
 void Encoder<float>::Encode(float value, unsigned char *key) {
   uint32_t val;
@@ -311,7 +310,6 @@ uint64_t Encoder<uint64_t>::Decode(const unsigned char *key) {
   val |= (uint64_t)key[7];
   return val;
 }
-
 }  // namespace Index
 }  // namespace Imcs
 }  // namespace ShannonBase
