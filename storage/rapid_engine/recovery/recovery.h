@@ -28,126 +28,163 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "my_inttypes.h"
+#include "storage/rapid_engine/imcs/cu_recovery.h"  // per-table snapshot + WAL I/O
 #include "storage/rapid_engine/recovery/recovery_load.h"
 
 class THD;
+class TABLE;
 
 namespace ShannonBase {
+namespace Imcs {
+class Imcu;
+class RpdTable;
+}  // namespace Imcs
+
 namespace Recovery {
-/**
- * @class RecoveryAdminSession
- * @brief RAII wrapper that creates an admin-privilege THD for use inside
- *        background recovery threads.
- *
- * Each background worker (DDWorker, RecoveryJob) must operate within its own
- * MySQL thread context so that it can issue SQL queries. This class:
- *   1. Calls my_thread_init() to initialise thread-local state.
- *   2. Allocates a new THD with COM_DAEMON command and skip_grants authority.
- *   3. Stores the THD as the thread global via store_globals().
- *   4. On destruction, restores prior globals, detaches, and cleans up.
- *
- */
+class RecoveryManager {
+ public:
+  explicit RecoveryManager(std::string base_dir);
+  ~RecoveryManager();
+
+  RecoveryManager(const RecoveryManager &) = delete;
+  RecoveryManager &operator=(const RecoveryManager &) = delete;
+
+  /** Persist one IMCU snapshot. snapshot_lsn=0 → use current WAL head. */
+  bool checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu, uint64_t scn);
+
+  /**
+   * Return the latest snapshot LSN for (db, tbl), or 0 if no snapshot exists.
+   * A non-zero return means the fast lane is viable for this table.
+   */
+  uint64_t latest_checkpoint_scn(const std::string &db, const std::string &tbl);
+
+  /**
+   * Load all per-IMCU snapshots into an already-created RpdTable, then
+   * replay WAL records that post-date the snapshots.
+   * Field* are left nullptr; caller patches them via an open TABLE afterwards.
+   * @return true if at least one IMCU was recovered.
+   */
+  bool load_from_snapshots(const std::string &db, const std::string &tbl, Imcs::RpdTable *rpd_table);
+
+  /** fdatasync all open WAL streams. */
+  bool sync();
+
+  /** Remove all snapshot + WAL files for a table. */
+  void purge_table(const std::string &db, const std::string &tbl);
+
+ private:
+  Imcs::CURecoveryManager *get_table_mgr(const std::string &db, const std::string &tbl);
+  std::filesystem::path table_dir(const std::string &db, const std::string &tbl) const;
+
+  std::string m_base_dir;
+  std::mutex m_mutex;
+  // key = db + '\x01' + tbl
+  std::unordered_map<std::string, std::unique_ptr<Imcs::CURecoveryManager>> m_per_table;
+};
+
+// Background thread. Two triggers:
+//   1. Periodic sweep of READ_ONLY IMCUs every `interval` seconds.
+//   2. On-demand queue: RecoveryJob::execute() enqueues after a slow-lane
+//      reload so the next restart can take the fast lane.
+class CheckpointScheduler {
+ public:
+  struct Config {
+    std::string snapshot_base_dir;
+    std::chrono::seconds interval{300};
+  };
+
+  explicit CheckpointScheduler(Config cfg);
+  ~CheckpointScheduler();
+
+  CheckpointScheduler(const CheckpointScheduler &) = delete;
+  CheckpointScheduler &operator=(const CheckpointScheduler &) = delete;
+
+  bool start();
+  void stop();
+
+  /** Enqueue an on-demand checkpoint. Non-blocking; I/O on bg thread. */
+  void enqueue(const std::string &schema_name, const std::string &table_name);
+
+  RecoveryManager *recovery_manager() { return m_mgr.get(); }
+
+  static CheckpointScheduler *global();
+  static void set_global(CheckpointScheduler *s);
+
+ private:
+  void run();
+  void do_periodic_checkpoint();
+  void do_ondemand_checkpoints();
+
+  Config m_cfg;
+  std::unique_ptr<RecoveryManager> m_mgr;
+
+  std::thread m_thread;
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  std::atomic<bool> m_stop{false};
+
+  std::vector<std::pair<std::string, std::string>> m_queue;
+
+  static std::atomic<CheckpointScheduler *> s_global;
+};
+
 class RecoveryAdminSession {
  public:
   RecoveryAdminSession();
   ~RecoveryAdminSession();
 
-  // Non-copyable, non-movable (RAII resource).
   RecoveryAdminSession(const RecoveryAdminSession &) = delete;
   RecoveryAdminSession &operator=(const RecoveryAdminSession &) = delete;
 
-  /** Returns the created THD, or nullptr if initialisation failed. */
   THD *thd() const { return m_thd; }
-
-  /** Returns true if the session was created successfully. */
   bool is_valid() const { return m_thd != nullptr; }
 
  private:
   THD *m_thd{nullptr};
 };
 
-/**
- * @class RecoveryJob
- * @brief Encapsulates a single-table reload task performed during restart
- *        recovery.
- *
- * The job is responsible for:
- *   1. Opening a new admin session in a background thread.
- *   2. Issuing "ALTER TABLE db.tbl SECONDARY_LOAD" through the normal IMCS
- *      load path (Imcs::load_table / load_parttable).
- *   3. Reporting success or failure without marking the entire recovery as
- *      FAILED (because OOM or other transient errors during restart reload
- *      should not block other tables – see Bug#34197659).
- *
- *   Before loading, RecoveryJob checks whether the table is already present
- *   in the in-memory Global State (Imcs::get_rpd_table). If it is, the job
- *   is skipped so that a table loaded by a concurrent user request before the
- *   DD Worker finishes is not double-processed.
- */
 class RecoveryJob {
  public:
   explicit RecoveryJob(const SecondaryLoadedTable &table_info) : m_table_info(table_info) {}
-
   ~RecoveryJob() = default;
 
   /**
-   * @brief Execute the reload job synchronously in the calling thread.
+   * Execute recovery for this table.
    *
-   * This is invoked by RecoveryFramework from within the DDWorker thread pool.
-   * Errors are logged but do not propagate upward (recovery continues for
-   * other tables regardless of this job's outcome).
+   * Two-lane strategy (new):
+   *   1. [FAST] try_snapshot_recovery() — .snap + WAL replay.
+   *   2. [SLOW] original DDL-replay via reload_normal/partitioned_table().
+   *      On success, schedules an async checkpoint so the next restart is fast.
    *
-   * @return true if the table was successfully reloaded, false otherwise.
+   * @return true if the table was successfully loaded by either lane.
    */
   bool execute();
 
   const SecondaryLoadedTable &table_info() const { return m_table_info; }
 
  private:
-  SecondaryLoadedTable m_table_info;
+  // Fast mode.
+  bool try_snapshot_recovery(THD *thd);
+  bool patch_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source);
+  bool register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTable *rpd_table);
+  void schedule_checkpoint_async();
 
-  /**
-   * @brief Execute the actual SECONDARY_LOAD for a non-partitioned table.
-   * @param thd Admin session THD.
-   * @return true on success.
-   */
+  // Slow mode.
   bool reload_normal_table(THD *thd);
-
-  /**
-   * @brief Execute the actual SECONDARY_LOAD for a partitioned table.
-   * @param thd Admin session THD.
-   * @return true on success.
-   */
   bool reload_partitioned_table(THD *thd);
+
+  SecondaryLoadedTable m_table_info;
 };
 
-/**
- * @class DDWorker
- * @brief Background thread that queries the Data Dictionary for tables that
- *        need to be reloaded after a MySQL restart.
- *
- * The DDWorker is started by RecoveryFramework during plugin initialisation
- * (before the recovery loop begins, per Patch #4 design). It:
- *   1. Waits until MySQL's server bootup is complete (up to 300s to account
- *      for long MySQL version upgrades – Patch #4).
- *   2. Opens a RecoveryAdminSession.
- *   3. Wraps all queries in a DD_KillImmunizer (Bug#33752387).
- *   4. Calls LoadFlagManager::query_loaded_tables() to enumerate tables with
- *      secondary_load=1 in their CREATE_OPTIONS.
- *   5. For each found table, creates a RecoveryJob and dispatches it.
- *   6. Exits cleanly when m_stop is set (during plugin shutdown).
- *
- * Thread lifecycle:
- *   start()  → spawns m_thread
- *   stop()   → sets m_stop, notifies m_cv, joins m_thread
- */
 class DDWorker {
  public:
   DDWorker() = default;
@@ -156,28 +193,14 @@ class DDWorker {
   DDWorker(const DDWorker &) = delete;
   DDWorker &operator=(const DDWorker &) = delete;
 
-  /**
-   * @brief Start the DDWorker background thread.
-   * @return true if the thread was started successfully.
-   */
   bool start();
-
-  /**
-   * @brief Signal the DDWorker to stop and wait for it to exit.
-   */
   void stop();
 
-  /** @brief Returns true if the DDWorker has completed its query phase. */
   bool is_done() const { return m_done.load(std::memory_order_acquire); }
-
-  /**
-   * @brief Returns the list of tables found during the DD scan.
-   *        Safe to call only after is_done() returns true.
-   */
   const std::vector<SecondaryLoadedTable> &found_tables() const { return m_found_tables; }
 
  private:
-  void run();  // thread body
+  void run();
 
   std::thread m_thread;
   std::mutex m_mutex;
@@ -189,27 +212,6 @@ class DDWorker {
   std::vector<SecondaryLoadedTable> m_found_tables;
 };
 
-/**
- * @class RecoveryFramework
- * @brief Top-level singleton that orchestrates ShannonBase restart recovery.
- *
- * Responsibilities:
- *   1. Detect at startup whether the IMCS Global State is empty (indicating a
- *      restart rather than a hot plugin reload).
- *   2. If rapid_reload_on_restart is ON and Global State is empty, start the
- *      DDWorker to find tables that were loaded before the restart.
- *   3. Dispatch RecoveryJob instances for each discovered table.
- *   4. If rapid_reload_on_restart is OFF, invalidate the external Global State
- *      (if any) so stale metadata does not confuse query planning.
- *   5. Provide a clean shutdown path that stops the DDWorker and waits for all
- *      in-flight jobs to complete.
- *
- * Usage (called from plugin init):
- *   RecoveryFramework::instance().startup();
- *
- * Usage (called from plugin deinit):
- *   RecoveryFramework::instance().shutdown();
- */
 class RecoveryFramework {
  public:
   static RecoveryFramework &instance() {
@@ -217,33 +219,10 @@ class RecoveryFramework {
     return inst;
   }
 
-  /**
-   * @brief Called during ShannonBase plugin initialisation.
-   *
-   * Determines whether recovery is needed, starts the DDWorker when
-   * appropriate, and dispatches recovery jobs.
-   *
-   * This function returns quickly (the DDWorker runs asynchronously).
-   */
   void startup();
-
-  /**
-   * @brief Called during ShannonBase plugin de-initialisation.
-   *
-   * Stops the DDWorker and waits for all pending recovery jobs to finish.
-   */
   void shutdown();
 
-  /**
-   * @brief Returns true if the framework detected that Global State was empty
-   *        at startup (i.e., a restart scenario).
-   */
   bool global_state_was_empty() const { return m_global_state_empty.load(); }
-
-  /**
-   * @brief Returns the total number of tables that were successfully reloaded
-   *        during this recovery session.
-   */
   size_t reloaded_count() const { return m_reloaded_count.load(); }
 
  private:
@@ -252,76 +231,33 @@ class RecoveryFramework {
   RecoveryFramework(const RecoveryFramework &) = delete;
   RecoveryFramework &operator=(const RecoveryFramework &) = delete;
 
-  /**
-   * @brief Check whether the current IMCS Global State is empty.
-   *        An empty state indicates a restart (no tables loaded in memory yet).
-   * @return true if no tables are currently loaded in IMCS.
-   */
   bool is_global_state_empty() const;
-
-  /**
-   * @brief Process the external Global State before starting the recovery loop.
-   *        Patch #4: single entry point for external state processing.
-   *
-   * - If rapid_reload_on_restart is OFF → invalidate the external state.
-   * - If rapid_reload_on_restart is ON  → start the DDWorker.
-   */
   void process_external_global_state();
-
-  /**
-   * @brief Dispatch RecoveryJob objects for all tables found by the DDWorker.
-   *        Called from the DDWorker callback after the DD scan is complete.
-   * @param tables List of tables to reload.
-   */
   void dispatch_jobs(const std::vector<SecondaryLoadedTable> &tables);
-
-  /**
-   * @brief Invalidate the external Global State when reload is disabled.
-   *        This prevents stale metadata from affecting query planning.
-   */
   void invalidate_external_global_state();
 
   std::thread m_monitoring_thread;
 
-  /** True if Global State was empty when startup() was called. */
   std::atomic<bool> m_global_state_empty{false};
-
-  /** Number of successfully reloaded tables this session. */
   std::atomic<size_t> m_reloaded_count{0};
 
-  /** The Data Dictionary worker thread. */
   std::unique_ptr<DDWorker> m_dd_worker;
+  std::unique_ptr<CheckpointScheduler> m_checkpoint_scheduler;  // NEW
 
-  /** Protects m_active_jobs and m_jobs_done. */
   std::mutex m_jobs_mutex;
   std::condition_variable m_jobs_cv;
   std::atomic<size_t> m_active_jobs{0};
 
-  /** Set to true once startup() has been called. */
   std::atomic<bool> m_started{false};
-
-  /** Set to true once shutdown() has been called. */
   std::atomic<bool> m_stopped{false};
 
   std::vector<std::thread> m_job_threads;
   std::mutex m_job_threads_mutex;
 };
 
-/**
- * @brief Entry point called from the ShannonBase plugin init function.
- *
- * Delegates to RecoveryFramework::instance().startup().
- * Must be called after Imcs::initialize() so that the Global State check
- * reflects the actual in-memory table count.
- */
+// Plugin entry points
 inline void rapid_recovery_startup() { RecoveryFramework::instance().startup(); }
-
-/**
- * @brief Entry point called from the ShannonBase plugin deinit function.
- *
- * Delegates to RecoveryFramework::instance().shutdown().
- */
 inline void rapid_recovery_shutdown() { RecoveryFramework::instance().shutdown(); }
 }  // namespace Recovery
 }  // namespace ShannonBase
-#endif  //__SHANNONBASE_RECOVERY_H__
+#endif  // __SHANNONBASE_RECOVERY_H__

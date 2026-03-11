@@ -34,6 +34,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/rapidjson.h>
+#include "include/my_dbug.h"
 
 namespace ShannonBase {
 namespace ML {
@@ -215,9 +216,21 @@ std::mt19937 g_rng(std::random_device{}());
 TextGenerator::TextGenerator(const std::string &modelPath, const std::string &tokenizerPath,
                              const GenerationOptions &option)
     : m_gen_option(option), m_modelPath(modelPath), m_tokenizerPath(tokenizerPath), m_modelType(option.model_id) {
-  auto ms = select_model_variant(m_modelPath);
-  m_modelPath = (fs::path(m_modelPath) / ms.filename).string();
-  m_initialized = !(InitializeONNX() || InitializeTokenizer() || LoadTokenizerConfig());
+  try {
+    auto ms = select_model_variant(m_modelPath);
+    m_modelPath = (fs::path(m_modelPath) / ms.filename).string();
+    bool failed = InitializeONNX() || InitializeTokenizer() || LoadTokenizerConfig();
+    m_initialized = !failed;
+  } catch (const Ort::Exception &e) {
+    m_error_string = std::string("[ORT Exception] ") + e.what();
+    m_initialized = false;
+  } catch (const std::exception &e) {
+    m_error_string = std::string("[Exception] ") + e.what();
+    m_initialized = false;
+  } catch (...) {
+    m_error_string = "[Unknown exception during initialization]";
+    m_initialized = false;
+  }
 }
 
 TextGenerator::~TextGenerator() {
@@ -331,26 +344,52 @@ bool TextGenerator::LoadTokenizerConfig() {
   return false;
 }
 
-std::string TextGenerator::ApplyChatTemplate(const std::string &userInput, const std::string &) {
-  if (!m_tokenizer->has_chat_template()) return "";
-
+tokenizers::Tokenizer::Encoding TextGenerator::BuildPromptEncoding(const std::string &userInput,
+                                                                   const std::string &systemPromptOverride) {
   auto lang = m_gen_option.language;
   std::string sys_prompt;
-  if (lang == "chinese") {
+  if (!systemPromptOverride.empty()) {
+    sys_prompt = systemPromptOverride;
+  } else if (lang == "chinese" || lang == "zh" || lang == "cn") {
     sys_prompt = "你是一个有用的中文助手。请用中文回答用户的问题。";
-  } else if (lang == "english") {
+  } else if (lang == "english" || lang == "en") {
     sys_prompt = "You are a helpful English assistant. Please respond in English.";
   } else {
     sys_prompt = "You are a helpful assistant.";
   }
 
-  std::vector<tokenizers::ChatMessage> messages = {{"system", sys_prompt.c_str()},
-                                                   {"user", "Hello!"},
-                                                   {"assistant", "Hi! How can I help you?"},
-                                                   {"user", userInput.c_str()}};
+  std::vector<tokenizers::ChatMessage> messages = {{"system", sys_prompt.c_str()}, {"user", userInput.c_str()}};
 
-  std::string formatted_chat = m_tokenizer->apply_chat_template(messages, true);
-  return formatted_chat;
+  if (m_tokenizer->has_chat_template()) {
+    auto enc = m_tokenizer->apply_chat_template_and_encode(messages, true, "", false);
+    if (!enc.ids().empty()) return enc;
+  }
+
+  std::string lowerModel = m_modelType;
+  std::transform(lowerModel.begin(), lowerModel.end(), lowerModel.begin(), ::tolower);
+  std::string fallback;
+
+  if (lowerModel.find("qwen") != std::string::npos) {
+    fallback = "<|im_start|>system\n" + sys_prompt + "<|im_end|>\n";
+    fallback += "<|im_start|>user\n" + userInput + "<|im_end|>\n";
+    fallback += "<|im_start|>assistant\n";
+  } else if (lowerModel.find("llama") != std::string::npos) {
+    fallback = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n";
+    fallback += sys_prompt + "<|eot_id|>";
+    fallback += "<|start_header_id|>user<|end_header_id|>\n\n";
+    fallback += userInput + "<|eot_id|>";
+    fallback += "<|start_header_id|>assistant<|end_header_id|>\n\n";
+  } else if (lowerModel.find("mistral") != std::string::npos) {
+    fallback = "[INST] " + userInput + " [/INST]";
+  } else if (lowerModel.find("phi") != std::string::npos) {
+    fallback = "<|system|>\n" + sys_prompt + "<|end|>\n";
+    fallback += "<|user|>\n" + userInput + "<|end|>\n";
+    fallback += "<|assistant|>\n";
+  } else {
+    fallback = sys_prompt + "\n\n" + userInput + "\n";
+  }
+
+  return m_tokenizer->encode(fallback, false);
 }
 
 void TextGenerator::TestTokenizerCompatibility() {
@@ -389,17 +428,13 @@ void TextGenerator::TestTokenizerCompatibility() {
   }
 
   std::string userInput = "What is AI?";
-  std::string chatTemplate = ApplyChatTemplate(userInput, "ShannonBase AI assistant");
+  auto testEncoding = BuildPromptEncoding(userInput, "ShannonBase AI assistant");
 
   std::cout << "\nChat Template Test:" << std::endl;
-  std::cout << "Template: " << chatTemplate << std::endl;
+  std::cout << "Token count: " << testEncoding.ids().size() << std::endl;
 
-  auto chatEncoding = m_tokenizer->encode(chatTemplate, true);
-  std::string chatDecoded = m_tokenizer->decode(chatEncoding.ids(), true);
-  std::cout << "Decode chat template: " << chatDecoded << std::endl;
-
-  std::cout << "Roundtrip match: " << (chatTemplate == chatDecoded ? "YES" : "NO") << std::endl;
-  std::cout << "Token count: " << chatEncoding.ids().size() << std::endl;
+  std::string chatDecoded = m_tokenizer->decode(testEncoding.ids(), true);
+  std::cout << "Decoded prompt: " << chatDecoded << std::endl;
 
   std::cout << "\nConfigured special tokens:" << std::endl;
   std::cout << "EOS token ID: " << m_eosTokenId << std::endl;
@@ -684,25 +719,42 @@ std::pair<size_t, bool> TextGenerator::ParseKVCacheInputName(const std::string &
   size_t layerIdx = 0;
   bool isKey = false;  // default to false
 
-  std::vector<std::regex> layerPatterns = {std::regex(R"(\.(\d+)\.)"),    std::regex(R"(_(\d+)_)"),
-                                           std::regex(R"(layer\.(\d+))"), std::regex(R"(layers\.(\d+))"),
-                                           std::regex(R"(h\.(\d+))"),     std::regex(R"(block\.(\d+))")};
+  // more patterns, such as `layer_1, past_key_values_1`.
+  std::vector<std::regex> layerPatterns = {std::regex(R"(\.(\d+)\.)"),                            // match .1.
+                                           std::regex(R"(_(\d+)_)", std::regex::optimize),        // match _1_
+                                           std::regex(R"(layer\.(\d+))", std::regex::optimize),   // match layer.1
+                                           std::regex(R"(layers\.(\d+))", std::regex::optimize),  // match layers.1
+                                           std::regex(R"(layer_(\d+))", std::regex::optimize),    // match layer_1
+                                           std::regex(R"(layers_(\d+))", std::regex::optimize),   // match layers_1
+                                           std::regex(R"(h\.(\d+))", std::regex::optimize),       // match h.1
+                                           std::regex(R"(block\.(\d+))", std::regex::optimize),   // match block.1
+                                           std::regex(R"(past_key_values\.(\d+))", std::regex::optimize),
+                                           std::regex(R"(past_key_values_(\d+))", std::regex::optimize)};
 
+  bool foundLayer = false;
   for (const auto &pattern : layerPatterns) {
     std::smatch match;
     if (std::regex_search(name, match, pattern) && match.size() > 1) {
       layerIdx = static_cast<size_t>(std::stoi(match[1].str()));
+      foundLayer = true;
       break;
     }
   }
 
-  if (name.find(".key") != std::string::npos) {
+  if (!foundLayer) {
+    DBUG_PRINT("warning", ("Could not parse layer index from KV cache name: %s", name.c_str()));
+  }
+
+  std::string lowerName = name;
+  std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+
+  if (lowerName.find("key") != std::string::npos) {
     isKey = true;
-  } else if (name.find(".value") != std::string::npos) {
+  } else if (lowerName.find("value") != std::string::npos) {
     isKey = false;
   } else {
-    // Fallback - shouldn't happen with proper naming
-    assert(false);  //[ERROR] Cannot determine key/value type
+    DBUG_PRINT("warning", ("Cannot determine key/value type for: %s. Defaulting to key.", name.c_str()));
+    isKey = true;
   }
 
   return {layerIdx, isKey};
@@ -868,6 +920,50 @@ int64_t TextGenerator::SampleTopK(const float *logits, size_t vocabSize, int top
   // in top-k with temp sampling.
   int64_t selectedIdx = SampleWithTemperature(topKLogits.data(), actualK, temperature);
   return topKIndices[selectedIdx];
+}
+
+int64_t TextGenerator::SampleTopKThenTopP(const float *logits, size_t vocabSize, int topK, float topP,
+                                          float temperature) {
+  // Step 1: collect all logits and then order it by desc, then keep the top_k subset.
+  std::vector<std::pair<float, int64_t>> logitPairs;
+  logitPairs.reserve(vocabSize);
+  for (size_t i = 0; i < vocabSize; ++i) logitPairs.emplace_back(logits[i], static_cast<int64_t>(i));
+
+  int actualK = std::min(topK, static_cast<int>(vocabSize));
+  std::partial_sort(logitPairs.begin(), logitPairs.begin() + actualK, logitPairs.end(), std::greater<>());
+  logitPairs.resize(actualK);
+
+  // Step 2: calc the softmax probabilities for the top_k subset
+  float maxLogit = logitPairs[0].first;
+  float sum = 0.0f;
+  std::vector<float> probs(actualK);
+  for (int i = 0; i < actualK; ++i) {
+    probs[i] = std::exp(logitPairs[i].first - maxLogit);
+    sum += probs[i];
+  }
+  for (int i = 0; i < actualK; ++i) probs[i] /= sum;
+
+  // Step 3: find the cutoff position based on cumulative probability (nucleus/top_p)
+  float cumProb = 0.0f;
+  int cutoff = actualK;
+  for (int i = 0; i < actualK; ++i) {
+    cumProb += probs[i];
+    if (cumProb >= topP) {
+      cutoff = i + 1;
+      break;
+    }
+  }
+
+  // Step 4: sample from the final candidate set with temperature
+  std::vector<float> finalLogits(cutoff);
+  std::vector<int64_t> finalIndices(cutoff);
+  for (int i = 0; i < cutoff; ++i) {
+    finalLogits[i] = logitPairs[i].first;
+    finalIndices[i] = logitPairs[i].second;
+  }
+
+  int64_t selectedIdx = SampleWithTemperature(finalLogits.data(), cutoff, temperature);
+  return finalIndices[selectedIdx];
 }
 
 int64_t TextGenerator::SampleTopP(const float *logits, size_t vocabSize, float topP, float temperature) {
@@ -1060,7 +1156,6 @@ void TextGenerator::PrintTopKLogits(const std::vector<float> &logits, int top_k)
 
 Ort::Value TextGenerator::CreateZeroCacheTensor(ONNXTensorElementDataType type, const std::vector<int64_t> &shape,
                                                 const Ort::MemoryInfo &memInfo) {
-  // calc total num of elems.
   size_t elementCount = 1;
   for (int64_t dim : shape) {
     if (dim < 0) return Ort::Value(nullptr);
@@ -1068,12 +1163,23 @@ Ort::Value TextGenerator::CreateZeroCacheTensor(ONNXTensorElementDataType type, 
   }
 
   switch (type) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      return Ort::Value::CreateTensor<float>(memInfo, nullptr, elementCount, shape.data(), shape.size());
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      return Ort::Value::CreateTensor<Ort::Float16_t>(memInfo, nullptr, elementCount, shape.data(), shape.size());
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-      return Ort::Value::CreateTensor<int8_t>(memInfo, nullptr, elementCount, shape.data(), shape.size());
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
+      m_stepFloatBuffers.emplace_back(elementCount, 0.0f);
+      auto &buf = m_stepFloatBuffers.back();
+      return Ort::Value::CreateTensor<float>(memInfo, buf.data(), elementCount, shape.data(), shape.size());
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
+      m_stepInt64Buffers.emplace_back((elementCount * sizeof(uint16_t) + sizeof(int64_t) - 1) / sizeof(int64_t), 0LL);
+      void *ptr = m_stepInt64Buffers.back().data();
+      return Ort::Value::CreateTensor(memInfo, ptr, elementCount * sizeof(uint16_t), shape.data(), shape.size(),
+                                      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
+      m_stepInt64Buffers.emplace_back((elementCount * sizeof(int8_t) + sizeof(int64_t) - 1) / sizeof(int64_t), 0LL);
+      void *ptr = m_stepInt64Buffers.back().data();
+      return Ort::Value::CreateTensor(memInfo, ptr, elementCount * sizeof(int8_t), shape.data(), shape.size(),
+                                      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
+    }
     default:
       return Ort::Value(nullptr);
   }
@@ -1117,6 +1223,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   Result result;
   if (!Initialized() || !m_gen_option.validate()) return result;
 
+  AnalyzeModelInputShapes();
   m_stepFloatBuffers.clear();
   m_stepInt64Buffers.clear();
 
@@ -1125,16 +1232,9 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     m_lastPrompt = userPrompt;
   }
 
-  // 1. applying template and tokens
-  std::string inputText;
-  if (m_gen_option.task == "summarization") {
-    inputText = ApplyChatTemplate("Please summarize the following text: " + userPrompt, m_system_prompt);
-  } else {  // generation.
-    inputText = ApplyChatTemplate(userPrompt, m_system_prompt);
-  }
-
-  // encoding the input text into token ids.
-  auto encoding = m_tokenizer->encode(inputText, true);
+  std::string promptInput =
+      (m_gen_option.task == "summarization") ? "Please summarize the following text: " + userPrompt : userPrompt;
+  auto encoding = BuildPromptEncoding(promptInput, m_system_prompt);
   std::vector<uint32_t> inputIds = encoding.ids();
   if (inputIds.empty()) return result;
 
@@ -1173,6 +1273,16 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     m_stepFloatBuffers.clear();
     m_stepInt64Buffers.clear();
 
+    // IMPORTANT: Reserve enough capacity upfront so that push_back / emplace_back
+    // never triggers a reallocation while we are building stepInputs.
+    // Each ORT tensor holds a raw data() pointer into these vectors; any
+    // reallocation invalidates those pointers, causing UB / garbled output.
+    // Worst case: 3 regular inputs + 2 int64 buffers each for KV cache packing
+    // + generous headroom for CreateZeroCacheTensor's internal pushes.
+    const size_t reserveSize = inputNames.size() * 2 + 8;
+    m_stepFloatBuffers.reserve(reserveSize);
+    m_stepInt64Buffers.reserve(reserveSize);
+
     std::vector<Ort::Value> stepInputs;
     stepInputs.reserve(inputNames.size());
 
@@ -1183,7 +1293,7 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     for (size_t inputIdx = 0; inputIdx < inputNames.size(); ++inputIdx) {
       const std::string &inputName = inputNames[inputIdx];
 
-      if (inputName == "input_ids" || inputName.find("input") != std::string::npos) {
+      if (inputName == "input_ids" || inputName == "inputs" || inputName == "input") {
         std::vector<int64_t> currentInput;
         if (step == 0) {
           currentInput = generatedTokens;
@@ -1252,8 +1362,30 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
                                         stepInputs.size(), outputNamesPtrs.data(), outputNamesPtrs.size());
     if (outputTensors.empty()) break;
 
-    // 4.3 porcessing logits
-    const Ort::Value &logitsTensor = outputTensors[0];
+    size_t logitsTensorIdx = 0;
+    {
+      bool found = false;
+      for (size_t oi = 0; oi < outputNames.size() && !found; ++oi) {
+        if (outputNames[oi] == "logits") {
+          logitsTensorIdx = oi;
+          found = true;
+        }
+      }
+      if (!found) {
+        for (size_t oi = 0; oi < outputTensors.size() && !found; ++oi) {
+          auto info = outputTensors[oi].GetTensorTypeAndShapeInfo();
+          if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) continue;
+          auto sh = info.GetShape();
+          if (!sh.empty() && sh.back() > 10000) {
+            logitsTensorIdx = oi;
+            found = true;
+          }
+        }
+      }
+    }
+
+    // 4.3 processing logits
+    const Ort::Value &logitsTensor = outputTensors[logitsTensorIdx];
     auto logitsInfo = logitsTensor.GetTensorTypeAndShapeInfo();
     auto logitsShape = logitsInfo.GetShape();
     const float *logitsData = logitsTensor.GetTensorData<float>();
@@ -1275,8 +1407,8 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     // According to the options values to choose sample strategy.
     int64_t nextToken;
     if (m_gen_option.top_k > 0 && m_gen_option.top_p < 1.0f) {
-      // top-k and top-p
-      nextToken = SampleTopK(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.temperature);
+      nextToken = SampleTopKThenTopP(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.top_p,
+                                     m_gen_option.temperature);
     } else if (m_gen_option.top_k > 0) {
       nextToken = SampleTopK(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.temperature);
     } else if (m_gen_option.top_p < 1.0f) {
