@@ -369,7 +369,8 @@ class TextGenerator {
    * @param systemPrompt Raw system prompt
    * @return Formatted prompt with appropriate chat template
    */
-  std::string ApplyChatTemplate(const std::string &userInput, const std::string &);
+  tokenizers::Tokenizer::Encoding BuildPromptEncoding(const std::string &userInput,
+                                                      const std::string &systemPromptOverride);
 
   /**
    * Find the index of maximum value in logits array (greedy sampling)
@@ -490,6 +491,7 @@ class TextGenerator {
    */
   int64_t SampleTopK(const float *logits, size_t vocabSize, int topK, float temperature);
 
+  int64_t SampleTopKThenTopP(const float *logits, size_t vocabSize, int topK, float topP, float temperature);
   /**
    * Sample next token using Top-P (nucleus) sampling with temperature
    * @param logits Array of raw logit scores from model output
@@ -571,7 +573,7 @@ class TextGenerator {
 
  private:
   // system prompt string.
-  std::string m_system_prompt{"You are an AI assistant that provides clear and concise explanations in "};
+  std::string m_system_prompt{"You are an AI assistant that provides clear and concise explanations."};
 
   // the last prompt string user input.
   std::string m_lastPrompt;

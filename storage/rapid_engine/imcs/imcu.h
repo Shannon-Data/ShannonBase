@@ -377,6 +377,35 @@ class Imcu : public MemoryObject {
 
   inline size_t get_row_count() const { return m_header.current_rows.load(std::memory_order_acquire); }
 
+  /** Unique identifier within the owning RpdTable (stored in snapshot header). */
+  inline uint32 get_imcu_id() const { return m_header.imcu_id; }
+
+  /** Number of CUs (columns) currently registered in this IMCU. */
+  inline size_t get_column_count() const { return m_column_units.size(); }
+
+  /** Highest SCN seen by any mutation applied to this IMCU. */
+  inline uint64 get_max_scn() const { return m_header.max_scn; }
+
+  /** Re-parent this IMCU after snapshot reconstruction (Field* already patched). */
+  inline void set_owner(RpdTable *o) { m_owner_table = o; }
+
+  /**
+   * Reconnect the Field* and CHARSET_INFO* for a single CU after snapshot
+   * recovery.  These pointers cannot be serialised; callers patch them once
+   * the live TABLE is opened with a shared lock.
+   *
+   * @param col_id   Column index (key into m_column_units).
+   * @param f        Pointer to the live Field object.
+   * @param cs       Character-set metadata for the column.
+   * @return true if the CU was found and patched; false if col_id not present.
+   */
+  bool patch_cu_field(uint32 col_id, Field *f, const CHARSET_INFO *cs) {
+    auto it = m_column_units.find(col_id);
+    if (it == m_column_units.end() || !it->second) return false;
+    it->second->patch_field_metadata(f, cs);
+    return true;
+  }
+
   inline double get_delete_ratio() const { return m_header.delete_ratio; }
 
   inline TransactionJournal *get_transaction_journal() const { return m_header.txn_journal.get(); }

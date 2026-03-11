@@ -131,6 +131,19 @@ class Imcs : public MemoryObject {
     }
   }
 
+  /**
+   * Look up a loaded RpdTable by schema + table name.
+   * Searches both normal and partitioned table maps.
+   * @return Pointer to the RpdTable, or nullptr if not found.
+   */
+  RpdTable *get_rpd_table_by_name(const std::string &db, const std::string &tbl) {
+    RpdTable *result = nullptr;
+    for_each_table([&](RpdTable *t) {
+      if (t && t->meta().db_name == db && t->meta().table_name == tbl) result = t;
+    });
+    return result;
+  }
+
  private:
   Imcs(Imcs &&) = delete;
   Imcs(Imcs &) = delete;

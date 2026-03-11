@@ -200,6 +200,15 @@ class RpdTable : public MemoryObject {
   /** @brief Lookup index by key name. */
   virtual Index::Index<uchar, row_id_t> *get_index(std::string key_name) = 0;
 
+  /** Append a pre-built IMCU (e.g. restored from a snapshot) to the table. */
+  virtual void add_imcu(std::shared_ptr<Imcu> imcu) = 0;
+
+  /** Count live rows by summing get_row_count() across all IMCUs. */
+  virtual uint64_t count_total_rows() const = 0;
+
+  /** Expose the table-level memory pool (needed by RecoveryManager). */
+  virtual std::shared_ptr<Utils::MemoryPool> get_memory_pool() const = 0;
+
   TableMetadata &meta() { return m_metadata; }
 
   template <typename Func>
@@ -251,7 +260,7 @@ class RpdTable : public MemoryObject {
   std::vector<ImcuIndex> m_imcu_index;
 
   // Table-level lock (coarse-grained, protects IMCU list)
-  std::shared_mutex m_table_mutex;
+  mutable std::shared_mutex m_table_mutex;
 
   // indexes mutex for index writing.
   std::unordered_map<std::string, std::unique_ptr<std::mutex>> m_index_mutexes;
@@ -310,6 +319,22 @@ class Table : public RpdTable {
   }
 
   virtual int register_transaction(Transaction *trx) override;
+
+  void add_imcu(std::shared_ptr<Imcu> imcu) override {
+    std::unique_lock lock(m_table_mutex);
+    m_imcus.push_back(std::move(imcu));
+  }
+
+  uint64_t count_total_rows() const override {
+    std::shared_lock read_lock(m_table_mutex);
+    uint64_t n = 0;
+    for (const auto &i : m_imcus) {
+      if (i) n += i->get_row_count();
+    }
+    return n;
+  }
+
+  std::shared_ptr<Utils::MemoryPool> get_memory_pool() const override { return m_memory_pool; }
 
  private:
   bool is_field_null(int field_index, const uchar *rowdata, const ulong *null_byte_offsets,

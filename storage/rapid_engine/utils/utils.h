@@ -328,6 +328,27 @@ class ColumnMapGuard {
   my_bitmap_map *old_rmap{nullptr};
   my_bitmap_map *old_wmap{nullptr};
 };
+
+class Binlog_guard {
+ public:
+  explicit Binlog_guard(THD *thd) : m_thd(thd) {
+    if (m_thd) {
+      m_saved_options = m_thd->variables.option_bits;
+      m_thd->variables.option_bits &= ~OPTION_BIN_LOG;
+    }
+  }
+
+  ~Binlog_guard() {
+    if (m_thd) m_thd->variables.option_bits = m_saved_options;
+  }
+
+  Binlog_guard(const Binlog_guard &) = delete;
+  Binlog_guard &operator=(const Binlog_guard &) = delete;
+
+ private:
+  THD *m_thd{nullptr};
+  ulonglong m_saved_options{0};
+};
 }  // namespace Utils
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_UTILS_H__
