@@ -187,6 +187,14 @@ SET @options = JSON_OBJECT(
 );
 
 CALL sys.ml_rag('Explain AutoML', @output, @options);
+
+mysql> SELECT sys.ML_GENERATE(     "What is 2 + 2?",      JSON_OBJECT(         "task", "generation",          "model_id", "Qwen2.5-0.5B-Instruct",          "language", "en",         "temperature", 0.1,         "frequency_penalty", 1.2,         "presence_penalty", 0.8,         "max_tokens", 256     ) ) as result;
++-----------------+
+| result          |
++-----------------+
+| 2 + 2 equals 4. |
++-----------------+
+1 row in set (6.97 sec)
 ```
 
 #### 5: Creating javascript language stored procedure.

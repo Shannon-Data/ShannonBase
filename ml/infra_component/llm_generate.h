@@ -19,9 +19,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   The fundmental code for imcs. Using `Llama-3.2-3B-Instruct` to generate
-   response text.
-
+   The fundmental code for imcs.
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
@@ -45,6 +43,7 @@
 #include <vector>
 
 #include <onnxruntime_cxx_api.h>
+#include "ml/infra_component/llm_kv_cache.h"
 #include "ml/infra_component/tokenizer.h"
 
 #if defined(_WIN32)
@@ -128,6 +127,8 @@ typedef struct {
   float repeat_penalty = 1.0f;     // Repetition penalty
   float frequency_penalty = 0.0f;  // Frequency penalty
   float presence_penalty = 0.0f;   // Presence penalty
+
+  int min_new_tokens = 8;  // Suppress EOS / stop sequences until at least this many tokens are generated.
 
   std::vector<std::string> stop_sequences;  // Stop sequences
   bool speculative_decoding = false;        // Speculative decoding
@@ -325,6 +326,23 @@ class TextGenerator {
     std::vector<int64_t> tokens;
   };
 
+  // kv-cache
+  enum class KVCacheLayout {
+    UNKNOWN,
+    BHSD,  // [batch, heads, seq, head_dim]  ← Optimum
+    BSHD,  // [batch, seq, heads, head_dim]  ← ONNX GenAI / Phi-3
+    BHDS,  // [batch, heads, head_dim, seq]  ← old version encoder-decoder
+  };
+
+  struct KVShapeInfo {
+    TextGenerator::KVCacheLayout layout = KVCacheLayout::UNKNOWN;
+    int dim_heads = -1;     // num_heads dim in shape
+    int dim_seq = -1;       // seq_len dim in shape
+    int dim_head_dim = -1;  // head_dim dim in shaope.
+    size_t num_heads = 0;
+    size_t head_dim = 0;
+  };
+
   TextGenerator(const std::string &modelPath, const std::string &tokenizerPath, const GenerationOptions &option);
   virtual ~TextGenerator();
 
@@ -372,6 +390,7 @@ class TextGenerator {
   tokenizers::Tokenizer::Encoding BuildPromptEncoding(const std::string &userInput,
                                                       const std::string &systemPromptOverride);
 
+  void ValidatePromptFormat(const std::vector<uint32_t> &token_ids);
   /**
    * Find the index of maximum value in logits array (greedy sampling)
    * @param logits Array of logit values
@@ -399,8 +418,11 @@ class TextGenerator {
   void InitializeKVCache();
   void ClearKVCache();
 
+  KVShapeInfo DetectKVShapeLayout(const std::vector<int64_t> &shape);
+
   inline void KVCache_Reset() {
     ClearKVCache();
+    m_kvFirstStep = true;
     m_shouldClearKVCache = true;
   }
   /**
@@ -568,12 +590,12 @@ class TextGenerator {
    * @param memInfo
    * @return Ort::Value ORT input tensor.
    */
-  Ort::Value CreateInputCacheTensor(cache_data_t &cache, size_t layerIdx, const std::vector<int64_t> &shape,
-                                    const Ort::MemoryInfo &memInfo);
+  Ort::Value CreateInputCacheTensor(ONNXTensorElementDataType type, size_t layerIdx, bool isKey,
+                                    const std::vector<int64_t> &shape, const Ort::MemoryInfo &memInfo);
 
  private:
   // system prompt string.
-  std::string m_system_prompt{"You are an AI assistant that provides clear and concise explanations."};
+  std::string m_system_prompt{"An AI assistant that provides clear and concise explanations."};
 
   // the last prompt string user input.
   std::string m_lastPrompt;
@@ -634,10 +656,22 @@ class TextGenerator {
   // tokenizer, tokens loaded from the `tokenizer.json`
   std::shared_ptr<tokenizers::Tokenizer> m_tokenizer;
 
-  // kv-cache
+  KVCacheLayout m_kvCacheLayout = KVCacheLayout::UNKNOWN;
+
+  bool m_kvFirstStep = true;
+  KVCacheManager<float> m_floatCache;          // FP32
+  KVCacheManager<Ort::Float16_t> m_fp16Cache;  // FP16
+  KVCacheManager<int8_t> m_int8Cache;          // INT8
   ONNXTensorElementDataType m_cacheDataType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-  cache_data_t m_keyCache;
-  cache_data_t m_valueCache;
+
+  template <typename T>
+  KVCacheManager<T> *get_cache_manager();
+
+  template <typename T>
+  const KVCacheManager<T> *get_cache_manager() const;
+
+  template <typename T>
+  void debug_print_cache(const KVCacheManager<T> &cache, int layer, const char *name);
 
   bool m_kvCacheInitialized = false;
   bool m_shouldClearKVCache = true;
