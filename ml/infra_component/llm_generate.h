@@ -348,10 +348,7 @@ class TextGenerator {
 
   inline bool Initialized() const { return m_initialized; }
 
-  inline void Reset() {
-    ClearKVCache();
-    m_shouldClearKVCache = true;
-  }
+  inline void Reset() { ClearKVCache(); }
 
   /**
    * Generate text based on user prompt
@@ -415,16 +412,12 @@ class TextGenerator {
   void DetectModelArchitecture(const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames);
 
   // About the KV cache.
-  void InitializeKVCache();
+  void InitializeKVCache(int max_seq);
   void ClearKVCache();
 
   KVShapeInfo DetectKVShapeLayout(const std::vector<int64_t> &shape);
 
-  inline void KVCache_Reset() {
-    ClearKVCache();
-    m_kvFirstStep = true;
-    m_shouldClearKVCache = true;
-  }
+  inline void KVCache_Reset() { ClearKVCache(); }
   /**
    * Parse KV cache input tensor name to extract layer index and key/value type
    * @param name Input tensor name (e.g., "past_key_values.5.key")
@@ -569,9 +562,6 @@ class TextGenerator {
   // A helper function.
   void PrintTopKLogits(const std::vector<float> &logits, int top_k) const;
 
-  template <typename CacheT, typename SourceT>
-  void updateLayerCache(full_cache_t<CacheT> &fullCache, size_t layerIdx, const SourceT *data, size_t elementCount);
-
   /**
    * @brief create a zero-elem(empty) ORT tensor.
    * @param type ONNX data type (m_cacheDataType).
@@ -658,7 +648,6 @@ class TextGenerator {
 
   KVCacheLayout m_kvCacheLayout = KVCacheLayout::UNKNOWN;
 
-  bool m_kvFirstStep = true;
   KVCacheManager<float> m_floatCache;          // FP32
   KVCacheManager<Ort::Float16_t> m_fp16Cache;  // FP16
   KVCacheManager<int8_t> m_int8Cache;          // INT8
@@ -674,10 +663,48 @@ class TextGenerator {
   void debug_print_cache(const KVCacheManager<T> &cache, int layer, const char *name);
 
   bool m_kvCacheInitialized = false;
-  bool m_shouldClearKVCache = true;
 
   std::vector<std::vector<float>> m_stepFloatBuffers;
   std::vector<std::vector<int64_t>> m_stepInt64Buffers;
+
+  std::unique_ptr<Ort::IoBinding> m_ioBinding;
+
+  /**
+   * @brief build up tensor shape [1, ?, ?, ?] according to current KV cache layout
+   * @param seqLen target sequence length (past or total)
+   * @return shape vector adapted to current layout
+   */
+  std::vector<int64_t> BuildKVShape(size_t seqLen) const;
+
+  /**
+  @brief Binds all present_key_values outputs of the model directly to the buffers of KVCacheManager.
+  * Principle:
+  * Ort::Value::CreateTensor() wraps existing memory without copying data.
+  * binding.BindOutput() instructs ORT to write inference outputs into specified tensors (i.e., cache buffers).
+  * During ORT session->Run(), present KV data is written directly into the cache, eliminating subsequent memcpy.
+  * Capacity Safety Check:
+  * totalSeqLen must not exceed the max_seq_len initialized by KVCacheManager;
+  * otherwise, it falls back to BindOutput(name, memInfo) allowing ORT to allocate memory (safe fallback).
+  * @param binding The IoBinding object for the current step
+  * @param outputNames List of all output names of the model
+  * @param totalSeqLen Total sequence length after the current step
+  * @param memInfo CPU memory info
+  */
+  void BindKVCacheDirect(Ort::IoBinding &binding, const std::vector<std::string> &outputNames, size_t totalSeqLen,
+                         const Ort::MemoryInfo &memInfo);
+
+  /**
+   * @brief after inference update KVCacheManager's seq set to totalSeqLen。
+   *
+   * when using IoBinding bind to cache buffer directly，ORT has alread written the buffer，
+   * only need to update seq.
+   *
+   * @param totalSeqLen totalSeq Len（= pastSeq + currentInputLen）
+   */
+  void UpdateCacheSeqCounters(size_t totalSeqLen);
+
+  int GetCurrentCacheSeq() const;
+  int GetCurrentCacheMaxSeq() const;
 };
 }  // namespace LLM_Generate
 }  // namespace ML
