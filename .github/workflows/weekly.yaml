@@ -26,6 +26,11 @@ concurrency:
   group: weekly
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  PROTOC: protoc
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Add this to  Node24
+
 defaults:
   run:
     shell: bash

@@ -45,6 +45,9 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
    */
   bool reload_on_restart{false};
 
+  std::string snapshot_dir;              // path for .icu / .wal snapshot files
+  uint32_t snapshot_interval_secs{300};  // default: 300
+
   // IMCU Configuration
   size_t rows_per_imcu{SHANNON_ROWS_IN_CHUNK};  // Number of rows per IMCU
 

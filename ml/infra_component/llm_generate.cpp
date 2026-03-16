@@ -34,6 +34,9 @@
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/rapidjson.h>
+#include "include/my_dbug.h"
+#include "include/mysql/components/services/log_builtins.h"  // LogErr
+#include "include/mysqld_error.h"
 
 namespace ShannonBase {
 namespace ML {
@@ -211,13 +214,70 @@ ModelSelection select_model_variant(const std::string &model_dir, const std::str
 
 std::mt19937 g_rng(std::random_device{}());
 
+template <>
+KVCacheManager<float> *TextGenerator::get_cache_manager<float>() {
+  return (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ? &m_floatCache : nullptr;
+}
+
+template <>
+KVCacheManager<Ort::Float16_t> *TextGenerator::get_cache_manager<Ort::Float16_t>() {
+  return (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) ? &m_fp16Cache : nullptr;
+}
+
+template <>
+KVCacheManager<int8_t> *TextGenerator::get_cache_manager<int8_t>() {
+  return (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8) ? &m_int8Cache : nullptr;
+}
+
+template <>
+const KVCacheManager<float> *TextGenerator::get_cache_manager<float>() const {
+  return (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ? &m_floatCache : nullptr;
+}
+
+template <>
+const KVCacheManager<Ort::Float16_t> *TextGenerator::get_cache_manager<Ort::Float16_t>() const {
+  return (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) ? &m_fp16Cache : nullptr;
+}
+
+template <>
+const KVCacheManager<int8_t> *TextGenerator::get_cache_manager<int8_t>() const {
+  return (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8) ? &m_int8Cache : nullptr;
+}
+
+template <typename T>
+void TextGenerator::debug_print_cache(const KVCacheManager<T> &cache, int layer, const char *name) {
+  if (layer < cache.num_layers && cache.layer_seq(layer) > 0) {
+    const T *data = cache.key_data(layer);
+    size_t elements = cache.layer_elements(layer);
+    if (elements >= 5) {
+      fprintf(stderr, "[Debug] %s[%d] first 5: ", name, layer);
+      for (int i = 0; i < 5; i++) {
+        fprintf(stderr, "%f ", (float)data[i]);
+      }
+      fprintf(stderr, "\n");
+    }
+  }
+}
+
 // TextGenerator Implementation
 TextGenerator::TextGenerator(const std::string &modelPath, const std::string &tokenizerPath,
                              const GenerationOptions &option)
     : m_gen_option(option), m_modelPath(modelPath), m_tokenizerPath(tokenizerPath), m_modelType(option.model_id) {
-  auto ms = select_model_variant(m_modelPath);
-  m_modelPath = (fs::path(m_modelPath) / ms.filename).string();
-  m_initialized = !(InitializeONNX() || InitializeTokenizer() || LoadTokenizerConfig());
+  try {
+    auto ms = select_model_variant(m_modelPath);
+    m_modelPath = (fs::path(m_modelPath) / ms.filename).string();
+    bool failed = InitializeONNX() || InitializeTokenizer() || LoadTokenizerConfig();
+    m_initialized = !failed;
+  } catch (const Ort::Exception &e) {
+    m_error_string = std::string("[ORT Exception] ") + e.what();
+    m_initialized = false;
+  } catch (const std::exception &e) {
+    m_error_string = std::string("[Exception] ") + e.what();
+    m_initialized = false;
+  } catch (...) {
+    m_error_string = "[Unknown exception during initialization]";
+    m_initialized = false;
+  }
 }
 
 TextGenerator::~TextGenerator() {
@@ -234,9 +294,9 @@ bool TextGenerator::InitializeONNX() {
   m_sessionOptions->SetIntraOpNumThreads(numThreads);
   m_sessionOptions->SetInterOpNumThreads(1);
   m_sessionOptions->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
   m_sessionOptions->EnableMemPattern();
   m_sessionOptions->EnableCpuMemArena();
-
 #ifdef _WIN32
   std::wstring wModelPath(m_modelPath.begin(), m_modelPath.end());
   m_session = std::make_unique<Ort::Session>(*m_env, wModelPath.c_str(), *m_sessionOptions);
@@ -331,26 +391,113 @@ bool TextGenerator::LoadTokenizerConfig() {
   return false;
 }
 
-std::string TextGenerator::ApplyChatTemplate(const std::string &userInput, const std::string &) {
-  if (!m_tokenizer->has_chat_template()) return "";
-
+tokenizers::Tokenizer::Encoding TextGenerator::BuildPromptEncoding(const std::string &userInput,
+                                                                   const std::string &systemPromptOverride) {
   auto lang = m_gen_option.language;
   std::string sys_prompt;
-  if (lang == "chinese") {
+  if (!systemPromptOverride.empty()) sys_prompt = systemPromptOverride;
+
+  if (lang == "chinese" || lang == "zh" || lang == "cn") {
     sys_prompt = "你是一个有用的中文助手。请用中文回答用户的问题。";
-  } else if (lang == "english") {
+  } else if (lang == "english" || lang == "en") {
     sys_prompt = "You are a helpful English assistant. Please respond in English.";
   } else {
     sys_prompt = "You are a helpful assistant.";
   }
 
-  std::vector<tokenizers::ChatMessage> messages = {{"system", sys_prompt.c_str()},
-                                                   {"user", "Hello!"},
-                                                   {"assistant", "Hi! How can I help you?"},
-                                                   {"user", userInput.c_str()}};
+  std::vector<tokenizers::ChatMessage> messages = {{"system", sys_prompt}, {"user", userInput}};
+  if (m_tokenizer->has_chat_template()) {
+    auto enc = m_tokenizer->apply_chat_template_and_encode(messages, true, "", false);
+    if (!enc.ids().empty()) {
+      auto ids = enc.ids();
+      DBUG_PRINT("info", ("Chat template encoded %zu tokens", ids.size()));
+      return enc;
+    }
+  }
 
-  std::string formatted_chat = m_tokenizer->apply_chat_template(messages, true);
-  return formatted_chat;
+  std::string lowerModel = m_modelType;
+  std::transform(lowerModel.begin(), lowerModel.end(), lowerModel.begin(), ::tolower);
+  std::string fallback;
+
+  if (lowerModel.find("qwen") != std::string::npos) {
+    fallback = "<|im_start|>system\n" + sys_prompt + "<|im_end|>\n";
+    fallback += "<|im_start|>user\n" + userInput + "<|im_end|>\n";
+    fallback += "<|im_start|>assistant\n";
+  } else if (lowerModel.find("llama") != std::string::npos) {
+    fallback = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n";
+    fallback += sys_prompt + "<|eot_id|>";
+    fallback += "<|start_header_id|>user<|end_header_id|>\n\n";
+    fallback += userInput + "<|eot_id|>";
+    fallback += "<|start_header_id|>assistant<|end_header_id|>\n\n";
+  } else if (lowerModel.find("mistral") != std::string::npos) {
+    fallback = "[INST] " + userInput + " [/INST]";
+  } else if (lowerModel.find("phi") != std::string::npos) {
+    fallback = "<|system|>\n" + sys_prompt + "<|end|>\n";
+    fallback += "<|user|>\n" + userInput + "<|end|>\n";
+    fallback += "<|assistant|>\n";
+  } else {
+    fallback = sys_prompt + "\n\n" + userInput + "\n";
+  }
+
+  auto encoding = m_tokenizer->encode(fallback, false);
+  auto ids = encoding.ids();
+  DBUG_PRINT("info", ("Manual format encoded %zu tokens", ids.size()));
+  return encoding;
+}
+
+std::vector<std::string> TextGenerator::GetModelSpecificStopTokens(const std::string &modelType) {
+  std::vector<std::string> stopTokens;
+
+  std::string lowerModelType = modelType;
+  std::transform(lowerModelType.begin(), lowerModelType.end(), lowerModelType.begin(), ::tolower);
+
+  if (lowerModelType.find("qwen") != std::string::npos) {
+    stopTokens = {"<|im_end|>", "<|im_start|>", "<|endoftext|>"};
+  } else if (lowerModelType.find("llama") != std::string::npos) {
+    stopTokens = {"</s>", "<|eot_id|>"};  // Llama 3<|eot_id|>
+  } else if (lowerModelType.find("mistral") != std::string::npos) {
+    stopTokens = {"</s>", "[INST]", "[/INST]"};
+  } else if (lowerModelType.find("phi") != std::string::npos) {
+    stopTokens = {"<|endoftext|>", "<|end|>"};
+  } else if (lowerModelType.find("gemma") != std::string::npos) {
+    stopTokens = {"<end_of_turn>", "<eos>", "<bos>"};
+  } else if (lowerModelType.find("chatglm") != std::string::npos) {
+    stopTokens = {"<|endoftext|>", "</s>"};
+  } else if (lowerModelType.find("baichuan") != std::string::npos) {
+    stopTokens = {"</s>", "<|endoftext|>"};
+  } else if (lowerModelType.find("yi") != std::string::npos) {
+    stopTokens = {"<|im_end|>", "<|im_start|>"};  // like Qwen
+  } else {
+    // fallback
+    stopTokens = {"\n\n", "<|endoftext|>", "</s>", "<|im_end|>"};
+  }
+
+  return stopTokens;
+}
+
+void TextGenerator::ValidatePromptFormat(const std::vector<uint32_t> &token_ids) {
+  fprintf(stderr, "\n=== Prompt Format Validation ===\n");
+
+  bool has_im_start = false;
+  bool has_im_end = false;
+
+  for (auto id : token_ids) {
+    if (id == 151644) has_im_start = true;  // <|im_start|>
+    if (id == 151645) has_im_end = true;    // <|im_end|>
+  }
+
+  fprintf(stderr, "Contains <|im_start|>: %s\n", has_im_start ? "YES" : "NO");
+  fprintf(stderr, "Contains <|im_end|>: %s\n", has_im_end ? "YES" : "NO");
+
+  std::vector<uint32_t> sample_ids;
+  size_t sample_size = std::min(size_t(50), token_ids.size());
+  for (size_t i = 0; i < sample_size; i++) {
+    sample_ids.push_back(token_ids[i]);
+  }
+
+  std::string sample_text = m_tokenizer->decode(sample_ids, false);
+  fprintf(stderr, "Sample decoded text (first 50 tokens):\n%s\n", sample_text.c_str());
+  fprintf(stderr, "================================\n");
 }
 
 void TextGenerator::TestTokenizerCompatibility() {
@@ -389,23 +536,28 @@ void TextGenerator::TestTokenizerCompatibility() {
   }
 
   std::string userInput = "What is AI?";
-  std::string chatTemplate = ApplyChatTemplate(userInput, "ShannonBase AI assistant");
+  auto testEncoding = BuildPromptEncoding(userInput, "");
+  std::vector<uint32_t> inputIds = testEncoding.ids();
+  ValidatePromptFormat(inputIds);
 
   std::cout << "\nChat Template Test:" << std::endl;
-  std::cout << "Template: " << chatTemplate << std::endl;
+  std::cout << "Token count: " << testEncoding.ids().size() << std::endl;
 
-  auto chatEncoding = m_tokenizer->encode(chatTemplate, true);
-  std::string chatDecoded = m_tokenizer->decode(chatEncoding.ids(), true);
-  std::cout << "Decode chat template: " << chatDecoded << std::endl;
-
-  std::cout << "Roundtrip match: " << (chatTemplate == chatDecoded ? "YES" : "NO") << std::endl;
-  std::cout << "Token count: " << chatEncoding.ids().size() << std::endl;
+  std::string chatDecoded = m_tokenizer->decode(testEncoding.ids(), true);
+  std::cout << "Decoded prompt: " << chatDecoded << std::endl;
 
   std::cout << "\nConfigured special tokens:" << std::endl;
   std::cout << "EOS token ID: " << m_eosTokenId << std::endl;
   std::cout << "BOS token ID: " << m_bosTokenId << std::endl;
   std::cout << "PAD token ID: " << m_padTokenId << std::endl;
 
+  std::cout << "[Info] Generating with model: " << m_modelType << std::endl;
+  auto enc = m_tokenizer->encode("What is AI?");
+  auto ids = enc.ids();
+  for (auto id : ids) printf("%d ", id);
+
+  auto dec_str = m_tokenizer->decode(ids, true);
+  std::cout << std::endl << "dec_str:" << dec_str << std::endl;
   std::cout << "=== Test Complete ===" << std::endl;
 }
 
@@ -430,49 +582,39 @@ void TextGenerator::AnalyzeModelInputShapes() {
   for (size_t i = 0; i < m_session->GetInputCount(); ++i) {
     Ort::AllocatedStringPtr inputNamePtr = m_session->GetInputNameAllocated(i, allocator);
     if (!inputNamePtr) continue;
-
     std::string inputName = inputNamePtr.get();
 
     Ort::TypeInfo typeInfo = m_session->GetInputTypeInfo(i);
     auto shapeInfo = typeInfo.GetTensorTypeAndShapeInfo();
     auto shape = shapeInfo.GetShape();
-    auto elementType = shapeInfo.GetElementType();
+    auto elemType = shapeInfo.GetElementType();
 
-    std::cout << "input" << i << " : " << inputName << std::endl;
-    std::cout << "  share: [";
+    std::cout << "input" << i << " : " << inputName << "\n";
+    std::cout << "  shape: [";
     for (size_t j = 0; j < shape.size(); ++j) {
       if (j > 0) std::cout << ", ";
-      if (shape[j] == -1) {
-        std::cout << "state";
-      } else {
-        std::cout << shape[j];
-      }
+      std::cout << (shape[j] == -1 ? "dyn" : std::to_string(shape[j]));
     }
-    std::cout << "]" << std::endl;
+    std::cout << "]  dtype: " << elemType << "\n";
 
-    std::cout << "  data type: " << elementType << std::endl;
-
-    if (inputName.find("past_key_values") != std::string::npos) {
+    if (inputName.find("past_key_values") != std::string::npos && shape.size() == 4) {
       auto [layerIdx, isKey] = ParseKVCacheInputName(inputName);
-      std::cout << "  KV Cache -> Layer: " << layerIdx << ", Type: " << (isKey ? "Key" : "Value") << std::endl;
+      KVShapeInfo si = DetectKVShapeLayout(shape);
 
-      if (shape.size() >= 4) {
-        std::cout << "  Dimension:" << std::endl;
-        std::cout << "    Batch (dim 0): " << shape[0] << std::endl;
-        std::cout << "    KV Heads (dim 1): " << shape[1] << std::endl;
-        std::cout << "    Seq Length (dim 2): " << shape[2] << std::endl;
-        std::cout << "    Head Dim (dim 3): " << shape[3] << std::endl;
+      std::cout << "  KV Cache layer=" << layerIdx << " type=" << (isKey ? "Key" : "Value") << "\n";
 
-        if (shape[3] > 0) {
-          std::cout << "  [OK] Fixed head_dim: " << shape[3] << std::endl;
-        } else {
-          std::cout << "  [failed] head_dim dynamic, need to do ananlysis more" << std::endl;
-        }
+      if (si.layout != KVCacheLayout::UNKNOWN) {
+        const char *layout_names[] = {"", "BHSD", "BSHD", "BHDS"};
+        std::cout << "  Layout: " << layout_names[static_cast<int>(si.layout)] << "\n";
+        std::cout << "  dim" << si.dim_heads << " = heads      = " << shape[si.dim_heads] << "\n";
+        std::cout << "  dim" << si.dim_seq << " = seq        = dyn\n";
+        std::cout << "  dim" << si.dim_head_dim << " = head_dim   = " << shape[si.dim_head_dim] << "\n";
+      } else {
+        std::cout << "  [WARN] Layout could not be determined\n";
       }
     }
-    std::cout << std::endl;
+    std::cout << "\n";
   }
-
   std::cout << "=== Done ===" << std::endl;
 }
 
@@ -578,16 +720,54 @@ void TextGenerator::DetectQueryHeadsFromOutputs(const std::vector<std::string> &
   }
 }
 
+TextGenerator::KVShapeInfo TextGenerator::DetectKVShapeLayout(const std::vector<int64_t> &shape) {
+  KVShapeInfo info;
+  if (shape.size() != 4) return info;
+
+  bool d1_fixed = shape[1] > 0;
+  bool d2_fixed = shape[2] > 0;
+  bool d3_fixed = shape[3] > 0;
+
+  if (d1_fixed && !d2_fixed && d3_fixed) {
+    // [-1, heads, -1, head_dim]  →  BHSD
+    info.layout = TextGenerator::KVCacheLayout::BHSD;
+    info.dim_heads = 1;
+    info.dim_seq = 2;
+    info.dim_head_dim = 3;
+  } else if (!d1_fixed && d2_fixed && d3_fixed) {
+    // [-1, -1, heads, head_dim]  →  BSHD
+    info.layout = TextGenerator::KVCacheLayout::BSHD;
+    info.dim_seq = 1;
+    info.dim_heads = 2;
+    info.dim_head_dim = 3;
+  } else if (d1_fixed && d2_fixed && !d3_fixed) {
+    // [-1, heads, head_dim, -1]  →  BHDS
+    info.layout = TextGenerator::KVCacheLayout::BHDS;
+    info.dim_heads = 1;
+    info.dim_head_dim = 2;
+    info.dim_seq = 3;
+  } else {
+    std::string log_msg = std::string("[WARN] KV cache shape [") + std::to_string(shape[0]) + "," +
+                          std::to_string(shape[1]) + "," + std::to_string(shape[2]) + "," + std::to_string(shape[3]) +
+                          "] does not match any known layout pattern\n";
+    LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
+    return info;
+  }
+
+  info.num_heads = static_cast<size_t>(shape[info.dim_heads]);
+  info.head_dim = static_cast<size_t>(shape[info.dim_head_dim]);
+  return info;
+}
+
 void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &,
                                             const std::vector<std::string> &outputNames) {
   m_numLayers = 0;
   m_numQueryHeads = 0;
   m_numKVHeads = 0;
   m_headDim = 0;
+  m_kvCacheLayout = KVCacheLayout::UNKNOWN;
 
   Ort::AllocatorWithDefaultOptions allocator;
-
-  // step 1:detect KV cache params.
   std::set<size_t> detectedLayers;
 
   for (size_t i = 0; i < m_session->GetInputCount(); ++i) {
@@ -595,30 +775,38 @@ void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &,
     if (!inputNamePtr) continue;
     std::string inputName = inputNamePtr.get();
 
-    if (inputName.find("past_key_values") != std::string::npos || inputName.find("past_key") != std::string::npos ||
-        inputName.find("cache") != std::string::npos) {
-      Ort::TypeInfo typeInfo = m_session->GetInputTypeInfo(i);
-      auto shapeInfo = typeInfo.GetTensorTypeAndShapeInfo();
-      auto shape = shapeInfo.GetShape();
-      if (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) m_cacheDataType = shapeInfo.GetElementType();
+    bool is_kv = inputName.find("past_key_values") != std::string::npos ||
+                 inputName.find("past_key") != std::string::npos || inputName.find("cache") != std::string::npos;
+    if (!is_kv) continue;
 
-      // parse index layer.
-      auto [layerIdx, isKey] = ParseKVCacheInputName(inputName);
-      detectedLayers.insert(layerIdx);
+    Ort::TypeInfo typeInfo = m_session->GetInputTypeInfo(i);
+    auto shapeInfo = typeInfo.GetTensorTypeAndShapeInfo();
+    auto shape = shapeInfo.GetShape();
 
-      // param detect (shape : [batch, kv_heads, seq_len, head_dim])
-      if (shape.size() >= 4) {  // KV heads (no 2 dim, index 1)
-        if (shape[1] > 0 && m_numKVHeads == 0) m_numKVHeads = static_cast<size_t>(shape[1]);
-        // Head dimension (no.4 dim, index:3) - key checkpoint.
-        if (shape[3] > 0 && m_headDim == 0) m_headDim = static_cast<size_t>(shape[3]);
+    if (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) m_cacheDataType = shapeInfo.GetElementType();
+
+    auto [layerIdx, isKey] = ParseKVCacheInputName(inputName);
+    detectedLayers.insert(layerIdx);
+
+    if (m_kvCacheLayout == KVCacheLayout::UNKNOWN && shape.size() == 4) {
+      KVShapeInfo si = DetectKVShapeLayout(shape);
+      if (si.layout != KVCacheLayout::UNKNOWN) {
+        m_kvCacheLayout = si.layout;
+        if (m_numKVHeads == 0) m_numKVHeads = si.num_heads;
+        if (m_headDim == 0) m_headDim = si.head_dim;
+
+        DBUG_PRINT("info", ("KV cache layout detected: %s "
+                            "(dim_heads=%d, dim_seq=%d, dim_head_dim=%d) "
+                            "num_kv_heads=%zu head_dim=%zu",
+                            m_kvCacheLayout == KVCacheLayout::BHSD   ? "BHSD [batch,heads,seq,head_dim]"
+                            : m_kvCacheLayout == KVCacheLayout::BSHD ? "BSHD [batch,seq,heads,head_dim]"
+                                                                     : "BHDS [batch,heads,head_dim,seq]",
+                            si.dim_heads, si.dim_seq, si.dim_head_dim, m_numKVHeads, m_headDim));
       }
     }
   }
 
-  // # of layers.
-  if (!detectedLayers.empty()) {
-    m_numLayers = *detectedLayers.rbegin() + 1;  // max # index layer + 1
-  }
+  if (!detectedLayers.empty()) m_numLayers = *detectedLayers.rbegin() + 1;
 
   // step 2:detect the missing param.
   GetModelMetadata();
@@ -663,47 +851,87 @@ void TextGenerator::DetectModelArchitecture(const std::vector<std::string> &,
   }
 }
 
-void TextGenerator::InitializeKVCache() {
-  if (m_numLayers == 0 || m_numKVHeads == 0 || m_headDim == 0) return;
+void TextGenerator::InitializeKVCache(int max_seq) {
+  if (m_numLayers == 0 || m_numKVHeads == 0 || m_headDim == 0 ||
+      m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
+    return;
+  }
 
-  std::visit([this](auto &cache) { cache.resize(this->m_numLayers); }, m_keyCache);
-  std::visit([this](auto &cache) { cache.resize(this->m_numLayers); }, m_valueCache);
+  switch (m_cacheDataType) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      m_floatCache.init(m_numLayers, m_numKVHeads, m_headDim, std::max(m_gen_option.max_tokens, max_seq));
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      m_fp16Cache.init(m_numLayers, m_numKVHeads, m_headDim, std::max(m_gen_option.max_tokens, max_seq));
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+      m_int8Cache.init(m_numLayers, m_numKVHeads, m_headDim, std::max(m_gen_option.max_tokens, max_seq));
+      break;
+    default:
+      return;
+  }
 
+  DBUG_PRINT("info", ("KV Cache initialized: layers=%ld, heads=%ld, head_dim=%ld, max_seq=%d", m_numLayers,
+                      m_numKVHeads, m_headDim, std::max(m_gen_option.max_tokens, max_seq)));
   m_kvCacheInitialized = true;
-  m_shouldClearKVCache = false;
 }
 
 void TextGenerator::ClearKVCache() {
-  std::visit([](auto &cache) { cache.clear(); }, m_keyCache);
-  std::visit([](auto &cache) { cache.clear(); }, m_valueCache);
+  switch (m_cacheDataType) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      m_floatCache.clear();
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      m_fp16Cache.clear();
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+      m_int8Cache.clear();
+      break;
+    default:
+      break;
+  }
   m_kvCacheInitialized = false;
-  m_shouldClearKVCache = false;
 }
 
 std::pair<size_t, bool> TextGenerator::ParseKVCacheInputName(const std::string &name) const {
   size_t layerIdx = 0;
   bool isKey = false;  // default to false
 
-  std::vector<std::regex> layerPatterns = {std::regex(R"(\.(\d+)\.)"),    std::regex(R"(_(\d+)_)"),
-                                           std::regex(R"(layer\.(\d+))"), std::regex(R"(layers\.(\d+))"),
-                                           std::regex(R"(h\.(\d+))"),     std::regex(R"(block\.(\d+))")};
+  // more patterns, such as `layer_1, past_key_values_1`.
+  static const std::vector<std::regex> layerPatterns = {
+      std::regex(R"(\.(\d+)\.)"),                            // match .1.
+      std::regex(R"(_(\d+)_)", std::regex::optimize),        // match _1_
+      std::regex(R"(layer\.(\d+))", std::regex::optimize),   // match layer.1
+      std::regex(R"(layers\.(\d+))", std::regex::optimize),  // match layers.1
+      std::regex(R"(layer_(\d+))", std::regex::optimize),    // match layer_1
+      std::regex(R"(layers_(\d+))", std::regex::optimize),   // match layers_1
+      std::regex(R"(h\.(\d+))", std::regex::optimize),       // match h.1
+      std::regex(R"(block\.(\d+))", std::regex::optimize),   // match block.1
+      std::regex(R"(past_key_values\.(\d+))", std::regex::optimize),
+      std::regex(R"(past_key_values_(\d+))", std::regex::optimize)};
 
+  bool foundLayer = false;
   for (const auto &pattern : layerPatterns) {
     std::smatch match;
     if (std::regex_search(name, match, pattern) && match.size() > 1) {
       layerIdx = static_cast<size_t>(std::stoi(match[1].str()));
+      foundLayer = true;
       break;
     }
   }
 
-  if (name.find(".key") != std::string::npos) {
-    isKey = true;
-  } else if (name.find(".value") != std::string::npos) {
-    isKey = false;
-  } else {
-    // Fallback - shouldn't happen with proper naming
-    assert(false);  //[ERROR] Cannot determine key/value type
+  if (!foundLayer) {
+    DBUG_PRINT("warning", ("Could not parse layer index from KV cache name: %s", name.c_str()));
   }
+
+  size_t lastDot = name.rfind('.');
+  std::string suffix = (lastDot != std::string::npos) ? name.substr(lastDot + 1) : name;
+  std::string lowerSuffix = suffix;
+  std::transform(lowerSuffix.begin(), lowerSuffix.end(), lowerSuffix.begin(), ::tolower);
+  if (lowerSuffix == "value")
+    isKey = false;
+  else if (lowerSuffix == "key")
+    isKey = true;
 
   return {layerIdx, isKey};
 }
@@ -712,70 +940,246 @@ std::pair<size_t, bool> TextGenerator::ParseKVCacheOutputName(const std::string 
   return ParseKVCacheInputName(name);
 }
 
-template <typename CacheT, typename SourceT>
-void TextGenerator::updateLayerCache(full_cache_t<CacheT> &fullCache, size_t layerIdx, const SourceT *data,
-                                     size_t elementCount) {
-  if (layerIdx >= fullCache.size()) fullCache.resize(layerIdx + 1);
-
-  layer_cache_t<CacheT> &layerCache = fullCache[layerIdx];
-
-  if constexpr (std::is_same_v<CacheT, SourceT>) {
-    layerCache.assign(data, data + elementCount);
-  } else
-    assert(false);
+std::vector<int64_t> TextGenerator::BuildKVShape(size_t seqLen) const {
+  std::vector<int64_t> shape(4);
+  shape[0] = 1;  // batch = 1
+  switch (m_kvCacheLayout) {
+    case KVCacheLayout::BHSD:
+      // [batch, heads, seq, head_dim]
+      shape[1] = static_cast<int64_t>(m_numKVHeads);
+      shape[2] = static_cast<int64_t>(seqLen);
+      shape[3] = static_cast<int64_t>(m_headDim);
+      break;
+    case KVCacheLayout::BSHD:
+      // [batch, seq, heads, head_dim]
+      shape[1] = static_cast<int64_t>(seqLen);
+      shape[2] = static_cast<int64_t>(m_numKVHeads);
+      shape[3] = static_cast<int64_t>(m_headDim);
+      break;
+    case KVCacheLayout::BHDS:
+      // [batch, heads, head_dim, seq]
+      shape[1] = static_cast<int64_t>(m_numKVHeads);
+      shape[2] = static_cast<int64_t>(m_headDim);
+      shape[3] = static_cast<int64_t>(seqLen);
+      break;
+    default:
+      // fallback：take BHSD as default
+      shape[1] = static_cast<int64_t>(m_numKVHeads);
+      shape[2] = static_cast<int64_t>(seqLen);
+      shape[3] = static_cast<int64_t>(m_headDim);
+      break;
+  }
+  return shape;
 }
 
-void TextGenerator::UpdateKVCache(const std::vector<Ort::Value> &outputTensors,
-                                  const std::vector<std::string> &outputNames, const Ort::MemoryInfo &) {
-  if (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) return;
-  for (size_t i = 0; i < outputTensors.size(); ++i) {
-    const std::string &outputName = outputNames[i];
+int TextGenerator::GetCurrentCacheSeq() const {
+  switch (m_cacheDataType) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      return m_floatCache.seq_len();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      return m_fp16Cache.seq_len();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+      return m_int8Cache.seq_len();
+    default:
+      return 0;
+  }
+}
 
-    // 1. find present_key_values
-    if (outputName.find("present") == std::string::npos && outputName.find("key_values") == std::string::npos) continue;
+int TextGenerator::GetCurrentCacheMaxSeq() const {
+  switch (m_cacheDataType) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      return m_floatCache.max_seq_len;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      return m_fp16Cache.max_seq_len;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+      return m_int8Cache.max_seq_len;
+    default:
+      return 0;
+  }
+}
 
-    auto [layerIdx, isKey] = ParseKVCacheOutputName(outputName);
-    if (layerIdx >= m_numLayers) continue;
+void TextGenerator::UpdateCacheSeqCounters(size_t totalSeqLen) {
+  auto update = [&](auto &cache) {
+    for (int layer = 0; layer < cache.num_layers; ++layer) {
+      // buffer has written by ORT, just update the seq len for next iteration.
+      cache.layers[layer].seq = static_cast<int>(totalSeqLen);
+    }
+  };
 
-    auto shapeInfo = outputTensors[i].GetTensorTypeAndShapeInfo();
-    size_t elementCount = shapeInfo.GetElementCount();
+  switch (m_cacheDataType) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      update(m_floatCache);
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      update(m_fp16Cache);
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+      update(m_int8Cache);
+      break;
+    default:
+      break;
+  }
+}
 
-    auto outputType = shapeInfo.GetElementType();
-    if (outputType != m_cacheDataType) continue;  // mis-match the data type.
+void TextGenerator::BindKVCacheDirect(Ort::IoBinding &binding, const std::vector<std::string> &outputNames,
+                                      size_t totalSeqLen, const Ort::MemoryInfo &memInfo) {
+  const std::vector<int64_t> shape = BuildKVShape(totalSeqLen);
+  const size_t elementCount = GetElementCount(shape);
 
-    cache_data_t &targetCache = isKey ? m_keyCache : m_valueCache;
+  for (const auto &name : outputNames) {
+    // only dealwith present_key_values output，logits not be binded here.
+    bool is_present = name.find("present") != std::string::npos || name.find("key_values") != std::string::npos;
+    if (!is_present) continue;
 
-    switch (outputType) {
+    auto [layerIdx, isKey] = ParseKVCacheOutputName(name);
+    if (layerIdx >= m_numLayers) {
+      binding.BindOutput(name.c_str(), memInfo);
+      continue;
+    }
+
+    switch (m_cacheDataType) {
       case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
-        const float *data = outputTensors[i].GetTensorData<float>();
-        std::visit(
-            [&](auto &fullCache) {
-              using CacheT = typename std::decay_t<decltype(fullCache)>::value_type::value_type;
-              updateLayerCache<CacheT>(fullCache, layerIdx, data, elementCount);
-            },
-            targetCache);
-        break;
-      }
+        const size_t capacity =
+            static_cast<size_t>(m_floatCache.max_seq_len) * m_floatCache.layers[layerIdx].token_stride();
+        if (elementCount > capacity) {
+          DBUG_PRINT("warning", ("[BindKVOutput] layer %zu %s: elementCount=%zu > capacity=%zu, "
+                                 "falling back to ORT alloc",
+                                 layerIdx, isKey ? "key" : "val", elementCount, capacity));
+          binding.BindOutput(name.c_str(), memInfo);
+          break;
+        }
+        float *buf = isKey ? m_floatCache.key_data(layerIdx) : m_floatCache.value_data(layerIdx);
+        auto tensor = Ort::Value::CreateTensor<float>(memInfo, buf, elementCount, shape.data(), shape.size());
+        binding.BindOutput(name.c_str(), tensor);
+      } break;
       case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
-        const Ort::Float16_t *data = outputTensors[i].GetTensorData<Ort::Float16_t>();
-        std::visit(
-            [&](auto &fullCache) {
-              using CacheT = typename std::decay_t<decltype(fullCache)>::value_type::value_type;
-              updateLayerCache<CacheT>(fullCache, layerIdx, data, elementCount);
-            },
-            targetCache);
-        break;
-      }
+        const size_t capacity =
+            static_cast<size_t>(m_fp16Cache.max_seq_len) * m_fp16Cache.layers[layerIdx].token_stride();
+        if (elementCount > capacity) {
+          binding.BindOutput(name.c_str(), memInfo);
+          break;
+        }
+        void *buf = isKey ? static_cast<void *>(m_fp16Cache.key_data(layerIdx))
+                          : static_cast<void *>(m_fp16Cache.value_data(layerIdx));
+        auto tensor = Ort::Value::CreateTensor(memInfo, buf,
+                                               elementCount * sizeof(uint16_t),  // byteCount
+                                               shape.data(), shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        binding.BindOutput(name.c_str(), tensor);
+      } break;
       case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
-        const int8_t *data = outputTensors[i].GetTensorData<int8_t>();
-        std::visit(
-            [&](auto &fullCache) {
-              using CacheT = typename std::decay_t<decltype(fullCache)>::value_type::value_type;
-              updateLayerCache<CacheT>(fullCache, layerIdx, data, elementCount);
-            },
-            targetCache);
+        const size_t capacity =
+            static_cast<size_t>(m_int8Cache.max_seq_len) * m_int8Cache.layers[layerIdx].token_stride();
+        if (elementCount > capacity) {
+          binding.BindOutput(name.c_str(), memInfo);
+          break;
+        }
+        void *buf = isKey ? static_cast<void *>(m_int8Cache.key_data(layerIdx))
+                          : static_cast<void *>(m_int8Cache.value_data(layerIdx));
+        auto tensor = Ort::Value::CreateTensor(memInfo, buf, elementCount * sizeof(int8_t), shape.data(), shape.size(),
+                                               ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
+        binding.BindOutput(name.c_str(), tensor);
+      } break;
+      default:
+        binding.BindOutput(name.c_str(), memInfo);
         break;
-      }
+    }
+  }
+}
+
+void TextGenerator::UpdateKVCache(const std::vector<Ort::Value> &outputs, const std::vector<std::string> &outputNames,
+                                  const Ort::MemoryInfo &) {
+  if (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) return;
+  if (m_kvCacheLayout == KVCacheLayout::UNKNOWN) return;
+
+  struct LayerKV {
+    const void *key = nullptr;
+    const void *value = nullptr;
+    int total_seq_len = 0;
+  };
+  std::map<int, LayerKV> layer_data;
+
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const std::string &name = outputNames[i];
+    bool is_kv = name.find("present") != std::string::npos || name.find("key_values") != std::string::npos ||
+                 name.find("past_key_values") != std::string::npos;
+    if (!is_kv) continue;
+
+    auto info = outputs[i].GetTensorTypeAndShapeInfo();
+    auto shape = info.GetShape();
+    if (shape.size() != 4) continue;
+
+    int seq_dim = -1;
+    switch (m_kvCacheLayout) {
+      case KVCacheLayout::BHSD:
+        seq_dim = 2;
+        break;  // [batch, heads, seq, head_dim]
+      case KVCacheLayout::BSHD:
+        seq_dim = 1;
+        break;  // [batch, seq, heads, head_dim]
+      case KVCacheLayout::BHDS:
+        seq_dim = 3;
+        break;  // [batch, heads, head_dim, seq]
+      default:
+        continue;
+    }
+
+    int total_seq = static_cast<int>(shape[seq_dim]);
+    if (total_seq <= 0) continue;
+
+    int heads_dim = (m_kvCacheLayout == KVCacheLayout::BSHD) ? 2 : 1;
+    int head_dim_dim = (m_kvCacheLayout == KVCacheLayout::BHDS) ? 2 : 3;
+    if (shape[heads_dim] != static_cast<int64_t>(m_numKVHeads) ||
+        shape[head_dim_dim] != static_cast<int64_t>(m_headDim)) {
+      DBUG_PRINT("warning", ("[WARN] UpdateKVCache: output '%s' shape mismatch "
+                             "(expected heads=%zu head_dim=%zu, got %ld %ld), skipping\n",
+                             name.c_str(), m_numKVHeads, m_headDim, shape[heads_dim], shape[head_dim_dim]));
+      continue;
+    }
+
+    const void *data = nullptr;
+    switch (m_cacheDataType) {
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        data = outputs[i].GetTensorData<float>();
+        break;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        data = outputs[i].GetTensorData<Ort::Float16_t>();
+        break;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+        data = outputs[i].GetTensorData<int8_t>();
+        break;
+      default:
+        continue;
+    }
+    if (!data) continue;
+
+    auto [layerIdx, isKey] = ParseKVCacheOutputName(name);
+    auto &entry = layer_data[static_cast<int>(layerIdx)];
+    entry.total_seq_len = total_seq;
+    if (isKey)
+      entry.key = data;
+    else
+      entry.value = data;
+  }
+
+  if (layer_data.empty()) return;
+
+  for (const auto &[layerIdx, kv] : layer_data) {
+    if (layerIdx < 0 || static_cast<size_t>(layerIdx) >= m_numLayers) continue;
+    if (!kv.key || !kv.value || kv.total_seq_len <= 0) continue;
+
+    switch (m_cacheDataType) {
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        m_floatCache.init_layer_from_onnx(layerIdx, static_cast<const float *>(kv.key),
+                                          static_cast<const float *>(kv.value), kv.total_seq_len);
+        break;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        m_fp16Cache.init_layer_from_onnx(layerIdx, static_cast<const Ort::Float16_t *>(kv.key),
+                                         static_cast<const Ort::Float16_t *>(kv.value), kv.total_seq_len);
+        break;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+        m_int8Cache.init_layer_from_onnx(layerIdx, static_cast<const int8_t *>(kv.key),
+                                         static_cast<const int8_t *>(kv.value), kv.total_seq_len);
+        break;
       default:
         break;
     }
@@ -870,6 +1274,50 @@ int64_t TextGenerator::SampleTopK(const float *logits, size_t vocabSize, int top
   return topKIndices[selectedIdx];
 }
 
+int64_t TextGenerator::SampleTopKThenTopP(const float *logits, size_t vocabSize, int topK, float topP,
+                                          float temperature) {
+  // Step 1: collect all logits and then order it by desc, then keep the top_k subset.
+  std::vector<std::pair<float, int64_t>> logitPairs;
+  logitPairs.reserve(vocabSize);
+  for (size_t i = 0; i < vocabSize; ++i) logitPairs.emplace_back(logits[i], static_cast<int64_t>(i));
+
+  int actualK = std::min(topK, static_cast<int>(vocabSize));
+  std::partial_sort(logitPairs.begin(), logitPairs.begin() + actualK, logitPairs.end(), std::greater<>());
+  logitPairs.resize(actualK);
+
+  // Step 2: calc the softmax probabilities for the top_k subset
+  float maxLogit = logitPairs[0].first;
+  float sum = 0.0f;
+  std::vector<float> probs(actualK);
+  for (int i = 0; i < actualK; ++i) {
+    probs[i] = std::exp(logitPairs[i].first - maxLogit);
+    sum += probs[i];
+  }
+  for (int i = 0; i < actualK; ++i) probs[i] /= sum;
+
+  // Step 3: find the cutoff position based on cumulative probability (nucleus/top_p)
+  float cumProb = 0.0f;
+  int cutoff = actualK;
+  for (int i = 0; i < actualK; ++i) {
+    cumProb += probs[i];
+    if (cumProb >= topP) {
+      cutoff = i + 1;
+      break;
+    }
+  }
+
+  // Step 4: sample from the final candidate set with temperature
+  std::vector<float> finalLogits(cutoff);
+  std::vector<int64_t> finalIndices(cutoff);
+  for (int i = 0; i < cutoff; ++i) {
+    finalLogits[i] = logitPairs[i].first;
+    finalIndices[i] = logitPairs[i].second;
+  }
+
+  int64_t selectedIdx = SampleWithTemperature(finalLogits.data(), cutoff, temperature);
+  return finalIndices[selectedIdx];
+}
+
 int64_t TextGenerator::SampleTopP(const float *logits, size_t vocabSize, float topP, float temperature) {
   std::vector<std::pair<float, int64_t>> logitPairs;
   logitPairs.reserve(vocabSize);
@@ -952,36 +1400,6 @@ void TextGenerator::ApplyPresencePenalty(float *logits, size_t vocabSize, float 
   }
 }
 
-std::vector<std::string> TextGenerator::GetModelSpecificStopTokens(const std::string &modelType) {
-  std::vector<std::string> stopTokens;
-
-  std::string lowerModelType = modelType;
-  std::transform(lowerModelType.begin(), lowerModelType.end(), lowerModelType.begin(), ::tolower);
-
-  if (lowerModelType.find("qwen") != std::string::npos) {
-    stopTokens = {"<|im_end|>", "<|im_start|>", "<|endoftext|>"};
-  } else if (lowerModelType.find("llama") != std::string::npos) {
-    stopTokens = {"</s>", "<|eot_id|>"};  // Llama 3<|eot_id|>
-  } else if (lowerModelType.find("mistral") != std::string::npos) {
-    stopTokens = {"</s>", "[INST]", "[/INST]"};
-  } else if (lowerModelType.find("phi") != std::string::npos) {
-    stopTokens = {"<|endoftext|>", "<|end|>"};
-  } else if (lowerModelType.find("gemma") != std::string::npos) {
-    stopTokens = {"<end_of_turn>", "<eos>", "<bos>"};
-  } else if (lowerModelType.find("chatglm") != std::string::npos) {
-    stopTokens = {"<|endoftext|>", "</s>"};
-  } else if (lowerModelType.find("baichuan") != std::string::npos) {
-    stopTokens = {"</s>", "<|endoftext|>"};
-  } else if (lowerModelType.find("yi") != std::string::npos) {
-    stopTokens = {"<|im_end|>", "<|im_start|>"};  // like Qwen
-  } else {
-    // fallback
-    stopTokens = {"\n\n", "<|endoftext|>", "</s>", "<|im_end|>"};
-  }
-
-  return stopTokens;
-}
-
 bool TextGenerator::ShouldStop(const std::vector<int64_t> &tokens, const std::vector<std::string> &stopSequences) {
   if (tokens.empty()) return false;
 
@@ -1004,7 +1422,9 @@ bool TextGenerator::ShouldStop(const std::vector<int64_t> &tokens, const std::ve
     recentTokens.push_back(static_cast<uint32_t>(tokens[i]));
   }
 
-  std::string recentText = m_tokenizer->decode(recentTokens, true);
+  // skip_special_tokens=false so that model-specific stop tokens like <|im_end|>
+  // are preserved in the decoded text and can be matched against allStopSequences.
+  std::string recentText = m_tokenizer->decode(recentTokens, false);
 
   for (const auto &stopSeq : allStopSequences) {
     if (!stopSeq.empty() && recentText.find(stopSeq) != std::string::npos) {
@@ -1060,7 +1480,6 @@ void TextGenerator::PrintTopKLogits(const std::vector<float> &logits, int top_k)
 
 Ort::Value TextGenerator::CreateZeroCacheTensor(ONNXTensorElementDataType type, const std::vector<int64_t> &shape,
                                                 const Ort::MemoryInfo &memInfo) {
-  // calc total num of elems.
   size_t elementCount = 1;
   for (int64_t dim : shape) {
     if (dim < 0) return Ort::Value(nullptr);
@@ -1068,54 +1487,84 @@ Ort::Value TextGenerator::CreateZeroCacheTensor(ONNXTensorElementDataType type, 
   }
 
   switch (type) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      return Ort::Value::CreateTensor<float>(memInfo, nullptr, elementCount, shape.data(), shape.size());
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      return Ort::Value::CreateTensor<Ort::Float16_t>(memInfo, nullptr, elementCount, shape.data(), shape.size());
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-      return Ort::Value::CreateTensor<int8_t>(memInfo, nullptr, elementCount, shape.data(), shape.size());
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
+      // Allocate at least 1 element so buf.data() is always non-null.
+      // ORT still receives elementCount=0 for the actual 0-dim tensor.
+      m_stepFloatBuffers.emplace_back(std::max(elementCount, size_t(1)), 0.0f);
+      auto &buf = m_stepFloatBuffers.back();
+      return Ort::Value::CreateTensor<float>(memInfo, buf.data(), elementCount, shape.data(), shape.size());
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
+      size_t words = (std::max(elementCount, size_t(1)) * sizeof(uint16_t) + sizeof(int64_t) - 1) / sizeof(int64_t);
+      m_stepInt64Buffers.emplace_back(words, 0LL);
+      void *ptr = m_stepInt64Buffers.back().data();
+      return Ort::Value::CreateTensor(memInfo, ptr, elementCount * sizeof(uint16_t), shape.data(), shape.size(),
+                                      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
+      size_t words = (std::max(elementCount, size_t(1)) * sizeof(int8_t) + sizeof(int64_t) - 1) / sizeof(int64_t);
+      m_stepInt64Buffers.emplace_back(words, 0LL);
+      void *ptr = m_stepInt64Buffers.back().data();
+      return Ort::Value::CreateTensor(memInfo, ptr, elementCount * sizeof(int8_t), shape.data(), shape.size(),
+                                      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
+    }
     default:
       return Ort::Value(nullptr);
   }
 }
 
-Ort::Value TextGenerator::CreateInputCacheTensor(cache_data_t &cache, size_t layerIdx,
+Ort::Value TextGenerator::CreateInputCacheTensor(ONNXTensorElementDataType type, size_t layerIdx, bool isKey,
                                                  const std::vector<int64_t> &shape, const Ort::MemoryInfo &memInfo) {
-  Ort::Value result(nullptr);
-  // total elem num.
-  size_t elementCount = 1;
-  for (int64_t dim : shape) elementCount *= static_cast<size_t>(dim);
-
-  std::visit(
-      [&](auto &fullCache) {
-        using FullCacheType = typename std::decay_t<decltype(fullCache)>;
-        if constexpr (std::is_same_v<FullCacheType, full_cache_t<float>> ||
-                      std::is_same_v<FullCacheType, full_cache_t<Ort::Float16_t>> ||
-                      std::is_same_v<FullCacheType, full_cache_t<int8_t>>) {
-          using CacheT = typename FullCacheType::value_type::value_type;
-          if (layerIdx < fullCache.size()) {
-            const auto &layerCache = fullCache[layerIdx];
-            if (layerCache.size() != elementCount) {
-              result = CreateZeroCacheTensor(m_cacheDataType, shape, memInfo);
-              return;
-            }
-
-            result = Ort::Value::CreateTensor<CacheT>(memInfo, const_cast<CacheT *>(layerCache.data()),
-                                                      layerCache.size(), shape.data(), shape.size());
-          } else
-            result = CreateZeroCacheTensor(m_cacheDataType, shape, memInfo);
-        } else
-          result = Ort::Value(nullptr);
-      },
-      cache);
-
-  if (!result) result = CreateZeroCacheTensor(m_cacheDataType, shape, memInfo);
-  return result;
+  switch (type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
+      if (static_cast<int>(layerIdx) < m_floatCache.num_layers && m_floatCache.layer_seq(layerIdx) > 0) {
+        // # of expected = 1 * num_heads * past_seq * head_dim
+        size_t expected = GetElementCount(shape);
+        size_t cached = m_floatCache.layer_elements(layerIdx);
+        if (cached == expected) {
+          float *data = isKey ? m_floatCache.key_data(layerIdx) : m_floatCache.value_data(layerIdx);
+          return Ort::Value::CreateTensor<float>(memInfo, data, expected, shape.data(), shape.size());
+        }
+      }
+      return CreateZeroCacheTensor(type, shape, memInfo);
+    } break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
+      if (static_cast<int>(layerIdx) < m_fp16Cache.num_layers && m_fp16Cache.layer_seq(layerIdx) > 0) {
+        size_t expected = GetElementCount(shape);
+        size_t cached = m_fp16Cache.layer_elements(layerIdx);
+        if (cached == expected) {
+          void *data = isKey ? (void *)m_fp16Cache.key_data(layerIdx) : (void *)m_fp16Cache.value_data(layerIdx);
+          return Ort::Value::CreateTensor(memInfo, data, expected * sizeof(uint16_t), shape.data(), shape.size(),
+                                          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        }
+      }
+      return CreateZeroCacheTensor(type, shape, memInfo);
+    } break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
+      if (static_cast<int>(layerIdx) < m_int8Cache.num_layers && m_int8Cache.layer_seq(layerIdx) > 0) {
+        size_t expected = GetElementCount(shape);
+        size_t cached = m_int8Cache.layer_elements(layerIdx);
+        if (cached == expected) {
+          void *data = isKey ? (void *)m_int8Cache.key_data(layerIdx) : (void *)m_int8Cache.value_data(layerIdx);
+          return Ort::Value::CreateTensor(memInfo, data, expected * sizeof(int8_t), shape.data(), shape.size(),
+                                          ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
+        }
+      }
+      return CreateZeroCacheTensor(type, shape, memInfo);
+    } break;
+    default:
+      return Ort::Value(nullptr);
+  }
 }
 
 TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int maxNewTokens) {
   Result result;
   if (!Initialized() || !m_gen_option.validate()) return result;
+
+#ifndef NDEBUG
+  TestTokenizerCompatibility();
+  AnalyzeModelInputShapes();
+#endif
 
   m_stepFloatBuffers.clear();
   m_stepInt64Buffers.clear();
@@ -1125,18 +1574,16 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     m_lastPrompt = userPrompt;
   }
 
-  // 1. applying template and tokens
-  std::string inputText;
-  if (m_gen_option.task == "summarization") {
-    inputText = ApplyChatTemplate("Please summarize the following text: " + userPrompt, m_system_prompt);
-  } else {  // generation.
-    inputText = ApplyChatTemplate(userPrompt, m_system_prompt);
-  }
-
-  // encoding the input text into token ids.
-  auto encoding = m_tokenizer->encode(inputText, true);
+  // 1. encoding prompt
+  std::string promptInput =
+      (m_gen_option.task == "summarization") ? "Please summarize the following text: " + userPrompt : userPrompt;
+  auto encoding = BuildPromptEncoding(promptInput, "");
   std::vector<uint32_t> inputIds = encoding.ids();
   if (inputIds.empty()) return result;
+
+#ifndef NDEBUG
+  ValidatePromptFormat(inputIds);
+#endif
 
   std::vector<int64_t> inputIds64;
   inputIds64.reserve(inputIds.size());
@@ -1154,111 +1601,147 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   for (size_t i = 0; i < m_session->GetOutputCount(); ++i)
     outputNames.emplace_back(m_session->GetOutputNameAllocated(i, allocator).get());
 
-  // 3. model detection and KV cache initialization.
-  if (m_numLayers == 0 || !m_kvCacheInitialized) {
-    DetectModelArchitecture(inputNames, outputNames);
-    InitializeKVCache();
+  // 3. detect model architecture + initialize KV Cache
+  if (m_numLayers == 0) DetectModelArchitecture(inputNames, outputNames);
+
+  const int actualMaxSeq = static_cast<int>(inputIds64.size()) + maxNewTokens;
+  if (!m_kvCacheInitialized || GetCurrentCacheMaxSeq() < actualMaxSeq) {
+    InitializeKVCache(actualMaxSeq);
   }
 
-  std::vector<const char *> inputNamesPtrs, outputNamesPtrs;
-  for (auto &n : inputNames) inputNamesPtrs.push_back(n.c_str());
-  for (auto &n : outputNames) outputNamesPtrs.push_back(n.c_str());
+  // 4. build up IoBinding
+  Ort::IoBinding binding(*m_session);
 
   std::vector<int64_t> generatedTokens(inputIds64);
   std::vector<int64_t> newTokens;
   newTokens.reserve(maxNewTokens);
 
-  // 4. generating.
+  // 5. generating.
   for (int step = 0; step < maxNewTokens; ++step) {
     m_stepFloatBuffers.clear();
     m_stepInt64Buffers.clear();
+    binding.ClearBoundInputs();
+    binding.ClearBoundOutputs();
 
-    std::vector<Ort::Value> stepInputs;
-    stepInputs.reserve(inputNames.size());
+    const size_t reserveSize = inputNames.size() * 2 + 8;
+    m_stepFloatBuffers.reserve(reserveSize);
+    m_stepInt64Buffers.reserve(reserveSize);
 
-    size_t pastSeqLen = (step == 0) ? 0 : generatedTokens.size() - 1;
-    size_t currentInputLen = (step == 0) ? generatedTokens.size() : 1;
+    const size_t pastSeqLen = (step == 0) ? 0 : static_cast<size_t>(GetCurrentCacheSeq());
+    const size_t currentInputLen = (step == 0) ? generatedTokens.size() : 1;
+    const size_t totalSeqLen = pastSeqLen + currentInputLen;
 
-    // Process inputs in the exact order expected by the model
+    // 5.1 bind（input_ids / attention_mask / position_ids）
     for (size_t inputIdx = 0; inputIdx < inputNames.size(); ++inputIdx) {
       const std::string &inputName = inputNames[inputIdx];
+      Ort::Value tensor{nullptr};
 
-      if (inputName == "input_ids" || inputName.find("input") != std::string::npos) {
-        std::vector<int64_t> currentInput;
-        if (step == 0) {
-          currentInput = generatedTokens;
-        } else {
-          currentInput = {generatedTokens.back()};
-        }
-
+      if (inputName == "input_ids" || inputName == "inputs" || inputName == "input") {
+        std::vector<int64_t> currentInput =
+            (step == 0) ? generatedTokens : std::vector<int64_t>{generatedTokens.back()};
         m_stepInt64Buffers.push_back(std::move(currentInput));
         auto &buf = m_stepInt64Buffers.back();
         std::vector<int64_t> shape = {1, static_cast<int64_t>(buf.size())};
-        stepInputs.emplace_back(
-            Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size()));
+        tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
 
       } else if (inputName == "attention_mask" || inputName.find("attention") != std::string::npos) {
-        size_t fullSeqLen = pastSeqLen + currentInputLen;
-        std::vector<int64_t> attentionMask(fullSeqLen, 1);
-
-        m_stepInt64Buffers.push_back(std::move(attentionMask));
-        auto &buf = m_stepInt64Buffers.back();
-        std::vector<int64_t> maskShape = {1, static_cast<int64_t>(buf.size())};
-        stepInputs.emplace_back(
-            Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), maskShape.data(), maskShape.size()));
-      } else if (inputName == "position_ids" || inputName.find("position") != std::string::npos) {
-        std::vector<int64_t> positionIds;
-        if (step == 0) {
-          positionIds.resize(currentInputLen);
-          for (size_t i = 0; i < currentInputLen; ++i) positionIds[i] = i;
-        } else {
-          positionIds = {static_cast<int64_t>(pastSeqLen + currentInputLen - 1)};
-        }
-        m_stepInt64Buffers.push_back(std::move(positionIds));
+        std::vector<int64_t> mask(totalSeqLen, 1);
+        m_stepInt64Buffers.push_back(std::move(mask));
         auto &buf = m_stepInt64Buffers.back();
         std::vector<int64_t> shape = {1, static_cast<int64_t>(buf.size())};
-        stepInputs.emplace_back(
-            Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size()));
-      } else if (inputName.find("past_key_values") != std::string::npos) {
-        // Create KV cache input for this specific layer and type
-        auto [layerIdx, isKey] = ParseKVCacheInputName(inputName);
-        // Determine the sequence length for this cache tensor
-        std::vector<int64_t> cacheShape = {
-            1,                                   // batch size
-            static_cast<int64_t>(m_numKVHeads),  // KV heads
-            static_cast<int64_t>(pastSeqLen),    // sequence length
-            static_cast<int64_t>(m_headDim)      // head dimension
-        };
-        if (pastSeqLen > 0 && step > 0) {
-          cache_data_t &sourceCache = isKey ? m_keyCache : m_valueCache;
-          stepInputs.emplace_back(CreateInputCacheTensor(sourceCache, layerIdx, cacheShape, memInfo));
+        tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
+
+      } else if (inputName == "position_ids" || inputName.find("position") != std::string::npos) {
+        std::vector<int64_t> posIds;
+        if (step == 0) {
+          posIds.resize(currentInputLen);
+          for (size_t i = 0; i < currentInputLen; ++i) posIds[i] = static_cast<int64_t>(i);
         } else {
-          stepInputs.emplace_back(CreateZeroCacheTensor(m_cacheDataType, cacheShape, memInfo));
+          posIds = {static_cast<int64_t>(pastSeqLen + currentInputLen - 1)};
         }
+        m_stepInt64Buffers.push_back(std::move(posIds));
+        auto &buf = m_stepInt64Buffers.back();
+        std::vector<int64_t> shape = {1, static_cast<int64_t>(buf.size())};
+        tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
+
+      } else if (inputName.find("past_key_values") != std::string::npos) {
+        // ── KV cache input： into cache buffer directly.
+        auto [layerIdx, isKey] = ParseKVCacheInputName(inputName);
+        auto cacheShape = BuildKVShape(pastSeqLen);
+        tensor = (pastSeqLen == 0) ? CreateZeroCacheTensor(m_cacheDataType, cacheShape, memInfo)
+                                   : CreateInputCacheTensor(m_cacheDataType, layerIdx, isKey, cacheShape, memInfo);
       } else {
-        // Unknown input - create default
-        std::vector<int64_t> defaultValue = {0};
-        m_stepInt64Buffers.push_back(std::move(defaultValue));
+        // unknown input. Create a dummy tensor to bind, to avoid ORT error. The actual content won't be used by the
+        // model.
+        std::vector<int64_t> defaultVal = {0};
+        m_stepInt64Buffers.push_back(std::move(defaultVal));
         auto &buf = m_stepInt64Buffers.back();
         std::vector<int64_t> shape = {1, 1};
-        stepInputs.emplace_back(
-            Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size()));
+        tensor = Ort::Value::CreateTensor<int64_t>(memInfo, buf.data(), buf.size(), shape.data(), shape.size());
+      }
+
+      if (!tensor) break;  // failed to create tensor for this input, break and let ORT handle the error
+      binding.BindInput(inputName.c_str(), tensor);
+    }
+
+    // 5.2 bind KV cache outputs directly.
+    //   present_key_values 输出直接写入 KVCacheManager buffer，
+    BindKVCacheDirect(binding, outputNames, totalSeqLen, memInfo);
+
+    // 5.3 bind logits and other outputs (let ORT handle allocation)
+    for (const auto &name : outputNames) {
+      bool is_kv = name.find("present") != std::string::npos || name.find("key_values") != std::string::npos;
+      if (!is_kv) {
+        binding.BindOutput(name.c_str(), memInfo);
       }
     }
 
-    // Verify we have the correct number of inputs
-    if (stepInputs.size() != inputNames.size()) break;
-    auto outputTensors = m_session->Run(Ort::RunOptions{nullptr}, inputNamesPtrs.data(), stepInputs.data(),
-                                        stepInputs.size(), outputNamesPtrs.data(), outputNamesPtrs.size());
-    if (outputTensors.empty()) break;
+    // 5.4 execute inference
+    try {
+      m_session->Run(Ort::RunOptions{nullptr}, binding);
+    } catch (const Ort::Exception &e) {
+      DBUG_PRINT("error", ("ORT Run failed at step %d: %s", step, e.what()));
+      break;
+    }
 
-    // 4.3 porcessing logits
-    const Ort::Value &logitsTensor = outputTensors[0];
+    // 5.5 update KV cache seq, ORT already write present KV to cache buffer, just need to update the seq counters in
+    // KVCacheManager
+    UpdateCacheSeqCounters(totalSeqLen);
+
+    // 5.6 dealing with logits
+    auto outputValues = binding.GetOutputValues();
+    auto outputValNames = binding.GetOutputNames();
+
+    // check logits tensor
+    size_t logitsTensorIdx = outputValues.size();  // sentinel value for "not found"
+    for (size_t oi = 0; oi < outputValNames.size(); ++oi) {
+      if (outputValNames[oi] == "logits") {
+        logitsTensorIdx = oi;
+        break;
+      }
+    }
+    if (logitsTensorIdx == outputValues.size()) {
+      for (size_t oi = 0; oi < outputValues.size(); ++oi) {
+        if (!outputValues[oi]) continue;
+        auto info = outputValues[oi].GetTensorTypeAndShapeInfo();
+        if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) continue;
+        auto sh = info.GetShape();
+        if (!sh.empty() && sh.back() > 10000) {
+          logitsTensorIdx = oi;
+          break;
+        }
+      }
+    }
+    if (logitsTensorIdx == outputValues.size()) break;
+
+    const Ort::Value &logitsTensor = outputValues[logitsTensorIdx];
     auto logitsInfo = logitsTensor.GetTensorTypeAndShapeInfo();
     auto logitsShape = logitsInfo.GetShape();
     const float *logitsData = logitsTensor.GetTensorData<float>();
-
     int64_t vocabSize = logitsShape.back();
+
+    // the last logits slice corresponds to the next token prediction, with shape [vocab_size]. If the logits tensor has
+    // more than 2 dims, we need to calculate the offset to get to that slice.
     size_t logitsOffset = 0;
     if (logitsShape.size() >= 2) {
       size_t seqLen = static_cast<size_t>(logitsShape[logitsShape.size() - 2]);
@@ -1267,16 +1750,20 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
 
     std::vector<float> currentLogits(logitsData + logitsOffset, logitsData + logitsOffset + vocabSize);
 
-    // 4.4 Apply penalty strategies.
-    ApplyRepeatPenalty(currentLogits.data(), vocabSize, generatedTokens, m_gen_option.repeat_penalty);
+#ifndef NDEBUG
+    PrintTopKLogits(currentLogits, 5);
+#endif
+
+    // 5.7 apply punishment
+    ApplyRepeatPenalty(currentLogits.data(), vocabSize, newTokens, m_gen_option.repeat_penalty);
     ApplyFrequencyPenalty(currentLogits.data(), vocabSize, m_gen_option.frequency_penalty);
     ApplyPresencePenalty(currentLogits.data(), vocabSize, m_gen_option.presence_penalty);
 
-    // According to the options values to choose sample strategy.
+    // 5.8 sampling
     int64_t nextToken;
     if (m_gen_option.top_k > 0 && m_gen_option.top_p < 1.0f) {
-      // top-k and top-p
-      nextToken = SampleTopK(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.temperature);
+      nextToken = SampleTopKThenTopP(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.top_p,
+                                     m_gen_option.temperature);
     } else if (m_gen_option.top_k > 0) {
       nextToken = SampleTopK(currentLogits.data(), vocabSize, m_gen_option.top_k, m_gen_option.temperature);
     } else if (m_gen_option.top_p < 1.0f) {
@@ -1285,27 +1772,26 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
       nextToken = SampleWithTemperature(currentLogits.data(), vocabSize, m_gen_option.temperature);
     }
 
-    // 4.5 stop condition check. Check EOS or stop serial.
-    if (nextToken == m_eosTokenId) break;
+    // 5.9 stop condition check.
     generatedTokens.push_back(nextToken);
     newTokens.push_back(nextToken);
     UpdateTokenTracking(nextToken);
-    if (ShouldStop(generatedTokens, m_gen_option.stop_sequences)) break;
 
-    // 4.6 update kv cache.
-    UpdateKVCache(outputTensors, outputNames, memInfo);
+    bool minReached = (static_cast<int>(newTokens.size()) >= m_gen_option.min_new_tokens);
+    if (minReached && nextToken == m_eosTokenId) break;
+    if (!minReached && nextToken == m_eosTokenId) continue;
+    if (minReached && ShouldStop(newTokens, m_gen_option.stop_sequences)) break;
   }
 
-  // 5. decode and return the result.
+  // 6. decoding and return result
   if (!newTokens.empty()) {
     std::vector<uint32_t> decodeTokens;
     decodeTokens.reserve(newTokens.size());
-    for (auto token : newTokens) {
-      decodeTokens.push_back(static_cast<uint32_t>(token));
-    }
+    for (auto t : newTokens) decodeTokens.push_back(static_cast<uint32_t>(t));
     result.output = m_tokenizer->decode(decodeTokens, true);
-  } else  // No new tokens generated
+  } else {
     result.output = "[No tokens generated: possibly EOS or empty output]";
+  }
 
   result.tokens = std::move(generatedTokens);
   return result;

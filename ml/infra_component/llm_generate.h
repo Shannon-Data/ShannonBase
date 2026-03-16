@@ -19,9 +19,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   The fundmental code for imcs. Using `Llama-3.2-3B-Instruct` to generate
-   response text.
-
+   The fundmental code for imcs.
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 
@@ -45,6 +43,7 @@
 #include <vector>
 
 #include <onnxruntime_cxx_api.h>
+#include "ml/infra_component/llm_kv_cache.h"
 #include "ml/infra_component/tokenizer.h"
 
 #if defined(_WIN32)
@@ -128,6 +127,8 @@ typedef struct {
   float repeat_penalty = 1.0f;     // Repetition penalty
   float frequency_penalty = 0.0f;  // Frequency penalty
   float presence_penalty = 0.0f;   // Presence penalty
+
+  int min_new_tokens = 8;  // Suppress EOS / stop sequences until at least this many tokens are generated.
 
   std::vector<std::string> stop_sequences;  // Stop sequences
   bool speculative_decoding = false;        // Speculative decoding
@@ -325,15 +326,29 @@ class TextGenerator {
     std::vector<int64_t> tokens;
   };
 
+  // kv-cache
+  enum class KVCacheLayout {
+    UNKNOWN,
+    BHSD,  // [batch, heads, seq, head_dim]  ← Optimum
+    BSHD,  // [batch, seq, heads, head_dim]  ← ONNX GenAI / Phi-3
+    BHDS,  // [batch, heads, head_dim, seq]  ← old version encoder-decoder
+  };
+
+  struct KVShapeInfo {
+    TextGenerator::KVCacheLayout layout = KVCacheLayout::UNKNOWN;
+    int dim_heads = -1;     // num_heads dim in shape
+    int dim_seq = -1;       // seq_len dim in shape
+    int dim_head_dim = -1;  // head_dim dim in shaope.
+    size_t num_heads = 0;
+    size_t head_dim = 0;
+  };
+
   TextGenerator(const std::string &modelPath, const std::string &tokenizerPath, const GenerationOptions &option);
   virtual ~TextGenerator();
 
   inline bool Initialized() const { return m_initialized; }
 
-  inline void Reset() {
-    ClearKVCache();
-    m_shouldClearKVCache = true;
-  }
+  inline void Reset() { ClearKVCache(); }
 
   /**
    * Generate text based on user prompt
@@ -369,8 +384,10 @@ class TextGenerator {
    * @param systemPrompt Raw system prompt
    * @return Formatted prompt with appropriate chat template
    */
-  std::string ApplyChatTemplate(const std::string &userInput, const std::string &);
+  tokenizers::Tokenizer::Encoding BuildPromptEncoding(const std::string &userInput,
+                                                      const std::string &systemPromptOverride);
 
+  void ValidatePromptFormat(const std::vector<uint32_t> &token_ids);
   /**
    * Find the index of maximum value in logits array (greedy sampling)
    * @param logits Array of logit values
@@ -395,13 +412,12 @@ class TextGenerator {
   void DetectModelArchitecture(const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames);
 
   // About the KV cache.
-  void InitializeKVCache();
+  void InitializeKVCache(int max_seq);
   void ClearKVCache();
 
-  inline void KVCache_Reset() {
-    ClearKVCache();
-    m_shouldClearKVCache = true;
-  }
+  KVShapeInfo DetectKVShapeLayout(const std::vector<int64_t> &shape);
+
+  inline void KVCache_Reset() { ClearKVCache(); }
   /**
    * Parse KV cache input tensor name to extract layer index and key/value type
    * @param name Input tensor name (e.g., "past_key_values.5.key")
@@ -490,6 +506,7 @@ class TextGenerator {
    */
   int64_t SampleTopK(const float *logits, size_t vocabSize, int topK, float temperature);
 
+  int64_t SampleTopKThenTopP(const float *logits, size_t vocabSize, int topK, float topP, float temperature);
   /**
    * Sample next token using Top-P (nucleus) sampling with temperature
    * @param logits Array of raw logit scores from model output
@@ -545,9 +562,6 @@ class TextGenerator {
   // A helper function.
   void PrintTopKLogits(const std::vector<float> &logits, int top_k) const;
 
-  template <typename CacheT, typename SourceT>
-  void updateLayerCache(full_cache_t<CacheT> &fullCache, size_t layerIdx, const SourceT *data, size_t elementCount);
-
   /**
    * @brief create a zero-elem(empty) ORT tensor.
    * @param type ONNX data type (m_cacheDataType).
@@ -566,12 +580,12 @@ class TextGenerator {
    * @param memInfo
    * @return Ort::Value ORT input tensor.
    */
-  Ort::Value CreateInputCacheTensor(cache_data_t &cache, size_t layerIdx, const std::vector<int64_t> &shape,
-                                    const Ort::MemoryInfo &memInfo);
+  Ort::Value CreateInputCacheTensor(ONNXTensorElementDataType type, size_t layerIdx, bool isKey,
+                                    const std::vector<int64_t> &shape, const Ort::MemoryInfo &memInfo);
 
  private:
   // system prompt string.
-  std::string m_system_prompt{"You are an AI assistant that provides clear and concise explanations in "};
+  std::string m_system_prompt{"An AI assistant that provides clear and concise explanations."};
 
   // the last prompt string user input.
   std::string m_lastPrompt;
@@ -632,16 +646,65 @@ class TextGenerator {
   // tokenizer, tokens loaded from the `tokenizer.json`
   std::shared_ptr<tokenizers::Tokenizer> m_tokenizer;
 
-  // kv-cache
+  KVCacheLayout m_kvCacheLayout = KVCacheLayout::UNKNOWN;
+
+  KVCacheManager<float> m_floatCache;          // FP32
+  KVCacheManager<Ort::Float16_t> m_fp16Cache;  // FP16
+  KVCacheManager<int8_t> m_int8Cache;          // INT8
   ONNXTensorElementDataType m_cacheDataType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-  cache_data_t m_keyCache;
-  cache_data_t m_valueCache;
+
+  template <typename T>
+  KVCacheManager<T> *get_cache_manager();
+
+  template <typename T>
+  const KVCacheManager<T> *get_cache_manager() const;
+
+  template <typename T>
+  void debug_print_cache(const KVCacheManager<T> &cache, int layer, const char *name);
 
   bool m_kvCacheInitialized = false;
-  bool m_shouldClearKVCache = true;
 
   std::vector<std::vector<float>> m_stepFloatBuffers;
   std::vector<std::vector<int64_t>> m_stepInt64Buffers;
+
+  std::unique_ptr<Ort::IoBinding> m_ioBinding;
+
+  /**
+   * @brief build up tensor shape [1, ?, ?, ?] according to current KV cache layout
+   * @param seqLen target sequence length (past or total)
+   * @return shape vector adapted to current layout
+   */
+  std::vector<int64_t> BuildKVShape(size_t seqLen) const;
+
+  /**
+  @brief Binds all present_key_values outputs of the model directly to the buffers of KVCacheManager.
+  * Principle:
+  * Ort::Value::CreateTensor() wraps existing memory without copying data.
+  * binding.BindOutput() instructs ORT to write inference outputs into specified tensors (i.e., cache buffers).
+  * During ORT session->Run(), present KV data is written directly into the cache, eliminating subsequent memcpy.
+  * Capacity Safety Check:
+  * totalSeqLen must not exceed the max_seq_len initialized by KVCacheManager;
+  * otherwise, it falls back to BindOutput(name, memInfo) allowing ORT to allocate memory (safe fallback).
+  * @param binding The IoBinding object for the current step
+  * @param outputNames List of all output names of the model
+  * @param totalSeqLen Total sequence length after the current step
+  * @param memInfo CPU memory info
+  */
+  void BindKVCacheDirect(Ort::IoBinding &binding, const std::vector<std::string> &outputNames, size_t totalSeqLen,
+                         const Ort::MemoryInfo &memInfo);
+
+  /**
+   * @brief after inference update KVCacheManager's seq set to totalSeqLen。
+   *
+   * when using IoBinding bind to cache buffer directly，ORT has alread written the buffer，
+   * only need to update seq.
+   *
+   * @param totalSeqLen totalSeq Len（= pastSeq + currentInputLen）
+   */
+  void UpdateCacheSeqCounters(size_t totalSeqLen);
+
+  int GetCurrentCacheSeq() const;
+  int GetCurrentCacheMaxSeq() const;
 };
 }  // namespace LLM_Generate
 }  // namespace ML
