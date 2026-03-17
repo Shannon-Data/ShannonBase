@@ -90,6 +90,8 @@ class RapidCursor : public MemoryObject {
     size_t batch_size{0};    ///< #rows in the current batch
     size_t row_in_batch{0};  ///< index of the next row to serve
 
+    row_id_t key_rowid{0};  /// For index scans: position within the current key
+
     inline bool is_exhausted() const noexcept { return row_in_batch >= batch_size; }
     inline void commit_batch(size_t n) noexcept {
       batch_size = n;
@@ -108,6 +110,7 @@ class RapidCursor : public MemoryObject {
       curr_imcu_offset = 0;
       curr_row_idx.store(0, std::memory_order_release);
       exhausted.store(false, std::memory_order_release);
+      key_rowid = 0;
       invalidate_batch();
     }
 
@@ -187,7 +190,7 @@ class RapidCursor : public MemoryObject {
   }
 
   inline void set_projection_columns(const std::vector<uint32_t> &cols) {
-    m_projection_columns = cols;
+    if (!cols.empty()) m_projection_columns = cols;
     m_proj_cols_dirty = true;
   }
 
@@ -197,7 +200,7 @@ class RapidCursor : public MemoryObject {
     m_scan_offset = offset;
   }
 
-  inline void enable_storage_index() { m_use_storage_index = true; }
+  inline void set_storage_index(bool use_storage_index) { m_use_storage_index = use_storage_index; }
 
   inline void set_active_index(int8_t aci) { m_active_index = aci; }
 

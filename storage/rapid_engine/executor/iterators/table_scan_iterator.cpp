@@ -41,13 +41,12 @@
 
 namespace ShannonBase {
 namespace Executor {
-VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows,
+VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *mtable, double expected_rows,
                                                          ha_rows *examined_rows,
                                                          std::unique_ptr<Imcs::Predicate> predicate,
                                                          const std::vector<uint32_t> &projection, ha_rows limit,
                                                          ha_rows offset, bool use_storage_index)
-    : TableRowIterator(thd, table),
-      m_table{table},
+    : TableRowIterator(thd, mtable),
       m_pushed_predicate{std::move(predicate)},
       m_projected_columns(projection),
       m_limit{limit},
@@ -64,16 +63,13 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *table,
   m_batch_size = m_opt_batch_size;
 
   m_metrics.reset();
-  auto share = shannon_loaded_tables->get(m_table->s->db.str, m_table->s->table_name.str);
-  auto table_id = share ? share->m_tableid : 0;
-  m_cursor.reset(new ShannonBase::Imcs::RapidCursor(table, Imcs::Imcs::instance()->get_rpd_table(table_id)));
 }
 
 size_t VectorizedTableScanIterator::EstimateRowSize() const {
   size_t total_size = 0;
-  for (uint idx = 0; idx < m_table->s->fields; idx++) {
-    Field *field = *(m_table->field + idx);
-    if (bitmap_is_set(m_table->read_set, idx) && !field->is_flag_set(NOT_SECONDARY_FLAG))
+  for (uint idx = 0; idx < table()->s->fields; idx++) {
+    Field *field = *(table()->field + idx);
+    if (bitmap_is_set(table()->read_set, idx) && !field->is_flag_set(NOT_SECONDARY_FLAG))
       total_size += field->pack_length();
   }
   return total_size > 0 ? total_size : 64;
@@ -104,9 +100,9 @@ void VectorizedTableScanIterator::CacheActiveFields() {
   m_active_fields.clear();
   m_field_indices.clear();
 
-  for (uint ind = 0; ind < m_table->s->fields; ind++) {
-    Field *field = *(m_table->field + ind);
-    if (bitmap_is_set(m_table->read_set, ind) && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
+  for (uint ind = 0; ind < table()->s->fields; ind++) {
+    Field *field = *(table()->field + ind);
+    if (bitmap_is_set(table()->read_set, ind) && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
       m_active_fields.push_back(field);
       m_field_indices.push_back(ind);
     }
@@ -116,17 +112,29 @@ void VectorizedTableScanIterator::CacheActiveFields() {
 }
 
 void VectorizedTableScanIterator::PreallocateColumnChunks() {
-  m_col_chunks.clear();
-  m_col_chunks.reserve(m_table->s->fields);
+  if (m_col_chunks.size() != static_cast<size_t>(table()->s->fields)) {
+    m_col_chunks.assign(table()->s->fields, ShannonBase::Executor::ColumnChunk(nullptr, 0));
+  }
 
-  for (uint ind = 0; ind < m_table->s->fields; ind++) {
-    Field *field = *(m_table->field + ind);
-    if (!bitmap_is_set(m_table->read_set, ind) || field->is_flag_set(NOT_SECONDARY_FLAG)) {
-      m_col_chunks.emplace_back(nullptr, 0);  // place-holder.
-    } else {                                  // using larger memory to reduce `allocate/new`
+  uint valid_fields = 0;
+  for (uint ind = 0; ind < table()->s->fields; ind++) {
+    Field *field = table()->field[ind];
+    if (bitmap_is_set(table()->read_set, ind) && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
       auto initial_capacity =
           std::max(m_batch_size, static_cast<size_t>(((ShannonBase::SHANNON_ROWS_IN_CHUNK + 7) / 8) + 1));
-      m_col_chunks.emplace_back(field, initial_capacity);
+      m_col_chunks[ind] = ShannonBase::Executor::ColumnChunk(field, initial_capacity);
+      valid_fields++;
+    }
+  }
+
+  if (valid_fields == 0 && !m_active_fields.empty()) {
+    for (const auto &field : m_active_fields) {
+      auto idx = field->field_index();
+      if (idx < m_col_chunks.size()) {
+        auto initial_capacity =
+            std::max(m_batch_size, static_cast<size_t>(((ShannonBase::SHANNON_ROWS_IN_CHUNK + 7) / 8) + 1));
+        m_col_chunks[idx] = ShannonBase::Executor::ColumnChunk(field, initial_capacity);
+      }
     }
   }
 }
@@ -155,6 +163,27 @@ void VectorizedTableScanIterator::AdaptBatchSize() {
   }
 }
 
+void VectorizedTableScanIterator::ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk,
+                                                     size_t rowid) {
+  if (field->real_type() == MYSQL_TYPE_ENUM) {
+    field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
+  } else {
+    Utils::ColumnMapGuard guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+    auto *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
+    auto str_id = *reinterpret_cast<uint32 *>(const_cast<char *>(data_ptr));
+
+    auto fld_idx = field->field_index();
+    auto share = ShannonBase::shannon_loaded_tables->get(table()->s->db.str, table()->s->table_name.str);
+    auto table_id = share ? share->m_tableid : 0;
+    auto rpd_table = share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
+                                           : Imcs::Imcs::instance()->get_rpd_table(table_id);
+    auto dict = rpd_table->meta().fields[fld_idx].dictionary;
+    if (!dict) return;
+    auto str_ptr = dict->get(str_id);
+    field->store(str_ptr.c_str(), strlen(str_ptr.c_str()), field->charset());
+  }
+}
+
 int VectorizedTableScanIterator::PopulateCurrentRow() {
   size_t rowid = m_curr_row_in_batch;
 
@@ -175,13 +204,12 @@ int VectorizedTableScanIterator::PopulateCurrentRow() {
 }
 
 bool VectorizedTableScanIterator::Init() {
-  // Initialize similar to ha_rapid::rnd_init()
-  if (m_pushed_predicate) m_cursor->set_scan_predicates(std::move(m_pushed_predicate));
-  if (!m_projected_columns.empty()) m_cursor->set_projection_columns(m_projected_columns);
-  if (m_limit != HA_POS_ERROR) m_cursor->set_scan_limit(m_limit, m_offset);
-  if (m_use_storage_index) m_cursor->enable_storage_index();
+  if (table()->file->ha_rnd_init(true)) return true;
 
-  if (m_cursor->init()) return true;
+  if (m_pushed_predicate) down_cast<ha_rapid *>(table()->file)->set_predicate(std::move(m_pushed_predicate));
+  down_cast<ha_rapid *>(table()->file)->set_projection(m_projected_columns);
+  down_cast<ha_rapid *>(table()->file)->set_scan_limit(m_limit, m_offset);
+  down_cast<ha_rapid *>(table()->file)->set_storage_index(m_use_storage_index);
 
   // Allocate row buffer for batch processing. to store data in mysql format in column format.
   CacheActiveFields();
@@ -238,7 +266,7 @@ int VectorizedTableScanIterator::ReadNextBatch() {
   ClearBatchData();
 
   size_t read_cnt = 0;
-  int result = m_cursor->next(m_batch_size, m_col_chunks, read_cnt);
+  int result = down_cast<ha_rapid *>(table()->file)->rnd_next_batch(m_batch_size, m_col_chunks, read_cnt);
 
   if (result != 0) {
     if (result == HA_ERR_END_OF_FILE) {

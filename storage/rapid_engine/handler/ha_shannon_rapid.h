@@ -32,8 +32,8 @@
 #include "sql/handler.h"
 #include "thr_lock.h"
 
+#include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/include/rapid_table_info.h"
-
 class THD;
 struct TABLE;
 struct TABLE_SHARE;
@@ -47,6 +47,7 @@ class Transaction;
 namespace Imcs {
 class RpdTable;
 class RapidCursor;
+class Predicate;
 }  // namespace Imcs
 
 class ha_rapidpart;
@@ -90,6 +91,13 @@ struct RapidShare {
 class ha_rapid : public handler {
  public:
   ha_rapid(handlerton *hton, TABLE_SHARE *table_share);
+
+  void set_predicate(std::unique_ptr<Imcs::Predicate> predicate);
+  void set_projection(const std::vector<uint32_t> &columns);
+  void set_scan_limit(ha_rows limit, ha_rows offset);
+  void set_storage_index(bool use_storage_index = true);
+
+  int rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
  protected:
   ShannonBase::Imcs::RpdTable *m_rpd_table{nullptr};

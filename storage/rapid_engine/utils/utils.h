@@ -95,7 +95,8 @@ class Util {
       } break;
       case MYSQL_TYPE_TINY: {
         // Field_tiny::val_int() impl
-        const int tmp = field->is_unsigned() ? (int)data_ptr[0] : (int)((signed char *)data_ptr)[0];
+        const int tmp = field->is_unsigned() ? static_cast<int>(data_ptr[0])
+                                             : static_cast<int>(reinterpret_cast<const signed char *>(data_ptr)[0]);
         data_val = safe_cast((longlong)tmp);
       } break;
       case MYSQL_TYPE_SHORT: {

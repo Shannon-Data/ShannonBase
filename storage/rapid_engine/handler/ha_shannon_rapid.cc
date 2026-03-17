@@ -229,6 +229,16 @@ int ha_rapid::info(unsigned int flags) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+void ha_rapid::set_predicate(std::unique_ptr<Imcs::Predicate> predicate) {
+  m_cursor->set_scan_predicates(predicate.get() ? std::move(predicate) : nullptr);
+}
+
+void ha_rapid::set_projection(const std::vector<uint32_t> &columns) { m_cursor->set_projection_columns(columns); }
+
+void ha_rapid::set_scan_limit(ha_rows limit, ha_rows offset) { m_cursor->set_scan_limit(limit, offset); }
+
+void ha_rapid::set_storage_index(bool use_storage_index) { m_cursor->set_storage_index(use_storage_index); }
+
 /** Returns the operations supported for indexes.
  @return flags of supported operations */
 handler::Table_flags ha_rapid::table_flags() const {
@@ -504,6 +514,16 @@ int ha_rapid::rnd_next(uchar *buf) {
       }
     }
   }
+
+  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  return error;
+}
+
+int ha_rapid::rnd_next_batch(size_t batch_size, std::vector<ShannonBase::Executor::ColumnChunk> &data,
+                             size_t &read_cnt) {
+  int error{HA_ERR_END_OF_FILE};
+
+  if (inited == handler::RND) error = m_cursor->next(batch_size, data, read_cnt);
 
   if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
   return error;
