@@ -75,9 +75,9 @@ namespace Executor {
  * processed in batches rather than row-by-row. It leverages columnar storage and SIMD
  * optimizations to improve cache locality and CPU efficiency.
  */
-class VectorizedTableScanIterator : public TableRowIterator {
+class VectorizedTableScanIterator final : public TableRowIterator {
  public:
-  VectorizedTableScanIterator(THD *thd, TABLE *table, double expected_rows, ha_rows *examined_rows,
+  VectorizedTableScanIterator(THD *thd, TABLE *mtable, double expected_rows, ha_rows *examined_rows,
                               std::unique_ptr<Imcs::Predicate> predicate = nullptr,
                               const std::vector<uint32_t> &projection = {}, ha_rows limit = HA_POS_ERROR,
                               ha_rows offset = 0, bool use_storage_index = false);
@@ -155,21 +155,7 @@ class VectorizedTableScanIterator : public TableRowIterator {
    * @param col_chunk Column chunk containing the data
    * @param rowid Row index within the current batch
    */
-  inline void ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
-    if (field->real_type() == MYSQL_TYPE_ENUM) {
-      field->pack(const_cast<uchar *>(field->data_ptr()), col_chunk.data(rowid), field->pack_length());
-    } else {
-      Utils::ColumnMapGuard guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
-      auto *data_ptr = reinterpret_cast<const char *>(col_chunk.data(rowid));
-      auto str_id = *reinterpret_cast<uint32 *>(const_cast<char *>(data_ptr));
-
-      auto fld_idx = field->field_index();
-      auto dict = m_cursor->table_source()->meta().fields[fld_idx].dictionary;
-      if (!dict) return;
-      auto str_ptr = dict->get(str_id);
-      field->store(str_ptr.c_str(), strlen(str_ptr.c_str()), field->charset());
-    }
-  }
+  void ProcessStringField(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid);
 
   /**
    * Process numeric field data with direct memory copying
@@ -183,7 +169,7 @@ class VectorizedTableScanIterator : public TableRowIterator {
   }
 
  private:
-  TABLE *m_table;  ///< source MySQL table
+  //  these fields came from optimized plan.
   // these fields came from optimized plan.
   std::unique_ptr<Imcs::Predicate> m_pushed_predicate{nullptr};
   std::vector<uint32_t> m_projected_columns;
@@ -191,7 +177,6 @@ class VectorizedTableScanIterator : public TableRowIterator {
   ha_rows m_offset{0};
   bool m_use_storage_index{false};
 
-  std::unique_ptr<ShannonBase::Imcs::RapidCursor> m_cursor;      ///< Underlying columnar data table
   std::vector<ShannonBase::Executor::ColumnChunk> m_col_chunks;  ///< Column chunks for batch processing
 
   filter_func_t m_filter;  ///< Optional filter function for row-level filtering

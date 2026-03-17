@@ -66,6 +66,8 @@ int RapidCursor::close() {
 }
 
 int RapidCursor::init() {
+  if (m_inited.load(std::memory_order_acquire)) return ShannonBase::SHANNON_SUCCESS;
+
   m_scan_context = std::make_unique<Rapid_scan_context>();
   m_scan_context->m_thd = current_thd;
   m_scan_context->m_extra_info.m_keynr = m_active_index;
@@ -92,6 +94,14 @@ int RapidCursor::init() {
   m_rows_skipped = 0;
   m_rows_returned = 0;
   m_last_returned_rowid = INVALID_ROW_ID;
+
+  m_projection_columns.clear();
+  m_proj_cols_cache.clear();
+  m_proj_cols_dirty = true;
+  m_scan_predicates.clear();
+  m_use_storage_index = true;
+  m_scan_limit = HA_POS_ERROR;
+  m_scan_offset = 0;
 
   m_inited.store(true, std::memory_order_release);
   return ShannonBase::SHANNON_SUCCESS;
@@ -308,14 +318,11 @@ int RapidCursor::next(size_t batch_size, std::vector<ShannonBase::Executor::Colu
 
 // Random access (position / rnd_pos)
 row_id_t RapidCursor::position(const unsigned char *record) {
-  // get the rowid of current row `record`.
-  /* Copy primary key as the row reference */
+  // get the rowid of current row `record`. Copy primary key as the row reference.
   // KEY *key_info = table->key_info + table_share->primary_key;
   // the first key is always primary key.
   auto offset = m_rpd_table->meta().col_offsets;
-  if (m_active_index == MAX_KEY) {
-    index_init(0, false);
-  }
+  if (m_active_index == MAX_KEY) index_init(0 /** primary key index */, false);
 
   assert(m_rpd_table->meta().keys.size());
   auto key_info = m_data_source->s->key_info + m_active_index;
@@ -331,10 +338,9 @@ row_id_t RapidCursor::position(const unsigned char *record) {
   key_copy(ref.get(), (uchar *)record, key_info, key_info->key_length);
 
   auto key_len = m_rpd_table->meta().keys[0].key_length;
-  index_read(ref.get(), ref.get(), key_len, HA_READ_KEY_EXACT, true);
-  auto rowid = m_scan_state.curr_row_idx.load(std::memory_order_relaxed);
-  index_end();
-  return rowid;
+  // to locate the rowid by primary key, we can use index read with HA_READ_KEY_EXACT.
+  if (index_read(ref.get(), ref.get(), key_len, HA_READ_KEY_EXACT, true /**navigation*/)) return INVALID_ROW_ID;
+  return m_scan_state.key_rowid;
 }
 
 int RapidCursor::rnd_pos(uchar *buff, uchar *pos) {
@@ -390,6 +396,7 @@ void RapidCursor::encode_key_parts(uchar *encoded_key, const uchar *original_key
 
 int RapidCursor::index_init(uint keynr, bool sorted) {
   init();
+
   m_active_index = keynr;
   auto index = m_rpd_table->get_index(m_data_source->s->key_info[keynr].name);
   if (index == nullptr) {
@@ -465,9 +472,14 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   row_id_t rowid{std::numeric_limits<row_id_t>::max()};
 
   if (m_index_iter->next(&result_key, &result_key_len, &rowid)) {
-    locate(rowid);
-    auto ret = (!navigation) ? next(buf) : ShannonBase::SHANNON_SUCCESS;
-    return ret ? ret : ShannonBase::SHANNON_SUCCESS;
+    if (navigation) {
+      m_scan_state.key_rowid = rowid;
+      return ShannonBase::SHANNON_SUCCESS;  // caller just wants to know its position if the key exists, no need to
+                                            // locate or fetch
+    } else {
+      locate(rowid);
+      return next(buf);
+    }
   }
   return HA_ERR_KEY_NOT_FOUND;
 }
