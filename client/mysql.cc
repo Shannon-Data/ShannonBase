@@ -3921,16 +3921,15 @@ static void print_field_types(MYSQL_RES *result) {
 /* Used to determine if we should invoke print_as_hex for this field */
 
 static bool is_binary_field(MYSQL_FIELD *field) {
-  return ((field->charsetnr == 63) &&
-          (field->type == MYSQL_TYPE_BIT || field->type == MYSQL_TYPE_BLOB ||
-           field->type == MYSQL_TYPE_LONG_BLOB ||
-           field->type == MYSQL_TYPE_MEDIUM_BLOB ||
-           field->type == MYSQL_TYPE_TINY_BLOB ||
-           field->type == MYSQL_TYPE_VAR_STRING ||
-           field->type == MYSQL_TYPE_STRING ||
-           field->type == MYSQL_TYPE_VARCHAR ||
-           field->type == MYSQL_TYPE_VECTOR ||
-           field->type == MYSQL_TYPE_GEOMETRY));
+  return (
+      (field->charsetnr == 63) &&
+      (field->type == MYSQL_TYPE_BIT || field->type == MYSQL_TYPE_BLOB ||
+       field->type == MYSQL_TYPE_LONG_BLOB ||
+       field->type == MYSQL_TYPE_MEDIUM_BLOB ||
+       field->type == MYSQL_TYPE_TINY_BLOB ||
+       field->type == MYSQL_TYPE_VAR_STRING ||
+       field->type == MYSQL_TYPE_STRING || field->type == MYSQL_TYPE_VARCHAR ||
+       field->type == MYSQL_TYPE_VECTOR || field->type == MYSQL_TYPE_GEOMETRY));
 }
 
 /* Print binary value as hex literal (0x ...) */
