@@ -3,6 +3,9 @@
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
+--let $restart_parameters = restart
+--source include/restart_mysqld.inc
+
 create database sh_test11 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 use sh_test11;
 --disable_warnings
@@ -58,38 +61,38 @@ alter table tt1 secondary_load;
 alter table tt8 secondary_load;
 
 --replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
-select * from performance_schema.rpd_tables;
+select * from performance_schema.rpd_tables order by ID;
 
 --replace_column 1 IGNORE
-select * from performance_schema.rpd_table_id;
+select * from performance_schema.rpd_table_id order by ID;
 
---replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_columns;
+--replace_column 1 IGNORE
+select * from performance_schema.rpd_columns order by TABLE_ID, COLUMN_ID;
 
---replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_column_id;
+--replace_column 2 IGNORE
+select * from performance_schema.rpd_column_id order by ID;
 
 select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME;
 
---echo "restart mysqld"
+--echo "starting restart mysqld..."
 --source include/restart_mysqld.inc
 
---sleep 5
+--sleep 10
 SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test11';
 
 show variables like "rapid_reload_on_restart";
 
 --replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
-select * from performance_schema.rpd_tables;
+select * from performance_schema.rpd_tables order by ID;
 
 --replace_column 1 IGNORE
-select * from performance_schema.rpd_table_id;
+select * from performance_schema.rpd_table_id order by ID;
 
---replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_columns;
+--replace_column 1 IGNORE
+select * from performance_schema.rpd_columns order by TABLE_ID, COLUMN_ID;
 
---replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_column_id;
+--replace_column 2 IGNORE
+select * from performance_schema.rpd_column_id order by ID;
 
 select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME;
 set persist rapid_reload_on_restart =off;
