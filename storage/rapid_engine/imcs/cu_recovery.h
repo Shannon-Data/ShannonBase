@@ -254,8 +254,13 @@ class CURecoveryManager {
   std::filesystem::path snap_path(uint32_t imcu_id) const;
 
  private:
+  static constexpr size_t WAL_FOOTER_SIZE = 16;
+  // Footer layout: [MAGIC_FOOT 4B][reserved 4B][max_lsn 8B]
+  static constexpr uint32_t WAL_FOOT_MAGIC = 0x544F4F46u;  // "FOOT"
+
   bool append_record(const WalRecord &rec);
   bool read_record(std::istream &in, WalRecord &rec) const;
+  void update_wal_footer(uint64_t current_max_lsn);
 
   /** Serialize a WAL record to a byte buffer (including CRC). */
   std::vector<uint8_t> encode_record(const WalRecord &rec) const;
@@ -278,6 +283,8 @@ class CURecoveryManager {
   /** Read and validate the snapshot file header. */
   bool read_snap_header(std::istream &in, uint32_t &imcu_id, uint32_t &col_count, uint64_t &snap_lsn) const;
 
+  void close_locked();
+
   std::string m_db_name;
   std::string m_tbl_name;
 
@@ -285,6 +292,7 @@ class CURecoveryManager {
   std::filesystem::path m_wal_path;       // m_partition_dir / "cu_wal.log"
 
   std::ofstream m_wal_out;         // append-mode WAL writer
+  int m_wal_fd{-1};                // O_WRONLY fd for fdatasync; -1 when closed
   mutable std::mutex m_wal_mutex;  // serialises all WAL appends
 
   std::atomic<uint64_t> m_lsn{1};  // next LSN to assign (1-based)
