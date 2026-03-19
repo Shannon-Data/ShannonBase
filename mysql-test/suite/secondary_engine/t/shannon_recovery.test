@@ -58,16 +58,16 @@ alter table tt1 secondary_load;
 alter table tt8 secondary_load;
 
 --replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
-select * from performance_schema.rpd_tables;
+select * from performance_schema.rpd_tables ID;
 
 --replace_column 1 IGNORE
-select * from performance_schema.rpd_table_id;
+select * from performance_schema.rpd_table_id order by NAME;
 
 --replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_columns;
+select * from performance_schema.rpd_columns order by TABLE_ID,COLUMN_ID;
 
 --replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_column_id;
+select * from performance_schema.rpd_column_id order by table_id, id;
 
 select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME;
 
@@ -80,16 +80,16 @@ SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM 
 show variables like "rapid_reload_on_restart";
 
 --replace_column 1 IGNORE 2 IGNORE 13 IGNORE 14 IGNORE 19 IGNORE
-select * from performance_schema.rpd_tables;
+select * from performance_schema.rpd_tables order by ID;
 
 --replace_column 1 IGNORE
-select * from performance_schema.rpd_table_id;
+select * from performance_schema.rpd_table_id order by NAME;
 
 --replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_columns;
+select * from performance_schema.rpd_columns order by TABLE_ID,COLUMN_ID;
 
 --replace_column 1 IGNORE 2 IGNORE
-select * from performance_schema.rpd_column_id;
+select * from performance_schema.rpd_column_id order by table_id, id;
 
 select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME;
 set persist rapid_reload_on_restart =off;

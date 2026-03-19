@@ -76,85 +76,7 @@ static bool is_system_schema(const std::string &name) {
  */
 static bool has_secondary_load_flag(const std::string &opts) {
   static const char TOKEN[] = "secondary_load=1";
-  auto pos = opts.find(TOKEN);
-  if (pos == std::string::npos) return false;
-  size_t after = pos + sizeof(TOKEN) - 1 /* '\0' */;
-  if (after < opts.size() && std::isdigit(static_cast<unsigned char>(opts[after]))) return false;
-  return true;
-}
-
-/**
- * @brief Strip the existing secondary_load token and re-add it when needed.
- *
- * The options column holds a space-separated "key=value" string, e.g.:
- *   "secondary_engine=rapid secondary_load=1 partitioned"
- *
- * @param current_opts  Current value of the options field.
- * @param loaded    true  → write "secondary_load=1".
- *                      false → write "secondary_load=0"
- * @return Updated options string.
- */
-static std::string rebuild_options(const std::string &current_opts, bool loaded) {
-  static const std::string TARGET_KEY = "secondary_load";
-  static const char DELIMITER = ';';
-
-  if (current_opts.empty()) return TARGET_KEY + "=" + (loaded ? "1" : "0") + DELIMITER;
-
-  std::string opts = current_opts;
-  bool ends_with_delim = (opts.back() == DELIMITER);
-  if (!ends_with_delim) {
-    opts += DELIMITER;
-  }
-
-  std::stringstream ss(opts);
-  std::string token;
-  std::string result;
-  bool found = false;
-  const std::string target_prefix = TARGET_KEY + "=";
-
-  while (std::getline(ss, token, DELIMITER)) {
-    if (token.empty()) continue;
-
-    if (token.find(target_prefix) == 0) {
-      found = true;
-      result += target_prefix + (loaded ? "1" : "0") + DELIMITER;
-    } else {
-      result += token + DELIMITER;
-    }
-  }
-
-  if (!found) result += target_prefix + (loaded ? "1" : "0") + DELIMITER;
-
-  if (!ends_with_delim && !result.empty()) result.pop_back();
-  return result;
-}
-
-int LoadFlagManager::set_flag(THD *thd, const std::string &schema_name, const std::string &table_name, bool loaded) {
-  DBUG_PRINT("recovery",
-             ("LoadFlagManager::set_flag %s.%s loaded=%d", schema_name.c_str(), table_name.c_str(), loaded ? 1 : 0));
-
-  dd::cache::Dictionary_client *client = thd->dd_client();
-  if (!client) return HA_ERR_GENERIC;
-  dd::cache::Dictionary_client::Auto_releaser releaser(client);
-
-  const dd::Table *table_def = nullptr;
-  if (client->acquire(schema_name.c_str(), table_name.c_str(), &table_def) || !table_def) {
-    return HA_ERR_KEY_NOT_FOUND;
-  }
-
-  std::unique_ptr<dd::Table> table_clone(table_def->clone());
-
-  dd::String_type current_opts_raw = table_clone->options().raw_string();
-  std::string current_opts(current_opts_raw.c_str(), current_opts_raw.length());
-  std::string new_opts_std = rebuild_options(current_opts, loaded);
-  if (current_opts == new_opts_std) return 0;
-
-  table_clone->options().clear();
-  dd::String_type new_opts_raw(new_opts_std.data(), new_opts_std.size());
-  table_clone->set_options(new_opts_raw);
-  // will update in second_load_unload, so no need to update here
-  // table_clone->update_options().set_changed();
-  return 0;
+  return opts.find(TOKEN) != std::string::npos;
 }
 
 int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTable> &out) {
@@ -185,6 +107,7 @@ int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTa
       if (!table_ptr) continue;
 
       std::string opts(table_ptr->options().raw_string().c_str(), table_ptr->options().raw_string().length());
+      std::transform(opts.begin(), opts.end(), opts.begin(), ::tolower);
       if (has_secondary_load_flag(opts)) {
         SecondaryLoadedTable entry;
         entry.schema_name = schema_name;

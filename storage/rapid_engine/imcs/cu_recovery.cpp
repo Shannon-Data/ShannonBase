@@ -78,35 +78,61 @@ bool CURecoveryManager::open() {
 
   // Open WAL in append mode (creates if absent).
   m_wal_out.open(m_wal_path, std::ios::out | std::ios::binary | std::ios::app);
-  if (!m_wal_out.is_open()) {
-    DBUG_PRINT("cu_recovery", ("failed to open WAL: %s", m_wal_path.string().c_str()));
-    return false;
-  }
+  if (!m_wal_out.is_open()) return false;
+#ifndef _WIN32
+  m_wal_fd = ::open(m_wal_path.c_str(), O_WRONLY);
+#endif
 
-  // Fast-forward the LSN counter past existing records so we never reuse LSNs.
-  // Open a read stream, scan records, find max LSN.
+  uint64_t max_lsn = 0;
   {
-    std::ifstream wal_in(m_wal_path, std::ios::binary);
-    if (wal_in.is_open()) {
-      uint64_t max_lsn = 0;
-      WalRecord rec;
-      while (read_record(wal_in, rec)) {
-        if (rec.lsn > max_lsn) max_lsn = rec.lsn;
+    std::ifstream wal_in(m_wal_path, std::ios::binary | std::ios::ate);
+    auto file_size = wal_in.tellg();
+    if (file_size >= static_cast<std::streamoff>(WAL_FOOTER_SIZE)) {
+      wal_in.seekg(-static_cast<std::streamoff>(WAL_FOOTER_SIZE), std::ios::end);
+      uint32_t foot_magic = 0, reserved = 0;
+      wal_in.read(reinterpret_cast<char *>(&foot_magic), 4);
+      wal_in.read(reinterpret_cast<char *>(&reserved), 4);
+      if (foot_magic == WAL_FOOT_MAGIC) {
+        wal_in.read(reinterpret_cast<char *>(&max_lsn), 8);
+      } else {  // old format without footer: need to scan the whole file to find max LSN
+        wal_in.seekg(0);
+        WalRecord rec;
+        while (read_record(wal_in, rec))
+          if (rec.lsn > max_lsn) max_lsn = rec.lsn;
       }
-      if (max_lsn >= m_lsn.load(std::memory_order_relaxed)) m_lsn.store(max_lsn + 1, std::memory_order_relaxed);
     }
   }
+  if (max_lsn >= m_lsn.load()) m_lsn.store(max_lsn + 1);
 
   DBUG_PRINT("cu_recovery",
              ("WAL opened at %s  next_lsn=%llu", m_wal_path.string().c_str(), (unsigned long long)m_lsn.load()));
   return true;
 }
 
+void CURecoveryManager::close_locked() {
+  // caller has already acquired m_wal_mutex
+  if (m_wal_out.is_open()) {
+    m_wal_out.flush();
+    m_wal_out.close();
+  }
+#ifndef _WIN32
+  if (m_wal_fd >= 0) {
+    ::close(m_wal_fd);
+    m_wal_fd = -1;
+  }
+#endif
+}
 void CURecoveryManager::close() {
   std::lock_guard lock(m_wal_mutex);
   if (m_wal_out.is_open()) {
     m_wal_out.flush();
     m_wal_out.close();
+#ifndef _WIN32
+    if (m_wal_fd >= 0) {
+      ::close(m_wal_fd);
+      m_wal_fd = -1;
+    }
+#endif
   }
 }
 
@@ -114,22 +140,8 @@ bool CURecoveryManager::sync() {
   std::lock_guard lock(m_wal_mutex);
   if (!m_wal_out.is_open()) return false;
   m_wal_out.flush();
-  // Durability sync: fstream::flush() only drains the user-space buffer to the
-  // OS page cache.  We need fdatasync() to guarantee persistence.  Accessing
-  // the underlying fd via std::filebuf::_M_file is a GCC internal and is
-  // declared protected.  Instead, open the file by path for the sole purpose
-  // of calling fdatasync(), then close immediately.
 #ifndef _WIN32
-  {
-    int fd = ::open(m_wal_path.c_str(), O_WRONLY);
-    if (fd >= 0) {
-      ::fdatasync(fd);
-      ::close(fd);
-    }
-  }
-#else
-  // On Windows, fflush to the C runtime is the best we can do portably here.
-  // A production port would call FlushFileBuffers(HANDLE).
+  if (m_wal_fd >= 0) ::fdatasync(m_wal_fd);
 #endif
   return m_wal_out.good();
 }
@@ -185,65 +197,47 @@ std::vector<uint8_t> CURecoveryManager::encode_record(const WalRecord &rec) cons
 }
 
 bool CURecoveryManager::read_record(std::istream &in, WalRecord &rec) const {
-  // Helper: read T from stream without updating any CRC.
-  auto rd = [&](void *p, size_t n) -> bool {
-    return static_cast<bool>(in.read(reinterpret_cast<char *>(p), static_cast<std::streamsize>(n)));
+  uint32_t running_crc = 0;
+
+  auto rd_crc = [&](void *p, size_t n) -> bool {
+    if (!in.read(reinterpret_cast<char *>(p), static_cast<std::streamsize>(n))) return false;
+    running_crc = crc32(p, n, running_crc);
+    return true;
   };
 
   uint32_t magic = 0;
-  if (!rd(&magic, 4) || magic != WAL_MAGIC) return false;
+  if (!rd_crc(&magic, 4) || magic != WAL_MAGIC) return false;
 
   uint64_t lsn = 0;
-  rd(&lsn, 8);
+  if (!rd_crc(&lsn, 8)) return false;
   uint8_t op = 0;
-  rd(&op, 1);
+  if (!rd_crc(&op, 1)) return false;
   uint32_t iid = 0;
-  rd(&iid, 4);
+  if (!rd_crc(&iid, 4)) return false;
   uint32_t cid = 0;
-  rd(&cid, 4);
+  if (!rd_crc(&cid, 4)) return false;
   uint64_t rid = 0;
-  rd(&rid, 8);
+  if (!rd_crc(&rid, 8)) return false;
   uint64_t tid = 0;
-  rd(&tid, 8);
+  if (!rd_crc(&tid, 8)) return false;
   uint64_t scn = 0;
-  rd(&scn, 8);
+  if (!rd_crc(&scn, 8)) return false;
   uint64_t vl = 0;
-  rd(&vl, 8);
-
-  if (!in) return false;
+  if (!rd_crc(&vl, 8)) return false;
 
   std::vector<uint8_t> val_data;
   const size_t data_bytes = (vl != UNIV_SQL_NULL && vl > 0) ? static_cast<size_t>(vl) : 0;
   if (data_bytes > 0) {
     val_data.resize(data_bytes);
-    if (!rd(val_data.data(), data_bytes)) return false;
+    if (!rd_crc(val_data.data(), data_bytes)) return false;
   }
 
   uint32_t stored_crc = 0;
-  if (!rd(&stored_crc, 4)) return false;
+  if (!in.read(reinterpret_cast<char *>(&stored_crc), 4)) return false;
 
-  // Recompute CRC over what we just read (magic through val_data).
-  // Build a local buffer.
-  std::vector<uint8_t> hdr;
-  hdr.reserve(53 + data_bytes);
-  auto ph = [&](const void *p, size_t n) {
-    const auto *b = static_cast<const uint8_t *>(p);
-    hdr.insert(hdr.end(), b, b + n);
-  };
-  ph(&magic, 4);
-  ph(&lsn, 8);
-  ph(&op, 1);
-  ph(&iid, 4);
-  ph(&cid, 4);
-  ph(&rid, 8);
-  ph(&tid, 8);
-  ph(&scn, 8);
-  ph(&vl, 8);
-  if (!val_data.empty()) ph(val_data.data(), val_data.size());
-
-  if (crc32(hdr.data(), hdr.size()) != stored_crc) {
-    DBUG_PRINT("cu_recovery", ("WAL record CRC mismatch at LSN %llu", (unsigned long long)lsn));
-    return false;  // corrupt record — stop parsing
+  if (running_crc != stored_crc) {
+    DBUG_PRINT("cu_recovery", ("WAL CRC mismatch at LSN %llu", (unsigned long long)lsn));
+    return false;
   }
 
   rec.lsn = lsn;
@@ -256,6 +250,14 @@ bool CURecoveryManager::read_record(std::istream &in, WalRecord &rec) const {
   rec.val_len = static_cast<size_t>(vl);
   rec.val_data = std::move(val_data);
   return true;
+}
+
+void CURecoveryManager::update_wal_footer(uint64_t current_max_lsn) {
+  uint32_t magic = WAL_FOOT_MAGIC;
+  uint32_t reserved = 0;
+  m_wal_out.write(reinterpret_cast<const char *>(&magic), 4);
+  m_wal_out.write(reinterpret_cast<const char *>(&reserved), 4);
+  m_wal_out.write(reinterpret_cast<const char *>(&current_max_lsn), 8);
 }
 
 bool CURecoveryManager::append_record(const WalRecord &rec) {
@@ -279,7 +281,9 @@ bool CURecoveryManager::log_write(uint32_t imcu_id, uint32_t col_id, uint64_t ro
   rec.scn = scn;
   rec.val_len = val_len;
   if (val_len != UNIV_SQL_NULL && val_len > 0 && val_data) rec.val_data.assign(val_data, val_data + val_len);
-  return append_record(rec);
+  auto result = append_record(rec);
+  if (result) update_wal_footer(rec.lsn);
+  return result;
 }
 
 bool CURecoveryManager::log_update(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id, uint64_t scn,
@@ -294,7 +298,9 @@ bool CURecoveryManager::log_update(uint32_t imcu_id, uint32_t col_id, uint64_t r
   rec.scn = scn;
   rec.val_len = val_len;
   if (val_len != UNIV_SQL_NULL && val_len > 0 && new_val) rec.val_data.assign(new_val, new_val + val_len);
-  return append_record(rec);
+  auto result = append_record(rec);
+  if (result) update_wal_footer(rec.lsn);
+  return result;
 }
 
 bool CURecoveryManager::log_delete(uint32_t imcu_id, uint32_t col_id, uint64_t row_id, uint64_t txn_id, uint64_t scn) {
@@ -307,7 +313,9 @@ bool CURecoveryManager::log_delete(uint32_t imcu_id, uint32_t col_id, uint64_t r
   rec.txn_id = txn_id;
   rec.scn = scn;
   rec.val_len = 0;
-  return append_record(rec);
+  auto result = append_record(rec);
+  if (result) update_wal_footer(rec.lsn);
+  return result;
 }
 
 fs::path CURecoveryManager::snap_path(uint32_t imcu_id) const {
@@ -383,25 +391,28 @@ bool CURecoveryManager::checkpoint(Imcu *imcu, uint64_t snapshot_lsn) {
     for (uint32_t c = 0; c < col_count; ++c) {
       CU *cu = imcu->get_cu(c);
       if (!cu) {
-        // Write a zero-length placeholder so col_count records stay aligned.
         uint64_t sentinel = 0;
         snap.write(reinterpret_cast<const char *>(&sentinel), sizeof(sentinel));
         continue;
       }
 
-      // Record byte offset so the reader can seek directly if needed.
-      // (We prefix each CU block with its size for streaming reads.)
-      std::ostringstream cu_buf;
-      cu_buf.str().reserve(64 * 1024);
-      bool ok = cu->serialize(cu_buf, row_count);
+      auto size_pos = snap.tellp();
+      uint64_t cu_size_placeholder = 0;
+      snap.write(reinterpret_cast<const char *>(&cu_size_placeholder), sizeof(cu_size_placeholder));
+
+      auto data_start = snap.tellp();
+      bool ok = cu->serialize(snap, row_count);
       if (!ok) {
         DBUG_PRINT("cu_recovery", ("checkpoint: CU %u serialize failed", c));
         return false;
       }
-      std::string cu_data = cu_buf.str();
-      uint64_t cu_size = static_cast<uint64_t>(cu_data.size());
+      auto data_end = snap.tellp();
+
+      // Go back and write the actual CU size (data_end - data_start).
+      uint64_t cu_size = static_cast<uint64_t>(data_end - data_start);
+      snap.seekp(size_pos);
       snap.write(reinterpret_cast<const char *>(&cu_size), sizeof(cu_size));
-      snap.write(cu_data.data(), static_cast<std::streamsize>(cu_size));
+      snap.seekp(data_end);
     }
 
     snap.flush();
@@ -424,6 +435,13 @@ bool CURecoveryManager::checkpoint(Imcu *imcu, uint64_t snapshot_lsn) {
                              (unsigned long long)snapshot_lsn, col_count, final_path.string().c_str()));
   return true;
 }
+
+struct MemStreamBuf : std::streambuf {
+  MemStreamBuf(const char *data, size_t size) {
+    char *p = const_cast<char *>(data);
+    setg(p, p, p + size);
+  }
+};
 
 uint64_t CURecoveryManager::load_snapshot(Imcu *imcu) {
   if (!imcu) return 0;
@@ -470,12 +488,13 @@ uint64_t CURecoveryManager::load_snapshot(Imcu *imcu) {
     }
 
     // Read exactly cu_size bytes into a buffer, then wrap in istringstream.
-    std::string cu_data(cu_size, '\0');
-    if (!snap.read(&cu_data[0], static_cast<std::streamsize>(cu_size))) return 0;
+    std::vector<char> cu_buf(cu_size);
+    if (!snap.read(cu_buf.data(), static_cast<std::streamsize>(cu_size))) return 0;
 
-    std::istringstream cu_in(cu_data);
+    MemStreamBuf msb(cu_buf.data(), cu_size);
+    std::istream cu_in(&msb);
     if (!cu->deserialize(cu_in)) {
-      DBUG_PRINT("cu_recovery", ("CU %u deserialize failed from snapshot %s", c, path.string().c_str()));
+      DBUG_PRINT("cu_recovery", ("CU %u deserialize failed", c));
       return 0;
     }
   }
@@ -544,19 +563,17 @@ size_t CURecoveryManager::recover(const std::vector<Imcu *> &imcus,
 }
 
 bool CURecoveryManager::truncate_wal(uint64_t up_to_lsn) {
-  // Read all records; keep only those with lsn >= up_to_lsn.
+  std::lock_guard lock(m_wal_mutex);
   std::vector<WalRecord> keep;
   {
     std::ifstream in(m_wal_path, std::ios::binary);
-    if (!in.is_open()) return true;  // nothing to do
+    if (!in.is_open()) return true;
     WalRecord rec;
     while (read_record(in, rec)) {
       if (rec.lsn >= up_to_lsn) keep.push_back(std::move(rec));
     }
   }
-
-  // Close the WAL write stream, rewrite the file, reopen.
-  close();
+  close_locked();
 
   {
     std::ofstream out(m_wal_path, std::ios::out | std::ios::binary | std::ios::trunc);
@@ -566,15 +583,13 @@ bool CURecoveryManager::truncate_wal(uint64_t up_to_lsn) {
       out.write(reinterpret_cast<const char *>(buf.data()), static_cast<std::streamsize>(buf.size()));
     }
   }
-
-  // Reopen in append mode.
-  {
-    std::lock_guard lock(m_wal_mutex);
-    m_wal_out.open(m_wal_path, std::ios::out | std::ios::binary | std::ios::app);
-  }
+  m_wal_out.open(m_wal_path, std::ios::out | std::ios::binary | std::ios::app);
+#ifndef _WIN32
+  if (m_wal_out.is_open()) m_wal_fd = ::open(m_wal_path.c_str(), O_WRONLY);
+#endif
 
   DBUG_PRINT("cu_recovery",
-             ("WAL truncated: kept %zu records  (lsn >= %llu)", keep.size(), (unsigned long long)up_to_lsn));
+             ("WAL truncated: kept %zu records (lsn >= %llu)", keep.size(), (unsigned long long)up_to_lsn));
   return m_wal_out.is_open();
 }
 }  // namespace Imcs

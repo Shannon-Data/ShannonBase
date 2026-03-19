@@ -62,22 +62,6 @@ class LoadFlagManager {
   }
 
   /**
-   * @brief Set or clear the secondary_load flag for a given table.
-   *
-   * This is called after a successful SECONDARY_LOAD or SECONDARY_UNLOAD
-   * operation completes. It updates the `options` column in mysql.tables
-   * by adding or removing the "secondary_load=1" token.
-   *
-   * @param thd         MySQL thread descriptor.
-   * @param schema_name Database name.
-   * @param table_name  Table name.
-   * @param loaded      true  → set the flag (table is now loaded).
-   *                    false → clear the flag (table is now unloaded).
-   * @return 0 on success, non-zero on failure.
-   */
-  int set_flag(THD *thd, const std::string &schema_name, const std::string &table_name, bool loaded);
-
-  /**
    * @brief Query INFORMATION_SCHEMA.TABLES to find all tables with
    *        secondary_load=1 in their CREATE_OPTIONS.
    *

@@ -99,9 +99,6 @@ class Imcs : public MemoryObject {
 
   void cleanup(const table_id_t &table_id);
 
-  int set_secondary_load_flag(const Rapid_load_context *context);
-  int clear_secondary_load_flag(const Rapid_load_context *context, const std::string &schema_name,
-                                const std::string &table_name);
   bool is_global_state_empty() const;
 
   inline RpdTable *get_rpd_table(const table_id_t &table_id) {
